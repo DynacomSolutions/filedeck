@@ -30,6 +30,7 @@ export async function startSftp(root: string, user: string, password: string): P
   const clients = new Set<{ end(): void; _sock?: { destroy(): void } }>();
   const server = new Server({ hostKeys: [privateKey] }, (client) => {
     clients.add(client);
+    (client as unknown as { setNoDelay(b: boolean): void }).setNoDelay(true);
     client.on("close", () => clients.delete(client));
     client.on("authentication", (ctx) => {
       if (ctx.method === "password" && ctx.username === user && ctx.password === password) ctx.accept();

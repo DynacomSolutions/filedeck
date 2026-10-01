@@ -106,6 +106,9 @@ export class SftpBackend implements SourceBackend {
           return true;
         },
       });
+      // Without ssh2's optional native module (absent in the Alpine image) it writes header and body as separate
+      // segments; Nagle plus delayed ACK then costs about 40 ms per SFTP round trip.
+      conn.setNoDelay(true);
     });
     const drop = () => {
       if (this.conn === conn) {
