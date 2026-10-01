@@ -10,7 +10,7 @@ metadata:
 spec:
   ambassador_id:
     - --apiVersion-v3alpha1-only--default
-  host: {{ .Values.mapping.host | quote }}
+  hostname: {{ .Values.mapping.host | quote }}
   prefix: /
   service: {{ printf "%s.%s:%v" (include "filedeck.name" .) .Release.Namespace .Values.service.port | quote }}
   timeout_ms: 0
