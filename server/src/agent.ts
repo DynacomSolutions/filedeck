@@ -63,13 +63,15 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
       "Content-Disposition": download ? dispo(name) : "inline",
     };
     if (range === "invalid") {
+      await f.fh.close();
       return new Response(null, { status: 416, headers: { ...headers, "Content-Range": `bytes */${f.size}` } });
     }
     if (c.req.method === "HEAD") {
+      await f.fh.close();
       return new Response(null, { status: 200, headers: { ...headers, "Content-Length": String(f.size) } });
     }
     if (range) {
-      const body = Readable.toWeb(ops.streamFile(f.r.real, range)) as ReadableStream;
+      const body = Readable.toWeb(ops.streamFile(f, range)) as ReadableStream;
       return new Response(body, {
         status: 206,
         headers: {
@@ -79,7 +81,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
         },
       });
     }
-    const body = Readable.toWeb(ops.streamFile(f.r.real)) as ReadableStream;
+    const body = Readable.toWeb(ops.streamFile(f)) as ReadableStream;
     return new Response(body, { status: 200, headers: { ...headers, "Content-Length": String(f.size) } });
   };
   app.on(["GET", "HEAD"], "/api/fs/read", (c) => serve(c, false));
@@ -168,6 +170,10 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.post("/api/fs/mkdir", async (c) => {
     const b = await json<{ path: string }>(c);
     return c.json({ path: await ops.mkdir(root, str(b.path, "path")) }, 201);
+  });
+  app.post("/api/fs/symlink", async (c) => {
+    const b = await json<{ path: string; target: string; overwrite?: boolean }>(c);
+    return c.json(await ops.symlink(root, str(b.path, "path"), str(b.target, "target"), b.overwrite === true), 201);
   });
   app.post("/api/fs/rename", async (c) => {
     const b = await json<{ from: string; to: string; overwrite?: boolean }>(c);

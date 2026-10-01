@@ -29,6 +29,7 @@ test("read-only prefixes block every change under them, reads and outside writes
     assert.equal((await app.request("/api/fs/list?path=/ro")).status, 200);
     assert.equal((await app.request("/api/fs/read?path=/ro/a.txt")).status, 200);
     await denied(post("/api/fs/mkdir", { path: "/ro/new" }));
+    await denied(post("/api/fs/symlink", { path: "/ro/ln", target: "a.txt" }));
     await denied(post("/api/fs/delete", { paths: ["/ro/a.txt"] }));
     await denied(post("/api/fs/trash", { paths: ["/ro/a.txt"] }));
     await denied(post("/api/fs/rename", { from: "/ro/a.txt", to: "/rw/a.txt" }));

@@ -6,7 +6,7 @@ import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
-import { ConfirmDialog, NameDialog } from "./Dialogs";
+import { ConfirmDialog, LinkDialog, NameDialog } from "./Dialogs";
 import { PropertiesDialog } from "./Properties";
 import { copyText, getClip, setClip, useClip } from "./clipboard";
 import type { FileRef } from "./EditorViews";
@@ -55,6 +55,7 @@ interface Props {
 }
 
 type Modal =
+  | { k: "link"; dir: string; existing?: Entry }
   | { k: "new"; dir: string; type: "file" | "folder" }
   | { k: "del"; paths: string[] }
   | { k: "props"; path: string; entry?: Entry };
@@ -297,6 +298,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       { label: "Copy", hint: "Ctrl+C", onSelect: () => setClipboard("copy", picked) },
       { label: pasteLabel + (pasteDir !== path ? " into folder" : ""), hint: "Ctrl+V", disabled: !clip, onSelect: () => void paste(pasteDir) },
       "sep",
+      ...(one && one.type === "symlink" ? ([{ label: "Edit link target...", onSelect: () => setModal({ k: "link", dir: path, existing: one }) }] as MenuItem[]) : []),
       { label: "Rename", hint: "F2", disabled: !one, onSelect: () => one && setRenaming(one.path) },
       { label: "Duplicate", onSelect: () => void duplicate(picked) },
       { label: "Compress...", onSelect: () => setDialog("compress") },
@@ -316,6 +318,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     { label: isBookmarked(marks, { node, path: dir }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: dir }) },
     { label: "New file...", onSelect: () => setModal({ k: "new", dir, type: "file" }) },
     { label: "New folder...", onSelect: () => setModal({ k: "new", dir, type: "folder" }) },
+    { label: "New symbolic link...", onSelect: () => setModal({ k: "link", dir }) },
     { label: pasteLabel, hint: here ? "Ctrl+V" : undefined, disabled: !clip, onSelect: () => void paste(dir) },
     ...(here ? ([{ label: "Select all", hint: "Ctrl+A", onSelect: () => setSel(new Set(entries.map((x) => x.path))) }, { label: "Upload...", onSelect: () => fileInput.current?.click() }, { label: "Upload folder...", onSelect: () => folderInput.current?.click() }, { label: "Refresh", onSelect: refresh }] as MenuItem[]) : []),
     "sep",
@@ -527,6 +530,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
                   <td className="name">
                     <span className="ico">{isDir ? "📁" : en.type === "symlink" ? "🔗" : "📄"}</span>
                     {nameEditor(en)}
+                    {en.type === "symlink" && (
+                      <span className={"ln-target" + (en.broken ? " broken" : "")} title={en.broken ? `Broken link: ${en.target ?? ""} does not exist` : `Link to ${en.target ?? ""}`}>
+                        {en.broken && <span className="visually-hidden">Broken link </span>}→ {en.target}
+                      </span>
+                    )}
                   </td>
                   <td className="num">{isDir ? "" : fmtSize(en.size)}</td>
                   <td className="num">{fmtDate(en.mtime)}</td>
@@ -828,6 +836,18 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
             if (modal.type === "file") await createFile(node, target);
             else await api.mkdir(node, target);
             onStatus(`Created ${target}`);
+            refresh();
+          }}
+        />
+      )}
+      {modal?.k === "link" && (
+        <LinkDialog
+          {...(modal.existing ? { existing: { name: modal.existing.name, target: modal.existing.target ?? "" } } : {})}
+          onClose={() => setModal(null)}
+          onSubmit={async (name, target) => {
+            const at = modal.existing ? modal.existing.path : join(modal.dir, name);
+            await api.symlink(node, at, target, !!modal.existing);
+            onStatus(modal.existing ? `Retargeted ${at}` : `Created link ${at}`);
             refresh();
           }}
         />

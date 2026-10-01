@@ -1,4 +1,5 @@
-import { lstatSync, readlinkSync } from "node:fs";
+import { constants, lstatSync, readlinkSync } from "node:fs";
+import fsp, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -14,8 +15,13 @@ import path from "node:path";
  *  - the final component is only followed when `followFinal` is set; mutating
  *    operations act on the link itself
  *
- * A TOCTOU race between resolution and use remains possible for an attacker who
- * can already create symlinks on the volume; see HISTORY.md (T-symlinks).
+ * Resolution alone leaves a TOCTOU window: an attacker who can already create
+ * symlinks on the volume could swap a directory for a link between resolving
+ * and using the path. `pinDir` / `openChecked` close it on Linux without
+ * openat2: the directory (or file) is opened first, then its real location is
+ * read back from /proc/self/fd and refused unless it is inside the root, and
+ * the operation runs through /proc/self/fd/<n>/<name>, which names the pinned
+ * directory itself, so a later swap of any path component changes nothing.
  */
 export class PathError extends Error {
   constructor(
@@ -119,4 +125,49 @@ export const TRASH_DIR = ".filedeck-trash";
 /** Mutations may never target the trash store directly (use the trash API). */
 export function assertNotTrash(virtual: string): void {
   if (virtual.split("/").includes(TRASH_DIR)) throw new PathError(403, "trash is managed via the trash API");
+}
+
+const LINUX = process.platform === "linux";
+
+const within = (root: string, p: string) => root === "/" || p === root || p.startsWith(root + path.sep);
+
+/** Real location of an open descriptor, or refuse when it is outside the root (or deleted). */
+async function fdLocation(root: string, fd: number): Promise<string> {
+  const loc = await fsp.readlink(`/proc/self/fd/${fd}`);
+  if (!within(root, loc)) throw new PathError(403, "path escapes root");
+  return loc;
+}
+
+/** Open a file (never following a final link) and prove it lives inside the root. */
+export async function openChecked(root: string, real: string, flags: number = constants.O_RDONLY): Promise<FileHandle> {
+  const fh = await fsp.open(real, flags | constants.O_NOFOLLOW);
+  if (!LINUX) return fh;
+  try {
+    await fdLocation(root, fh.fd);
+  } catch (e) {
+    await fh.close().catch(() => undefined);
+    throw e;
+  }
+  return fh;
+}
+
+/**
+ * Run `fn` with a path that names `dirReal` through a held descriptor. The
+ * directory must be inside the root at the moment it is opened; afterwards it
+ * cannot be swapped for something else under the same name.
+ */
+export async function pinDir<T>(root: string, dirReal: string, fn: (at: string) => Promise<T>): Promise<T> {
+  if (!LINUX) return fn(dirReal);
+  const fh = await fsp.open(dirReal, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    await fdLocation(root, fh.fd);
+    return await fn(`/proc/self/fd/${fh.fd}`);
+  } finally {
+    await fh.close().catch(() => undefined);
+  }
+}
+
+/** `pinDir` for the parent of `real`; `fn` receives the pinned path of the entry itself. */
+export function pinParent<T>(root: string, real: string, fn: (at: string) => Promise<T>): Promise<T> {
+  return pinDir(root, path.dirname(real), (dir) => fn(path.join(dir, path.basename(real))));
 }

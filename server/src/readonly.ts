@@ -31,6 +31,7 @@ export function writeTargets(method: string, route: string, query: (k: string) =
   if (method !== "POST") return [];
   switch (route) {
     case "/api/fs/mkdir":
+    case "/api/fs/symlink":
     case "/api/fs/perms":
       return b("path");
     case "/api/fs/rename":

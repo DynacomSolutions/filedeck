@@ -1,5 +1,5 @@
-import { createReadStream } from "node:fs";
-import fs from "node:fs/promises";
+import { constants } from "node:fs";
+import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
@@ -8,6 +8,9 @@ import {
   PathError,
   TRASH_DIR,
   assertNotTrash,
+  openChecked,
+  pinDir,
+  pinParent,
   resolveRead,
   resolveWrite,
   virtualJoin,
@@ -23,6 +26,10 @@ export interface Entry {
   mode: number;
   /** For symlinks: whether the target resolves to a directory */
   linkDir?: boolean;
+  /** For symlinks: the link text exactly as stored */
+  target?: string;
+  /** For symlinks: the target does not exist (inside this volume) */
+  broken?: boolean;
 }
 
 export class FsError extends Error {
@@ -76,11 +83,13 @@ async function toEntry(root: string, parentVirtual: string, parentReal: string, 
       mode: st.mode & 0o7777,
     };
     if (e.type === "symlink") {
+      e.target = await fs.readlink(path.join(parentReal, name)).catch(() => undefined);
       try {
         const t = await fs.stat(resolveRead(root, e.path).real); // confined, never the container fs
         e.linkDir = t.isDirectory();
-      } catch {
+      } catch (err) {
         e.linkDir = false;
+        e.broken = (err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ELOOP" || (err as NodeJS.ErrnoException).code === "ENOTDIR";
       }
     }
     return e;
@@ -120,6 +129,8 @@ export async function stat(root: string, p: string) {
 
 export interface Opened {
   r: Resolved;
+  /** descriptor opened inside the root and checked there; close it, or stream it with `streamFile` */
+  fh: FileHandle;
   size: number;
   mtime: number;
   mime: string;
@@ -142,10 +153,17 @@ export function mimeFor(name: string): string {
 
 export async function openFile(root: string, p: string): Promise<Opened> {
   const r = resolveRead(root, p);
-  const st = await fs.stat(r.real);
-  if (st.isDirectory()) throw new FsError(400, "is a directory");
-  if (!st.isFile()) throw new FsError(400, "not a regular file");
-  return { r, size: st.size, mtime: st.mtimeMs, mime: mimeFor(r.real) };
+  // O_NONBLOCK: a FIFO swapped in after resolution must not hang the open; the type is checked on the descriptor.
+  const fh = await openChecked(root, r.real, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const st = await fh.stat();
+    if (st.isDirectory()) throw new FsError(400, "is a directory");
+    if (!st.isFile()) throw new FsError(400, "not a regular file");
+    return { r, fh, size: st.size, mtime: st.mtimeMs, mime: mimeFor(r.real) };
+  } catch (e) {
+    await fh.close().catch(() => undefined);
+    throw e;
+  }
 }
 
 export function parseRange(header: string | undefined, size: number): { start: number; end: number } | "invalid" | null {
@@ -169,16 +187,44 @@ export function parseRange(header: string | undefined, size: number): { start: n
   return { start, end };
 }
 
-export function streamFile(real: string, range?: { start: number; end: number }): Readable {
-  return createReadStream(real, range ? { start: range.start, end: range.end } : undefined);
+export function streamFile(f: Pick<Opened, "fh">, range?: { start: number; end: number }): Readable {
+  return f.fh.createReadStream(range ? { start: range.start, end: range.end } : undefined);
 }
 
 export async function mkdir(root: string, p: string) {
   const r = resolveWrite(root, p);
   assertNotTrash(r.virtual);
   if (r.virtual === "/") throw new FsError(409, "already exists");
-  await fs.mkdir(r.real);
+  await pinParent(root, r.real, (at) => fs.mkdir(at));
   return r.virtual;
+}
+
+/**
+ * Create a symbolic link at `p` pointing at `target` (stored verbatim: relative
+ * stays relative, an absolute target is the host's own path). With `overwrite`
+ * an existing *link* is retargeted atomically (temp link + rename); a regular
+ * file or folder is never replaced.
+ */
+export async function symlink(root: string, p: string, target: string, overwrite = false) {
+  const r = resolveWrite(root, p);
+  assertNotTrash(r.virtual);
+  if (r.virtual === "/") throw new FsError(409, "already exists");
+  if (typeof target !== "string" || target === "" || target.includes("\0") || target.length > 4096) throw new FsError(400, "invalid link target");
+  await pinParent(root, r.real, async (at) => {
+    const cur = await fs.lstat(at).catch(() => null);
+    if (!cur) return fs.symlink(target, at);
+    if (!overwrite) throw new FsError(409, "already exists");
+    if (!cur.isSymbolicLink()) throw new FsError(409, "exists and is not a symbolic link");
+    const tmp = path.join(path.dirname(at), `.${path.basename(at)}.filedeck-ln-${randomUUID().slice(0, 8)}`);
+    try {
+      await fs.symlink(target, tmp);
+      await fs.rename(tmp, at);
+    } catch (e) {
+      await fs.rm(tmp, { force: true });
+      throw e;
+    }
+  });
+  return stat(root, r.virtual);
 }
 
 export async function rename(root: string, from: string, to: string, overwrite = false) {
@@ -190,7 +236,7 @@ export async function rename(root: string, from: string, to: string, overwrite =
   if (b.virtual === a.virtual) return b.virtual;
   if (b.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot move into itself");
   if (!overwrite && (await exists(b.real))) throw new FsError(409, "destination exists");
-  await moveReal(a.real, b.real, overwrite);
+  await pinParent(root, a.real, (from) => pinParent(root, b.real, (to) => moveReal(from, to, overwrite)));
   return b.virtual;
 }
 
@@ -319,7 +365,7 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   };
   await fs.mkdir(path.join(dir, id));
   await fs.writeFile(path.join(dir, id, "meta.json"), JSON.stringify(meta));
-  await fs.rename(r.real, path.join(dir, id, "data"));
+  await pinParent(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
   return meta;
 }
 
@@ -327,7 +373,7 @@ export async function permanentDelete(root: string, p: string) {
   const r = resolveWrite(root, p);
   assertNotTrash(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "cannot delete root");
-  await fs.rm(r.real, { recursive: true });
+  await pinParent(root, r.real, (at) => fs.rm(at, { recursive: true }));
 }
 
 export async function upload(
@@ -342,30 +388,34 @@ export async function upload(
   const d = resolveRead(root, dir);
   assertNotTrash(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name));
-  if (!overwrite && (await exists(target.real))) {
-    body.resume();
-    throw new FsError(409, "destination exists");
-  }
-  const tmp = path.join(d.real, `.${name}.filedeck-${randomUUID().slice(0, 8)}.part`);
-  let written = 0;
-  const handle = await fs.open(tmp, "wx", 0o644);
-  try {
-    const out = handle.createWriteStream();
-    body.on("data", (c: Buffer) => {
-      written += c.length;
-      if (written > maxBytes) body.destroy(new FsError(413, "upload too large"));
-    });
-    await pipeline(body, out);
-    if (mtimeMs !== undefined && Number.isFinite(mtimeMs) && mtimeMs > 0) {
-      const t = new Date(mtimeMs);
-      await fs.utimes(tmp, t, t);
+  // Work through the pinned destination folder so it cannot be swapped for a link mid-upload.
+  return pinDir(root, d.real, async (at) => {
+    const dest = path.join(at, path.basename(target.real));
+    if (!overwrite && (await exists(dest))) {
+      body.resume();
+      throw new FsError(409, "destination exists");
     }
-    await fs.rename(tmp, target.real);
-  } catch (e) {
-    await fs.rm(tmp, { force: true });
-    throw e;
-  }
-  return { path: target.virtual, size: written };
+    const tmp = path.join(at, `.${name}.filedeck-${randomUUID().slice(0, 8)}.part`);
+    let written = 0;
+    const handle = await fs.open(tmp, "wx", 0o644);
+    try {
+      const out = handle.createWriteStream();
+      body.on("data", (c: Buffer) => {
+        written += c.length;
+        if (written > maxBytes) body.destroy(new FsError(413, "upload too large"));
+      });
+      await pipeline(body, out);
+      if (mtimeMs !== undefined && Number.isFinite(mtimeMs) && mtimeMs > 0) {
+        const t = new Date(mtimeMs);
+        await fs.utimes(tmp, t, t);
+      }
+      await fs.rename(tmp, dest);
+    } catch (e) {
+      await fs.rm(tmp, { force: true });
+      throw e;
+    }
+    return { path: target.virtual, size: written };
+  });
 }
 
 export const MAX_EDIT = 5 * 1024 * 1024;
@@ -384,10 +434,16 @@ function assertText(buf: Buffer) {
 /** Read a small UTF-8 text file for the editor, with the etag used for conflict checks. */
 export async function readText(root: string, p: string, maxBytes = MAX_EDIT) {
   const r = resolveRead(root, p);
-  const st = await fs.stat(r.real);
-  if (!st.isFile()) throw new FsError(400, st.isDirectory() ? "is a directory" : "not a regular file");
-  if (st.size > maxBytes) throw new FsError(413, "file too large to edit");
-  const buf = await fs.readFile(r.real);
+  const fh = await openChecked(root, r.real, constants.O_RDONLY | constants.O_NONBLOCK);
+  let st, buf;
+  try {
+    st = await fh.stat();
+    if (!st.isFile()) throw new FsError(400, st.isDirectory() ? "is a directory" : "not a regular file");
+    if (st.size > maxBytes) throw new FsError(413, "file too large to edit");
+    buf = await fh.readFile();
+  } finally {
+    await fh.close().catch(() => undefined);
+  }
   assertText(buf);
   return { path: r.virtual, content: buf.toString("utf8"), size: st.size, mtime: st.mtimeMs, etag: etagOf(st) };
 }
@@ -403,34 +459,36 @@ export async function writeText(root: string, p: string, body: Buffer, ifMatch: 
   if (r.virtual === "/") throw new FsError(400, "is a directory");
   if (body.length > maxBytes) throw new FsError(413, "content too large");
   assertText(body);
-  let cur: Awaited<ReturnType<typeof fs.stat>> | null = null;
-  try {
-    cur = await fs.stat(r.real);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-  }
-  if (cur && !cur.isFile()) throw new FsError(400, cur.isDirectory() ? "is a directory" : "not a regular file");
-  if (ifMatch === null) {
-    if (cur) throw new FsError(409, "file already exists", { etag: etagOf(cur), mtime: cur.mtimeMs });
-  } else {
-    if (!cur) throw new FsError(404, "not found");
-    if (etagOf(cur) !== ifMatch) {
-      throw new FsError(409, "file changed on disk since it was opened", { etag: etagOf(cur), mtime: cur.mtimeMs });
+  return pinDir(root, path.dirname(r.real), async (dir) => {
+    const at = path.join(dir, path.basename(r.real));
+    let cur: Awaited<ReturnType<typeof fs.stat>> | null = null;
+    try {
+      cur = await fs.stat(at);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     }
-  }
-  const dir = path.dirname(r.real);
-  const tmp = path.join(dir, `.${path.basename(r.real)}.filedeck-${randomUUID().slice(0, 8)}.part`);
-  try {
-    await fs.writeFile(tmp, body, { flag: "wx", mode: cur ? Number(cur.mode) & 0o7777 : 0o644 });
-    if (cur) {
-      await fs.chmod(tmp, Number(cur.mode) & 0o7777);
-      await fs.chown(tmp, Number(cur.uid), Number(cur.gid)).catch(() => undefined);
+    if (cur && !cur.isFile()) throw new FsError(400, cur.isDirectory() ? "is a directory" : "not a regular file");
+    if (ifMatch === null) {
+      if (cur) throw new FsError(409, "file already exists", { etag: etagOf(cur), mtime: cur.mtimeMs });
+    } else {
+      if (!cur) throw new FsError(404, "not found");
+      if (etagOf(cur) !== ifMatch) {
+        throw new FsError(409, "file changed on disk since it was opened", { etag: etagOf(cur), mtime: cur.mtimeMs });
+      }
     }
-    await fs.rename(tmp, r.real);
-  } catch (e) {
-    await fs.rm(tmp, { force: true });
-    throw e;
-  }
-  const st = await fs.stat(r.real);
-  return { path: r.virtual, size: st.size, mtime: st.mtimeMs, etag: etagOf(st) };
+    const tmp = path.join(dir, `.${path.basename(r.real)}.filedeck-${randomUUID().slice(0, 8)}.part`);
+    try {
+      await fs.writeFile(tmp, body, { flag: "wx", mode: cur ? Number(cur.mode) & 0o7777 : 0o644 });
+      if (cur) {
+        await fs.chmod(tmp, Number(cur.mode) & 0o7777);
+        await fs.chown(tmp, Number(cur.uid), Number(cur.gid)).catch(() => undefined);
+      }
+      await fs.rename(tmp, at);
+    } catch (e) {
+      await fs.rm(tmp, { force: true });
+      throw e;
+    }
+    const st = await fs.stat(at);
+    return { path: r.virtual, size: st.size, mtime: st.mtimeMs, etag: etagOf(st) };
+  });
 }

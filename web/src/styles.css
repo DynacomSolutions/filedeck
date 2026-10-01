@@ -298,3 +298,7 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .side .marks li:hover button.mark-rm,.side .marks li:focus-within button.mark-rm{opacity:1}
 .mark-star{color:var(--accent-text)}.mark-node{font-size:.68rem;font-weight:500;margin-left:.2rem}
 .side-hint{font-size:.74rem;margin:0 .5rem .8rem}
+
+/* symbolic links: stored target after the name, broken ones struck through with a dashed underline */
+.ln-target{margin-left:.5rem;color:var(--muted);font-size:.78em;font-family:var(--mono)}
+.ln-target.broken{color:var(--accent-text,var(--accent));text-decoration:line-through dashed}

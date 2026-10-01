@@ -7,6 +7,10 @@ export interface Entry {
   mtime: number;
   mode: number;
   linkDir?: boolean;
+  /** symlinks: the link text as stored */
+  target?: string;
+  /** symlinks: the target does not exist */
+  broken?: boolean;
 }
 export interface Mount {
   device: string;
@@ -357,6 +361,7 @@ export const api = {
       j<{ path: string; entries: Entry[]; truncated: boolean }>(r),
     ),
   mkdir: (node: string, path: string) => post(node, "mkdir", { path }),
+  symlink: (node: string, path: string, target: string, overwrite = false) => post(node, "symlink", { path, target, overwrite }),
   rename: (node: string, from: string, to: string) => post(node, "rename", { from, to }),
   move: (node: string, from: string[], toDir: string) => post(node, "move", { from, toDir }),
   copy: (node: string, from: string[], toDir: string, o: SyncOpts = {}) => post(node, "copy", { from, toDir, ...o }),
