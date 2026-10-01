@@ -190,28 +190,33 @@ export async function rename(root: string, from: string, to: string, overwrite =
   if (b.virtual === a.virtual) return b.virtual;
   if (b.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot move into itself");
   if (!overwrite && (await exists(b.real))) throw new FsError(409, "destination exists");
+  await moveReal(a.real, b.real, overwrite);
+  return b.virtual;
+}
+
+/** rename(2), falling back to copy-beside + swap + remove when source and destination are on different devices. */
+export async function moveReal(from: string, to: string, overwrite: boolean) {
   try {
-    await fs.rename(a.real, b.real);
+    await fs.rename(from, to);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
     // Copy beside the destination first so a failure midway leaves nothing
     // at the real name and the temp tree can be removed; the source is only
     // deleted once the copy is complete and in place.
-    const tmp = path.join(path.dirname(b.real), `.${path.basename(b.real)}.filedeck-part-${randomUUID()}`);
+    const tmp = path.join(path.dirname(to), `.${path.basename(to)}.filedeck-part-${randomUUID()}`);
     try {
-      await fs.cp(a.real, tmp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-      if (overwrite) await fs.rm(b.real, { recursive: true, force: true });
-      await fs.rename(tmp, b.real);
+      await fs.cp(from, tmp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+      if (overwrite) await fs.rm(to, { recursive: true, force: true });
+      await fs.rename(tmp, to);
     } catch (err) {
       await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
       throw err;
     }
-    await fs.rm(a.real, { recursive: true, force: true });
+    await fs.rm(from, { recursive: true, force: true });
   }
-  return b.virtual;
 }
 
-async function exists(real: string) {
+export async function exists(real: string) {
   try {
     await fs.lstat(real);
     return true;
@@ -220,7 +225,7 @@ async function exists(real: string) {
   }
 }
 
-async function uniqueName(dirReal: string, name: string): Promise<string> {
+export async function uniqueName(dirReal: string, name: string): Promise<string> {
   if (!(await exists(path.join(dirReal, name)))) return name;
   const dot = name.lastIndexOf(".");
   const [base, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];

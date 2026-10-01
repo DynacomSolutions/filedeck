@@ -176,7 +176,37 @@ export interface DiffResult {
   durationMs: number;
 }
 
+export interface TrashItem {
+  id: string;
+  name: string;
+  originalPath: string;
+  deletedAt: number;
+  type: Entry["type"];
+  size: number;
+  orphan?: boolean;
+}
+export interface TrashVolume {
+  volume: string;
+  items: TrashItem[];
+  truncated: boolean;
+}
+export interface TrashResult {
+  id: string;
+  ok: boolean;
+  path?: string;
+  error?: string;
+  conflict?: boolean;
+}
+export type TrashConflict = "fail" | "rename" | "replace";
+const trashPost = <T,>(node: string, op: string, body: unknown) =>
+  fetch(`${nodeBase(node)}/api/trash/${op}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => j<T>(r));
+
 export const api = {
+  trashList: (node: string) => fetch(`${nodeBase(node)}/api/trash/list`).then((r) => j<{ volumes: TrashVolume[] }>(r)),
+  trashRestore: (node: string, volume: string, ids: string[], o: { conflict?: TrashConflict; toDir?: string } = {}) =>
+    trashPost<{ results: TrashResult[] }>(node, "restore", { volume, ids, ...o }),
+  trashDelete: (node: string, volume: string, ids: string[]) => trashPost<{ results: TrashResult[] }>(node, "delete", { volume, ids }),
+  trashEmpty: (node: string, volume: string, olderThanDays?: number) => trashPost<{ removed: number; failed: number }>(node, "empty", { volume, ...(olderThanDays !== undefined ? { olderThanDays } : {}) }),
   readText: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/text?path=${enc(path)}`).then((r) => j<TextFile>(r)),
   /** Save with optimistic concurrency. `etag` null creates a new file. 409 -> ConflictError with the current etag. */
   writeText: async (node: string, path: string, content: string, etag: string | null): Promise<WriteResult> => {

@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { DEFAULT_UI, decodeState, encodeState, leaves, maxId, type FolderState, type Leaf, type Tree } from "./urlState";
+import { DEFAULT_UI, decodeState, encodeState, leaves, maxId, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
@@ -10,6 +10,7 @@ const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.
 import { JobsTray } from "./Jobs";
 import { ThemeMenu } from "./ThemeMenu";
 import { ShortcutHelp } from "./Shortcuts";
+import { TrashBrowser } from "./Trash";
 import { FolderDiff, type FolderDiffInit } from "./FolderDiff";
 import type { Loc } from "./api";
 
@@ -43,7 +44,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
   const prev = useRef<Record<string, { node: string; path: string }> | null>(null);
   const fromPop = useRef(false);
@@ -53,7 +54,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   useEffect(() => {
     if (!tree) return;
     const paths = pathsOf(tree);
-    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}) });
+    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}) });
     latest.current.url = url;
     latest.current.paths = paths;
     let changed: string | undefined;
@@ -75,7 +76,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     } catch {
       /* history unavailable (sandboxed frame) */
     }
-  }, [tree, active, diff, folder]);
+  }, [tree, active, diff, folder, trash]);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
@@ -107,7 +108,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus]);
 }
 
-function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string) => void; footer: React.ReactNode }) {
+function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
   const [mounts, setMounts] = useState<Record<string, Mount[]>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const toggle = (n: string) => {
@@ -128,6 +129,7 @@ function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: 
           {open[n.name] && (
             <ul className="mounts">
               <li><button onClick={() => onOpen(n.name, "/")}>/ (root)</button></li>
+              <li><button onClick={() => onTrash(n.name)}>Trash</button></li>
               {(mounts[n.name] ?? []).map((m) => (
                 <li key={m.mountpoint}>
                   <button
@@ -163,6 +165,7 @@ export function App() {
   const [tree, setTree] = useState<Tree | null>(initial?.tree ?? null);
   const [activeId, setActiveId] = useState(initial?.active ?? "");
   const [status, setStatus] = useState("");
+  const [trash, setTrash] = useState<TrashState | null>(initial?.trash ?? null);
   const [help, setHelp] = useState(false);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -230,7 +233,7 @@ export function App() {
     setActiveId(l.id);
   }, [nodes, tree]);
 
-  useUrlHistory(tree, activeId, diff, folderDiff ? folderLive : null, setTree, setStatus);
+  useUrlHistory(tree, activeId, diff, folderDiff ? folderLive : null, trash, setTree, setStatus);
 
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => (t ? mapTree(t, fn) : t));
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
@@ -273,6 +276,7 @@ export function App() {
           next={nx ? { node: nx.node, path: nx.path } : null}
           onSwitch={(d) => switchPanel(t.id, d)}
           onHelp={() => setHelp(true)}
+          onTrash={(node) => setTrash({ node, volume: "" })}
           peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel }))}
           onStatus={setStatus}
         />
@@ -327,9 +331,14 @@ export function App() {
         </div>
       </header>
       <div className="body">
-        <Sidebar nodes={nodes} onOpen={openInActive} footer={<JobsTray nodes={nodes} />} />
+        <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<JobsTray nodes={nodes} />} />
         <div className="main">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</div>
       </div>
+      {trash && (
+        <Suspense fallback={null}>
+          <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => setTrash(null)} onStatus={setStatus} />
+        </Suspense>
+      )}
       {help && <ShortcutHelp onClose={() => setHelp(false)} />}
       <Suspense fallback={<div className="ed"><div className="pad muted">Loading editor...</div></div>}>
         {folderDiff && nodes.length > 0 && (

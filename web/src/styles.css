@@ -216,3 +216,14 @@ button.primary{border-color:var(--accent);color:var(--accent)}
 .kbd-help dl>div{display:grid;grid-template-columns:minmax(9rem,12rem) 1fr;gap:.6rem;font-size:.82rem;align-items:baseline}
 .kbd-help dt{white-space:nowrap}.kbd-help dd{margin:0;color:var(--fg-soft)}
 kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var(--border-strong);border-bottom-width:2px;border-radius:var(--radius-sm);padding:.05rem .4rem}
+
+/* trash browser */
+.tr-tabs{display:flex;flex-wrap:wrap;gap:.35rem;padding:.5rem var(--gutter) 0}
+.tr-tabs button.on{background:var(--surface-3);border-color:var(--accent-line)}
+.tr-bar{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;padding:.6rem var(--gutter);border-bottom:1px solid var(--border)}
+.tr-count{margin-left:auto;font-size:.78rem}
+.tr-body{overflow:auto}
+.tr-loc{max-width:0;width:40%;overflow:hidden;text-overflow:ellipsis}
+.trash:focus{outline:none}
+.modal-actions button.danger{border-color:var(--accent-line);color:var(--accent-text)}
+.modal-actions button.danger[type=submit]{color:#fff}

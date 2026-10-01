@@ -60,9 +60,16 @@ export interface FolderState {
   preset: string;
 }
 
+/** Open trash browser: the node and the volume ("" = first volume with items). */
+export interface TrashState {
+  node: string;
+  volume: string;
+}
+
 export interface AppState {
   tree: Tree;
   active: string;
+  trash?: TrashState;
   diff?: { left: FileRef; right: FileRef };
   folder?: FolderState;
 }
@@ -75,6 +82,8 @@ interface Wire {
   t: WTree;
   a: string;
   f?: [[string, string], [string, string]];
+  /** trash browser: node, volume */
+  r?: [string, string];
   /** folder diff: l/r folders, then only the options that differ from the defaults */
   g?: { l: [string, string]; r: [string, string]; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
 }
@@ -94,6 +103,7 @@ const toWire = (t: Tree): WTree => {
 
 export function encodeState(s: AppState): string {
   const w: Wire = { t: toWire(s.tree), a: s.active };
+  if (s.trash) w.r = [s.trash.node, s.trash.volume];
   if (s.diff) w.f = [[s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
   if (s.folder) {
     const { left, right, opts: o, preset } = s.folder;
@@ -182,7 +192,9 @@ export function decodeState(search: string): AppState | null {
       Array.isArray(f) && f.length === 2 && f.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]))
         ? { left: { node: f[0][0], path: f[0][1] }, right: { node: f[1][0], path: f[1][1] } }
         : undefined;
-    return { tree, active, ...(diff ? { diff } : {}), ...(folderFromWire(w.g) ? { folder: folderFromWire(w.g) as FolderState } : {}) };
+    const r = w.r;
+    const trash = Array.isArray(r) && str(r[0]) && typeof r[1] === "string" ? { node: r[0], volume: r[1] } : undefined;
+    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folderFromWire(w.g) ? { folder: folderFromWire(w.g) as FolderState } : {}) };
   } catch {
     return null;
   }

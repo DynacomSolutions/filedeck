@@ -3,13 +3,13 @@ import { fmtDate, fmtMode, fmtSize, stat, type Entry } from "./api";
 import { Modal } from "./ArchiveDialog";
 
 /** Ask for a single name (new file/folder, duplicate target...). `onSubmit` throws to show an error. */
-export function NameDialog({ title, label, initial = "", action, onSubmit, onClose }: { title: string; label: string; initial?: string; action: string; onSubmit: (name: string) => Promise<void>; onClose: () => void }) {
+export function NameDialog({ title, label, initial = "", action, allowSlash, onSubmit, onClose }: { title: string; label: string; initial?: string; action: string; allowSlash?: boolean; onSubmit: (name: string) => Promise<void>; onClose: () => void }) {
   const [name, setName] = useState(initial);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const go = async () => {
     const v = name.trim();
-    if (!v || v.includes("/") || v === "." || v === "..") return setErr("Enter a plain name without slashes");
+    if (allowSlash ? !v.startsWith("/") : !v || v.includes("/") || v === "." || v === "..") return setErr(allowSlash ? "Enter an absolute path starting with /" : "Enter a plain name without slashes");
     setBusy(true);
     try {
       await onSubmit(v);

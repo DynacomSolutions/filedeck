@@ -44,6 +44,8 @@ interface Props {
   onSwitch: (dir: 1 | -1) => void;
   /** `?` opens the shortcut overlay */
   onHelp: () => void;
+  /** open this node's trash browser */
+  onTrash: (node: string) => void;
   onStatus: (msg: string) => void;
 }
 
@@ -54,7 +56,7 @@ type Modal =
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, peers, next, onSwitch, onHelp, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, peers, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
@@ -283,6 +285,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     "sep",
     ...compareItems([{ node, path: dir }]),
     { label: "Copy path", onSelect: () => void copyPaths([dir]) },
+    { label: "Open trash", onSelect: () => onTrash(node) },
     "sep",
     { label: "Properties", onSelect: () => setModal({ k: "props", path: dir }) },
   ];

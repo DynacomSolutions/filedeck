@@ -8,6 +8,7 @@ import { resolveRead } from "./paths.ts";
 import { Watches } from "./watch.ts";
 import { registerArchiveRoutes } from "./archive-routes.ts";
 import { registerDiffRoutes } from "./diff-routes.ts";
+import * as trash from "./trash.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -157,6 +158,22 @@ export function createAgent(cfg: Config) {
     const b = await json<{ paths: string[] }>(c);
     for (const p of strs(b.paths)) await ops.permanentDelete(root, p);
     return c.json({ ok: true });
+  });
+
+  // Trash browser: every volume's `.filedeck-trash`, restore / delete / empty.
+  app.get("/api/trash/list", async (c) => c.json({ volumes: await trash.listTrash(root, cfg.procMounts) }));
+  app.post("/api/trash/restore", async (c) => {
+    const b = await json<{ volume: string; ids: string[]; conflict?: "fail" | "rename" | "replace"; toDir?: string }>(c);
+    return c.json({ results: await trash.restoreItems(root, str(b.volume, "volume"), b.ids, { conflict: b.conflict, ...(b.toDir ? { toDir: str(b.toDir, "toDir") } : {}) }) });
+  });
+  app.post("/api/trash/delete", async (c) => {
+    const b = await json<{ volume: string; ids: string[] }>(c);
+    return c.json({ results: await trash.deleteItems(root, str(b.volume, "volume"), b.ids) });
+  });
+  app.post("/api/trash/empty", async (c) => {
+    const b = await json<{ volume: string; olderThanDays?: number }>(c);
+    if (b.olderThanDays !== undefined && typeof b.olderThanDays !== "number") throw new ops.FsError(400, "olderThanDays must be a number");
+    return c.json(await trash.emptyTrash(root, str(b.volume, "volume"), b.olderThanDays));
   });
 
   registerArchiveRoutes(app, cfg);
