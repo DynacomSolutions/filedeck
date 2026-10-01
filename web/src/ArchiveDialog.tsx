@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, type ArchiveFormat } from "./api";
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div className="modal-back" onMouseDown={onClose}>
       <form

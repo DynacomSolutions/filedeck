@@ -259,3 +259,14 @@ const NOT_TEXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "i
 /** Cheap client-side check; the agent still refuses binary or oversize content. */
 export const canEdit = (e: Entry) =>
   (e.type === "file" || (e.type === "symlink" && !e.linkDir)) && e.size <= MAX_EDIT && !NOT_TEXT.has(e.name.slice(e.name.lastIndexOf(".") + 1).toLowerCase());
+
+export const stat = (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/stat?path=${enc(path)}`).then((r) => j<Entry>(r));
+/** Create an empty file (fails with 409 when it exists). */
+export const createFile = (node: string, path: string) => api.writeText(node, path, "", null);
+const MODE_BITS = "rwxrwxrwx";
+/** `-rw-r--r--` style string for a st_mode. */
+export function fmtMode(mode: number, type: Entry["type"]): string {
+  let s = type === "dir" ? "d" : type === "symlink" ? "l" : "-";
+  for (let i = 0; i < 9; i++) s += mode & (1 << (8 - i)) ? MODE_BITS[i] : "-";
+  return s;
+}

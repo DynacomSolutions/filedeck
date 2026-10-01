@@ -233,6 +233,7 @@ export function App() {
           diffMarked={diffMark !== null}
           onFolderDiff={onFolderDiff}
           folderMarked={folderMark !== null}
+          peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel }))}
           onStatus={setStatus}
         />
       );
