@@ -302,3 +302,10 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 /* symbolic links: stored target after the name, broken ones struck through with a dashed underline */
 .ln-target{margin-left:.5rem;color:var(--muted);font-size:.78em;font-family:var(--mono)}
 .ln-target.broken{color:var(--accent-text,var(--accent));text-decoration:line-through dashed}
+
+/* transcoded media player */
+.pv-media{width:100%;display:flex;flex-direction:column;align-items:center;gap:.5rem}
+.pv-media audio{width:100%;margin:1rem 1rem 0}
+.pv-trans{width:100%;padding:.2rem .8rem .8rem;display:flex;flex-direction:column;gap:.35rem;font-size:.78rem}
+.pv-seek{display:flex;flex-direction:column;gap:.2rem}.pv-seek input{width:100%}
+.pv-trans-err{color:var(--accent-text,var(--accent))}

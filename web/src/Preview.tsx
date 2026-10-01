@@ -1,11 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
+import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
 
 const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
-const VID = ["mp4", "m4v", "webm", "mov", "mkv"];
-const AUD = ["mp3", "m4a", "ogg", "wav", "flac", "opus"];
+const VID = VIDEO_EXT;
+const AUD = AUDIO_EXT;
 const TXT = ["txt", "md", "log", "json", "yaml", "yml", "ts", "tsx", "js", "css", "html", "xml", "csv", "sh", "py", "toml", "ini", "conf", "go", "rs"];
 
 function Text({ url }: { url: string }) {
@@ -43,9 +44,9 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
         ) : IMG.includes(e) ? (
           <img src={url} alt={entry.name} />
         ) : VID.includes(e) ? (
-          <video src={url} controls preload="metadata" />
+          <MediaPlayer node={node} path={entry.path} name={entry.name} kind="video" />
         ) : AUD.includes(e) ? (
-          <audio src={url} controls preload="metadata" />
+          <MediaPlayer node={node} path={entry.path} name={entry.name} kind="audio" />
         ) : e === "pdf" ? (
           <iframe src={url} title={entry.name} sandbox="allow-same-origin" />
         ) : TXT.includes(e) || entry.size === 0 ? (

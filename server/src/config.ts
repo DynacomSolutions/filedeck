@@ -30,6 +30,8 @@ export interface Config {
   thumbCacheMax: number;
   thumbConcurrency: number;
   ffmpeg: string;
+  /** concurrent on-the-fly media transcodes per agent */
+  transcodeConcurrency: number;
   /** agent: virtual path prefixes that are read-only */
   readOnly: string[];
   /** shared hub-to-agent secret; empty = agents are unauthenticated (NetworkPolicy only) */
@@ -78,6 +80,7 @@ export function loadConfig(env = process.env): Config {
     thumbCacheMax: Number(env.FILEDECK_THUMB_CACHE_MAX ?? 256 * 1024 * 1024),
     thumbConcurrency: Number(env.FILEDECK_THUMB_CONCURRENCY ?? 2),
     ffmpeg: env.FILEDECK_FFMPEG ?? "ffmpeg",
+    transcodeConcurrency: Number(env.FILEDECK_TRANSCODE_CONCURRENCY ?? 2),
     readOnly: parseReadOnly(env.FILEDECK_READONLY),
     agentToken: env.FILEDECK_AGENT_TOKEN || undefined,
     nodes: parseNodes(env.NODES),

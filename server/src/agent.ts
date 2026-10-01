@@ -13,6 +13,7 @@ import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
 import { registerSearchRoutes } from "./search.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
+import { registerTranscodeRoutes } from "./transcode.ts";
 import { agentAuth } from "./agent-auth.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { readOnlyGuard, isReadOnly } from "./readonly.ts";
@@ -226,6 +227,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   registerDiffRoutes(app, cfg);
   registerSearchRoutes(app, cfg);
   registerThumbRoutes(app, cfg);
+  registerTranscodeRoutes(app, cfg);
 
   // Live change feed: one event per change in the watched directory.
   app.get("/api/events", (c) => {

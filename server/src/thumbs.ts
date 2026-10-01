@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { Hono, Context } from "hono";
 import { FsError } from "./fsops.ts";
-import { resolveRead } from "./paths.ts";
+import { openChecked, resolveRead } from "./paths.ts";
 import type { Config } from "./config.ts";
 
 export const THUMB_SIZE = 256;
@@ -255,7 +255,7 @@ export function registerThumbRoutes(app: Hono, cfg: Config) {
   const th = makeThumbnailer(cfg);
   app.get("/api/fs/thumb", async (c: Context) => {
     const r = resolveRead(cfg.root, c.req.query("path") ?? "");
-    const fh = await fs.open(r.real, "r");
+    const fh = await openChecked(cfg.root, r.real, constants.O_RDONLY | constants.O_NONBLOCK);
     try {
       const st = await fh.stat();
       if (!st.isFile()) throw new FsError(400, "not a regular file");

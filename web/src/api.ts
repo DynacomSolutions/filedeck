@@ -39,6 +39,14 @@ export interface NodeInfo {
 }
 
 const enc = encodeURIComponent;
+export interface MediaInfo {
+  duration: number | null;
+  video: { codec: string; width: number; height: number } | null;
+  audio: { codec: string } | null;
+}
+/** On-the-fly transcode stream (H.264/AAC MP4 or MP3), starting `t` seconds in. */
+export const transcodeUrl = (node: string, path: string, kind: "video" | "audio", t = 0) =>
+  `/api/nodes/${enc(node)}/api/fs/transcode?path=${enc(path)}&kind=${kind}${t > 0 ? `&t=${Math.floor(t)}` : ""}`;
 export const nodeBase = (node: string) => `/api/nodes/${enc(node)}`;
 export const fileUrl = (node: string, path: string, kind: "read" | "download" = "read") =>
   `${nodeBase(node)}/api/fs/${kind}?path=${enc(path)}`;
@@ -430,11 +438,12 @@ export function fmtSize(n: number): string {
 export const fmtDate = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
 
 export const MAX_EDIT = 5 * 1024 * 1024;
-const NOT_TEXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "mp4", "m4v", "webm", "mov", "mkv", "mp3", "m4a", "ogg", "wav", "flac", "opus", "pdf", "zip", "gz", "tgz", "7z", "xz", "bz2", "tar", "iso", "bin", "exe", "so"]);
+const NOT_TEXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "mp4", "m4v", "webm", "mov", "mkv", "avi", "wmv", "flv", "mpg", "mpeg", "wma", "aiff", "mp3", "m4a", "ogg", "wav", "flac", "opus", "pdf", "zip", "gz", "tgz", "7z", "xz", "bz2", "tar", "iso", "bin", "exe", "so"]);
 /** Cheap client-side check; the agent still refuses binary or oversize content. */
 export const canEdit = (e: Entry) =>
   (e.type === "file" || (e.type === "symlink" && !e.linkDir)) && e.size <= MAX_EDIT && !NOT_TEXT.has(e.name.slice(e.name.lastIndexOf(".") + 1).toLowerCase());
 
+export const mediaInfo = (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/mediainfo?path=${enc(path)}`).then((r) => j<MediaInfo>(r));
 export const stat = (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/stat?path=${enc(path)}`).then((r) => j<Entry>(r));
 /** Create an empty file (fails with 409 when it exists). */
 export const createFile = (node: string, path: string) => api.writeText(node, path, "", null);
