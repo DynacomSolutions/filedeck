@@ -143,6 +143,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
             theme={theme}
             options={OPTS}
             onChange={(v) => setText(v ?? "")}
+            onMount={(e) => e.focus()}
             loading={<div className="pad muted">Loading editor...</div>}
           />
         )}
@@ -261,6 +262,7 @@ export function DiffViewer({ left, right, onClose, onStatus }: { left: FileRef; 
             options={{ ...OPTS, renderSideBySide: !inline, originalEditable: false, readOnly: false, useInlineViewWhenSpaceIsLimited: false }}
             onMount={(e) => {
               ed.current = e;
+              e.getModifiedEditor().focus();
               e.getModifiedEditor().onDidChangeModelContent(() => setRText(e.getModifiedEditor().getValue()));
             }}
             loading={<div className="pad muted">Loading editor...</div>}

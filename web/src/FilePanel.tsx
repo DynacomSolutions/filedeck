@@ -693,7 +693,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       className={"fp" + (active ? " active" : "") + (over === "." ? " drop" : "")}
       onMouseDown={(e) => {
         onFocus();
-        if (!(e.target as Element).closest("input,button,select,textarea,a,[role=menu]")) secRef.current?.focus({ preventScroll: true });
+        // .ed = the editor/diff overlay rendered inside this panel: taking focus there would steal it from Monaco
+        if (!(e.target as Element).closest("input,button,select,textarea,a,[role=menu],.ed")) secRef.current?.focus({ preventScroll: true });
       }}
       onDragOver={(e) => dragOver(e, ".")}
       onDragLeave={() => setOver(null)}
