@@ -32,32 +32,31 @@ export function Modal({ title, onClose, wide, children }: { title: string; onClo
   );
 }
 
-export function CompressDialog({
-  node,
-  dir,
-  names,
-  onClose,
-  onStatus,
-}: {
+export interface CompressGroup {
   node: string;
   dir: string;
   names: string[];
-  onClose: () => void;
-  onStatus: (m: string) => void;
-}) {
+}
+/** Compress the selection; items from several folders (or nodes) become one archive per folder. */
+export function CompressDialog({ groups, onClose, onStatus }: { groups: CompressGroup[]; onClose: () => void; onStatus: (m: string) => void }) {
+  const total = groups.reduce((n, g) => n + g.names.length, 0);
+  const first = groups[0]!;
   const [format, setFormat] = useState<ArchiveFormat>("zip");
-  const [name, setName] = useState(names.length === 1 ? names[0]! : dir.split("/").filter(Boolean).pop() || "archive");
+  const [name, setName] = useState(total === 1 ? first.names[0]! : first.dir.split("/").filter(Boolean).pop() || "archive");
   const [err, setErr] = useState("");
-  const go = () =>
-    api
-      .startCompress(node, dir, names, format, name)
-      .then((j) => {
+  const go = async () => {
+    try {
+      for (const [i, g] of groups.entries()) {
+        const j = await api.startCompress(g.node, g.dir, g.names, format, groups.length > 1 ? `${name}-${i + 1}` : name);
         onStatus(`Started: ${j.title}`);
-        onClose();
-      })
-      .catch((e: Error) => setErr(e.message));
+      }
+      onClose();
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
   return (
-    <Modal title={`Compress ${names.length} item(s)`} onClose={onClose}>
+    <Modal title={`Compress ${total} item(s)`} onClose={onClose}>
       <label>
         Archive name
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
@@ -71,6 +70,7 @@ export function CompressDialog({
           <option value="7z">.7z</option>
         </select>
       </label>
+      {groups.length > 1 && <p className="muted">The items sit in {groups.length} folders, so {groups.length} archives are made (each next to its items).</p>}
       {err && <div className="fp-err">{err}</div>}
       <div className="modal-actions">
         <button type="button" onClick={onClose}>Cancel</button>

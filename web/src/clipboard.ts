@@ -3,8 +3,8 @@ import { useSyncExternalStore } from "react";
 /** The file clipboard is shared by every panel (and node), so copy here and paste there works. */
 export interface Clip {
   mode: "copy" | "cut";
-  node: string;
-  paths: string[];
+  /** items can come from any node (and, with a cross-panel selection, from several) */
+  items: { node: string; path: string }[];
 }
 let clip: Clip | null = null;
 const subs = new Set<() => void>();

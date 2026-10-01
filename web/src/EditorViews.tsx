@@ -156,7 +156,8 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
 }
 
 /** Two-file diff: left is read-only, right is editable and saveable. */
-export function DiffViewer({ left, right, onClose, onStatus }: { left: FileRef; right: FileRef; onClose: () => void; onStatus: (m: string) => void }) {
+/** `overlay` places the diff over the panel area (inside <main>) instead of the whole page. */
+export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: FileRef; right: FileRef; onClose: () => void; onStatus: (m: string) => void; overlay?: boolean }) {
   const [l, setL] = useState<TextFile | null>(null);
   const [r, setR] = useState<TextFile | null>(null);
   const [rText, setRText] = useState("");
@@ -232,7 +233,7 @@ export function DiffViewer({ left, right, onClose, onStatus }: { left: FileRef; 
   const same = l && r && l.content === r.content;
 
   return (
-    <div className="ed" role="dialog" aria-label="File diff">
+    <div className={"ed" + (overlay ? " over" : "")} role="region" aria-label="File diff">
       <header className="ed-head">
         <b>Diff</b>
         <Tip label={`${left.node}:${left.path}`}><span className="muted ed-pair">{left.node}:{left.path}</span></Tip>

@@ -1,0 +1,755 @@
+// In-place folder compare (Total Commander / WinMerge style): two open panels show the two
+// sides of one diff result, rows aligned by relative path, scrolling and navigation synced.
+// The diff itself is the existing hub job (/api/diff/jobs); sync actions are one hub op job.
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CircleAlert, Equal, EqualNot, X, type LucideIcon } from "lucide-react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffMode, type DiffResult, type JobView, type Loc, type OpJob, type SyncStepSpec } from "./api";
+import { buildIndex, joinRoot, listFolder, rightRel, relUnder, sharedRel, withDescendants, type CNode } from "./compareModel";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { FileIcon } from "./FileIcon";
+import { Tip } from "./Tooltip";
+import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
+import { DEFAULT_UI, DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
+
+/* ------------------------------------------------------------------ options and presets */
+
+const MODES: { id: DiffMode; label: string; help: string }[] = [
+  { id: "name", label: "Name only", help: "Present on both sides means identical" },
+  { id: "size", label: "Size", help: "Same size" },
+  { id: "mtime", label: "Modified time", help: "Same mtime within the tolerance" },
+  { id: "quick", label: "Quick (size + time, then hash)", help: "Size differs: different. Size and time match: identical. Otherwise compare sha256 on the agents" },
+  { id: "content", label: "Content (sha256)", help: "Equal size, then sha256 computed on each node; no file data crosses nodes" },
+];
+const toApi = (o: UiOpts): DiffApiOptions => ({
+  mode: o.mode,
+  toleranceMs: Math.max(0, Math.round(o.toleranceSec * 1000)),
+  ignoreCase: o.ignoreCase,
+  ignoreHidden: o.ignoreHidden,
+  include: o.include,
+  exclude: o.exclude,
+  depth: o.depth,
+  maxEntries: o.maxEntries,
+});
+const PRESET_KEY = "filedeck-folderdiff-presets";
+type Presets = Record<string, UiOpts>;
+function loadPresets(): Presets {
+  try {
+    const v = JSON.parse(localStorage.getItem(PRESET_KEY) ?? "{}") as Presets;
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+function savePresets(p: Presets) {
+  try {
+    localStorage.setItem(PRESET_KEY, JSON.stringify(p));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export const STATUS: Record<DiffStatus, { Icon: LucideIcon; label: string }> = {
+  identical: { Icon: Equal, label: "Identical" },
+  different: { Icon: EqualNot, label: "Different" },
+  "left-only": { Icon: ArrowLeft, label: "Left only" },
+  "right-only": { Icon: ArrowRight, label: "Right only" },
+  error: { Icon: CircleAlert, label: "Error" },
+};
+const ACTION_LABEL: Record<SyncAction, string> = {
+  "copy-lr": "Copy left to right",
+  "copy-rl": "Copy right to left",
+  "delete-left": "Delete from left",
+  "delete-right": "Delete from right",
+};
+export const ROW_H = 26;
+
+interface Exec {
+  action: SyncAction;
+  plan: Plan;
+  state: "plan" | "running" | "done";
+  done: number;
+  errors: string[];
+  canceled: boolean;
+  jobId?: string;
+  job?: OpJob;
+}
+
+/* ------------------------------------------------------------------ controller */
+
+export type Side = "left" | "right";
+export interface CompareCtl {
+  st: FolderState;
+  sideOf: (panelId: string) => Side | null;
+  result: DiffResult | null;
+  job: JobView | null;
+  running: boolean;
+  err: string;
+  rows: CNode[];
+  hide: ReadonlySet<DiffStatus>;
+  selected: ReadonlySet<string>;
+  cursor: string | null;
+  setCursor: (p: string | null) => void;
+  setSelected: (s: Set<string>) => void;
+  click: (e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, n: CNode) => void;
+  open: (n: CNode) => void;
+  go: (rel: string) => void;
+  up: () => void;
+  exit: () => void;
+  start: () => void;
+  cancel: () => void;
+  setOpts: (o: UiOpts) => void;
+  setPreset: (p: string) => void;
+  toggleStatus: (s: DiffStatus) => void;
+  preview: (a: SyncAction) => void;
+  exec: Exec | null;
+  runExec: () => void;
+  stopExec: () => void;
+  closeExec: () => void;
+  presets: Presets;
+  savePreset: (name: string) => void;
+  deletePreset: () => void;
+  scrollers: React.MutableRefObject<{ left: HTMLElement | null; right: HTMLElement | null }>;
+  syncScroll: (from: Side, top: number) => void;
+  onStatus: (m: string) => void;
+  filtersActive: boolean;
+}
+export const CompareCtx = createContext<CompareCtl | null>(null);
+export const useCompareCtl = () => useContext(CompareCtx);
+
+interface HookArgs {
+  state: FolderState | null;
+  setState: (fn: (s: FolderState | null) => FolderState | null) => void;
+  leafOf: (id: string) => Leaf | undefined;
+  patchLeaf: (id: string, p: Partial<Leaf>) => void;
+  activeId: string;
+  onFileDiff: (l: Loc, r: Loc) => void;
+  onStatus: (m: string) => void;
+}
+
+export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFileDiff, onStatus }: HookArgs): CompareCtl | null {
+  const st = state;
+  const stRef = useRef(st);
+  stRef.current = st;
+  const [job, setJob] = useState<JobView | null>(null);
+  const [jobId, setJobId] = useState("");
+  const [err, setErr] = useState("");
+  const [result, setResult] = useState<DiffResult | null>(null);
+  const [selected, setSelectedState] = useState<Set<string>>(new Set());
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [exec, setExec] = useState<Exec | null>(null);
+  const [presets, setPresets] = useState<Presets>(loadPresets);
+  const scrollers = useRef<{ left: HTMLElement | null; right: HTMLElement | null }>({ left: null, right: null });
+  const idx = useMemo(() => (result ? buildIndex(result.rows) : null), [result]);
+  const hide = useMemo(() => new Set<DiffStatus>(st?.hide ?? []), [st?.hide]);
+  const rel = st?.rel ?? "";
+  const rows = useMemo(() => (idx ? listFolder(idx, rel, hide) : []), [idx, rel, hide]);
+  const running = job !== null && (job.state === "queued" || job.state === "running");
+  const setSelected = (s: Set<string>) => setSelectedState(s);
+
+  const start = useCallback(async () => {
+    const s = stRef.current;
+    if (!s) return;
+    setErr("");
+    setResult(null);
+    setSelectedState(new Set());
+    try {
+      const j = await api.startDiff(s.left, s.right, toApi(s.opts));
+      setJob(j);
+      setJobId(j.id);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, []);
+
+  // Enter or restore compare mode: run the comparison once.
+  const ran = useRef(false);
+  useEffect(() => {
+    if (!st) {
+      ran.current = false;
+      setResult(null);
+      setJob(null);
+      setErr("");
+      setExec(null);
+      setSelectedState(new Set());
+      return;
+    }
+    if (!ran.current) {
+      ran.current = true;
+      void start();
+    }
+  }, [!st]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll the hub job; fetch the result once it is done.
+  useEffect(() => {
+    if (!jobId) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      try {
+        const j = await api.diffJob(jobId);
+        if (!live) return;
+        setJob(j);
+        if (j.state === "done") {
+          const r = await api.diffResult(jobId);
+          if (!live) return;
+          setResult(r);
+          setJobId("");
+          api.dismissDiff(jobId).catch(() => undefined);
+          return;
+        }
+        if (j.state === "failed" || j.state === "canceled") {
+          setErr(j.state === "failed" ? (j.error ?? "Comparison failed") : "Comparison canceled");
+          setJobId("");
+          return;
+        }
+      } catch (e) {
+        if (live) {
+          setErr((e as Error).message);
+          setJobId("");
+        }
+        return;
+      }
+      timer = setTimeout(() => void tick(), 400);
+    };
+    void tick();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [jobId]);
+
+  /* ---------- navigation: both panels always show the same relative folder ---------- */
+  const lp = st ? leafOf(st.lp) : undefined;
+  const rp = st ? leafOf(st.rp) : undefined;
+  const exit = useCallback(() => {
+    const j = jobId;
+    if (j) api.cancelDiff(j).catch(() => undefined);
+    setState(() => null);
+  }, [jobId, setState]);
+  const go = useCallback(
+    (to: string) => {
+      const s = stRef.current;
+      if (!s) return;
+      setState((x) => (x ? { ...x, rel: to } : x));
+      const l = leafOf(s.lp);
+      const r = leafOf(s.rp);
+      if (l) patchLeaf(s.lp, { node: s.left.node, path: joinRoot(s.left.path, to), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
+      if (r) patchLeaf(s.rp, { node: s.right.node, path: joinRoot(s.right.path, rightRel(idx, to)), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
+      setCursor(null);
+      setSelectedState(new Set());
+      scrollers.current.left?.scrollTo?.({ top: 0 });
+      scrollers.current.right?.scrollTo?.({ top: 0 });
+    },
+    [idx, leafOf, patchLeaf, setState],
+  );
+  // A panel that navigated by itself (breadcrumb, Up, back button) drags the other one along; leaving the
+  // compared roots ends the compare.
+  useEffect(() => {
+    if (!st || !lp || !rp) return;
+    const wantL = joinRoot(st.left.path, st.rel);
+    const wantR = joinRoot(st.right.path, rightRel(idx, st.rel));
+    const okL = lp.node === st.left.node && lp.path === wantL;
+    const okR = rp.node === st.right.node && rp.path === wantR;
+    if (okL && okR) return;
+    const fromLeft = !okL && (okR || activeId === st.lp);
+    const side = fromLeft ? { leaf: lp, root: st.left } : { leaf: rp, root: st.right };
+    const r = side.leaf.node === side.root.node ? relUnder(side.root.path, side.leaf.path) : null;
+    if (r === null) {
+      onStatus("A compared panel left its folder: compare closed");
+      setState(() => null);
+      return;
+    }
+    go(fromLeft ? r : sharedRel(idx, r));
+  }, [st?.rel, st?.left, st?.right, lp?.node, lp?.path, rp?.node, rp?.path]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A closed panel ends the compare.
+  useEffect(() => {
+    if (st && (!lp || !rp)) setState(() => null);
+  }, [st, lp, rp, setState]);
+
+  const up = () => {
+    if (!rel) return;
+    go(rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
+  };
+  const open = (n: CNode) => {
+    const s = stRef.current;
+    if (!s) return;
+    const r = n.row;
+    if (n.isDir) return go(r.p);
+    if (!r.l || !r.r) return onStatus(`${r.p} exists only on the ${r.l ? "left" : "right"} side`);
+    if (r.l.t !== "file" || r.r.t !== "file") return onStatus("Only regular files can be diffed");
+    if (r.status === "identical") return onStatus(`${r.p} is identical on both sides`);
+    onFileDiff({ node: s.left.node, path: joinRel(s.left.path, r.p) }, { node: s.right.node, path: joinRel(s.right.path, r.rp ?? r.p) });
+  };
+
+  const click: CompareCtl["click"] = (e, n) => {
+    setCursor(n.row.p);
+    if (e.shiftKey && cursor) {
+      const a = rows.findIndex((x) => x.row.p === cursor);
+      const b = rows.findIndex((x) => x.row.p === n.row.p);
+      if (a >= 0 && b >= 0) {
+        const next = new Set<string>();
+        for (const x of rows.slice(Math.min(a, b), Math.max(a, b) + 1)) withDescendants(x).forEach((p) => next.add(p));
+        return setSelectedState(next);
+      }
+    }
+    const all = withDescendants(n);
+    if (e.ctrlKey || e.metaKey) {
+      setSelectedState((s) => {
+        const next = new Set(s);
+        const on = !s.has(n.row.p);
+        for (const p of all) on ? next.add(p) : next.delete(p);
+        return next;
+      });
+    } else setSelectedState(new Set(all));
+  };
+
+  const syncScroll = (from: Side, top: number) => {
+    const o = scrollers.current[from === "left" ? "right" : "left"];
+    if (o && o.scrollTop !== top) o.scrollTop = top;
+  };
+
+  /* ---------- options ---------- */
+  const setOpts = (o: UiOpts) => setState((x) => (x ? { ...x, opts: o } : x));
+  const setPreset = (p: string) => {
+    setState((x) => (x ? { ...x, preset: p, opts: p && presets[p] ? { ...DEFAULT_UI, ...presets[p] } : x.opts } : x));
+  };
+  const toggleStatus = (s: DiffStatus) => setState((x) => (x ? { ...x, hide: x.hide.includes(s) ? x.hide.filter((h) => h !== s) : [...x.hide, s] } : x));
+  const savePreset = (name: string) => {
+    if (!st) return;
+    const next = { ...presets, [name]: st.opts };
+    setPresets(next);
+    savePresets(next);
+    setState((x) => (x ? { ...x, preset: name } : x));
+  };
+  const deletePreset = () => {
+    if (!st?.preset) return;
+    const next = { ...presets };
+    delete next[st.preset];
+    setPresets(next);
+    savePresets(next);
+    setState((x) => (x ? { ...x, preset: "" } : x));
+  };
+
+  /* ---------- sync ---------- */
+  const filtersActive = !!(st && (st.opts.include.trim() || st.opts.exclude.trim() || st.opts.ignoreHidden)) || (result?.warnings.length ?? 0) > 0;
+  const preview = (action: SyncAction) => {
+    if (!result) return;
+    const plan = planSync(result.rows, selected, action, { wholeDirs: !filtersActive });
+    setExec({ action, plan, state: "plan", done: 0, errors: [], canceled: false });
+  };
+  /** The plan becomes one hub job: it keeps running when the compare or the browser is closed. */
+  const runExec = async () => {
+    if (!exec || !st) return;
+    const loc = (side: Side) => (side === "left" ? st.left : st.right);
+    const steps: SyncStepSpec[] = [];
+    for (const s of exec.plan.steps) {
+      if (s.op === "skip") continue;
+      if (s.op === "mkdir") steps.push({ kind: "mkdir", node: loc(s.side).node, path: joinRel(loc(s.side).path, s.rel) });
+      else if (s.op === "trash") steps.push({ kind: "trash", node: loc(s.side).node, path: joinRel(loc(s.side).path, s.rel) });
+      else {
+        const from = loc(s.from);
+        const to = loc(s.from === "left" ? "right" : "left");
+        steps.push({ kind: "copy", src: { node: from.node, path: joinRel(from.path, s.srcRel) }, dst: { node: to.node, dir: s.destDirRel ? joinRel(to.path, s.destDirRel) : to.path }, bytes: s.bytes });
+      }
+    }
+    try {
+      const j = await api.startOp({ op: "sync", steps, title: `${ACTION_LABEL[exec.action]}: ${st.left.node}:${st.left.path} / ${st.right.node}:${st.right.path}` });
+      setExec({ ...exec, state: "running", jobId: j.id, job: j });
+    } catch (e) {
+      setExec({ ...exec, state: "done", errors: [(e as Error).message], done: 0 });
+    }
+  };
+  const execJobId = exec?.state === "running" ? exec.jobId : undefined;
+  useEffect(() => {
+    if (!execJobId) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const j = await api.opJob(execJobId);
+        if (stop) return;
+        if (opLive(j)) setExec((x) => (x && x.jobId === execJobId ? { ...x, job: j } : x));
+        else {
+          const errors = (j.items ?? []).filter((i) => i.error).slice(0, 50).map((i) => `${i.label}: ${i.error}`);
+          setExec((x) => (x && x.jobId === execJobId ? { ...x, job: j, state: "done", done: j.counts.done, errors, canceled: j.state === "canceled" } : x));
+          return;
+        }
+      } catch {
+        /* keep polling */
+      }
+      if (!stop) setTimeout(() => void tick(), 600);
+    };
+    void tick();
+    return () => {
+      stop = true;
+    };
+  }, [execJobId]);
+  const closeExec = () => {
+    const ran = exec?.state === "done";
+    setExec(null);
+    if (ran) void start();
+  };
+
+  if (!st) return null;
+  return {
+    st,
+    sideOf: (id) => (id === st.lp ? "left" : id === st.rp ? "right" : null),
+    result,
+    job,
+    running,
+    err,
+    rows,
+    hide,
+    selected,
+    cursor,
+    setCursor,
+    setSelected,
+    click,
+    open,
+    go,
+    up,
+    exit,
+    start: () => void start(),
+    cancel: () => jobId && void api.cancelDiff(jobId).catch(() => undefined),
+    setOpts,
+    setPreset,
+    toggleStatus,
+    preview,
+    exec,
+    runExec: () => void runExec(),
+    stopExec: () => exec?.jobId && void api.opAction(exec.jobId, "cancel"),
+    closeExec,
+    presets,
+    savePreset,
+    deletePreset,
+    scrollers,
+    syncScroll,
+    onStatus,
+    filtersActive,
+  };
+}
+
+/* ------------------------------------------------------------------ view: one panel's side */
+
+const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+
+function Cell({ n, side }: { n: CNode; side: Side }) {
+  const r = n.row;
+  const d = side === "left" ? r.l : r.r;
+  const spelling = side === "right" && r.rp ? nameOf(r.rp) : n.name;
+  if (!d) return <span className="cmp-ph" aria-label={`Not on the ${side} side`} />;
+  return (
+    <>
+      <span className="cmp-name" title={r.p}>
+        <FileIcon className="ico" dir={n.isDir} type={d.t === "symlink" ? "symlink" : "file"} /> {spelling}
+      </span>
+      <span className="num">{n.isDir ? "" : fmtSize(d.s)}</span>
+      <span className={"cmp-mt" + (r.newer === side ? " fd-newer" : "")}>
+        {fmtDate(d.m)}
+        {r.newer === side ? <span className="fd-newer-tag" title="Newer side"><ArrowUp /><span className="visually-hidden">newer</span></span> : null}
+      </span>
+    </>
+  );
+}
+
+/** Body of a compared panel: the aligned rows of the current folder, this panel's side only. */
+export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [top, setTop] = useState(0);
+  const [h, setH] = useState(600);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    ctl.scrollers.current[side] = el;
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => setH(el.clientHeight)) : null;
+    ro?.observe(el);
+    setH(el.clientHeight);
+    return () => {
+      ro?.disconnect();
+      if (ctl.scrollers.current[side] === el) ctl.scrollers.current[side] = null;
+    };
+  }, [side]); // eslint-disable-line react-hooks/exhaustive-deps
+  const first = Math.max(0, Math.floor(top / ROW_H) - 6);
+  const last = Math.min(ctl.rows.length, Math.ceil((top + h) / ROW_H) + 6);
+  const sel = ctl.selected;
+  const rowMenu = (e: React.MouseEvent, n: CNode) => {
+    e.preventDefault();
+    if (!sel.has(n.row.p)) ctl.click({ shiftKey: false, ctrlKey: false, metaKey: false }, n);
+    const items: MenuItem[] = [
+      { label: n.isDir ? "Open folder (both panels)" : "Diff the two files", onSelect: () => ctl.open(n) },
+      "sep",
+      { label: "Copy selected left to right", onSelect: () => ctl.preview("copy-lr") },
+      { label: "Copy selected right to left", onSelect: () => ctl.preview("copy-rl") },
+      { label: "Delete selected from left", danger: true, onSelect: () => ctl.preview("delete-left") },
+      { label: "Delete selected from right", danger: true, onSelect: () => ctl.preview("delete-right") },
+    ];
+    setMenu({ x: e.clientX, y: e.clientY, items });
+  };
+  return (
+    <div className={"cmp cmp-" + side} aria-label={`Compare, ${side} side`}>
+      {ctl.err && <div className="fp-err" role="alert">{ctl.err}</div>}
+      {ctl.running && ctl.job && (
+        <div className="fd-run" role="status">
+          <b>{ctl.job.state === "queued" ? "Queued" : "Comparing"}</b>
+          {ctl.job.progress.totalEntries > 0 ? <progress aria-label="Comparison progress" max={Math.max(1, ctl.job.progress.totalBytes)} value={ctl.job.progress.bytes} /> : <progress aria-label="Comparison progress" />}
+          <span className="muted">{ctl.job.progress.totalEntries > 0 ? `${ctl.job.progress.entries} / ${ctl.job.progress.totalEntries} hashed` : `${ctl.job.progress.entries} entries found`}</span>
+        </div>
+      )}
+      <div className="cmp-head" aria-hidden>
+        <span>{side === "left" ? "Left" : "Right"}: name</span>
+        <span className="num">Size</span>
+        <span>Modified</span>
+        <span />
+      </div>
+      <div
+        className="cmp-scroll"
+        ref={ref}
+        role="grid"
+        aria-label={`Aligned rows, ${side} side`}
+        onScroll={(e) => {
+          setTop(e.currentTarget.scrollTop);
+          ctl.syncScroll(side, e.currentTarget.scrollTop);
+        }}
+        onClick={(e) => e.target === e.currentTarget && ctl.setSelected(new Set())}
+      >
+        <div style={{ height: ctl.rows.length * ROW_H, position: "relative" }}>
+          {ctl.rows.slice(first, last).map((n, k) => {
+            const r = n.row;
+            return (
+              <div
+                key={r.p}
+                role="row"
+                aria-selected={sel.has(r.p)}
+                data-rel={r.p}
+                data-status={r.status}
+                className={"cmp-row st-" + r.status + (sel.has(r.p) ? " sel" : "") + (ctl.cursor === r.p ? " cur" : "") + (!(side === "left" ? r.l : r.r) ? " ph" : "")}
+                style={{ top: (first + k) * ROW_H, height: ROW_H }}
+                onClick={(e) => ctl.click(e, n)}
+                onDoubleClick={() => ctl.open(n)}
+                onContextMenu={(e) => rowMenu(e, n)}
+              >
+                <Cell n={n} side={side} />
+                <span className="cmp-status" title={r.why ?? STATUS[r.status].label}>
+                  {(() => { const I = STATUS[r.status].Icon; return <I aria-hidden="true" />; })()}
+                  <span className="visually-hidden">{STATUS[r.status].label}</span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+        {!ctl.rows.length && !ctl.running && ctl.result && <div className="pad muted">Nothing to show here with the current filters.</div>}
+      </div>
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+    </div>
+  );
+}
+
+/** Keyboard handling for compared panels; returns true when the key was used. */
+export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent): boolean {
+  const mod = e.ctrlKey || e.metaKey;
+  const rows = ctl.rows;
+  const i = ctl.cursor ? rows.findIndex((x) => x.row.p === ctl.cursor) : -1;
+  const move = (to: number) => {
+    const n = rows[Math.max(0, Math.min(rows.length - 1, to))];
+    if (!n) return;
+    ctl.setCursor(n.row.p);
+    if (e.shiftKey) ctl.click({ shiftKey: true, ctrlKey: false, metaKey: false }, n);
+    else ctl.setSelected(new Set(withDescendants(n)));
+    document.querySelectorAll<HTMLElement>(`.cmp-scroll`).forEach((sc) => {
+      const y = rows.indexOf(n) * ROW_H;
+      if (y < sc.scrollTop) sc.scrollTop = y;
+      else if (y + ROW_H > sc.scrollTop + sc.clientHeight) sc.scrollTop = y + ROW_H - sc.clientHeight;
+    });
+  };
+  const k = e.key;
+  if (k === "ArrowDown") return move(i + 1), true;
+  if (k === "ArrowUp") return move(i < 0 ? 0 : i - 1), true;
+  if (k === "Home") return move(0), true;
+  if (k === "End") return move(rows.length - 1), true;
+  if (k === "PageDown") return move(i + 10), true;
+  if (k === "PageUp") return move(i - 10), true;
+  if (k === "Enter" && !mod) {
+    const n = rows[i];
+    return !!n && (ctl.open(n), true);
+  }
+  if (k === " ") {
+    const n = rows[i];
+    return !!n && (ctl.click({ shiftKey: false, ctrlKey: true, metaKey: false }, n), true);
+  }
+  if (k === "Backspace" || (e.altKey && k === "ArrowUp")) return ctl.up(), true;
+  if (mod && k.toLowerCase() === "a") return ctl.setSelected(new Set(rows.flatMap((n) => withDescendants(n)))), true;
+  if (k === "Escape") return ctl.selected.size > 0 ? (ctl.setSelected(new Set()), true) : (ctl.exit(), true);
+  if (k === "F5") return ctl.selected.size > 0 && (ctl.preview(side === "left" ? "copy-lr" : "copy-rl"), true);
+  if (k === "F6") return ctl.selected.size > 0 && (ctl.preview(side === "left" ? "copy-lr" : "copy-rl"), true);
+  if (k === "Delete") return ctl.selected.size > 0 && (ctl.preview(side === "left" ? "delete-left" : "delete-right"), true);
+  return false;
+}
+
+/* ------------------------------------------------------------------ view: toolbar in the panel header */
+
+export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: Side; otherLabel: string }) {
+  const { st, result } = ctl;
+  const [showOpts, setShowOpts] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  const o = st.opts;
+  const c = result?.files;
+  const n = (s: DiffStatus) => (!c ? 0 : s === "identical" ? c.identical : s === "different" ? c.different : s === "left-only" ? c.leftOnly : s === "right-only" ? c.rightOnly : c.error);
+  const sel = ctl.selected.size;
+  return (
+    <div className="cmp-bar" role="toolbar" aria-label={`Compare toolbar, ${side} panel`}>
+      <Tip label={`${st.left.node}:${st.left.path}  vs  ${st.right.node}:${st.right.path}`}><span className="cmp-badge">Compare</span></Tip>
+      <span className="muted cmp-with">{side === "left" ? "with" : "against"} {otherLabel}{st.rel ? ` / ${st.rel}` : ""}</span>
+      <span className="fd-toggles" role="group" aria-label="Show">
+        {DIFF_STATUSES.map((s) => {
+          if (s === "error" && !n(s)) return null;
+          return (
+            <button key={s} className={"fd-tog st-" + s} aria-pressed={!ctl.hide.has(s)} onClick={() => ctl.toggleStatus(s)}>
+              {(() => { const I = STATUS[s].Icon; return <I aria-hidden="true" />; })()} {STATUS[s].label}{result ? ` ${n(s)}` : ""}
+            </button>
+          );
+        })}
+      </span>
+      {side === "left" && (
+        <>
+          <label className="cmp-mode">
+            <span className="visually-hidden">Compare by</span>
+            <select value={o.mode} title={MODES.find((m) => m.id === o.mode)?.help} onChange={(e) => ctl.setOpts({ ...o, mode: e.target.value as DiffMode })}>
+              {MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+          </label>
+          <Tip label="Tolerance, filters, depth and presets"><button onClick={() => setShowOpts((v) => !v)} aria-expanded={showOpts}>Options</button></Tip>
+          <button className="primary" onClick={() => (ctl.running ? ctl.cancel() : ctl.start())}>{ctl.running ? "Cancel" : "Compare again"}</button>
+          <span className="fd-sep" />
+          <span className="fd-sync" role="group" aria-label="Sync selected rows">
+            <Tip label="Copy selected left items over to the right side"><button disabled={!sel} onClick={() => ctl.preview("copy-lr")}>Copy <ArrowRight /></button></Tip>
+            <Tip label="Copy selected right items over to the left side"><button disabled={!sel} onClick={() => ctl.preview("copy-rl")}><ArrowLeft /> Copy</button></Tip>
+            <Tip label="Move selected left items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-left")}>Delete left</button></Tip>
+            <Tip label="Move selected right items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-right")}>Delete right</button></Tip>
+          </span>
+          <Tip label="Select every differing row in the whole tree"><button disabled={!result} onClick={() => ctl.setSelected(new Set(result!.rows.filter((r) => r.status !== "identical" && !ctl.hide.has(r.status)).map((r) => r.p)))}>Select differing</button></Tip>
+          <button disabled={!sel} onClick={() => ctl.setSelected(new Set())}>Clear</button>
+        </>
+      )}
+      <span className="muted fd-count">{sel} selected</span>
+      <Tip label="Leave compare mode (Esc)"><button className="cmp-exit" onClick={ctl.exit}>Exit compare</button></Tip>
+      {side === "left" && showOpts && (
+        <div className="cmp-pop fd-opts" role="group" aria-label="Compare options">
+          <label>
+            Time tolerance (s)
+            <input type="number" min={0} step={1} value={o.toleranceSec} onChange={(e) => ctl.setOpts({ ...o, toleranceSec: Number(e.target.value) })} />
+          </label>
+          <label>
+            Include (globs)
+            <input type="text" value={o.include} placeholder="*.ts, src/**" onChange={(e) => ctl.setOpts({ ...o, include: e.target.value })} />
+          </label>
+          <label>
+            Exclude (globs)
+            <input type="text" value={o.exclude} placeholder="node_modules/, *.log, .git/" onChange={(e) => ctl.setOpts({ ...o, exclude: e.target.value })} />
+          </label>
+          <label>
+            Max depth
+            <input type="number" min={1} max={64} value={o.depth} onChange={(e) => ctl.setOpts({ ...o, depth: Number(e.target.value) })} />
+          </label>
+          <label>
+            Max entries per side
+            <input type="number" min={1} max={500000} step={1000} value={o.maxEntries} onChange={(e) => ctl.setOpts({ ...o, maxEntries: Number(e.target.value) })} />
+          </label>
+          <label className="chk"><input type="checkbox" checked={o.ignoreCase} onChange={(e) => ctl.setOpts({ ...o, ignoreCase: e.target.checked })} /> Ignore case in names</label>
+          <label className="chk"><input type="checkbox" checked={o.ignoreHidden} onChange={(e) => ctl.setOpts({ ...o, ignoreHidden: e.target.checked })} /> Ignore hidden files</label>
+          <div className="fd-presets">
+            <label>
+              Preset
+              <select value={st.preset} onChange={(e) => ctl.setPreset(e.target.value)}>
+                <option value="">(none)</option>
+                {Object.keys(ctl.presets).sort().map((p) => <option key={p}>{p}</option>)}
+              </select>
+            </label>
+            <label>
+              Save current options as
+              <input type="text" value={presetName} placeholder="name" onChange={(e) => setPresetName(e.target.value)} />
+            </label>
+            <button disabled={!presetName.trim()} onClick={() => (ctl.savePreset(presetName.trim()), setPresetName(""))}>Save preset</button>
+            <button disabled={!st.preset} onClick={ctl.deletePreset}>Delete preset</button>
+            <button className="primary" onClick={() => (setShowOpts(false), ctl.start())}>Apply and compare</button>
+          </div>
+        </div>
+      )}
+      {side === "left" && result && (
+        <div className="fd-sum muted cmp-sum">
+          {c!.identical + c!.different + c!.leftOnly + c!.rightOnly + c!.error} files and {result.dirs.identical + result.dirs.different + result.dirs.leftOnly + result.dirs.rightOnly + result.dirs.error} folders compared in {(result.durationMs / 1000).toFixed(1)} s
+          {result.hashedFiles > 0 && `; ${result.hashedFiles} file pairs hashed (${fmtSize(result.hashedBytes)} read on the agents)`}
+          {result.warnings.map((w) => <span key={w} className="cmp-warn" role="alert"> {w}</span>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ sync dialog */
+
+export function SyncDialog({ ctl }: { ctl: CompareCtl }) {
+  const exec = ctl.exec;
+  if (!exec) return null;
+  return (
+    <div className="modal-back" role="dialog" aria-modal="true" aria-label={ACTION_LABEL[exec.action]}>
+      <div className="modal wide">
+        <h2>{ACTION_LABEL[exec.action]}</h2>
+        {exec.state === "plan" && (
+          <>
+            <p className="muted">
+              Dry run: nothing has changed yet. {exec.plan.copies} file(s) to copy ({fmtSize(exec.plan.bytes)}), {exec.plan.mkdirs} folder(s) to create, {exec.plan.trashes} item(s) to move to the trash
+              {exec.plan.skipped ? `, ${exec.plan.skipped} skipped` : ""}. Replaced and deleted items go to each node's trash and can be restored.
+            </p>
+            {exec.plan.notes.map((x) => <p key={x} className="muted">{x}</p>)}
+            <PlanList steps={exec.plan.steps} />
+            <div className="modal-actions">
+              <button onClick={ctl.closeExec}>Cancel</button>
+              <button className="primary" onClick={ctl.runExec} disabled={exec.plan.steps.every((s) => s.op === "skip")}>Run</button>
+            </div>
+          </>
+        )}
+        {exec.state === "running" && (
+          <>
+            <progress aria-label="Sync progress" max={Math.max(1, exec.job?.counts.total ?? 1)} value={exec.job?.progress.entries ?? 0} />
+            <p className="muted" role="status">
+              {exec.job?.progress.entries ?? 0} / {exec.job?.counts.total ?? "?"} steps
+              {exec.job && exec.job.progress.bytes > 0 ? ` - ${fmtSize(exec.job.progress.bytes)}${exec.job.speed > 0 ? ` at ${fmtSize(exec.job.speed)}/s` : ""}` : ""}
+              {exec.job?.state === "paused" ? " - paused" : ""} {exec.job?.progress.current ? `- ${exec.job.progress.current}` : ""}
+            </p>
+            <p className="muted">This runs on the server as a job (see Jobs in the sidebar): you can close this window and it keeps going.</p>
+            <div className="modal-actions">
+              <button onClick={ctl.stopExec}>Stop</button>
+              <button onClick={ctl.closeExec}>Close, keep running</button>
+            </div>
+          </>
+        )}
+        {exec.state === "done" && (
+          <>
+            <p role="status">{exec.canceled ? "Stopped" : "Finished"}: {exec.done} step(s) run, {exec.errors.length} failed.</p>
+            {exec.errors.length > 0 && <ul className="fd-errs">{exec.errors.map((e) => <li key={e}>{e}</li>)}</ul>}
+            <div className="modal-actions"><button className="primary" onClick={ctl.closeExec}>Close and compare again</button></div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlanList({ steps }: { steps: Step[] }) {
+  const shown = steps.slice(0, 400);
+  const text = (s: Step) =>
+    s.op === "copy"
+      ? `copy${s.replaces ? " (replace)" : ""} ${s.srcRel} ${s.from === "left" ? "▶" : "◀"}`
+      : s.op === "mkdir"
+        ? `create folder ${s.rel} on the ${s.side}`
+        : s.op === "trash"
+          ? `trash ${s.rel} on the ${s.side} (${s.why})`
+          : `skip ${s.rel}: ${s.reason}`;
+  return (
+    <ul className="fd-plan" aria-label="Planned actions">
+      {shown.map((s, i) => <li key={i} className={s.op}>{text(s)}</li>)}
+      {steps.length > shown.length && <li className="muted">... and {steps.length - shown.length} more</li>}
+      {!steps.length && <li className="muted">Nothing to do for the selected rows.</li>}
+    </ul>
+  );
+}

@@ -1,5 +1,5 @@
 import { brand } from "./brand";
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
@@ -13,8 +13,8 @@ import { useBookmarks, removeBookmark, bookmarkLabel } from "./bookmarks";
 import { ThemeMenu } from "./ThemeMenu";
 import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
-import { FolderDiff, type FolderDiffInit } from "./FolderDiff";
-import type { Loc } from "./api";
+import { CompareCtx, SyncDialog, useCompare } from "./Compare";
+import { SelectionBar, type SelRef } from "./Selection";
 import { ChevronDown, ChevronRight, Keyboard, Star, X } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
@@ -85,7 +85,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
   const prev = useRef<Record<string, { node: string; path: string; ti?: number }> | null>(null);
   const fromPop = useRef(false);
@@ -95,7 +95,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   useEffect(() => {
     if (!tree) return;
     const paths = pathsOf(tree);
-    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}) });
+    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(panelSel.length ? { panelSel } : {}) });
     latest.current.url = url;
     latest.current.paths = paths;
     let changed: string | undefined;
@@ -117,7 +117,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     } catch {
       /* history unavailable (sandboxed frame) */
     }
-  }, [tree, active, diff, folder, trash]);
+  }, [tree, active, diff, folder, trash, panelSel]);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
@@ -259,27 +259,28 @@ export function App() {
       }
     }
   };
-  const [folderDiff, setFolderDiff] = useState<FolderDiffInit | null>(() => (initial?.folder ? { ...initial.folder, autorun: true } : null));
-  // Live folder-diff state (folders + options) that the URL mirrors while the dialog is open.
-  const [folderLive, setFolderLive] = useState<FolderState | null>(initial?.folder ?? null);
-  const [folderMark, setFolderMark] = useState<Loc | null>(null);
-  const onFolderDiff = (folders: Loc[]) => {
-    const open = (l: Loc, r: Loc) => {
-      setFolderDiff({ left: l, right: r, opts: DEFAULT_UI, preset: "", autorun: false });
-      setFolderMark(null);
-    };
-    if (folders.length === 2) return open(folders[0]!, folders[1]!);
-    const f = folders[0];
-    if (!f) return;
-    if (folderMark && !(folderMark.node === f.node && folderMark.path === f.path)) open(folderMark, f);
-    else if (folderMark) {
-      setFolderMark(null);
-      setStatus("Folder diff mark cleared");
-    } else {
-      setFolderMark(f);
-      setStatus(`Marked ${f.node}:${f.path} for folder diff; pick another folder in any panel and press the folder diff button`);
-    }
-  };
+  // In-place folder compare between two panels; its state (roots, options, folder, filters) is mirrored into the URL.
+  const [compare, setCompare] = useState<FolderState | null>(initial?.folder ?? null);
+
+  // Selection across panels: each panel reports its own, plain clicks clear the others, header clicks pick whole panels.
+  const [sels, setSels] = useState<Record<string, SelRef[]>>({});
+  const [panelSel, setPanelSel] = useState<string[]>(initial?.panelSel ?? []);
+  const [clearReq, setClearReq] = useState<{ except: string; n: number } | null>(null);
+  const reportSel = useCallback((pid: string, refs: SelRef[]) => {
+    setSels((m) => {
+      const old = m[pid] ?? [];
+      if (old.length === refs.length && old.every((o, i) => o.node === refs[i]!.node && o.path === refs[i]!.path)) return m;
+      const n = { ...m };
+      if (refs.length) n[pid] = refs;
+      else delete n[pid];
+      return n;
+    });
+  }, []);
+  const clearOthers = useCallback((pid: string) => {
+    setClearReq((c) => ({ except: pid, n: (c?.n ?? 0) + 1 }));
+    setPanelSel((p) => (p.length ? [] : p));
+  }, []);
+  const togglePanel = useCallback((pid: string) => setPanelSel((p) => (p.includes(pid) ? p.filter((x) => x !== pid) : [...p, pid])), []);
 
   useEffect(() => {
     const load = () => api.nodes().then((r) => setNodes(r.nodes)).catch(() => setNodes([]));
@@ -295,10 +296,28 @@ export function App() {
     setActiveId(l.id);
   }, [nodes, tree]);
 
-  useUrlHistory(tree, activeId, diff, folderDiff ? folderLive : null, trash, setTree, setStatus);
+  // Panels that no longer exist leave the cross-panel selection.
+  useEffect(() => {
+    if (!tree) return;
+    const ids = new Set(leaves(tree).map((l) => l.id));
+    setSels((m) => (Object.keys(m).every((k) => ids.has(k)) ? m : Object.fromEntries(Object.entries(m).filter(([k]) => ids.has(k)))));
+    setPanelSel((p) => (p.every((k) => ids.has(k)) ? p : p.filter((k) => ids.has(k))));
+  }, [tree]);
+
+  useUrlHistory(tree, activeId, diff, compare, trash, panelSel, setTree, setStatus);
 
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => { const m = t ? mapTree(t, fn) : t; return m ? syncTree(m) : m; });
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
+  const leafOf = (lid: string) => (tree ? leaves(tree).find((l) => l.id === lid) : undefined);
+  const cmp = useCompare({ state: compare, setState: setCompare, leafOf, patchLeaf, activeId, onFileDiff: (l, r) => setDiff({ left: l, right: r }), onStatus: setStatus });
+  const startCompare = (a: string, b: string) => {
+    const la = leafOf(a);
+    const lb = leafOf(b);
+    if (!la || !lb || a === b) return;
+    setCompare({ left: { node: la.node, path: la.path }, right: { node: lb.node, path: lb.path }, opts: DEFAULT_UI, preset: "", lp: a, rp: b, rel: "", hide: [] });
+    setPanelSel([]);
+    setStatus(`Comparing ${la.node}:${la.path} with ${lb.node}:${lb.path}`);
+  };
   const patchSizes = (sid: string, sizes: number[]) =>
     setTree((t) => {
       const go = (n: Tree): Tree => (n.kind === "leaf" ? n : n.id === sid ? { ...n, sizes } : { ...n, children: n.children.map(go) });
@@ -366,13 +385,18 @@ export function App() {
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
           onDiff={onDiff}
           diffMarked={diffMark !== null}
-          onFolderDiff={onFolderDiff}
-          folderMarked={folderMark !== null}
+          onCompare={(peer) => startCompare(t.id, peer)}
+          others={Object.entries(sels).filter(([k]) => k !== t.id).flatMap(([, v]) => v)}
+          panelPicked={panelSel.includes(t.id)}
+          clearReq={clearReq}
+          onSelection={(refs) => reportSel(t.id, refs)}
+          onClearOthers={() => clearOthers(t.id)}
+          onTogglePanel={() => togglePanel(t.id)}
           next={nx ? { node: nx.node, path: nx.path } : null}
           onSwitch={(d) => switchPanel(t.id, d)}
           onHelp={() => setHelp(true)}
           onTrash={(node) => setTrash({ node, volume: "" })}
-          peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel }))}
+          peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel, picked: panelSel.includes(l.id) }))}
           onStatus={setStatus}
         />
         </DockSlot>
@@ -423,13 +447,6 @@ export function App() {
                 </button>
               </Tip>
             )}
-            {folderMark && (
-              <Tip label="Clear folder diff mark">
-                <button className="btn btn--ghost btn--sm" onClick={() => setFolderMark(null)}>
-                  Folder mark: {folderMark.node}:{folderMark.path} <X />
-                </button>
-              </Tip>
-            )}
             <Tip label="Keyboard shortcuts" shortcut="?"><button className="btn btn--ghost btn--sm" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
             {brand.links.map((l) => (
               <a key={l.url} className="btn btn--ghost btn--sm" href={l.url}>{l.label}</a>
@@ -438,32 +455,42 @@ export function App() {
           </div>
         </div>
       </header>
+      {(panelSel.length > 0 || Object.keys(sels).length > 1) && (
+        <SelectionBar
+          refs={Object.values(sels).flat()}
+          panelCount={Object.keys(sels).length}
+          picked={panelSel}
+          dests={tree ? leaves(tree).map((l) => ({ id: l.id, node: l.node, path: l.path })) : []}
+          onClear={() => {
+            setClearReq((c) => ({ except: "", n: (c?.n ?? 0) + 1 }));
+            setPanelSel([]);
+          }}
+          onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
+          onCompare={startCompare}
+          onStatus={setStatus}
+        />
+      )}
+      <CompareCtx.Provider value={cmp}>
       <div className="body">
         <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<JobsTray nodes={nodes} />} />
         <main className="main" aria-label="File panels">
           <h1 className="visually-hidden">Files</h1>
           {tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
+          {diff && (
+            <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
+              <DiffViewer overlay left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />
+            </Suspense>
+          )}
         </main>
       </div>
+      {cmp && <SyncDialog ctl={cmp} />}
+      </CompareCtx.Provider>
       {trash && (
         <Suspense fallback={null}>
           <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => setTrash(null)} onStatus={setStatus} />
         </Suspense>
       )}
       {help && <ShortcutHelp onClose={() => setHelp(false)} />}
-      <Suspense fallback={<div className="ed"><div className="pad muted">Loading editor...</div></div>}>
-        {folderDiff && nodes.length > 0 && (
-          <FolderDiff
-            init={folderDiff}
-            onState={setFolderLive}
-            nodes={nodes}
-            onClose={() => setFolderDiff(null)}
-            onFileDiff={(l, r) => setDiff({ left: l, right: r })}
-            onStatus={setStatus}
-          />
-        )}
-        {diff && <DiffViewer left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />}
-      </Suspense>
     </div>
   );
 }

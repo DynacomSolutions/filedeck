@@ -1,4 +1,4 @@
-import type { DiffMode, Loc, SearchForm } from "./urlState";
+import type { DiffMode, DiffStatus, Loc, SearchForm } from "./urlState";
 export interface Entry {
   name: string;
   path: string;
@@ -208,7 +208,7 @@ export interface DiffApiOptions {
   depth: number;
   maxEntries: number;
 }
-export type DiffStatus = "identical" | "different" | "left-only" | "right-only" | "error";
+export type { DiffStatus };
 export interface DiffSide {
   t: "file" | "dir" | "symlink" | "other";
   s: number;

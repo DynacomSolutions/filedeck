@@ -67,20 +67,20 @@ test("delete with filters active never trashes folders wholesale", () => {
   assert.equal(p.notes.length, 1);
 });
 
-import { DEFAULT_UI, decodeState, encodeState, type AppState } from "../../web/src/urlState.ts";
+import { DEFAULT_UI, decodeState, encodeState, type AppState, type Tree } from "../../web/src/urlState.ts";
 
 test("folder diff state round-trips through the app URL and ignores junk", () => {
-  const tree = { kind: "leaf" as const, id: "p1", node: "node-a", path: "/" };
+  const tree: Tree = { kind: "split", id: "p3", dir: "horizontal", children: [{ kind: "leaf", id: "p1", node: "node-a", path: "/a" }, { kind: "leaf", id: "p2", node: "node-c", path: "/b" }] };
   const opts = { ...DEFAULT_UI, mode: "content" as const, toleranceSec: 5, ignoreCase: true, exclude: "*.log, node_modules/", depth: 3 };
-  const st: AppState = { tree, active: "p1", folder: { left: { node: "node-a", path: "/a" }, right: { node: "node-c", path: "/b" }, opts, preset: "dev" } };
+  const st: AppState = { tree, active: "p1", folder: { left: { node: "node-a", path: "/a" }, right: { node: "node-c", path: "/b" }, opts, preset: "dev", lp: "p1", rp: "p2", rel: "", hide: [] } };
   const back = decodeState(encodeState(st));
   assert.deepEqual(back?.folder, st.folder);
   // defaults are not written out
   assert.ok(!encodeState({ tree, active: "p1", folder: { ...st.folder!, opts: DEFAULT_UI, preset: "" } }).includes("%22m%22"));
   // malformed folder state is dropped, the rest of the state survives
-  const bad = "?s=" + encodeURIComponent(JSON.stringify({ t: { i: "p1", n: "node-a", p: "/" }, a: "p1", g: { l: ["x", "nope"], r: ["y", "/b"] } }));
+  const bad = "?s=" + encodeURIComponent(JSON.stringify({ t: { i: "p1", n: "node-a", p: "/" }, a: "p1", g: { l: ["x", "nope"], r: ["y", "/b"], a: "p1", b: "p2" } }));
   assert.ok(decodeState(bad) && !decodeState(bad)?.folder);
-  const clamped = decodeState("?s=" + encodeURIComponent(JSON.stringify({ t: { i: "p1", n: "node-a", p: "/" }, a: "p1", g: { l: ["a", "/a"], r: ["b", "/b"], m: "bogus", d: 9999, n: -4 } })));
+  const clamped = decodeState("?s=" + encodeURIComponent(JSON.stringify({ t: { i: "p3", d: "h", k: [{ i: "p1", n: "node-a", p: "/" }, { i: "p2", n: "node-a", p: "/" }] }, a: "p1", g: { l: ["a", "/a"], r: ["b", "/b"], a: "p1", b: "p2", m: "bogus", d: 9999, n: -4 } })));
   assert.equal(clamped?.folder?.opts.mode, "quick");
   assert.equal(clamped?.folder?.opts.depth, 64);
   assert.equal(clamped?.folder?.opts.maxEntries, 1);

@@ -34,6 +34,8 @@ export interface Leaf {
   path: string;
   /** the single selected entry (path), when exactly one is selected */
   sel?: string;
+  /** every selected path when several are selected here (capped; a selection can also span several panels) */
+  sels?: string[];
   sort?: { key: SortKey; asc: boolean };
   hidden?: boolean;
   /** preview sub-panel placement and size (percent of the panel) */
@@ -83,7 +85,18 @@ export interface FolderState {
   right: Loc;
   opts: UiOpts;
   preset: string;
+  /** panels showing the left and right side while the compare is open in place */
+  lp: string;
+  rp: string;
+  /** folder (relative to both roots) the two panels currently show; "" = the roots */
+  rel: string;
+  /** status filters switched off */
+  hide: DiffStatus[];
 }
+export type DiffStatus = "identical" | "different" | "left-only" | "right-only" | "error";
+export const DIFF_STATUSES: DiffStatus[] = ["identical", "different", "left-only", "right-only", "error"];
+/** Most paths of a multi-selection kept per panel in the URL. */
+export const MAX_SELS = 100;
 
 /** Open trash browser: the node and the volume ("" = first volume with items). */
 export interface TrashState {
@@ -97,10 +110,12 @@ export interface AppState {
   trash?: TrashState;
   diff?: { left: FileRef; right: FileRef };
   folder?: FolderState;
+  /** panels picked as a whole (Shift/Ctrl+click on the panel header) */
+  panelSel?: string[];
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: [string, string][]; ti?: number };
+type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: [string, string][]; ti?: number };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
@@ -110,14 +125,17 @@ interface Wire {
   f?: [[string, string], [string, string]];
   /** trash browser: node, volume */
   r?: [string, string];
-  /** folder diff: l/r folders, then only the options that differ from the defaults */
-  g?: { l: [string, string]; r: [string, string]; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
+  /** panels selected as a whole */
+  ps?: string[];
+  /** folder compare: l/r roots, a/b panel ids, u current relative folder, f hidden statuses, then only the options that differ from the defaults */
+  g?: { l: [string, string]; r: [string, string]; a: string; b: string; u?: string; f?: string; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
 }
 
 const toWire = (t: Tree): WTree => {
   if (t.kind === "split") return { i: t.id, d: t.dir === "horizontal" ? "h" : "v", k: t.children.map(toWire), ...(t.sizes ? { z: t.sizes.map((x) => Math.round(x * 10) / 10) } : {}) };
   const w: WLeaf = { i: t.id, n: t.node, p: t.path };
   if (t.sel) w.s = t.sel;
+  else if (t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
   if (t.sort && (t.sort.key !== "name" || !t.sort.asc)) w.o = `${t.sort.key}:${t.sort.asc ? "a" : "d"}`;
   if (t.hidden) w.h = 1;
   if (t.pv) w.v = [t.pv.dock, Math.round(t.pv.size * 10) / 10];
@@ -146,10 +164,13 @@ const toWire = (t: Tree): WTree => {
 export function encodeState(s: AppState): string {
   const w: Wire = { t: toWire(s.tree), a: s.active };
   if (s.trash) w.r = [s.trash.node, s.trash.volume];
+  if (s.panelSel?.length) w.ps = s.panelSel;
   if (s.diff) w.f = [[s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
   if (s.folder) {
-    const { left, right, opts: o, preset } = s.folder;
-    const g: NonNullable<Wire["g"]> = { l: [left.node, left.path], r: [right.node, right.path] };
+    const { left, right, opts: o, preset, lp, rp, rel, hide } = s.folder;
+    const g: NonNullable<Wire["g"]> = { l: [left.node, left.path], r: [right.node, right.path], a: lp, b: rp };
+    if (rel) g.u = rel;
+    if (hide.length) g.f = hide.join(",");
     if (o.mode !== DEFAULT_UI.mode) g.m = o.mode;
     if (o.toleranceSec !== DEFAULT_UI.toleranceSec) g.t = o.toleranceSec;
     if (o.ignoreCase) g.c = 1;
@@ -180,6 +201,7 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (!str(o.n) || !str(o.p)) return null;
   const leaf: Leaf = { kind: "leaf", id: o.i, node: o.n, path: o.p };
   if (str(o.s)) leaf.sel = o.s;
+  else if (Array.isArray(o.m) && o.m.length > 1 && o.m.length <= MAX_SELS && o.m.every(str)) leaf.sels = o.m as string[];
   if (str(o.o)) {
     const [key, dir] = o.o.split(":");
     if (key === "name" || key === "size" || key === "mtime") leaf.sort = { key, asc: dir !== "d" };
@@ -233,14 +255,19 @@ export function leaves(t: Tree): Leaf[] {
 }
 
 const pair = (x: unknown): x is [string, string] => Array.isArray(x) && str(x[0]) && str(x[1]) && x[1].startsWith("/");
-function folderFromWire(g: unknown): FolderState | null {
+function folderFromWire(g: unknown, ids: string[]): FolderState | null {
   const o = g as NonNullable<Wire["g"]> | undefined;
   if (!o || typeof o !== "object" || !pair(o.l) || !pair(o.r)) return null;
+  if (!str(o.a) || !str(o.b) || o.a === o.b || !ids.includes(o.a) || !ids.includes(o.b)) return null;
   const num = (v: unknown, d: number, lo: number, hi: number) => (typeof v === "number" && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d);
   return {
     left: { node: o.l[0], path: o.l[1] },
     right: { node: o.r[0], path: o.r[1] },
     preset: str(o.p) ? o.p : "",
+    lp: o.a,
+    rp: o.b,
+    rel: str(o.u) ? o.u.replace(/^\/+|\/+$/g, "") : "",
+    hide: str(o.f) ? (o.f.split(",").filter((x) => DIFF_STATUSES.includes(x as DiffStatus)) as DiffStatus[]) : [],
     opts: {
       mode: FOLDER_MODES.includes(o.m as DiffMode) ? (o.m as DiffMode) : DEFAULT_UI.mode,
       toleranceSec: num(o.t, DEFAULT_UI.toleranceSec, 0, 86400),
@@ -272,7 +299,9 @@ export function decodeState(search: string): AppState | null {
         : undefined;
     const r = w.r;
     const trash = Array.isArray(r) && str(r[0]) && typeof r[1] === "string" ? { node: r[0], volume: r[1] } : undefined;
-    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folderFromWire(w.g) ? { folder: folderFromWire(w.g) as FolderState } : {}) };
+    const folder = folderFromWire(w.g, ids);
+    const panelSel = Array.isArray(w.ps) ? w.ps.filter((x) => str(x) && ids.includes(x)) : [];
+    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}) };
   } catch {
     return null;
   }

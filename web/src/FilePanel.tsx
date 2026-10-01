@@ -10,12 +10,14 @@ import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { ConfirmDialog, LinkDialog, NameDialog } from "./Dialogs";
 import { PropertiesDialog } from "./Properties";
 import { copyText, getClip, setClip, useClip } from "./clipboard";
+import { deleteSpec, downloadRefs, groupRefs, refOf, trashSpec, type SelRef } from "./Selection";
 import type { FileRef } from "./EditorViews";
 import { SearchView } from "./Search";
+import { CompareBar, CompareBody, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
-import { EMPTY_SEARCH, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
-import { ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
+import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
+import { ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
 
@@ -46,11 +48,19 @@ interface Props {
   /** Two selected files diff directly; one selected file is marked, then paired with the next. */
   onDiff: (files: { node: string; path: string }[]) => void;
   diffMarked: boolean;
-  /** Folder diff: two selected folders compare directly; one folder (or this panel's folder when nothing is selected) is marked, then paired with the next. */
-  onFolderDiff: (folders: { node: string; path: string }[]) => void;
-  folderMarked: boolean;
-  /** the other panels, for "diff with..." / "compare folders with..." menu entries */
-  peers: { id: string; node: string; path: string; sel?: string }[];
+  /** Compare this panel with another one in place (both panels switch to compare mode). */
+  onCompare: (peerId: string) => void;
+  /** the other panels, for "diff with..." / "compare with..." menu entries */
+  peers: { id: string; node: string; path: string; sel?: string; picked?: boolean }[];
+  /** items selected in the other panels: Shift/Ctrl+click adds to them, a plain click clears them, and actions here run on the lot */
+  others: SelRef[];
+  /** this panel is picked as a whole (Shift/Ctrl+click on its header) */
+  panelPicked: boolean;
+  /** a plain selection elsewhere asks every other panel to drop its selection */
+  clearReq: { except: string; n: number } | null;
+  onSelection: (refs: SelRef[]) => void;
+  onClearOthers: () => void;
+  onTogglePanel: () => void;
   /** the panel F5/F6 copy and move to (the next panel in layout order), if any */
   next: { node: string; path: string } | null;
   /** Tab / Shift+Tab: move focus to the next / previous panel */
@@ -66,18 +76,18 @@ interface Props {
 type Modal =
   | { k: "link"; dir: string; existing?: Entry }
   | { k: "new"; dir: string; type: "file" | "folder" }
-  | { k: "del"; paths: string[] }
+  | { k: "del"; refs: SelRef[] }
   | { k: "props"; path: string; entry?: Entry };
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, dragProps, onDock, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, peers, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, dragProps, onDock, onPatch, onDiff, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
   const [hidden, setHiddenState] = useState(leaf.hidden ?? false);
   const [sort, setSortState] = useState<{ key: SortKey; asc: boolean }>(leaf.sort ?? { key: "name", asc: true });
-  const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sel ? [leaf.sel] : []));
+  const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sels ?? (leaf.sel ? [leaf.sel] : [])));
   const setHidden = (h: boolean) => {
     setHiddenState(h);
     onPatch({ hidden: h || undefined });
@@ -96,7 +106,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const secRef = useRef<HTMLElement>(null);
   const [over, setOver] = useState<string | null>(null); // "." = panel itself, else folder path
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"compress" | "extract" | null>(null);
+  const [dialog, setDialog] = useState<"compress" | "extract" | { k: "compress"; extra: SelRef[] } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [modal, setModal] = useState<Modal | null>(null);
   const clip = useClip();
@@ -170,8 +180,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   useEffect(() => {
     if (!entries.length && sel.size) return; // a deep-linked selection waits for the listing
     const v = sel.size === 1 ? [...sel][0] : undefined;
-    if (v !== leaf.sel) onPatch({ sel: v });
+    const many = sel.size > 1 && sel.size <= MAX_SELS ? [...sel].sort() : undefined;
+    const old = leaf.sels ? [...leaf.sels].sort() : undefined;
+    if (v !== leaf.sel || many?.join("\0") !== old?.join("\0")) onPatch({ sel: v, sels: many });
   }, [sel, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Report the selection upward so the other panels and the selection bar see it.
+  useEffect(() => {
+    onSelection(entries.filter((e) => sel.has(e.path)).map((e) => refOf(leaf.id, node, e)));
+  }, [sel, entries, node]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (clearReq && clearReq.except !== leaf.id) setSel((s) => (s.size ? new Set() : s));
+  }, [clearReq]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A finished hub job (copy, move, delete...) changes what this folder holds.
   useEffect(() => onOpFinished(() => refresh()), [refresh]);
@@ -184,8 +203,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       onStatus(`${label} failed: ${(e as Error).message}`);
     }
   };
-  const transferOp = (op: "copy" | "move", from: string, paths: string[], to: string, dir: string) =>
-    queueOp(op === "copy" ? "Copy" : "Move", { op, items: paths.map((p) => ({ node: from, path: p })), dst: { node: to, dir }, conflict: "ask" });
+  const transferOp = (op: "copy" | "move", items: { node: string; path: string }[], to: string, dir: string) =>
+    queueOp(op === "copy" ? "Copy" : "Move", { op, items: items.map((i) => ({ node: i.node, path: i.path })), dst: { node: to, dir }, conflict: "ask" });
   const run = async (label: string, fn: () => Promise<unknown>) => {
     try {
       onStatus(label + "...");
@@ -200,6 +219,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const click = (e: React.MouseEvent, en: Entry) => {
     onFocus();
     setCursor(en.path);
+    // Plain click selects here and nowhere else; Shift (range) and Ctrl/Cmd (toggle) keep the other panels' selections.
+    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) onClearOthers();
     if (e.shiftKey && anchor) {
       const a = visible.findIndex((x) => x.path === anchor);
       const b = visible.findIndex((x) => x.path === en.path);
@@ -238,21 +259,21 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const selEntries = entries.filter((e) => sel.has(e.path));
 
   // ---- shared actions (context menus, toolbar) ----
-  const download = (picked: Entry[]) => {
-    const one = picked.length === 1 ? picked[0] : undefined;
-    if (one && one.type === "file") window.location.href = fileUrl(node, one.path, "download");
-    else if (picked.length) window.location.href = zipUrl(node, path, picked.map((x) => x.name));
-  };
-  const setClipboard = (mode: "copy" | "cut", picked: Entry[]) => {
-    setClip({ mode, node, paths: picked.map((x) => x.path) });
-    onStatus(`${mode === "cut" ? "Cut" : "Copied"} ${picked.length} item(s) to the file clipboard`);
+  const myRefs = (picked: Entry[]) => picked.map((e) => refOf(leaf.id, node, e));
+  /** this panel's picked entries plus whatever is selected in the other panels */
+  const combine = (picked: Entry[], extra: SelRef[] = others): SelRef[] => [...myRefs(picked), ...extra];
+  const download = (picked: Entry[], extra: SelRef[] = others) => downloadRefs(combine(picked, extra));
+  const setClipboard = (mode: "copy" | "cut", picked: Entry[], extra: SelRef[] = others) => {
+    const refs = combine(picked, extra);
+    setClip({ mode, items: refs.map((r) => ({ node: r.node, path: r.path })) });
+    onStatus(`${mode === "cut" ? "Cut" : "Copied"} ${refs.length} item(s) to the file clipboard`);
   };
   const paste = async (dir: string) => {
     const c = getClip();
     if (!c) return;
     const cut = c.mode === "cut";
-    if (cut && c.node === node && c.paths.every((p) => parent(p) === dir)) return onStatus("Already in this folder");
-    await transferOp(cut ? "move" : "copy", c.node, c.paths, node, dir);
+    if (cut && c.items.every((i) => i.node === node && parent(i.path) === dir)) return onStatus("Already in this folder");
+    await transferOp(cut ? "move" : "copy", c.items, node, dir);
     if (cut) setClip(null);
   };
   const copyPaths = (paths: string[]) =>
@@ -261,12 +282,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       (e: Error) => onStatus(`Copy path failed: ${e.message}`),
     );
   const duplicate = (picked: Entry[]) => run("Duplicate", () => api.copy(node, picked.map((x) => x.path), path));
-  const trashPaths = (paths: string[]) => queueOp("Trash", { op: "trash", items: paths.map((p) => ({ node, path: p })) });
+  const trashEntries = (picked: Entry[], extra: SelRef[] = others) => queueOp("Trash", trashSpec(combine(picked, extra)));
   const peerLabel = (pr: { node: string; path: string }) => `${pr.node}:${pr.path}`;
-  const diffItems = (picked: Entry[]): MenuItem[] => {
+  const diffItems = (picked: Entry[], extra: SelRef[] = others): MenuItem[] => {
+    const refs = combine(picked, extra);
+    if (refs.length === 2 && refs.every((r) => r.editable)) return [{ label: "Diff the two selected files", onSelect: () => onDiff(refs.map((r) => ({ node: r.node, path: r.path }))) }];
     const files = picked.filter(canEdit);
-    if (picked.length === 2 && files.length === 2) return [{ label: "Diff the two selected files", onSelect: () => onDiff(files.map((e) => ({ node, path: e.path }))) }];
-    if (picked.length !== 1 || files.length !== 1) return [{ label: "Diff with...", disabled: true }];
+    if (refs.length !== 1 || files.length !== 1) return [{ label: "Diff with...", disabled: true }];
     const f = { node, path: files[0]!.path };
     const sub: MenuItem[] = [
       { label: diffMarked ? "Compare with the marked file" : "Mark for diff (pick the other file next)", onSelect: () => onDiff([f]) },
@@ -274,17 +296,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     ];
     return [{ label: "Diff with...", sub }];
   };
-  const compareItems = (dirs: Loc[]): MenuItem[] => {
-    if (dirs.length === 2) return [{ label: "Compare the two selected folders", onSelect: () => onFolderDiff(dirs) }];
-    if (dirs.length !== 1) return [{ label: "Compare folders...", disabled: true }];
-    const d = dirs[0]!;
-    const sub: MenuItem[] = [
-      { label: folderMarked ? "Compare with the marked folder" : "Mark for folder compare (pick the other folder next)", onSelect: () => onFolderDiff([d]) },
-      ...peers.filter((pr) => pr.node !== d.node || pr.path !== d.path).map((pr): MenuItem => ({ label: `With ${peerLabel(pr)}`, onSelect: () => onFolderDiff([d, { node: pr.node, path: pr.path }]) })),
-    ];
-    return [{ label: "Compare folders...", sub }];
+  const cmpCtl = useCompareCtl();
+  const cside = cmpCtl?.sideOf(leaf.id) ?? null;
+  const compareItems = (): MenuItem[] => {
+    if (cside && cmpCtl) return [{ label: "Exit compare", onSelect: cmpCtl.exit }];
+    if (!peers.length) return [{ label: "Compare with... (open a second panel first)", disabled: true }];
+    return [{ label: "Compare with", sub: peers.map((pr): MenuItem => ({ label: peerLabel(pr), onSelect: () => onCompare(pr.id) })) }];
   };
-  const pasteLabel = clip ? `Paste ${clip.paths.length} item(s)${clip.node !== node ? ` from ${clip.node}` : ""}` : "Paste";
+  const pasteLabel = clip ? `Paste ${clip.items.length} item(s)${clip.items.some((i) => i.node !== node) ? ` from ${[...new Set(clip.items.map((i) => i.node))].join(", ")}` : ""}` : "Paste";
 
   const openFile = (en: Entry) => {
     if (isDirEntry(en)) onNavigate(node, en.path);
@@ -295,12 +314,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, items });
   };
-  const rowItems = (picked: Entry[]): MenuItem[] => {
+  const rowItems = (picked: Entry[], extra: SelRef[] = others): MenuItem[] => {
     const one = picked.length === 1 ? picked[0]! : undefined;
-    const folders = picked.filter(isDirEntry);
-    const pasteDir = one && isDirEntry(one) ? one.path : path;
+        const pasteDir = one && isDirEntry(one) ? one.path : path;
     return [
-      { label: one && isDirEntry(one) ? "Open folder" : "Open", disabled: !one, hint: "Enter", onSelect: () => one && openFile(one) },
+      { label: one && isDirEntry(one) ? "Open folder" : "Open", disabled: !one || extra.length > 0, hint: "Enter", onSelect: () => one && openFile(one) },
       ...(one && isDirEntry(one)
         ? ([
             { label: "Open in new tab", onSelect: () => newTab({ node, path: one.path }) },
@@ -309,23 +327,22 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
         : []),
       { label: "Preview", disabled: !one || isDirEntry(one), onSelect: () => setClosedFor(null) },
       { label: "Edit", disabled: !one || !canEdit(one), onSelect: () => one && setEditing({ node, path: one.path }) },
-      ...diffItems(picked),
-      ...(folders.length === picked.length ? compareItems(folders.map((f) => ({ node, path: f.path }))) : []),
+      ...diffItems(picked, extra),
       "sep",
-      { label: "Cut", hint: "Ctrl+X", onSelect: () => setClipboard("cut", picked) },
-      { label: "Copy", hint: "Ctrl+C", onSelect: () => setClipboard("copy", picked) },
+      { label: "Cut", hint: "Ctrl+X", onSelect: () => setClipboard("cut", picked, extra) },
+      { label: "Copy", hint: "Ctrl+C", onSelect: () => setClipboard("copy", picked, extra) },
       { label: pasteLabel + (pasteDir !== path ? " into folder" : ""), hint: "Ctrl+V", disabled: !clip, onSelect: () => void paste(pasteDir) },
       "sep",
       ...(one && one.type === "symlink" ? ([{ label: "Edit link target...", onSelect: () => setModal({ k: "link", dir: path, existing: one }) }] as MenuItem[]) : []),
-      { label: "Rename", hint: "F2", disabled: !one, onSelect: () => one && setRenaming(one.path) },
-      { label: "Duplicate", onSelect: () => void duplicate(picked) },
-      { label: "Compress...", onSelect: () => setDialog("compress") },
+      { label: "Rename", hint: "F2", disabled: !one || extra.length > 0, onSelect: () => one && setRenaming(one.path) },
+      { label: "Duplicate", disabled: extra.length > 0, onSelect: () => void duplicate(picked) },
+      { label: "Compress...", onSelect: () => setDialog(extra.length ? { k: "compress", extra } : "compress") },
       { label: "Extract...", disabled: !(one && one.type === "file" && isArchive(one.name)), onSelect: () => setDialog("extract") },
-      { label: picked.length === 1 && one!.type === "file" ? "Download" : "Download as zip", onSelect: () => download(picked) },
+      { label: picked.length + extra.length === 1 && one!.type === "file" ? "Download" : "Download as zip", onSelect: () => download(picked, extra) },
       "sep",
-      { label: picked.length > 1 ? "Copy paths" : "Copy path", onSelect: () => void copyPaths(picked.map((x) => x.path)) },
-      { label: "Move to trash", hint: "Del", danger: true, onSelect: () => void trashPaths(picked.map((x) => x.path)) },
-      { label: "Delete permanently...", hint: "Shift+Del", danger: true, onSelect: () => setModal({ k: "del", paths: picked.map((x) => x.path) }) },
+      { label: picked.length + extra.length > 1 ? "Copy paths" : "Copy path", onSelect: () => void copyPaths(combine(picked, extra).map((x) => x.path)) },
+      { label: "Move to trash", hint: "Del", danger: true, onSelect: () => void trashEntries(picked, extra) },
+      { label: "Delete permanently...", hint: "Shift+Del", danger: true, onSelect: () => setModal({ k: "del", refs: combine(picked, extra) }) },
       "sep",
       { label: "Properties", disabled: !one, onSelect: () => one && setModal({ k: "props", path: one.path, entry: one }) },
     ];
@@ -340,7 +357,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     { label: pasteLabel, hint: here ? "Ctrl+V" : undefined, disabled: !clip, onSelect: () => void paste(dir) },
     ...(here ? ([{ label: "Select all", hint: "Ctrl+A", onSelect: () => setSel(new Set(entries.map((x) => x.path))) }, { label: "Upload...", onSelect: () => fileInput.current?.click() }, { label: "Upload folder...", onSelect: () => folderInput.current?.click() }, { label: "Refresh", onSelect: refresh }] as MenuItem[]) : []),
     "sep",
-    ...compareItems([{ node, path: dir }]),
+    ...compareItems(),
     { label: "Copy path", onSelect: () => void copyPaths([dir]) },
     { label: "Open trash", onSelect: () => onTrash(node) },
     "sep",
@@ -356,7 +373,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     const src = getDrag(e);
     if (src) {
       if (src.node === node && src.paths.every((p) => parent(p) === destDir) && !copy) return;
-      await transferOp(copy ? "copy" : "move", src.node, src.paths, node, destDir);
+      await transferOp(copy ? "copy" : "move", src.paths.map((p) => ({ node: src.node, path: p })), node, destDir);
     } else if (hasFiles(e)) {
       // Entries are only readable during the event, so take them before awaiting anything.
       const dropped = dropEntries(e.dataTransfer);
@@ -405,7 +422,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       </Tip>
     </span>
   );
-  const pane = editing ? (
+  const pane = cside ? null : editing ? (
     <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
       <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
     </Suspense>
@@ -481,16 +498,18 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     onAuxClick: isDir ? (e: React.MouseEvent) => e.button === 1 && (e.preventDefault(), newTab({ node, path: en.path })) : undefined,
     onContextMenu: (e: React.MouseEvent) => {
       onFocus();
-      const picked = sel.has(en.path) ? entries.filter((x) => sel.has(x.path)) : [en];
-      if (!sel.has(en.path)) {
+      const inSel = sel.has(en.path);
+      const picked = inSel ? entries.filter((x) => sel.has(x.path)) : [en];
+      if (!inSel) {
+        onClearOthers();
         setSel(new Set([en.path]));
         setAnchor(en.path);
       }
-      showMenu(e, rowItems(picked));
+      showMenu(e, rowItems(picked, inSel ? others : []));
     },
     onDragStart: (e: React.DragEvent) => {
       const paths = sel.has(en.path) ? selected() : [en.path];
-      if (!sel.has(en.path)) setSel(new Set([en.path]));
+      if (!sel.has(en.path)) (onClearOthers(), setSel(new Set([en.path])));
       setDrag(e, { node, paths });
     },
     onDragOver: isDir ? (e: React.DragEvent) => dragOver(e, en.path) : undefined,
@@ -518,7 +537,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const searchView = leaf.sr ? (
     <SearchView node={node} dir={path} hidden={hidden} form={leaf.sr} onForm={setSearch} onClose={() => (setSearch(undefined), setTimeout(() => secRef.current?.focus(), 0))} onReveal={revealHit} onOpen={openHit} onStatus={onStatus} />
   ) : null;
-  const listing = searchView ?? (
+  const listing = cside && cmpCtl ? <CompareBody ctl={cmpCtl} side={cside} /> : searchView ?? (
       <div
         className="fp-scroll"
         tabIndex={0}
@@ -530,9 +549,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           // mouseup made clicks on rows further down land elsewhere. :focus-visible is true for keyboard focus only.
           if (e.target === e.currentTarget && sel.size === 0 && visible[0] && e.currentTarget.matches(":focus-visible")) selectOnly(visible[0].path);
         }}
-        onClick={(e) => e.target === e.currentTarget && setSel(new Set())}
+        onClick={(e) => e.target === e.currentTarget && (onClearOthers(), setSel(new Set()))}
         onContextMenu={(e) => {
           onFocus();
+          onClearOthers();
           setSel(new Set());
           showMenu(e, folderItems(path, true));
         }}
@@ -585,6 +605,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   );
   // ---- keyboard ----
   const selectOnly = (p: string) => {
+    onClearOthers();
     setSel(new Set([p]));
     setAnchor(p);
     setCursor(p);
@@ -601,16 +622,19 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   }, [entries]);
   const toOther = (op: "copy" | "move") => {
     if (!next) return onStatus("Open a second panel first (split button)");
-    if (!selEntries.length) return;
-    const paths = selEntries.map((x) => x.path);
-    const label = op === "copy" ? "Copy" : "Move";
-    void transferOp(op, node, paths, next.node, next.path);
+    const refs = combine(selEntries);
+    if (!refs.length) return;
+    void transferOp(op, refs, next.node, next.path);
   };
   function onKeyDown(e: React.KeyboardEvent) {
     if (menu || modal || dialog) return;
     const t = e.target as HTMLElement;
     if (t.closest("input,textarea,select,[contenteditable=true],.monaco-editor")) return;
     if (t.closest("button") && (e.key === "Enter" || e.key === " ")) return;
+    if (cside && cmpCtl && e.key !== "Tab" && !(e.altKey && e.key !== "ArrowUp")) {
+      if (compareKey(cmpCtl, cside, e)) (e.preventDefault(), e.stopPropagation());
+      return;
+    }
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key;
     const hasText = !!window.getSelection()?.toString();
@@ -645,8 +669,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
         return true;
       }
       if (mod && key.toLowerCase() === "a") return !hasText && (setSel(new Set(visible.map((x) => x.path))), true);
-      if (mod && key.toLowerCase() === "c") return !hasText && selEntries.length > 0 && (setClipboard("copy", selEntries), true);
-      if (mod && key.toLowerCase() === "x") return selEntries.length > 0 && (setClipboard("cut", selEntries), true);
+      if (mod && key.toLowerCase() === "c") return !hasText && combine(selEntries).length > 0 && (setClipboard("copy", selEntries), true);
+      if (mod && key.toLowerCase() === "x") return combine(selEntries).length > 0 && (setClipboard("cut", selEntries), true);
       if (mod && key.toLowerCase() === "v") return !!getClip() && (void paste(path), true);
       // Grid: left/right step one tile, up/down one row (columns measured from the layout).
       const cols = (() => {
@@ -674,14 +698,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       if (key === "F6") return toOther("move"), true;
       if (key === "F7") return setModal({ k: "new", dir: path, type: "folder" }), true;
       if (key === "Delete") {
-        if (!selEntries.length) return false;
-        if (e.shiftKey) setModal({ k: "del", paths: selected() });
-        else void trashPaths(selected());
+        const refs = combine(selEntries);
+        if (!refs.length) return false;
+        if (e.shiftKey) setModal({ k: "del", refs });
+        else void trashEntries(selEntries);
         return true;
       }
       if (key === "Escape") {
         if (filter || filterOpen) return onPatch({ q: undefined }), setFilterOpen(false), true;
-        return sel.size > 0 && (setSel(new Set()), true);
+        if (others.length) onClearOthers();
+        return (sel.size > 0 || others.length > 0) && (setSel(new Set()), true);
       }
       if (key === "ContextMenu" || (e.shiftKey && key === "F10")) {
         const row = cursor ? secRef.current?.querySelector(`[data-path="${CSS.escape(cursor)}"]`) : null;
@@ -707,7 +733,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       data-fp={leaf.id}
       tabIndex={-1}
       onKeyDown={onKeyDown}
-      className={"fp" + (active ? " active" : "") + (over === "." ? " drop" : "")}
+      className={"fp" + (active ? " active" : "") + (panelPicked ? " picked" : "") + (over === "." ? " drop" : "")}
       onMouseDown={(e) => {
         onFocus();
         // .ed = the editor/diff overlay rendered inside this panel: taking focus there would steal it from Monaco
@@ -757,7 +783,18 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           <Tip label="New tab" shortcut="Alt+T"><button type="button" className="fp-tab-new" aria-label="New tab" onClick={() => newTab()}><Plus /></button></Tip>
         </div>
       )}
-      <header className="fp-bar" {...dragProps}>
+      <header
+        className="fp-bar"
+        {...dragProps}
+        onClick={(e) => {
+          // Shift/Ctrl/Cmd+click on the header picks the whole panel (e.g. two panels to compare).
+          if ((e.shiftKey || e.ctrlKey || e.metaKey) && !(e.target as Element).closest("button,input,select,label,a")) {
+            e.preventDefault();
+            onFocus();
+            onTogglePanel();
+          }
+        }}
+      >
         <nav className="crumbs" aria-label="Breadcrumb">
           <Tip label={`Root of ${node}`}>
             <button onClick={() => onNavigate(node, "/")} onContextMenu={(e) => showMenu(e, folderItems("/", false))}>
@@ -771,6 +808,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           ))}
         </nav>
         <div className="fp-actions">
+          <Tip label="Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels"><button aria-label="Pick this panel" aria-pressed={panelPicked} className={panelPicked ? "marked" : ""} onClick={onTogglePanel}><SquareCheck /></button></Tip>
           <Tip label="Search under this folder" shortcut="Ctrl+Shift+F"><button aria-label="Search under this folder" className={leaf.sr ? "marked" : ""} aria-pressed={!!leaf.sr} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}><Search /></button></Tip>
           <Tip label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"}><button aria-label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"} aria-pressed={view === "grid"} className={view === "grid" ? "marked" : ""} onClick={() => onPatch({ w: view === "grid" ? undefined : "g" })}>{view === "grid" ? <List /> : <LayoutGrid />}</button></Tip>
           {view === "grid" && (
@@ -792,23 +830,31 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
             <button
               aria-label="Diff files"
               className={diffMarked ? "marked" : ""}
-              disabled={!selEntries.length || selEntries.length > 2 || !selEntries.every(canEdit)}
-              onClick={() => onDiff(selEntries.map((e) => ({ node, path: e.path })))}
+              disabled={!combine(selEntries).length || combine(selEntries).length > 2 || !combine(selEntries).every((r) => r.editable)}
+              onClick={() => onDiff(combine(selEntries).map((r) => ({ node: r.node, path: r.path })))}
             ><Diff /></button>
           </Tip>
-          <Tip label={folderMarked ? "Folder diff against the marked folder" : "Folder diff: select two folders, or mark one (or this folder) then pick another"}>
+          <Tip label={cside ? "Exit compare mode" : "Compare this panel with another panel, in place"}>
             <button
-              aria-label="Diff folders"
-              className={folderMarked ? "marked" : ""}
-              disabled={selEntries.length > 2 || !selEntries.every((e) => e.type === "dir" || e.linkDir)}
-              onClick={() => onFolderDiff(selEntries.length ? selEntries.map((e) => ({ node, path: e.path })) : [{ node, path }])}
+              aria-label={cside ? "Exit compare mode" : "Compare with another panel"}
+              aria-pressed={!!cside}
+              className={cside ? "marked" : ""}
+              onClick={(e) => {
+                if (cside && cmpCtl) return cmpCtl.exit();
+                if (!peers.length) return onStatus("Open a second panel first (split button)");
+                const pickedPeers = peers.filter((p) => p.picked);
+                if (panelPicked && pickedPeers.length === 1) return onCompare(pickedPeers[0]!.id);
+                if (peers.length === 1) return onCompare(peers[0]!.id);
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setMenu({ x: r.left, y: r.bottom + 2, items: peers.map((pr): MenuItem => ({ label: `Compare with ${peerLabel(pr)}`, onSelect: () => onCompare(pr.id) })) });
+              }}
             ><GitCompareArrows /></button>
           </Tip>
-          <Tip label="Download (several items or folders as a zip)"><button aria-label="Download" disabled={!sel.size} onClick={() => download(selEntries)}><Download /></button></Tip>
-          <Tip label="Compress selection"><button aria-label="Compress selection" disabled={!sel.size} onClick={() => setDialog("compress")}><Archive /></button></Tip>
+          <Tip label="Download (several items or folders as a zip)"><button aria-label="Download" disabled={!combine(selEntries).length} onClick={() => download(selEntries)}><Download /></button></Tip>
+          <Tip label="Compress selection"><button aria-label="Compress selection" disabled={!combine(selEntries).length} onClick={() => setDialog("compress")}><Archive /></button></Tip>
           <Tip label="Extract archive"><button aria-label="Extract archive" disabled={!(sel.size === 1 && entries.some((x) => x.path === [...sel][0] && x.type === "file" && isArchive(x.name)))} onClick={() => setDialog("extract")}><PackageOpen /></button></Tip>
-          <Tip label="Move to trash"><button aria-label="Move to trash" disabled={!sel.size} onClick={() => void trashPaths(selected())}><Trash2 /></button></Tip>
-          <Tip label="Delete permanently"><button aria-label="Delete permanently" disabled={!sel.size} onClick={() => setModal({ k: "del", paths: selected() })}><CircleX /></button></Tip>
+          <Tip label="Move to trash"><button aria-label="Move to trash" disabled={!combine(selEntries).length} onClick={() => void trashEntries(selEntries)}><Trash2 /></button></Tip>
+          <Tip label="Delete permanently"><button aria-label="Delete permanently" disabled={!combine(selEntries).length} onClick={() => setModal({ k: "del", refs: combine(selEntries) })}><CircleX /></button></Tip>
           <label className="chk"><input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} /> hidden</label>
           <Tip label="Split right"><button aria-label="Split right" onClick={() => onSplit("horizontal")}><Columns2 /></button></Tip>
           <Tip label="Split down"><button aria-label="Split down" onClick={() => onSplit("vertical")}><Rows2 /></button></Tip>
@@ -829,7 +875,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           }} />
         </div>
       </header>
-      {filterOpen && (
+      {cside && cmpCtl && <CompareBar ctl={cmpCtl} side={cside} otherLabel={cside === "left" ? `${cmpCtl.st.right.node}:${cmpCtl.st.right.path}` : `${cmpCtl.st.left.node}:${cmpCtl.st.left.path}`} />}
+      {filterOpen && !cside && (
         <div className="fp-filter">
           <input
             ref={filterInput}
@@ -899,16 +946,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       {modal?.k === "del" && (
         <ConfirmDialog
           title="Delete permanently"
-          message={`Permanently delete ${modal.paths.length === 1 ? base(modal.paths[0]!) : modal.paths.length + " items"}? This cannot be undone.`}
+          message={`Permanently delete ${modal.refs.length === 1 ? modal.refs[0]!.name : modal.refs.length + " items"}? This cannot be undone.`}
           action="Delete permanently"
           danger
           onClose={() => setModal(null)}
-          onConfirm={() => void queueOp("Delete", { op: "delete", items: modal.paths.map((p) => ({ node, path: p })) })}
+          onConfirm={() => void queueOp("Delete", deleteSpec(modal.refs))}
         />
       )}
       {modal?.k === "props" && <PropertiesDialog node={node} path={modal.path} entry={modal.entry} onClose={() => setModal(null)} onChanged={refresh} onStatus={onStatus} />}
-      {dialog === "compress" && (
-        <CompressDialog node={node} dir={path} names={entries.filter((x) => sel.has(x.path)).map((x) => x.name)} onClose={() => setDialog(null)} onStatus={onStatus} />
+      {(dialog === "compress" || (typeof dialog === "object" && dialog?.k === "compress")) && (
+        <CompressDialog groups={groupRefs(combine(selEntries, typeof dialog === "object" && dialog ? dialog.extra : others))} onClose={() => setDialog(null)} onStatus={onStatus} />
       )}
       {dialog === "extract" && [...sel][0] && (
         <ExtractDialog node={node} archive={[...sel][0]!} defaultDest={path} onClose={() => setDialog(null)} onStatus={onStatus} />
