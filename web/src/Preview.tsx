@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
+import { OfficeView } from "./OfficeView";
+import { LEGACY_OFFICE, OFFICE_EXT } from "./officeParse";
 import { HexView } from "./HexView";
 import { MarkdownView } from "./MarkdownView";
 import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
@@ -9,7 +11,7 @@ const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
 const VID = VIDEO_EXT;
 const AUD = AUDIO_EXT;
-const TXT = ["txt", "log", "json", "yaml", "yml", "ts", "tsx", "js", "css", "html", "xml", "csv", "sh", "py", "toml", "ini", "conf", "go", "rs"];
+const TXT = ["txt", "log", "json", "yaml", "yml", "ts", "tsx", "js", "css", "html", "xml", "csv", "tsv", "sh", "py", "toml", "ini", "conf", "go", "rs"];
 
 function Text({ url }: { url: string }) {
   const [t, setT] = useState("loading...");
@@ -29,7 +31,8 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
   const e = ext(entry.name);
   const [hex, setHex] = useState(false);
   useEffect(() => setHex(false), [node, entry.path]);
-  const known = isArchive(entry.name) || IMG.includes(e) || VID.includes(e) || AUD.includes(e) || e === "pdf" || e === "md" || e === "markdown" || TXT.includes(e) || entry.size === 0;
+  const isOffice = OFFICE_EXT.includes(e) && (e !== "csv" && e !== "tsv" || entry.size <= 8 * 1024 * 1024);
+  const known = isArchive(entry.name) || IMG.includes(e) || VID.includes(e) || AUD.includes(e) || e === "pdf" || isOffice || LEGACY_OFFICE.includes(e) || e === "md" || e === "markdown" || TXT.includes(e) || entry.size === 0;
   return (
     <div className="pv">
       <div className="pv-head">
@@ -59,6 +62,10 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
           <MediaPlayer node={node} path={entry.path} name={entry.name} kind="audio" />
         ) : e === "pdf" ? (
           <iframe src={url} title={entry.name} sandbox="allow-same-origin" />
+        ) : isOffice ? (
+          <OfficeView node={node} path={entry.path} ext={e} size={entry.size} />
+        ) : LEGACY_OFFICE.includes(e) ? (
+          <div className="pv-empty muted">Legacy .{e} files cannot be rendered here. Use Hex to inspect, or Download.</div>
         ) : e === "md" || e === "markdown" ? (
           <MarkdownView node={node} path={entry.path} />
         ) : TXT.includes(e) || entry.size === 0 ? (

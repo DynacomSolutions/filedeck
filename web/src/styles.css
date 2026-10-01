@@ -330,3 +330,12 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .pv-hexbar button{min-height:26px;min-width:28px;padding:0 .4rem}.pv-hexbar input{min-height:26px;font:.76rem var(--mono)}
 .pv-hexdump{margin:0;padding:.6rem .8rem;font:.74rem/1.55 var(--mono);overflow:auto;white-space:pre;text-align:left}
 .hx-off{color:var(--muted)}.hx-asc{color:var(--fg-soft)}
+
+/* office viewer */
+.pv-office{width:100%;align-self:stretch;min-width:0}
+.pv-office p.pv-li::before{content:"\2022";margin-right:.5rem;color:var(--muted)}
+.pv-slides{padding:.6rem .8rem;display:flex;flex-direction:column;gap:.7rem;font-size:.84rem;text-align:left}
+.pv-slides section{border:1px solid var(--border);border-radius:var(--radius-sm);padding:.5rem .8rem;background:var(--surface-2)}.pv-slides h4{margin:0 0 .3rem;font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}.pv-slides p{margin:.2rem 0}
+.pv-sheets{display:flex;flex-direction:column}
+.pv-sheetwrap{overflow:auto;font-size:.76rem;text-align:left}.pv-sheetwrap table{border-collapse:collapse}.pv-sheetwrap td,.pv-sheetwrap th{border:1px solid var(--border);padding:.2rem .5rem;white-space:pre;max-width:24rem;overflow:hidden;text-overflow:ellipsis}.pv-sheetwrap th{background:var(--surface-2);color:var(--muted);font-weight:400;position:sticky;left:0}
+.sp-b{font-weight:700}.sp-i{font-style:italic}
