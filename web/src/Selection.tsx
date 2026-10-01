@@ -6,6 +6,7 @@ import { setClip } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { CompressDialog } from "./ArchiveDialog";
 import { ConfirmDialog } from "./Dialogs";
+import { Tip } from "./Tooltip";
 
 export interface SelRef {
   node: string;
@@ -87,11 +88,14 @@ export interface BarProps {
   dests: Dest[];
   onClear: () => void;
   onDiff: (a: SelRef, b: SelRef) => void;
-  onCompare: (a: string, b: string) => void;
+  /** starts the compare (picked panels, the only two panels, or a picker) */
+  onCompare: (e: React.MouseEvent) => void;
+  /** why Compare panels is unavailable, or null when it is enabled */
+  compareWhyNot: string | null;
   onStatus: (m: string) => void;
 }
 
-export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff, onCompare, onStatus }: BarProps) {
+export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff, onCompare, compareWhyNot, onStatus }: BarProps) {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [compress, setCompress] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -114,7 +118,6 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
   };
   const files = refs.filter(isEditable);
   const diffable = refs.length === 2 && files.length === 2;
-  const comparable = picked.length === 2;
   return (
     <div className="selbar" role="region" aria-label="Selection across panels">
       <b role="status">
@@ -131,7 +134,9 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
         <button disabled={!refs.length} onClick={() => void queue("Trash", trashSpec(refs))}>Trash</button>
         <button disabled={!refs.length} className="danger" onClick={() => setConfirm(true)}>Delete...</button>
         <button disabled={!diffable} title="Diff the two selected files" onClick={() => diffable && onDiff(refs[0]!, refs[1]!)}>Diff files</button>
-        <button disabled={!comparable} title="Compare the two picked panels in place (Shift/Ctrl+click a panel header to pick it)" onClick={() => comparable && onCompare(picked[0]!, picked[1]!)}>Compare panels</button>
+        <Tip label={compareWhyNot ?? "Compare two panels in place: the two picked ones (Shift/Ctrl+click a panel header), else the focused panel with another"}>
+          <button disabled={!!compareWhyNot} onClick={onCompare}>Compare panels</button>
+        </Tip>
         <button onClick={onClear}>Clear</button>
       </span>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}

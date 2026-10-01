@@ -15,7 +15,8 @@ import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
 import { CompareCtx, SyncDialog, useCompare } from "./Compare";
 import { SelectionBar, type SelRef } from "./Selection";
-import { ChevronDown, ChevronRight, Keyboard, Star, X } from "lucide-react";
+import { ChevronDown, ChevronRight, GitCompareArrows, Keyboard, Star, X } from "lucide-react";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 
@@ -318,6 +319,23 @@ export function App() {
     setPanelSel([]);
     setStatus(`Comparing ${la.node}:${la.path} with ${lb.node}:${lb.path}`);
   };
+  // "Compare panels" from the header or the selection bar: two picked panels, else the only two panels,
+  // else the focused panel against one chosen from a small menu.
+  const [cmpMenu, setCmpMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const panelCount = tree ? leaves(tree).length : 0;
+  const compareWhyNot = panelCount < 2 ? "Compare needs two panels: open a second one with a Split button in a panel header." : null;
+  const compareClick = (e: React.MouseEvent) => {
+    if (!tree || compareWhyNot) return;
+    const all = leaves(tree);
+    const picked = panelSel.filter((p) => all.some((l) => l.id === p));
+    if (picked.length === 2) return startCompare(picked[0]!, picked[1]!);
+    const anchor = picked.length === 1 ? picked[0]! : all.some((l) => l.id === activeId) ? activeId : all[0]!.id;
+    const others = all.filter((l) => l.id !== anchor);
+    if (others.length === 1) return startCompare(anchor, others[0]!.id);
+    const al = all.find((l) => l.id === anchor)!;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setCmpMenu({ x: r.left, y: r.bottom + 2, items: others.map((l): MenuItem => ({ label: `Compare ${al.node}:${al.path} with ${l.node}:${l.path}`, onSelect: () => startCompare(anchor, l.id) })) });
+  };
   const patchSizes = (sid: string, sizes: number[]) =>
     setTree((t) => {
       const go = (n: Tree): Tree => (n.kind === "leaf" ? n : n.id === sid ? { ...n, sizes } : { ...n, children: n.children.map(go) });
@@ -448,6 +466,9 @@ export function App() {
               </Tip>
             )}
             <Tip label="Keyboard shortcuts" shortcut="?"><button className="btn btn--ghost btn--sm" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
+            <Tip label={compareWhyNot ?? "Compare two panels in place (folder compare, file diff, sync)"}>
+              <button className="btn btn--ghost btn--sm" aria-label="Compare panels" disabled={!!compareWhyNot} onClick={compareClick}><GitCompareArrows /> Compare panels</button>
+            </Tip>
             {brand.links.map((l) => (
               <a key={l.url} className="btn btn--ghost btn--sm" href={l.url}>{l.label}</a>
             ))}
@@ -455,6 +476,7 @@ export function App() {
           </div>
         </div>
       </header>
+      {cmpMenu && <ContextMenu x={cmpMenu.x} y={cmpMenu.y} items={cmpMenu.items} onClose={() => setCmpMenu(null)} />}
       {(panelSel.length > 0 || Object.keys(sels).length > 1) && (
         <SelectionBar
           refs={Object.values(sels).flat()}
@@ -466,7 +488,8 @@ export function App() {
             setPanelSel([]);
           }}
           onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
-          onCompare={startCompare}
+          onCompare={compareClick}
+          compareWhyNot={compareWhyNot}
           onStatus={setStatus}
         />
       )}

@@ -267,4 +267,71 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
     assert.equal((await fetch(S("/api/fs/thumb?path=/nope.png"))).status, 404);
     assert.equal((await fetch(S("/api/fs/thumb?path=/../x.png"))).status, 400);
   });
+
+  test(`${type}: folder compare, file hash and sync run between a node agent and the source, both directions`, async () => {
+    const seed = (root: string, rel: string, data: string) => {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), data);
+    };
+    const nodeSide = path.join(agentRoot, "xcmp");
+    const srcSide = path.join(remote, "share/xcmp");
+    seed(nodeSide, "same.txt", "equal");
+    seed(srcSide, "same.txt", "equal");
+    seed(nodeSide, "diff.txt", "node-AAAA"); // same size, different bytes: only a content hash tells
+    seed(srcSide, "diff.txt", "node-BBBB");
+    seed(nodeSide, "d/only-node.txt", "from the node");
+    seed(srcSide, "only-src.txt", "from the source");
+
+    const job = async (left: [string, string], right: [string, string]) => {
+      const r = await post(`${hub}/api/diff/jobs`, { left: { node: left[0], path: left[1] }, right: { node: right[0], path: right[1] }, options: { mode: "content", toleranceMs: 24 * 3600_000 } });
+      assert.equal(r.status, 202, await r.clone().text());
+      const { id } = (await r.json()) as { id: string };
+      for (let i = 0; i < 400; i++) {
+        const v = (await (await fetch(`${hub}/api/diff/jobs/${id}`)).json()) as { state: string; error?: string };
+        if (v.state === "done") return (await (await fetch(`${hub}/api/diff/jobs/${id}/result`)).json()) as { rows: { p: string; status: string }[]; hashedFiles: number };
+        assert.ok(!["failed", "canceled"].includes(v.state), `diff job ${v.state}: ${v.error}`);
+        await new Promise((res) => setTimeout(res, 25));
+      }
+      assert.fail("diff job timed out");
+    };
+    const st = (res: { rows: { p: string; status: string }[] }) => Object.fromEntries(res.rows.map((x) => [x.p, x.status]));
+
+    const ns = st(await job(["n1", "/xcmp"], ["nas", "/xcmp"]));
+    assert.deepEqual(ns, { "same.txt": "identical", "diff.txt": "different", d: "left-only", "d/only-node.txt": "left-only", "only-src.txt": "right-only" });
+    const sn = await job(["nas", "/xcmp"], ["n1", "/xcmp"]);
+    assert.deepEqual(st(sn), { "same.txt": "identical", "diff.txt": "different", d: "right-only", "d/only-node.txt": "right-only", "only-src.txt": "left-only" });
+    assert.ok(sn.hashedFiles >= 2, "content mode hashed on both the source and the node");
+
+    // sync: node -> source copy (with a new folder), source -> node copy, then deletes on both sides
+    const sync = async (steps: unknown[]) => {
+      const r = await post(`${hub}/api/ops/jobs`, { op: "sync", steps });
+      assert.equal(r.status, 202, await r.clone().text());
+      const { id } = (await r.json()) as { id: string };
+      for (let i = 0; i < 400; i++) {
+        const v = (await (await fetch(`${hub}/api/ops/jobs/${id}`)).json()) as { state: string; counts: { failed: number } };
+        if (["done", "failed", "canceled"].includes(v.state)) {
+          assert.equal(v.state, "done");
+          assert.equal(v.counts.failed, 0);
+          return;
+        }
+        await new Promise((res) => setTimeout(res, 25));
+      }
+      assert.fail("sync timed out");
+    };
+    await sync([
+      { kind: "mkdir", node: "nas", path: "/xcmp/d" },
+      { kind: "copy", src: { node: "n1", path: "/xcmp/d/only-node.txt" }, dst: { node: "nas", dir: "/xcmp/d" } },
+      { kind: "copy", src: { node: "n1", path: "/xcmp/diff.txt" }, dst: { node: "nas", dir: "/xcmp" } },
+      { kind: "copy", src: { node: "nas", path: "/xcmp/only-src.txt" }, dst: { node: "n1", dir: "/xcmp" } },
+    ]);
+    assert.equal(fs.readFileSync(path.join(srcSide, "d/only-node.txt"), "utf8"), "from the node");
+    assert.equal(fs.readFileSync(path.join(srcSide, "diff.txt"), "utf8"), "node-AAAA");
+    assert.equal(fs.readFileSync(path.join(nodeSide, "only-src.txt"), "utf8"), "from the source");
+    assert.ok(Object.values(st(await job(["n1", "/xcmp"], ["nas", "/xcmp"]))).every((v) => v === "identical"));
+
+    await sync([{ kind: "trash", node: "nas", path: "/xcmp/only-src.txt" }, { kind: "trash", node: "n1", path: "/xcmp/same.txt" }]);
+    assert.equal(fs.existsSync(path.join(srcSide, "only-src.txt")), false);
+    assert.equal(fs.existsSync(path.join(nodeSide, "same.txt")), false);
+    assert.equal(st(await job(["n1", "/xcmp"], ["nas", "/xcmp"]))["same.txt"], "right-only");
+  });
 }
