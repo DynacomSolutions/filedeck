@@ -193,7 +193,18 @@ export async function rename(root: string, from: string, to: string, overwrite =
     await fs.rename(a.real, b.real);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
-    await fs.cp(a.real, b.real, { recursive: true, errorOnExist: !overwrite, force: overwrite, verbatimSymlinks: true });
+    // Copy beside the destination first so a failure midway leaves nothing
+    // at the real name and the temp tree can be removed; the source is only
+    // deleted once the copy is complete and in place.
+    const tmp = path.join(path.dirname(b.real), `.${path.basename(b.real)}.filedeck-part-${randomUUID()}`);
+    try {
+      await fs.cp(a.real, tmp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+      if (overwrite) await fs.rm(b.real, { recursive: true, force: true });
+      await fs.rename(tmp, b.real);
+    } catch (err) {
+      await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
     await fs.rm(a.real, { recursive: true, force: true });
   }
   return b.virtual;

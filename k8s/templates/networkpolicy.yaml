@@ -1,0 +1,26 @@
+# Agents run as root with hostPath / and have no authentication of their own,
+# so only the hub pod may reach them. Kubelet probes come from the node and are
+# not subject to pod NetworkPolicy under kube-router.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "filedeck.name" . }}-agent
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "filedeck.name" . }}
+      app.kubernetes.io/component: agent
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "filedeck.name" . }}
+              app.kubernetes.io/component: hub
+      ports:
+        - port: http
+          protocol: TCP
