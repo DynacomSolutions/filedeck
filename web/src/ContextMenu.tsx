@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ChevronRight } from "lucide-react";
 
 export type MenuItem =
   | "sep"
@@ -93,7 +94,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft }: { items: MenuItem[]; 
               onClick={() => run(it)}
             >
               <span>{it.label}</span>
-              {it.sub ? <span className="hint">▸</span> : it.hint ? <span className="hint">{it.hint}</span> : null}
+              {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
             </button>
             {it.sub && openSub === i && (
               <div className={"ctx-subwrap" + (flip() ? " flip" : "")}>

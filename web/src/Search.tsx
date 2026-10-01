@@ -1,6 +1,9 @@
+import { Tip } from "./Tooltip";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fmtDate, fmtSize, searchStream, type SearchDone, type SearchHit } from "./api";
 import { EMPTY_SEARCH, type SearchForm, type SearchMode, type SearchTypes } from "./urlState";
+import { FileIcon } from "./FileIcon";
+import { X } from "lucide-react";
 
 interface Props {
   node: string;
@@ -137,10 +140,10 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
           <option value="glob">glob</option>
           <option value="regex">regex</option>
         </select>
-        <label className="chk" title="Match name case-sensitively"><input type="checkbox" checked={!form.ic} onChange={(e) => set({ ic: !e.target.checked })} /> Aa</label>
+        <Tip label="Match name case-sensitively"><label className="chk"><input type="checkbox" checked={!form.ic} onChange={(e) => set({ ic: !e.target.checked })} /> Aa</label></Tip>
         <input type="search" placeholder="Text inside files (optional)" aria-label="Content" value={form.content} onChange={(e) => set({ content: e.target.value })} />
-        <label className="chk" title="Treat the content text as a regular expression"><input type="checkbox" checked={form.cre} onChange={(e) => set({ cre: e.target.checked })} /> regex</label>
-        <label className="chk" title="Match content case-sensitively"><input type="checkbox" checked={!form.cic} onChange={(e) => set({ cic: !e.target.checked })} /> Aa</label>
+        <Tip label="Treat the content text as a regular expression"><label className="chk"><input type="checkbox" checked={form.cre} onChange={(e) => set({ cre: e.target.checked })} /> regex</label></Tip>
+        <Tip label="Match content case-sensitively"><label className="chk"><input type="checkbox" checked={!form.cic} onChange={(e) => set({ cic: !e.target.checked })} /> Aa</label></Tip>
         <select aria-label="Type" value={form.types} onChange={(e) => set({ types: e.target.value as SearchTypes })}>
           <option value="all">files and folders</option>
           <option value="file">files</option>
@@ -151,10 +154,10 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
         ) : (
           <button type="submit" className="primary">Search</button>
         )}
-        <button type="button" title="Close search (Esc)" aria-label="Close search" onClick={() => (onForm(EMPTY_SEARCH), onClose())}>×</button>
+        <Tip label="Close search" shortcut="Esc"><button type="button" aria-label="Close search" onClick={() => (onForm(EMPTY_SEARCH), onClose())}><X /></button></Tip>
       </form>
       <div className="sr-sum muted" role="status">
-        <span title={`${node}:${dir}`}>In {dir}</span> · {summary()}
+        <Tip label={`${node}:${dir}`}><span>In {dir}</span></Tip> · {summary()}
       </div>
       <div className="sr-list fp-scroll" ref={listRef} tabIndex={0}>
         <table className="ft">
@@ -165,22 +168,22 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
             {hits.map((h, i) => (
               <tr key={h.p} data-i={i} className={i === cur ? "sel cur" : ""} onClick={() => setCur(i)} onDoubleClick={() => onReveal(h.p)}>
                 <td className="name">
-                  <span className="ico">{h.t === "dir" ? "📁" : h.t === "symlink" ? "🔗" : "📄"}</span>
+                  <FileIcon className="ico" type={h.t} />
                   <span className="nm">{baseOf(h.p)}</span>
                   {h.x !== undefined && (
-                    <span className="sr-snip muted" title={h.x}>
+                    <span className="sr-snip muted">
                       {" "}
                       :{h.l} {h.x}
                       {h.n && h.n > 1 ? ` (+${h.n - 1} more lines)` : ""}
                     </span>
                   )}
                 </td>
-                <td className="sr-dir" title={dirOf(h.p) || "/"}>{dirOf(h.p) || "."}</td>
+                <td className="sr-dir"><Tip label={dirOf(h.p) || "/"} fill><span>{dirOf(h.p) || "."}</span></Tip></td>
                 <td className="num">{h.t === "dir" ? "" : fmtSize(h.s)}</td>
                 <td className="num">{fmtDate(h.m)}</td>
                 <td className="sr-act">
-                  <button type="button" title="Show in its folder (Enter)" onClick={(e) => (e.stopPropagation(), onReveal(h.p))}>Reveal</button>
-                  <button type="button" title={h.t === "dir" ? "Open folder" : "Open file in a new tab (Shift+Enter)"} onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}>Open</button>
+                  <Tip label="Show in its folder" shortcut="Enter"><button type="button" onClick={(e) => (e.stopPropagation(), onReveal(h.p))}>Reveal</button></Tip>
+                  <Tip label={h.t === "dir" ? "Open folder" : "Open file in a new tab (Shift+Enter)"}><button type="button" onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}>Open</button></Tip>
                 </td>
               </tr>
             ))}

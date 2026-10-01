@@ -15,6 +15,8 @@ import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
 import { FolderDiff, type FolderDiffInit } from "./FolderDiff";
 import type { Loc } from "./api";
+import { ChevronDown, ChevronRight, Keyboard, Star, X } from "lucide-react";
+import { Tip } from "./Tooltip";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 
 /** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = merge as a tab). */
@@ -165,10 +167,14 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       <ul className="marks">
         {marks.map((b) => (
           <li key={b.node + "\0" + b.path}>
-            <button className="mark-open" onClick={() => onOpen(b.node, b.path)} title={`${b.node}:${b.path}`}>
-              <span className="mark-star" aria-hidden="true">★</span> {bookmarkLabel(b)} <span className="muted mark-node">{b.node}</span>
-            </button>
-            <button className="mark-rm" onClick={() => removeBookmark(b)} title="Remove bookmark" aria-label={`Remove bookmark ${b.node}:${b.path}`}>×</button>
+            <Tip label={`${b.node}:${b.path}`}>
+              <button className="mark-open" onClick={() => onOpen(b.node, b.path)}>
+                <Star className="mark-star" fill="currentColor" /> {bookmarkLabel(b)} <span className="muted mark-node">{b.node}</span>
+              </button>
+            </Tip>
+            <Tip label="Remove bookmark">
+              <button className="mark-rm" onClick={() => removeBookmark(b)} aria-label={`Remove bookmark ${b.node}:${b.path}`}><X /></button>
+            </Tip>
           </li>
         ))}
       </ul>
@@ -176,7 +182,7 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       {cluster.map((n) => (
         <div key={n.name}>
           <button className="side-node" onClick={() => toggle(n.name)}>
-            <span className={"dot " + (n.online ? "on" : "off")} /> {open[n.name] ? "▾" : "▸"} {n.name}
+            <span className={"dot " + (n.online ? "on" : "off")} /> {open[n.name] ? <ChevronDown /> : <ChevronRight />} {n.name}
           </button>
           {open[n.name] && (
             <ul className="mounts">
@@ -184,15 +190,16 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
               <li><button onClick={() => onTrash(n.name)}>Trash</button></li>
               {(mounts[n.name] ?? []).map((m) => (
                 <li key={m.mountpoint}>
+                  <Tip label={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}${m.readOnly ? " - read-only" : ""}`}>
                   <button
                     onClick={() => onOpen(n.name, m.mountpoint)}
-                    title={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}${m.readOnly ? " - read-only" : ""}`}
                   >
                     {m.mountpoint}
                     {m.network && <span className={"net-badge" + (m.unreachable ? " bad" : "")}>{m.netKind ?? "network"}</span>}
                     {m.readOnly && <span className="net-badge">read-only</span>}
                     <span className="bar"><i style={{ width: `${m.total ? Math.round((m.used / m.total) * 100) : 0}%` }} /></span>
                   </button>
+                  </Tip>
                 </li>
               ))}
             </ul>
@@ -202,10 +209,12 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       {!cluster.length && <p className="muted">No nodes</p>}
       {network.length > 0 && <h2>Network</h2>}
       {network.map((n) => (
-        <button key={n.name} className="side-node" onClick={() => onOpen(n.name, "/")} title={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : " - unreachable"}`}>
-          <span className={"dot " + (n.online ? "on" : "off")} /> {n.name}
-          <span className="net-badge">{(n.type ?? "net").toUpperCase()}</span>
-        </button>
+        <Tip key={n.name} label={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : " - unreachable"}`}>
+          <button className="side-node" onClick={() => onOpen(n.name, "/")}>
+            <span className={"dot " + (n.online ? "on" : "off")} /> {n.name}
+            <span className="net-badge">{(n.type ?? "net").toUpperCase()}</span>
+          </button>
+        </Tip>
       ))}
       </div>
       {footer}
@@ -408,16 +417,20 @@ export function App() {
           <span className="status" role="status">{status}</span>
           <div className="site-header__actions">
             {diffMark && (
-              <button className="btn btn--ghost btn--sm" onClick={() => setDiffMark(null)} title="Clear diff mark">
-                Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)} ×
-              </button>
+              <Tip label="Clear diff mark">
+                <button className="btn btn--ghost btn--sm" onClick={() => setDiffMark(null)}>
+                  Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)} <X />
+                </button>
+              </Tip>
             )}
             {folderMark && (
-              <button className="btn btn--ghost btn--sm" onClick={() => setFolderMark(null)} title="Clear folder diff mark">
-                Folder mark: {folderMark.node}:{folderMark.path} ×
-              </button>
+              <Tip label="Clear folder diff mark">
+                <button className="btn btn--ghost btn--sm" onClick={() => setFolderMark(null)}>
+                  Folder mark: {folderMark.node}:{folderMark.path} <X />
+                </button>
+              </Tip>
             )}
-            <button className="btn btn--ghost btn--sm" onClick={() => setHelp(true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+            <Tip label="Keyboard shortcuts" shortcut="?"><button className="btn btn--ghost btn--sm" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
             {brand.links.map((l) => (
               <a key={l.url} className="btn btn--ghost btn--sm" href={l.url}>{l.label}</a>
             ))}
