@@ -88,7 +88,7 @@ test("parseMounts filters pseudo filesystems and decodes escapes", () => {
 });
 
 test("hub fills branding into index.html and the neutral default has no links", async () => {
-  fs.writeFileSync(path.join(tmp, "index.html"), "<title>%%TITLE%%</title><link href=\"%%ICON%%\"><script>%%BOOT%%</script>");
+  fs.writeFileSync(path.join(tmp, "index.html"), "<title>%%TITLE%%</title><link href=\"%%ICON%%\">%%BRANDCSS%%<script>%%BOOT%%</script>");
   const mk = async (env: Record<string, string>) => {
     const s = await new Promise<ReturnType<typeof serve>>((res) => {
       const x: ReturnType<typeof serve> = serve({ fetch: createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, ...env } as never)).fetch as never, port: 0 }, () => res(x));
@@ -104,10 +104,11 @@ test("hub fills branding into index.html and the neutral default has no links", 
   assert.match(neutral.html, /"links":\[\]/);
   assert.match(neutral.html, /"themeKey":"filedeck-theme"/);
   assert.equal(neutral.deep, neutral.html);
-  const branded = await mk({ FILEDECK_BRAND: JSON.stringify({ name: "Acme <b>", links: [{ label: "Docs", url: "https://docs.example/" }, { label: "bad", url: "javascript:alert(1)" }], logo: { light: "/l.svg", dark: "/d.svg" }, themeKey: "acme-theme" }) });
+  const branded = await mk({ FILEDECK_BRAND: JSON.stringify({ name: "Acme <b>", links: [{ label: "Docs", url: "https://docs.example/" }, { label: "bad", url: "javascript:alert(1)" }], logo: { light: "/l.svg", dark: "/d.svg" }, themeKey: "acme-theme", css: "/assets/brand/theme.css" }) });
   assert.match(branded.html, /<title>Acme &#60;b&#62;<\/title>/);
   assert.match(branded.html, /"links":\[\{"label":"Docs","url":"https:\/\/docs.example\/"\}\]/);
   assert.ok(!branded.html.includes("javascript:"));
   assert.ok(!branded.html.includes("<b>"));
   assert.match(branded.html, /"themeKey":"acme-theme"/);
+  assert.match(branded.html, /<link rel="stylesheet" href="\/assets\/brand\/theme.css" \/>/);
 });

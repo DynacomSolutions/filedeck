@@ -15,11 +15,11 @@
 }
 
 /*
-  Filedeck Studio — redesign v2 on the Filedeck design system.
+  Filedeck theme (neutral). Deployments recolour it through FILEDECK_BRAND.css.
   Composition, not reskin: full-bleed hairline bands, sticky split rails,
   open ledger rows instead of boxed cards, display-scale type inside the
   app, licence keys as oversized type, device usage as rotated-square
-  node marks. Pure black, Montserrat, one red moment per viewport.
+  node marks. Pure black, Montserrat, one accent moment per viewport.
 */
 
 :root {
@@ -31,18 +31,18 @@
   --fg: #ffffff;
   --muted: #737373;
   --border: #242424;
-  --accent: #e8414a;
-  --accent-deep: #841719;
+  --accent: #4f8cff;
+  --accent-deep: #1d3f9e;
 
   /* Derived (alpha and oklch mixes of the palette only). */
   --fg-soft: rgba(255, 255, 255, 0.78);
   --surface-2: rgba(255, 255, 255, 0.045);
   --surface-3: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.18);
-  --accent-fill: #e8414a;
-  --accent-fill-hover: #841719;
-  --accent-tint: rgba(232, 65, 74, 0.12);
-  --accent-line: rgba(232, 65, 74, 0.38);
+  --accent-fill: #2563eb;
+  --accent-fill-hover: #1d3f9e;
+  --accent-tint: rgba(79, 140, 255, 0.12);
+  --accent-line: rgba(79, 140, 255, 0.38);
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.4);
   --header-bg: rgba(0, 0, 0, 0.86);
@@ -71,9 +71,9 @@
   --surface-3: rgba(0, 0, 0, 0.06);
   --border: rgba(0, 0, 0, 0.13);
   --border-strong: rgba(0, 0, 0, 0.3);
-  --accent-tint: rgba(232, 65, 74, 0.09);
-  --accent-line: rgba(132, 23, 25, 0.45);
-  --accent-text: #841719;
+  --accent-tint: rgba(79, 140, 255, 0.09);
+  --accent-line: rgba(29, 63, 158, 0.45);
+  --accent-text: #1d3f9e;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
   --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.08);
   --header-bg: rgba(255, 255, 255, 0.88);
@@ -82,10 +82,10 @@
 
 /* Deepen the action fill where relative-color syntax is supported
    (keeps white button labels above 4.5:1). */
-@supports (background: oklch(from #e8414a calc(l - 0.05) c h)) {
+@supports (background: oklch(from #2563eb calc(l - 0.05) c h)) {
   :root {
-    --accent-fill: oklch(from #e8414a calc(l - 0.045) c h);
-    --accent-fill-hover: oklch(from #e8414a calc(l - 0.105) c h);
+    --accent-fill: oklch(from #2563eb calc(l - 0.045) c h);
+    --accent-fill-hover: oklch(from #2563eb calc(l - 0.105) c h);
   }
 }
 

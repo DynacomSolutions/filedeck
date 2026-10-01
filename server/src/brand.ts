@@ -12,6 +12,8 @@ export interface Brand {
   logo?: { light: string; dark: string };
   /** browser-tab icon; defaults to the bundled neutral one */
   icon: string;
+  /** extra stylesheet loaded after the bundled theme (same-origin path or https URL), e.g. to recolour the accent */
+  css?: string;
   /** links shown in the header, e.g. sibling tools */
   links: { label: string; url: string }[];
   /** localStorage key shared with other pages of the same deployment so the theme choice follows the user */
@@ -39,6 +41,8 @@ export function parseBrand(s: string | undefined): Brand {
   const light = safeUrl(lg?.light);
   const dark = safeUrl(lg?.dark);
   if (light && dark) b.logo = { light, dark };
+  const css = safeUrl(j.css);
+  if (css) b.css = css;
   if (Array.isArray(j.links)) {
     for (const l of j.links.slice(0, 8)) {
       const label = text((l as { label?: unknown })?.label, 40);
@@ -60,5 +64,6 @@ export function renderIndex(html: string, b: Brand): string {
   return html
     .replace("%%TITLE%%", esc(b.title))
     .replace("%%ICON%%", esc(b.icon))
+    .replace("%%BRANDCSS%%", b.css ? `<link rel="stylesheet" href="${esc(b.css)}" />` : "")
     .replace("%%BOOT%%", `window.__FILEDECK__=${boot};`);
 }

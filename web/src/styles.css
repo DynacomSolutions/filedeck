@@ -1,5 +1,5 @@
 /* filedeck on the bundled Studio theme (tokens, fonts, header, pills and ledger
-   headings). Colours come only from /assets/studio.css; the aliases below keep
+   headings). Colours come only from /assets/theme.css; the aliases below keep
    the component class names stable. */
 :root{
   --panel:var(--surface);--panel2:var(--surface-2);--ink:var(--fg);--line:var(--border);
@@ -341,7 +341,7 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .sp-b{font-weight:700}.sp-i{font-style:italic}
 
 /* ---- accessibility and small screens ---- */
-/* studio.css --muted (#737373) is 4.4:1 on the black page; nudged to pass 4.5:1 for small text. */
+/* theme.css --muted (#737373) is 4.4:1 on the black page; nudged to pass 4.5:1 for small text. */
 :root:not([data-theme="light"]){--muted:#8c8c8c}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 @media(max-width:700px){
