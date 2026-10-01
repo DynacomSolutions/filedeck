@@ -1,5 +1,9 @@
-# Timeouts are load-bearing for transfers and the SSE change feed; see the
-# identical block (and the measurements behind it) in files/k8s/templates/mappings.yaml.
+# Timeouts are load-bearing for file transfers and the SSE change feed:
+# - timeout_ms: 0 disables the request timeout (no limit for long-running downloads/uploads).
+# - idle_timeout_ms: 3600000 (1 hour) closes connections idle longer than an hour.
+# - cluster_idle_timeout_ms: 0 disables idle timeout on the backend connection.
+# - cluster_max_connection_lifetime_ms: 0 disables max lifetime on the backend connection.
+# These settings prevent interruption of large file transfers and maintain active connections for SSE updates.
 apiVersion: getambassador.io/v3alpha1
 kind: Mapping
 metadata:
