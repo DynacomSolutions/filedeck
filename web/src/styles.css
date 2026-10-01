@@ -409,3 +409,6 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 .cmp-status{font-weight:700;text-align:center}
 .cmp-name{display:block;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:800px){.cmp-head,.cmp-row{grid-template-columns:minmax(100px,1fr) 26px}.cmp-head span:nth-child(2),.cmp-head span:nth-child(3),.cmp-row>span:nth-child(2),.cmp-row>span:nth-child(3){display:none}}
+svg.lucide{display:inline-block}
+.ln-target{white-space:nowrap}.ln-target svg.lucide{width:12px;height:12px;vertical-align:-2px}
+.side-node svg.lucide{vertical-align:-3px}
