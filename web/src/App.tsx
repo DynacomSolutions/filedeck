@@ -2,12 +2,13 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { DEFAULT_UI, decodeState, encodeState, leaves, maxId, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
+import { DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
+import { useBookmarks, removeBookmark, bookmarkLabel } from "./bookmarks";
 import { ThemeMenu } from "./ThemeMenu";
 import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
@@ -34,9 +35,9 @@ interface HState {
   /** panel whose navigation created this entry ("init" for the first) */
   panel: string;
   /** every panel's node/path right after that navigation */
-  paths: Record<string, { node: string; path: string }>;
+  paths: Record<string, { node: string; path: string; ti?: number }>;
 }
-const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { node: l.node, path: l.path }]));
+const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { node: l.node, path: l.path, ti: l.ti ?? 0 }]));
 
 /**
  * The URL always reflects the full app state. A folder change in a panel pushes a
@@ -46,7 +47,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  */
 function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
-  const prev = useRef<Record<string, { node: string; path: string }> | null>(null);
+  const prev = useRef<Record<string, { node: string; path: string; ti?: number }> | null>(null);
   const fromPop = useRef(false);
   const latest = useRef({ active, url: "", paths: {} as HState["paths"] });
   latest.current.active = active;
@@ -58,7 +59,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     latest.current.url = url;
     latest.current.paths = paths;
     let changed: string | undefined;
-    if (prev.current && !fromPop.current) changed = Object.keys(paths).find((k) => prev.current![k] && (prev.current![k]!.node !== paths[k]!.node || prev.current![k]!.path !== paths[k]!.path));
+    if (prev.current && !fromPop.current) changed = Object.keys(paths).find((k) => prev.current![k] && prev.current![k]!.ti === paths[k]!.ti && (prev.current![k]!.node !== paths[k]!.node || prev.current![k]!.path !== paths[k]!.path));
     prev.current = paths;
     fromPop.current = false;
     try {
@@ -99,7 +100,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
       setTree((t) => {
         if (!t) return t;
         const go = (n: Tree): Tree => (n.kind === "leaf" ? (n.id === focused ? { ...n, node: target.node, path: target.path, sel: undefined, closed: undefined } : n) : { ...n, children: n.children.map(go) });
-        return go(t);
+        return syncTree(go(t));
       });
       setStatus(`${back ? "Back" : "Forward"}: ${target.node}:${target.path}`);
     };
@@ -117,9 +118,22 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
   };
   const cluster = nodes.filter((n) => n.kind !== "source");
   const network = nodes.filter((n) => n.kind === "source");
+  const marks = useBookmarks();
   return (
     <aside className="side">
       <div className="side-scroll">
+      <h2>Bookmarks</h2>
+      {marks.length === 0 && <p className="muted side-hint">Star a folder to keep it here.</p>}
+      <ul className="marks">
+        {marks.map((b) => (
+          <li key={b.node + "\0" + b.path}>
+            <button className="mark-open" onClick={() => onOpen(b.node, b.path)} title={`${b.node}:${b.path}`}>
+              <span className="mark-star" aria-hidden="true">★</span> {bookmarkLabel(b)} <span className="muted mark-node">{b.node}</span>
+            </button>
+            <button className="mark-rm" onClick={() => removeBookmark(b)} title="Remove bookmark" aria-label={`Remove bookmark ${b.node}:${b.path}`}>×</button>
+          </li>
+        ))}
+      </ul>
       <h2>Nodes</h2>
       {cluster.map((n) => (
         <div key={n.name}>
@@ -235,7 +249,7 @@ export function App() {
 
   useUrlHistory(tree, activeId, diff, folderDiff ? folderLive : null, trash, setTree, setStatus);
 
-  const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => (t ? mapTree(t, fn) : t));
+  const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => { const m = t ? mapTree(t, fn) : t; return m ? syncTree(m) : m; });
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
   const patchSizes = (sid: string, sizes: number[]) =>
     setTree((t) => {

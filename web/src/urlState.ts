@@ -48,6 +48,10 @@ export interface Leaf {
   sr?: SearchForm;
   /** view mode: absent = list, "g" = thumbnail grid */
   w?: "g";
+  /** tabs (every tab's folder, in order); absent = a single location. `node`/`path` above are always the active tab's. */
+  tabs?: Loc[];
+  /** index of the active tab in `tabs` */
+  ti?: number;
 }
 export type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[]; sizes?: number[] };
 
@@ -96,7 +100,7 @@ export interface AppState {
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g" };
+type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: [string, string][]; ti?: number };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
@@ -121,6 +125,10 @@ const toWire = (t: Tree): WTree => {
   if (t.edit) w.e = [t.edit.node, t.edit.path];
   if (t.q) w.q = t.q;
   if (t.w === "g") w.w = "g";
+  if (t.tabs && t.tabs.length > 1) {
+    w.tb = t.tabs.map((x) => [x.node, x.path]);
+    if (t.ti) w.ti = t.ti;
+  }
   if (t.sr) {
     const z: WSearch = {};
     if (t.sr.q) z.q = t.sr.q;
@@ -182,6 +190,11 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
   if (str(o.q) && o.q) leaf.q = o.q;
   if (o.w === "g") leaf.w = "g";
+  if (Array.isArray(o.tb) && o.tb.length > 1 && o.tb.length <= MAX_TABS && o.tb.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]) && x[1].startsWith("/"))) {
+    leaf.tabs = (o.tb as [string, string][]).map(([node, path]) => ({ node, path }));
+    leaf.ti = typeof o.ti === "number" && Number.isInteger(o.ti) && o.ti >= 0 && o.ti < leaf.tabs.length ? o.ti : 0;
+    leaf.tabs[leaf.ti] = { node: leaf.node, path: leaf.path };
+  }
   if (o.z && typeof o.z === "object") {
     const z = o.z as WSearch;
     leaf.sr = {
@@ -196,6 +209,24 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   }
   return leaf;
 };
+
+export const MAX_TABS = 16;
+
+/** Keeps `tabs[ti]` equal to the panel's own node/path (navigation edits the active tab in place). Same object when nothing changes. */
+export function syncTabs(l: Leaf): Leaf {
+  if (!l.tabs) return l;
+  const ti = Math.min(Math.max(l.ti ?? 0, 0), l.tabs.length - 1);
+  const cur = l.tabs[ti]!;
+  if (cur.node === l.node && cur.path === l.path && ti === (l.ti ?? 0)) return l;
+  const tabs = l.tabs.slice();
+  tabs[ti] = { node: l.node, path: l.path };
+  return { ...l, tabs, ti };
+}
+export function syncTree(t: Tree): Tree {
+  if (t.kind === "leaf") return syncTabs(t);
+  const kids = t.children.map(syncTree);
+  return kids.every((k, i) => k === t.children[i]) ? t : { ...t, children: kids };
+}
 
 export function leaves(t: Tree): Leaf[] {
   return t.kind === "leaf" ? [t] : t.children.flatMap(leaves);

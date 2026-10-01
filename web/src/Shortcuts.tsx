@@ -11,6 +11,8 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["Backspace / Alt+Up", "Go to the parent folder"],
       ["Tab / Shift+Tab", "Next / previous panel"],
       ["Ctrl+F", "Filter this folder by name"],
+      ["Alt+T / Alt+W", "New tab with this folder / close the tab"],
+      ["Alt+[ / Alt+]", "Previous / next tab"],
       ["Ctrl+Shift+F", "Search under this folder (name, glob, regex, file content)"],
       ["Esc", "Clear filter, then selection"],
     ],

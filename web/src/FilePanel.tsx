@@ -12,7 +12,8 @@ import { copyText, getClip, setClip, useClip } from "./clipboard";
 import type { FileRef } from "./EditorViews";
 import { SearchView } from "./Search";
 import { Thumb } from "./Thumb";
-import { EMPTY_SEARCH, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
+import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
+import { EMPTY_SEARCH, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
@@ -281,6 +282,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     const pasteDir = one && isDirEntry(one) ? one.path : path;
     return [
       { label: one && isDirEntry(one) ? "Open folder" : "Open", disabled: !one, hint: "Enter", onSelect: () => one && openFile(one) },
+      ...(one && isDirEntry(one)
+        ? ([
+            { label: "Open in new tab", onSelect: () => newTab({ node, path: one.path }) },
+            { label: isBookmarked(marks, { node, path: one.path }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: one.path }) },
+          ] as MenuItem[])
+        : []),
       { label: "Preview", disabled: !one || isDirEntry(one), onSelect: () => setClosedFor(null) },
       { label: "Edit", disabled: !one || !canEdit(one), onSelect: () => one && setEditing({ node, path: one.path }) },
       ...diffItems(picked),
@@ -305,7 +312,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   };
   /** Menu for a folder itself: empty space in the listing, or a breadcrumb. */
   const folderItems = (dir: string, here: boolean): MenuItem[] => [
-    ...(here ? [] : [{ label: "Open", onSelect: () => onNavigate(node, dir) } as MenuItem]),
+    ...(here ? [] : ([{ label: "Open", onSelect: () => onNavigate(node, dir) }, { label: "Open in new tab", onSelect: () => newTab({ node, path: dir }) }] as MenuItem[])),
+    { label: isBookmarked(marks, { node, path: dir }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: dir }) },
     { label: "New file...", onSelect: () => setModal({ k: "new", dir, type: "file" }) },
     { label: "New folder...", onSelect: () => setModal({ k: "new", dir, type: "folder" }) },
     { label: pasteLabel, hint: here ? "Ctrl+V" : undefined, disabled: !clip, onSelect: () => void paste(dir) },
@@ -378,6 +386,65 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   ) : previewEntry ? (
     <Preview node={node} entry={previewEntry} onEdit={(n, p) => setEditing({ node: n, path: p })} extra={paneExtra} />
   ) : null;
+  // ---- tabs: several folders per panel; `node`/`path` stay the active tab's, the list lives in the URL ----
+  const marks = useBookmarks();
+  const here = { node, path };
+  const tabs: Loc[] = leaf.tabs ?? [here];
+  const ti = Math.min(leaf.ti ?? 0, tabs.length - 1);
+  const [tabDrag, setTabDrag] = useState<number | null>(null);
+  const applyTabs = (list: Loc[], idx: number, reset: boolean) => {
+    const t = list[idx]!;
+    onPatch({
+      tabs: list.length > 1 ? list : undefined,
+      ti: list.length > 1 && idx > 0 ? idx : undefined,
+      node: t.node,
+      path: t.path,
+      ...(reset ? { sel: undefined, closed: undefined, sr: undefined, q: undefined } : {}),
+    });
+    if (reset) {
+      setSel(new Set());
+      setFilterOpen(false);
+    }
+  };
+  const newTab = (at: Loc = here) => {
+    if (tabs.length >= MAX_TABS) return onStatus(`At most ${MAX_TABS} tabs per panel`);
+    const list = [...tabs.slice(0, ti + 1), at, ...tabs.slice(ti + 1)];
+    applyTabs(list, ti + 1, at.node !== node || at.path !== path);
+  };
+  const selectTab = (i: number) => i !== ti && applyTabs(tabs, i, true);
+  const closeTab = (i: number) => {
+    if (tabs.length < 2) return;
+    const list = tabs.filter((_, k) => k !== i);
+    const idx = i < ti ? ti - 1 : i === ti ? Math.min(i, list.length - 1) : ti;
+    applyTabs(list, idx, i === ti);
+  };
+  const moveTab = (from: number, to: number) => {
+    if (from === to || to < 0 || to >= tabs.length) return;
+    const list = tabs.slice();
+    const [m] = list.splice(from, 1);
+    list.splice(to, 0, m!);
+    const idx = ti === from ? to : from < ti && to >= ti ? ti - 1 : from > ti && to <= ti ? ti + 1 : ti;
+    applyTabs(list, idx, false);
+  };
+  const tabLabel = (t: Loc) => (t.path === "/" ? t.node + ":/" : t.path.slice(t.path.lastIndexOf("/") + 1));
+  const tabMenu = (e: React.MouseEvent, i: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const items: MenuItem[] = [
+      { label: "Duplicate tab", onSelect: () => { if (tabs.length >= MAX_TABS) return onStatus(`At most ${MAX_TABS} tabs per panel`); applyTabs([...tabs.slice(0, i + 1), tabs[i]!, ...tabs.slice(i + 1)], ti > i ? ti + 1 : ti, false); } },
+      { label: "Move left", disabled: i === 0, onSelect: () => moveTab(i, i - 1) },
+      { label: "Move right", disabled: i === tabs.length - 1, onSelect: () => moveTab(i, i + 1) },
+      "sep",
+      { label: "Close tab", hint: "Alt+W", disabled: tabs.length < 2, onSelect: () => closeTab(i) },
+      { label: "Close other tabs", disabled: tabs.length < 2, onSelect: () => applyTabs([tabs[i]!], 0, i !== ti) },
+    ];
+    setMenu({ x: e.clientX, y: e.clientY, items });
+  };
+  const toggleMark = (l: Loc) => {
+    onStatus(isBookmarked(marks, l) ? `Removed bookmark ${l.node}:${l.path}` : `Bookmarked ${l.node}:${l.path}`);
+    toggleBookmark(l);
+  };
+
   // Shared by the list rows and the grid tiles: selection, open, context menu, drag and drop.
   const itemProps = (en: Entry, isDir: boolean, cls: string) => ({
     "data-path": en.path,
@@ -385,6 +452,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     draggable: true,
     onClick: (e: React.MouseEvent) => click(e, en),
     onDoubleClick: () => open(en),
+    onAuxClick: isDir ? (e: React.MouseEvent) => e.button === 1 && (e.preventDefault(), newTab({ node, path: en.path })) : undefined,
     onContextMenu: (e: React.MouseEvent) => {
       onFocus();
       const picked = sel.has(en.path) ? entries.filter((x) => sel.has(x.path)) : [en];
@@ -517,8 +585,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     };
     const handled = (() => {
       // While the search results are open the panel's own selection is hidden: no file operations by key.
-      if (leaf.sr && !(key === "Tab" || key === "?" || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
+      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "twTW[]".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
       if (key === "?" && !mod) return onHelp(), true;
+      if (e.altKey && !mod && key.toLowerCase() === "t") return newTab(), true;
+      if (e.altKey && !mod && key.toLowerCase() === "w") return tabs.length > 1 && (closeTab(ti), true);
+      if (e.altKey && !mod && (key === "]" || key === "[") && tabs.length > 1) return selectTab((ti + (key === "]" ? 1 : -1) + tabs.length) % tabs.length), true;
       if (key === "Tab" && !mod && !e.altKey) return onSwitch(e.shiftKey ? -1 : 1), true;
       if (mod && e.shiftKey && key.toLowerCase() === "f") return setSearch(leaf.sr ?? EMPTY_SEARCH), true;
       if (mod && key.toLowerCase() === "f") {
@@ -600,6 +671,46 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       onDragLeave={() => setOver(null)}
       onDrop={(e) => drop(e, path)}
     >
+      {tabs.length > 1 && (
+        <div className="fp-tabs" role="tablist" aria-label="Tabs">
+          {tabs.map((t, i) => (
+            <div
+              key={i}
+              role="tab"
+              aria-selected={i === ti}
+              tabIndex={-1}
+              className={"fp-tab" + (i === ti ? " on" : "") + (tabDrag === i ? " dragging" : "")}
+              title={`${t.node}:${t.path}`}
+              draggable
+              onClick={() => selectTab(i)}
+              onAuxClick={(e) => e.button === 1 && (e.preventDefault(), closeTab(i))}
+              onContextMenu={(e) => tabMenu(e, i)}
+              onDragStart={(e) => {
+                e.dataTransfer.setData("application/x-filedeck-tab", String(i));
+                e.dataTransfer.effectAllowed = "move";
+                setTabDrag(i);
+              }}
+              onDragEnd={() => setTabDrag(null)}
+              onDragOver={(e) => {
+                if (tabDrag === null) return;
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onDrop={(e) => {
+                if (tabDrag === null) return;
+                e.preventDefault();
+                e.stopPropagation();
+                moveTab(tabDrag, i);
+                setTabDrag(null);
+              }}
+            >
+              <span className="fp-tab-name">{tabLabel(t)}</span>
+              <button type="button" className="fp-tab-x" aria-label={`Close tab ${tabLabel(t)}`} title="Close tab (Alt+W)" onClick={(e) => (e.stopPropagation(), closeTab(i))}>×</button>
+            </div>
+          ))}
+          <button type="button" className="fp-tab-new" title="New tab (Alt+T)" aria-label="New tab" onClick={() => newTab()}>＋</button>
+        </div>
+      )}
       <header className="fp-bar">
         <nav className="crumbs" aria-label="Breadcrumb">
           <button onClick={() => onNavigate(node, "/")} onContextMenu={(e) => showMenu(e, folderItems("/", false))} title={node}>
@@ -621,6 +732,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
               <option value="size:d">Largest first</option><option value="size:a">Smallest first</option>
             </select>
           )}
+          <button title={isBookmarked(marks, here) ? "Remove this folder from the bookmarks" : "Bookmark this folder"} aria-pressed={isBookmarked(marks, here)} className={isBookmarked(marks, here) ? "marked" : ""} onClick={() => toggleMark(here)}>{isBookmarked(marks, here) ? "★" : "☆"}</button>
+          <button title="New tab with this folder (Alt+T)" onClick={() => newTab()}>⧉</button>
           <button title="Up" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}>↑</button>
           <button title="New folder" onClick={() => setModal({ k: "new", dir: path, type: "folder" })}>＋📁</button>
           <button title="New file" onClick={() => setModal({ k: "new", dir: path, type: "file" })}>＋📄</button>
