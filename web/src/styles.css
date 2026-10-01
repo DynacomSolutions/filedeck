@@ -369,3 +369,25 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
   .main{min-height:0;flex:1}
 }
 .brand-name{font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:.95rem;color:var(--fg)}
+
+/* ---- flat line icons (lucide, currentColor) and tooltips ---- */
+svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3px;pointer-events:none}
+.ico{display:inline-block;margin-right:.45rem;color:var(--muted)}
+.tile-ico svg.lucide{width:36px;height:36px;stroke-width:1.25}.tile-ico{font-size:inherit;opacity:1;color:var(--muted)}
+.tile-play svg.lucide{width:12px;height:12px;fill:currentColor;vertical-align:-2px}
+.tip{display:inline-flex;min-width:0;max-width:100%}
+.tip--fill{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tip>button:disabled{pointer-events:none}
+.tip-bubble{position:fixed;z-index:200;max-width:min(26rem,calc(100vw - 8px));padding:.3rem .55rem;border-radius:var(--radius-sm);background:var(--tip-bg,var(--fg));color:var(--tip-fg,var(--bg));font-size:.74rem;font-weight:500;line-height:1.35;overflow-wrap:anywhere;pointer-events:none;display:flex;gap:.5rem;align-items:baseline}
+.tip-bubble kbd{border:0;background:transparent;padding:0;font:inherit;font-size:.68rem;opacity:.75;white-space:nowrap}
+.dirty-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent-text);margin-right:.4rem;vertical-align:baseline}
+/* flat controls: no heavy borders on toolbar buttons, border only on hover/pressed */
+.fp-actions button,.pv-dockbtn,.fp-tab-x,.fp-tab-new,.mark-rm{border-color:transparent;box-shadow:none;background-image:none}
+.fp-actions button:hover:not(:disabled){border-color:var(--border)}
+.fp-actions button.marked,.pv-dockbtn.on{border-color:transparent;background:var(--accent-tint)}
+.fp-actions button,.pv-dockbtn,.fp-tab-x,.fp-tab-new,.mark-rm,.btn--ghost{display:inline-flex;align-items:center;justify-content:center;gap:.35rem}
+.fd-newer-tag{display:inline-flex;align-items:center;gap:.15rem;margin-left:.35rem}.fd-newer-tag svg.lucide{width:12px;height:12px}
+.side-scroll .tip{display:flex;width:100%}.side-scroll .marks li{display:flex}.side-scroll .marks .tip:first-child{flex:1;min-width:0}.side-scroll .marks .tip:last-child{flex:none;width:auto}
+.fp-tabs>.tip{flex:0 1 auto;min-width:0}.fp-tabs .tip>.fp-tab{flex:1}
+.fd-row>.tip{min-width:0}.crumbs>.tip{display:inline-flex}
+.fd-newer svg{vertical-align:-2px}

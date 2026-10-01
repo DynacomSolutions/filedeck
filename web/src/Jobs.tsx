@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useUploads, pauseUpload, resumeUpload, cancelUpload, retryFailed, dismissUpload, type UpBatch } from "./uploads";
 import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type JobView, type NodeInfo, type OpJob } from "./api";
+import { Check, Circle, Loader, Minus, X } from "lucide-react";
+import { Tip } from "./Tooltip";
 
 const COLLAPSE_KEY = "filedeck-jobs-collapsed";
 const live = (j: JobView) => j.state === "queued" || j.state === "running";
@@ -32,7 +34,7 @@ function JobRow({ node, job, onChange }: { node: string; job: JobView; onChange:
         {live(job) ? (
           <button onClick={() => act(() => api.cancelJob(node, job.id))}>Cancel</button>
         ) : (
-          <button aria-label="Dismiss" onClick={() => act(() => api.dismissJob(node, job.id))}>×</button>
+          <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => act(() => api.dismissJob(node, job.id))}><X /></button></Tip>
         )}
       </div>
       {live(job) && (
@@ -105,7 +107,7 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
             <button onClick={() => act(() => api.opAction(job.id, "pause"))}>Pause</button>
           )
         )}
-        {live ? <button onClick={() => act(() => api.opAction(job.id, "cancel"))}>Cancel</button> : <button aria-label="Dismiss" onClick={() => act(() => api.dismissOp(job.id))}>×</button>}
+        {live ? <button onClick={() => act(() => api.opAction(job.id, "cancel"))}>Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => act(() => api.dismissOp(job.id))}><X /></button></Tip>}
       </div>
       {live && (p === null ? <progress aria-label={job.title} /> : <progress aria-label={job.title} max={100} value={p} />)}
       {live && job.conflict && (
@@ -129,7 +131,7 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
         <ul className="job-items" aria-label="Items">
           {items.map((it, i) => (
             <li key={i} className={"it " + it.state}>
-              <span className="it-s">{it.state === "done" ? "✓" : it.state === "failed" ? "✕" : it.state === "skipped" ? "–" : it.state === "running" ? "…" : "·"}</span>
+              <span className="it-s">{it.state === "done" ? <Check role="img" aria-label="done" /> : it.state === "failed" ? <X role="img" aria-label="failed" /> : it.state === "skipped" ? <Minus role="img" aria-label="skipped" /> : it.state === "running" ? <Loader role="img" aria-label="running" /> : <Circle role="img" aria-label="pending" />}</span>
               <span className="it-l">{it.label}</span>
               {(it.note || it.error) && <span className={it.error ? "fp-err" : "muted"}> {it.error ?? it.note}</span>}
               {it.bytes > 0 && <span className="muted"> {fmtSize(it.bytes)}</span>}
@@ -160,7 +162,7 @@ function UploadRow({ b, expanded, onToggle }: { b: UpBatch; expanded: boolean; o
         {b.state === "running" && <button onClick={() => pauseUpload(b.id)}>Pause</button>}
         {b.state === "paused" && <button onClick={() => resumeUpload(b.id)}>Resume</button>}
         {failed > 0 && !live && <button onClick={() => retryFailed(b.id)}>Retry failed</button>}
-        {live ? <button onClick={() => cancelUpload(b.id)}>Cancel</button> : <button aria-label="Dismiss" onClick={() => dismissUpload(b.id)}>×</button>}
+        {live ? <button onClick={() => cancelUpload(b.id)}>Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => dismissUpload(b.id)}><X /></button></Tip>}
       </div>
       {live && <progress aria-label={b.title} max={100} value={p} />}
       <div className="muted job-detail">
@@ -177,7 +179,7 @@ function UploadRow({ b, expanded, onToggle }: { b: UpBatch; expanded: boolean; o
         <ul className="job-items" aria-label="Items">
           {b.files.slice(0, 500).map((f, i) => (
             <li key={i} className={"it " + (f.state === "pending" ? "pending" : f.state)}>
-              <span className="it-s">{f.state === "done" ? "✓" : f.state === "failed" ? "✕" : f.state === "running" ? "…" : "·"}</span>
+              <span className="it-s">{f.state === "done" ? <Check role="img" aria-label="done" /> : f.state === "failed" ? <X role="img" aria-label="failed" /> : f.state === "running" ? <Loader role="img" aria-label="running" /> : <Circle role="img" aria-label="pending" />}</span>
               <span className="it-l">{f.rel}</span>
               {f.state === "running" && f.file.size > 0 && <span className="muted"> {Math.round((f.sent / f.file.size) * 100)}%</span>}
               {(f.note || f.error) && <span className={f.error ? "fp-err" : "muted"}> {f.error ?? f.note}</span>}

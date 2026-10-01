@@ -17,6 +17,9 @@ import {
 } from "./api";
 import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DEFAULT_UI, type FolderState, type UiOpts } from "./urlState";
+import { ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUp, ChevronDown, ChevronRight, ChevronUp, CircleAlert, Equal, EqualNot, type LucideIcon } from "lucide-react";
+import { Tip } from "./Tooltip";
+import { FileIcon } from "./FileIcon";
 
 /* ------------------------------------------------------------------ options, presets, URL */
 
@@ -89,12 +92,12 @@ function buildTree(rows: DiffRow[]): TNode[] {
   return roots;
 }
 
-const STATUS: Record<DiffStatus, { sym: string; label: string }> = {
-  identical: { sym: "=", label: "Identical" },
-  different: { sym: "≠", label: "Different" },
-  "left-only": { sym: "◀", label: "Left only" },
-  "right-only": { sym: "▶", label: "Right only" },
-  error: { sym: "!", label: "Error" },
+const STATUS: Record<DiffStatus, { Icon: LucideIcon; label: string }> = {
+  identical: { Icon: Equal, label: "Identical" },
+  different: { Icon: EqualNot, label: "Different" },
+  "left-only": { Icon: ArrowLeft, label: "Left only" },
+  "right-only": { Icon: ArrowRight, label: "Right only" },
+  error: { Icon: CircleAlert, label: "Error" },
 };
 const ALL_STATUS = Object.keys(STATUS) as DiffStatus[];
 const ROW_H = 26;
@@ -360,30 +363,30 @@ export function FolderDiff({ init, onState, nodes, onClose, onFileDiff, onStatus
       <header className="ed-head">
         <b>Folder diff</b>
         <span className="ed-spacer" />
-        <button onClick={close} title="Close">Close</button>
+        <Tip label="Close"><button onClick={close}>Close</button></Tip>
       </header>
 
       <div className="fd-setup">
         <div className="fd-locs">
           <LocEdit label="Left" loc={left} nodes={nodes} onChange={setLeft} />
-          <button title="Swap sides" aria-label="Swap sides" onClick={() => { setLeft(right); setRight(left); }}>⇄</button>
+          <Tip label="Swap sides"><button aria-label="Swap sides" onClick={() => { setLeft(right); setRight(left); }}><ArrowLeftRight /></button></Tip>
           <LocEdit label="Right" loc={right} nodes={nodes} onChange={setRight} />
           <button className="primary" onClick={() => void start()} disabled={running}>{result ? "Compare again" : "Compare"}</button>
-          <button onClick={() => setShowOpts((v) => !v)} aria-expanded={showOpts}>Options {showOpts ? "▴" : "▾"}</button>
+          <button onClick={() => setShowOpts((v) => !v)} aria-expanded={showOpts}>Options {showOpts ? <ChevronUp /> : <ChevronDown />}</button>
         </div>
 
         {showOpts && (
           <div className="fd-opts">
             <label>
               Compare by
-              <select value={opts.mode} onChange={(e) => setOpts({ ...opts, mode: e.target.value as DiffMode })} title={MODES.find((m) => m.id === opts.mode)?.help}>
+              <Tip label={MODES.find((m) => m.id === opts.mode)?.help}><select value={opts.mode} onChange={(e) => setOpts({ ...opts, mode: e.target.value as DiffMode })}>
                 {MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </select>
+              </select></Tip>
             </label>
-            <label title="Modified times closer than this count as equal">
+            <Tip label="Modified times closer than this count as equal"><label>
               Time tolerance (s)
               <input type="number" min={0} step={1} value={opts.toleranceSec} onChange={(e) => setOpts({ ...opts, toleranceSec: Number(e.target.value) })} />
-            </label>
+            </label></Tip>
             <label>
               Include (globs)
               <input type="text" value={opts.include} placeholder="*.ts, src/**" onChange={(e) => setOpts({ ...opts, include: e.target.value })} />
@@ -476,7 +479,7 @@ export function FolderDiff({ init, onState, nodes, onClose, onFileDiff, onStatus
                 if (s === "error" && !n) return null;
                 return (
                   <button key={s} className={"fd-tog st-" + s} aria-pressed={shown.has(s)} onClick={() => setShown((x) => { const y = new Set(x); y.has(s) ? y.delete(s) : y.add(s); return y; })}>
-                    <span aria-hidden>{STATUS[s].sym}</span> {STATUS[s].label} {n}
+                    {(() => { const I = STATUS[s].Icon; return <I />; })()} {STATUS[s].label} {n}
                   </button>
                 );
               })}
@@ -489,10 +492,10 @@ export function FolderDiff({ init, onState, nodes, onClose, onFileDiff, onStatus
             <button onClick={() => setSelected(new Set())} disabled={!selected.size}>Clear</button>
             <span className="fd-sep" />
             <span className="fd-sync" role="group" aria-label="Sync selected rows">
-              <button disabled={!selected.size} onClick={() => preview("copy-lr")} title="Copy selected left items over to the right side">Copy ▶</button>
-              <button disabled={!selected.size} onClick={() => preview("copy-rl")} title="Copy selected right items over to the left side">◀ Copy</button>
-              <button disabled={!selected.size} onClick={() => preview("delete-left")} title="Move selected left items to the trash">Delete left</button>
-              <button disabled={!selected.size} onClick={() => preview("delete-right")} title="Move selected right items to the trash">Delete right</button>
+              <Tip label="Copy selected left items over to the right side"><button disabled={!selected.size} onClick={() => preview("copy-lr")}>Copy <ArrowRight /></button></Tip>
+              <Tip label="Copy selected right items over to the left side"><button disabled={!selected.size} onClick={() => preview("copy-rl")}><ArrowLeft /> Copy</button></Tip>
+              <Tip label="Move selected left items to the trash"><button disabled={!selected.size} onClick={() => preview("delete-left")}>Delete left</button></Tip>
+              <Tip label="Move selected right items to the trash"><button disabled={!selected.size} onClick={() => preview("delete-right")}>Delete right</button></Tip>
             </span>
             <span className="muted fd-count">{selected.size} selected</span>
           </div>
@@ -535,22 +538,22 @@ export function FolderDiff({ init, onState, nodes, onClose, onFileDiff, onStatus
                     }}
                   >
                     <input type="checkbox" aria-label={`Select ${r.p}`} checked={selected.has(r.p)} onChange={() => toggleSel(n)} onDoubleClick={(e) => e.stopPropagation()} />
-                    <span className="fd-name" style={{ paddingLeft: n.depth * 16 }} title={r.p}>
+                    <Tip label={r.p} fill><span className="fd-name" style={{ paddingLeft: n.depth * 16 }}>
                       {n.isDir ? (
-                        <button className="fd-caret" aria-label={expanded.has(r.p) ? "Collapse" : "Expand"} onClick={() => open(n)} onDoubleClick={(e) => e.stopPropagation()}>{expanded.has(r.p) ? "▾" : "▸"}</button>
+                        <button className="fd-caret" aria-label={expanded.has(r.p) ? "Collapse" : "Expand"} onClick={() => open(n)} onDoubleClick={(e) => e.stopPropagation()}>{expanded.has(r.p) ? <ChevronDown /> : <ChevronRight />}</button>
                       ) : (
                         <span className="fd-caret" />
                       )}
-                      <span aria-hidden>{n.isDir ? "📁" : r.l?.t === "symlink" || r.r?.t === "symlink" ? "🔗" : "📄"}</span> {n.name}
-                    </span>
+                      <FileIcon className="ico" dir={n.isDir} type={r.l?.t === "symlink" || r.r?.t === "symlink" ? "symlink" : "file"} /> {n.name}
+                    </span></Tip>
                     <span className="num">{r.l && !n.isDir ? fmtSize(r.l.s) : ""}</span>
-                    <span className={r.newer === "left" ? "fd-newer" : ""}>{r.l ? fmtDate(r.l.m) : ""}{r.newer === "left" ? " ▲ newer" : ""}</span>
-                    <span className="fd-status" title={r.why}>
-                      <span aria-hidden>{STATUS[r.status].sym}</span> {STATUS[r.status].label}
+                    <span className={r.newer === "left" ? "fd-newer" : ""}>{r.l ? fmtDate(r.l.m) : ""}{r.newer === "left" ? <span className="fd-newer-tag"><ArrowUp /> newer</span> : null}</span>
+                    <Tip label={r.why} fill><span className="fd-status">
+                      {(() => { const I = STATUS[r.status].Icon; return <I />; })()} {STATUS[r.status].label}
                       {r.why && r.status !== "identical" && !n.isDir ? <span className="muted"> ({r.why})</span> : null}
-                    </span>
+                    </span></Tip>
                     <span className="num">{r.r && !n.isDir ? fmtSize(r.r.s) : ""}</span>
-                    <span className={r.newer === "right" ? "fd-newer" : ""}>{r.r ? fmtDate(r.r.m) : ""}{r.newer === "right" ? " ▲ newer" : ""}</span>
+                    <span className={r.newer === "right" ? "fd-newer" : ""}>{r.r ? fmtDate(r.r.m) : ""}{r.newer === "right" ? <span className="fd-newer-tag"><ArrowUp /> newer</span> : null}</span>
                   </div>
                 );
               })}
@@ -611,7 +614,7 @@ function PlanList({ steps }: { steps: Step[] }) {
   const shown = steps.slice(0, 400);
   const text = (s: Step) =>
     s.op === "copy"
-      ? `copy${s.replaces ? " (replace)" : ""} ${s.srcRel} ${s.from === "left" ? "▶" : "◀"}`
+      ? `copy${s.replaces ? " (replace)" : ""} ${s.srcRel} ${s.from === "left" ? "to the right" : "to the left"}`
       : s.op === "mkdir"
         ? `create folder ${s.rel} on the ${s.side}`
         : s.op === "trash"

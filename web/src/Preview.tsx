@@ -6,6 +6,7 @@ import { LEGACY_OFFICE, OFFICE_EXT } from "./officeParse";
 import { HexView } from "./HexView";
 import { MarkdownView } from "./MarkdownView";
 import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
+import { Tip } from "./Tooltip";
 
 const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
@@ -36,15 +37,15 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
   return (
     <div className="pv">
       <div className="pv-head">
-        <b title={entry.path}>{entry.name}</b>
+        <Tip label={entry.path}><b>{entry.name}</b></Tip>
         <span className="muted">
           {fmtSize(entry.size)} · {fmtDate(entry.mtime)}
         </span>
         {canEdit(entry) && (
-          <button className="link" onClick={() => onEdit(node, entry.path)} title="Open in the editor">Edit</button>
+          <Tip label="Open in the editor"><button className="link" onClick={() => onEdit(node, entry.path)}>Edit</button></Tip>
         )}
         {entry.size > 0 && known && (
-          <button className="link" aria-pressed={hex} onClick={() => setHex(!hex)} title="Show the raw bytes as a hex dump">{hex ? "Preview" : "Hex"}</button>
+          <Tip label="Show the raw bytes as a hex dump"><button className="link" aria-pressed={hex} onClick={() => setHex(!hex)}>{hex ? "Preview" : "Hex"}</button></Tip>
         )}
         <a href={fileUrl(node, entry.path, "download")}>Download</a>
         {extra}

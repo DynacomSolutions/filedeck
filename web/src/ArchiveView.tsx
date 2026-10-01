@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, fmtSize, parent, type ArchiveEntry, type Entry } from "./api";
+import { FileIcon } from "./FileIcon";
+import { Tip } from "./Tooltip";
 
 /** Browse an archive's contents without extracting it. */
 export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
@@ -49,9 +51,10 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
           <tbody>
             {data.entries.map((e, i) => (
               <tr key={i}>
-                <td className="name" title={e.link ? `${e.name} -> ${e.link}` : e.name}>
-                  <span className="ico">{e.type === "dir" ? "📁" : e.type === "symlink" ? "🔗" : "📄"}</span>
-                  {e.name}
+                <td className="name">
+                  <Tip label={e.link ? `${e.name} -> ${e.link}` : e.name} fill>
+                    <span><FileIcon className="ico" type={e.type} />{e.name}</span>
+                  </Tip>
                 </td>
                 <td className="num">{e.type === "file" ? fmtSize(e.size) : ""}</td>
               </tr>

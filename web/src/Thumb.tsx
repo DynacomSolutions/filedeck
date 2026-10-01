@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileUrl, thumbKind, thumbUrl, type Entry } from "./api";
+import { Play } from "lucide-react";
+import { FileIcon } from "./FileIcon";
 
 const SVG_MAX = 1024 * 1024;
 
@@ -23,8 +25,7 @@ export function Thumb({ node, entry, isDir }: { node: string; entry: Entry; isDi
     return () => io.disconnect();
   }, [usable, near]);
 
-  const icon = isDir ? "📁" : entry.type === "symlink" ? "🔗" : kind === "video" ? "🎞" : kind ? "🖼" : "📄";
-  const src = kind === "svg" ? fileUrl(node, entry.path) : thumbUrl(node, entry.path, entry.mtime, tries);
+    const src = kind === "svg" ? fileUrl(node, entry.path) : thumbUrl(node, entry.path, entry.mtime, tries);
   return (
     <div className="tile-img" ref={box}>
       {usable && near && !bad ? (
@@ -40,10 +41,10 @@ export function Thumb({ node, entry, isDir }: { node: string; entry: Entry; isDi
               else setBad(true);
             }}
           />
-          {kind === "video" && <span className="tile-play" aria-hidden="true">▶</span>}
+          {kind === "video" && <span className="tile-play" aria-hidden="true"><Play /></span>}
         </>
       ) : (
-        <span className="tile-ico" aria-hidden="true">{icon}</span>
+        <span className="tile-ico"><FileIcon dir={isDir} type={entry.type} kind={kind} /></span>
       )}
     </div>
   );

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { fileUrl } from "./api";
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from "lucide-react";
+import { Tip } from "./Tooltip";
 
 const PAGE = 4096;
 const COLS = 16;
@@ -54,13 +56,13 @@ export function HexView({ node, path, size }: { node: string; path: string; size
   return (
     <div className="pv-hex">
       <div className="pv-hexbar">
-        <button onClick={() => go(0)} disabled={page === 0} aria-label="First page">⏮</button>
-        <button onClick={() => go(page - 1)} disabled={page === 0} aria-label="Previous page">◀</button>
+        <Tip label="First page"><button onClick={() => go(0)} disabled={page === 0} aria-label="First page"><ChevronsLeft /></button></Tip>
+        <Tip label="Previous page"><button onClick={() => go(page - 1)} disabled={page === 0} aria-label="Previous page"><ChevronLeft /></button></Tip>
         <span className="muted">
           {(page * PAGE).toString(16)}h - {Math.min(size, (page + 1) * PAGE).toString(16)}h of {size.toString(16)}h ({page + 1}/{pages})
         </span>
-        <button onClick={() => go(page + 1)} disabled={page >= pages - 1} aria-label="Next page">▶</button>
-        <button onClick={() => go(pages - 1)} disabled={page >= pages - 1} aria-label="Last page">⏭</button>
+        <Tip label="Next page"><button onClick={() => go(page + 1)} disabled={page >= pages - 1} aria-label="Next page"><ChevronRight /></button></Tip>
+        <Tip label="Last page"><button onClick={() => go(pages - 1)} disabled={page >= pages - 1} aria-label="Last page"><ChevronsRight /></button></Tip>
         <form
           onSubmit={(e) => {
             e.preventDefault();

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtDate, fmtSize, parent, type TrashItem, type TrashResult, type TrashVolume } from "./api";
 import { Modal } from "./ArchiveDialog";
 import { ConfirmDialog, NameDialog } from "./Dialogs";
+import { FileIcon } from "./FileIcon";
+import { Tip } from "./Tooltip";
 
 type Dlg =
   | { k: "del"; ids: string[] }
@@ -115,8 +117,8 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
         <b>Trash</b>
         <span className="muted">{node}</span>
         <span className="ed-spacer" />
-        <button onClick={load} title="Reload">Refresh</button>
-        <button onClick={onClose} title="Close (Esc)">Close</button>
+        <Tip label="Reload"><button onClick={load}>Refresh</button></Tip>
+        <Tip label="Close" shortcut="Esc"><button onClick={onClose}>Close</button></Tip>
       </header>
       {vols && vols.length > 0 && (
         <div className="tr-tabs" role="tablist" aria-label="Volumes">
@@ -128,9 +130,9 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
         </div>
       )}
       <div className="tr-bar">
-        <button disabled={!restorable || busy} onClick={() => void restore(ids)} title="Restore to the original location (Enter)">Restore</button>
+        <Tip label="Restore to the original location" shortcut="Enter"><button disabled={!restorable || busy} onClick={() => void restore(ids)}>Restore</button></Tip>
         <button disabled={!restorable || busy} onClick={() => setDlg({ k: "to", ids })}>Restore to...</button>
-        <button disabled={!ids.length || busy} onClick={() => setDlg({ k: "del", ids })} title="Delete permanently (Del)">Delete permanently</button>
+        <Tip label="Delete permanently" shortcut="Del"><button disabled={!ids.length || busy} onClick={() => setDlg({ k: "del", ids })}>Delete permanently</button></Tip>
         <button disabled={!items.length || busy} onClick={() => setDlg({ k: "empty" })}>Empty trash...</button>
         <span className="muted tr-count">{items.length ? `${items.length} item(s)${current?.truncated ? " (list truncated)" : ""}${ids.length ? `, ${ids.length} selected` : ""}` : ""}</span>
       </div>
@@ -152,11 +154,11 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
               {items.map((it) => (
                 <tr key={it.id} className={sel.has(it.id) ? "sel" : ""} onClick={(e) => click(e, it)} onDoubleClick={() => !it.orphan && void restore([it.id])}>
                   <td className="name">
-                    <span className="ico">{it.type === "dir" ? "📁" : it.type === "symlink" ? "🔗" : "📄"}</span>
+                    <FileIcon className="ico" type={it.type} />
                     <span className="nm">{it.name}</span>
-                    {it.orphan && <span className="pill" title="metadata missing: can be deleted but not restored">orphan</span>}
+                    {it.orphan && <Tip label="metadata missing: can be deleted but not restored"><span className="pill">orphan</span></Tip>}
                   </td>
-                  <td className="muted tr-loc" title={it.originalPath}>{dirOf(it.originalPath) || "-"}</td>
+                  <td className="muted tr-loc"><Tip label={it.originalPath} fill><span>{dirOf(it.originalPath) || "-"}</span></Tip></td>
                   <td className="num">{it.deletedAt ? fmtDate(it.deletedAt) : "-"}</td>
                   <td className="num">{it.type === "dir" ? "" : fmtSize(it.size)}</td>
                 </tr>
@@ -196,7 +198,7 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
           <div className="modal-actions">
             <button type="button" onClick={() => setDlg(null)}>Skip</button>
             <button type="button" onClick={() => (setDlg(null), void restore(dlg.ids, { conflict: "rename", toDir: dlg.toDir }))}>Keep both</button>
-            <button type="submit" onClick={() => (setDlg(null), void restore(dlg.ids, { conflict: "replace", toDir: dlg.toDir }))} title="The existing item moves to the trash">Replace</button>
+            <Tip label="The existing item moves to the trash"><button type="submit" onClick={() => (setDlg(null), void restore(dlg.ids, { conflict: "replace", toDir: dlg.toDir }))}>Replace</button></Tip>
           </div>
         </Modal>
       )}
