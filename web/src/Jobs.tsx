@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useUploads, pauseUpload, resumeUpload, cancelUpload, retryFailed, dismissUpload, type UpBatch } from "./uploads";
 import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type JobView, type NodeInfo, type OpJob } from "./api";
 
 const COLLAPSE_KEY = "filedeck-jobs-collapsed";
@@ -141,10 +142,59 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
   );
 }
 
+/** A browser-driven upload batch (files or a folder tree): chunked and resumable, with pause. */
+function UploadRow({ b, expanded, onToggle }: { b: UpBatch; expanded: boolean; onToggle: () => void }) {
+  const live = b.state === "running" || b.state === "paused";
+  const sent = b.files.reduce((n, f) => n + (f.state === "done" ? f.file.size : f.sent), 0);
+  const p = b.totalBytes > 0 ? Math.min(100, Math.round((sent / b.totalBytes) * 100)) : b.files.every((f) => f.state === "done") ? 100 : 0;
+  const done = b.files.filter((f) => f.state === "done").length;
+  const failed = b.files.filter((f) => f.state === "failed").length;
+  const eta = b.state === "running" && b.speed > 0 ? (b.totalBytes - sent) / b.speed : null;
+  const label = b.state === "running" ? ` ${p}%` : ` ${b.state}`;
+  return (
+    <li className={"job op upload " + b.state} data-job-id={b.id}>
+      <div className="job-line">
+        <b>{b.title}</b>
+        <span className="muted"> to {b.node}:{b.dir}</span>
+        <span className="job-state">{label}</span>
+        {b.state === "running" && <button onClick={() => pauseUpload(b.id)}>Pause</button>}
+        {b.state === "paused" && <button onClick={() => resumeUpload(b.id)}>Resume</button>}
+        {failed > 0 && !live && <button onClick={() => retryFailed(b.id)}>Retry failed</button>}
+        {live ? <button onClick={() => cancelUpload(b.id)}>Cancel</button> : <button aria-label="Dismiss" onClick={() => dismissUpload(b.id)}>×</button>}
+      </div>
+      {live && <progress aria-label={b.title} max={100} value={p} />}
+      <div className="muted job-detail">
+        {[
+          `${fmtSize(sent)} / ${fmtSize(b.totalBytes)}`,
+          b.state === "running" && b.speed > 0 ? `${fmtSize(b.speed)}/s` : "",
+          eta !== null ? `${fmtEta(eta)} left` : "",
+          `${done} / ${b.files.length} files${b.dirs.length ? `, ${b.dirs.length} folders` : ""}`,
+          failed ? `${failed} failed` : "",
+        ].filter(Boolean).join(" · ")}
+      </div>
+      <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}>{expanded ? "Hide items" : `Items (${b.files.length})`}</button>
+      {expanded && (
+        <ul className="job-items" aria-label="Items">
+          {b.files.slice(0, 500).map((f, i) => (
+            <li key={i} className={"it " + (f.state === "pending" ? "pending" : f.state)}>
+              <span className="it-s">{f.state === "done" ? "✓" : f.state === "failed" ? "✕" : f.state === "running" ? "…" : "·"}</span>
+              <span className="it-l">{f.rel}</span>
+              {f.state === "running" && f.file.size > 0 && <span className="muted"> {Math.round((f.sent / f.file.size) * 100)}%</span>}
+              {(f.note || f.error) && <span className={f.error ? "fp-err" : "muted"}> {f.error ?? f.note}</span>}
+            </li>
+          ))}
+          {b.files.length > 500 && <li className="muted">more items not shown</li>}
+        </ul>
+      )}
+    </li>
+  );
+}
+
 /** Background jobs from every node, polled while anything is active. */
 export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   const [jobs, setJobs] = useState<Record<string, JobView[]>>({});
   const [ops, setOps] = useState<OpJob[]>([]);
+  const uploads = useUploads();
   const [open, setOpen] = useState<string | null>(null);
   const [detail, setDetail] = useState<OpJob | undefined>();
   const openRef = useRef<string | null>(null);
@@ -219,10 +269,11 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   const now = Date.now();
   // Clean, finished hub jobs fade out of the tray after a while; they stay dismissible until then.
   const opRows = ops.filter((o) => !(o.state === "done" && o.counts.failed === 0 && o.counts.skipped === 0 && o.finishedAt && now - o.finishedAt > 20000));
+  const upRows = uploads.filter((u) => !(u.state === "done" && u.finishedAt && now - u.finishedAt > 20000));
   const rows = Object.entries(jobs).flatMap(([node, l]) => l.map((job) => ({ node, job })));
-  if (!rows.length && !opRows.length) return null;
-  const running = rows.filter((r) => live(r.job)).length + opRows.filter(opLive).length;
-  const total = rows.length + opRows.length;
+  if (!rows.length && !opRows.length && !upRows.length) return null;
+  const running = rows.filter((r) => live(r.job)).length + opRows.filter(opLive).length + upRows.filter((u) => u.state === "running" || u.state === "paused").length;
+  const total = rows.length + opRows.length + upRows.length;
   // Questions need attention, so the tray opens by itself.
   const asking = opRows.some((o) => o.state === "waiting");
   return (
@@ -235,6 +286,9 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
       {(!collapsed || asking) && (
         <div className="jobs-body">
           <ul>
+            {upRows.map((b) => (
+              <UploadRow key={b.id} b={b} expanded={open === b.id} onToggle={() => setOpen(open === b.id ? null : b.id)} />
+            ))}
             {opRows.map((job) => (
               <OpRow key={job.id} job={job} detail={open === job.id ? detail : undefined} expanded={open === job.id} onToggle={() => setOpen(open === job.id ? null : job.id)} onChange={() => void poll()} />
             ))}

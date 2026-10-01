@@ -209,6 +209,9 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     return c.json({ path: target, size }, 201);
   });
 
+  // Network sources have no append-in-place, so resumable chunked uploads are an agent feature; clients fall back to a streamed PUT.
+  app.all("/api/upload/*", (c) => c.json({ error: "chunked upload is not supported on network sources" }, 501));
+
   const json = async <T,>(c: Context): Promise<T> => {
     try {
       return (await c.req.json()) as T;

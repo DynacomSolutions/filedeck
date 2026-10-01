@@ -9,6 +9,7 @@ import { Watches } from "./watch.ts";
 import { registerArchiveRoutes } from "./archive-routes.ts";
 import { registerDiffRoutes } from "./diff-routes.ts";
 import * as trash from "./trash.ts";
+import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
 import { registerSearchRoutes } from "./search.ts";
 import type { Config } from "./config.ts";
@@ -108,6 +109,35 @@ export function createAgent(cfg: Config) {
       c.req.query("mtime") ? Number(c.req.query("mtime")) : undefined,
     );
     return c.json(r, 201);
+  });
+
+  // Resumable chunked uploads (see chunked.ts): status -> chunks in order -> the last one commits.
+  const upQ = (c: import("hono").Context) => ({ dir: c.req.query("dir") ?? "/", name: c.req.query("name") ?? "", id: c.req.query("id") ?? "" });
+  app.get("/api/upload/status", async (c) => {
+    const u = upQ(c);
+    return c.json(await uploadStatus(root, u.dir, u.name, u.id));
+  });
+  app.patch("/api/upload/chunk", async (c) => {
+    const u = upQ(c);
+    const body = c.req.raw.body;
+    const stream = body ? Readable.fromWeb(body as never) : Readable.from([]);
+    try {
+      const r = await uploadChunk(root, u.dir, u.name, u.id, Number(c.req.query("offset")), stream, {
+        total: Number(c.req.query("total")),
+        overwrite: c.req.query("overwrite") === "1",
+        ...(c.req.query("mtime") ? { mtimeMs: Number(c.req.query("mtime")) } : {}),
+        maxBytes: cfg.maxUpload,
+      });
+      return c.json(r, r.done ? 201 : 200);
+    } catch (e) {
+      if (e instanceof ops.FsError && e.extra) return c.json({ error: e.message, ...e.extra }, e.status as 409);
+      throw e;
+    }
+  });
+  app.delete("/api/upload", async (c) => {
+    const u = upQ(c);
+    await uploadAbort(root, u.dir, u.name, u.id);
+    return c.json({ ok: true });
   });
 
   const json = async <T,>(c: import("hono").Context): Promise<T> => {

@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
+import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploads";
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
@@ -306,7 +307,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     { label: "New file...", onSelect: () => setModal({ k: "new", dir, type: "file" }) },
     { label: "New folder...", onSelect: () => setModal({ k: "new", dir, type: "folder" }) },
     { label: pasteLabel, hint: here ? "Ctrl+V" : undefined, disabled: !clip, onSelect: () => void paste(dir) },
-    ...(here ? ([{ label: "Select all", hint: "Ctrl+A", onSelect: () => setSel(new Set(entries.map((x) => x.path))) }, { label: "Upload...", onSelect: () => fileInput.current?.click() }, { label: "Refresh", onSelect: refresh }] as MenuItem[]) : []),
+    ...(here ? ([{ label: "Select all", hint: "Ctrl+A", onSelect: () => setSel(new Set(entries.map((x) => x.path))) }, { label: "Upload...", onSelect: () => fileInput.current?.click() }, { label: "Upload folder...", onSelect: () => folderInput.current?.click() }, { label: "Refresh", onSelect: refresh }] as MenuItem[]) : []),
     "sep",
     ...compareItems([{ node, path: dir }]),
     { label: "Copy path", onSelect: () => void copyPaths([dir]) },
@@ -325,10 +326,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       if (src.node === node && src.paths.every((p) => parent(p) === destDir) && !copy) return;
       await transferOp(copy ? "copy" : "move", src.node, src.paths, node, destDir);
     } else if (hasFiles(e)) {
-      const files = Array.from(e.dataTransfer.files);
-      await run(`Upload ${files.length} file(s)`, async () => {
-        for (const f of files) await api.upload(node, destDir, f, (p) => onStatus(`Uploading ${f.name} ${Math.round(p * 100)}%`));
-      });
+      // Entries are only readable during the event, so take them before awaiting anything.
+      const dropped = dropEntries(e.dataTransfer);
+      onStatus("Reading dropped items...");
+      try {
+        const { picked, dirs } = await gatherDrop(dropped);
+        if (!picked.length && !dirs.length) return onStatus("Nothing to upload");
+        enqueueUpload(node, destDir, picked, dirs);
+        onStatus(`Uploading ${picked.length} file(s)${dirs.length ? ` in ${dirs.length} folder(s)` : ""} (see Jobs)`);
+      } catch (err) {
+        onStatus(`Upload failed: ${(err as Error).message}`);
+      }
     }
   };
   const dragOver = (e: React.DragEvent, target: string) => {
@@ -347,6 +355,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     </th>
   );
   const fileInput = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
 
   const paneExtra = (
     <span className="pv-dock" role="group" aria-label="Preview position">
@@ -606,9 +615,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
             const files = Array.from(e.target.files ?? []);
             e.target.value = "";
-            void run(`Upload ${files.length} file(s)`, async () => {
-              for (const f of files) await api.upload(node, path, f);
-            });
+            if (!files.length) return;
+            enqueueUpload(node, path, pickedFromInput(files));
+            onStatus(`Uploading ${files.length} file(s) (see Jobs)`);
+          }} />
+          <input ref={folderInput} type="file" hidden {...({ webkitdirectory: "", directory: "" } as object)} onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            e.target.value = "";
+            if (!files.length) return;
+            enqueueUpload(node, path, pickedFromInput(files));
+            onStatus(`Uploading folder, ${files.length} file(s) (see Jobs)`);
           }} />
         </div>
       </header>

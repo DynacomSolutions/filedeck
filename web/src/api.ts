@@ -123,6 +123,8 @@ export const onJobStarted = (fn: (node: string) => void) => {
   return () => void jobListeners.delete(fn);
 };
 const jobStarted = (node: string) => jobListeners.forEach((f) => f(node));
+/** Expand the jobs drawer for work that is not a server job (browser uploads). */
+export const announceJob = (node: string) => jobStarted(node);
 
 export type ConflictPolicy = "ask" | "skip" | "overwrite" | "rename";
 export type OpState = "queued" | "running" | "paused" | "waiting" | "done" | "failed" | "canceled";
@@ -164,15 +166,15 @@ export type OpSpec =
   | { op: "sync"; steps: SyncStepSpec[]; title?: string };
 export const opLive = (j: { state: OpState }) => j.state === "queued" || j.state === "running" || j.state === "paused" || j.state === "waiting";
 
-const opFinishListeners = new Set<(j: OpJob) => void>();
+const opFinishListeners = new Set<(j?: OpJob) => void>();
 /** Panels refresh when a hub job ends (also fired for jobs started in another tab). */
-export const onOpFinished = (fn: (j: OpJob) => void) => {
+export const onOpFinished = (fn: (j?: OpJob) => void) => {
   opFinishListeners.add(fn);
   return () => void opFinishListeners.delete(fn);
 };
 /** Jobs this tab started: if one finishes between two polls the panels still refresh. */
 export const startedOps = new Set<string>();
-export const emitOpFinished = (j: OpJob) => opFinishListeners.forEach((f) => f(j));
+export const emitOpFinished = (j?: OpJob) => opFinishListeners.forEach((f) => f(j));
 const opReq = (path: string, method = "GET", body?: unknown) =>
   fetch(`/api/ops/jobs${path}`, { method, ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}) });
 
