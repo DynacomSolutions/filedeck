@@ -1,0 +1,7 @@
+apiVersion: v2
+name: filedeck
+description: Web file manager - per-node agents (hostPath /) plus a hub serving the SPA
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+fullnameOverride: filedeck

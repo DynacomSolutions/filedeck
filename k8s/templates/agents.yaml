@@ -1,0 +1,104 @@
+{{- range .Values.nodes }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "filedeck.agentName" . }}
+  labels:
+    {{- include "filedeck.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: agent
+    filedeck.example.invalid/node: {{ .nodeName }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "filedeck.name" $ }}
+      app.kubernetes.io/component: agent
+      filedeck.example.invalid/node: {{ .nodeName }}
+  template:
+    metadata:
+      labels:
+        {{- include "filedeck.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: agent
+        filedeck.example.invalid/node: {{ .nodeName }}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: {{ .nodeName | quote }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: {{ include "filedeck.image" $ | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          env:
+            - name: FILEDECK_MODE
+              value: agent
+            - name: FILEDECK_ROOT
+              value: /host
+            - name: FILEDECK_NODE
+              value: {{ .name | quote }}
+            - name: PORT
+              value: {{ $.Values.port | quote }}
+            - name: FILEDECK_MAX_UPLOAD
+              value: {{ $.Values.agent.maxUpload | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $.Values.port }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml $.Values.agent.resources | nindent 12 }}
+          securityContext:
+            # Same reasoning as the files/ dufs backends: with ALL dropped,
+            # uid 0 still obeys DAC, so writing 775 dirs owned by other uids
+            # needs DAC_OVERRIDE; CHOWN/FOWNER cover mkdir/chmod/rename.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: host
+              mountPath: /host
+              readOnly: false
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "filedeck.agentName" . }}
+  labels:
+    {{- include "filedeck.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: agent
+    filedeck.example.invalid/node: {{ .nodeName }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "filedeck.name" $ }}
+    app.kubernetes.io/component: agent
+    filedeck.example.invalid/node: {{ .nodeName }}
+  ports:
+    - name: http
+      port: {{ $.Values.port }}
+      targetPort: http
+{{- end }}

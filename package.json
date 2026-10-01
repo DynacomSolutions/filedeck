@@ -1,0 +1,16 @@
+{
+  "name": "filedeck",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web file manager: per-node agents plus a hub SPA",
+  "license": "UNLICENSED",
+  "workspaces": ["server", "web"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
+    "test": "npm test -w server",
+    "build": "npm run build -w server && npm run build -w web",
+    "dev:agent": "FILEDECK_MODE=agent FILEDECK_ROOT=${FILEDECK_ROOT:-$HOME} npm run dev -w server",
+    "dev:web": "npm run dev -w web"
+  }
+}

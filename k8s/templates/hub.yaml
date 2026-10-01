@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "filedeck.name" . }}-hub
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "filedeck.name" . }}
+      app.kubernetes.io/component: hub
+  template:
+    metadata:
+      labels:
+        {{- include "filedeck.labels" . | nindent 8 }}
+        app.kubernetes.io/component: hub
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        {{- toYaml .Values.hub.nodeSelector | nindent 8 }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hub
+          image: {{ include "filedeck.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: FILEDECK_MODE
+              value: hub
+            - name: PORT
+              value: {{ .Values.port | quote }}
+            - name: NODES
+              value: {{ range $i, $n := .Values.nodes }}{{ if $i }},{{ end }}{{ $n.name }}=http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.hub.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "filedeck.name" . }}
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "filedeck.name" . }}
+    app.kubernetes.io/component: hub
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

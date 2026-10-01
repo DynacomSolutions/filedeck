@@ -1,0 +1,19 @@
+# Timeouts are load-bearing for transfers and the SSE change feed; see the
+# identical block (and the measurements behind it) in files/k8s/templates/mappings.yaml.
+apiVersion: getambassador.io/v3alpha1
+kind: Mapping
+metadata:
+  name: {{ .Values.mapping.name }}
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+spec:
+  ambassador_id:
+    - --apiVersion-v3alpha1-only--default
+  host: {{ .Values.mapping.host | quote }}
+  prefix: /
+  service: {{ printf "%s.%s:%v" (include "filedeck.name" .) .Release.Namespace .Values.service.port | quote }}
+  timeout_ms: 0
+  idle_timeout_ms: 3600000
+  cluster_idle_timeout_ms: 0
+  cluster_max_connection_lifetime_ms: 0
