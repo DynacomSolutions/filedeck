@@ -8,6 +8,31 @@ export interface Mount {
   total: number;
   used: number;
   free: number;
+  /** true for NFS, SMB/CIFS, other network filesystems and every FUSE mount (which is usually a remote or cloud drive) */
+  network: boolean;
+  /** human label when `network`, e.g. "NFS", "SMB/CIFS", "SSHFS", "FUSE" */
+  netKind?: string;
+  /** a network mount that did not answer statfs in time (stale or unreachable); sizes are 0 */
+  unreachable?: boolean;
+}
+
+const NET_FS: Record<string, string> = {
+  nfs: "NFS", nfs4: "NFS", cifs: "SMB/CIFS", smb3: "SMB/CIFS", smbfs: "SMB/CIFS", afs: "AFS", ceph: "CephFS",
+  glusterfs: "GlusterFS", lustre: "Lustre", "9p": "9P", ncpfs: "NCP", ocfs2: "OCFS2", gfs2: "GFS2",
+};
+const FUSE_KIND: Record<string, string> = {
+  sshfs: "SSHFS", rclone: "rclone", s3fs: "S3 (s3fs)", davfs2: "WebDAV", gcsfuse: "GCS", goofys: "S3 (goofys)",
+  curlftpfs: "FTP", glusterfs: "GlusterFS", cephfs: "CephFS", "ceph-fuse": "CephFS", nfs: "NFS", smb: "SMB/CIFS",
+};
+
+/** Classify a mount as a network drive. Returns the label, or null for local filesystems. */
+export function networkKind(fstype: string): string | null {
+  if (NET_FS[fstype]) return NET_FS[fstype];
+  if (fstype === "fuse" || fstype.startsWith("fuse.")) {
+    const sub = fstype.slice(5);
+    return FUSE_KIND[sub] ?? "FUSE";
+  }
+  return null;
 }
 
 const PSEUDO = new Set([
@@ -52,13 +77,17 @@ export async function listMounts(root: string, procMounts: string): Promise<Moun
   }
   const res: Mount[] = [];
   for (const m of parseMounts(text)) {
+    const kind = networkKind(m.fstype);
+    const label = kind ? { network: true, netKind: kind } : { network: false };
     try {
       const real = path.join(root, m.mountpoint);
-      const s = await fs.statfs(real);
+      // A dead NFS/SMB server can hang statfs for minutes; show the mount as unreachable instead of blocking the list.
+      const s = kind ? await Promise.race([fs.statfs(real), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]) : await fs.statfs(real);
       const total = s.blocks * s.bsize;
-      res.push({ ...m, total, free: s.bavail * s.bsize, used: total - s.bfree * s.bsize });
-    } catch {
-      // unreadable mount (permission, stale NFS): skip
+      res.push({ ...m, ...label, total, free: s.bavail * s.bsize, used: total - s.bfree * s.bsize });
+    } catch (e) {
+      // network mount that timed out: keep it, clearly marked; other unreadable mounts (permission) are skipped
+      if (kind && (e as Error).message === "timeout") res.push({ ...m, ...label, total: 0, free: 0, used: 0, unreachable: true });
     }
   }
   return res.sort((a, b) => a.mountpoint.localeCompare(b.mountpoint));

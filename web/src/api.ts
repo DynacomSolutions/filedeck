@@ -15,10 +15,21 @@ export interface Mount {
   total: number;
   used: number;
   free: number;
+  /** NFS, SMB/CIFS, other network filesystems and FUSE mounts */
+  network?: boolean;
+  /** e.g. "NFS", "SMB/CIFS", "SSHFS", "FUSE" */
+  netKind?: string;
+  /** network mount that did not answer in time */
+  unreachable?: boolean;
 }
 export interface NodeInfo {
   name: string;
   online: boolean;
+  /** "source" = network server configured on the hub (SFTP, ...), served like a node; absent = cluster node */
+  kind?: "node" | "source";
+  /** source protocol, e.g. "sftp" */
+  type?: string;
+  host?: string;
 }
 
 const enc = encodeURIComponent;
@@ -180,7 +191,11 @@ export const api = {
     }
     return j<WriteResult>(r);
   },
-  nodes: () => fetch("/api/nodes").then((r) => j<{ nodes: NodeInfo[] }>(r)),
+  /** Cluster nodes first, then the network sources (marked kind: "source"). */
+  nodes: () =>
+    fetch("/api/nodes")
+      .then((r) => j<{ nodes: NodeInfo[]; sources?: NodeInfo[] }>(r))
+      .then((r) => ({ nodes: [...r.nodes.map((n) => ({ ...n, kind: "node" as const })), ...(r.sources ?? []).map((s) => ({ ...s, kind: "source" as const }))] })),
   mounts: (node: string) => fetch(`${nodeBase(node)}/api/mounts`).then((r) => j<{ mounts: Mount[] }>(r)),
   list: (node: string, path: string, hidden: boolean) =>
     fetch(`${nodeBase(node)}/api/fs/list?path=${enc(path)}${hidden ? "&hidden=1" : ""}`).then((r) =>

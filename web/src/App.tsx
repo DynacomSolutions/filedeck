@@ -113,11 +113,13 @@ function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: 
     setOpen((o) => ({ ...o, [n]: !o[n] }));
     if (!mounts[n]) api.mounts(n).then((r) => setMounts((m) => ({ ...m, [n]: r.mounts }))).catch(() => setMounts((m) => ({ ...m, [n]: [] })));
   };
+  const cluster = nodes.filter((n) => n.kind !== "source");
+  const network = nodes.filter((n) => n.kind === "source");
   return (
     <aside className="side">
       <div className="side-scroll">
       <h2>Nodes</h2>
-      {nodes.map((n) => (
+      {cluster.map((n) => (
         <div key={n.name}>
           <button className="side-node" onClick={() => toggle(n.name)}>
             <span className={"dot " + (n.online ? "on" : "off")} /> {open[n.name] ? "▾" : "▸"} {n.name}
@@ -127,8 +129,12 @@ function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: 
               <li><button onClick={() => onOpen(n.name, "/")}>/ (root)</button></li>
               {(mounts[n.name] ?? []).map((m) => (
                 <li key={m.mountpoint}>
-                  <button onClick={() => onOpen(n.name, m.mountpoint)} title={`${m.device} (${m.fstype})`}>
+                  <button
+                    onClick={() => onOpen(n.name, m.mountpoint)}
+                    title={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}`}
+                  >
                     {m.mountpoint}
+                    {m.network && <span className={"net-badge" + (m.unreachable ? " bad" : "")}>{m.netKind ?? "network"}</span>}
                     <span className="bar"><i style={{ width: `${m.total ? Math.round((m.used / m.total) * 100) : 0}%` }} /></span>
                   </button>
                 </li>
@@ -137,7 +143,14 @@ function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: 
           )}
         </div>
       ))}
-      {!nodes.length && <p className="muted">No nodes</p>}
+      {!cluster.length && <p className="muted">No nodes</p>}
+      {network.length > 0 && <h2>Network</h2>}
+      {network.map((n) => (
+        <button key={n.name} className="side-node" onClick={() => onOpen(n.name, "/")} title={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : " - unreachable"}`}>
+          <span className={"dot " + (n.online ? "on" : "off")} /> {n.name}
+          <span className="net-badge">{(n.type ?? "net").toUpperCase()}</span>
+        </button>
+      ))}
       </div>
       {footer}
     </aside>
@@ -199,7 +212,8 @@ export function App() {
   }, []);
   useEffect(() => {
     if (tree || !nodes.length) return;
-    const l = leaf((nodes.find((n) => n.online) ?? nodes[0])!.name);
+    const cluster = nodes.filter((n) => n.kind !== "source");
+    const l = leaf(((cluster.length ? cluster : nodes).find((n) => n.online) ?? nodes[0])!.name);
     setTree(l);
     setActiveId(l.id);
   }, [nodes, tree]);

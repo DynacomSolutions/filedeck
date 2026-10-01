@@ -51,6 +51,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .side .mounts{list-style:none;margin:0 0 .4rem .9rem;padding:0 0 0 .5rem;border-left:1px solid var(--border);font-size:.8rem}
 .side-scroll .mounts button{font-weight:500;color:var(--fg-soft)}
 .side .bar{display:block;height:3px;background:var(--surface-3);border-radius:2px;margin-top:.25rem}.side .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
+.net-badge{margin-left:.4rem;padding:0 .35rem;border:1px solid var(--border);border-radius:.6rem;font-size:.65rem;font-weight:600;letter-spacing:.03em;color:var(--muted);vertical-align:middle}.net-badge.bad{color:var(--fg);border-style:dashed}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%}.dot.on{background:var(--fg)}.dot.off{background:var(--muted)}
 .sep{background:transparent;flex:0 0 .6rem;transition:background var(--fast) var(--ease)}.sep:hover,.sep[data-separator="active"]{background:var(--accent-tint)}
 .sep.vertical{height:.6rem}

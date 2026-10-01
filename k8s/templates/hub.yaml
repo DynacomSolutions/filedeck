@@ -1,3 +1,5 @@
+{{- $withSecrets := false }}
+{{- range .Values.sources }}{{ if .secretRef }}{{ $withSecrets = true }}{{ end }}{{ end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,6 +27,9 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+        {{- if $withSecrets }}
+        fsGroup: 1000 # lets the non-root hub read the mounted source Secrets (mode 0440)
+        {{- end }}
       containers:
         - name: hub
           image: {{ include "filedeck.image" . | quote }}
@@ -36,6 +41,11 @@ spec:
               value: {{ .Values.port | quote }}
             - name: NODES
               value: {{ range $i, $n := .Values.nodes }}{{ if $i }},{{ end }}{{ $n.name }}=http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}
+            {{- if .Values.sources }}
+            # Network sources: only non-secret fields. Credentials are read from the Secret volumes below.
+            - name: FILEDECK_SOURCES
+              value: {{ .Values.sources | toJson | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.port }}
@@ -56,6 +66,27 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
+          {{- if $withSecrets }}
+          volumeMounts:
+            {{- range .Values.sources }}
+            {{- if .secretRef }}
+            - name: src-{{ .name }}
+              mountPath: /var/run/filedeck/sources/{{ .name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+      volumes:
+        {{- range .Values.sources }}
+        {{- if .secretRef }}
+        # optional: a missing Secret leaves the source offline ("credentials are missing") instead of blocking the hub.
+        - name: src-{{ .name }}
+          secret:
+            secretName: {{ .secretRef }}
+            optional: true
+            defaultMode: 0440
+        {{- end }}
+        {{- end }}
+          {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
 import { Jobs, type JobView } from "./jobs.ts";
 import { compareTrees, normalizeOptions, type DiffOptions, type DiffSource } from "./folderdiff.ts";
+import type { Target } from "./hub.ts";
 import type { WalkEntry, WalkOpts, WalkSummary } from "./walk.ts";
 
 async function agentError(r: Response, what: string): Promise<FsError> {
@@ -16,7 +17,7 @@ async function agentError(r: Response, what: string): Promise<FsError> {
 }
 
 /** DiffSource that talks to one agent over HTTP; content hashes are computed agent-side. */
-export function agentSource(base: string, vpath: string, label: string): DiffSource {
+export function agentSource(base: Target, vpath: string, label: string): DiffSource {
   const at = (rel: string) => (vpath === "/" ? "" : vpath) + "/" + rel;
   return {
     async walk(o: WalkOpts, signal, onEntries) {
@@ -25,7 +26,7 @@ export function agentSource(base: string, vpath: string, label: string): DiffSou
       if (o.ignoreCase) q.set("ignoreCase", "1");
       for (const p of o.include) q.append("include", p);
       for (const p of o.exclude) q.append("exclude", p);
-      const r = await fetch(`${base}/api/fs/walk?${q}`, { signal });
+      const r = await base.fetch(`/api/fs/walk?${q}`, { signal });
       if (!r.ok || !r.body) throw await agentError(r, `${label} folder`);
       const entries: WalkEntry[] = [];
       let summary: WalkSummary | null = null;
@@ -54,7 +55,7 @@ export function agentSource(base: string, vpath: string, label: string): DiffSou
       return { ...(summary as WalkSummary), entries };
     },
     async hash(rel, signal) {
-      const r = await fetch(`${base}/api/fs/hash?path=${encodeURIComponent(at(rel))}`, { signal });
+      const r = await base.fetch(`/api/fs/hash?path=${encodeURIComponent(at(rel))}`, { signal });
       if (!r.ok) throw await agentError(r, "hash");
       return ((await r.json()) as { sha256: string }).sha256;
     },
@@ -66,7 +67,7 @@ interface Loc {
   path: string;
 }
 
-export function registerHubDiff(app: Hono, agents: Map<string, string>): Jobs {
+export function registerHubDiff(app: Hono, agents: Map<string, Target>): Jobs {
   const jobs = new Jobs(2, 20, (e) => {
     if (e instanceof FsError) return e.message;
     if ((e as Error)?.name === "AbortError") return "canceled";
@@ -98,8 +99,8 @@ export function registerHubDiff(app: Hono, agents: Map<string, string>): Jobs {
       const left = loc(b.left, "left");
       const right = loc(b.right, "right");
       const options = normalizeOptions(b.options);
-      const ls = agentSource(agents.get(left.node) as string, left.path, "left");
-      const rs = agentSource(agents.get(right.node) as string, right.path, "right");
+      const ls = agentSource(agents.get(left.node) as Target, left.path, "left");
+      const rs = agentSource(agents.get(right.node) as Target, right.path, "right");
       const t0 = Date.now();
       const job = jobs.create("folderdiff", `Compare ${left.node}:${left.path} with ${right.node}:${right.path}`, async (ctl) => {
         const res = await compareTrees(ls, rs, options, ctl);

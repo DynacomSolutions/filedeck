@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import * as ops from "./fsops.ts";
-import { Semaphore, hashFile, walkTree, type WalkSummary } from "./walk.ts";
+import { Semaphore, hashFile, walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
 import type { Config } from "./config.ts";
 
 const int = (v: string | undefined, d: number, lo: number, hi: number) => {
@@ -34,34 +34,38 @@ export function registerDiffRoutes(app: Hono, cfg: Config) {
       exclude: (c.req.queries("exclude") ?? []).slice(0, 100),
       ignoreCase: q("ignoreCase") === "1",
     };
-    const gen = walkTree(root, q("path") ?? "/", opts, c.req.raw.signal);
-    // Pull the first batch before answering so path errors still map to a proper status.
-    const first = await gen.next();
-    const enc = new TextEncoder();
-    const line = (o: unknown) => enc.encode(JSON.stringify(o) + "\n");
-    const body = new ReadableStream<Uint8Array>({
-      async start(ctl) {
-        const push = (r: IteratorResult<unknown, WalkSummary>) => {
-          ctl.enqueue(line(r.done ? { done: r.value } : { e: r.value }));
-        };
-        push(first);
-        if (first.done) return ctl.close();
-      },
-      async pull(ctl) {
-        if (first.done) return;
-        try {
-          const r = await gen.next();
-          ctl.enqueue(line(r.done ? { done: r.value } : { e: r.value }));
-          if (r.done) ctl.close();
-        } catch (e) {
-          ctl.enqueue(line({ error: ops.mapError(e).message }));
-          ctl.close();
-        }
-      },
-      async cancel() {
-        await gen.return({ truncated: false, depthLimited: false, errors: 0 }).catch(() => undefined);
-      },
-    });
-    return new Response(body, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" } });
+    return walkResponse(walkTree(root, q("path") ?? "/", opts, c.req.raw.signal));
   });
+}
+
+/** NDJSON body for a walk generator: {"e":[...]} batches, then {"done":{...}}. Pulls the first batch so path errors map to a status. */
+export async function walkResponse(gen: AsyncGenerator<WalkEntry[], WalkSummary>): Promise<Response> {
+  // Pull the first batch before answering so path errors still map to a proper status.
+  const first = await gen.next();
+  const enc = new TextEncoder();
+  const line = (o: unknown) => enc.encode(JSON.stringify(o) + "\n");
+  const body = new ReadableStream<Uint8Array>({
+    async start(ctl) {
+      const push = (r: IteratorResult<unknown, WalkSummary>) => {
+        ctl.enqueue(line(r.done ? { done: r.value } : { e: r.value }));
+      };
+      push(first);
+      if (first.done) return ctl.close();
+    },
+    async pull(ctl) {
+      if (first.done) return;
+      try {
+        const r = await gen.next();
+        ctl.enqueue(line(r.done ? { done: r.value } : { e: r.value }));
+        if (r.done) ctl.close();
+      } catch (e) {
+        ctl.enqueue(line({ error: ops.mapError(e).message }));
+        ctl.close();
+      }
+    },
+    async cancel() {
+      await gen.return({ truncated: false, depthLimited: false, errors: 0 }).catch(() => undefined);
+    },
+  });
+  return new Response(body, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" } });
 }

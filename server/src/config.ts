@@ -1,3 +1,6 @@
+import { parseSources } from "./sources/registry.ts";
+import type { SourceConfig } from "./sources/types.ts";
+
 export interface Config {
   mode: "agent" | "hub";
   port: number;
@@ -17,6 +20,9 @@ export interface Config {
   walkMaxEntries: number;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
+  /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
+  sources: SourceConfig[];
+  sourceSecretDir: string;
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -50,5 +56,7 @@ export function loadConfig(env = process.env): Config {
     hashConcurrency: Number(env.FILEDECK_HASH_CONCURRENCY ?? 4),
     walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
     nodes: parseNodes(env.NODES),
+    sources: parseSources(env.FILEDECK_SOURCES),
+    sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",
   };
 }
