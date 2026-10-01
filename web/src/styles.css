@@ -382,7 +382,7 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 /* ---- in-place compare ---- */
 .ed.over{position:absolute;inset:.6rem;z-index:20;border:1px solid var(--border-strong);border-radius:var(--radius);overflow:hidden;flex:none}
 .cmp-bar{display:flex;flex-wrap:wrap;gap:.3rem .5rem;align-items:center;padding:.3rem .65rem;border-bottom:1px solid var(--border);background:var(--surface-2);font-size:.78rem;position:relative}
-.cmp-bar button,.cmp-bar select{min-height:0;padding:.1rem .45rem;font-size:.78rem}
+.cmp-bar button,.cmp-bar select{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{flex-wrap:wrap}
 .cmp-badge{font-weight:700;color:var(--accent-text)}
 .cmp-with{overflow-wrap:anywhere}
 .cmp-exit{margin-left:auto}
