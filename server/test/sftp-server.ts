@@ -27,7 +27,7 @@ export async function startSftp(root: string, user: string, password: string): P
   };
   const attrs = (s: fs.Stats) => ({ mode: s.mode, uid: s.uid, gid: s.gid, size: s.size, atime: Math.floor(s.atimeMs / 1000), mtime: Math.floor(s.mtimeMs / 1000) });
 
-  const clients = new Set<{ end(): void }>();
+  const clients = new Set<{ end(): void; _sock?: { destroy(): void } }>();
   const server = new Server({ hostKeys: [privateKey] }, (client) => {
     clients.add(client);
     client.on("close", () => clients.delete(client));
@@ -157,7 +157,10 @@ export async function startSftp(root: string, user: string, password: string): P
     root,
     close: () =>
       new Promise<void>((res) => {
-        for (const c of clients) c.end();
+        for (const c of clients) {
+          c.end();
+          c._sock?.destroy();
+        }
         server.close(() => res());
       }),
   };

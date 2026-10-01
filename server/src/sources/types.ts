@@ -38,7 +38,7 @@ export interface SourceBackend {
    * target is an error (409). Should not leave a partial file at the target
    * name when the stream fails. Returns the bytes written.
    */
-  write(path: string, body: Readable, o: { overwrite: boolean; mtime?: number }): Promise<number>;
+  write(path: string, body: Readable, o: { overwrite: boolean; mtime?: number; /** total bytes when known (some servers refuse chunked uploads) */ size?: number }): Promise<number>;
   mkdir(path: string): Promise<void>;
   /** Rename or move one entry within the source. */
   rename(from: string, to: string, overwrite: boolean): Promise<void>;

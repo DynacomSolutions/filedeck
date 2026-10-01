@@ -175,7 +175,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       if (!cur) throw new FsError(404, "not found");
       if (have !== ifMatch) return c.json({ error: "file changed on disk since it was opened", etag: have, mtime: cur.mtime }, 409);
     }
-    await backend.write(p, Readable.from([buf]), { overwrite: !create });
+    await backend.write(p, Readable.from([buf]), { overwrite: !create, size: buf.length });
     const st = await need(p);
     return c.json({ path: p, size: st.size, mtime: st.mtime, etag: etagOfBytes(buf) });
   });
@@ -196,7 +196,12 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       }),
     );
     const mt = c.req.query("mtime") ? Number(c.req.query("mtime")) : undefined;
-    const size = await backend.write(target, stream, { overwrite: c.req.query("overwrite") === "1", ...(mt !== undefined ? { mtime: mt } : {}) });
+    const len = Number(c.req.header("content-length"));
+    const size = await backend.write(target, stream, {
+      overwrite: c.req.query("overwrite") === "1",
+      ...(mt !== undefined ? { mtime: mt } : {}),
+      ...(Number.isFinite(len) && c.req.header("content-length") ? { size: len } : {}),
+    });
     return c.json({ path: target, size }, 201);
   });
 
@@ -271,7 +276,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       }
     } else if (s.type === "file") {
       const rs = s.size === 0 ? Readable.from([]) : await backend.read(from);
-      await backend.write(to, rs, { overwrite, mtime: s.mtime });
+      await backend.write(to, rs, { overwrite, mtime: s.mtime, size: s.size });
     }
     // symlinks and special files are not copied
   }

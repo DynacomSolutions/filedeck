@@ -79,9 +79,14 @@ export class SftpBackend implements SourceBackend {
     const conn = new Client();
     const pinned = this.opts.hostKeySha256?.replace(/^SHA256:/, "").replace(/=+$/, "");
     const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
-      conn.on("error", (e) => reject(sftpError(e, "connection failed")));
+      // a failed attempt (bad credentials, unreachable) must not leave a half-open connection behind
+      const fail = (e: Error) => {
+        conn.destroy();
+        reject(e);
+      };
+      conn.on("error", (e) => fail(sftpError(e, "connection failed")));
       conn.on("ready", () => {
-        conn.sftp((err, s) => (err ? reject(sftpError(err, "sftp unavailable")) : resolve(s)));
+        conn.sftp((err, s) => (err ? fail(sftpError(err, "sftp unavailable")) : resolve(s)));
       });
       conn.connect({
         host: this.host,
@@ -120,11 +125,17 @@ export class SftpBackend implements SourceBackend {
     const s = await this.open();
     return await new Promise<T>((resolve, reject) => {
       const t = setTimeout(() => reject(new FsError(504, "remote timed out")), TIMEOUT_MS * 4);
-      fn(s, (err, v) => {
+      t.unref();
+      const done = (err: Error | null | undefined, v?: T) => {
         clearTimeout(t);
         if (err) reject(sftpError(err));
         else resolve(v as T);
-      });
+      };
+      try {
+        fn(s, done);
+      } catch (e) {
+        done(e as Error);
+      }
     });
   }
 

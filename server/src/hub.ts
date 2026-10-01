@@ -44,14 +44,19 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>)
     const hit = pingCache.get(name);
     if (hit && Date.now() - hit.at < 10_000) return hit.ok;
     let ok = false;
+    let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
         (sources.get(name) as { backend: SourceBackend }).backend.ping(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 4000)),
+        new Promise((_, rej) => {
+          timer = setTimeout(() => rej(new Error("timeout")), 4000);
+        }),
       ]);
       ok = true;
     } catch {
       ok = false;
+    } finally {
+      clearTimeout(timer);
     }
     pingCache.set(name, { at: Date.now(), ok });
     return ok;

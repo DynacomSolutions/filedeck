@@ -2,11 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Config } from "../config.ts";
 import { SftpBackend } from "./sftp.ts";
+import { WebdavBackend } from "./webdav.ts";
 import type { Credentials, SourceBackend, SourceConfig } from "./types.ts";
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** Files in a source's Secret that are credentials; each becomes a key of Credentials. */
-const CRED_FILES = ["username", "password", "privateKey", "passphrase", "accessKeyId", "secretAccessKey", "domain"];
+const CRED_FILES = ["username", "password", "privateKey", "passphrase", "accessKeyId", "secretAccessKey", "domain", "token"];
 /** Single-line values lose a trailing newline (secrets created from files often carry one); keys keep theirs. */
 const MULTILINE = new Set(["privateKey"]);
 
@@ -54,6 +55,8 @@ export function createBackend(sc: SourceConfig, creds: () => Promise<Credentials
   switch (sc.type) {
     case "sftp":
       return new SftpBackend(sc, creds);
+    case "webdav":
+      return new WebdavBackend(sc, creds);
     default:
       throw new Error(`source ${sc.name}: unsupported type ${JSON.stringify(sc.type)}`);
   }
