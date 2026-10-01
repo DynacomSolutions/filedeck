@@ -166,6 +166,25 @@ export function DiffViewer({ left, right, onClose, onStatus }: { left: FileRef; 
   const dirty = r !== null && rText !== r.content;
   useLeaveGuard(dirty);
 
+  // The wrapper would dispose both models before the diff widget lets go of them, which
+  // Monaco reports as "TextModel got disposed before DiffEditorWidget model got reset".
+  // Keep the models alive across the wrapper's own cleanup, detach them from the widget
+  // here, and dispose them only after the widget is gone.
+  useEffect(
+    () => () => {
+      const e = ed.current;
+      ed.current = null;
+      const models = e ? [e.getOriginalEditor().getModel(), e.getModifiedEditor().getModel()] : [];
+      try {
+        e?.setModel(null);
+      } catch {
+        /* widget already disposed */
+      }
+      setTimeout(() => models.forEach((m) => m?.dispose()), 0);
+    },
+    [],
+  );
+
   const load = useCallback(() => {
     setErr("");
     setConflict(null);
@@ -234,6 +253,8 @@ export function DiffViewer({ left, right, onClose, onStatus }: { left: FileRef; 
           <DiffEditor
             originalModelPath={modelUri(left.node, left.path) + "?side=left"}
             modifiedModelPath={modelUri(right.node, right.path) + "?side=right"}
+            keepCurrentOriginalModel
+            keepCurrentModifiedModel
             original={l.content}
             modified={r.content}
             theme={theme}
