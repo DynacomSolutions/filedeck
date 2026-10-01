@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { api, canEdit, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
+import { api, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
@@ -149,6 +149,19 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     if (v !== leaf.sel) onPatch({ sel: v });
   }, [sel, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A finished hub job (copy, move, delete...) changes what this folder holds.
+  useEffect(() => onOpFinished(() => refresh()), [refresh]);
+  /** Hand a bulk operation to the hub job queue; progress shows in the jobs drawer and it survives closing the browser. */
+  const queueOp = async (label: string, spec: OpSpec) => {
+    try {
+      await api.startOp(spec);
+      onStatus(`${label} queued (see Jobs)`);
+    } catch (e) {
+      onStatus(`${label} failed: ${(e as Error).message}`);
+    }
+  };
+  const transferOp = (op: "copy" | "move", from: string, paths: string[], to: string, dir: string) =>
+    queueOp(op === "copy" ? "Copy" : "Move", { op, items: paths.map((p) => ({ node: from, path: p })), dst: { node: to, dir }, conflict: "ask" });
   const run = async (label: string, fn: () => Promise<unknown>) => {
     try {
       onStatus(label + "...");
@@ -198,14 +211,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     if (!c) return;
     const cut = c.mode === "cut";
     if (cut && c.node === node && c.paths.every((p) => parent(p) === dir)) return onStatus("Already in this folder");
-    await run(cut ? "Move" : "Copy", async () => {
-      if (c.node === node) {
-        if (cut) await api.move(node, c.paths, dir);
-        else await api.copy(node, c.paths, dir);
-      } else {
-        for (const p of c.paths) await api.transfer({ node: c.node, path: p }, { node, dir }, cut ? "move" : "copy");
-      }
-    });
+    await transferOp(cut ? "move" : "copy", c.node, c.paths, node, dir);
     if (cut) setClip(null);
   };
   const copyPaths = (paths: string[]) =>
@@ -214,7 +220,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       (e: Error) => onStatus(`Copy path failed: ${e.message}`),
     );
   const duplicate = (picked: Entry[]) => run("Duplicate", () => api.copy(node, picked.map((x) => x.path), path));
-  const trashPaths = (paths: string[]) => run("Trash", () => api.trash(node, paths));
+  const trashPaths = (paths: string[]) => queueOp("Trash", { op: "trash", items: paths.map((p) => ({ node, path: p })) });
   const peerLabel = (pr: { node: string; path: string }) => `${pr.node}:${pr.path}`;
   const diffItems = (picked: Entry[]): MenuItem[] => {
     const files = picked.filter(canEdit);
@@ -298,14 +304,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     const copy = e.ctrlKey || e.altKey;
     const src = getDrag(e);
     if (src) {
-      if (src.node === node) {
-        if (src.paths.every((p) => parent(p) === destDir) && !copy) return;
-        await run(copy ? "Copy" : "Move", () => (copy ? api.copy(node, src.paths, destDir) : api.move(node, src.paths, destDir)));
-      } else {
-        await run("Transfer", async () => {
-          for (const p of src.paths) await api.transfer({ node: src.node, path: p }, { node, dir: destDir }, copy ? "copy" : "move");
-        });
-      }
+      if (src.node === node && src.paths.every((p) => parent(p) === destDir) && !copy) return;
+      await transferOp(copy ? "copy" : "move", src.node, src.paths, node, destDir);
     } else if (hasFiles(e)) {
       const files = Array.from(e.dataTransfer.files);
       await run(`Upload ${files.length} file(s)`, async () => {
@@ -438,14 +438,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     if (!selEntries.length) return;
     const paths = selEntries.map((x) => x.path);
     const label = op === "copy" ? "Copy" : "Move";
-    void run(`${label} to ${next.node}:${next.path}`, async () => {
-      if (next.node === node) {
-        if (op === "copy") await api.copy(node, paths, next.path);
-        else await api.move(node, paths, next.path);
-      } else {
-        for (const p of paths) await api.transfer({ node, path: p }, { node: next.node, dir: next.path }, op);
-      }
-    });
+    void transferOp(op, node, paths, next.node, next.path);
   };
   function onKeyDown(e: React.KeyboardEvent) {
     if (menu || modal || dialog) return;
@@ -573,7 +566,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           <button title="Download (several items or folders as a zip)" disabled={!sel.size} onClick={() => download(selEntries)}>⇩</button>
           <button title="Compress selection" disabled={!sel.size} onClick={() => setDialog("compress")}>📦</button>
           <button title="Extract archive" disabled={!(sel.size === 1 && entries.some((x) => x.path === [...sel][0] && x.type === "file" && isArchive(x.name)))} onClick={() => setDialog("extract")}>📂</button>
-          <button title="Move to trash" disabled={!sel.size} onClick={() => void run("Trash", () => api.trash(node, selected()))}>🗑</button>
+          <button title="Move to trash" disabled={!sel.size} onClick={() => void trashPaths(selected())}>🗑</button>
           <button title="Delete permanently" disabled={!sel.size} onClick={() => setModal({ k: "del", paths: selected() })}>✕</button>
           <label className="chk"><input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} /> hidden</label>
           <button title="Split right" onClick={() => onSplit("horizontal")}>▥</button>
@@ -650,7 +643,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           action="Delete permanently"
           danger
           onClose={() => setModal(null)}
-          onConfirm={() => void run("Delete", () => api.remove(node, modal.paths))}
+          onConfirm={() => void queueOp("Delete", { op: "delete", items: modal.paths.map((p) => ({ node, path: p })) })}
         />
       )}
       {modal?.k === "props" && <PropertiesDialog node={node} path={modal.path} entry={modal.entry} onClose={() => setModal(null)} onChanged={refresh} onStatus={onStatus} />}

@@ -124,6 +124,58 @@ export const onJobStarted = (fn: (node: string) => void) => {
 };
 const jobStarted = (node: string) => jobListeners.forEach((f) => f(node));
 
+export type ConflictPolicy = "ask" | "skip" | "overwrite" | "rename";
+export type OpState = "queued" | "running" | "paused" | "waiting" | "done" | "failed" | "canceled";
+export interface OpItem {
+  label: string;
+  state: "pending" | "running" | "done" | "skipped" | "failed";
+  bytes: number;
+  size: number;
+  note?: string;
+  error?: string;
+}
+/** A hub-side bulk job (copy, move, trash, delete, folder sync). */
+export interface OpJob {
+  id: string;
+  kind: "ops";
+  op: "copy" | "move" | "trash" | "delete" | "sync";
+  title: string;
+  state: OpState;
+  conflictPolicy?: ConflictPolicy;
+  progress: { bytes: number; totalBytes: number; entries: number; totalEntries: number; current: string };
+  speed: number;
+  counts: { total: number; done: number; skipped: number; failed: number };
+  conflict?: { target: string; name: string; srcType: string; dstType: string; srcSize: number; dstSize: number };
+  items?: OpItem[];
+  itemsTruncated?: boolean;
+  error?: string;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+}
+export type OpLoc = { node: string; path: string };
+export type SyncStepSpec =
+  | { kind: "mkdir"; node: string; path: string }
+  | { kind: "trash"; node: string; path: string }
+  | { kind: "copy"; src: OpLoc; dst: { node: string; dir: string }; bytes?: number };
+export type OpSpec =
+  | { op: "copy" | "move"; items: OpLoc[]; dst: { node: string; dir: string }; conflict: ConflictPolicy; preserveTimes?: boolean }
+  | { op: "trash" | "delete"; items: OpLoc[] }
+  | { op: "sync"; steps: SyncStepSpec[]; title?: string };
+export const opLive = (j: { state: OpState }) => j.state === "queued" || j.state === "running" || j.state === "paused" || j.state === "waiting";
+
+const opFinishListeners = new Set<(j: OpJob) => void>();
+/** Panels refresh when a hub job ends (also fired for jobs started in another tab). */
+export const onOpFinished = (fn: (j: OpJob) => void) => {
+  opFinishListeners.add(fn);
+  return () => void opFinishListeners.delete(fn);
+};
+/** Jobs this tab started: if one finishes between two polls the panels still refresh. */
+export const startedOps = new Set<string>();
+export const emitOpFinished = (j: OpJob) => opFinishListeners.forEach((f) => f(j));
+const opReq = (path: string, method = "GET", body?: unknown) =>
+  fetch(`/api/ops/jobs${path}`, { method, ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}) });
+
 /** Options for sync copies: replace what is there, keep modification times. */
 export interface SyncOpts {
   overwrite?: boolean;
@@ -247,6 +299,19 @@ export interface PermsResult {
 }
 
 export const api = {
+  startOp: (spec: OpSpec) =>
+    opReq("", "POST", spec)
+      .then((r) => j<OpJob>(r))
+      .then((v) => {
+        startedOps.add(v.id);
+        jobStarted("hub");
+        return v;
+      }),
+  opJobs: () => opReq("").then((r) => j<{ jobs: OpJob[] }>(r)),
+  opJob: (id: string) => opReq(`/${id}`).then((r) => j<OpJob>(r)),
+  opAction: (id: string, action: "pause" | "resume" | "cancel") => opReq(`/${id}/${action}`, "POST").then((r) => j<OpJob>(r)),
+  opResolve: (id: string, action: "skip" | "overwrite" | "rename", all: boolean) => opReq(`/${id}/resolve`, "POST", { action, all }).then((r) => j<OpJob>(r)),
+  dismissOp: (id: string) => opReq(`/${id}`, "DELETE").then((r) => j<unknown>(r)),
   props: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/props?path=${enc(path)}`).then((r) => j<Props>(r)),
   startSize: (node: string, path: string) => postJob(node, "size", { path }),
   job: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}`).then((r) => j<JobView>(r)),

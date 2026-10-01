@@ -9,6 +9,9 @@ import {
   type DiffRow,
   type DiffStatus,
   type JobView,
+  type OpJob,
+  type SyncStepSpec,
+  opLive,
   type Loc,
   type NodeInfo,
 } from "./api";
@@ -129,6 +132,8 @@ interface Exec {
   current: string;
   errors: string[];
   canceled: boolean;
+  jobId?: string;
+  job?: OpJob;
 }
 
 const ACTION_LABEL: Record<SyncAction, string> = {
@@ -156,7 +161,6 @@ export function FolderDiff({ init, onState, nodes, onClose, onFileDiff, onStatus
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exec, setExec] = useState<Exec | null>(null);
-  const cancelExec = useRef(false);
   const scroller = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const running = job !== null && (job.state === "queued" || job.state === "running");
@@ -291,48 +295,57 @@ export function FolderDiff({ init, onState, nodes, onClose, onFileDiff, onStatus
   };
   const loc = (side: "left" | "right") => (side === "left" ? left : right);
   const other = (side: "left" | "right") => (side === "left" ? "right" : "left");
-  const runStep = async (s: Step) => {
-    if (s.op === "skip") return;
-    if (s.op === "mkdir") {
-      const l = loc(s.side);
-      try {
-        await api.mkdir(l.node, joinRel(l.path, s.rel));
-      } catch (e) {
-        if (!/exists/.test((e as Error).message)) throw e;
-      }
-    } else if (s.op === "trash") {
-      const l = loc(s.side);
-      await api.trash(l.node, [joinRel(l.path, s.rel)]);
-    } else {
-      const from = loc(s.from);
-      const to = loc(other(s.from));
-      const src = joinRel(from.path, s.srcRel);
-      const dir = s.destDirRel ? joinRel(to.path, s.destDirRel) : to.path;
-      const o = { overwrite: true, preserveTimes: true };
-      if (from.node === to.node) await api.copy(to.node, [src], dir, o);
-      else await api.transfer({ node: from.node, path: src }, { node: to.node, dir }, "copy", o);
-    }
-  };
+  /** The plan becomes one hub job: it keeps running when this dialog or the browser is closed. */
   const execute = async () => {
     if (!exec) return;
-    cancelExec.current = false;
-    const todo = exec.plan.steps.filter((s) => s.op !== "skip");
-    setExec({ ...exec, state: "running", done: 0, errors: [] });
-    const errors: string[] = [];
-    let done = 0;
-    for (const s of todo) {
-      if (cancelExec.current) break;
-      const what = s.op === "copy" ? s.srcRel : s.rel;
-      setExec((x) => (x ? { ...x, current: `${s.op} ${what}`, done } : x));
-      try {
-        await runStep(s);
-      } catch (e) {
-        if (errors.length < 50) errors.push(`${s.op} ${what}: ${(e as Error).message}`);
+    const steps: SyncStepSpec[] = [];
+    for (const s of exec.plan.steps) {
+      if (s.op === "skip") continue;
+      if (s.op === "mkdir") steps.push({ kind: "mkdir", node: loc(s.side).node, path: joinRel(loc(s.side).path, s.rel) });
+      else if (s.op === "trash") steps.push({ kind: "trash", node: loc(s.side).node, path: joinRel(loc(s.side).path, s.rel) });
+      else {
+        const from = loc(s.from);
+        const to = loc(other(s.from));
+        steps.push({
+          kind: "copy",
+          src: { node: from.node, path: joinRel(from.path, s.srcRel) },
+          dst: { node: to.node, dir: s.destDirRel ? joinRel(to.path, s.destDirRel) : to.path },
+          bytes: s.bytes,
+        });
       }
-      done++;
     }
-    setExec((x) => (x ? { ...x, state: "done", done, current: "", errors, canceled: cancelExec.current } : x));
+    try {
+      const job = await api.startOp({ op: "sync", steps, title: `${ACTION_LABEL[exec.action]}: ${left.node}:${left.path} / ${right.node}:${right.path}` });
+      setExec({ ...exec, state: "running", jobId: job.id, job });
+    } catch (e) {
+      setExec({ ...exec, state: "done", errors: [(e as Error).message], done: 0 });
+    }
   };
+  // Follow the sync job while the dialog is open.
+  const execJobId = exec?.state === "running" ? exec.jobId : undefined;
+  useEffect(() => {
+    if (!execJobId) return;
+    let stop = false;
+    const tick = async () => {
+      try {
+        const job = await api.opJob(execJobId);
+        if (stop) return;
+        if (opLive(job)) setExec((x) => (x && x.jobId === execJobId ? { ...x, job } : x));
+        else {
+          const errors = (job.items ?? []).filter((i) => i.error).slice(0, 50).map((i) => `${i.label}: ${i.error}`);
+          setExec((x) => (x && x.jobId === execJobId ? { ...x, job, state: "done", done: job.counts.done, errors, canceled: job.state === "canceled" } : x));
+          return;
+        }
+      } catch {
+        /* keep polling */
+      }
+      if (!stop) setTimeout(() => void tick(), 600);
+    };
+    void tick();
+    return () => {
+      stop = true;
+    };
+  }, [execJobId]);
   const finishExec = () => {
     const ran = exec?.state === "done";
     setExec(null);
@@ -567,9 +580,17 @@ export function FolderDiff({ init, onState, nodes, onClose, onFileDiff, onStatus
             )}
             {exec.state === "running" && (
               <>
-                <progress aria-label="Sync progress" max={Math.max(1, exec.plan.steps.filter((s) => s.op !== "skip").length)} value={exec.done} />
-                <p className="muted" role="status">{exec.done} / {exec.plan.steps.filter((s) => s.op !== "skip").length} - {exec.current}</p>
-                <div className="modal-actions"><button onClick={() => { cancelExec.current = true; }}>Stop</button></div>
+                <progress aria-label="Sync progress" max={Math.max(1, exec.job?.counts.total ?? 1)} value={exec.job?.progress.entries ?? 0} />
+                <p className="muted" role="status">
+                  {exec.job?.progress.entries ?? 0} / {exec.job?.counts.total ?? "?"} steps
+                  {exec.job && exec.job.progress.bytes > 0 ? ` - ${fmtSize(exec.job.progress.bytes)}${exec.job.speed > 0 ? ` at ${fmtSize(exec.job.speed)}/s` : ""}` : ""}
+                  {exec.job?.state === "paused" ? " - paused" : ""} {exec.job?.progress.current ? `- ${exec.job.progress.current}` : ""}
+                </p>
+                <p className="muted">This runs on the server as a job (see Jobs in the sidebar): you can close this window and it keeps going.</p>
+                <div className="modal-actions">
+                  <button onClick={() => { if (exec.jobId) void api.opAction(exec.jobId, "cancel"); }}>Stop</button>
+                  <button onClick={() => (setExec(null), void start())}>Close, keep running</button>
+                </div>
               </>
             )}
             {exec.state === "done" && (

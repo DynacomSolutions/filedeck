@@ -3,6 +3,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { registerHubDiff } from "./diff-hub.ts";
+import { registerOps } from "./ops-routes.ts";
 import type { Config } from "./config.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
@@ -83,6 +84,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>)
 
   // Folder diff jobs run here: the hub reads both agents' listings and asks each agent to hash its own files.
   registerHubDiff(app, agents);
+  // Bulk copy/move/trash/delete/sync run as hub jobs (survive the browser closing, pausable, conflict policy).
+  registerOps(app, agents, (n) => sources.has(n));
 
   // Cross-node / cross-source transfer: the hub streams src -> dst. Files and folders; both ends are
   // agents or network sources. Moving removes the source afterwards (node trash, permanent on sources).
