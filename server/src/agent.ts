@@ -9,6 +9,7 @@ import { Watches } from "./watch.ts";
 import { registerArchiveRoutes } from "./archive-routes.ts";
 import { registerDiffRoutes } from "./diff-routes.ts";
 import * as trash from "./trash.ts";
+import { registerPropsRoutes } from "./props.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -176,7 +177,8 @@ export function createAgent(cfg: Config) {
     return c.json(await trash.emptyTrash(root, str(b.volume, "volume"), b.olderThanDays));
   });
 
-  registerArchiveRoutes(app, cfg);
+  const jobs = registerArchiveRoutes(app, cfg);
+  registerPropsRoutes(app, cfg, jobs);
   registerDiffRoutes(app, cfg);
 
   // Live change feed: one event per change in the watched directory.

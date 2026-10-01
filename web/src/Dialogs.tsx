@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { fmtDate, fmtMode, fmtSize, stat, type Entry } from "./api";
+import { useState } from "react";
 import { Modal } from "./ArchiveDialog";
 
 /** Ask for a single name (new file/folder, duplicate target...). `onSubmit` throws to show an error. */
@@ -50,45 +49,6 @@ export function ConfirmDialog({ title, message, action, danger, onConfirm, onClo
         >
           {action}
         </button>
-      </div>
-    </Modal>
-  );
-}
-
-const TYPE: Record<Entry["type"], string> = { file: "File", dir: "Folder", symlink: "Symbolic link", other: "Special file" };
-
-/** Read-only properties of one entry (fetched when only a path is known). */
-export function PropertiesDialog({ node, path, entry, onClose }: { node: string; path: string; entry?: Entry; onClose: () => void }) {
-  const [e, setE] = useState<Entry | null>(entry ?? null);
-  const [err, setErr] = useState("");
-  useEffect(() => {
-    if (entry) return;
-    stat(node, path).then(setE).catch((x: Error) => setErr(x.message));
-  }, [node, path, entry]);
-  const rows: [string, string][] = e
-    ? [
-        ["Name", e.name || "/"],
-        ["Location", `${node}:${e.path}`],
-        ["Type", TYPE[e.type] + (e.linkDir ? " (to a folder)" : "")],
-        ...(e.type === "dir" ? [] : ([["Size", `${fmtSize(e.size)} (${e.size.toLocaleString()} bytes)`]] as [string, string][])),
-        ["Modified", fmtDate(e.mtime)],
-        ["Mode", `${fmtMode(e.mode, e.type)}  ${(e.mode & 0o7777).toString(8).padStart(4, "0")}`],
-      ]
-    : [];
-  return (
-    <Modal title="Properties" onClose={onClose}>
-      {err && <div className="fp-err">{err}</div>}
-      {!e && !err && <div className="muted">Loading...</div>}
-      <dl className="props">
-        {rows.map(([k, v]) => (
-          <div key={k}>
-            <dt>{k}</dt>
-            <dd>{v}</dd>
-          </div>
-        ))}
-      </dl>
-      <div className="modal-actions">
-        <button type="submit" onClick={onClose}>Close</button>
       </div>
     </Modal>
   );

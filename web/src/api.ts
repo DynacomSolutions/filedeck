@@ -201,7 +201,63 @@ export type TrashConflict = "fail" | "rename" | "replace";
 const trashPost = <T,>(node: string, op: string, body: unknown) =>
   fetch(`${nodeBase(node)}/api/trash/${op}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => j<T>(r));
 
+export interface Props {
+  name: string;
+  path: string;
+  type: Entry["type"];
+  size: number;
+  diskBytes: number;
+  mtime: number;
+  atime: number;
+  ctime: number;
+  mode: number;
+  uid: number;
+  gid: number;
+  owner: string | null;
+  group: string | null;
+  nlink: number;
+  ino: number;
+  linkTarget?: string;
+  linkDir?: boolean;
+  volume?: { mountpoint: string; device: string; fstype: string; network: boolean; netKind?: string; total: number; free: number };
+}
+export interface SizeResult {
+  files: number;
+  dirs: number;
+  symlinks: number;
+  other: number;
+  bytes: number;
+  diskBytes: number;
+  truncated: boolean;
+  mountsSkipped: number;
+  errors: number;
+}
+export interface PermsBody {
+  path: string;
+  mode?: number;
+  owner?: string | number;
+  group?: string | number;
+  recursive?: boolean;
+  scope?: "all" | "files" | "dirs";
+}
+export interface PermsResult {
+  changed: number;
+  skipped: number;
+  errors: number;
+}
+
 export const api = {
+  props: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/props?path=${enc(path)}`).then((r) => j<Props>(r)),
+  startSize: (node: string, path: string) => postJob(node, "size", { path }),
+  job: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}`).then((r) => j<JobView>(r)),
+  /** One entry changes at once (result); a recursive change starts a job (JobView with `id`). */
+  perms: (node: string, b: PermsBody) =>
+    fetch(`${nodeBase(node)}/api/fs/perms`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) })
+      .then((r) => j<PermsResult | JobView>(r))
+      .then((v) => {
+        if ("id" in v) jobStarted(node);
+        return v;
+      }),
   trashList: (node: string) => fetch(`${nodeBase(node)}/api/trash/list`).then((r) => j<{ volumes: TrashVolume[] }>(r)),
   trashRestore: (node: string, volume: string, ids: string[], o: { conflict?: TrashConflict; toDir?: string } = {}) =>
     trashPost<{ results: TrashResult[] }>(node, "restore", { volume, ids, ...o }),

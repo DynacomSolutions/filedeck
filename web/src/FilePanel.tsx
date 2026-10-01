@@ -5,7 +5,8 @@ import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
-import { ConfirmDialog, NameDialog, PropertiesDialog } from "./Dialogs";
+import { ConfirmDialog, NameDialog } from "./Dialogs";
+import { PropertiesDialog } from "./Properties";
 import { copyText, getClip, setClip, useClip } from "./clipboard";
 import type { FileRef } from "./EditorViews";
 import type { Dock, Leaf, Loc, SortKey } from "./urlState";
@@ -652,7 +653,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           onConfirm={() => void run("Delete", () => api.remove(node, modal.paths))}
         />
       )}
-      {modal?.k === "props" && <PropertiesDialog node={node} path={modal.path} entry={modal.entry} onClose={() => setModal(null)} />}
+      {modal?.k === "props" && <PropertiesDialog node={node} path={modal.path} entry={modal.entry} onClose={() => setModal(null)} onChanged={refresh} onStatus={onStatus} />}
       {dialog === "compress" && (
         <CompressDialog node={node} dir={path} names={entries.filter((x) => sel.has(x.path)).map((x) => x.name)} onClose={() => setDialog(null)} onStatus={onStatus} />
       )}
