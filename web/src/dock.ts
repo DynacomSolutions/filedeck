@@ -1,5 +1,5 @@
 // No imports beyond urlState: pure layout helpers (the drag-to-dock model), also exercised by the server tests.
-import { MAX_TABS, syncTabs, type Leaf, type Tree } from "./urlState";
+import { MAX_TABS, syncTabs, type Leaf, type Tree } from "./urlState.ts";
 
 export type DropZone = "top" | "bottom" | "left" | "right" | "center";
 export const PANEL_MIME = "application/x-filedeck-panel";
