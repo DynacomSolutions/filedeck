@@ -66,8 +66,11 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
-          {{- if $withSecrets }}
+          {{- if .Values.sources }}
           volumeMounts:
+            # smbclient (SMB sources) keeps small state files; the root filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
             {{- range .Values.sources }}
             {{- if .secretRef }}
             - name: src-{{ .name }}
@@ -76,6 +79,9 @@ spec:
             {{- end }}
             {{- end }}
       volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
         {{- range .Values.sources }}
         {{- if .secretRef }}
         # optional: a missing Secret leaves the source offline ("credentials are missing") instead of blocking the hub.

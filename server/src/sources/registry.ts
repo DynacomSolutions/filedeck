@@ -4,6 +4,7 @@ import type { Config } from "../config.ts";
 import { SftpBackend } from "./sftp.ts";
 import { WebdavBackend } from "./webdav.ts";
 import { S3Backend } from "./s3.ts";
+import { SmbBackend } from "./smb.ts";
 import type { Credentials, SourceBackend, SourceConfig } from "./types.ts";
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -60,6 +61,8 @@ export function createBackend(sc: SourceConfig, creds: () => Promise<Credentials
       return new WebdavBackend(sc, creds);
     case "s3":
       return new S3Backend(sc, creds);
+    case "smb":
+      return new SmbBackend(sc, creds);
     default:
       throw new Error(`source ${sc.name}: unsupported type ${JSON.stringify(sc.type)}`);
   }

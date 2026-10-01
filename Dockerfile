@@ -16,8 +16,9 @@ FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18
 ENV NODE_ENV=production FILEDECK_STATIC=/app/web PORT=8080
 WORKDIR /app
 # libarchive's bsdtar does zip/tar.*/7z encode and decode for the archive jobs;
+# samba-client's smbclient backs the SMB network sources (hub mode);
 # `apk upgrade` keeps the base packages on patched versions for the Trivy gate.
-RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools
+RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools samba-client
 COPY --from=build /src/node_modules node_modules
 COPY --from=build /src/server/package.json server/package.json
 COPY --from=build /src/server/dist server/dist
