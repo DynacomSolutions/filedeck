@@ -2,11 +2,9 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel, type Leaf } from "./FilePanel";
-import { Preview } from "./Preview";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
-const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
 import { ThemeMenu } from "./ThemeMenu";
@@ -67,10 +65,7 @@ export function App() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [tree, setTree] = useState<Tree | null>(null);
   const [activeId, setActiveId] = useState("");
-  const [preview, setPreview] = useState<Entry | null>(null);
-  const [previewNode, setPreviewNode] = useState("");
   const [status, setStatus] = useState("");
-  const [editing, setEditing] = useState<FileRef | null>(null);
   const [diff, setDiff] = useState<{ left: FileRef; right: FileRef } | null>(null);
   const [diffMark, setDiffMark] = useState<FileRef | null>(null);
   const onDiff = (files: FileRef[]) => {
@@ -121,11 +116,6 @@ export function App() {
           onNavigate={navigate(t.id)}
           onSplit={split(t.id)}
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
-          onPreview={(e) => {
-            setPreview(e);
-            setPreviewNode(t.node);
-          }}
-          onEdit={(node, path) => setEditing({ node, path })}
           onDiff={onDiff}
           diffMarked={diffMark !== null}
           onStatus={setStatus}
@@ -168,16 +158,9 @@ export function App() {
       </header>
       <div className="body">
         <Sidebar nodes={nodes} onOpen={openInActive} footer={<JobsTray nodes={nodes} />} />
-        <Group orientation="horizontal" id="main">
-          <Panel id="panels" minSize="30%">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</Panel>
-          <Separator className="sep horizontal" />
-          <Panel id="preview" defaultSize="28%" minSize="10%" collapsible>
-            <Preview node={previewNode} entry={preview} onEdit={(node, path) => setEditing({ node, path })} />
-          </Panel>
-        </Group>
+        <div className="main">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</div>
       </div>
       <Suspense fallback={<div className="ed"><div className="pad muted">Loading editor...</div></div>}>
-        {editing && <TextEditor key={editing.node + editing.path} file={editing} onClose={() => setEditing(null)} onStatus={setStatus} />}
         {diff && <DiffViewer left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />}
       </Suspense>
     </div>

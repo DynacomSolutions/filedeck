@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
 
@@ -21,8 +21,7 @@ function Text({ url }: { url: string }) {
   return <pre className="pv-text">{t}</pre>;
 }
 
-export function Preview({ node, entry, onEdit }: { node: string; entry: Entry | null; onEdit: (node: string, path: string) => void }) {
-  if (!entry || entry.type === "dir") return <div className="pv-empty muted">Select a file to preview</div>;
+export function Preview({ node, entry, onEdit, extra }: { node: string; entry: Entry; onEdit: (node: string, path: string) => void; extra?: ReactNode }) {
   const url = fileUrl(node, entry.path);
   const e = ext(entry.name);
   return (
@@ -36,6 +35,7 @@ export function Preview({ node, entry, onEdit }: { node: string; entry: Entry | 
           <button className="link" onClick={() => onEdit(node, entry.path)} title="Open in the editor">Edit</button>
         )}
         <a href={fileUrl(node, entry.path, "download")}>Download</a>
+        {extra}
       </div>
       <div className="pv-body">
         {isArchive(entry.name) ? (

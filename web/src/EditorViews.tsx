@@ -69,7 +69,7 @@ function Conflict({ onOverwrite, onReload }: { onOverwrite: () => void; onReload
 }
 
 /** Single-file editor with dirty indicator, Ctrl+S and conflict handling. */
-export function TextEditor({ file, onClose, onStatus }: { file: FileRef; onClose: () => void; onStatus: (m: string) => void }) {
+export function TextEditor({ file, onClose, onStatus, inline = false, extra }: { file: FileRef; onClose: () => void; onStatus: (m: string) => void; inline?: boolean; extra?: React.ReactNode }) {
   const { node, path } = file;
   const [loaded, setLoaded] = useState<TextFile | null>(null);
   const [text, setText] = useState("");
@@ -121,7 +121,7 @@ export function TextEditor({ file, onClose, onStatus }: { file: FileRef; onClose
   };
 
   return (
-    <div className="ed" role="dialog" aria-label={`Editing ${base(path)}`}>
+    <div className={"ed" + (inline ? " inline" : "")} role="dialog" aria-label={`Editing ${base(path)}`}>
       <header className="ed-head">
         <b title={`${node}:${path}`}>
           {dirty && <span className="ed-dirty" title="Unsaved changes" aria-label="Unsaved changes">● </span>}
@@ -131,6 +131,7 @@ export function TextEditor({ file, onClose, onStatus }: { file: FileRef; onClose
         <span className="ed-spacer" />
         <button onClick={() => void save()} disabled={!dirty || saving} title="Save (Ctrl+S)">{saving ? "Saving..." : "Save"}</button>
         <button onClick={close} title="Close">Close</button>
+        {extra}
       </header>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}

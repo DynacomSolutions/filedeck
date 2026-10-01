@@ -1,7 +1,35 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, canEdit, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
+import { Preview } from "./Preview";
+import type { FileRef } from "./EditorViews";
+
+// Monaco (several MB) stays in its own chunk, fetched on first edit.
+const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
+
+type Dock = "left" | "right" | "top" | "bottom";
+const DOCKS: { dock: Dock; icon: string; label: string }[] = [
+  { dock: "left", icon: "◧", label: "Dock preview left" },
+  { dock: "right", icon: "◨", label: "Dock preview right" },
+  { dock: "top", icon: "⬒", label: "Dock preview top" },
+  { dock: "bottom", icon: "⬓", label: "Dock preview bottom" },
+];
+const lsGet = (k: string) => {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+};
+const lsSet = (k: string, v: string) => {
+  try {
+    localStorage.setItem(k, v);
+  } catch {
+    /* storage unavailable */
+  }
+};
 
 export interface Leaf {
   kind: "leaf";
@@ -18,15 +46,13 @@ interface Props {
   onNavigate: (node: string, path: string) => void;
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
-  onPreview: (e: Entry | null) => void;
-  onEdit: (node: string, path: string) => void;
   /** Two selected files diff directly; one selected file is marked, then paired with the next. */
   onDiff: (files: { node: string; path: string }[]) => void;
   diffMarked: boolean;
   onStatus: (msg: string) => void;
 }
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPreview, onEdit, onDiff, diffMarked, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onDiff, diffMarked, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
@@ -39,6 +65,22 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const [dialog, setDialog] = useState<"compress" | "extract" | null>(null);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((t) => t + 1), []);
+
+  // Per-panel preview: shown only while exactly one file is selected here (or being edited).
+  const [editing, setEditing] = useState<FileRef | null>(null);
+  const [closedFor, setClosedFor] = useState<string | null>(null);
+  const [dock, setDockState] = useState<Dock>(() => {
+    const d = lsGet(`filedeck-pv-dock-${leaf.id}`);
+    return d === "left" || d === "right" || d === "top" || d === "bottom" ? d : "right";
+  });
+  const [pvSize, setPvSize] = useState<number>(() => {
+    const n = Number(lsGet(`filedeck-pv-size-${leaf.id}`));
+    return n >= 10 && n <= 90 ? n : 40;
+  });
+  const setDock = (d: Dock) => {
+    setDockState(d);
+    lsSet(`filedeck-pv-dock-${leaf.id}`, d);
+  };
 
   useEffect(() => {
     let live = true;
@@ -75,10 +117,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     return f;
   }, [entries, sort]);
 
+  const only = sel.size === 1 ? entries.find((e) => e.path === [...sel][0]) : undefined;
+  const previewEntry = only && only.type !== "dir" && !only.linkDir && closedFor !== only.path ? only : null;
   useEffect(() => {
-    const only = sel.size === 1 ? entries.find((e) => e.path === [...sel][0]) : null;
-    if (active) onPreview(only ?? null);
-  }, [sel, entries, active]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (closedFor && closedFor !== only?.path) setClosedFor(null);
+  }, [only?.path, closedFor]);
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     try {
@@ -155,66 +198,26 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   );
   const fileInput = useRef<HTMLInputElement>(null);
 
-  return (
-    <section
-      className={"fp" + (active ? " active" : "") + (over === "." ? " drop" : "")}
-      onMouseDown={onFocus}
-      onDragOver={(e) => dragOver(e, ".")}
-      onDragLeave={() => setOver(null)}
-      onDrop={(e) => drop(e, path)}
-    >
-      <header className="fp-bar">
-        <nav className="crumbs" aria-label="Breadcrumb">
-          <button onClick={() => onNavigate(node, "/")} title={node}>
-            {node}:
-          </button>
-          {crumbs.map((c, i) => (
-            <button key={i} onClick={() => onNavigate(node, "/" + crumbs.slice(0, i + 1).join("/"))}>
-              /{c}
-            </button>
-          ))}
-        </nav>
-        <div className="fp-actions">
-          <button title="Up" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}>↑</button>
-          <button title="New folder" onClick={() => {
-            const n = prompt("Folder name");
-            if (n) void run("New folder", () => api.mkdir(node, join(path, n)));
-          }}>＋📁</button>
-          <button title="Upload" onClick={() => fileInput.current?.click()}>⇪</button>
-          <button title="Rename" disabled={sel.size !== 1} onClick={() => setRenaming([...sel][0] ?? null)}>✎</button>
-          <button title="Edit (Monaco)" disabled={!selEntries.length || selEntries.length !== 1 || !selEntries.every(canEdit)} onClick={() => selEntries[0] && onEdit(node, selEntries[0].path)}>✐</button>
-          <button
-            title={diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another"}
-            className={diffMarked ? "marked" : ""}
-            disabled={!selEntries.length || selEntries.length > 2 || !selEntries.every(canEdit)}
-            onClick={() => onDiff(selEntries.map((e) => ({ node, path: e.path })))}
-          >⇄</button>
-          <button title="Download (several items or folders as a zip)" disabled={!sel.size} onClick={() => {
-            const picked = entries.filter((x) => sel.has(x.path));
-            const one = picked.length === 1 ? picked[0] : undefined;
-            if (one && one.type === "file") window.location.href = fileUrl(node, one.path, "download");
-            else if (picked.length) window.location.href = zipUrl(node, path, picked.map((x) => x.name));
-          }}>⇩</button>
-          <button title="Compress selection" disabled={!sel.size} onClick={() => setDialog("compress")}>📦</button>
-          <button title="Extract archive" disabled={!(sel.size === 1 && entries.some((x) => x.path === [...sel][0] && x.type === "file" && isArchive(x.name)))} onClick={() => setDialog("extract")}>📂</button>
-          <button title="Move to trash" disabled={!sel.size} onClick={() => void run("Trash", () => api.trash(node, selected()))}>🗑</button>
-          <button title="Delete permanently" disabled={!sel.size} onClick={() => {
-            if (confirm(`Permanently delete ${sel.size} item(s)? This cannot be undone.`)) void run("Delete", () => api.remove(node, selected()));
-          }}>✕</button>
-          <label className="chk"><input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} /> hidden</label>
-          <button title="Split right" onClick={() => onSplit("horizontal")}>▥</button>
-          <button title="Split down" onClick={() => onSplit("vertical")}>▤</button>
-          {onClose && <button title="Close panel" onClick={onClose}>×</button>}
-          <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
-            const files = Array.from(e.target.files ?? []);
-            e.target.value = "";
-            void run(`Upload ${files.length} file(s)`, async () => {
-              for (const f of files) await api.upload(node, path, f);
-            });
-          }} />
-        </div>
-      </header>
-      {err && <div className="fp-err">{err}</div>}
+  const paneExtra = (
+    <span className="pv-dock" role="group" aria-label="Preview position">
+      {DOCKS.map((d) => (
+        <button key={d.dock} type="button" className={"pv-dockbtn" + (dock === d.dock ? " on" : "")} aria-pressed={dock === d.dock} title={d.label} aria-label={d.label} onClick={() => setDock(d.dock)}>
+          {d.icon}
+        </button>
+      ))}
+      <button type="button" className="pv-dockbtn" title="Close preview" aria-label="Close preview" onClick={() => (editing ? setEditing(null) : only && setClosedFor(only.path))}>
+        ×
+      </button>
+    </span>
+  );
+  const pane = editing ? (
+    <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
+      <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
+    </Suspense>
+  ) : previewEntry ? (
+    <Preview node={node} entry={previewEntry} onEdit={(n, p) => setEditing({ node: n, path: p })} extra={paneExtra} />
+  ) : null;
+  const listing = (
       <div className="fp-scroll" onClick={(e) => e.target === e.currentTarget && setSel(new Set())}>
         <table className="ft">
           <thead>
@@ -268,6 +271,82 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
         </table>
         {!entries.length && !err && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
       </div>
+  );
+  const horizontal = dock === "left" || dock === "right";
+  const first = dock === "left" || dock === "top";
+
+  return (
+    <section
+      className={"fp" + (active ? " active" : "") + (over === "." ? " drop" : "")}
+      onMouseDown={onFocus}
+      onDragOver={(e) => dragOver(e, ".")}
+      onDragLeave={() => setOver(null)}
+      onDrop={(e) => drop(e, path)}
+    >
+      <header className="fp-bar">
+        <nav className="crumbs" aria-label="Breadcrumb">
+          <button onClick={() => onNavigate(node, "/")} title={node}>
+            {node}:
+          </button>
+          {crumbs.map((c, i) => (
+            <button key={i} onClick={() => onNavigate(node, "/" + crumbs.slice(0, i + 1).join("/"))}>
+              /{c}
+            </button>
+          ))}
+        </nav>
+        <div className="fp-actions">
+          <button title="Up" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}>↑</button>
+          <button title="New folder" onClick={() => {
+            const n = prompt("Folder name");
+            if (n) void run("New folder", () => api.mkdir(node, join(path, n)));
+          }}>＋📁</button>
+          <button title="Upload" onClick={() => fileInput.current?.click()}>⇪</button>
+          <button title="Rename" disabled={sel.size !== 1} onClick={() => setRenaming([...sel][0] ?? null)}>✎</button>
+          <button title="Edit (Monaco)" disabled={!selEntries.length || selEntries.length !== 1 || !selEntries.every(canEdit)} onClick={() => selEntries[0] && setEditing({ node, path: selEntries[0].path })}>✐</button>
+          <button
+            title={diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another"}
+            className={diffMarked ? "marked" : ""}
+            disabled={!selEntries.length || selEntries.length > 2 || !selEntries.every(canEdit)}
+            onClick={() => onDiff(selEntries.map((e) => ({ node, path: e.path })))}
+          >⇄</button>
+          <button title="Download (several items or folders as a zip)" disabled={!sel.size} onClick={() => {
+            const picked = entries.filter((x) => sel.has(x.path));
+            const one = picked.length === 1 ? picked[0] : undefined;
+            if (one && one.type === "file") window.location.href = fileUrl(node, one.path, "download");
+            else if (picked.length) window.location.href = zipUrl(node, path, picked.map((x) => x.name));
+          }}>⇩</button>
+          <button title="Compress selection" disabled={!sel.size} onClick={() => setDialog("compress")}>📦</button>
+          <button title="Extract archive" disabled={!(sel.size === 1 && entries.some((x) => x.path === [...sel][0] && x.type === "file" && isArchive(x.name)))} onClick={() => setDialog("extract")}>📂</button>
+          <button title="Move to trash" disabled={!sel.size} onClick={() => void run("Trash", () => api.trash(node, selected()))}>🗑</button>
+          <button title="Delete permanently" disabled={!sel.size} onClick={() => {
+            if (confirm(`Permanently delete ${sel.size} item(s)? This cannot be undone.`)) void run("Delete", () => api.remove(node, selected()));
+          }}>✕</button>
+          <label className="chk"><input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} /> hidden</label>
+          <button title="Split right" onClick={() => onSplit("horizontal")}>▥</button>
+          <button title="Split down" onClick={() => onSplit("vertical")}>▤</button>
+          {onClose && <button title="Close panel" onClick={onClose}>×</button>}
+          <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            e.target.value = "";
+            void run(`Upload ${files.length} file(s)`, async () => {
+              for (const f of files) await api.upload(node, path, f);
+            });
+          }} />
+        </div>
+      </header>
+      {err && <div className="fp-err">{err}</div>}
+      {pane ? (
+        <Group key={dock} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
+          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90) { setPvSize(v); lsSet(`filedeck-pv-size-${leaf.id}`, String(Math.round(v))); } }}>
+          {first && <Panel id="pv" minSize="15%">{pane}</Panel>}
+          {first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
+          <Panel id="list" minSize="20%">{listing}</Panel>
+          {!first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
+          {!first && <Panel id="pv" minSize="15%">{pane}</Panel>}
+        </Group>
+      ) : (
+        listing
+      )}
       {dialog === "compress" && (
         <CompressDialog node={node} dir={path} names={entries.filter((x) => sel.has(x.path)).map((x) => x.name)} onClose={() => setDialog(null)} onStatus={onStatus} />
       )}
