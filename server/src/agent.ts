@@ -7,6 +7,7 @@ import { listMounts } from "./mounts.ts";
 import { resolveRead } from "./paths.ts";
 import { Watches } from "./watch.ts";
 import { registerArchiveRoutes } from "./archive-routes.ts";
+import { registerDiffRoutes } from "./diff-routes.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -101,6 +102,7 @@ export function createAgent(cfg: Config) {
       Readable.fromWeb(body as never),
       c.req.query("overwrite") === "1",
       cfg.maxUpload,
+      c.req.query("mtime") ? Number(c.req.query("mtime")) : undefined,
     );
     return c.json(r, 201);
   });
@@ -138,9 +140,11 @@ export function createAgent(cfg: Config) {
     return c.json({ paths: results });
   });
   app.post("/api/fs/copy", async (c) => {
-    const b = await json<{ from: string[]; toDir: string }>(c);
+    const b = await json<{ from: string[]; toDir: string; overwrite?: boolean; preserveTimes?: boolean }>(c);
     const results = [];
-    for (const f of strs(b.from)) results.push(await ops.copy(root, f, str(b.toDir, "toDir")));
+    for (const f of strs(b.from)) {
+      results.push(await ops.copy(root, f, str(b.toDir, "toDir"), { overwrite: b.overwrite === true, preserveTimes: b.preserveTimes === true }));
+    }
     return c.json({ paths: results });
   });
   app.post("/api/fs/trash", async (c) => {
@@ -156,6 +160,7 @@ export function createAgent(cfg: Config) {
   });
 
   registerArchiveRoutes(app, cfg);
+  registerDiffRoutes(app, cfg);
 
   // Live change feed: one event per change in the watched directory.
   app.get("/api/events", (c) => {

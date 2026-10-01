@@ -1,3 +1,4 @@
+import type { DiffMode, Loc } from "./urlState";
 export interface Entry {
   name: string;
   path: string;
@@ -112,6 +113,58 @@ export const onJobStarted = (fn: (node: string) => void) => {
 };
 const jobStarted = (node: string) => jobListeners.forEach((f) => f(node));
 
+/** Options for sync copies: replace what is there, keep modification times. */
+export interface SyncOpts {
+  overwrite?: boolean;
+  preserveTimes?: boolean;
+}
+export type { DiffMode, Loc };
+export interface DiffApiOptions {
+  mode: DiffMode;
+  toleranceMs: number;
+  ignoreCase: boolean;
+  ignoreHidden: boolean;
+  include: string;
+  exclude: string;
+  depth: number;
+  maxEntries: number;
+}
+export type DiffStatus = "identical" | "different" | "left-only" | "right-only" | "error";
+export interface DiffSide {
+  t: "file" | "dir" | "symlink" | "other";
+  s: number;
+  m: number;
+  l?: string;
+}
+export interface DiffRow {
+  p: string;
+  rp?: string;
+  status: DiffStatus;
+  l?: DiffSide;
+  r?: DiffSide;
+  newer?: "left" | "right";
+  why?: string;
+}
+export interface DiffCounts {
+  identical: number;
+  different: number;
+  leftOnly: number;
+  rightOnly: number;
+  error: number;
+}
+export interface DiffResult {
+  left: Loc;
+  right: Loc;
+  options: DiffApiOptions & { include: string[]; exclude: string[] };
+  rows: DiffRow[];
+  files: DiffCounts;
+  dirs: DiffCounts;
+  hashedFiles: number;
+  hashedBytes: number;
+  warnings: string[];
+  durationMs: number;
+}
+
 export const api = {
   readText: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/text?path=${enc(path)}`).then((r) => j<TextFile>(r)),
   /** Save with optimistic concurrency. `etag` null creates a new file. 409 -> ConflictError with the current etag. */
@@ -136,7 +189,7 @@ export const api = {
   mkdir: (node: string, path: string) => post(node, "mkdir", { path }),
   rename: (node: string, from: string, to: string) => post(node, "rename", { from, to }),
   move: (node: string, from: string[], toDir: string) => post(node, "move", { from, toDir }),
-  copy: (node: string, from: string[], toDir: string) => post(node, "copy", { from, toDir }),
+  copy: (node: string, from: string[], toDir: string, o: SyncOpts = {}) => post(node, "copy", { from, toDir, ...o }),
   trash: (node: string, paths: string[]) => post(node, "trash", { paths }),
   remove: (node: string, paths: string[]) => post(node, "delete", { paths }),
   startCompress: (node: string, dir: string, names: string[], format: ArchiveFormat, name: string) =>
@@ -150,12 +203,22 @@ export const api = {
     fetch(`${nodeBase(node)}/api/archive/list?path=${enc(path)}`).then((r) =>
       j<{ entries: ArchiveEntry[]; truncated: boolean; bytes: number }>(r),
     ),
-  transfer: (src: { node: string; path: string }, dst: { node: string; dir: string }, op: "copy" | "move") =>
+  transfer: (src: { node: string; path: string }, dst: { node: string; dir: string }, op: "copy" | "move", o: SyncOpts = {}) =>
     fetch("/api/transfer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ src, dst, op }),
+      body: JSON.stringify({ src, dst, op, ...o }),
     }).then((r) => j<unknown>(r)),
+  startDiff: (left: Loc, right: Loc, options: DiffApiOptions) =>
+    fetch("/api/diff/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ left, right, options }),
+    }).then((r) => j<JobView>(r)),
+  diffJob: (id: string) => fetch(`/api/diff/jobs/${id}`).then((r) => j<JobView>(r)),
+  diffResult: (id: string) => fetch(`/api/diff/jobs/${id}/result`).then((r) => j<DiffResult>(r)),
+  cancelDiff: (id: string) => fetch(`/api/diff/jobs/${id}/cancel`, { method: "POST" }).then((r) => j<JobView>(r)),
+  dismissDiff: (id: string) => fetch(`/api/diff/jobs/${id}`, { method: "DELETE" }).then((r) => j<unknown>(r)),
   upload: (node: string, dir: string, file: File, onProgress?: (f: number) => void) =>
     new Promise<void>((resolve, reject) => {
       const x = new XMLHttpRequest();

@@ -30,10 +30,13 @@ interface Props {
   /** Two selected files diff directly; one selected file is marked, then paired with the next. */
   onDiff: (files: { node: string; path: string }[]) => void;
   diffMarked: boolean;
+  /** Folder diff: two selected folders compare directly; one folder (or this panel's folder when nothing is selected) is marked, then paired with the next. */
+  onFolderDiff: (folders: { node: string; path: string }[]) => void;
+  folderMarked: boolean;
   onStatus: (msg: string) => void;
 }
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
@@ -298,6 +301,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
             disabled={!selEntries.length || selEntries.length > 2 || !selEntries.every(canEdit)}
             onClick={() => onDiff(selEntries.map((e) => ({ node, path: e.path })))}
           >⇄</button>
+          <button
+            title={folderMarked ? "Folder diff against the marked folder" : "Folder diff: select two folders, or mark one (or this folder) then pick another"}
+            className={folderMarked ? "marked" : ""}
+            disabled={selEntries.length > 2 || !selEntries.every((e) => e.type === "dir" || e.linkDir)}
+            onClick={() => onFolderDiff(selEntries.length ? selEntries.map((e) => ({ node, path: e.path })) : [{ node, path }])}
+          >⇆</button>
           <button title="Download (several items or folders as a zip)" disabled={!sel.size} onClick={() => {
             const picked = entries.filter((x) => sel.has(x.path));
             const one = picked.length === 1 ? picked[0] : undefined;

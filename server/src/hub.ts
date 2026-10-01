@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { registerHubDiff } from "./diff-hub.ts";
 import type { Config } from "./config.ts";
 
 const HOP = new Set(["connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "host", "content-length"]);
@@ -35,12 +36,19 @@ export function createHub(cfg: Config) {
     return c.json({ nodes });
   });
 
+  // Folder diff jobs run here: the hub reads both agents' listings and asks each agent to hash its own files.
+  registerHubDiff(app, agents);
+
   // Cross-node transfer (files only for now): stream src agent -> dst agent.
   app.post("/api/transfer", async (c) => {
     const b = (await c.req.json().catch(() => null)) as {
       src?: { node: string; path: string };
       dst?: { node: string; dir: string };
       op?: "copy" | "move";
+      /** replace an existing file of the same name at the destination */
+      overwrite?: boolean;
+      /** give the destination file the source's modification time */
+      preserveTimes?: boolean;
     } | null;
     const src = b?.src && agents.get(b.src.node);
     const dst = b?.dst && agents.get(b.dst.node);
@@ -48,12 +56,14 @@ export function createHub(cfg: Config) {
     const name = path.posix.basename(b.src.path);
     const stat = await fetch(`${src}/api/fs/stat?path=${encodeURIComponent(b.src.path)}`);
     if (!stat.ok) return new Response(stat.body, { status: stat.status, headers: { "content-type": "application/json" } });
-    const st = (await stat.json()) as { type: string };
+    const st = (await stat.json()) as { type: string; mtime?: number };
     if (st.type !== "file") return c.json({ error: "cross-node folder transfer is not supported yet" }, 501);
     const down = await fetch(`${src}/api/fs/download?path=${encodeURIComponent(b.src.path)}`);
     if (!down.ok || !down.body) return c.json({ error: "source read failed" }, 502);
     const up = await fetch(
-      `${dst}/api/fs/upload?dir=${encodeURIComponent(b.dst.dir)}&name=${encodeURIComponent(name)}`,
+      `${dst}/api/fs/upload?dir=${encodeURIComponent(b.dst.dir)}&name=${encodeURIComponent(name)}` +
+        (b.overwrite === true ? "&overwrite=1" : "") +
+        (b.preserveTimes === true && st.mtime ? `&mtime=${Math.floor(st.mtime)}` : ""),
       { method: "PUT", body: down.body, duplex: "half", headers: { "content-length": down.headers.get("content-length") ?? "" } } as RequestInit,
     );
     if (!up.ok) return new Response(up.body, { status: up.status, headers: { "content-type": "application/json" } });

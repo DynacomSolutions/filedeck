@@ -12,6 +12,9 @@ export interface Config {
   archiveMaxEntries: number;
   archiveMaxBytes: number;
   jobConcurrency: number;
+  /** folder diff: agent-side concurrent hash streams and walk entry ceiling */
+  hashConcurrency: number;
+  walkMaxEntries: number;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
 }
@@ -44,6 +47,8 @@ export function loadConfig(env = process.env): Config {
     archiveMaxEntries: Number(env.FILEDECK_ARCHIVE_MAX_ENTRIES ?? 1_000_000),
     archiveMaxBytes: Number(env.FILEDECK_ARCHIVE_MAX_BYTES ?? 1024 ** 4),
     jobConcurrency: Number(env.FILEDECK_JOB_CONCURRENCY ?? 2),
+    hashConcurrency: Number(env.FILEDECK_HASH_CONCURRENCY ?? 4),
+    walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
     nodes: parseNodes(env.NODES),
   };
 }

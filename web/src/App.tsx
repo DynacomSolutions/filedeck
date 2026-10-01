@@ -2,13 +2,15 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { decodeState, encodeState, leaves, maxId, type Leaf, type Tree } from "./urlState";
+import { DEFAULT_UI, decodeState, encodeState, leaves, maxId, type FolderState, type Leaf, type Tree } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
 import { ThemeMenu } from "./ThemeMenu";
+import { FolderDiff, type FolderDiffInit } from "./FolderDiff";
+import type { Loc } from "./api";
 
 // Restored from the URL before first render so panel ids keep matching.
 const initial = decodeState(window.location.search);
@@ -40,7 +42,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
   const prev = useRef<Record<string, { node: string; path: string }> | null>(null);
   const fromPop = useRef(false);
@@ -50,7 +52,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   useEffect(() => {
     if (!tree) return;
     const paths = pathsOf(tree);
-    const url = encodeState({ tree, active, ...(diff ? { diff } : {}) });
+    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}) });
     latest.current.url = url;
     latest.current.paths = paths;
     let changed: string | undefined;
@@ -72,7 +74,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     } catch {
       /* history unavailable (sandboxed frame) */
     }
-  }, [tree, active, diff]);
+  }, [tree, active, diff, folder]);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
@@ -167,6 +169,27 @@ export function App() {
       }
     }
   };
+  const [folderDiff, setFolderDiff] = useState<FolderDiffInit | null>(() => (initial?.folder ? { ...initial.folder, autorun: true } : null));
+  // Live folder-diff state (folders + options) that the URL mirrors while the dialog is open.
+  const [folderLive, setFolderLive] = useState<FolderState | null>(initial?.folder ?? null);
+  const [folderMark, setFolderMark] = useState<Loc | null>(null);
+  const onFolderDiff = (folders: Loc[]) => {
+    const open = (l: Loc, r: Loc) => {
+      setFolderDiff({ left: l, right: r, opts: DEFAULT_UI, preset: "", autorun: false });
+      setFolderMark(null);
+    };
+    if (folders.length === 2) return open(folders[0]!, folders[1]!);
+    const f = folders[0];
+    if (!f) return;
+    if (folderMark && !(folderMark.node === f.node && folderMark.path === f.path)) open(folderMark, f);
+    else if (folderMark) {
+      setFolderMark(null);
+      setStatus("Folder diff mark cleared");
+    } else {
+      setFolderMark(f);
+      setStatus(`Marked ${f.node}:${f.path} for folder diff; pick another folder in any panel and press the folder diff button`);
+    }
+  };
 
   useEffect(() => {
     const load = () => api.nodes().then((r) => setNodes(r.nodes)).catch(() => setNodes([]));
@@ -181,7 +204,7 @@ export function App() {
     setActiveId(l.id);
   }, [nodes, tree]);
 
-  useUrlHistory(tree, activeId, diff, setTree, setStatus);
+  useUrlHistory(tree, activeId, diff, folderDiff ? folderLive : null, setTree, setStatus);
 
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => (t ? mapTree(t, fn) : t));
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
@@ -208,6 +231,8 @@ export function App() {
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
           onDiff={onDiff}
           diffMarked={diffMark !== null}
+          onFolderDiff={onFolderDiff}
+          folderMarked={folderMark !== null}
           onStatus={setStatus}
         />
       );
@@ -248,6 +273,11 @@ export function App() {
                 Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)} ×
               </button>
             )}
+            {folderMark && (
+              <button className="btn btn--ghost btn--sm" onClick={() => setFolderMark(null)} title="Clear folder diff mark">
+                Folder mark: {folderMark.node}:{folderMark.path} ×
+              </button>
+            )}
             <a className="btn btn--ghost btn--sm" href="https://worktrees.example.invalid/">Worktrees</a>
             <a className="btn btn--ghost btn--sm" href="https://gh.example.invalid/">Runners</a>
             <ThemeMenu />
@@ -259,6 +289,16 @@ export function App() {
         <div className="main">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</div>
       </div>
       <Suspense fallback={<div className="ed"><div className="pad muted">Loading editor...</div></div>}>
+        {folderDiff && nodes.length > 0 && (
+          <FolderDiff
+            init={folderDiff}
+            onState={setFolderLive}
+            nodes={nodes}
+            onClose={() => setFolderDiff(null)}
+            onFileDiff={(l, r) => setDiff({ left: l, right: r })}
+            onStatus={setStatus}
+          />
+        )}
         {diff && <DiffViewer left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />}
       </Suspense>
     </div>

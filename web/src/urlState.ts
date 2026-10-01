@@ -1,4 +1,10 @@
-import type { FileRef } from "./EditorViews";
+// No imports: this module is pure so the server tests can exercise it directly.
+export interface FileRef {
+  node: string;
+  path: string;
+}
+export type Loc = FileRef;
+export type DiffMode = "name" | "size" | "mtime" | "content" | "quick";
 
 export type Dock = "left" | "right" | "top" | "bottom";
 export type SortKey = "name" | "size" | "mtime";
@@ -22,10 +28,41 @@ export interface Leaf {
 }
 export type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[]; sizes?: number[] };
 
+/** Folder-diff options as edited in the UI (tolerance in seconds). */
+export interface UiOpts {
+  mode: DiffMode;
+  toleranceSec: number;
+  ignoreCase: boolean;
+  ignoreHidden: boolean;
+  include: string;
+  exclude: string;
+  depth: number;
+  maxEntries: number;
+}
+export const DEFAULT_UI: UiOpts = {
+  mode: "quick",
+  toleranceSec: 2,
+  ignoreCase: false,
+  ignoreHidden: false,
+  include: "",
+  exclude: "",
+  depth: 32,
+  maxEntries: 100000,
+};
+export const FOLDER_MODES: DiffMode[] = ["name", "size", "mtime", "quick", "content"];
+/** An open folder diff: both folders, the options and the preset they came from. */
+export interface FolderState {
+  left: Loc;
+  right: Loc;
+  opts: UiOpts;
+  preset: string;
+}
+
 export interface AppState {
   tree: Tree;
   active: string;
   diff?: { left: FileRef; right: FileRef };
+  folder?: FolderState;
 }
 
 // Compact wire format (short keys keep shared links readable).
@@ -36,6 +73,8 @@ interface Wire {
   t: WTree;
   a: string;
   f?: [[string, string], [string, string]];
+  /** folder diff: l/r folders, then only the options that differ from the defaults */
+  g?: { l: [string, string]; r: [string, string]; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
 }
 
 const toWire = (t: Tree): WTree => {
@@ -53,6 +92,20 @@ const toWire = (t: Tree): WTree => {
 export function encodeState(s: AppState): string {
   const w: Wire = { t: toWire(s.tree), a: s.active };
   if (s.diff) w.f = [[s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
+  if (s.folder) {
+    const { left, right, opts: o, preset } = s.folder;
+    const g: NonNullable<Wire["g"]> = { l: [left.node, left.path], r: [right.node, right.path] };
+    if (o.mode !== DEFAULT_UI.mode) g.m = o.mode;
+    if (o.toleranceSec !== DEFAULT_UI.toleranceSec) g.t = o.toleranceSec;
+    if (o.ignoreCase) g.c = 1;
+    if (o.ignoreHidden) g.h = 1;
+    if (o.include) g.i = o.include;
+    if (o.exclude) g.x = o.exclude;
+    if (o.depth !== DEFAULT_UI.depth) g.d = o.depth;
+    if (o.maxEntries !== DEFAULT_UI.maxEntries) g.n = o.maxEntries;
+    if (preset) g.p = preset;
+    w.g = g;
+  }
   return "?s=" + encodeURIComponent(JSON.stringify(w));
 }
 
@@ -87,6 +140,28 @@ export function leaves(t: Tree): Leaf[] {
   return t.kind === "leaf" ? [t] : t.children.flatMap(leaves);
 }
 
+const pair = (x: unknown): x is [string, string] => Array.isArray(x) && str(x[0]) && str(x[1]) && x[1].startsWith("/");
+function folderFromWire(g: unknown): FolderState | null {
+  const o = g as NonNullable<Wire["g"]> | undefined;
+  if (!o || typeof o !== "object" || !pair(o.l) || !pair(o.r)) return null;
+  const num = (v: unknown, d: number, lo: number, hi: number) => (typeof v === "number" && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d);
+  return {
+    left: { node: o.l[0], path: o.l[1] },
+    right: { node: o.r[0], path: o.r[1] },
+    preset: str(o.p) ? o.p : "",
+    opts: {
+      mode: FOLDER_MODES.includes(o.m as DiffMode) ? (o.m as DiffMode) : DEFAULT_UI.mode,
+      toleranceSec: num(o.t, DEFAULT_UI.toleranceSec, 0, 86400),
+      ignoreCase: o.c === 1,
+      ignoreHidden: o.h === 1,
+      include: str(o.i) ? o.i : "",
+      exclude: str(o.x) ? o.x : "",
+      depth: num(o.d, DEFAULT_UI.depth, 1, 64),
+      maxEntries: num(o.n, DEFAULT_UI.maxEntries, 1, 500000),
+    },
+  };
+}
+
 /** Parse `?s=...`; null when absent or malformed (the app then starts fresh). */
 export function decodeState(search: string): AppState | null {
   try {
@@ -103,7 +178,7 @@ export function decodeState(search: string): AppState | null {
       Array.isArray(f) && f.length === 2 && f.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]))
         ? { left: { node: f[0][0], path: f[0][1] }, right: { node: f[1][0], path: f[1][1] } }
         : undefined;
-    return { tree, active, ...(diff ? { diff } : {}) };
+    return { tree, active, ...(diff ? { diff } : {}), ...(folderFromWire(w.g) ? { folder: folderFromWire(w.g) as FolderState } : {}) };
   } catch {
     return null;
   }

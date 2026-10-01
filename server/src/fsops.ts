@@ -231,15 +231,40 @@ async function uniqueName(dirReal: string, name: string): Promise<string> {
   throw new FsError(409, "cannot find a free name");
 }
 
-export async function copy(root: string, from: string, toDir: string) {
+export interface CopyOpts {
+  /** Replace an existing destination of the same name instead of picking a free "(copy)" name. A folder replaces the whole destination folder, it is not merged. */
+  overwrite?: boolean;
+  /** Keep the source's modification times (used by folder-diff sync so the copy compares equal). */
+  preserveTimes?: boolean;
+}
+
+export async function copy(root: string, from: string, toDir: string, opts: CopyOpts = {}) {
   const a = resolveWrite(root, from);
   const d = resolveRead(root, toDir);
   assertNotTrash(a.virtual);
   assertNotTrash(d.virtual);
   if (a.virtual === "/") throw new FsError(400, "cannot copy root");
   if (d.virtual === a.virtual || d.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot copy into itself");
-  const name = await uniqueName(d.real, path.basename(a.real));
-  await fs.cp(a.real, path.join(d.real, name), { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+  const cpOpts = { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, preserveTimestamps: opts.preserveTimes === true };
+  if (!opts.overwrite) {
+    const name = await uniqueName(d.real, path.basename(a.real));
+    await fs.cp(a.real, path.join(d.real, name), cpOpts);
+    return virtualJoin(d.virtual, name);
+  }
+  const name = path.basename(a.real);
+  const dest = path.join(d.real, name);
+  if (dest === a.real) throw new FsError(400, "source and destination are the same");
+  // Copy beside the destination, then swap in: a failed copy never damages the existing file.
+  const tmp = path.join(d.real, `.${name}.filedeck-part-${randomUUID()}`);
+  try {
+    await fs.cp(a.real, tmp, cpOpts);
+    const [src, cur] = [await fs.lstat(tmp), await fs.lstat(dest).catch(() => null)];
+    if (cur && !(src.isFile() && cur.isFile())) await fs.rm(dest, { recursive: true, force: true });
+    await fs.rename(tmp, dest);
+  } catch (e) {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
   return virtualJoin(d.virtual, name);
 }
 
@@ -307,6 +332,7 @@ export async function upload(
   body: Readable,
   overwrite: boolean,
   maxBytes: number,
+  mtimeMs?: number,
 ) {
   const d = resolveRead(root, dir);
   assertNotTrash(d.virtual);
@@ -325,6 +351,10 @@ export async function upload(
       if (written > maxBytes) body.destroy(new FsError(413, "upload too large"));
     });
     await pipeline(body, out);
+    if (mtimeMs !== undefined && Number.isFinite(mtimeMs) && mtimeMs > 0) {
+      const t = new Date(mtimeMs);
+      await fs.utimes(tmp, t, t);
+    }
     await fs.rename(tmp, target.real);
   } catch (e) {
     await fs.rm(tmp, { force: true });
