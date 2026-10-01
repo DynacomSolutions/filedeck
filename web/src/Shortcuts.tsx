@@ -13,6 +13,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["Ctrl+F", "Filter this folder by name"],
       ["Alt+T / Alt+W", "New tab with this folder / close the tab"],
       ["Alt+[ / Alt+]", "Previous / next tab"],
+      ["Alt+Shift+Arrows", "Dock this panel beside the previous / next panel (or drag the panel header: edge splits, centre merges as a tab)"],
       ["Ctrl+Shift+F", "Search under this folder (name, glob, regex, file content)"],
       ["Esc", "Clear filter, then selection"],
     ],

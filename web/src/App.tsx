@@ -3,7 +3,7 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
+import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
@@ -15,6 +15,43 @@ import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
 import { FolderDiff, type FolderDiffInit } from "./FolderDiff";
 import type { Loc } from "./api";
+import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
+
+/** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = merge as a tab). */
+function DockSlot({ id, dragging, onDock, children }: { id: string; dragging: string | null; onDock: (src: string, target: string, zone: DropZone) => void; children: React.ReactNode }) {
+  const [zone, setZone] = useState<DropZone | null>(null);
+  const foreign = dragging !== null && dragging !== id;
+  const pick = (e: React.DragEvent) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return pickZone((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+  };
+  return (
+    <div
+      className="dock-slot"
+      data-dock-slot={id}
+      onDragOver={(e) => {
+        if (!foreign || !e.dataTransfer.types.includes(PANEL_MIME)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setZone(pick(e));
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setZone(null);
+      }}
+      onDrop={(e) => {
+        if (!foreign || !e.dataTransfer.types.includes(PANEL_MIME)) return;
+        e.preventDefault();
+        const src = e.dataTransfer.getData(PANEL_MIME);
+        const z = pick(e);
+        setZone(null);
+        if (src) onDock(src, id, z);
+      }}
+    >
+      {children}
+      {foreign && zone && <div className={"dock-drop dock-drop-" + zone} aria-hidden="true" />}
+    </div>
+  );
+}
 
 // Restored from the URL before first render so panel ids keep matching.
 const initial = decodeState(window.location.search);
@@ -263,6 +300,35 @@ export function App() {
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
 
+  const [dragId, setDragId] = useState<string | null>(null);
+  const dock = (src: string, target: string, zone: DropZone): boolean => {
+    const next = tree ? dockPanel(tree, src, target, zone, id) : null;
+    if (!next) {
+      setStatus(zone === "center" ? `Cannot merge: at most ${MAX_TABS} tabs per panel` : "Cannot move the panel there");
+      return false;
+    }
+    setTree(syncTree(next));
+    setActiveId(src);
+    setStatus(zone === "center" ? "Merged panel as tabs" : `Moved panel to the ${zone}`);
+    return true;
+  };
+  const dragProps = (lid: string): React.HTMLAttributes<HTMLElement> => ({
+    draggable: true,
+    onDragStart: (e) => {
+      // inputs and the tab strip keep their own text/drag behaviour
+      if ((e.target as Element).closest("input,textarea,select,.fp-tab")) return;
+      e.dataTransfer.setData(PANEL_MIME, lid);
+      e.dataTransfer.effectAllowed = "move";
+      setDragId(lid);
+    },
+    onDragEnd: () => setDragId(null),
+  });
+  const onKeyDock = (lid: string) => (key: string): boolean => {
+    const r = tree && keyDock(leaves(tree).map((l) => l.id), lid, key);
+    if (!r) return true;
+    if (dock(lid, r.target, r.zone)) setTimeout(() => document.querySelector<HTMLElement>(`[data-fp="${lid}"]`)?.focus(), 0);
+    return true;
+  };
   const switchPanel = (from: string, dir: 1 | -1): boolean => {
     if (!tree) return false;
     const all = leaves(tree);
@@ -278,7 +344,10 @@ export function App() {
       const all = leaves(tree!);
       const nx = all.length > 1 ? all[(all.findIndex((l) => l.id === t.id) + 1) % all.length] : undefined;
       return (
+        <DockSlot id={t.id} dragging={dragId} onDock={dock}>
         <FilePanel
+          dragProps={dragProps(t.id)}
+          onDock={onKeyDock(t.id)}
           leaf={t}
           active={t.id === activeId}
           onFocus={() => setActiveId(t.id)}
@@ -297,10 +366,12 @@ export function App() {
           peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel }))}
           onStatus={setStatus}
         />
+        </DockSlot>
       );
     }
     return (
       <Group
+        key={t.id + ":" + t.children.map((c) => c.id).join(",")}
         orientation={t.dir}
         id={t.id}
         defaultLayout={t.sizes && t.sizes.length === t.children.length ? Object.fromEntries(t.children.map((c, i) => [c.id, t.sizes![i]!])) : undefined}
