@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, fileUrl, fmtDate, fmtSize, join, nodeBase, parent, type Entry } from "./api";
+import { api, canEdit, fileUrl, fmtDate, fmtSize, join, nodeBase, parent, type Entry } from "./api";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 
 export interface Leaf {
@@ -18,10 +18,14 @@ interface Props {
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
   onPreview: (e: Entry | null) => void;
+  onEdit: (node: string, path: string) => void;
+  /** Two selected files diff directly; one selected file is marked, then paired with the next. */
+  onDiff: (files: { node: string; path: string }[]) => void;
+  diffMarked: boolean;
   onStatus: (msg: string) => void;
 }
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPreview, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPreview, onEdit, onDiff, diffMarked, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
@@ -108,6 +112,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     else window.open(fileUrl(node, en.path), "_blank", "noopener");
   };
   const selected = () => [...sel];
+  const selEntries = entries.filter((e) => sel.has(e.path));
 
   const drop = async (e: React.DragEvent, destDir: string) => {
     e.preventDefault();
@@ -175,6 +180,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           }}>＋📁</button>
           <button title="Upload" onClick={() => fileInput.current?.click()}>⇪</button>
           <button title="Rename" disabled={sel.size !== 1} onClick={() => setRenaming([...sel][0] ?? null)}>✎</button>
+          <button title="Edit (Monaco)" disabled={!selEntries.length || selEntries.length !== 1 || !selEntries.every(canEdit)} onClick={() => selEntries[0] && onEdit(node, selEntries[0].path)}>✐</button>
+          <button
+            title={diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another"}
+            className={diffMarked ? "marked" : ""}
+            disabled={!selEntries.length || selEntries.length > 2 || !selEntries.every(canEdit)}
+            onClick={() => onDiff(selEntries.map((e) => ({ node, path: e.path })))}
+          >⇄</button>
           <button title="Download" disabled={sel.size !== 1} onClick={() => {
             const en = entries.find((x) => x.path === [...sel][0]);
             if (en && en.type === "file") window.location.href = fileUrl(node, en.path, "download");

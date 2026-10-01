@@ -27,8 +27,9 @@ export interface Entry {
 
 export class FsError extends Error {
   constructor(
-    public status: 400 | 403 | 404 | 409 | 413 | 500,
+    public status: 400 | 403 | 404 | 409 | 413 | 415 | 428 | 500,
     message: string,
+    public extra?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -330,4 +331,71 @@ export async function upload(
     throw e;
   }
   return { path: target.virtual, size: written };
+}
+
+export const MAX_EDIT = 5 * 1024 * 1024;
+
+export const etagOf = (st: { mtimeMs: number; size: number; ino: number }) => `${st.mtimeMs}-${st.size}-${st.ino}`;
+
+function assertText(buf: Buffer) {
+  if (buf.subarray(0, 8192).includes(0)) throw new FsError(415, "binary file");
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    throw new FsError(415, "file is not valid UTF-8 text");
+  }
+}
+
+/** Read a small UTF-8 text file for the editor, with the etag used for conflict checks. */
+export async function readText(root: string, p: string, maxBytes = MAX_EDIT) {
+  const r = resolveRead(root, p);
+  const st = await fs.stat(r.real);
+  if (!st.isFile()) throw new FsError(400, st.isDirectory() ? "is a directory" : "not a regular file");
+  if (st.size > maxBytes) throw new FsError(413, "file too large to edit");
+  const buf = await fs.readFile(r.real);
+  assertText(buf);
+  return { path: r.virtual, content: buf.toString("utf8"), size: st.size, mtime: st.mtimeMs, etag: etagOf(st) };
+}
+
+/**
+ * Atomic overwrite (temp file + rename in the same directory) with optimistic
+ * concurrency: `ifMatch` must equal the file's current etag, otherwise 409 with
+ * the current etag. `ifMatch === "*"` is rejected; `null` means create-only.
+ */
+export async function writeText(root: string, p: string, body: Buffer, ifMatch: string | null, maxBytes = MAX_EDIT) {
+  const r = resolveRead(root, p); // follow a final symlink, confined to root
+  assertNotTrash(r.virtual);
+  if (r.virtual === "/") throw new FsError(400, "is a directory");
+  if (body.length > maxBytes) throw new FsError(413, "content too large");
+  assertText(body);
+  let cur: Awaited<ReturnType<typeof fs.stat>> | null = null;
+  try {
+    cur = await fs.stat(r.real);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  if (cur && !cur.isFile()) throw new FsError(400, cur.isDirectory() ? "is a directory" : "not a regular file");
+  if (ifMatch === null) {
+    if (cur) throw new FsError(409, "file already exists", { etag: etagOf(cur), mtime: cur.mtimeMs });
+  } else {
+    if (!cur) throw new FsError(404, "not found");
+    if (etagOf(cur) !== ifMatch) {
+      throw new FsError(409, "file changed on disk since it was opened", { etag: etagOf(cur), mtime: cur.mtimeMs });
+    }
+  }
+  const dir = path.dirname(r.real);
+  const tmp = path.join(dir, `.${path.basename(r.real)}.filedeck-${randomUUID().slice(0, 8)}.part`);
+  try {
+    await fs.writeFile(tmp, body, { flag: "wx", mode: cur ? Number(cur.mode) & 0o7777 : 0o644 });
+    if (cur) {
+      await fs.chmod(tmp, Number(cur.mode) & 0o7777);
+      await fs.chown(tmp, Number(cur.uid), Number(cur.gid)).catch(() => undefined);
+    }
+    await fs.rename(tmp, r.real);
+  } catch (e) {
+    await fs.rm(tmp, { force: true });
+    throw e;
+  }
+  const st = await fs.stat(r.real);
+  return { path: r.virtual, size: st.size, mtime: st.mtimeMs, etag: etagOf(st) };
 }

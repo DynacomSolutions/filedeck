@@ -72,6 +72,23 @@ export function createAgent(cfg: Config) {
   app.on(["GET", "HEAD"], "/api/fs/read", (c) => serve(c, false));
   app.on(["GET", "HEAD"], "/api/fs/download", (c) => serve(c, true));
 
+  app.get("/api/fs/text", async (c) => c.json(await ops.readText(root, c.req.query("path") ?? "", cfg.maxEdit)));
+
+  // Editor save: atomic overwrite guarded by If-Match (etag from /api/fs/text or a previous save).
+  // `create=1` (no If-Match) makes a new file and fails with 409 if it exists.
+  app.put("/api/fs/write", async (c) => {
+    const ifMatch = c.req.header("if-match");
+    const create = c.req.query("create") === "1";
+    if (!create && !ifMatch) throw new ops.FsError(428, "If-Match header required");
+    const buf = Buffer.from(await c.req.arrayBuffer());
+    try {
+      return c.json(await ops.writeText(root, c.req.query("path") ?? "", buf, create ? null : (ifMatch as string), cfg.maxEdit));
+    } catch (e) {
+      if (e instanceof ops.FsError && e.extra) return c.json({ error: e.message, ...e.extra }, e.status as 409);
+      throw e;
+    }
+  });
+
   app.put("/api/fs/upload", async (c) => {
     const body = c.req.raw.body;
     if (!body) return c.json({ error: "empty body" }, 400);

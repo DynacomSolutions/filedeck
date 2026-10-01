@@ -45,7 +45,44 @@ const post = <T,>(node: string, op: string, body: unknown) =>
     body: JSON.stringify(body),
   }).then((r) => j<T>(r));
 
+export class ConflictError extends Error {
+  constructor(
+    message: string,
+    public etag: string,
+  ) {
+    super(message);
+  }
+}
+
+export interface TextFile {
+  path: string;
+  content: string;
+  size: number;
+  mtime: number;
+  etag: string;
+}
+export interface WriteResult {
+  path: string;
+  size: number;
+  mtime: number;
+  etag: string;
+}
+
 export const api = {
+  readText: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/text?path=${enc(path)}`).then((r) => j<TextFile>(r)),
+  /** Save with optimistic concurrency. `etag` null creates a new file. 409 -> ConflictError with the current etag. */
+  writeText: async (node: string, path: string, content: string, etag: string | null): Promise<WriteResult> => {
+    const r = await fetch(`${nodeBase(node)}/api/fs/write?path=${enc(path)}${etag === null ? "&create=1" : ""}`, {
+      method: "PUT",
+      headers: etag === null ? {} : { "if-match": etag },
+      body: content,
+    });
+    if (r.status === 409) {
+      const b = (await r.json().catch(() => ({}))) as { error?: string; etag?: string };
+      throw new ConflictError(b.error ?? "conflict", b.etag ?? "");
+    }
+    return j<WriteResult>(r);
+  },
   nodes: () => fetch("/api/nodes").then((r) => j<{ nodes: NodeInfo[] }>(r)),
   mounts: (node: string) => fetch(`${nodeBase(node)}/api/mounts`).then((r) => j<{ mounts: Mount[] }>(r)),
   list: (node: string, path: string, hidden: boolean) =>
@@ -98,3 +135,9 @@ export function fmtSize(n: number): string {
   return `${n.toFixed(n < 10 ? 1 : 0)} ${u[i]}`;
 }
 export const fmtDate = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+
+export const MAX_EDIT = 5 * 1024 * 1024;
+const NOT_TEXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "mp4", "m4v", "webm", "mov", "mkv", "mp3", "m4a", "ogg", "wav", "flac", "opus", "pdf", "zip", "gz", "tgz", "7z", "xz", "bz2", "tar", "iso", "bin", "exe", "so"]);
+/** Cheap client-side check; the agent still refuses binary or oversize content. */
+export const canEdit = (e: Entry) =>
+  (e.type === "file" || (e.type === "symlink" && !e.linkDir)) && e.size <= MAX_EDIT && !NOT_TEXT.has(e.name.slice(e.name.lastIndexOf(".") + 1).toLowerCase());

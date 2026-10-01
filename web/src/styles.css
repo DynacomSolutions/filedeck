@@ -48,3 +48,11 @@ input[type=text],input:not([type]){background:var(--panel);border:1px solid var(
 .pv-text{margin:0;padding:10px;font:12.5px/1.45 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;width:100%}
 .pv-empty{padding:16px;font-size:13px}
 @media(max-width:700px){.side{flex-basis:140px}}
+.ed{position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;background:var(--bg)}
+.ed-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel2);font-size:13px}
+.ed-head button{align-self:center}.ed-spacer{flex:1}.ed-pair{overflow-wrap:anywhere}.ed-dirty{color:var(--warn)}
+.ed-banner{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:6px 14px;background:var(--panel);border-bottom:1px solid var(--warn);color:var(--warn);font-size:13px}.ed-banner.err{border-color:var(--line)}
+.ed-body{flex:1;min-height:0;position:relative}
+.pill{background:var(--pill-bg);border-radius:999px;padding:0 8px;font-size:12px}
+button.link{border:0;background:transparent;color:var(--accent);padding:0;text-decoration:underline}
+.fp-actions button.marked{border-color:var(--accent);color:var(--accent)}

@@ -1,8 +1,13 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel, type Leaf } from "./FilePanel";
 import { Preview } from "./Preview";
+import type { FileRef } from "./EditorViews";
+
+// Monaco (several MB) lives in its own chunks, fetched on first use.
+const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
+const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 
 type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[] };
 let seq = 1;
@@ -60,6 +65,27 @@ export function App() {
   const [preview, setPreview] = useState<Entry | null>(null);
   const [previewNode, setPreviewNode] = useState("");
   const [status, setStatus] = useState("");
+  const [editing, setEditing] = useState<FileRef | null>(null);
+  const [diff, setDiff] = useState<{ left: FileRef; right: FileRef } | null>(null);
+  const [diffMark, setDiffMark] = useState<FileRef | null>(null);
+  const onDiff = (files: FileRef[]) => {
+    if (files.length === 2) {
+      setDiff({ left: files[0]!, right: files[1]! });
+      setDiffMark(null);
+    } else if (files.length === 1) {
+      const f = files[0]!;
+      if (diffMark && !(diffMark.node === f.node && diffMark.path === f.path)) {
+        setDiff({ left: diffMark, right: f });
+        setDiffMark(null);
+      } else if (diffMark) {
+        setDiffMark(null);
+        setStatus("Diff mark cleared");
+      } else {
+        setDiffMark(f);
+        setStatus(`Marked ${f.path} for diff; select another file and press the diff button`);
+      }
+    }
+  };
   const [theme, setTheme] = useState<string>(() => document.documentElement.dataset.theme ?? "");
 
   useEffect(() => {
@@ -107,6 +133,9 @@ export function App() {
             setPreview(e);
             setPreviewNode(t.node);
           }}
+          onEdit={(node, path) => setEditing({ node, path })}
+          onDiff={onDiff}
+          diffMarked={diffMark !== null}
           onStatus={setStatus}
         />
       );
@@ -128,6 +157,7 @@ export function App() {
       <header className="top">
         <b>filedeck</b>
         <span className="muted status" role="status">{status}</span>
+        {diffMark && <button onClick={() => setDiffMark(null)} title="Clear diff mark">Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)} ×</button>}
         <button onClick={toggleTheme} title="Theme: auto / dark / light">Theme: {theme || "auto"}</button>
       </header>
       <div className="body">
@@ -136,10 +166,14 @@ export function App() {
           <Panel id="panels" minSize="30%">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</Panel>
           <Separator className="sep horizontal" />
           <Panel id="preview" defaultSize="28%" minSize="10%" collapsible>
-            <Preview node={previewNode} entry={preview} />
+            <Preview node={previewNode} entry={preview} onEdit={(node, path) => setEditing({ node, path })} />
           </Panel>
         </Group>
       </div>
+      <Suspense fallback={<div className="ed"><div className="pad muted">Loading editor...</div></div>}>
+        {editing && <TextEditor key={editing.node + editing.path} file={editing} onClose={() => setEditing(null)} onStatus={setStatus} />}
+        {diff && <DiffViewer left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />}
+      </Suspense>
     </div>
   );
 }

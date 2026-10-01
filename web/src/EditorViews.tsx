@@ -1,0 +1,251 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { DiffEditor, Editor } from "@monaco-editor/react";
+import type { editor as MonacoEditor } from "monaco-editor";
+import { ConflictError, api, fmtSize, type TextFile } from "./api";
+import { modelUri, monacoTheme } from "./monacoSetup";
+
+export interface FileRef {
+  node: string;
+  path: string;
+}
+const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+
+const OPTS: MonacoEditor.IStandaloneEditorConstructionOptions = {
+  automaticLayout: true,
+  minimap: { enabled: false },
+  scrollBeyondLastLine: false,
+  fontSize: 13,
+  tabSize: 2,
+};
+
+function useCtrlS(save: () => void) {
+  const ref = useRef(save);
+  ref.current = save;
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        ref.current();
+      }
+    };
+    window.addEventListener("keydown", h, true);
+    return () => window.removeEventListener("keydown", h, true);
+  }, []);
+}
+
+function useLeaveGuard(dirty: boolean) {
+  useEffect(() => {
+    if (!dirty) return;
+    const h = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [dirty]);
+}
+
+const useTheme = () => {
+  const [t, setT] = useState(monacoTheme);
+  useEffect(() => {
+    const mo = new MutationObserver(() => setT(monacoTheme()));
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const f = () => setT(monacoTheme());
+    mq.addEventListener("change", f);
+    return () => {
+      mo.disconnect();
+      mq.removeEventListener("change", f);
+    };
+  }, []);
+  return t;
+};
+
+function Conflict({ onOverwrite, onReload }: { onOverwrite: () => void; onReload: () => void }) {
+  return (
+    <div className="ed-banner" role="alert">
+      <span>This file changed on disk since you opened it.</span>
+      <button onClick={onOverwrite}>Overwrite</button>
+      <button onClick={onReload}>Discard my edits and reload</button>
+    </div>
+  );
+}
+
+/** Single-file editor with dirty indicator, Ctrl+S and conflict handling. */
+export function TextEditor({ file, onClose, onStatus }: { file: FileRef; onClose: () => void; onStatus: (m: string) => void }) {
+  const { node, path } = file;
+  const [loaded, setLoaded] = useState<TextFile | null>(null);
+  const [text, setText] = useState("");
+  const [err, setErr] = useState("");
+  const [conflict, setConflict] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const theme = useTheme();
+  const dirty = loaded !== null && text !== loaded.content;
+  useLeaveGuard(dirty);
+
+  const load = useCallback(() => {
+    setErr("");
+    setConflict(null);
+    api
+      .readText(node, path)
+      .then((f) => {
+        setLoaded(f);
+        setText(f.content);
+      })
+      .catch((e: Error) => setErr(e.message));
+  }, [node, path]);
+  useEffect(load, [load]);
+
+  const save = useCallback(
+    async (force = false) => {
+      if (!loaded || saving || (!dirty && !force)) return;
+      setSaving(true);
+      try {
+        const etag = force && conflict ? conflict : loaded.etag;
+        const r = await api.writeText(node, path, text, etag);
+        setLoaded({ ...loaded, content: text, etag: r.etag, size: r.size, mtime: r.mtime });
+        setConflict(null);
+        setErr("");
+        onStatus(`Saved ${base(path)}`);
+      } catch (e) {
+        if (e instanceof ConflictError) setConflict(e.etag);
+        else setErr((e as Error).message);
+      } finally {
+        setSaving(false);
+      }
+    },
+    [loaded, saving, dirty, conflict, node, path, text, onStatus],
+  );
+  useCtrlS(() => void save());
+
+  const close = () => {
+    if (dirty && !confirm("Discard unsaved changes?")) return;
+    onClose();
+  };
+
+  return (
+    <div className="ed" role="dialog" aria-label={`Editing ${base(path)}`}>
+      <header className="ed-head">
+        <b title={`${node}:${path}`}>
+          {dirty && <span className="ed-dirty" title="Unsaved changes" aria-label="Unsaved changes">● </span>}
+          {base(path)}
+        </b>
+        <span className="muted">{node}:{path}{loaded ? ` · ${fmtSize(loaded.size)}` : ""}</span>
+        <span className="ed-spacer" />
+        <button onClick={() => void save()} disabled={!dirty || saving} title="Save (Ctrl+S)">{saving ? "Saving..." : "Save"}</button>
+        <button onClick={close} title="Close">Close</button>
+      </header>
+      {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
+      {err && <div className="ed-banner err" role="alert">{err}</div>}
+      <div className="ed-body">
+        {loaded && (
+          <Editor
+            path={modelUri(node, path)}
+            value={loaded.content}
+            theme={theme}
+            options={OPTS}
+            onChange={(v) => setText(v ?? "")}
+            loading={<div className="pad muted">Loading editor...</div>}
+          />
+        )}
+        {!loaded && !err && <div className="pad muted">Loading...</div>}
+      </div>
+    </div>
+  );
+}
+
+/** Two-file diff: left is read-only, right is editable and saveable. */
+export function DiffViewer({ left, right, onClose, onStatus }: { left: FileRef; right: FileRef; onClose: () => void; onStatus: (m: string) => void }) {
+  const [l, setL] = useState<TextFile | null>(null);
+  const [r, setR] = useState<TextFile | null>(null);
+  const [rText, setRText] = useState("");
+  const [err, setErr] = useState("");
+  const [conflict, setConflict] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [inline, setInline] = useState(false);
+  const ed = useRef<MonacoEditor.IStandaloneDiffEditor | null>(null);
+  const theme = useTheme();
+  const dirty = r !== null && rText !== r.content;
+  useLeaveGuard(dirty);
+
+  const load = useCallback(() => {
+    setErr("");
+    setConflict(null);
+    Promise.all([api.readText(left.node, left.path), api.readText(right.node, right.path)])
+      .then(([a, b]) => {
+        setL(a);
+        setR(b);
+        setRText(b.content);
+      })
+      .catch((e: Error) => setErr(e.message));
+  }, [left.node, left.path, right.node, right.path]);
+  useEffect(load, [load]);
+
+  const save = useCallback(
+    async (force = false) => {
+      if (!r || saving || (!dirty && !force)) return;
+      const text = ed.current?.getModifiedEditor().getValue() ?? rText;
+      setSaving(true);
+      try {
+        const etag = force && conflict ? conflict : r.etag;
+        const res = await api.writeText(right.node, right.path, text, etag);
+        setR({ ...r, content: text, etag: res.etag, size: res.size, mtime: res.mtime });
+        setRText(text);
+        setConflict(null);
+        setErr("");
+        onStatus(`Saved ${base(right.path)}`);
+      } catch (e) {
+        if (e instanceof ConflictError) setConflict(e.etag);
+        else setErr((e as Error).message);
+      } finally {
+        setSaving(false);
+      }
+    },
+    [r, saving, dirty, conflict, right.node, right.path, rText, onStatus],
+  );
+  useCtrlS(() => void save());
+
+  const close = () => {
+    if (dirty && !confirm("Discard unsaved changes?")) return;
+    onClose();
+  };
+  const same = l && r && l.content === r.content;
+
+  return (
+    <div className="ed" role="dialog" aria-label="File diff">
+      <header className="ed-head">
+        <b>Diff</b>
+        <span className="muted ed-pair" title={`${left.node}:${left.path}`}>{left.node}:{left.path}</span>
+        <span className="muted">↔</span>
+        <span className="muted ed-pair" title={`${right.node}:${right.path}`}>
+          {dirty && <span className="ed-dirty" title="Unsaved changes" aria-label="Unsaved changes">● </span>}
+          {right.node}:{right.path}
+        </span>
+        {same && <span className="pill">identical</span>}
+        <span className="ed-spacer" />
+        <button onClick={() => setInline((v) => !v)} aria-pressed={inline} title="Toggle side-by-side / inline">
+          {inline ? "Side by side" : "Inline"}
+        </button>
+        <button onClick={() => void save()} disabled={!dirty || saving} title="Save right side (Ctrl+S)">{saving ? "Saving..." : "Save right"}</button>
+        <button onClick={close} title="Close">Close</button>
+      </header>
+      {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
+      {err && <div className="ed-banner err" role="alert">{err}</div>}
+      <div className="ed-body">
+        {l && r && (
+          <DiffEditor
+            originalModelPath={modelUri(left.node, left.path) + "?side=left"}
+            modifiedModelPath={modelUri(right.node, right.path) + "?side=right"}
+            original={l.content}
+            modified={r.content}
+            theme={theme}
+            options={{ ...OPTS, renderSideBySide: !inline, originalEditable: false, readOnly: false, useInlineViewWhenSpaceIsLimited: false }}
+            onMount={(e) => {
+              ed.current = e;
+              e.getModifiedEditor().onDidChangeModelContent(() => setRText(e.getModifiedEditor().getValue()));
+            }}
+            loading={<div className="pad muted">Loading editor...</div>}
+          />
+        )}
+        {!(l && r) && !err && <div className="pad muted">Loading...</div>}
+      </div>
+    </div>
+  );
+}

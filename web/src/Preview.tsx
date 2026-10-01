@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fileUrl, fmtDate, fmtSize, type Entry } from "./api";
+import { canEdit, fileUrl, fmtDate, fmtSize, type Entry } from "./api";
 
 const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
@@ -20,7 +20,7 @@ function Text({ url }: { url: string }) {
   return <pre className="pv-text">{t}</pre>;
 }
 
-export function Preview({ node, entry }: { node: string; entry: Entry | null }) {
+export function Preview({ node, entry, onEdit }: { node: string; entry: Entry | null; onEdit: (node: string, path: string) => void }) {
   if (!entry || entry.type === "dir") return <div className="pv-empty muted">Select a file to preview</div>;
   const url = fileUrl(node, entry.path);
   const e = ext(entry.name);
@@ -31,6 +31,9 @@ export function Preview({ node, entry }: { node: string; entry: Entry | null }) 
         <span className="muted">
           {fmtSize(entry.size)} · {fmtDate(entry.mtime)}
         </span>
+        {canEdit(entry) && (
+          <button className="link" onClick={() => onEdit(node, entry.path)} title="Open in the editor">Edit</button>
+        )}
         <a href={fileUrl(node, entry.path, "download")}>Download</a>
       </div>
       <div className="pv-body">
