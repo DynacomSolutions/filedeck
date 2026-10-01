@@ -22,7 +22,7 @@ loader.config({ monaco });
 
 export const monacoTheme = () => {
   const t = document.documentElement.dataset.theme;
-  const dark = t === "dark" || (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const dark = t !== "light"; // Studio default is dark; Auto follows it, like the other Filedeck pages
   return dark ? "vs-dark" : "vs";
 };
 

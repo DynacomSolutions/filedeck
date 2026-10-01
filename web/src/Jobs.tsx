@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, fmtSize, onJobStarted, type JobView, type NodeInfo } from "./api";
 
+const COLLAPSE_KEY = "filedeck-jobs-collapsed";
 const live = (j: JobView) => j.state === "queued" || j.state === "running";
 
 function pct(j: JobView): number | null {
@@ -94,15 +95,43 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     };
   }, [poll, nodes.length]);
 
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(COLLAPSE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setCollapsedPersist = useCallback((v: boolean) => {
+    setCollapsed(v);
+    try {
+      localStorage.setItem(COLLAPSE_KEY, v ? "1" : "0");
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+  // A newly started job expands the tray so progress is visible.
+  useEffect(() => onJobStarted(() => setCollapsedPersist(false)), [setCollapsedPersist]);
+
   const rows = Object.entries(jobs).flatMap(([node, l]) => l.map((job) => ({ node, job })));
   if (!rows.length) return null;
+  const running = rows.filter((r) => live(r.job)).length;
   return (
-    <section className="jobs" aria-label="Background jobs" role="status">
-      <ul>
-        {rows.map(({ node, job }) => (
-          <JobRow key={node + job.id} node={node} job={job} onChange={() => void poll()} />
-        ))}
-      </ul>
+    <section className={"jobs" + (collapsed ? " collapsed" : "")} aria-label="Background jobs" role="status">
+      <button type="button" className="jobs-toggle" aria-expanded={!collapsed} onClick={() => setCollapsedPersist(!collapsed)}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+        Jobs
+        <span className="n">{running > 0 ? `${running} running` : rows.length}</span>
+      </button>
+      {!collapsed && (
+        <div className="jobs-body">
+          <ul>
+            {rows.map(({ node, job }) => (
+              <JobRow key={node + job.id} node={node} job={job} onChange={() => void poll()} />
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   );
 }

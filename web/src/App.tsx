@@ -9,6 +9,7 @@ import type { FileRef } from "./EditorViews";
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
+import { ThemeMenu } from "./ThemeMenu";
 
 type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[] };
 let seq = 1;
@@ -24,7 +25,7 @@ const mapTree = (t: Tree, fn: (l: Leaf) => Tree | null): Tree | null => {
 };
 const count = (t: Tree): number => (t.kind === "leaf" ? 1 : t.children.reduce((n, c) => n + count(c), 0));
 
-function Sidebar({ nodes, onOpen }: { nodes: NodeInfo[]; onOpen: (node: string, path: string) => void }) {
+function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string) => void; footer: React.ReactNode }) {
   const [mounts, setMounts] = useState<Record<string, Mount[]>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const toggle = (n: string) => {
@@ -33,10 +34,11 @@ function Sidebar({ nodes, onOpen }: { nodes: NodeInfo[]; onOpen: (node: string, 
   };
   return (
     <aside className="side">
+      <div className="side-scroll">
       <h2>Nodes</h2>
       {nodes.map((n) => (
         <div key={n.name}>
-          <button className="node" onClick={() => toggle(n.name)}>
+          <button className="side-node" onClick={() => toggle(n.name)}>
             <span className={"dot " + (n.online ? "on" : "off")} /> {open[n.name] ? "▾" : "▸"} {n.name}
           </button>
           {open[n.name] && (
@@ -55,6 +57,8 @@ function Sidebar({ nodes, onOpen }: { nodes: NodeInfo[]; onOpen: (node: string, 
         </div>
       ))}
       {!nodes.length && <p className="muted">No nodes</p>}
+      </div>
+      {footer}
     </aside>
   );
 }
@@ -87,7 +91,6 @@ export function App() {
       }
     }
   };
-  const [theme, setTheme] = useState<string>(() => document.documentElement.dataset.theme ?? "");
 
   useEffect(() => {
     const load = () => api.nodes().then((r) => setNodes(r.nodes)).catch(() => setNodes([]));
@@ -107,18 +110,6 @@ export function App() {
   const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path } : l));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
-
-  const toggleTheme = () => {
-    const next = theme === "dark" ? "light" : theme === "light" ? "" : "dark";
-    setTheme(next);
-    if (next) document.documentElement.dataset.theme = next;
-    else delete document.documentElement.dataset.theme;
-    try {
-      next ? localStorage.setItem("filedeck-theme", next) : localStorage.removeItem("filedeck-theme");
-    } catch {
-      /* storage unavailable */
-    }
-  };
 
   const render = (t: Tree, total: number): React.ReactNode => {
     if (t.kind === "leaf") {
@@ -155,14 +146,28 @@ export function App() {
 
   return (
     <div className="app">
-      <header className="top">
-        <b>filedeck</b>
-        <span className="muted status" role="status">{status}</span>
-        {diffMark && <button onClick={() => setDiffMark(null)} title="Clear diff mark">Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)} ×</button>}
-        <button onClick={toggleTheme} title="Theme: auto / dark / light">Theme: {theme || "auto"}</button>
+      <header className="site-header">
+        <div className="site-header__inner shell">
+          <a className="brand-logo" href="/" aria-label="Filedeck">
+            <img className="brand-logo__white" src="/assets/logo/lockup-horizontal-white.svg" alt="" />
+            <img className="brand-logo__default" src="/assets/logo/lockup-horizontal-default.svg" alt="" />
+          </a>
+          <span className="crumb">Files</span>
+          <span className="status" role="status">{status}</span>
+          <div className="site-header__actions">
+            {diffMark && (
+              <button className="btn btn--ghost btn--sm" onClick={() => setDiffMark(null)} title="Clear diff mark">
+                Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)} ×
+              </button>
+            )}
+            <a className="btn btn--ghost btn--sm" href="https://worktrees.example.invalid/">Worktrees</a>
+            <a className="btn btn--ghost btn--sm" href="https://gh.example.invalid/">Runners</a>
+            <ThemeMenu />
+          </div>
+        </div>
       </header>
       <div className="body">
-        <Sidebar nodes={nodes} onOpen={openInActive} />
+        <Sidebar nodes={nodes} onOpen={openInActive} footer={<JobsTray nodes={nodes} />} />
         <Group orientation="horizontal" id="main">
           <Panel id="panels" minSize="30%">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</Panel>
           <Separator className="sep horizontal" />
@@ -175,7 +180,6 @@ export function App() {
         {editing && <TextEditor key={editing.node + editing.path} file={editing} onClose={() => setEditing(null)} onStatus={setStatus} />}
         {diff && <DiffViewer left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />}
       </Suspense>
-      <JobsTray nodes={nodes} />
     </div>
   );
 }
