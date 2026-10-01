@@ -46,6 +46,8 @@ export interface Leaf {
   q?: string;
   /** open search (under this panel's folder) */
   sr?: SearchForm;
+  /** view mode: absent = list, "g" = thumbnail grid */
+  w?: "g";
 }
 export type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[]; sizes?: number[] };
 
@@ -94,7 +96,7 @@ export interface AppState {
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string; z?: WSearch };
+type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g" };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
@@ -118,6 +120,7 @@ const toWire = (t: Tree): WTree => {
   if (t.closed) w.c = t.closed;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
   if (t.q) w.q = t.q;
+  if (t.w === "g") w.w = "g";
   if (t.sr) {
     const z: WSearch = {};
     if (t.sr.q) z.q = t.sr.q;
@@ -178,6 +181,7 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (str(o.c)) leaf.closed = o.c;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
   if (str(o.q) && o.q) leaf.q = o.q;
+  if (o.w === "g") leaf.w = "g";
   if (o.z && typeof o.z === "object") {
     const z = o.z as WSearch;
     leaf.sr = {

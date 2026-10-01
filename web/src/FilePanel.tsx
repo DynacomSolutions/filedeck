@@ -11,6 +11,7 @@ import { PropertiesDialog } from "./Properties";
 import { copyText, getClip, setClip, useClip } from "./clipboard";
 import type { FileRef } from "./EditorViews";
 import { SearchView } from "./Search";
+import { Thumb } from "./Thumb";
 import { EMPTY_SEARCH, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -77,6 +78,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   };
   const [anchor, setAnchor] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | null>(leaf.sel ?? null);
+  const view = leaf.w === "g" ? "grid" : "list";
   const filter = leaf.q ?? "";
   const [filterOpen, setFilterOpen] = useState(!!leaf.q);
   const filterInput = useRef<HTMLInputElement>(null);
@@ -376,6 +378,49 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   ) : previewEntry ? (
     <Preview node={node} entry={previewEntry} onEdit={(n, p) => setEditing({ node: n, path: p })} extra={paneExtra} />
   ) : null;
+  // Shared by the list rows and the grid tiles: selection, open, context menu, drag and drop.
+  const itemProps = (en: Entry, isDir: boolean, cls: string) => ({
+    "data-path": en.path,
+    className: cls + (sel.has(en.path) ? "sel " : "") + (cursor === en.path ? "cur " : "") + (over === en.path ? "drop" : ""),
+    draggable: true,
+    onClick: (e: React.MouseEvent) => click(e, en),
+    onDoubleClick: () => open(en),
+    onContextMenu: (e: React.MouseEvent) => {
+      onFocus();
+      const picked = sel.has(en.path) ? entries.filter((x) => sel.has(x.path)) : [en];
+      if (!sel.has(en.path)) {
+        setSel(new Set([en.path]));
+        setAnchor(en.path);
+      }
+      showMenu(e, rowItems(picked));
+    },
+    onDragStart: (e: React.DragEvent) => {
+      const paths = sel.has(en.path) ? selected() : [en.path];
+      if (!sel.has(en.path)) setSel(new Set([en.path]));
+      setDrag(e, { node, paths });
+    },
+    onDragOver: isDir ? (e: React.DragEvent) => dragOver(e, en.path) : undefined,
+    onDrop: isDir ? (e: React.DragEvent) => drop(e, en.path) : undefined,
+  });
+  const nameEditor = (en: Entry) =>
+    renaming === en.path ? (
+      <input
+        autoFocus
+        defaultValue={en.name}
+        onClick={(e) => e.stopPropagation()}
+        onBlur={() => setRenaming(null)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setRenaming(null);
+          if (e.key === "Enter") {
+            const v = e.currentTarget.value.trim();
+            setRenaming(null);
+            if (v && v !== en.name) void run("Rename", () => api.rename(node, en.path, join(parent(en.path), v)));
+          }
+        }}
+      />
+    ) : (
+      <span className="nm">{en.name}</span>
+    );
   const searchView = leaf.sr ? (
     <SearchView node={node} dir={path} hidden={hidden} form={leaf.sr} onForm={setSearch} onClose={() => (setSearch(undefined), setTimeout(() => secRef.current?.focus(), 0))} onReveal={revealHit} onOpen={openHit} onStatus={onStatus} />
   ) : null;
@@ -389,58 +434,31 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           showMenu(e, folderItems(path, true));
         }}
       >
+        {view === "grid" ? (
+          <div className="fp-grid" role="listbox" aria-label="Files" aria-multiselectable="true">
+            {visible.map((en) => {
+              const isDir = !!(en.type === "dir" || en.linkDir);
+              return (
+                <div key={en.path} role="option" aria-selected={sel.has(en.path)} {...itemProps(en, isDir, "tile ")} title={en.name}>
+                  <Thumb node={node} entry={en} isDir={isDir} />
+                  <div className="tile-name">{nameEditor(en)}</div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
         <table className="ft">
           <thead>
             <tr>{th("name", "Name")}{th("size", "Size")}{th("mtime", "Modified")}</tr>
           </thead>
           <tbody>
             {visible.map((en) => {
-              const isDir = en.type === "dir" || en.linkDir;
+              const isDir = !!(en.type === "dir" || en.linkDir);
               return (
-                <tr
-                  key={en.path}
-                  data-path={en.path}
-                  className={(sel.has(en.path) ? "sel " : "") + (cursor === en.path ? "cur " : "") + (over === en.path ? "drop" : "")}
-                  draggable
-                  onClick={(e) => click(e, en)}
-                  onDoubleClick={() => open(en)}
-                  onContextMenu={(e) => {
-                    onFocus();
-                    const picked = sel.has(en.path) ? entries.filter((x) => sel.has(x.path)) : [en];
-                    if (!sel.has(en.path)) {
-                      setSel(new Set([en.path]));
-                      setAnchor(en.path);
-                    }
-                    showMenu(e, rowItems(picked));
-                  }}
-                  onDragStart={(e) => {
-                    const paths = sel.has(en.path) ? selected() : [en.path];
-                    if (!sel.has(en.path)) setSel(new Set([en.path]));
-                    setDrag(e, { node, paths });
-                  }}
-                  onDragOver={isDir ? (e) => dragOver(e, en.path) : undefined}
-                  onDrop={isDir ? (e) => drop(e, en.path) : undefined}
-                >
+                <tr key={en.path} {...itemProps(en, isDir, "")}>
                   <td className="name">
                     <span className="ico">{isDir ? "📁" : en.type === "symlink" ? "🔗" : "📄"}</span>
-                    {renaming === en.path ? (
-                      <input
-                        autoFocus
-                        defaultValue={en.name}
-                        onClick={(e) => e.stopPropagation()}
-                        onBlur={() => setRenaming(null)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Escape") setRenaming(null);
-                          if (e.key === "Enter") {
-                            const v = e.currentTarget.value.trim();
-                            setRenaming(null);
-                            if (v && v !== en.name) void run("Rename", () => api.rename(node, en.path, join(parent(en.path), v)));
-                          }
-                        }}
-                      />
-                    ) : (
-                      <span className="nm">{en.name}</span>
-                    )}
+                    {nameEditor(en)}
                   </td>
                   <td className="num">{isDir ? "" : fmtSize(en.size)}</td>
                   <td className="num">{fmtDate(en.mtime)}</td>
@@ -449,6 +467,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
             })}
           </tbody>
         </table>
+        )}
         {!entries.length && !err && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
         {entries.length > 0 && !visible.length && <div className="muted pad">No entries match the filter.</div>}
       </div>
@@ -461,13 +480,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   };
   useEffect(() => {
     if (!cursor) return;
-    secRef.current?.querySelector(`tr[data-path="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
+    secRef.current?.querySelector(`[data-path="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
   useEffect(() => {
     const p = scrollTo.current;
     if (!p || !entries.some((e) => e.path === p)) return;
     scrollTo.current = null;
-    setTimeout(() => secRef.current?.querySelector(`tr[data-path="${CSS.escape(p)}"]`)?.scrollIntoView({ block: "center" }), 0);
+    setTimeout(() => secRef.current?.querySelector(`[data-path="${CSS.escape(p)}"]`)?.scrollIntoView({ block: "center" }), 0);
   }, [entries]);
   const toOther = (op: "copy" | "move") => {
     if (!next) return onStatus("Open a second panel first (split button)");
@@ -513,8 +532,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       if (mod && key.toLowerCase() === "c") return !hasText && selEntries.length > 0 && (setClipboard("copy", selEntries), true);
       if (mod && key.toLowerCase() === "x") return selEntries.length > 0 && (setClipboard("cut", selEntries), true);
       if (mod && key.toLowerCase() === "v") return !!getClip() && (void paste(path), true);
-      if (key === "ArrowDown") return moveTo(idx + 1), true;
-      if (key === "ArrowUp") return moveTo(idx < 0 ? 0 : idx - 1), true;
+      // Grid: left/right step one tile, up/down one row (columns measured from the layout).
+      const cols = (() => {
+        if (view !== "grid") return 1;
+        const tiles = Array.from(secRef.current?.querySelectorAll<HTMLElement>(".tile") ?? []);
+        const top = tiles[0]?.offsetTop;
+        return Math.max(1, tiles.findIndex((t) => t.offsetTop !== top) < 0 ? tiles.length : tiles.findIndex((t) => t.offsetTop !== top));
+      })();
+      if (view === "grid" && key === "ArrowRight") return moveTo(idx + 1), true;
+      if (view === "grid" && key === "ArrowLeft") return moveTo(idx < 0 ? 0 : idx - 1), true;
+      if (key === "ArrowDown") return moveTo(idx + cols), true;
+      if (key === "ArrowUp") return moveTo(idx < 0 ? 0 : idx - cols), true;
       if (key === "Home") return moveTo(0), true;
       if (key === "End") return moveTo(visible.length - 1), true;
       if (key === "PageDown") return moveTo(idx + 10), true;
@@ -540,7 +568,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
         return sel.size > 0 && (setSel(new Set()), true);
       }
       if (key === "ContextMenu" || (e.shiftKey && key === "F10")) {
-        const row = cursor ? secRef.current?.querySelector(`tr[data-path="${CSS.escape(cursor)}"]`) : null;
+        const row = cursor ? secRef.current?.querySelector(`[data-path="${CSS.escape(cursor)}"]`) : null;
         const r = (row ?? secRef.current?.querySelector(".fp-scroll"))?.getBoundingClientRect();
         const x = (r?.left ?? 100) + 48;
         const y = (row ? r!.bottom : (r?.top ?? 100) + 24);
@@ -585,6 +613,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
         </nav>
         <div className="fp-actions">
           <button title="Search under this folder (Ctrl+Shift+F)" className={leaf.sr ? "marked" : ""} aria-pressed={!!leaf.sr} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}>🔍</button>
+          <button title={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"} aria-pressed={view === "grid"} className={view === "grid" ? "marked" : ""} onClick={() => onPatch({ w: view === "grid" ? undefined : "g" })}>{view === "grid" ? "☰" : "▦"}</button>
+          {view === "grid" && (
+            <select className="fp-sort" aria-label="Sort" value={sort.key + ":" + (sort.asc ? "a" : "d")} onChange={(e) => { const [key, d] = e.target.value.split(":"); setSort(() => ({ key: key as SortKey, asc: d === "a" })); }}>
+              <option value="name:a">Name A-Z</option><option value="name:d">Name Z-A</option>
+              <option value="mtime:d">Newest first</option><option value="mtime:a">Oldest first</option>
+              <option value="size:d">Largest first</option><option value="size:a">Smallest first</option>
+            </select>
+          )}
           <button title="Up" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}>↑</button>
           <button title="New folder" onClick={() => setModal({ k: "new", dir: path, type: "folder" })}>＋📁</button>
           <button title="New file" onClick={() => setModal({ k: "new", dir: path, type: "file" })}>＋📄</button>

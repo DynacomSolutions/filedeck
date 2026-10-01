@@ -5,6 +5,7 @@ import path from "node:path";
 import { registerHubDiff } from "./diff-hub.ts";
 import { registerOps } from "./ops-routes.ts";
 import type { Config } from "./config.ts";
+import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
@@ -33,7 +34,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>)
   for (const [name, backend] of Object.entries(injected ?? {})) {
     sources.set(name, { config: { name, type: backend.type, host: "test", root: "/" }, backend });
   }
-  const sourceOpts = { maxUpload: cfg.maxUpload, maxEdit: cfg.maxEdit, hashConcurrency: cfg.hashConcurrency, walkMaxEntries: cfg.walkMaxEntries, searchConcurrency: cfg.searchConcurrency, searchMaxFileBytes: cfg.searchMaxFileBytes, searchMaxBytes: cfg.searchMaxBytes };
+  const sourceOpts = { maxUpload: cfg.maxUpload, maxEdit: cfg.maxEdit, hashConcurrency: cfg.hashConcurrency, walkMaxEntries: cfg.walkMaxEntries, searchConcurrency: cfg.searchConcurrency, searchMaxFileBytes: cfg.searchMaxFileBytes, searchMaxBytes: cfg.searchMaxBytes, thumbs: makeThumbnailer(cfg) };
   for (const [name, s] of sources) {
     if (agents.has(name)) throw new Error(`source ${name} collides with a node of the same name`);
     const sapp = createSourceApp(name, s.backend, sourceOpts);

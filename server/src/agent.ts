@@ -12,6 +12,7 @@ import * as trash from "./trash.ts";
 import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
 import { registerSearchRoutes } from "./search.ts";
+import { registerThumbRoutes } from "./thumbs.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -212,6 +213,7 @@ export function createAgent(cfg: Config) {
   registerPropsRoutes(app, cfg, jobs);
   registerDiffRoutes(app, cfg);
   registerSearchRoutes(app, cfg);
+  registerThumbRoutes(app, cfg);
 
   // Live change feed: one event per change in the watched directory.
   app.get("/api/events", (c) => {

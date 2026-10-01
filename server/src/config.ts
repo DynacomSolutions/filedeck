@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import { parseSources } from "./sources/registry.ts";
 import type { SourceConfig } from "./sources/types.ts";
 
@@ -22,6 +24,11 @@ export interface Config {
   searchConcurrency: number;
   searchMaxFileBytes: number;
   searchMaxBytes: number;
+  /** thumbnails: cache dir (outside user data), cache ceiling in bytes, concurrent ffmpeg runs, binary */
+  thumbDir: string;
+  thumbCacheMax: number;
+  thumbConcurrency: number;
+  ffmpeg: string;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
@@ -62,6 +69,10 @@ export function loadConfig(env = process.env): Config {
     searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 2),
     searchMaxFileBytes: Number(env.FILEDECK_SEARCH_MAX_FILE ?? 8 * 1024 * 1024),
     searchMaxBytes: Number(env.FILEDECK_SEARCH_MAX_BYTES ?? 512 * 1024 * 1024),
+    thumbDir: env.FILEDECK_THUMB_DIR ?? path.join(os.tmpdir(), "filedeck-thumbs"),
+    thumbCacheMax: Number(env.FILEDECK_THUMB_CACHE_MAX ?? 256 * 1024 * 1024),
+    thumbConcurrency: Number(env.FILEDECK_THUMB_CONCURRENCY ?? 2),
+    ffmpeg: env.FILEDECK_FFMPEG ?? "ffmpeg",
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",

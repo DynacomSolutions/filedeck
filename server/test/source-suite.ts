@@ -251,4 +251,19 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
     assert.equal((await run("q=(a%2B)%2B$&mode=regex")).status, 400);
     assert.equal((await fetch(S("/api/fs/search?path=/../..&q=a"))).status, 400);
   });
+
+  test(`${type}: image thumbnails come through the hub; videos and non-images have none`, async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64");
+    await put(S("/api/fs/upload?dir=/&name=pic.png"), png);
+    await put(S("/api/fs/upload?dir=/&name=clip.mp4"), "not really a video");
+    const r = await fetch(S("/api/fs/thumb?path=/pic.png"));
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("content-type"), "image/jpeg");
+    const b = Buffer.from(await r.arrayBuffer());
+    assert.equal(b[0], 0xff);
+    assert.equal(b[1], 0xd8);
+    assert.equal((await fetch(S("/api/fs/thumb?path=/clip.mp4"))).status, 415);
+    assert.equal((await fetch(S("/api/fs/thumb?path=/nope.png"))).status, 404);
+    assert.equal((await fetch(S("/api/fs/thumb?path=/../x.png"))).status, 400);
+  });
 }

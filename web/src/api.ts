@@ -488,3 +488,14 @@ export async function searchStream(node: string, path: string, f: SearchForm, hi
   if (!done) throw new Error("search ended unexpectedly");
   return done;
 }
+
+const THUMB_IMAGE = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "avif", "ico"]);
+const THUMB_VIDEO = new Set(["mp4", "m4v", "mov", "mkv", "webm", "avi", "mpg", "mpeg", "ts", "ogv", "wmv", "flv", "3gp"]);
+/** Which files get a thumbnail tile (mirrors the agent); SVG is drawn from the file itself when small. */
+export function thumbKind(name: string): "image" | "video" | "svg" | null {
+  const i = name.lastIndexOf(".");
+  if (i < 1) return null;
+  const e = name.slice(i + 1).toLowerCase();
+  return e === "svg" ? "svg" : THUMB_IMAGE.has(e) ? "image" : THUMB_VIDEO.has(e) ? "video" : null;
+}
+export const thumbUrl = (node: string, path: string, mtime: number, retry = 0) => `${nodeBase(node)}/api/fs/thumb?path=${enc(path)}&m=${Math.floor(mtime)}${retry ? "&r=" + retry : ""}`;

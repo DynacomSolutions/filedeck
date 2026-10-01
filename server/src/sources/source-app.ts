@@ -8,6 +8,7 @@ import { cleanVirtual, virtualJoin } from "../paths.ts";
 import { compileGlobs } from "../glob.ts";
 import { Semaphore, type WalkEntry, type WalkOpts, type WalkSummary } from "../walk.ts";
 import { walkResponse } from "../diff-routes.ts";
+import { THUMB_MAX_IMAGE_BYTES, thumbKind, thumbResponse, type Thumbnailer } from "../thumbs.ts";
 import { SearchGate, parseSearch, searchTree } from "../search.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "./types.ts";
 
@@ -49,6 +50,8 @@ export interface SourceAppOptions {
   searchConcurrency?: number;
   searchMaxFileBytes?: number;
   searchMaxBytes?: number;
+  /** image thumbnails for the SPA grid (videos need a seekable file, so they have none on sources) */
+  thumbs?: Thumbnailer;
 }
 
 const DIR_STAT: SourceStat = { type: "dir", size: 0, mtime: 0, mode: 0o755 };
@@ -418,6 +421,21 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       ignoreCase: q("ignoreCase") === "1",
     };
     return walkResponse(walk(norm(q("path") ?? "/"), opts, c.req.raw.signal));
+  });
+
+  app.get("/api/fs/thumb", async (c) => {
+    const p = norm(c.req.query("path") ?? "");
+    const s = await need(p);
+    if (s.type !== "file") throw new FsError(400, "not a regular file");
+    if (!o.thumbs || thumbKind(base(p)) !== "image") throw new FsError(415, "no thumbnail for this type");
+    if (s.size > THUMB_MAX_IMAGE_BYTES) throw new FsError(413, "image too large for a thumbnail");
+    const t = await o.thumbs.get(
+      `src:${name}\0${p}\0${s.mtime}\0${s.size}`,
+      "image",
+      async () => ({ input: { stream: await backend.read(p) }, close: () => undefined }),
+      c.req.raw.signal,
+    );
+    return thumbResponse(t);
   });
 
   const searches = new SearchGate(o.searchConcurrency ?? 2);
