@@ -13,6 +13,7 @@ import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
 import { registerSearchRoutes } from "./search.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
+import { audit, type AuditSink } from "./audit.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -25,8 +26,9 @@ function dispo(name: string) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
-export function createAgent(cfg: Config) {
+export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
+  app.use("*", audit(`agent:${cfg.node}`, auditSink));
   const watches = new Watches();
   const root = cfg.root;
 

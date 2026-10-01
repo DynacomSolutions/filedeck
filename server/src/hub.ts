@@ -9,6 +9,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
+import { audit, type AuditSink } from "./audit.ts";
 
 /** Where a request for a node or a network source goes. Agents are HTTP; sources run inside the hub. */
 export interface Target {
@@ -26,8 +27,9 @@ function clean(h: Headers, keepLength: boolean): Headers {
   return out;
 }
 
-export function createHub(cfg: Config, injected?: Record<string, SourceBackend>) {
+export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink) {
   const app = new Hono() as Hono & { close(): Promise<void> };
+  app.use("*", audit("hub", auditSink));
   app.close = async () => void (await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined))));
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => fetch(n.url + rest, init) }]));
   const sources = buildSources(cfg);
