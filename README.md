@@ -16,8 +16,8 @@ There are no user accounts: put it behind a trusted network boundary (a VPN, a p
 | `server/` | Agent and hub (TypeScript, Hono, Node 22) and its tests | core |
 | `web/` | The app (React, Vite, Monaco) | core |
 | `Dockerfile`, `package.json`, `tsconfig.base.json` | Image and workspace | core |
-| `web/public/assets/studio.css`, `fonts/` | Bundled theme tokens and fonts | core, theme (see the note in HISTORY.md, work-item) |
-| `deploy/brand/` | Logos for one deployment, copied into the image at `/assets/brand` when the folder exists | deployment |
+| `web/public/assets/theme.css`, `fonts/` | Bundled theme tokens and fonts | core: neutral theme; Montserrat is SIL OFL 1.1 (`fonts/OFL.txt`) |
+| `deploy/brand/` | Logos and palette (`theme.css`, referenced by `brand.css`) for one deployment, copied into the image at `/assets/brand` when the folder exists | deployment |
 | `k8s/` | Helm chart (hub, one agent per node, network policy, ingress mapping) | deployment |
 | `../.github/workflows/filedeck-image.yml` | Test, build, scan, publish, open a pin PR | deployment |
 
@@ -41,12 +41,16 @@ Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDEC
 
 Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
-`FILEDECK_BRAND` is JSON: `{"name","title","icon","logo":{"light","dark"},"links":[{"label","url"}],"themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links.
+`FILEDECK_BRAND` is JSON: `{"name","title","icon","logo":{"light","dark"},"links":[{"label","url"}],"css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links.
 
 ## Contributing
 
 - Keep the core free of company or deployment names: hostnames, registries, logos and link targets belong in `deploy/`, the chart values or `FILEDECK_BRAND`. `npm run check:neutral` fails on the identifiers it knows.
-- Colours, fonts and spacing come from the theme tokens in `studio.css` (`var(--fg)`, `var(--border)` ...), never literals. Navigation state (panels, folders, sort, selection, open viewers) lives in the URL, see `web/src/urlState.ts`.
+- Colours, fonts and spacing come from the theme tokens in `theme.css` (`var(--fg)`, `var(--border)` ...), never literals. Navigation state (panels, folders, sort, selection, open viewers) lives in the URL, see `web/src/urlState.ts`.
 - Every path that touches the filesystem goes through `paths.ts` (`resolveRead`, `resolveWrite`) and, for the actual open or change, `openChecked` or `pinParent`/`pinDir`. A new mutating route must be listed in `server/src/readonly.ts` so read-only volumes cover it.
 - Add a test beside each change (`server/test/*.test.ts`, `node --test` with `tsx`). Web changes are checked in a browser at desktop and phone width, dark and light, and with the keyboard.
 - Small pull requests, one concern each.
+
+## Licence
+
+MIT, see `LICENSE`. The bundled Montserrat fonts are under the SIL Open Font License 1.1 (`web/public/assets/fonts/OFL.txt`).
