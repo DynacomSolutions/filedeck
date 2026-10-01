@@ -49,6 +49,10 @@ spec:
             {{- end }}
             - name: NODES
               value: {{ range $i, $n := .Values.nodes }}{{ if $i }},{{ end }}{{ $n.name }}=http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}
+            {{- if .Values.brand }}
+            - name: FILEDECK_BRAND
+              value: {{ .Values.brand | toJson | quote }}
+            {{- end }}
             {{- if .Values.sources }}
             # Network sources: only non-secret fields. Credentials are read from the Secret volumes below.
             - name: FILEDECK_SOURCES

@@ -1,3 +1,4 @@
+import { brand } from "./brand";
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
@@ -322,9 +323,15 @@ export function App() {
     <div className="app">
       <header className="site-header">
         <div className="site-header__inner shell">
-          <a className="brand-logo" href="/" aria-label="Filedeck">
-            <img className="brand-logo__white" src="/assets/logo/lockup-horizontal-white.svg" alt="" />
-            <img className="brand-logo__default" src="/assets/logo/lockup-horizontal-default.svg" alt="" />
+          <a className="brand-logo" href="/" aria-label={brand.name}>
+            {brand.logo ? (
+              <>
+                <img className="brand-logo__white" src={brand.logo.dark} alt="" />
+                <img className="brand-logo__default" src={brand.logo.light} alt="" />
+              </>
+            ) : (
+              <span className="brand-name">{brand.name}</span>
+            )}
           </a>
           <span className="crumb">Files</span>
           <span className="status" role="status">{status}</span>
@@ -340,8 +347,9 @@ export function App() {
               </button>
             )}
             <button className="btn btn--ghost btn--sm" onClick={() => setHelp(true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
-            <a className="btn btn--ghost btn--sm" href="https://worktrees.example.invalid/">Worktrees</a>
-            <a className="btn btn--ghost btn--sm" href="https://gh.example.invalid/">Runners</a>
+            {brand.links.map((l) => (
+              <a key={l.url} className="btn btn--ghost btn--sm" href={l.url}>{l.label}</a>
+            ))}
             <ThemeMenu />
           </div>
         </div>

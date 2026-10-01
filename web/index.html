@@ -4,12 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
-    <title>Files · Filedeck</title>
-    <link rel="icon" type="image/svg+xml" href="/assets/logo/icon-default.svg" />
+    <title>%%TITLE%%</title>
+    <link rel="icon" type="image/svg+xml" href="%%ICON%%" />
     <script>
+      %%BOOT%%
       (function () {
         try {
-          var p = localStorage.getItem("Filedeck-theme");
+          var p = localStorage.getItem((window.__FILEDECK__ || {}).themeKey || "filedeck-theme");
           if (p === "light" || p === "dark") document.documentElement.dataset.theme = p;
         } catch (e) {}
       })();

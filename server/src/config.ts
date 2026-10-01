@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { parseBrand, type Brand } from "./brand.ts";
 import { parseReadOnly } from "./readonly.ts";
 import { parseSources } from "./sources/registry.ts";
 import type { SourceConfig } from "./sources/types.ts";
@@ -32,6 +33,8 @@ export interface Config {
   ffmpeg: string;
   /** concurrent on-the-fly media transcodes per agent */
   transcodeConcurrency: number;
+  /** hub: name, logos, header links and theme key shown in the page */
+  brand: Brand;
   /** agent: virtual path prefixes that are read-only */
   readOnly: string[];
   /** shared hub-to-agent secret; empty = agents are unauthenticated (NetworkPolicy only) */
@@ -81,6 +84,7 @@ export function loadConfig(env = process.env): Config {
     thumbConcurrency: Number(env.FILEDECK_THUMB_CONCURRENCY ?? 2),
     ffmpeg: env.FILEDECK_FFMPEG ?? "ffmpeg",
     transcodeConcurrency: Number(env.FILEDECK_TRANSCODE_CONCURRENCY ?? 2),
+    brand: parseBrand(env.FILEDECK_BRAND),
     readOnly: parseReadOnly(env.FILEDECK_READONLY),
     agentToken: env.FILEDECK_AGENT_TOKEN || undefined,
     nodes: parseNodes(env.NODES),

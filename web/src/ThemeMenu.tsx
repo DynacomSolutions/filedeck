@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
 type Pref = "light" | "dark" | "auto";
-const KEY = "Filedeck-theme";
+import { brand } from "./brand";
+
+const KEY = brand.themeKey;
 const svg = (children: React.ReactNode, fill = false) => (
   <svg viewBox="0 0 24 24" fill={fill ? "currentColor" : "none"} stroke={fill ? "none" : "currentColor"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     {children}
@@ -27,7 +29,7 @@ const stored = (): Pref => {
   }
 };
 
-/** Light / Dark / Auto picker; same storage key and behaviour as the other Filedeck pages. */
+/** Light / Dark / Auto picker; the storage key comes from the deployment branding so sibling pages can share the choice. */
 export function ThemeMenu() {
   const [pref, setPref] = useState<Pref>(stored);
   const [open, setOpen] = useState(false);

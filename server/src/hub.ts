@@ -10,6 +10,7 @@ import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
+import { renderIndex } from "./brand.ts";
 import { audit, type AuditSink } from "./audit.ts";
 
 /** Where a request for a node or a network source goes. Agents are HTTP; sources run inside the hub. */
@@ -231,13 +232,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
 
   // SPA
   const index = path.join(cfg.staticDir, "index.html");
-  app.use("/*", serveStatic({ root: path.relative(process.cwd(), cfg.staticDir) || "." }));
-  app.get("*", async (c) => {
+  const page = async (c: import("hono").Context) => {
     try {
-      return c.html(await readFile(index, "utf8"));
+      return c.html(renderIndex(await readFile(index, "utf8"), cfg.brand), 200, { "Cache-Control": "no-cache" });
     } catch {
       return c.text("web UI not built", 503);
     }
-  });
+  };
+  app.get("/", page);
+  app.get("/index.html", page);
+  app.use("/*", serveStatic({ root: path.relative(process.cwd(), cfg.staticDir) || "." }));
+  app.get("*", page);
   return app;
 }

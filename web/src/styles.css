@@ -1,6 +1,6 @@
-/* filedeck on the Filedeck Studio design system (same tokens, fonts, header,
-   pills and ledger headings as the worktrees page). Colours come only from
-   /assets/studio.css; the aliases below keep the component class names stable. */
+/* filedeck on the bundled Studio theme (tokens, fonts, header, pills and ledger
+   headings). Colours come only from /assets/studio.css; the aliases below keep
+   the component class names stable. */
 :root{
   --panel:var(--surface);--panel2:var(--surface-2);--ink:var(--fg);--line:var(--border);
   --warn:var(--accent-text);--pill-bg:var(--surface-3);--sel:var(--accent-tint);
@@ -352,3 +352,4 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
   .side{flex:0 0 auto;max-height:26vh;border-right:0;border-bottom:1px solid var(--border)}
   .main{min-height:0;flex:1}
 }
+.brand-name{font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:.95rem;color:var(--fg)}
