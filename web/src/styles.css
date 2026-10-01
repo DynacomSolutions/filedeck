@@ -323,3 +323,10 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .pv-md blockquote{border-left:3px solid var(--accent-line);padding:.1rem .9rem;color:var(--fg-soft)}
 .pv-md table{border-collapse:collapse;display:block;overflow:auto}.pv-md th,.pv-md td{border:1px solid var(--border);padding:.3rem .6rem}.pv-md th{background:var(--surface-2)}
 .pv-md a{color:var(--accent-text,var(--accent))}.pv-md img{max-width:100%;height:auto}.pv-md hr{border:0;border-top:1px solid var(--border)}
+
+/* hex view */
+.pv-hex{width:100%;align-self:stretch;display:flex;flex-direction:column;min-width:0}
+.pv-hexbar{display:flex;flex-wrap:wrap;gap:.3rem .5rem;align-items:center;padding:.4rem .7rem;border-bottom:1px solid var(--border);font-size:.76rem}
+.pv-hexbar button{min-height:26px;min-width:28px;padding:0 .4rem}.pv-hexbar input{min-height:26px;font:.76rem var(--mono)}
+.pv-hexdump{margin:0;padding:.6rem .8rem;font:.74rem/1.55 var(--mono);overflow:auto;white-space:pre;text-align:left}
+.hx-off{color:var(--muted)}.hx-asc{color:var(--fg-soft)}

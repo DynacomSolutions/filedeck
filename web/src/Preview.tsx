@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
+import { HexView } from "./HexView";
 import { MarkdownView } from "./MarkdownView";
 import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
 
@@ -26,6 +27,9 @@ function Text({ url }: { url: string }) {
 export function Preview({ node, entry, onEdit, extra }: { node: string; entry: Entry; onEdit: (node: string, path: string) => void; extra?: ReactNode }) {
   const url = fileUrl(node, entry.path);
   const e = ext(entry.name);
+  const [hex, setHex] = useState(false);
+  useEffect(() => setHex(false), [node, entry.path]);
+  const known = isArchive(entry.name) || IMG.includes(e) || VID.includes(e) || AUD.includes(e) || e === "pdf" || e === "md" || e === "markdown" || TXT.includes(e) || entry.size === 0;
   return (
     <div className="pv">
       <div className="pv-head">
@@ -36,11 +40,16 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
         {canEdit(entry) && (
           <button className="link" onClick={() => onEdit(node, entry.path)} title="Open in the editor">Edit</button>
         )}
+        {entry.size > 0 && known && (
+          <button className="link" aria-pressed={hex} onClick={() => setHex(!hex)} title="Show the raw bytes as a hex dump">{hex ? "Preview" : "Hex"}</button>
+        )}
         <a href={fileUrl(node, entry.path, "download")}>Download</a>
         {extra}
       </div>
       <div className="pv-body">
-        {isArchive(entry.name) ? (
+        {hex || (!known && entry.size > 0) ? (
+          <HexView node={node} path={entry.path} size={entry.size} />
+        ) : isArchive(entry.name) ? (
           <ArchiveView node={node} entry={entry} />
         ) : IMG.includes(e) ? (
           <img src={url} alt={entry.name} />
