@@ -262,14 +262,15 @@ export function App() {
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
 
-  const switchPanel = (from: string, dir: 1 | -1) => {
-    if (!tree) return;
+  const switchPanel = (from: string, dir: 1 | -1): boolean => {
+    if (!tree) return false;
     const all = leaves(tree);
     const i = all.findIndex((l) => l.id === from);
-    const to = all[(i + dir + all.length) % all.length];
-    if (!to) return;
+    const to = all[i + dir];
+    if (!to) return false;
     setActiveId(to.id);
     setTimeout(() => document.querySelector<HTMLElement>(`[data-fp="${to.id}"]`)?.focus(), 0);
+    return true;
   };
   const render = (t: Tree, total: number): React.ReactNode => {
     if (t.kind === "leaf") {
@@ -347,7 +348,10 @@ export function App() {
       </header>
       <div className="body">
         <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<JobsTray nodes={nodes} />} />
-        <div className="main">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</div>
+        <main className="main" aria-label="File panels">
+          <h1 className="visually-hidden">Files</h1>
+          {tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
+        </main>
       </div>
       {trash && (
         <Suspense fallback={null}>

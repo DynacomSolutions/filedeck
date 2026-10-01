@@ -116,7 +116,7 @@ button.link:hover:not(:disabled){background:transparent}
 /* dialogs */
 .modal-back{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:60}
 .modal{background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.25rem;width:min(420px,calc(100vw - 32px));display:flex;flex-direction:column;gap:.8rem}
-.modal h3{margin:0;font-size:1rem;font-weight:700;letter-spacing:-.01em}.modal label{display:flex;flex-direction:column;gap:.35rem;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.modal label.chk{flex-direction:row;gap:.5rem;align-items:center;text-transform:none;letter-spacing:0;font-size:.82rem}
+.modal h2,.modal h3{margin:0;font-size:1rem;font-weight:700;letter-spacing:-.01em}.modal label{display:flex;flex-direction:column;gap:.35rem;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.modal label.chk{flex-direction:row;gap:.5rem;align-items:center;text-transform:none;letter-spacing:0;font-size:.82rem}
 .modal input[type=text],.modal input:not([type]),.modal select{width:100%;background:transparent;color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:.4rem .6rem;font:inherit;font-size:.88rem;text-transform:none;letter-spacing:0}
 .modal select option{background:var(--surface)}
 .modal-actions{display:flex;justify-content:flex-end;gap:.5rem}
@@ -339,3 +339,16 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .pv-sheets{display:flex;flex-direction:column}
 .pv-sheetwrap{overflow:auto;font-size:.76rem;text-align:left}.pv-sheetwrap table{border-collapse:collapse}.pv-sheetwrap td,.pv-sheetwrap th{border:1px solid var(--border);padding:.2rem .5rem;white-space:pre;max-width:24rem;overflow:hidden;text-overflow:ellipsis}.pv-sheetwrap th{background:var(--surface-2);color:var(--muted);font-weight:400;position:sticky;left:0}
 .sp-b{font-weight:700}.sp-i{font-style:italic}
+
+/* ---- accessibility and small screens ---- */
+/* studio.css --muted (#737373) is 4.4:1 on the black page; nudged to pass 4.5:1 for small text. */
+:root:not([data-theme="light"]){--muted:#8c8c8c}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media(max-width:700px){
+  .site-header__inner{flex-wrap:nowrap;gap:.4rem}
+  .site-header__actions a.btn{display:none}
+  .site-header .status{display:none}
+  .body{flex-direction:column}
+  .side{flex:0 0 auto;max-height:26vh;border-right:0;border-bottom:1px solid var(--border)}
+  .main{min-height:0;flex:1}
+}

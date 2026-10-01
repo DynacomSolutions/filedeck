@@ -9,7 +9,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["Page Up / Page Down", "Move by ten entries"],
       ["Enter", "Open folder or file"],
       ["Backspace / Alt+Up", "Go to the parent folder"],
-      ["Tab / Shift+Tab", "Next / previous panel"],
+      ["Tab / Shift+Tab", "Next / previous panel from the file list (after the last panel Tab moves on to the rest of the page)"],
       ["Ctrl+F", "Filter this folder by name"],
       ["Alt+T / Alt+W", "New tab with this folder / close the tab"],
       ["Alt+[ / Alt+]", "Previous / next tab"],
@@ -62,7 +62,7 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
           }
         }}
       >
-        <h3>Keyboard shortcuts</h3>
+        <h2>Keyboard shortcuts</h2>
         {GROUPS.map((g) => (
           <section key={g.title}>
             <h4>{g.title}</h4>

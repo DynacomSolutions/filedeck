@@ -46,7 +46,8 @@ interface Props {
   /** the panel F5/F6 copy and move to (the next panel in layout order), if any */
   next: { node: string; path: string } | null;
   /** Tab / Shift+Tab: move focus to the next / previous panel */
-  onSwitch: (dir: 1 | -1) => void;
+  /** move to the neighbouring panel; false when there is none in that direction (Tab then leaves the panels normally) */
+  onSwitch: (dir: 1 | -1) => boolean;
   /** `?` opens the shortcut overlay */
   onHelp: () => void;
   /** open this node's trash browser */
@@ -99,7 +100,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const setEditing = (f: FileRef | null) => onPatch({ edit: f ?? undefined });
   const closedFor = leaf.closed ?? null;
   const setClosedFor = (p: string | null) => onPatch({ closed: p ?? undefined });
-  const dock: Dock = leaf.pv?.dock ?? "right";
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const el = secRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([e]) => setNarrow((e?.contentRect.width ?? 999) < 620));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // A narrow panel (phone, deep split) always stacks the preview underneath; the saved dock is kept for wide panels.
+  const dock: Dock = narrow ? "bottom" : (leaf.pv?.dock ?? "right");
   const pvSize = leaf.pv?.size ?? 40;
   const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize } });
 
@@ -498,6 +508,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const listing = searchView ?? (
       <div
         className="fp-scroll"
+        tabIndex={0}
+        role="group"
+        aria-label={`Files in ${path} on ${node}. Arrow keys select, Enter opens.`}
+        onFocus={(e) => {
+          // Tabbing into the list selects the first entry so the arrow keys have somewhere to start.
+          if (e.target === e.currentTarget && sel.size === 0 && visible[0]) selectOnly(visible[0].path);
+        }}
         onClick={(e) => e.target === e.currentTarget && setSel(new Set())}
         onContextMenu={(e) => {
           onFocus();
@@ -598,7 +615,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       if (e.altKey && !mod && key.toLowerCase() === "t") return newTab(), true;
       if (e.altKey && !mod && key.toLowerCase() === "w") return tabs.length > 1 && (closeTab(ti), true);
       if (e.altKey && !mod && (key === "]" || key === "[") && tabs.length > 1) return selectTab((ti + (key === "]" ? 1 : -1) + tabs.length) % tabs.length), true;
-      if (key === "Tab" && !mod && !e.altKey) return onSwitch(e.shiftKey ? -1 : 1), true;
+      // Tab hops between panels only from the list itself, and never wraps: otherwise it would be a keyboard trap.
+      if (key === "Tab" && !mod && !e.altKey && (e.target === e.currentTarget || !!(e.target as HTMLElement).closest(".fp-scroll"))) return onSwitch(e.shiftKey ? -1 : 1);
       if (mod && e.shiftKey && key.toLowerCase() === "f") return setSearch(leaf.sr ?? EMPTY_SEARCH), true;
       if (mod && key.toLowerCase() === "f") {
         if (filterInput.current) {
