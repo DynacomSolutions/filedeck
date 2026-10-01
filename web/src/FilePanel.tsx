@@ -5,39 +5,18 @@ import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
 import type { FileRef } from "./EditorViews";
+import type { Dock, Leaf, SortKey } from "./urlState";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
 
-type Dock = "left" | "right" | "top" | "bottom";
 const DOCKS: { dock: Dock; icon: string; label: string }[] = [
   { dock: "left", icon: "◧", label: "Dock preview left" },
   { dock: "right", icon: "◨", label: "Dock preview right" },
   { dock: "top", icon: "⬒", label: "Dock preview top" },
   { dock: "bottom", icon: "⬓", label: "Dock preview bottom" },
 ];
-const lsGet = (k: string) => {
-  try {
-    return localStorage.getItem(k);
-  } catch {
-    return null;
-  }
-};
-const lsSet = (k: string, v: string) => {
-  try {
-    localStorage.setItem(k, v);
-  } catch {
-    /* storage unavailable */
-  }
-};
-
-export interface Leaf {
-  kind: "leaf";
-  id: string;
-  node: string;
-  path: string;
-}
-type SortKey = "name" | "size" | "mtime";
+export type { Leaf };
 
 interface Props {
   leaf: Leaf;
@@ -46,19 +25,30 @@ interface Props {
   onNavigate: (node: string, path: string) => void;
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
+  /** non-navigation state (selection, sort, preview dock...) mirrored into the URL */
+  onPatch: (p: Partial<Leaf>) => void;
   /** Two selected files diff directly; one selected file is marked, then paired with the next. */
   onDiff: (files: { node: string; path: string }[]) => void;
   diffMarked: boolean;
   onStatus: (msg: string) => void;
 }
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onDiff, diffMarked, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
-  const [hidden, setHidden] = useState(false);
-  const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: "name", asc: true });
-  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [hidden, setHiddenState] = useState(leaf.hidden ?? false);
+  const [sort, setSortState] = useState<{ key: SortKey; asc: boolean }>(leaf.sort ?? { key: "name", asc: true });
+  const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sel ? [leaf.sel] : []));
+  const setHidden = (h: boolean) => {
+    setHiddenState(h);
+    onPatch({ hidden: h || undefined });
+  };
+  const setSort = (fn: (s: { key: SortKey; asc: boolean }) => { key: SortKey; asc: boolean }) => {
+    const n = fn(sort);
+    setSortState(n);
+    onPatch({ sort: n.key === "name" && n.asc ? undefined : n });
+  };
   const [anchor, setAnchor] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null); // "." = panel itself, else folder path
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -67,20 +57,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
   // Per-panel preview: shown only while exactly one file is selected here (or being edited).
-  const [editing, setEditing] = useState<FileRef | null>(null);
-  const [closedFor, setClosedFor] = useState<string | null>(null);
-  const [dock, setDockState] = useState<Dock>(() => {
-    const d = lsGet(`filedeck-pv-dock-${leaf.id}`);
-    return d === "left" || d === "right" || d === "top" || d === "bottom" ? d : "right";
-  });
-  const [pvSize, setPvSize] = useState<number>(() => {
-    const n = Number(lsGet(`filedeck-pv-size-${leaf.id}`));
-    return n >= 10 && n <= 90 ? n : 40;
-  });
-  const setDock = (d: Dock) => {
-    setDockState(d);
-    lsSet(`filedeck-pv-dock-${leaf.id}`, d);
-  };
+  const editing = leaf.edit ?? null;
+  const setEditing = (f: FileRef | null) => onPatch({ edit: f ?? undefined });
+  const closedFor = leaf.closed ?? null;
+  const setClosedFor = (p: string | null) => onPatch({ closed: p ?? undefined });
+  const dock: Dock = leaf.pv?.dock ?? "right";
+  const pvSize = leaf.pv?.size ?? 40;
+  const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize } });
 
   useEffect(() => {
     let live = true;
@@ -121,7 +104,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const previewEntry = only && only.type !== "dir" && !only.linkDir && closedFor !== only.path ? only : null;
   useEffect(() => {
     if (closedFor && closedFor !== only?.path) setClosedFor(null);
-  }, [only?.path, closedFor]);
+  }, [only?.path, closedFor]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Mirror a single selection into the URL once the listing has confirmed it exists.
+  useEffect(() => {
+    if (!entries.length && sel.size) return; // a deep-linked selection waits for the listing
+    const v = sel.size === 1 ? [...sel][0] : undefined;
+    if (v !== leaf.sel) onPatch({ sel: v });
+  }, [sel, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     try {
@@ -337,7 +326,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       {err && <div className="fp-err">{err}</div>}
       {pane ? (
         <Group key={dock} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
-          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90) { setPvSize(v); lsSet(`filedeck-pv-size-${leaf.id}`, String(Math.round(v))); } }}>
+          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock, size: v } }); }}>
           {first && <Panel id="pv" minSize="15%">{pane}</Panel>}
           {first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
           <Panel id="list" minSize="20%">{listing}</Panel>

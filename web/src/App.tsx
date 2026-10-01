@@ -1,7 +1,8 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
-import { FilePanel, type Leaf } from "./FilePanel";
+import { FilePanel } from "./FilePanel";
+import { decodeState, encodeState, leaves, maxId, type Leaf, type Tree } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
@@ -9,8 +10,9 @@ const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.
 import { JobsTray } from "./Jobs";
 import { ThemeMenu } from "./ThemeMenu";
 
-type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[] };
-let seq = 1;
+// Restored from the URL before first render so panel ids keep matching.
+const initial = decodeState(window.location.search);
+let seq = initial ? maxId(initial.tree) + 1 : 1;
 const id = () => `p${seq++}`;
 const leaf = (node: string, path = "/"): Leaf => ({ kind: "leaf", id: id(), node, path });
 
@@ -22,6 +24,85 @@ const mapTree = (t: Tree, fn: (l: Leaf) => Tree | null): Tree | null => {
   return { ...t, children };
 };
 const count = (t: Tree): number => (t.kind === "leaf" ? 1 : t.children.reduce((n, c) => n + count(c), 0));
+
+interface HState {
+  idx: number;
+  /** panel whose navigation created this entry ("init" for the first) */
+  panel: string;
+  /** every panel's node/path right after that navigation */
+  paths: Record<string, { node: string; path: string }>;
+}
+const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { node: l.node, path: l.path }]));
+
+/**
+ * The URL always reflects the full app state. A folder change in a panel pushes a
+ * history entry tagged with that panel; everything else (layout, sizes, selection,
+ * preview, editor) replaces the current entry. Back/forward only walks the entries
+ * made by the focused panel and restores that panel's own folder.
+ */
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
+  const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
+  const prev = useRef<Record<string, { node: string; path: string }> | null>(null);
+  const fromPop = useRef(false);
+  const latest = useRef({ active, url: "", paths: {} as HState["paths"] });
+  latest.current.active = active;
+
+  useEffect(() => {
+    if (!tree) return;
+    const paths = pathsOf(tree);
+    const url = encodeState({ tree, active, ...(diff ? { diff } : {}) });
+    latest.current.url = url;
+    latest.current.paths = paths;
+    let changed: string | undefined;
+    if (prev.current && !fromPop.current) changed = Object.keys(paths).find((k) => prev.current![k] && (prev.current![k]!.node !== paths[k]!.node || prev.current![k]!.path !== paths[k]!.path));
+    prev.current = paths;
+    fromPop.current = false;
+    try {
+      if (changed && cur.current) {
+        const st: HState = { idx: cur.current.idx + 1, panel: changed, paths };
+        history.pushState(st, "", url);
+        cur.current = st;
+      } else {
+        const old = cur.current;
+        const keep = old ? Object.fromEntries(Object.entries(old.paths).filter(([k]) => k in paths)) : {};
+        const st: HState = { idx: old?.idx ?? 0, panel: old?.panel ?? "init", paths: { ...paths, ...keep } };
+        history.replaceState(st, "", url);
+        cur.current = st;
+      }
+    } catch {
+      /* history unavailable (sandboxed frame) */
+    }
+  }, [tree, active, diff]);
+
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      const arrival = e.state as HState | null;
+      const departed = cur.current;
+      if (!arrival || typeof arrival.idx !== "number" || !departed) return;
+      cur.current = arrival;
+      const focused = latest.current.active;
+      const back = arrival.idx < departed.idx;
+      const owner = back ? departed.panel : arrival.panel;
+      if (owner !== focused) {
+        // Not the focused panel's entry: step over it without touching anything.
+        if (back ? arrival.idx > 0 : true) history.go(back ? -1 : 1);
+        else history.replaceState({ ...arrival, paths: arrival.paths }, "", latest.current.url);
+        return;
+      }
+      const target = arrival.paths[focused];
+      if (!target) return;
+      fromPop.current = true;
+      setTree((t) => {
+        if (!t) return t;
+        const go = (n: Tree): Tree => (n.kind === "leaf" ? (n.id === focused ? { ...n, node: target.node, path: target.path, sel: undefined, closed: undefined } : n) : { ...n, children: n.children.map(go) });
+        return go(t);
+      });
+      setStatus(`${back ? "Back" : "Forward"}: ${target.node}:${target.path}`);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [setTree, setStatus]);
+}
 
 function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string) => void; footer: React.ReactNode }) {
   const [mounts, setMounts] = useState<Record<string, Mount[]>>({});
@@ -63,10 +144,10 @@ function Sidebar({ nodes, onOpen, footer }: { nodes: NodeInfo[]; onOpen: (node: 
 
 export function App() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
-  const [tree, setTree] = useState<Tree | null>(null);
-  const [activeId, setActiveId] = useState("");
+  const [tree, setTree] = useState<Tree | null>(initial?.tree ?? null);
+  const [activeId, setActiveId] = useState(initial?.active ?? "");
   const [status, setStatus] = useState("");
-  const [diff, setDiff] = useState<{ left: FileRef; right: FileRef } | null>(null);
+  const [diff, setDiff] = useState<{ left: FileRef; right: FileRef } | null>(initial?.diff ?? null);
   const [diffMark, setDiffMark] = useState<FileRef | null>(null);
   const onDiff = (files: FileRef[]) => {
     if (files.length === 2) {
@@ -100,7 +181,15 @@ export function App() {
     setActiveId(l.id);
   }, [nodes, tree]);
 
+  useUrlHistory(tree, activeId, diff, setTree, setStatus);
+
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => (t ? mapTree(t, fn) : t));
+  const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
+  const patchSizes = (sid: string, sizes: number[]) =>
+    setTree((t) => {
+      const go = (n: Tree): Tree => (n.kind === "leaf" ? n : n.id === sid ? { ...n, sizes } : { ...n, children: n.children.map(go) });
+      return t ? go(t) : t;
+    });
   const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path } : l));
   const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path } : l));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
@@ -115,6 +204,7 @@ export function App() {
           onFocus={() => setActiveId(t.id)}
           onNavigate={navigate(t.id)}
           onSplit={split(t.id)}
+          onPatch={(p) => patchLeaf(t.id, p)}
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
           onDiff={onDiff}
           diffMarked={diffMark !== null}
@@ -123,7 +213,15 @@ export function App() {
       );
     }
     return (
-      <Group orientation={t.dir} id={t.id}>
+      <Group
+        orientation={t.dir}
+        id={t.id}
+        defaultLayout={t.sizes && t.sizes.length === t.children.length ? Object.fromEntries(t.children.map((c, i) => [c.id, t.sizes![i]!])) : undefined}
+        onLayoutChanged={(l) => {
+          const sizes = t.children.map((c) => l[c.id] ?? 0);
+          if (!t.sizes || sizes.some((x, i) => Math.abs(x - (t.sizes![i] ?? 0)) > 0.5)) patchSizes(t.id, sizes);
+        }}
+      >
         {t.children.flatMap((c, i) => [
           i > 0 ? <Separator key={c.id + "s"} className={"sep " + t.dir} /> : null,
           <Panel key={c.id} id={c.id} minSize="10%">
