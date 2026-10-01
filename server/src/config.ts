@@ -18,6 +18,10 @@ export interface Config {
   /** folder diff: agent-side concurrent hash streams and walk entry ceiling */
   hashConcurrency: number;
   walkMaxEntries: number;
+  /** search: concurrent searches per agent, per-file and total content bytes read */
+  searchConcurrency: number;
+  searchMaxFileBytes: number;
+  searchMaxBytes: number;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
@@ -55,6 +59,9 @@ export function loadConfig(env = process.env): Config {
     jobConcurrency: Number(env.FILEDECK_JOB_CONCURRENCY ?? 2),
     hashConcurrency: Number(env.FILEDECK_HASH_CONCURRENCY ?? 4),
     walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
+    searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 2),
+    searchMaxFileBytes: Number(env.FILEDECK_SEARCH_MAX_FILE ?? 8 * 1024 * 1024),
+    searchMaxBytes: Number(env.FILEDECK_SEARCH_MAX_BYTES ?? 512 * 1024 * 1024),
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",

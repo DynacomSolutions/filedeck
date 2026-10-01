@@ -1,4 +1,4 @@
-import type { DiffMode, Loc } from "./urlState";
+import type { DiffMode, Loc, SearchForm } from "./urlState";
 export interface Entry {
   name: string;
   path: string;
@@ -435,4 +435,54 @@ export function fmtMode(mode: number, type: Entry["type"]): string {
   let s = type === "dir" ? "d" : type === "symlink" ? "l" : "-";
   for (let i = 0; i < 9; i++) s += mode & (1 << (8 - i)) ? MODE_BITS[i] : "-";
   return s;
+}
+
+export interface SearchHit {
+  /** path below the searched folder */
+  p: string;
+  t: Entry["type"];
+  s: number;
+  m: number;
+  /** content hits: first matching line, its text, and the number of matching lines */
+  l?: number;
+  x?: string;
+  n?: number;
+}
+export interface SearchDone {
+  scanned: number;
+  grepped: number;
+  skipped: number;
+  capped: boolean;
+  truncated: boolean;
+  depthLimited: boolean;
+  errors: number;
+}
+
+/** Streams a search (NDJSON from the agent) and reports each batch; abort the signal to cancel the walk on the node. */
+export async function searchStream(node: string, path: string, f: SearchForm, hidden: boolean, signal: AbortSignal, onBatch: (hits: SearchHit[], scanned: number) => void): Promise<SearchDone> {
+  const qs = new URLSearchParams({ path, q: f.q, mode: f.mode, ic: f.ic ? "1" : "0", content: f.content, cre: f.cre ? "1" : "0", cic: f.cic ? "1" : "0", types: f.types });
+  if (hidden) qs.set("hidden", "1");
+  const r = await fetch(`${nodeBase(node)}/api/fs/search?${qs}`, { signal });
+  if (!r.ok) await j<unknown>(r);
+  const reader = (r.body as ReadableStream<Uint8Array>).getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let done: SearchDone | null = null;
+  for (;;) {
+    const { value, done: end } = await reader.read();
+    buf += dec.decode(value, { stream: !end });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const o = JSON.parse(line) as { e?: { h: SearchHit[]; sc: number }; done?: SearchDone; error?: string };
+      if (o.error) throw new Error(o.error);
+      if (o.e) onBatch(o.e.h, o.e.sc);
+      if (o.done) done = o.done;
+    }
+    if (end) break;
+  }
+  if (!done) throw new Error("search ended unexpectedly");
+  return done;
 }

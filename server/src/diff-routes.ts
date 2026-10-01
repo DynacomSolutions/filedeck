@@ -39,14 +39,14 @@ export function registerDiffRoutes(app: Hono, cfg: Config) {
 }
 
 /** NDJSON body for a walk generator: {"e":[...]} batches, then {"done":{...}}. Pulls the first batch so path errors map to a status. */
-export async function walkResponse(gen: AsyncGenerator<WalkEntry[], WalkSummary>): Promise<Response> {
+export async function walkResponse<T = WalkEntry[], S = WalkSummary>(gen: AsyncGenerator<T, S>): Promise<Response> {
   // Pull the first batch before answering so path errors still map to a proper status.
   const first = await gen.next();
   const enc = new TextEncoder();
   const line = (o: unknown) => enc.encode(JSON.stringify(o) + "\n");
   const body = new ReadableStream<Uint8Array>({
     async start(ctl) {
-      const push = (r: IteratorResult<unknown, WalkSummary>) => {
+      const push = (r: IteratorResult<unknown, unknown>) => {
         ctl.enqueue(line(r.done ? { done: r.value } : { e: r.value }));
       };
       push(first);
@@ -64,7 +64,7 @@ export async function walkResponse(gen: AsyncGenerator<WalkEntry[], WalkSummary>
       }
     },
     async cancel() {
-      await gen.return({ truncated: false, depthLimited: false, errors: 0 }).catch(() => undefined);
+      await gen.return({ truncated: false, depthLimited: false, errors: 0 } as S).catch(() => undefined);
     },
   });
   return new Response(body, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" } });

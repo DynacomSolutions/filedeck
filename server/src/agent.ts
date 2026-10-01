@@ -10,6 +10,7 @@ import { registerArchiveRoutes } from "./archive-routes.ts";
 import { registerDiffRoutes } from "./diff-routes.ts";
 import * as trash from "./trash.ts";
 import { registerPropsRoutes } from "./props.ts";
+import { registerSearchRoutes } from "./search.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -180,6 +181,7 @@ export function createAgent(cfg: Config) {
   const jobs = registerArchiveRoutes(app, cfg);
   registerPropsRoutes(app, cfg, jobs);
   registerDiffRoutes(app, cfg);
+  registerSearchRoutes(app, cfg);
 
   // Live change feed: one event per change in the watched directory.
   app.get("/api/events", (c) => {

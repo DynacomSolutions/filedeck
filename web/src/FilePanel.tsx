@@ -9,7 +9,8 @@ import { ConfirmDialog, NameDialog } from "./Dialogs";
 import { PropertiesDialog } from "./Properties";
 import { copyText, getClip, setClip, useClip } from "./clipboard";
 import type { FileRef } from "./EditorViews";
-import type { Dock, Leaf, Loc, SortKey } from "./urlState";
+import { SearchView } from "./Search";
+import { EMPTY_SEARCH, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
@@ -193,6 +194,23 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     }
   };
   const open = (en: Entry) => openFile(en);
+  // Search results: show a hit in its own folder (selected and scrolled into view) or open it.
+  const scrollTo = useRef<string | null>(null);
+  const hitPath = (rel: string) => join(path, rel);
+  const revealHit = (rel: string) => {
+    const full = hitPath(rel);
+    scrollTo.current = full;
+    onNavigate(node, parent(full));
+    setSel(new Set([full]));
+    setAnchor(full);
+    setCursor(full);
+  };
+  const openHit = (rel: string, h: { t: Entry["type"] }) => {
+    const full = hitPath(rel);
+    if (h.t === "dir") onNavigate(node, full);
+    else window.open(fileUrl(node, full), "_blank", "noopener");
+  };
+  const setSearch = (sr: SearchForm | undefined) => onPatch({ sr });
   const selected = () => [...sel];
   const selEntries = entries.filter((e) => sel.has(e.path));
 
@@ -349,7 +367,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   ) : previewEntry ? (
     <Preview node={node} entry={previewEntry} onEdit={(n, p) => setEditing({ node: n, path: p })} extra={paneExtra} />
   ) : null;
-  const listing = (
+  const searchView = leaf.sr ? (
+    <SearchView node={node} dir={path} hidden={hidden} form={leaf.sr} onForm={setSearch} onClose={() => (setSearch(undefined), setTimeout(() => secRef.current?.focus(), 0))} onReveal={revealHit} onOpen={openHit} onStatus={onStatus} />
+  ) : null;
+  const listing = searchView ?? (
       <div
         className="fp-scroll"
         onClick={(e) => e.target === e.currentTarget && setSel(new Set())}
@@ -433,6 +454,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     if (!cursor) return;
     secRef.current?.querySelector(`tr[data-path="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
+  useEffect(() => {
+    const p = scrollTo.current;
+    if (!p || !entries.some((e) => e.path === p)) return;
+    scrollTo.current = null;
+    setTimeout(() => secRef.current?.querySelector(`tr[data-path="${CSS.escape(p)}"]`)?.scrollIntoView({ block: "center" }), 0);
+  }, [entries]);
   const toOther = (op: "copy" | "move") => {
     if (!next) return onStatus("Open a second panel first (split button)");
     if (!selEntries.length) return;
@@ -461,8 +488,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       } else selectOnly(en.path);
     };
     const handled = (() => {
+      // While the search results are open the panel's own selection is hidden: no file operations by key.
+      if (leaf.sr && !(key === "Tab" || key === "?" || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
       if (key === "?" && !mod) return onHelp(), true;
       if (key === "Tab" && !mod && !e.altKey) return onSwitch(e.shiftKey ? -1 : 1), true;
+      if (mod && e.shiftKey && key.toLowerCase() === "f") return setSearch(leaf.sr ?? EMPTY_SEARCH), true;
       if (mod && key.toLowerCase() === "f") {
         if (filterInput.current) {
           filterInput.current.focus();
@@ -545,6 +575,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           ))}
         </nav>
         <div className="fp-actions">
+          <button title="Search under this folder (Ctrl+Shift+F)" className={leaf.sr ? "marked" : ""} aria-pressed={!!leaf.sr} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}>🔍</button>
           <button title="Up" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}>↑</button>
           <button title="New folder" onClick={() => setModal({ k: "new", dir: path, type: "folder" })}>＋📁</button>
           <button title="New file" onClick={() => setModal({ k: "new", dir: path, type: "file" })}>＋📄</button>

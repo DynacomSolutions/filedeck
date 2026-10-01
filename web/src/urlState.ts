@@ -9,6 +9,23 @@ export type DiffMode = "name" | "size" | "mtime" | "content" | "quick";
 export type Dock = "left" | "right" | "top" | "bottom";
 export type SortKey = "name" | "size" | "mtime";
 
+export type SearchMode = "name" | "glob" | "regex";
+export type SearchTypes = "all" | "file" | "dir";
+/** Search form of a panel; its presence means the results view is open. */
+export interface SearchForm {
+  q: string;
+  mode: SearchMode;
+  /** ignore case in the name match */
+  ic: boolean;
+  content: string;
+  /** the content text is a regular expression */
+  cre: boolean;
+  /** ignore case in the content match */
+  cic: boolean;
+  types: SearchTypes;
+}
+export const EMPTY_SEARCH: SearchForm = { q: "", mode: "name", ic: true, content: "", cre: false, cic: true, types: "all" };
+
 /** One file-browser panel. Everything here is mirrored into the URL. */
 export interface Leaf {
   kind: "leaf";
@@ -27,6 +44,8 @@ export interface Leaf {
   edit?: FileRef;
   /** name filter (Ctrl+F) */
   q?: string;
+  /** open search (under this panel's folder) */
+  sr?: SearchForm;
 }
 export type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[]; sizes?: number[] };
 
@@ -75,7 +94,8 @@ export interface AppState {
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string };
+type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string; z?: WSearch };
+type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
 interface Wire {
@@ -98,6 +118,17 @@ const toWire = (t: Tree): WTree => {
   if (t.closed) w.c = t.closed;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
   if (t.q) w.q = t.q;
+  if (t.sr) {
+    const z: WSearch = {};
+    if (t.sr.q) z.q = t.sr.q;
+    if (t.sr.mode !== "name") z.m = t.sr.mode;
+    if (!t.sr.ic) z.s = 1;
+    if (t.sr.content) z.c = t.sr.content;
+    if (t.sr.cre) z.r = 1;
+    if (!t.sr.cic) z.k = 1;
+    if (t.sr.types !== "all") z.t = t.sr.types;
+    w.z = z;
+  }
   return w;
 };
 
@@ -147,6 +178,18 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (str(o.c)) leaf.closed = o.c;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
   if (str(o.q) && o.q) leaf.q = o.q;
+  if (o.z && typeof o.z === "object") {
+    const z = o.z as WSearch;
+    leaf.sr = {
+      q: str(z.q) ? z.q.slice(0, 200) : "",
+      mode: z.m === "glob" || z.m === "regex" ? z.m : "name",
+      ic: z.s !== 1,
+      content: str(z.c) ? z.c.slice(0, 200) : "",
+      cre: z.r === 1,
+      cic: z.k !== 1,
+      types: z.t === "file" || z.t === "dir" ? z.t : "all",
+    };
+  }
   return leaf;
 };
 

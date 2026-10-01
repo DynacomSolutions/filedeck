@@ -8,6 +8,7 @@ import { cleanVirtual, virtualJoin } from "../paths.ts";
 import { compileGlobs } from "../glob.ts";
 import { Semaphore, type WalkEntry, type WalkOpts, type WalkSummary } from "../walk.ts";
 import { walkResponse } from "../diff-routes.ts";
+import { SearchGate, parseSearch, searchTree } from "../search.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "./types.ts";
 
 const SAFE_HEADERS = {
@@ -45,6 +46,9 @@ export interface SourceAppOptions {
   maxEdit: number;
   hashConcurrency: number;
   walkMaxEntries: number;
+  searchConcurrency?: number;
+  searchMaxFileBytes?: number;
+  searchMaxBytes?: number;
 }
 
 const DIR_STAT: SourceStat = { type: "dir", size: 0, mtime: 0, mode: 0o755 };
@@ -411,6 +415,16 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       ignoreCase: q("ignoreCase") === "1",
     };
     return walkResponse(walk(norm(q("path") ?? "/"), opts, c.req.raw.signal));
+  });
+
+  const searches = new SearchGate(o.searchConcurrency ?? 2);
+  app.get("/api/fs/search", async (c) => {
+    const q = c.req.query.bind(c.req);
+    const p = parseSearch(q, { searchMaxFileBytes: o.searchMaxFileBytes ?? 8 * 1024 * 1024, searchMaxBytes: o.searchMaxBytes ?? 256 * 1024 * 1024 });
+    const start = norm(q("path") ?? "/");
+    const signal = c.req.raw.signal;
+    const w = walk(start, { hidden: p.hidden, depth: p.depth, max: Math.min(p.maxEntries, o.walkMaxEntries), include: [], exclude: [], ignoreCase: false }, signal);
+    return walkResponse(searches.wrap(searchTree(w, p, (rel) => backend.read((start === "/" ? "" : start) + "/" + rel), signal)));
   });
 
   // Archive jobs and live change events need local disk access; the SPA gets a clear answer.

@@ -33,7 +33,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>)
   for (const [name, backend] of Object.entries(injected ?? {})) {
     sources.set(name, { config: { name, type: backend.type, host: "test", root: "/" }, backend });
   }
-  const sourceOpts = { maxUpload: cfg.maxUpload, maxEdit: cfg.maxEdit, hashConcurrency: cfg.hashConcurrency, walkMaxEntries: cfg.walkMaxEntries };
+  const sourceOpts = { maxUpload: cfg.maxUpload, maxEdit: cfg.maxEdit, hashConcurrency: cfg.hashConcurrency, walkMaxEntries: cfg.walkMaxEntries, searchConcurrency: cfg.searchConcurrency, searchMaxFileBytes: cfg.searchMaxFileBytes, searchMaxBytes: cfg.searchMaxBytes };
   for (const [name, s] of sources) {
     if (agents.has(name)) throw new Error(`source ${name} collides with a node of the same name`);
     const sapp = createSourceApp(name, s.backend, sourceOpts);

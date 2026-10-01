@@ -242,8 +242,8 @@ export function App() {
       const go = (n: Tree): Tree => (n.kind === "leaf" ? n : n.id === sid ? { ...n, sizes } : { ...n, children: n.children.map(go) });
       return t ? go(t) : t;
     });
-  const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path } : l));
-  const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path } : l));
+  const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path, sr: undefined } : l));
+  const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path, sr: undefined } : l));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
 

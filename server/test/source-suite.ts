@@ -230,4 +230,25 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
     const res = (await (await fetch(`${hub}/api/diff/jobs/${j.id}/result`)).json()) as { rows: { p: string; status: string }[] };
     assert.deepEqual(Object.fromEntries(res.rows.map((r) => [r.p, r.status])), { "same.txt": "identical", "diff.txt": "different", "only.txt": "right-only" });
   });
+
+  test(`${type}: search by name and content works on a source`, async () => {
+    await post(S("/api/fs/mkdir"), { path: "/srch" });
+    await post(S("/api/fs/mkdir"), { path: "/srch/sub" });
+    await put(S("/api/fs/upload?dir=/srch&name=Alpha.txt"), "first\nfind-me here\n");
+    await put(S("/api/fs/upload?dir=/srch/sub&name=beta.log"), "nothing");
+    await put(S("/api/fs/upload?dir=/srch/sub&name=gamma.txt"), "find-me too");
+    const run = async (qs: string) => {
+      const r = await fetch(S("/api/fs/search?path=/srch&" + qs));
+      const lines = (await r.text()).trim().split("\n").map((l) => JSON.parse(l) as { e?: { h: { p: string; l?: number; x?: string }[] }; done?: { scanned: number } });
+      return { status: r.status, hits: lines.flatMap((l) => l.e?.h ?? []), done: lines.at(-1)?.done };
+    };
+    assert.deepEqual((await run("q=alpha")).hits.map((h) => h.p), ["Alpha.txt"]);
+    assert.deepEqual((await run("q=*.txt&mode=glob")).hits.map((h) => h.p).sort(), ["Alpha.txt", "sub/gamma.txt"]);
+    const c = await run("content=find-me");
+    assert.deepEqual(c.hits.map((h) => h.p).sort(), ["Alpha.txt", "sub/gamma.txt"]);
+    assert.equal(c.hits.find((h) => h.p === "Alpha.txt")?.l, 2);
+    assert.ok(c.done);
+    assert.equal((await run("q=(a%2B)%2B$&mode=regex")).status, 400);
+    assert.equal((await fetch(S("/api/fs/search?path=/../..&q=a"))).status, 400);
+  });
 }
