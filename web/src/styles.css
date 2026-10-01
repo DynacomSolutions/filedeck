@@ -56,3 +56,18 @@ input[type=text],input:not([type]){background:var(--panel);border:1px solid var(
 .pill{background:var(--pill-bg);border-radius:999px;padding:0 8px;font-size:12px}
 button.link{border:0;background:transparent;color:var(--accent);padding:0;text-decoration:underline}
 .fp-actions button.marked{border-color:var(--accent);color:var(--accent)}
+.jobs{border-top:1px solid var(--line);background:var(--panel);max-height:30dvh;overflow:auto;padding:4px 12px}
+.jobs ul{list-style:none;margin:0;padding:0}
+.job{padding:4px 0;border-bottom:1px solid var(--line);font-size:13px}.job:last-child{border-bottom:0}
+.job-line{display:flex;gap:8px;align-items:baseline}.job-line b{overflow-wrap:anywhere}.job-state{flex:1}.job-line button{padding:0 8px}
+.job progress{width:100%;height:8px;accent-color:var(--accent)}
+.job-detail{font-size:12px;overflow-wrap:anywhere}
+.job.failed .job-state{color:var(--warn)}
+.modal-back{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;width:min(420px,calc(100vw - 32px));display:flex;flex-direction:column;gap:10px}
+.modal h3{margin:0;font-size:15px}.modal label{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--muted)}.modal label.chk{flex-direction:row;gap:6px;align-items:center}
+.modal input[type=text],.modal input:not([type]),.modal select{width:100%;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:inherit}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px}
+.av{width:100%;align-self:stretch;display:flex;flex-direction:column}
+.av-bar{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line)}
+.av-table{font-size:12.5px}

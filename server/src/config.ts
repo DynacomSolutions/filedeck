@@ -8,6 +8,10 @@ export interface Config {
   /** Largest text file the editor will open or save (bytes) */
   maxEdit: number;
   staticDir: string;
+  /** archive extraction/compression caps and background-job concurrency */
+  archiveMaxEntries: number;
+  archiveMaxBytes: number;
+  jobConcurrency: number;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
 }
@@ -37,6 +41,9 @@ export function loadConfig(env = process.env): Config {
     maxUpload: Number(env.FILEDECK_MAX_UPLOAD ?? 1024 ** 4),
     maxEdit: Number(env.FILEDECK_MAX_EDIT ?? 5 * 1024 * 1024),
     staticDir: env.FILEDECK_STATIC ?? "/app/web",
+    archiveMaxEntries: Number(env.FILEDECK_ARCHIVE_MAX_ENTRIES ?? 1_000_000),
+    archiveMaxBytes: Number(env.FILEDECK_ARCHIVE_MAX_BYTES ?? 1024 ** 4),
+    jobConcurrency: Number(env.FILEDECK_JOB_CONCURRENCY ?? 2),
     nodes: parseNodes(env.NODES),
   };
 }

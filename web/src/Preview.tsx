@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { canEdit, fileUrl, fmtDate, fmtSize, type Entry } from "./api";
+import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
+import { ArchiveView } from "./ArchiveView";
 
 const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
@@ -37,7 +38,9 @@ export function Preview({ node, entry, onEdit }: { node: string; entry: Entry | 
         <a href={fileUrl(node, entry.path, "download")}>Download</a>
       </div>
       <div className="pv-body">
-        {IMG.includes(e) ? (
+        {isArchive(entry.name) ? (
+          <ArchiveView node={node} entry={entry} />
+        ) : IMG.includes(e) ? (
           <img src={url} alt={entry.name} />
         ) : VID.includes(e) ? (
           <video src={url} controls preload="metadata" />

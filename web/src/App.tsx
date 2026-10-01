@@ -8,6 +8,7 @@ import type { FileRef } from "./EditorViews";
 // Monaco (several MB) lives in its own chunks, fetched on first use.
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
+import { JobsTray } from "./Jobs";
 
 type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[] };
 let seq = 1;
@@ -174,6 +175,7 @@ export function App() {
         {editing && <TextEditor key={editing.node + editing.path} file={editing} onClose={() => setEditing(null)} onStatus={setStatus} />}
         {diff && <DiffViewer left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />}
       </Suspense>
+      <JobsTray nodes={nodes} />
     </div>
   );
 }

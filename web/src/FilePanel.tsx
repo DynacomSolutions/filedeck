@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, canEdit, fileUrl, fmtDate, fmtSize, join, nodeBase, parent, type Entry } from "./api";
+import { api, canEdit, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
+import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 
 export interface Leaf {
@@ -35,6 +36,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   const [anchor, setAnchor] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null); // "." = panel itself, else folder path
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<"compress" | "extract" | null>(null);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
@@ -187,10 +189,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
             disabled={!selEntries.length || selEntries.length > 2 || !selEntries.every(canEdit)}
             onClick={() => onDiff(selEntries.map((e) => ({ node, path: e.path })))}
           >⇄</button>
-          <button title="Download" disabled={sel.size !== 1} onClick={() => {
-            const en = entries.find((x) => x.path === [...sel][0]);
-            if (en && en.type === "file") window.location.href = fileUrl(node, en.path, "download");
+          <button title="Download (several items or folders as a zip)" disabled={!sel.size} onClick={() => {
+            const picked = entries.filter((x) => sel.has(x.path));
+            const one = picked.length === 1 ? picked[0] : undefined;
+            if (one && one.type === "file") window.location.href = fileUrl(node, one.path, "download");
+            else if (picked.length) window.location.href = zipUrl(node, path, picked.map((x) => x.name));
           }}>⇩</button>
+          <button title="Compress selection" disabled={!sel.size} onClick={() => setDialog("compress")}>📦</button>
+          <button title="Extract archive" disabled={!(sel.size === 1 && entries.some((x) => x.path === [...sel][0] && x.type === "file" && isArchive(x.name)))} onClick={() => setDialog("extract")}>📂</button>
           <button title="Move to trash" disabled={!sel.size} onClick={() => void run("Trash", () => api.trash(node, selected()))}>🗑</button>
           <button title="Delete permanently" disabled={!sel.size} onClick={() => {
             if (confirm(`Permanently delete ${sel.size} item(s)? This cannot be undone.`)) void run("Delete", () => api.remove(node, selected()));
@@ -262,6 +268,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
         </table>
         {!entries.length && !err && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
       </div>
+      {dialog === "compress" && (
+        <CompressDialog node={node} dir={path} names={entries.filter((x) => sel.has(x.path)).map((x) => x.name)} onClose={() => setDialog(null)} onStatus={onStatus} />
+      )}
+      {dialog === "extract" && [...sel][0] && (
+        <ExtractDialog node={node} archive={[...sel][0]!} defaultDest={path} onClose={() => setDialog(null)} onStatus={onStatus} />
+      )}
     </section>
   );
 }

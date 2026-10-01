@@ -6,6 +6,7 @@ import * as ops from "./fsops.ts";
 import { listMounts } from "./mounts.ts";
 import { resolveRead } from "./paths.ts";
 import { Watches } from "./watch.ts";
+import { registerArchiveRoutes } from "./archive-routes.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -153,6 +154,8 @@ export function createAgent(cfg: Config) {
     for (const p of strs(b.paths)) await ops.permanentDelete(root, p);
     return c.json({ ok: true });
   });
+
+  registerArchiveRoutes(app, cfg);
 
   // Live change feed: one event per change in the watched directory.
   app.get("/api/events", (c) => {

@@ -67,6 +67,50 @@ export interface WriteResult {
   mtime: number;
   etag: string;
 }
+export type JobState = "queued" | "running" | "done" | "failed" | "canceled";
+export interface JobView {
+  id: string;
+  kind: string;
+  title: string;
+  state: JobState;
+  progress: { bytes: number; totalBytes: number; entries: number; totalEntries: number; current: string };
+  error?: string;
+  result?: { path?: string; size?: number; files?: number; skipped?: { symlinks: number; hardlinks: number; special: number } };
+  createdAt: number;
+}
+export interface ArchiveEntry {
+  name: string;
+  type: "file" | "dir" | "symlink" | "other";
+  size: number;
+  date: string;
+  link?: string;
+}
+export type ArchiveFormat = "zip" | "tar.gz" | "tar.zst" | "7z";
+export const ARCHIVE_EXT = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4", ".tgz", ".tbz2", ".txz", ".tzst", ".tar", ".zip", ".7z", ".jar", ".war", ".whl", ".rar"];
+export const isArchive = (name: string) => ARCHIVE_EXT.some((e) => name.toLowerCase().endsWith(e));
+/** Streamed zip of several direct children of `dir` (files and folders). */
+export const zipUrl = (node: string, dir: string, names: string[]) =>
+  `${nodeBase(node)}/api/fs/zip?dir=${enc(dir)}${names.map((n) => `&name=${enc(n)}`).join("")}`;
+
+const postJob = (node: string, kind: string, body: unknown) =>
+  fetch(`${nodeBase(node)}/api/jobs/${kind}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then((r) => j<JobView>(r))
+    .then((v) => {
+      jobStarted(node);
+      return v;
+    });
+
+const jobListeners = new Set<(node: string) => void>();
+/** The jobs tray subscribes to learn that a job was just started on a node. */
+export const onJobStarted = (fn: (node: string) => void) => {
+  jobListeners.add(fn);
+  return () => void jobListeners.delete(fn);
+};
+const jobStarted = (node: string) => jobListeners.forEach((f) => f(node));
 
 export const api = {
   readText: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/text?path=${enc(path)}`).then((r) => j<TextFile>(r)),
@@ -95,6 +139,17 @@ export const api = {
   copy: (node: string, from: string[], toDir: string) => post(node, "copy", { from, toDir }),
   trash: (node: string, paths: string[]) => post(node, "trash", { paths }),
   remove: (node: string, paths: string[]) => post(node, "delete", { paths }),
+  startCompress: (node: string, dir: string, names: string[], format: ArchiveFormat, name: string) =>
+    postJob(node, "compress", { dir, names, format, name }),
+  startExtract: (node: string, path: string, destDir: string, subfolder: boolean) =>
+    postJob(node, "extract", { path, destDir, subfolder }),
+  jobs: (node: string) => fetch(`${nodeBase(node)}/api/jobs`).then((r) => j<{ jobs: JobView[] }>(r)),
+  cancelJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}/cancel`, { method: "POST" }).then((r) => j<JobView>(r)),
+  dismissJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}`, { method: "DELETE" }).then((r) => j<unknown>(r)),
+  archiveList: (node: string, path: string) =>
+    fetch(`${nodeBase(node)}/api/archive/list?path=${enc(path)}`).then((r) =>
+      j<{ entries: ArchiveEntry[]; truncated: boolean; bytes: number }>(r),
+    ),
   transfer: (src: { node: string; path: string }, dst: { node: string; dir: string }, op: "copy" | "move") =>
     fetch("/api/transfer", {
       method: "POST",
