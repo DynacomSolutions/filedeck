@@ -203,3 +203,16 @@ button.primary{border-color:var(--accent);color:var(--accent)}
 .props>div{display:grid;grid-template-columns:6.5rem 1fr;gap:.6rem;font-size:.84rem}
 .props dt{font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding-top:.15rem}
 .props dd{margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+
+/* keyboard */
+.fp:focus{outline:none}
+.ft tr.cur{box-shadow:inset 2px 0 0 var(--accent)}
+.fp:not(:focus-within) .ft tr.cur{box-shadow:none}
+.fp-filter{padding:.4rem .65rem;border-bottom:1px solid var(--border)}
+.fp-filter input{width:100%}
+.kbd-help{outline:none;max-height:calc(100dvh - 48px);overflow:auto}
+.kbd-help h4{margin:.2rem 0 .4rem;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.kbd-help dl{margin:0;display:flex;flex-direction:column;gap:.3rem}
+.kbd-help dl>div{display:grid;grid-template-columns:minmax(9rem,12rem) 1fr;gap:.6rem;font-size:.82rem;align-items:baseline}
+.kbd-help dt{white-space:nowrap}.kbd-help dd{margin:0;color:var(--fg-soft)}
+kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var(--border-strong);border-bottom-width:2px;border-radius:var(--radius-sm);padding:.05rem .4rem}

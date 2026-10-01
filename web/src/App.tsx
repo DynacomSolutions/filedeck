@@ -9,6 +9,7 @@ import type { FileRef } from "./EditorViews";
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
 import { ThemeMenu } from "./ThemeMenu";
+import { ShortcutHelp } from "./Shortcuts";
 import { FolderDiff, type FolderDiffInit } from "./FolderDiff";
 import type { Loc } from "./api";
 
@@ -162,6 +163,17 @@ export function App() {
   const [tree, setTree] = useState<Tree | null>(initial?.tree ?? null);
   const [activeId, setActiveId] = useState(initial?.active ?? "");
   const [status, setStatus] = useState("");
+  const [help, setHelp] = useState(false);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
+      if ((e.target as HTMLElement | null)?.closest("input,textarea,select,[contenteditable=true],.monaco-editor")) return;
+      e.preventDefault();
+      setHelp(true);
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
   const [diff, setDiff] = useState<{ left: FileRef; right: FileRef } | null>(initial?.diff ?? null);
   const [diffMark, setDiffMark] = useState<FileRef | null>(null);
   const onDiff = (files: FileRef[]) => {
@@ -232,8 +244,19 @@ export function App() {
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
 
+  const switchPanel = (from: string, dir: 1 | -1) => {
+    if (!tree) return;
+    const all = leaves(tree);
+    const i = all.findIndex((l) => l.id === from);
+    const to = all[(i + dir + all.length) % all.length];
+    if (!to) return;
+    setActiveId(to.id);
+    setTimeout(() => document.querySelector<HTMLElement>(`[data-fp="${to.id}"]`)?.focus(), 0);
+  };
   const render = (t: Tree, total: number): React.ReactNode => {
     if (t.kind === "leaf") {
+      const all = leaves(tree!);
+      const nx = all.length > 1 ? all[(all.findIndex((l) => l.id === t.id) + 1) % all.length] : undefined;
       return (
         <FilePanel
           leaf={t}
@@ -247,6 +270,9 @@ export function App() {
           diffMarked={diffMark !== null}
           onFolderDiff={onFolderDiff}
           folderMarked={folderMark !== null}
+          next={nx ? { node: nx.node, path: nx.path } : null}
+          onSwitch={(d) => switchPanel(t.id, d)}
+          onHelp={() => setHelp(true)}
           peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel }))}
           onStatus={setStatus}
         />
@@ -293,6 +319,7 @@ export function App() {
                 Folder mark: {folderMark.node}:{folderMark.path} ×
               </button>
             )}
+            <button className="btn btn--ghost btn--sm" onClick={() => setHelp(true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
             <a className="btn btn--ghost btn--sm" href="https://worktrees.example.invalid/">Worktrees</a>
             <a className="btn btn--ghost btn--sm" href="https://gh.example.invalid/">Runners</a>
             <ThemeMenu />
@@ -303,6 +330,7 @@ export function App() {
         <Sidebar nodes={nodes} onOpen={openInActive} footer={<JobsTray nodes={nodes} />} />
         <div className="main">{tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}</div>
       </div>
+      {help && <ShortcutHelp onClose={() => setHelp(false)} />}
       <Suspense fallback={<div className="ed"><div className="pad muted">Loading editor...</div></div>}>
         {folderDiff && nodes.length > 0 && (
           <FolderDiff

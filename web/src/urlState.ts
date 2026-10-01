@@ -25,6 +25,8 @@ export interface Leaf {
   closed?: string;
   /** file open in the panel's editor */
   edit?: FileRef;
+  /** name filter (Ctrl+F) */
+  q?: string;
 }
 export type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[]; sizes?: number[] };
 
@@ -66,7 +68,7 @@ export interface AppState {
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string] };
+type WLeaf = { i: string; n: string; p: string; s?: string; o?: string; h?: 1; v?: [string, number]; c?: string; e?: [string, string]; q?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
 interface Wire {
@@ -86,6 +88,7 @@ const toWire = (t: Tree): WTree => {
   if (t.pv) w.v = [t.pv.dock, Math.round(t.pv.size * 10) / 10];
   if (t.closed) w.c = t.closed;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
+  if (t.q) w.q = t.q;
   return w;
 };
 
@@ -133,6 +136,7 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (Array.isArray(o.v) && DOCKS.includes(o.v[0] as string) && typeof o.v[1] === "number" && o.v[1] >= 10 && o.v[1] <= 90) leaf.pv = { dock: o.v[0] as Dock, size: o.v[1] };
   if (str(o.c)) leaf.closed = o.c;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
+  if (str(o.q) && o.q) leaf.q = o.q;
   return leaf;
 };
 

@@ -38,6 +38,12 @@ interface Props {
   folderMarked: boolean;
   /** the other panels, for "diff with..." / "compare folders with..." menu entries */
   peers: { id: string; node: string; path: string; sel?: string }[];
+  /** the panel F5/F6 copy and move to (the next panel in layout order), if any */
+  next: { node: string; path: string } | null;
+  /** Tab / Shift+Tab: move focus to the next / previous panel */
+  onSwitch: (dir: 1 | -1) => void;
+  /** `?` opens the shortcut overlay */
+  onHelp: () => void;
   onStatus: (msg: string) => void;
 }
 
@@ -48,7 +54,7 @@ type Modal =
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, peers, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, peers, next, onSwitch, onHelp, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
@@ -65,6 +71,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     onPatch({ sort: n.key === "name" && n.asc ? undefined : n });
   };
   const [anchor, setAnchor] = useState<string | null>(null);
+  const [cursor, setCursor] = useState<string | null>(leaf.sel ?? null);
+  const filter = leaf.q ?? "";
+  const [filterOpen, setFilterOpen] = useState(!!leaf.q);
+  const filterInput = useRef<HTMLInputElement>(null);
+  const secRef = useRef<HTMLElement>(null);
   const [over, setOver] = useState<string | null>(null); // "." = panel itself, else folder path
   const [renaming, setRenaming] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"compress" | "extract" | null>(null);
@@ -118,6 +129,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     return f;
   }, [entries, sort]);
 
+  const visible = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return q ? sorted.filter((e) => e.name.toLowerCase().includes(q)) : sorted;
+  }, [sorted, filter]);
+
   const only = sel.size === 1 ? entries.find((e) => e.path === [...sel][0]) : undefined;
   const previewEntry = only && only.type !== "dir" && !only.linkDir && closedFor !== only.path ? only : null;
   useEffect(() => {
@@ -143,10 +159,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
 
   const click = (e: React.MouseEvent, en: Entry) => {
     onFocus();
+    setCursor(en.path);
     if (e.shiftKey && anchor) {
-      const a = sorted.findIndex((x) => x.path === anchor);
-      const b = sorted.findIndex((x) => x.path === en.path);
-      setSel(new Set(sorted.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.path)));
+      const a = visible.findIndex((x) => x.path === anchor);
+      const b = visible.findIndex((x) => x.path === en.path);
+      setSel(new Set(visible.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.path)));
     } else if (e.ctrlKey || e.metaKey) {
       setSel((s) => {
         const n = new Set(s);
@@ -343,12 +360,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
             <tr>{th("name", "Name")}{th("size", "Size")}{th("mtime", "Modified")}</tr>
           </thead>
           <tbody>
-            {sorted.map((en) => {
+            {visible.map((en) => {
               const isDir = en.type === "dir" || en.linkDir;
               return (
                 <tr
                   key={en.path}
-                  className={(sel.has(en.path) ? "sel " : "") + (over === en.path ? "drop" : "")}
+                  data-path={en.path}
+                  className={(sel.has(en.path) ? "sel " : "") + (cursor === en.path ? "cur " : "") + (over === en.path ? "drop" : "")}
                   draggable
                   onClick={(e) => click(e, en)}
                   onDoubleClick={() => open(en)}
@@ -398,15 +416,122 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           </tbody>
         </table>
         {!entries.length && !err && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
+        {entries.length > 0 && !visible.length && <div className="muted pad">No entries match the filter.</div>}
       </div>
   );
+  // ---- keyboard ----
+  const selectOnly = (p: string) => {
+    setSel(new Set([p]));
+    setAnchor(p);
+    setCursor(p);
+  };
+  useEffect(() => {
+    if (!cursor) return;
+    secRef.current?.querySelector(`tr[data-path="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [cursor]);
+  const toOther = (op: "copy" | "move") => {
+    if (!next) return onStatus("Open a second panel first (split button)");
+    if (!selEntries.length) return;
+    const paths = selEntries.map((x) => x.path);
+    const label = op === "copy" ? "Copy" : "Move";
+    void run(`${label} to ${next.node}:${next.path}`, async () => {
+      if (next.node === node) {
+        if (op === "copy") await api.copy(node, paths, next.path);
+        else await api.move(node, paths, next.path);
+      } else {
+        for (const p of paths) await api.transfer({ node, path: p }, { node: next.node, dir: next.path }, op);
+      }
+    });
+  };
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (menu || modal || dialog) return;
+    const t = e.target as HTMLElement;
+    if (t.closest("input,textarea,select,[contenteditable=true],.monaco-editor")) return;
+    if (t.closest("button") && (e.key === "Enter" || e.key === " ")) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key;
+    const hasText = !!window.getSelection()?.toString();
+    const idx = cursor ? visible.findIndex((x) => x.path === cursor) : -1;
+    const moveTo = (i: number) => {
+      const en = visible[Math.max(0, Math.min(visible.length - 1, i))];
+      if (!en) return;
+      setCursor(en.path);
+      if (e.shiftKey) {
+        const a = visible.findIndex((x) => x.path === (anchor ?? en.path));
+        const b = visible.findIndex((x) => x.path === en.path);
+        setSel(new Set(visible.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.path)));
+        if (!anchor) setAnchor(en.path);
+      } else selectOnly(en.path);
+    };
+    const handled = (() => {
+      if (key === "?" && !mod) return onHelp(), true;
+      if (key === "Tab" && !mod && !e.altKey) return onSwitch(e.shiftKey ? -1 : 1), true;
+      if (mod && key.toLowerCase() === "f") {
+        if (filterInput.current) {
+          filterInput.current.focus();
+          filterInput.current.select();
+        } else setFilterOpen(true); // the input autofocuses when it mounts
+        return true;
+      }
+      if (mod && key.toLowerCase() === "a") return !hasText && (setSel(new Set(visible.map((x) => x.path))), true);
+      if (mod && key.toLowerCase() === "c") return !hasText && selEntries.length > 0 && (setClipboard("copy", selEntries), true);
+      if (mod && key.toLowerCase() === "x") return selEntries.length > 0 && (setClipboard("cut", selEntries), true);
+      if (mod && key.toLowerCase() === "v") return !!getClip() && (void paste(path), true);
+      if (key === "ArrowDown") return moveTo(idx + 1), true;
+      if (key === "ArrowUp") return moveTo(idx < 0 ? 0 : idx - 1), true;
+      if (key === "Home") return moveTo(0), true;
+      if (key === "End") return moveTo(visible.length - 1), true;
+      if (key === "PageDown") return moveTo(idx + 10), true;
+      if (key === "PageUp") return moveTo(idx - 10), true;
+      if (key === "Enter" && !mod) {
+        const en = visible[idx];
+        return !!en && (open(en), true);
+      }
+      if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return path !== "/" && (onNavigate(node, parent(path)), true);
+      if (key === "F2") return selEntries.length === 1 && (setRenaming(selEntries[0]!.path), true);
+      if (key === "F4") return selEntries.length === 1 && canEdit(selEntries[0]!) && (setEditing({ node, path: selEntries[0]!.path }), true);
+      if (key === "F5") return toOther("copy"), true;
+      if (key === "F6") return toOther("move"), true;
+      if (key === "F7") return setModal({ k: "new", dir: path, type: "folder" }), true;
+      if (key === "Delete") {
+        if (!selEntries.length) return false;
+        if (e.shiftKey) setModal({ k: "del", paths: selected() });
+        else void trashPaths(selected());
+        return true;
+      }
+      if (key === "Escape") {
+        if (filter || filterOpen) return onPatch({ q: undefined }), setFilterOpen(false), true;
+        return sel.size > 0 && (setSel(new Set()), true);
+      }
+      if (key === "ContextMenu" || (e.shiftKey && key === "F10")) {
+        const row = cursor ? secRef.current?.querySelector(`tr[data-path="${CSS.escape(cursor)}"]`) : null;
+        const r = (row ?? secRef.current?.querySelector(".fp-scroll"))?.getBoundingClientRect();
+        const x = (r?.left ?? 100) + 48;
+        const y = (row ? r!.bottom : (r?.top ?? 100) + 24);
+        setMenu({ x, y, items: selEntries.length ? rowItems(selEntries) : folderItems(path, true) });
+        return true;
+      }
+      return false;
+    })();
+    if (handled) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
   const horizontal = dock === "left" || dock === "right";
   const first = dock === "left" || dock === "top";
 
   return (
     <section
+      ref={secRef}
+      data-fp={leaf.id}
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
       className={"fp" + (active ? " active" : "") + (over === "." ? " drop" : "")}
-      onMouseDown={onFocus}
+      onMouseDown={(e) => {
+        onFocus();
+        if (!(e.target as Element).closest("input,button,select,textarea,a,[role=menu]")) secRef.current?.focus({ preventScroll: true });
+      }}
       onDragOver={(e) => dragOver(e, ".")}
       onDragLeave={() => setOver(null)}
       onDrop={(e) => drop(e, path)}
@@ -459,6 +584,32 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           }} />
         </div>
       </header>
+      {filterOpen && (
+        <div className="fp-filter">
+          <input
+            ref={filterInput}
+            autoFocus
+            type="search"
+            placeholder="Filter this folder (Esc to clear)"
+            aria-label="Filter this folder"
+            value={filter}
+            onChange={(e) => onPatch({ q: e.target.value || undefined })}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" || (e.key === "Enter" && !filter)) {
+                e.stopPropagation();
+                onPatch({ q: undefined });
+                setFilterOpen(false);
+                secRef.current?.focus();
+              } else if (e.key === "Enter" || e.key === "ArrowDown") {
+                e.preventDefault();
+                e.stopPropagation();
+                secRef.current?.focus();
+                if (visible[0]) selectOnly(visible[0].path);
+              }
+            }}
+          />
+        </div>
+      )}
       {err && <div className="fp-err">{err}</div>}
       {pane ? (
         <Group key={dock} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
