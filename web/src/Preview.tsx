@@ -1,13 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
+import { MarkdownView } from "./MarkdownView";
 import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
 
 const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
 const VID = VIDEO_EXT;
 const AUD = AUDIO_EXT;
-const TXT = ["txt", "md", "log", "json", "yaml", "yml", "ts", "tsx", "js", "css", "html", "xml", "csv", "sh", "py", "toml", "ini", "conf", "go", "rs"];
+const TXT = ["txt", "log", "json", "yaml", "yml", "ts", "tsx", "js", "css", "html", "xml", "csv", "sh", "py", "toml", "ini", "conf", "go", "rs"];
 
 function Text({ url }: { url: string }) {
   const [t, setT] = useState("loading...");
@@ -49,6 +50,8 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
           <MediaPlayer node={node} path={entry.path} name={entry.name} kind="audio" />
         ) : e === "pdf" ? (
           <iframe src={url} title={entry.name} sandbox="allow-same-origin" />
+        ) : e === "md" || e === "markdown" ? (
+          <MarkdownView node={node} path={entry.path} />
         ) : TXT.includes(e) || entry.size === 0 ? (
           <Text url={url} />
         ) : (
