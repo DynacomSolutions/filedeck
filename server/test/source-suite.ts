@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { createAgent } from "../src/agent.ts";
 import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
+import { hasFfmpeg } from "./ffmpeg.ts";
 
 /** What a backend fixture hands the shared suite. Sources must be named `nas` (good credentials) and `badnas` (wrong ones). */
 export interface Fixture {
@@ -252,7 +253,7 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
     assert.equal((await fetch(S("/api/fs/search?path=/../..&q=a"))).status, 400);
   });
 
-  test(`${type}: image thumbnails come through the hub; videos and non-images have none`, async () => {
+  test(`${type}: image thumbnails come through the hub; videos and non-images have none`, { skip: !hasFfmpeg }, async () => {
     const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64");
     await put(S("/api/fs/upload?dir=/&name=pic.png"), png);
     await put(S("/api/fs/upload?dir=/&name=clip.mp4"), "not really a video");

@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { Thumbnailer, thumbKind } from "../src/thumbs.ts";
+import { hasFfmpeg } from "./ffmpeg.ts";
 
 let tmp: string, outside: string, cache: string, agent: ReturnType<typeof createAgent>;
 const ff = (...a: string[]) => execFileSync("ffmpeg", ["-loglevel", "error", "-y", ...a]);
@@ -28,6 +29,7 @@ function jpegSize(b: Buffer) {
 const get = (p: string) => agent.request("/api/fs/thumb?path=" + encodeURIComponent(p));
 
 before(() => {
+  if (!hasFfmpeg) return;
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-th-")));
   outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-th-out-")));
   cache = path.join(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-th-cache-"))), "c");
@@ -45,6 +47,7 @@ before(() => {
   agent = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_THUMB_DIR: cache } as never));
 });
 after(() => {
+  if (!hasFfmpeg) return;
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
   fs.rmSync(path.dirname(cache), { recursive: true, force: true });
@@ -58,7 +61,7 @@ test("thumbKind by extension", () => {
   assert.equal(thumbKind("svg"), null);
 });
 
-test("image thumbnail: JPEG, scaled down to 256, never upscaled, cached outside the data root", async () => {
+test("image thumbnail: JPEG, scaled down to 256, never upscaled, cached outside the data root", { skip: !hasFfmpeg }, async () => {
   const r = await get("/wide.png");
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("content-type"), "image/jpeg");
@@ -74,7 +77,7 @@ test("image thumbnail: JPEG, scaled down to 256, never upscaled, cached outside 
   assert.equal(fs.readdirSync(cache, { recursive: true }).filter((f) => String(f).endsWith(".jpg")).length, 2, "second request is a cache hit");
 });
 
-test("video poster: moov at the end, and a clip shorter than the seek offset", async () => {
+test("video poster: moov at the end, and a clip shorter than the seek offset", { skip: !hasFfmpeg }, async () => {
   for (const f of ["/late-moov.mp4", "/short.mp4"]) {
     const r = await get(f);
     assert.equal(r.status, 200, f);
@@ -83,7 +86,7 @@ test("video poster: moov at the end, and a clip shorter than the seek offset", a
   }
 });
 
-test("refusals: non-media, unsupported type, oversize, traversal, symlink escape, playlists cannot read other files", async () => {
+test("refusals: non-media, unsupported type, oversize, traversal, symlink escape, playlists cannot read other files", { skip: !hasFfmpeg }, async () => {
   assert.equal((await get("/notimage.png")).status, 415);
   assert.equal((await get("/notimage.png")).status, 415); // negative cache
   assert.equal((await get("/doc.txt")).status, 415);
@@ -97,7 +100,7 @@ test("refusals: non-media, unsupported type, oversize, traversal, symlink escape
   assert.equal(evil.status, 415);
 });
 
-test("bounded cache: least recently used entries are evicted", async () => {
+test("bounded cache: least recently used entries are evicted", { skip: !hasFfmpeg }, async () => {
   const dir = path.join(path.dirname(cache), "lru");
   const t = new Thumbnailer({ dir, maxBytes: 1, concurrency: 2, queue: 8, timeoutMs: 10000, ffmpeg: "ffmpeg" });
   const open = async () => ({ input: { fd: fs.openSync(path.join(tmp, "wide.png"), "r") }, close: () => undefined });
@@ -115,7 +118,7 @@ test("bounded cache: least recently used entries are evicted", async () => {
   assert.ok(left.length >= 1 && left.length < 5);
 });
 
-test("queue is bounded: beyond the waiting limit the answer is 429", async () => {
+test("queue is bounded: beyond the waiting limit the answer is 429", { skip: !hasFfmpeg }, async () => {
   const t = new Thumbnailer({ dir: path.join(path.dirname(cache), "q"), maxBytes: 1 << 26, concurrency: 1, queue: 1, timeoutMs: 10000, ffmpeg: "ffmpeg" });
   const open = async () => ({ input: { fd: fs.openSync(path.join(tmp, "wide.png"), "r") }, close: () => undefined });
   const res = await Promise.allSettled(["1", "2", "3"].map((id) => t.get(id, "image", open)));
@@ -123,13 +126,13 @@ test("queue is bounded: beyond the waiting limit the answer is 429", async () =>
   assert.ok(res.filter((r) => r.status === "fulfilled").length >= 2);
 });
 
-test("missing ffmpeg gives a clean 502, not a crash", async () => {
+test("missing ffmpeg gives a clean 502, not a crash", { skip: !hasFfmpeg }, async () => {
   const a = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_THUMB_DIR: cache + "-x", FILEDECK_FFMPEG: "/nonexistent/ffmpeg" } as never));
   const r = await a.request("/api/fs/thumb?path=/wide.png");
   assert.equal(r.status, 502);
 });
 
-test("an unwritable cache dir still serves thumbnails", async () => {
+test("an unwritable cache dir still serves thumbnails", { skip: !hasFfmpeg }, async () => {
   const a = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_THUMB_DIR: path.join(tmp, "doc.txt", "thumbs") /* a file in the way: ENOTDIR */ } as never));
   const r = await a.request("/api/fs/thumb?path=/small.jpg");
   assert.equal(r.status, 200);
