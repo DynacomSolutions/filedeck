@@ -154,7 +154,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   }, [sorted, filter]);
 
   const only = sel.size === 1 ? entries.find((e) => e.path === [...sel][0]) : undefined;
-  const previewEntry = only && only.type !== "dir" && !only.linkDir && closedFor !== only.path ? only : null;
+  const previewEntry = only && only.type !== "dir" && !only.linkDir && !only.broken && closedFor !== only.path ? only : null; // a broken link has nothing to preview
   useEffect(() => {
     if (closedFor && closedFor !== only?.path) setClosedFor(null);
   }, [only?.path, closedFor]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -512,8 +512,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
         role="group"
         aria-label={`Files in ${path} on ${node}. Arrow keys select, Enter opens.`}
         onFocus={(e) => {
-          // Tabbing into the list selects the first entry so the arrow keys have somewhere to start.
-          if (e.target === e.currentTarget && sel.size === 0 && visible[0]) selectOnly(visible[0].path);
+          // Tabbing into the list selects the first entry so the arrow keys have somewhere to start. A mouse click
+          // also focuses the list but must not: selecting (and scrolling to) the first row between mousedown and
+          // mouseup made clicks on rows further down land elsewhere. :focus-visible is true for keyboard focus only.
+          if (e.target === e.currentTarget && sel.size === 0 && visible[0] && e.currentTarget.matches(":focus-visible")) selectOnly(visible[0].path);
         }}
         onClick={(e) => e.target === e.currentTarget && setSel(new Set())}
         onContextMenu={(e) => {
