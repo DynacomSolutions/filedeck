@@ -21,6 +21,8 @@ export interface Mount {
   netKind?: string;
   /** network mount that did not answer in time */
   unreachable?: boolean;
+  /** the agent refuses changes here */
+  readOnly?: boolean;
 }
 export interface NodeInfo {
   name: string;

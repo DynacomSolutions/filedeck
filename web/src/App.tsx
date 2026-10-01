@@ -148,10 +148,11 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
                 <li key={m.mountpoint}>
                   <button
                     onClick={() => onOpen(n.name, m.mountpoint)}
-                    title={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}`}
+                    title={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}${m.readOnly ? " - read-only" : ""}`}
                   >
                     {m.mountpoint}
                     {m.network && <span className={"net-badge" + (m.unreachable ? " bad" : "")}>{m.netKind ?? "network"}</span>}
+                    {m.readOnly && <span className="net-badge">read-only</span>}
                     <span className="bar"><i style={{ width: `${m.total ? Math.round((m.used / m.total) * 100) : 0}%` }} /></span>
                   </button>
                 </li>

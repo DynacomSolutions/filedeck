@@ -45,6 +45,12 @@ spec:
               value: {{ $.Values.port | quote }}
             - name: FILEDECK_MAX_UPLOAD
               value: {{ $.Values.agent.maxUpload | quote }}
+            {{- $ro := default $.Values.agent.readOnlyPaths .readOnlyPaths }}
+            {{- if $ro }}
+            # Virtual paths this agent refuses to change (read-only volumes).
+            - name: FILEDECK_READONLY
+              value: {{ join "," $ro | quote }}
+            {{- end }}
             # Thumbnail cache: a bounded emptyDir, never inside the browsed data.
             - name: FILEDECK_THUMB_DIR
               value: /var/cache/filedeck

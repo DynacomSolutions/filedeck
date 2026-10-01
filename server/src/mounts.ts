@@ -14,6 +14,8 @@ export interface Mount {
   netKind?: string;
   /** a network mount that did not answer statfs in time (stale or unreachable); sizes are 0 */
   unreachable?: boolean;
+  /** the agent refuses changes under this mount point (FILEDECK_READONLY) */
+  readOnly?: boolean;
 }
 
 const NET_FS: Record<string, string> = {

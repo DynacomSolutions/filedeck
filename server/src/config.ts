@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { parseReadOnly } from "./readonly.ts";
 import { parseSources } from "./sources/registry.ts";
 import type { SourceConfig } from "./sources/types.ts";
 
@@ -29,6 +30,8 @@ export interface Config {
   thumbCacheMax: number;
   thumbConcurrency: number;
   ffmpeg: string;
+  /** agent: virtual path prefixes that are read-only */
+  readOnly: string[];
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
@@ -73,6 +76,7 @@ export function loadConfig(env = process.env): Config {
     thumbCacheMax: Number(env.FILEDECK_THUMB_CACHE_MAX ?? 256 * 1024 * 1024),
     thumbConcurrency: Number(env.FILEDECK_THUMB_CONCURRENCY ?? 2),
     ffmpeg: env.FILEDECK_FFMPEG ?? "ffmpeg",
+    readOnly: parseReadOnly(env.FILEDECK_READONLY),
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",

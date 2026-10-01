@@ -14,6 +14,7 @@ import { registerPropsRoutes } from "./props.ts";
 import { registerSearchRoutes } from "./search.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
 import { audit, type AuditSink } from "./audit.ts";
+import { readOnlyGuard, isReadOnly } from "./readonly.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -29,6 +30,7 @@ function dispo(name: string) {
 export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
+  app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   const watches = new Watches();
   const root = cfg.root;
 
@@ -39,8 +41,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   });
 
   app.get("/healthz", (c) => c.text("ok"));
-  app.get("/api/info", (c) => c.json({ node: cfg.node, root: cfg.root, watches: watches.size }));
-  app.get("/api/mounts", async (c) => c.json({ mounts: await listMounts(root, cfg.procMounts) }));
+  app.get("/api/info", (c) => c.json({ node: cfg.node, root: cfg.root, watches: watches.size, readOnly: cfg.readOnly }));
+  app.get("/api/mounts", async (c) => c.json({ mounts: (await listMounts(root, cfg.procMounts)).map((m) => (isReadOnly(cfg.readOnly, m.mountpoint) ? { ...m, readOnly: true } : m)) }));
 
   app.get("/api/fs/list", async (c) =>
     c.json(await ops.list(root, c.req.query("path") ?? "/", c.req.query("hidden") === "1")),
