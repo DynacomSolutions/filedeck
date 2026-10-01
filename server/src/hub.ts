@@ -9,6 +9,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
+import { withAgentToken } from "./agent-auth.ts";
 import { audit, type AuditSink } from "./audit.ts";
 
 /** Where a request for a node or a network source goes. Agents are HTTP; sources run inside the hub. */
@@ -31,7 +32,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const app = new Hono() as Hono & { close(): Promise<void> };
   app.use("*", audit("hub", auditSink));
   app.close = async () => void (await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined))));
-  const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => fetch(n.url + rest, init) }]));
+  const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => fetch(n.url + rest, withAgentToken(init, cfg.agentToken)) }]));
   const sources = buildSources(cfg);
   for (const [name, backend] of Object.entries(injected ?? {})) {
     sources.set(name, { config: { name, type: backend.type, host: "test", root: "/" }, backend });
@@ -72,7 +73,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const nodes = await Promise.all(
       cfg.nodes.map(async (n) => {
         try {
-          const r = await fetch(`${n.url}/healthz`, { signal: AbortSignal.timeout(2000) });
+          const r = await fetch(`${n.url}/healthz`, { signal: AbortSignal.timeout(2000) }); // open probe: no token needed
           return { name: n.name, online: r.ok };
         } catch {
           return { name: n.name, online: false };

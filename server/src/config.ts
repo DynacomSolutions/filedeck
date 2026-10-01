@@ -32,6 +32,8 @@ export interface Config {
   ffmpeg: string;
   /** agent: virtual path prefixes that are read-only */
   readOnly: string[];
+  /** shared hub-to-agent secret; empty = agents are unauthenticated (NetworkPolicy only) */
+  agentToken: string | undefined;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
@@ -77,6 +79,7 @@ export function loadConfig(env = process.env): Config {
     thumbConcurrency: Number(env.FILEDECK_THUMB_CONCURRENCY ?? 2),
     ffmpeg: env.FILEDECK_FFMPEG ?? "ffmpeg",
     readOnly: parseReadOnly(env.FILEDECK_READONLY),
+    agentToken: env.FILEDECK_AGENT_TOKEN || undefined,
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",

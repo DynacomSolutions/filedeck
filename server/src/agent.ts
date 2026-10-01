@@ -13,6 +13,7 @@ import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
 import { registerSearchRoutes } from "./search.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
+import { agentAuth } from "./agent-auth.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { readOnlyGuard, isReadOnly } from "./readonly.ts";
 import type { Config } from "./config.ts";
@@ -29,6 +30,7 @@ function dispo(name: string) {
 
 export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
+  app.use("*", agentAuth(cfg.agentToken));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   const watches = new Watches();

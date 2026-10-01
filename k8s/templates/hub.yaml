@@ -39,6 +39,14 @@ spec:
               value: hub
             - name: PORT
               value: {{ .Values.port | quote }}
+            {{- if .Values.agentToken.secretName }}
+            # Shared hub-to-agent secret (Secret created out of band, never in Git).
+            - name: FILEDECK_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentToken.secretName }}
+                  key: {{ .Values.agentToken.key }}
+            {{- end }}
             - name: NODES
               value: {{ range $i, $n := .Values.nodes }}{{ if $i }},{{ end }}{{ $n.name }}=http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}
             {{- if .Values.sources }}
