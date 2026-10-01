@@ -66,6 +66,19 @@ export function listFolder(idx: CIndex, rel: string, hide: ReadonlySet<DiffStatu
   return list.filter(keep);
 }
 
+/** The visible rows with their nesting depth: the folder's rows plus, under every expanded folder, its own rows. */
+export function flatten(idx: CIndex, rel: string, hide: ReadonlySet<DiffStatus>, expanded: ReadonlySet<string>): { n: CNode; depth: number }[] {
+  const out: { n: CNode; depth: number }[] = [];
+  const walk = (at: string, depth: number) => {
+    for (const n of listFolder(idx, at, hide)) {
+      out.push({ n, depth });
+      if (n.isDir && expanded.has(n.row.p)) walk(n.row.p, depth + 1);
+    }
+  };
+  walk(rel, 0);
+  return out;
+}
+
 /** Every path under (and including) a row, so selecting a folder selects what is inside it. */
 export function withDescendants(n: CNode, out: string[] = []): string[] {
   out.push(n.row.p);

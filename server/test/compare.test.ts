@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildIndex, joinRoot, listFolder, relUnder, rightRel, sharedRel, withDescendants } from "../../web/src/compareModel.ts";
+import { buildIndex, flatten, joinRoot, listFolder, relUnder, rightRel, sharedRel, withDescendants } from "../../web/src/compareModel.ts";
 import { decodeState, encodeState, DEFAULT_UI, type Tree } from "../../web/src/urlState.ts";
 
 const F = (s = 1, m = 0) => ({ t: "file" as const, s, m });
@@ -19,6 +19,15 @@ test("folders list first, then names; one folder at a time", () => {
   const idx = buildIndex(rows);
   assert.deepEqual(listFolder(idx, "", new Set()).map((n) => n.row.p), ["dir", "docs", "a.txt", "only-r.txt"]);
   assert.deepEqual(listFolder(idx, "dir", new Set()).map((n) => n.row.p), ["dir/new.txt", "dir/same.txt"]);
+});
+
+test("expanding a folder lists its rows inline, nested one level deeper, for both sides alike", () => {
+  const idx = buildIndex(rows);
+  const flat = flatten(idx, "", new Set(), new Set(["dir"]));
+  assert.deepEqual(flat.map((f) => [f.n.row.p, f.depth]), [["dir", 0], ["dir/new.txt", 1], ["dir/same.txt", 1], ["docs", 0], ["a.txt", 0], ["only-r.txt", 0]]);
+  assert.deepEqual(flatten(idx, "", new Set(), new Set()).map((f) => f.n.row.p), ["dir", "docs", "a.txt", "only-r.txt"]);
+  // a filter still applies inside an expanded folder
+  assert.deepEqual(flatten(idx, "", new Set(["identical"] as const), new Set(["dir"])).map((f) => f.n.row.p), ["dir", "dir/new.txt", "a.txt", "only-r.txt"]);
 });
 
 test("status filters keep a folder when something below it still shows", () => {

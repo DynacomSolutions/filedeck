@@ -76,7 +76,7 @@ export const DEFAULT_UI: UiOpts = {
   include: "",
   exclude: "",
   depth: 32,
-  maxEntries: 100000,
+  maxEntries: 250000,
 };
 export const FOLDER_MODES: DiffMode[] = ["name", "size", "mtime", "quick", "content"];
 /** An open folder diff: both folders, the options and the preset they came from. */

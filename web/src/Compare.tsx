@@ -1,13 +1,14 @@
 // In-place folder compare (Total Commander / WinMerge style): two open panels show the two
 // sides of one diff result, rows aligned by relative path, scrolling and navigation synced.
 // The diff itself is the existing hub job (/api/diff/jobs); sync actions are one hub op job.
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CircleAlert, Equal, EqualNot, X, type LucideIcon } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronRight, CircleAlert, Equal, EqualNot, TriangleAlert, type LucideIcon } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffMode, type DiffResult, type JobView, type Loc, type OpJob, type SyncStepSpec } from "./api";
-import { buildIndex, joinRoot, listFolder, rightRel, relUnder, sharedRel, withDescendants, type CNode } from "./compareModel";
+import { buildIndex, flatten, joinRoot, rightRel, relUnder, sharedRel, withDescendants, type CNode } from "./compareModel";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
+import { wheelX } from "./scrollx";
 import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DEFAULT_UI, DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
 
@@ -62,6 +63,8 @@ const ACTION_LABEL: Record<SyncAction, string> = {
   "delete-right": "Delete from right",
 };
 export const ROW_H = 26;
+/** Height of the column header row inside each scroller (same on both sides, so row 0 lines up). */
+export const HEAD_H = 28;
 
 interface Exec {
   action: SyncAction;
@@ -85,6 +88,10 @@ export interface CompareCtl {
   running: boolean;
   err: string;
   rows: CNode[];
+  /** nesting depth of a visible row (expanded sub-folders), same list on both sides */
+  depthOf: (p: string) => number;
+  expanded: ReadonlySet<string>;
+  toggleOpen: (p: string) => void;
   hide: ReadonlySet<DiffStatus>;
   selected: ReadonlySet<string>;
   cursor: string | null;
@@ -142,7 +149,16 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   const idx = useMemo(() => (result ? buildIndex(result.rows) : null), [result]);
   const hide = useMemo(() => new Set<DiffStatus>(st?.hide ?? []), [st?.hide]);
   const rel = st?.rel ?? "";
-  const rows = useMemo(() => (idx ? listFolder(idx, rel, hide) : []), [idx, rel, hide]);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const flat = useMemo(() => (idx ? flatten(idx, rel, hide, expanded) : []), [idx, rel, hide, expanded]);
+  const rows = useMemo(() => flat.map((f) => f.n), [flat]);
+  const depths = useMemo(() => new Map(flat.map((f) => [f.n.row.p, f.depth])), [flat]);
+  const toggleOpen = (p: string) =>
+    setExpanded((x) => {
+      const next = new Set(x);
+      next.has(p) ? next.delete(p) : next.add(p);
+      return next;
+    });
   const running = job !== null && (job.state === "queued" || job.state === "running");
   const setSelected = (s: Set<string>) => setSelectedState(s);
 
@@ -237,6 +253,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
       if (r) patchLeaf(s.rp, { node: s.right.node, path: joinRoot(s.right.path, rightRel(idx, to)), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
       setCursor(null);
       setSelectedState(new Set());
+      setExpanded(new Set());
       scrollers.current.left?.scrollTo?.({ top: 0 });
       scrollers.current.right?.scrollTo?.({ top: 0 });
     },
@@ -398,6 +415,9 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     running,
     err,
     rows,
+    depthOf: (p) => depths.get(p) ?? 0,
+    expanded,
+    toggleOpen,
     hide,
     selected,
     cursor,
@@ -432,16 +452,29 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
 
 const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
-function Cell({ n, side }: { n: CNode; side: Side }) {
+function Cell({ n, side, ctl }: { n: CNode; side: Side; ctl: CompareCtl }) {
   const r = n.row;
   const d = side === "left" ? r.l : r.r;
   const spelling = side === "right" && r.rp ? nameOf(r.rp) : n.name;
   if (!d) return <span className="cmp-ph" aria-label={`Not on the ${side} side`} />;
   return (
     <>
-      <span className="cmp-name" title={r.p}>
+      <Tip label={r.p} fill><span className="cmp-name" style={{ paddingLeft: ctl.depthOf(r.p) * 16 }}>
+        {n.isDir ? (
+          <button
+            className="cmp-twisty"
+            aria-label={(ctl.expanded.has(r.p) ? "Collapse " : "Expand ") + spelling}
+            aria-expanded={ctl.expanded.has(r.p)}
+            onClick={(e) => (e.stopPropagation(), ctl.toggleOpen(r.p))}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            {ctl.expanded.has(r.p) ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
+          </button>
+        ) : (
+          <span className="cmp-twisty" aria-hidden="true" />
+        )}
         <FileIcon className="ico" dir={n.isDir} type={d.t === "symlink" ? "symlink" : "file"} /> {spelling}
-      </span>
+      </span></Tip>
       <span className="num">{n.isDir ? "" : fmtSize(d.s)}</span>
       <span className={"cmp-mt" + (r.newer === side ? " fd-newer" : "")}>
         {fmtDate(d.m)}
@@ -469,7 +502,7 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
       if (ctl.scrollers.current[side] === el) ctl.scrollers.current[side] = null;
     };
   }, [side]); // eslint-disable-line react-hooks/exhaustive-deps
-  const first = Math.max(0, Math.floor(top / ROW_H) - 6);
+  const first = Math.max(0, Math.floor(Math.max(0, top - HEAD_H) / ROW_H) - 6);
   const last = Math.min(ctl.rows.length, Math.ceil((top + h) / ROW_H) + 6);
   const sel = ctl.selected;
   const rowMenu = (e: React.MouseEvent, n: CNode) => {
@@ -487,20 +520,6 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
   };
   return (
     <div className={"cmp cmp-" + side} aria-label={`Compare, ${side} side`}>
-      {ctl.err && <div className="fp-err" role="alert">{ctl.err}</div>}
-      {ctl.running && ctl.job && (
-        <div className="fd-run" role="status">
-          <b>{ctl.job.state === "queued" ? "Queued" : "Comparing"}</b>
-          {ctl.job.progress.totalEntries > 0 ? <progress aria-label="Comparison progress" max={Math.max(1, ctl.job.progress.totalBytes)} value={ctl.job.progress.bytes} /> : <progress aria-label="Comparison progress" />}
-          <span className="muted">{ctl.job.progress.totalEntries > 0 ? `${ctl.job.progress.entries} / ${ctl.job.progress.totalEntries} hashed` : `${ctl.job.progress.entries} entries found`}</span>
-        </div>
-      )}
-      <div className="cmp-head" aria-hidden>
-        <span>{side === "left" ? "Left" : "Right"}: name</span>
-        <span className="num">Size</span>
-        <span>Modified</span>
-        <span />
-      </div>
       <div
         className="cmp-scroll"
         ref={ref}
@@ -512,6 +531,13 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
         }}
         onClick={(e) => e.target === e.currentTarget && ctl.setSelected(new Set())}
       >
+       <div className="cmp-inner">
+        <div className="cmp-head" aria-hidden>
+          <span>{side === "left" ? "Left" : "Right"}: name</span>
+          <span className="num">Size</span>
+          <span>Modified</span>
+          <span />
+        </div>
         <div style={{ height: ctl.rows.length * ROW_H, position: "relative" }}>
           {ctl.rows.slice(first, last).map((n, k) => {
             const r = n.row;
@@ -528,7 +554,7 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
                 onDoubleClick={() => ctl.open(n)}
                 onContextMenu={(e) => rowMenu(e, n)}
               >
-                <Cell n={n} side={side} />
+                <Cell n={n} side={side} ctl={ctl} />
                 <span className="cmp-status" title={r.why ?? STATUS[r.status].label}>
                   {(() => { const I = STATUS[r.status].Icon; return <I aria-hidden="true" />; })()}
                   <span className="visually-hidden">{STATUS[r.status].label}</span>
@@ -537,7 +563,8 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
             );
           })}
         </div>
-        {!ctl.rows.length && !ctl.running && ctl.result && <div className="pad muted">Nothing to show here with the current filters.</div>}
+        {!ctl.rows.length && !ctl.running && ctl.result && <div className="cmp-empty muted">Nothing to show here with the current filters.</div>}
+       </div>
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </div>
@@ -556,8 +583,8 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
     if (e.shiftKey) ctl.click({ shiftKey: true, ctrlKey: false, metaKey: false }, n);
     else ctl.setSelected(new Set(withDescendants(n)));
     document.querySelectorAll<HTMLElement>(`.cmp-scroll`).forEach((sc) => {
-      const y = rows.indexOf(n) * ROW_H;
-      if (y < sc.scrollTop) sc.scrollTop = y;
+      const y = HEAD_H + rows.indexOf(n) * ROW_H;
+      if (y - HEAD_H < sc.scrollTop) sc.scrollTop = y - HEAD_H;
       else if (y + ROW_H > sc.scrollTop + sc.clientHeight) sc.scrollTop = y + ROW_H - sc.clientHeight;
     });
   };
@@ -575,6 +602,14 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
   if (k === " ") {
     const n = rows[i];
     return !!n && (ctl.click({ shiftKey: false, ctrlKey: true, metaKey: false }, n), true);
+  }
+  if (k === "ArrowRight" && !mod) {
+    const n = rows[i];
+    return !!n && n.isDir && (!ctl.expanded.has(n.row.p) && ctl.toggleOpen(n.row.p), true);
+  }
+  if (k === "ArrowLeft" && !mod) {
+    const n = rows[i];
+    return !!n && n.isDir && (ctl.expanded.has(n.row.p) && ctl.toggleOpen(n.row.p), true);
   }
   if (k === "Backspace" || (e.altKey && k === "ArrowUp")) return ctl.up(), true;
   if (mod && k.toLowerCase() === "a") return ctl.setSelected(new Set(rows.flatMap((n) => withDescendants(n)))), true;
@@ -596,9 +631,11 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
   const n = (s: DiffStatus) => (!c ? 0 : s === "identical" ? c.identical : s === "different" ? c.different : s === "left-only" ? c.leftOnly : s === "right-only" ? c.rightOnly : c.error);
   const sel = ctl.selected.size;
   return (
-    <div className="cmp-bar" role="toolbar" aria-label={`Compare toolbar, ${side} panel`}>
+    // Same fixed height on both sides (controls only, one scrollable row): row 0 of both lists lines up.
+    <div className="cmp-barwrap">
+    <div className="cmp-bar" onWheel={wheelX} role="toolbar" aria-label={`Compare toolbar, ${side} panel`}>
       <Tip label={`${st.left.node}:${st.left.path}  vs  ${st.right.node}:${st.right.path}`}><span className="cmp-badge">Compare</span></Tip>
-      <span className="muted cmp-with">{side === "left" ? "with" : "against"} {otherLabel}{st.rel ? ` / ${st.rel}` : ""}</span>
+      <Tip label={`${side === "left" ? "with" : "against"} ${otherLabel}${st.rel ? ` / ${st.rel}` : ""}`}><span className="muted cmp-with">{side === "left" ? "with" : "against"} {otherLabel}{st.rel ? ` / ${st.rel}` : ""}</span></Tip>
       <span className="fd-toggles" role="group" aria-label="Show">
         {DIFF_STATUSES.map((s) => {
           if (s === "error" && !n(s)) return null;
@@ -632,6 +669,7 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
       )}
       <span className="muted fd-count">{sel} selected</span>
       <Tip label="Leave compare mode (Esc)"><button className="cmp-exit" onClick={ctl.exit}>Exit compare</button></Tip>
+    </div>
       {side === "left" && showOpts && (
         <div className="cmp-pop fd-opts" role="group" aria-label="Compare options">
           <label>
@@ -651,8 +689,8 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
             <input type="number" min={1} max={64} value={o.depth} onChange={(e) => ctl.setOpts({ ...o, depth: Number(e.target.value) })} />
           </label>
           <label>
-            Max entries per side
-            <input type="number" min={1} max={500000} step={1000} value={o.maxEntries} onChange={(e) => ctl.setOpts({ ...o, maxEntries: Number(e.target.value) })} />
+            Max entries per side (up to 500000)
+            <input type="number" min={1} max={500000} step={10000} value={o.maxEntries} onChange={(e) => ctl.setOpts({ ...o, maxEntries: Number(e.target.value) })} />
           </label>
           <label className="chk"><input type="checkbox" checked={o.ignoreCase} onChange={(e) => ctl.setOpts({ ...o, ignoreCase: e.target.checked })} /> Ignore case in names</label>
           <label className="chk"><input type="checkbox" checked={o.ignoreHidden} onChange={(e) => ctl.setOpts({ ...o, ignoreHidden: e.target.checked })} /> Ignore hidden files</label>
@@ -674,14 +712,59 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
           </div>
         </div>
       )}
-      {side === "left" && result && (
-        <div className="fd-sum muted cmp-sum">
-          {c!.identical + c!.different + c!.leftOnly + c!.rightOnly + c!.error} files and {result.dirs.identical + result.dirs.different + result.dirs.leftOnly + result.dirs.rightOnly + result.dirs.error} folders compared in {(result.durationMs / 1000).toFixed(1)} s
-          {result.hashedFiles > 0 && `; ${result.hashedFiles} file pairs hashed (${fmtSize(result.hashedBytes)} read on the agents)`}
-          {result.warnings.map((w) => <span key={w} className="cmp-warn" role="alert"> {w}</span>)}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ sidebar: what the compare found */
+
+/** Warnings from the diff job, per side, as a short label plus the full text for the tooltip. */
+function warnRow(w: string): { side: "Left" | "Right" | ""; short: string; full: string } {
+  const side = /\bleft\b/i.test(w) ? "Left" : /\bright\b/i.test(w) ? "Right" : "";
+  const cut = /more than (\d+) entries/.exec(w);
+  const deep = /deeper than (\d+) levels/.exec(w);
+  const bad = /^(\d+) entr/.exec(w);
+  const short = cut ? `cut off at ${cut[1]} entries` : deep ? `deeper than ${deep[1]} levels` : bad ? `${bad[1]} unreadable` : w;
+  const hint = cut ? " Raise \"Max entries per side\" in the compare Options (up to 500000) and compare again." : deep ? " Raise \"Max depth\" in the compare Options." : "";
+  return { side, short, full: w + (w.endsWith(".") ? "" : ".") + hint };
+}
+
+/** Compare status in the sidebar, so the panel headers keep only controls: progress, errors, totals, per-side warnings. */
+export function CompareInfo() {
+  const ctl = useCompareCtl();
+  if (!ctl) return null;
+  const { st, result, job, running, err } = ctl;
+  const files = result ? result.files.identical + result.files.different + result.files.leftOnly + result.files.rightOnly + result.files.error : 0;
+  const dirs = result ? result.dirs.identical + result.dirs.different + result.dirs.leftOnly + result.dirs.rightOnly + result.dirs.error : 0;
+  return (
+    <section className="side-cmp" aria-label="Compare status">
+      <h2>Compare</h2>
+      <Tip label={`${st.left.node}:${st.left.path}  vs  ${st.right.node}:${st.right.path}`}>
+        <p className="side-cmp-roots muted">{st.left.node}:{st.left.path} vs {st.right.node}:{st.right.path}</p>
+      </Tip>
+      {err && <p className="side-cmp-err" role="alert">{err}</p>}
+      {running && job && (
+        <div className="side-cmp-run" role="status">
+          <b>{job.state === "queued" ? "Queued" : "Comparing"}</b>
+          {job.progress.totalEntries > 0 ? <progress aria-label="Comparison progress" max={Math.max(1, job.progress.totalBytes)} value={job.progress.bytes} /> : <progress aria-label="Comparison progress" />}
+          <span className="muted">{job.progress.totalEntries > 0 ? `${job.progress.entries} / ${job.progress.totalEntries} hashed` : `${job.progress.entries} entries found`}</span>
         </div>
       )}
-    </div>
+      {result && (
+        <>
+          <p className="side-cmp-line">{files} files, {dirs} folders in {(result.durationMs / 1000).toFixed(1)} s</p>
+          {result.hashedFiles > 0 && <p className="side-cmp-line muted">{result.hashedFiles} pairs hashed, {fmtSize(result.hashedBytes)} read</p>}
+          {result.warnings.map((w) => {
+            const x = warnRow(w);
+            return (
+              <Tip key={w} label={x.full}>
+                <p className="side-cmp-warn" role="alert"><TriangleAlert aria-hidden="true" /> <span>{x.side ? `${x.side}: ` : ""}{x.short}</span></p>
+              </Tip>
+            );
+          })}
+        </>
+      )}
+    </section>
   );
 }
 

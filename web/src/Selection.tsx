@@ -7,6 +7,7 @@ import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { CompressDialog } from "./ArchiveDialog";
 import { ConfirmDialog } from "./Dialogs";
 import { Tip } from "./Tooltip";
+import { wheelX } from "./scrollx";
 
 export interface SelRef {
   node: string;
@@ -118,26 +119,33 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
   };
   const files = refs.filter(isEditable);
   const diffable = refs.length === 2 && files.length === 2;
+  const none = "Select one or more items in a panel first.";
+  const need = (label: string) => (refs.length ? label : none);
+  const nPanels = new Set(refs.map((r) => r.panel)).size || panelCount;
+  const text = `${refs.length ? summary(refs, nPanels) : "0 selected"}${picked.length > 0 ? `${refs.length ? "; " : " - "}${picked.length} panel${picked.length === 1 ? "" : "s"} picked` : ""}`;
+  const clip = (mode: "copy" | "cut") => () => (setClip({ mode, items: refs.map((r) => ({ node: r.node, path: r.path })) }), onStatus(`${mode === "copy" ? "Copied" : "Cut"} ${refs.length} item(s) to the file clipboard`));
   return (
-    <div className="selbar" role="region" aria-label="Selection across panels">
-      <b role="status">
-        {refs.length ? summary(refs, new Set(refs.map((r) => r.panel)).size || panelCount) : "No items selected"}
-        {picked.length > 0 ? `${refs.length ? "; " : ""}${picked.length} panel${picked.length === 1 ? "" : "s"} picked` : ""}
-      </b>
+    // Always present at a fixed height: nothing moves when a selection starts or ends.
+    <div className="selbar" onWheel={wheelX} role="region" aria-label="Selection across panels">
+      <Tip label={text}><b role="status">{text}</b></Tip>
       <span className="selbar-actions">
-        <button disabled={!refs.length} onClick={() => (setClip({ mode: "copy", items: refs.map((r) => ({ node: r.node, path: r.path })) }), onStatus(`Copied ${refs.length} item(s) to the file clipboard`))}>Copy</button>
-        <button disabled={!refs.length} onClick={() => (setClip({ mode: "cut", items: refs.map((r) => ({ node: r.node, path: r.path })) }), onStatus(`Cut ${refs.length} item(s) to the file clipboard`))}>Cut</button>
-        <button disabled={!refs.length} onClick={to("copy")}>Copy to...</button>
-        <button disabled={!refs.length} onClick={to("move")}>Move to...</button>
-        <button disabled={!refs.length} onClick={() => downloadRefs(refs)}>Download</button>
-        <button disabled={!refs.length} onClick={() => setCompress(true)}>Compress...</button>
-        <button disabled={!refs.length} onClick={() => void queue("Trash", trashSpec(refs))}>Trash</button>
-        <button disabled={!refs.length} className="danger" onClick={() => setConfirm(true)}>Delete...</button>
-        <button disabled={!diffable} title="Diff the two selected files" onClick={() => diffable && onDiff(refs[0]!, refs[1]!)}>Diff files</button>
+        <Tip label={need("Copy the selection to the file clipboard")}><button disabled={!refs.length} onClick={clip("copy")}>Copy</button></Tip>
+        <Tip label={need("Cut the selection to the file clipboard")}><button disabled={!refs.length} onClick={clip("cut")}>Cut</button></Tip>
+        <Tip label={need("Copy the selection into another open panel's folder")}><button disabled={!refs.length} onClick={to("copy")}>Copy to...</button></Tip>
+        <Tip label={need("Move the selection into another open panel's folder")}><button disabled={!refs.length} onClick={to("move")}>Move to...</button></Tip>
+        <Tip label={need("Download the selection (several items or folders as a zip)")}><button disabled={!refs.length} onClick={() => downloadRefs(refs)}>Download</button></Tip>
+        <Tip label={need("Compress the selection into an archive")}><button disabled={!refs.length} onClick={() => setCompress(true)}>Compress...</button></Tip>
+        <Tip label={need("Move the selection to the trash")}><button disabled={!refs.length} onClick={() => void queue("Trash", trashSpec(refs))}>Trash</button></Tip>
+        <Tip label={need("Delete the selection permanently")}><button disabled={!refs.length} className="danger" onClick={() => setConfirm(true)}>Delete...</button></Tip>
+        <Tip label={diffable ? "Diff the two selected files" : "Select exactly two regular files (in one or two panels) to diff them."}>
+          <button disabled={!diffable} onClick={() => diffable && onDiff(refs[0]!, refs[1]!)}>Diff files</button>
+        </Tip>
         <Tip label={compareWhyNot ?? "Compare two panels in place: the two picked ones (Shift/Ctrl+click a panel header), else the focused panel with another"}>
           <button disabled={!!compareWhyNot} onClick={onCompare}>Compare panels</button>
         </Tip>
-        <button onClick={onClear}>Clear</button>
+        <Tip label={refs.length || picked.length ? "Clear the selection and picked panels" : "Nothing is selected."}>
+          <button disabled={!refs.length && !picked.length} onClick={onClear}>Clear</button>
+        </Tip>
       </span>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {compress && <CompressDialog groups={groupRefs(refs)} onClose={() => setCompress(false)} onStatus={onStatus} />}

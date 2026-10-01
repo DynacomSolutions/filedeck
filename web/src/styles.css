@@ -43,7 +43,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 /* ---- layout ---- */
 .body{flex:1;min-height:0;display:flex}
 .main{flex:1;min-width:0;min-height:0;padding:.6rem;display:flex;position:relative}.main>*{flex:1;min-width:0}
-.side{flex:0 0 15rem;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border);background:var(--surface)}
+.side{flex:0 0 15rem;min-width:0;overflow:hidden;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border);background:var(--surface)}
 .side-scroll{flex:1;min-height:0;overflow:auto;padding:.9rem .7rem}
 .side h2{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:.2rem .5rem .6rem}
 .side-scroll button{display:block;width:100%;text-align:left;border:0;border-radius:var(--radius-sm);background:transparent;padding:.3rem .5rem;font-size:.84rem;font-weight:600;min-height:0}
@@ -73,14 +73,17 @@ input[type=checkbox]{accent-color:var(--accent)}
 .dock-drop-right{top:6px;bottom:6px;right:6px;width:calc(50% - 6px)}
 
 /* ---- file panels ---- */
-.fp,.pv{height:100%;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;min-width:0}
+.fp,.pv{position:relative;height:100%;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;min-width:0}
 .fp.active{border-color:var(--accent-line)}.fp.drop{outline:2px dashed var(--accent);outline-offset:-4px}
-.fp-bar{display:flex;flex-wrap:wrap;gap:.35rem .7rem;align-items:center;padding:.5rem .65rem;border-bottom:1px solid var(--border)}
-.crumbs{display:flex;flex-wrap:wrap;flex:1 1 200px;min-width:0;font-size:.84rem}
+/* a panel header is two fixed rows (path, then actions that scroll sideways when they do not fit): every panel header has the same height, so side-by-side lists line up */
+.fp-bar{flex:none;box-sizing:border-box;height:72px;display:flex;flex-direction:column;justify-content:center;gap:.25rem;padding:0 .65rem;border-bottom:1px solid var(--border)}
+.crumbs{display:flex;flex-wrap:nowrap;flex:none;height:22px;align-items:center;min-width:0;font-size:.84rem;white-space:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}.crumbs button{flex:none}
 .crumbs button{border:0;background:transparent;padding:0 .15rem;min-height:0;color:var(--fg);font-weight:600}
 .crumbs button:hover:not(:disabled){background:transparent;color:var(--accent-text)}
 .crumbs button:first-child{color:var(--muted)}
-.fp-actions{display:flex;gap:.25rem;align-items:center;flex-wrap:wrap}.fp-actions button{padding:0 .6rem;min-height:28px;font-size:.78rem}.chk{font-size:.72rem;font-weight:600;color:var(--muted)}
+.fp-actions{display:flex;gap:.25rem;align-items:center;flex-wrap:nowrap;flex:none;height:32px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}.fp-actions>*{flex:none}.fp-actions button{padding:0 .5rem;min-height:28px;font-size:.78rem}.chk{font-size:.72rem;font-weight:600;color:var(--muted)}
+/* messages overlay the bottom of the panel instead of pushing the list */
+.fp-err,.fp-filter{position:absolute;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--border)}
 .fp-err{padding:.35rem .8rem;color:var(--accent-text);font-size:.8rem;font-weight:500}
 .fp-scroll{height:100%;min-height:0;overflow:auto}
 .fp>div[data-group]{flex:1;min-height:0}
@@ -205,7 +208,7 @@ button.primary{border-color:var(--accent);color:var(--accent)}
 .fp:focus{outline:none}
 .ft tr.cur{box-shadow:inset 2px 0 0 var(--accent)}
 .fp:not(:focus-within) .ft tr.cur{box-shadow:none}
-.fp-filter{padding:.4rem .65rem;border-bottom:1px solid var(--border)}
+.fp-filter{padding:.4rem .65rem}
 .fp-filter input{width:100%}
 .kbd-help{outline:none;max-height:calc(100dvh - 48px);overflow:auto}
 .kbd-help h4{margin:.2rem 0 .4rem;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
@@ -374,26 +377,31 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 .fd-newer svg{vertical-align:-2px}
 
 /* ---- selection across panels ---- */
-.selbar{display:flex;flex-wrap:wrap;gap:.4rem .8rem;align-items:center;padding:.4rem .8rem;border-bottom:1px solid var(--accent-line);background:var(--accent-tint);font-size:.82rem}
-.selbar-actions{display:flex;flex-wrap:wrap;gap:.3rem}
+/* the selection toolbar is always there at one height; nothing moves when a selection starts or ends */
+.selbar{flex:none;box-sizing:border-box;height:42px;display:flex;flex-wrap:nowrap;gap:0 .8rem;align-items:center;padding:0 .8rem;border-bottom:1px solid var(--accent-line);background:var(--accent-tint);font-size:.82rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.selbar>.tip{flex:0 0 20rem;min-width:8rem;overflow:hidden}.selbar b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.selbar-actions{display:flex;flex-wrap:nowrap;gap:.3rem;flex:none}.selbar-actions>.tip{flex:none}.selbar-actions button{white-space:nowrap}
 .fp.picked{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
 .fp.picked .fp-bar{background:var(--accent-tint)}
 
 /* ---- in-place compare ---- */
 .ed.over{position:absolute;inset:.6rem;z-index:20;border:1px solid var(--border-strong);border-radius:var(--radius);overflow:hidden;flex:none}
-.cmp-bar{display:flex;flex-wrap:wrap;gap:.3rem .5rem;align-items:center;padding:.3rem .65rem;border-bottom:1px solid var(--border);background:var(--surface-2);font-size:.78rem;position:relative}
-.cmp-bar button,.cmp-bar select{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{flex-wrap:wrap}
+.cmp-barwrap{position:relative;flex:none;height:36px;box-sizing:border-box;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.cmp-bar{display:flex;flex-wrap:nowrap;gap:0 .5rem;align-items:center;height:100%;padding:0 .65rem;font-size:.78rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.cmp-bar>*{flex:none}
+.cmp-bar button,.cmp-bar select{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{display:inline-flex;gap:.3rem;flex-wrap:nowrap}.cmp-bar .fd-toggles{display:inline-flex;gap:.3rem;flex-wrap:nowrap}
 .cmp-badge{font-weight:700;color:var(--accent-text)}
-.cmp-with{overflow-wrap:anywhere}
+.cmp-with{display:block;max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmp-exit{margin-left:auto}
-.cmp-sum{flex-basis:100%;padding:0}
-.cmp-warn{color:var(--fd-diff)}
 .cmp-pop{position:absolute;top:100%;left:0;right:0;z-index:30;padding:.6rem .8rem;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);box-shadow:var(--shadow);font-size:.78rem}
 .cmp{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
-.cmp-head,.cmp-row{display:grid;grid-template-columns:minmax(120px,1fr) 70px 128px 26px;align-items:center;gap:0 .5rem;padding:0 .6rem}
-.cmp-head{font-size:.74rem;color:var(--muted);font-weight:600;background:var(--surface-2);border-bottom:1px solid var(--border);padding-top:.2rem;padding-bottom:.2rem}
+.cmp-head,.cmp-row{box-sizing:border-box;display:grid;grid-template-columns:minmax(120px,1fr) 70px 128px 26px;align-items:center;gap:0 .5rem;padding:0 .6rem}
+.cmp-head{position:sticky;top:0;z-index:2;height:28px;font-size:.74rem;color:var(--muted);font-weight:600;background:var(--surface-2);border-bottom:1px solid var(--border)}
 .cmp-head .num,.cmp-row .num{text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
-.cmp-scroll{flex:1;min-height:0;overflow:auto;position:relative}
+/* both scrollers always show both scrollbars, so one side needing a horizontal bar never makes it shorter than the other */
+.cmp-scroll{flex:1;min-height:0;overflow:scroll;position:relative}
+.cmp-inner{min-width:440px;position:relative}
+.cmp-empty{padding:.8rem}
 .cmp-row{position:absolute;left:0;right:0;font-size:.82rem;white-space:nowrap;cursor:default;border-bottom:1px solid var(--border)}
 .cmp-row>span{overflow:hidden;text-overflow:ellipsis}
 .cmp-row:hover{filter:brightness(1.08)}
@@ -407,8 +415,21 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 .cmp-row.ph.sel{background:var(--accent-tint)!important}
 .cmp-ph{grid-column:1 / 4}
 .cmp-status{font-weight:700;text-align:center}
-.cmp-name{display:block;overflow:hidden;text-overflow:ellipsis}
+.cmp-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmp-row>.tip{min-width:0;display:block;overflow:hidden}
+.cmp-twisty{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;margin:0 2px 0 0;vertical-align:middle;border:0;background:transparent;color:var(--muted);min-height:0}
+button.cmp-twisty:hover{color:var(--fg);background:var(--surface-3)}.cmp-twisty svg{width:14px;height:14px}
 @media(max-width:800px){.cmp-head,.cmp-row{grid-template-columns:minmax(100px,1fr) 26px}.cmp-head span:nth-child(2),.cmp-head span:nth-child(3),.cmp-row>span:nth-child(2),.cmp-row>span:nth-child(3){display:none}}
 svg.lucide{display:inline-block}
 .ln-target{white-space:nowrap}.ln-target svg.lucide{width:12px;height:12px;vertical-align:-2px}
 .side-node svg.lucide{vertical-align:-3px}
+
+/* ---- compare status in the sidebar ---- */
+.side-cmp{flex:none;min-width:0;padding:.6rem .7rem;border-top:1px solid var(--border);font-size:.76rem;max-height:30vh;overflow:auto}
+.side-cmp h2{margin:.1rem .5rem .4rem}
+.side-cmp p{margin:.15rem .5rem}
+.side-cmp-roots{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-cmp-err{color:var(--fd-bad)}
+.side-cmp-run{display:flex;flex-direction:column;gap:.25rem;margin:.2rem .5rem}.side-cmp-run progress{width:100%;accent-color:var(--accent)}
+.side-cmp-warn{display:flex;gap:.3rem;align-items:center;color:var(--fd-diff);cursor:default}.side-cmp-warn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.side-cmp-warn svg{flex:none;width:14px;height:14px}
+.side-cmp .tip{display:block}

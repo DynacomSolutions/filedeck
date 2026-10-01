@@ -13,7 +13,7 @@ import { useBookmarks, removeBookmark, bookmarkLabel } from "./bookmarks";
 import { ThemeMenu } from "./ThemeMenu";
 import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
-import { CompareCtx, SyncDialog, useCompare } from "./Compare";
+import { CompareCtx, CompareInfo, SyncDialog, useCompare } from "./Compare";
 import { SelectionBar, type SelRef } from "./Selection";
 import { ChevronDown, ChevronRight, GitCompareArrows, Keyboard, Star, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -477,25 +477,23 @@ export function App() {
         </div>
       </header>
       {cmpMenu && <ContextMenu x={cmpMenu.x} y={cmpMenu.y} items={cmpMenu.items} onClose={() => setCmpMenu(null)} />}
-      {(panelSel.length > 0 || Object.keys(sels).length > 1) && (
-        <SelectionBar
-          refs={Object.values(sels).flat()}
-          panelCount={Object.keys(sels).length}
-          picked={panelSel}
-          dests={tree ? leaves(tree).map((l) => ({ id: l.id, node: l.node, path: l.path })) : []}
-          onClear={() => {
-            setClearReq((c) => ({ except: "", n: (c?.n ?? 0) + 1 }));
-            setPanelSel([]);
-          }}
-          onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
-          onCompare={compareClick}
-          compareWhyNot={compareWhyNot}
-          onStatus={setStatus}
-        />
-      )}
+      <SelectionBar
+        refs={Object.values(sels).flat()}
+        panelCount={Object.keys(sels).length}
+        picked={panelSel}
+        dests={tree ? leaves(tree).map((l) => ({ id: l.id, node: l.node, path: l.path })) : []}
+        onClear={() => {
+          setClearReq((c) => ({ except: "", n: (c?.n ?? 0) + 1 }));
+          setPanelSel([]);
+        }}
+        onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
+        onCompare={compareClick}
+        compareWhyNot={compareWhyNot}
+        onStatus={setStatus}
+      />
       <CompareCtx.Provider value={cmp}>
       <div className="body">
-        <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<JobsTray nodes={nodes} />} />
+        <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><JobsTray nodes={nodes} /></>} />
         <main className="main" aria-label="File panels">
           <h1 className="visually-hidden">Files</h1>
           {tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}

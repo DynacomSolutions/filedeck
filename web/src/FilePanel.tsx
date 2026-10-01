@@ -13,6 +13,7 @@ import { copyText, getClip, setClip, useClip } from "./clipboard";
 import { deleteSpec, downloadRefs, groupRefs, refOf, trashSpec, type SelRef } from "./Selection";
 import type { FileRef } from "./EditorViews";
 import { SearchView } from "./Search";
+import { wheelX } from "./scrollx";
 import { CompareBar, CompareBody, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
@@ -743,7 +744,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       onDragLeave={() => setOver(null)}
       onDrop={(e) => drop(e, path)}
     >
-      {tabs.length > 1 && (
+      {tabs.length > 1 && !cside && (
         <div className="fp-tabs" role="tablist" aria-label="Tabs">
           {tabs.map((t, i) => (
             <Tip key={i} label={`${t.node}:${t.path}`}>
@@ -795,7 +796,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           }
         }}
       >
-        <nav className="crumbs" aria-label="Breadcrumb">
+        <nav className="crumbs" aria-label="Breadcrumb" onWheel={wheelX}>
           <Tip label={`Root of ${node}`}>
             <button onClick={() => onNavigate(node, "/")} onContextMenu={(e) => showMenu(e, folderItems("/", false))}>
               {node}:
@@ -807,7 +808,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
             </button>
           ))}
         </nav>
-        <div className="fp-actions">
+        <div className="fp-actions" onWheel={wheelX}>
           <Tip label="Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels"><button aria-label="Pick this panel" aria-pressed={panelPicked} className={panelPicked ? "marked" : ""} onClick={onTogglePanel}><SquareCheck /></button></Tip>
           <Tip label="Search under this folder" shortcut="Ctrl+Shift+F"><button aria-label="Search under this folder" className={leaf.sr ? "marked" : ""} aria-pressed={!!leaf.sr} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}><Search /></button></Tip>
           <Tip label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"}><button aria-label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"} aria-pressed={view === "grid"} className={view === "grid" ? "marked" : ""} onClick={() => onPatch({ w: view === "grid" ? undefined : "g" })}>{view === "grid" ? <List /> : <LayoutGrid />}</button></Tip>

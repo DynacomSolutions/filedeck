@@ -30,7 +30,7 @@ export const DEFAULT_OPTIONS: DiffOptions = {
   include: [],
   exclude: [],
   depth: 32,
-  maxEntries: 100_000,
+  maxEntries: 250_000,
   concurrency: 4,
 };
 export const LIMITS = { depth: 64, maxEntries: 500_000, concurrency: 16, toleranceMs: 24 * 3600_000 };
