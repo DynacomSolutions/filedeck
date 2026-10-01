@@ -1,3 +1,4 @@
+import { PANEL_MIME } from "./dock";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
@@ -33,6 +34,10 @@ interface Props {
   onNavigate: (node: string, path: string) => void;
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
+  /** HTML5 drag props that make the panel header the drag handle for docking */
+  dragProps?: React.HTMLAttributes<HTMLElement>;
+  /** Alt+Shift+Arrow: dock this panel beside its neighbour */
+  onDock?: (key: string) => boolean;
   /** non-navigation state (selection, sort, preview dock...) mirrored into the URL */
   onPatch: (p: Partial<Leaf>) => void;
   /** Two selected files diff directly; one selected file is marked, then paired with the next. */
@@ -63,7 +68,7 @@ type Modal =
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, peers, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, dragProps, onDock, onPatch, onDiff, diffMarked, onFolderDiff, folderMarked, peers, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
@@ -340,6 +345,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   ];
 
   const drop = async (e: React.DragEvent, destDir: string) => {
+    if (e.dataTransfer.types.includes(PANEL_MIME)) return; // a dragged panel: the dock slot handles it
     e.preventDefault();
     e.stopPropagation();
     setOver(null);
@@ -611,6 +617,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       } else selectOnly(en.path);
     };
     const handled = (() => {
+      if (e.altKey && e.shiftKey && !mod && key.startsWith("Arrow") && onDock) return onDock(key);
       // While the search results are open the panel's own selection is hidden: no file operations by key.
       if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "twTW[]".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
       if (key === "?" && !mod) return onHelp(), true;
@@ -740,7 +747,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           <button type="button" className="fp-tab-new" title="New tab (Alt+T)" aria-label="New tab" onClick={() => newTab()}>＋</button>
         </div>
       )}
-      <header className="fp-bar">
+      <header className="fp-bar" {...dragProps}>
         <nav className="crumbs" aria-label="Breadcrumb">
           <button onClick={() => onNavigate(node, "/")} onContextMenu={(e) => showMenu(e, folderItems("/", false))} title={node}>
             {node}:

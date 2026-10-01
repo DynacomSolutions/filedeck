@@ -53,8 +53,24 @@ input[type=checkbox]{accent-color:var(--accent)}
 .side .bar{display:block;height:3px;background:var(--surface-3);border-radius:2px;margin-top:.25rem}.side .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .net-badge{margin-left:.4rem;padding:0 .35rem;border:1px solid var(--border);border-radius:.6rem;font-size:.65rem;font-weight:600;letter-spacing:.03em;color:var(--muted);vertical-align:middle}.net-badge.bad{color:var(--fg);border-style:dashed}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%}.dot.on{background:var(--fg)}.dot.off{background:var(--muted)}
-.sep{background:transparent;flex:0 0 .6rem;transition:background var(--fast) var(--ease)}.sep:hover,.sep[data-separator="active"]{background:var(--accent-tint)}
-.sep.vertical{height:.6rem}
+/* gutter between panels: one token; the resize handle is the gutter itself (a thin grip shows on hover) */
+:root{--panel-gap:10px}
+.sep{position:relative;background:transparent;flex:0 0 var(--panel-gap);transition:background var(--fast) var(--ease)}
+.sep::after{content:"";position:absolute;inset:0;margin:auto;border-radius:999px;background:var(--border-strong);opacity:0;transition:opacity var(--fast) var(--ease)}
+.sep.horizontal::after,.sep[aria-orientation="vertical"]::after{width:3px;height:36px}
+.sep.vertical::after,.sep[aria-orientation="horizontal"]::after{height:3px;width:36px}
+.sep:hover::after,.sep[data-separator="active"]::after,.sep:focus-visible::after{opacity:1;background:var(--accent)}
+.sep.horizontal{width:var(--panel-gap)}.sep.vertical{height:var(--panel-gap)}
+/* docking: a panel is dragged by its header onto an edge (split) or its centre (merge as a tab) */
+.dock-slot{position:relative;height:100%;min-width:0;min-height:0}
+.fp-bar[draggable=true]{cursor:grab}
+.fp-bar[draggable=true]:active{cursor:grabbing}
+.dock-drop{position:absolute;z-index:20;pointer-events:none;background:color-mix(in srgb,var(--accent) 20%,transparent);border:2px solid var(--accent);border-radius:var(--radius-sm)}
+.dock-drop-center{inset:6px}
+.dock-drop-top{left:6px;right:6px;top:6px;height:calc(50% - 6px)}
+.dock-drop-bottom{left:6px;right:6px;bottom:6px;height:calc(50% - 6px)}
+.dock-drop-left{top:6px;bottom:6px;left:6px;width:calc(50% - 6px)}
+.dock-drop-right{top:6px;bottom:6px;right:6px;width:calc(50% - 6px)}
 
 /* ---- file panels ---- */
 .fp,.pv{height:100%;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;min-width:0}
@@ -135,7 +151,7 @@ button.link:hover:not(:disabled){background:transparent}
 .ed.inline .ed-head{padding-inline:.8rem}
 .fp .pv{border:0;border-radius:0}
 .fp [data-panel]{min-width:0;min-height:0}
-.fp .sep{background:var(--border)}.fp .sep:hover,.fp .sep[data-separator="active"]{background:var(--accent-line)}.fp .sep.horizontal{flex-basis:3px}.fp .sep.vertical{flex-basis:3px;height:3px}
+.fp .sep{background:var(--border)}.fp .sep:hover,.fp .sep[data-separator="active"]{background:var(--accent-line)}.fp .sep.horizontal{width:3px}.fp .sep.vertical{height:3px}
 /* folder diff: status colours stay distinguishable from the brand accent; each also has a symbol and a label */
 :root{--fd-diff:#ffc777;--fd-left:#8cc4ff;--fd-right:#7ee0c0;--fd-bad:#ff8f8f}
 :root[data-theme="light"]{--fd-diff:#885400;--fd-left:#165d9e;--fd-right:#08795f;--fd-bad:#a4262c}
