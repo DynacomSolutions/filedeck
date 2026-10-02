@@ -162,6 +162,15 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
   const marks = useBookmarks();
   return (
     <aside className="side">
+      <div className="side-brand">
+        <span className="brand-name">
+          <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M8 3h8M5.5 6.5h13" />
+            <path d="M3 19v-8a1 1 0 0 1 1-1h4a1 1 0 0 1 .7.3L10.5 12H20a1 1 0 0 1 1 1v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+          </svg>
+          {brand.name}
+        </span>
+      </div>
       <div className="side-scroll">
       <h2>Bookmarks</h2>
       {marks.length === 0 && <p className="muted side-hint">Star a folder to keep it here.</p>}
@@ -445,7 +454,6 @@ export function App() {
     <div className="app">
       <header className="site-header">
         <div className="site-header__inner shell">
-          <span className="brand-name">{brand.name}</span>
           <SelectionBar
             refs={Object.values(sels).flat()}
             panelCount={Object.keys(sels).length}

@@ -1,5 +1,9 @@
 # Filedeck
 
+<p align="center"><img src="web/public/logo-wordmark.svg" alt="Filedeck" height="48"></p>
+
+The mark is a folder with a deck of two cards peeking out behind it, drawn as a single-colour line icon (`web/public/logo-mark.svg`, `logo-wordmark.svg`, `favicon.svg`).
+
 A web file manager for a fleet of machines: dual (or more) panels, tabs, bookmarks, drag and drop between machines, bulk jobs with progress, folder compare and sync, search, archives, a Monaco editor and diff, previews (images, video with on-the-fly transcode, audio, PDF, Markdown, Word/Excel/PowerPoint/OpenDocument, hex), a trash per volume, permissions, symlinks and network sources (SFTP, WebDAV, S3, SMB).
 
 One image, two modes:

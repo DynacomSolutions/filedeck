@@ -353,7 +353,7 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
   .side{flex:0 0 auto;max-height:26vh;border-right:0;border-bottom:1px solid var(--border)}
   .main{min-height:0;flex:1}
 }
-.brand-name{font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:.95rem;color:var(--fg)}
+.brand-name{display:inline-flex;align-items:center;gap:.5rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:.95rem;color:var(--fg)}
 
 /* ---- flat line icons (lucide, currentColor) and tooltips ---- */
 svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3px;pointer-events:none}
@@ -434,3 +434,6 @@ svg.lucide{display:inline-block}
 .side-cmp-run{display:flex;flex-direction:column;gap:.25rem;margin:.2rem .5rem}.side-cmp-run progress{width:100%;accent-color:var(--accent)}
 .side-cmp-warn{display:flex;gap:.3rem;align-items:center;color:var(--fd-diff);cursor:default}.side-cmp-warn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.side-cmp-warn svg{flex:none;width:14px;height:14px}
 .side-cmp .tip{display:block}
+
+.brand-mark{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.side-brand{flex:none;display:flex;align-items:center;height:52px;box-sizing:border-box;padding:0 1.2rem;border-bottom:1px solid var(--border)}
