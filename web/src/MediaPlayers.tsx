@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fileUrl, mediaInfo, transcodeUrl, type MediaInfo } from "./api";
+import * as Ic from "lucide-react";
 
 /** Containers and codecs browsers play themselves. Others go straight to the transcoder. */
 const NATIVE_VIDEO = new Set(["mp4", "m4v", "webm", "mov", "ogv", "mkv"]);
@@ -84,7 +85,7 @@ export function MediaPlayer({ node, path, name, kind }: { node: string; path: st
           {failed && (
             <span role="alert" className="pv-trans-err">
               Could not play this file (the transcoder may be busy, or the file is not valid media).{" "}
-              <button className="link" onClick={() => { setFailed(false); setTries((n) => n + 1); }}>Retry</button>
+              <button className="link" onClick={() => { setFailed(false); setTries((n) => n + 1); }}><Ic.RotateCw /> Retry</button>
             </span>
           )}
         </div>

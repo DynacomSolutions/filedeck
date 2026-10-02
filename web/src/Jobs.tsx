@@ -3,6 +3,7 @@ import { useUploads, pauseUpload, resumeUpload, cancelUpload, retryFailed, dismi
 import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type JobView, type NodeInfo, type OpJob } from "./api";
 import { Check, Circle, Loader, Minus, X } from "lucide-react";
 import { Tip } from "./Tooltip";
+import * as Ic from "lucide-react";
 
 const COLLAPSE_KEY = "filedeck-jobs-collapsed";
 const live = (j: JobView) => j.state === "queued" || j.state === "running";
@@ -32,7 +33,7 @@ function JobRow({ node, job, onChange }: { node: string; job: JobView; onChange:
           {job.state === "failed" && " failed"}
         </span>
         {live(job) ? (
-          <button onClick={() => act(() => api.cancelJob(node, job.id))}>Cancel</button>
+          <button onClick={() => act(() => api.cancelJob(node, job.id))}><Ic.X /> Cancel</button>
         ) : (
           <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => act(() => api.dismissJob(node, job.id))}><X /></button></Tip>
         )}
@@ -102,12 +103,12 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
         <span className="job-state">{job.state === "running" ? (p === null ? " running" : ` ${p}%`) : ` ${STATE_LABEL[job.state] ?? job.state}`}</span>
         {live && job.state !== "waiting" && (
           job.state === "paused" ? (
-            <button onClick={() => act(() => api.opAction(job.id, "resume"))}>Resume</button>
+            <button onClick={() => act(() => api.opAction(job.id, "resume"))}><Ic.Play /> Resume</button>
           ) : (
-            <button onClick={() => act(() => api.opAction(job.id, "pause"))}>Pause</button>
+            <button onClick={() => act(() => api.opAction(job.id, "pause"))}><Ic.Pause /> Pause</button>
           )
         )}
-        {live ? <button onClick={() => act(() => api.opAction(job.id, "cancel"))}>Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => act(() => api.dismissOp(job.id))}><X /></button></Tip>}
+        {live ? <button onClick={() => act(() => api.opAction(job.id, "cancel"))}><Ic.X /> Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => act(() => api.dismissOp(job.id))}><X /></button></Tip>}
       </div>
       {live && (p === null ? <progress aria-label={job.title} /> : <progress aria-label={job.title} max={100} value={p} />)}
       {live && job.conflict && (
@@ -117,16 +118,16 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
             {job.conflict.srcType === "file" && job.conflict.dstType === "file" && <span className="muted"> ({fmtSize(job.conflict.srcSize)} replaces {fmtSize(job.conflict.dstSize)})</span>}
           </div>
           <div className="job-ask-btns">
-            <button onClick={() => act(() => api.opResolve(job.id, "skip", all))}>Skip</button>
-            <button onClick={() => act(() => api.opResolve(job.id, "overwrite", all))}>{job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? "Merge" : "Overwrite"}</button>
-            <button className="primary" onClick={() => act(() => api.opResolve(job.id, "rename", all))}>Keep both</button>
+            <button onClick={() => act(() => api.opResolve(job.id, "skip", all))}><Ic.SkipForward /> Skip</button>
+            <button onClick={() => act(() => api.opResolve(job.id, "overwrite", all))}>{job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? <Ic.Merge /> : <Ic.Replace />} {job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? "Merge" : "Overwrite"}</button>
+            <button className="primary" onClick={() => act(() => api.opResolve(job.id, "rename", all))}><Ic.CopyPlus /> Keep both</button>
           </div>
           <label className="chk"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Apply to all remaining</label>
         </div>
       )}
       <div className="muted job-detail">{detailLine(job, eta, live)}</div>
       {job.state === "failed" && job.error && <div className="fp-err">{job.error}</div>}
-      <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}>{expanded ? "Hide items" : `Items (${c.total})`}</button>
+      <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}><Ic.List /> {expanded ? "Hide items" : `Items (${c.total})`}</button>
       {expanded && (
         <ul className="job-items" aria-label="Items">
           {items.map((it, i) => (
@@ -159,10 +160,10 @@ function UploadRow({ b, expanded, onToggle }: { b: UpBatch; expanded: boolean; o
         <b>{b.title}</b>
         <span className="muted"> to {b.node}:{b.dir}</span>
         <span className="job-state">{label}</span>
-        {b.state === "running" && <button onClick={() => pauseUpload(b.id)}>Pause</button>}
-        {b.state === "paused" && <button onClick={() => resumeUpload(b.id)}>Resume</button>}
-        {failed > 0 && !live && <button onClick={() => retryFailed(b.id)}>Retry failed</button>}
-        {live ? <button onClick={() => cancelUpload(b.id)}>Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => dismissUpload(b.id)}><X /></button></Tip>}
+        {b.state === "running" && <button onClick={() => pauseUpload(b.id)}><Ic.Pause /> Pause</button>}
+        {b.state === "paused" && <button onClick={() => resumeUpload(b.id)}><Ic.Play /> Resume</button>}
+        {failed > 0 && !live && <button onClick={() => retryFailed(b.id)}><Ic.RotateCw /> Retry failed</button>}
+        {live ? <button onClick={() => cancelUpload(b.id)}><Ic.X /> Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => dismissUpload(b.id)}><X /></button></Tip>}
       </div>
       {live && <progress aria-label={b.title} max={100} value={p} />}
       <div className="muted job-detail">
@@ -174,7 +175,7 @@ function UploadRow({ b, expanded, onToggle }: { b: UpBatch; expanded: boolean; o
           failed ? `${failed} failed` : "",
         ].filter(Boolean).join(" · ")}
       </div>
-      <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}>{expanded ? "Hide items" : `Items (${b.files.length})`}</button>
+      <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}><Ic.List /> {expanded ? "Hide items" : `Items (${b.files.length})`}</button>
       {expanded && (
         <ul className="job-items" aria-label="Items">
           {b.files.slice(0, 500).map((f, i) => (

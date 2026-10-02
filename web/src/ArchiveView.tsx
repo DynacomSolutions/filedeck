@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, fmtSize, parent, type ArchiveEntry, type Entry } from "./api";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
+import * as Ic from "lucide-react";
 
 /** Browse an archive's contents without extracting it. */
 export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
@@ -32,7 +33,7 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
               .catch((e: Error) => setMsg(e.message))
           }
         >
-          Extract here
+          <Ic.PackageOpen /> Extract here
         </button>
         <span className="muted">
           {data ? `${data.entries.length}${data.truncated ? "+" : ""} entries, ${fmtSize(data.bytes)} uncompressed` : err ? "" : "reading archive..."}

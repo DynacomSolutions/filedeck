@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fileUrl } from "./api";
 import { MAX_ZIP, parseOffice, type OfficeDoc } from "./officeParse";
+import * as Ic from "lucide-react";
 
 /** Read-only text rendering of Word, Excel, PowerPoint, OpenDocument and CSV files, parsed in the browser. */
 export function OfficeView({ node, path, ext, size }: { node: string; path: string; ext: string; size: number }) {
@@ -64,7 +65,7 @@ export function OfficeView({ node, path, ext, size }: { node: string; path: stri
       {doc.sheets.length > 1 && (
         <div className="pv-tabs" role="tablist" aria-label="Sheets">
           {doc.sheets.map((s, i) => (
-            <button key={i} role="tab" aria-selected={i === sheet} className={i === sheet ? "on" : ""} onClick={() => setSheet(i)}>{s.name}</button>
+            <button key={i} role="tab" aria-selected={i === sheet} className={i === sheet ? "on" : ""} onClick={() => setSheet(i)}><Ic.Table2 /> {s.name}</button>
           ))}
         </div>
       )}

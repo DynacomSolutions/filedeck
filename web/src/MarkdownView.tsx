@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import { Marked } from "marked";
 import { fileUrl } from "./api";
+import * as Ic from "lucide-react";
 
 const MAX = 1024 * 1024;
 const md = new Marked({ gfm: true, breaks: false });
@@ -83,8 +84,8 @@ export function MarkdownView({ node, path }: { node: string; path: string }) {
   return (
     <div className="pv-mdwrap">
       <div className="pv-tabs" role="tablist" aria-label="Markdown view">
-        <button role="tab" aria-selected={!raw} className={!raw ? "on" : ""} onClick={() => setRaw(false)}>Rendered</button>
-        <button role="tab" aria-selected={raw} className={raw ? "on" : ""} onClick={() => setRaw(true)}>Source</button>
+        <button role="tab" aria-selected={!raw} className={!raw ? "on" : ""} onClick={() => setRaw(false)}><Ic.Eye /> Rendered</button>
+        <button role="tab" aria-selected={raw} className={raw ? "on" : ""} onClick={() => setRaw(true)}><Ic.FileCode /> Source</button>
         {trunc && <span className="muted">first 1 MiB shown</span>}
       </div>
       {raw ? (

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Modal } from "./ArchiveDialog";
+import * as Ic from "lucide-react";
 
 /** Ask for a single name (new file/folder, duplicate target...). `onSubmit` throws to show an error. */
 export function NameDialog({ title, label, initial = "", action, allowSlash, onSubmit, onClose }: { title: string; label: string; initial?: string; action: string; allowSlash?: boolean; onSubmit: (name: string) => Promise<void>; onClose: () => void }) {
@@ -26,8 +27,8 @@ export function NameDialog({ title, label, initial = "", action, allowSlash, onS
       </label>
       {err && <div className="fp-err">{err}</div>}
       <div className="modal-actions">
-        <button type="button" onClick={onClose}>Cancel</button>
-        <button type="submit" disabled={busy} onClick={() => void go()}>{action}</button>
+        <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
+        <button type="submit" disabled={busy} onClick={() => void go()}><Ic.Check /> {action}</button>
       </div>
     </Modal>
   );
@@ -64,8 +65,8 @@ export function LinkDialog({ existing, onSubmit, onClose }: { existing?: { name:
       </label>
       {err && <div className="fp-err" role="alert">{err}</div>}
       <div className="modal-actions">
-        <button type="button" onClick={onClose}>Cancel</button>
-        <button type="submit" disabled={busy} onClick={() => void go()}>{existing ? "Save" : "Create"}</button>
+        <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
+        <button type="submit" disabled={busy} onClick={() => void go()}>{existing ? <Ic.Save /> : <Ic.Plus />} {existing ? "Save" : "Create"}</button>
       </div>
     </Modal>
   );
@@ -76,7 +77,7 @@ export function ConfirmDialog({ title, message, action, danger, onConfirm, onClo
     <Modal title={title} onClose={onClose}>
       <p className="pad0">{message}</p>
       <div className="modal-actions">
-        <button type="button" autoFocus onClick={onClose}>Cancel</button>
+        <button type="button" autoFocus onClick={onClose}><Ic.X /> Cancel</button>
         <button
           type="submit"
           className={danger ? "danger" : undefined}
@@ -85,7 +86,7 @@ export function ConfirmDialog({ title, message, action, danger, onConfirm, onClo
             onConfirm();
           }}
         >
-          {action}
+          {danger ? <Ic.Trash2 /> : <Ic.Check />} {action}
         </button>
       </div>
     </Modal>

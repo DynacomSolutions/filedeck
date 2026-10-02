@@ -4,6 +4,7 @@ import { Modal } from "./ArchiveDialog";
 import { ConfirmDialog, NameDialog } from "./Dialogs";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
+import * as Ic from "lucide-react";
 
 type Dlg =
   | { k: "del"; ids: string[] }
@@ -113,27 +114,27 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
         e.stopPropagation();
       }}
     >
-      <header className="ed-head">
+      <div className="ed-head" role="group" aria-label="Toolbar">
         <b>Trash</b>
         <span className="muted">{node}</span>
         <span className="ed-spacer" />
-        <Tip label="Reload"><button onClick={load}>Refresh</button></Tip>
-        <Tip label="Close" shortcut="Esc"><button onClick={onClose}>Close</button></Tip>
-      </header>
+        <Tip label="Reload"><button onClick={load}><Ic.RefreshCw /> Refresh</button></Tip>
+        <Tip label="Close" shortcut="Esc"><button onClick={onClose}><Ic.X /> Close</button></Tip>
+      </div>
       {vols && vols.length > 0 && (
         <div className="tr-tabs" role="tablist" aria-label="Volumes">
           {vols.map((v) => (
             <button key={v.volume} role="tab" aria-selected={v.volume === current?.volume} className={v.volume === current?.volume ? "on" : ""} onClick={() => (setSel(new Set()), onVolume(v.volume))}>
-              {v.volume} <span className="pill">{v.items.length}</span>
+              <Ic.HardDrive /> {v.volume} <span className="pill">{v.items.length}</span>
             </button>
           ))}
         </div>
       )}
       <div className="tr-bar">
-        <Tip label="Restore to the original location" shortcut="Enter"><button disabled={!restorable || busy} onClick={() => void restore(ids)}>Restore</button></Tip>
-        <button disabled={!restorable || busy} onClick={() => setDlg({ k: "to", ids })}>Restore to...</button>
-        <Tip label="Delete permanently" shortcut="Del"><button disabled={!ids.length || busy} onClick={() => setDlg({ k: "del", ids })}>Delete permanently</button></Tip>
-        <button disabled={!items.length || busy} onClick={() => setDlg({ k: "empty" })}>Empty trash...</button>
+        <Tip label="Restore to the original location" shortcut="Enter"><button disabled={!restorable || busy} onClick={() => void restore(ids)}><Ic.Undo2 /> Restore</button></Tip>
+        <button disabled={!restorable || busy} onClick={() => setDlg({ k: "to", ids })}><Ic.FolderInput /> Restore to...</button>
+        <Tip label="Delete permanently" shortcut="Del"><button disabled={!ids.length || busy} onClick={() => setDlg({ k: "del", ids })}><Ic.CircleX /> Delete permanently</button></Tip>
+        <button disabled={!items.length || busy} onClick={() => setDlg({ k: "empty" })}><Ic.Trash2 /> Empty trash...</button>
         <span className="muted tr-count">{items.length ? `${items.length} item(s)${current?.truncated ? " (list truncated)" : ""}${ids.length ? `, ${ids.length} selected` : ""}` : ""}</span>
       </div>
       {err && <div className="ed-banner err" role="alert">{err}</div>}
@@ -196,9 +197,9 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
         <Modal title="Name already taken" onClose={() => setDlg(null)}>
           <p className="pad0">{dlg.ids.length} item(s) cannot be restored because something with the same name is already there.</p>
           <div className="modal-actions">
-            <button type="button" onClick={() => setDlg(null)}>Skip</button>
-            <button type="button" onClick={() => (setDlg(null), void restore(dlg.ids, { conflict: "rename", toDir: dlg.toDir }))}>Keep both</button>
-            <Tip label="The existing item moves to the trash"><button type="submit" onClick={() => (setDlg(null), void restore(dlg.ids, { conflict: "replace", toDir: dlg.toDir }))}>Replace</button></Tip>
+            <button type="button" onClick={() => setDlg(null)}><Ic.SkipForward /> Skip</button>
+            <button type="button" onClick={() => (setDlg(null), void restore(dlg.ids, { conflict: "rename", toDir: dlg.toDir }))}><Ic.CopyPlus /> Keep both</button>
+            <Tip label="The existing item moves to the trash"><button type="submit" onClick={() => (setDlg(null), void restore(dlg.ids, { conflict: "replace", toDir: dlg.toDir }))}><Ic.Replace /> Replace</button></Tip>
           </div>
         </Modal>
       )}
@@ -218,8 +219,8 @@ function EmptyDialog({ volume, count, onRun, onClose }: { volume: string; count:
       </label>
       <p className="pad0">{n === undefined ? `All ${count} item(s) will be permanently deleted.` : "Matching items will be permanently deleted."} This cannot be undone.</p>
       <div className="modal-actions">
-        <button type="button" onClick={onClose}>Cancel</button>
-        <button type="submit" className="danger" disabled={!valid} onClick={() => (onClose(), onRun(n))}>Empty trash</button>
+        <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
+        <button type="submit" className="danger" disabled={!valid} onClick={() => (onClose(), onRun(n))}><Ic.Trash2 /> Empty trash</button>
       </div>
     </Modal>
   );

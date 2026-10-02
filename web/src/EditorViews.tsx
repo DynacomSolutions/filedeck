@@ -5,6 +5,7 @@ import type { editor as MonacoEditor } from "monaco-editor";
 import { ConflictError, api, fmtSize, type TextFile } from "./api";
 import { modelUri, monacoTheme } from "./monacoSetup";
 import { ArrowLeftRight } from "lucide-react";
+import * as Ic from "lucide-react";
 
 export interface FileRef {
   node: string;
@@ -64,8 +65,8 @@ function Conflict({ onOverwrite, onReload }: { onOverwrite: () => void; onReload
   return (
     <div className="ed-banner" role="alert">
       <span>This file changed on disk since you opened it.</span>
-      <button onClick={onOverwrite}>Overwrite</button>
-      <button onClick={onReload}>Discard my edits and reload</button>
+      <button onClick={onOverwrite}><Ic.Replace /> Overwrite</button>
+      <button onClick={onReload}><Ic.RotateCw /> Discard my edits and reload</button>
     </div>
   );
 }
@@ -124,17 +125,17 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
 
   return (
     <div className={"ed" + (inline ? " inline" : "")} role="dialog" aria-label={`Editing ${base(path)}`}>
-      <header className="ed-head">
+      <div className="ed-head" role="group" aria-label="Editor toolbar">
         <b>
           {dirty && <Tip label="Unsaved changes"><span className="dirty-dot" role="img" aria-label="Unsaved changes" /></Tip>}
           <Tip label={`${node}:${path}`}><span>{base(path)}</span></Tip>
         </b>
         <span className="muted">{node}:{path}{loaded ? ` · ${fmtSize(loaded.size)}` : ""}</span>
         <span className="ed-spacer" />
-        <Tip label="Save" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}>{saving ? "Saving..." : "Save"}</button></Tip>
-        <Tip label="Close"><button onClick={close}>Close</button></Tip>
+        <Tip label="Save" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save"}</button></Tip>
+        <Tip label="Close"><button onClick={close}><Ic.X /> Close</button></Tip>
         {extra}
-      </header>
+      </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
       <div className="ed-body">
@@ -234,7 +235,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: 
 
   return (
     <div className={"ed" + (overlay ? " over" : "")} role="region" aria-label="File diff">
-      <header className="ed-head">
+      <div className="ed-head" role="group" aria-label="Diff toolbar">
         <b>Diff</b>
         <Tip label={`${left.node}:${left.path}`}><span className="muted ed-pair">{left.node}:{left.path}</span></Tip>
         <ArrowLeftRight className="muted" />
@@ -246,12 +247,12 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: 
         <span className="ed-spacer" />
         <Tip label="Toggle side-by-side / inline">
           <button onClick={() => setInline((v) => !v)} aria-pressed={inline}>
-            {inline ? "Side by side" : "Inline"}
+            {inline ? <Ic.Columns2 /> : <Ic.Rows2 />} {inline ? "Side by side" : "Inline"}
           </button>
         </Tip>
-        <Tip label="Save right side" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}>{saving ? "Saving..." : "Save right"}</button></Tip>
-        <Tip label="Close"><button onClick={close}>Close</button></Tip>
-      </header>
+        <Tip label="Save right side" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save right"}</button></Tip>
+        <Tip label="Close"><button onClick={close}><Ic.X /> Close</button></Tip>
+      </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
       <div className="ed-body">

@@ -9,6 +9,7 @@ import { CompressDialog } from "./ArchiveDialog";
 import { ConfirmDialog } from "./Dialogs";
 import { Tip } from "./Tooltip";
 import { wheelX } from "./scrollx";
+import * as Ic from "lucide-react";
 
 export interface SelRef {
   node: string;
@@ -127,19 +128,19 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
     <div className="selbar" onWheel={wheelX} role="region" aria-label="Selection across panels">
       <Tip label={text}><b role="status">{text}</b></Tip>
       <span className="selbar-actions">
-        <Tip label={need("Copy the selection to the file clipboard")}><button disabled={!refs.length} onClick={clip("copy")}>Copy</button></Tip>
-        <Tip label={need("Cut the selection to the file clipboard")}><button disabled={!refs.length} onClick={clip("cut")}>Cut</button></Tip>
-        <Tip label={need("Copy the selection into another open panel's folder")}><button disabled={!refs.length} onClick={to("copy")}>Copy to...</button></Tip>
-        <Tip label={need("Move the selection into another open panel's folder")}><button disabled={!refs.length} onClick={to("move")}>Move to...</button></Tip>
-        <Tip label={need("Download the selection (several items or folders as a zip)")}><button disabled={!refs.length} onClick={() => downloadRefs(refs)}>Download</button></Tip>
-        <Tip label={need("Compress the selection into an archive")}><button disabled={!refs.length} onClick={() => setCompress(true)}>Compress...</button></Tip>
-        <Tip label={need("Move the selection to the trash")}><button disabled={!refs.length} onClick={() => void queue("Trash", trashSpec(refs))}>Trash</button></Tip>
-        <Tip label={need("Delete the selection permanently")}><button disabled={!refs.length} className="danger" onClick={() => setConfirm(true)}>Delete...</button></Tip>
+        <Tip label={need("Copy the selection to the file clipboard")}><button disabled={!refs.length} onClick={clip("copy")}><Ic.Copy /> <span className="bl">Copy</span></button></Tip>
+        <Tip label={need("Cut the selection to the file clipboard")}><button disabled={!refs.length} onClick={clip("cut")}><Ic.Scissors /> <span className="bl">Cut</span></button></Tip>
+        <Tip label={need("Copy the selection into another open panel's folder")}><button disabled={!refs.length} onClick={to("copy")}><Ic.CopyPlus /> <span className="bl p2">Copy to...</span></button></Tip>
+        <Tip label={need("Move the selection into another open panel's folder")}><button disabled={!refs.length} onClick={to("move")}><Ic.FolderInput /> <span className="bl p2">Move to...</span></button></Tip>
+        <Tip label={need("Download the selection (several items or folders as a zip)")}><button disabled={!refs.length} onClick={() => downloadRefs(refs)}><Ic.Download /> <span className="bl">Download</span></button></Tip>
+        <Tip label={need("Compress the selection into an archive")}><button disabled={!refs.length} onClick={() => setCompress(true)}><Ic.Archive /> <span className="bl p2">Compress...</span></button></Tip>
+        <Tip label={need("Move the selection to the trash")}><button disabled={!refs.length} onClick={() => void queue("Trash", trashSpec(refs))}><Ic.Trash2 /> <span className="bl">Trash</span></button></Tip>
+        <Tip label={need("Delete the selection permanently")}><button disabled={!refs.length} className="danger" onClick={() => setConfirm(true)}><Ic.CircleX /> <span className="bl">Delete...</span></button></Tip>
         <Tip label={diffable ? "Diff the two selected files" : "Select exactly two regular files (in one or two panels) to diff them."}>
-          <button disabled={!diffable} onClick={() => diffable && onDiff(refs[0]!, refs[1]!)}>Diff files</button>
+          <button disabled={!diffable} onClick={() => diffable && onDiff(refs[0]!, refs[1]!)}><Ic.Diff /> <span className="bl p3">Diff files</span></button>
         </Tip>
         <Tip label={refs.length || picked.length ? "Clear the selection and picked panels" : "Nothing is selected."}>
-          <button disabled={!refs.length && !picked.length} onClick={onClear}>Clear</button>
+          <button disabled={!refs.length && !picked.length} onClick={onClear}><Ic.Eraser /> <span className="bl p3">Clear</span></button>
         </Tip>
       </span>
       {createPortal(<>

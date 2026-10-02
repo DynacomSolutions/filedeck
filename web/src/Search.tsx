@@ -4,6 +4,7 @@ import { fmtDate, fmtSize, searchStream, type SearchDone, type SearchHit } from 
 import { EMPTY_SEARCH, type SearchForm, type SearchMode, type SearchTypes } from "./urlState";
 import { FileIcon } from "./FileIcon";
 import { X } from "lucide-react";
+import * as Ic from "lucide-react";
 
 interface Props {
   node: string;
@@ -150,9 +151,9 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
           <option value="dir">folders</option>
         </select>
         {running ? (
-          <button type="button" onClick={cancel}>Cancel</button>
+          <button type="button" onClick={cancel}><Ic.X /> Cancel</button>
         ) : (
-          <button type="submit" className="primary">Search</button>
+          <button type="submit" className="primary"><Ic.Search /> Search</button>
         )}
         <Tip label="Close search" shortcut="Esc"><button type="button" aria-label="Close search" onClick={() => (onForm(EMPTY_SEARCH), onClose())}><X /></button></Tip>
       </form>
@@ -182,8 +183,8 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
                 <td className="num">{h.t === "dir" ? "" : fmtSize(h.s)}</td>
                 <td className="num">{fmtDate(h.m)}</td>
                 <td className="sr-act">
-                  <Tip label="Show in its folder" shortcut="Enter"><button type="button" onClick={(e) => (e.stopPropagation(), onReveal(h.p))}>Reveal</button></Tip>
-                  <Tip label={h.t === "dir" ? "Open folder" : "Open file in a new tab (Shift+Enter)"}><button type="button" onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}>Open</button></Tip>
+                  <Tip label="Show in its folder" shortcut="Enter"><button type="button" onClick={(e) => (e.stopPropagation(), onReveal(h.p))}><Ic.FolderSearch /> Reveal</button></Tip>
+                  <Tip label={h.t === "dir" ? "Open folder" : "Open file in a new tab (Shift+Enter)"}><button type="button" onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}><Ic.ExternalLink /> Open</button></Tip>
                 </td>
               </tr>
             ))}

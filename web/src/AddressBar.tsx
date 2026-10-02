@@ -5,6 +5,7 @@ import { fmtAddr, fuzzy, itemUri, parseAddress, splitTyped, type Where } from ".
 import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
 import { Tip } from "./Tooltip";
+import * as Ic from "lucide-react";
 import { wheelX } from "./scrollx";
 
 interface Item {
@@ -292,20 +293,20 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       <nav className="crumbs" aria-label="Breadcrumb" ref={navRef} onWheel={wheelX}>
         <Tip label={`Root of ${node}`}>
           <button onClick={() => onGo(node, "/")} onContextMenu={(e) => onCrumbMenu(e, "/")}>
-            {node}:
+            <Ic.HardDrive /> {node}:
           </button>
         </Tip>
         {crumbs.map((c, i) => {
           const p = "/" + crumbs.slice(0, i + 1).join("/");
           return (
             <button key={i} onClick={() => onGo(node, p)} onContextMenu={(e) => onCrumbMenu(e, p)}>
-              /{c}
+              <Ic.Folder /> {c}
             </button>
           );
         })}
       </nav>
       <Tip label="Edit the address" shortcut="Ctrl+L">
-        <button ref={editBtn} type="button" className="addr-edit" aria-label="Edit address" onFocus={() => !skipFocus.current && begin()} onClick={begin} />
+        <button ref={editBtn} type="button" className="addr-edit" aria-label="Edit address" onFocus={() => !skipFocus.current && begin()} onClick={begin}><Ic.Pencil aria-hidden="true" /></button>
       </Tip>
     </div>
   );

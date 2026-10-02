@@ -11,6 +11,7 @@ import { Tip } from "./Tooltip";
 import { wheelX } from "./scrollx";
 import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DEFAULT_UI, DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
+import * as Ic from "lucide-react";
 
 /* ------------------------------------------------------------------ options and presets */
 
@@ -62,7 +63,8 @@ const ACTION_LABEL: Record<SyncAction, string> = {
   "delete-left": "Delete from left",
   "delete-right": "Delete from right",
 };
-export const ROW_H = 26;
+/** Same height as a normal file-list row (22 px line plus 2 x .5rem padding and the 1 px separator). */
+export const ROW_H = 39;
 /** Height of the column header row inside each scroller (same on both sides, so row 0 lines up). */
 export const HEAD_H = 28;
 
@@ -654,21 +656,21 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
               {MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
           </label>
-          <Tip label="Tolerance, filters, depth and presets"><button onClick={() => setShowOpts((v) => !v)} aria-expanded={showOpts}>Options</button></Tip>
-          <button className="primary" onClick={() => (ctl.running ? ctl.cancel() : ctl.start())}>{ctl.running ? "Cancel" : "Compare again"}</button>
+          <Tip label="Tolerance, filters, depth and presets"><button onClick={() => setShowOpts((v) => !v)} aria-expanded={showOpts}><Ic.SlidersHorizontal /> Options</button></Tip>
+          <button className="primary" onClick={() => (ctl.running ? ctl.cancel() : ctl.start())}>{ctl.running ? <Ic.X /> : <Ic.RefreshCw />} {ctl.running ? "Cancel" : "Compare again"}</button>
           <span className="fd-sep" />
           <span className="fd-sync" role="group" aria-label="Sync selected rows">
             <Tip label="Copy selected left items over to the right side"><button disabled={!sel} onClick={() => ctl.preview("copy-lr")}>Copy <ArrowRight /></button></Tip>
             <Tip label="Copy selected right items over to the left side"><button disabled={!sel} onClick={() => ctl.preview("copy-rl")}><ArrowLeft /> Copy</button></Tip>
-            <Tip label="Move selected left items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-left")}>Delete left</button></Tip>
-            <Tip label="Move selected right items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-right")}>Delete right</button></Tip>
+            <Tip label="Move selected left items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-left")}><Ic.Trash2 /> Delete left</button></Tip>
+            <Tip label="Move selected right items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-right")}><Ic.Trash2 /> Delete right</button></Tip>
           </span>
-          <Tip label="Select every differing row in the whole tree"><button disabled={!result} onClick={() => ctl.setSelected(new Set(result!.rows.filter((r) => r.status !== "identical" && !ctl.hide.has(r.status)).map((r) => r.p)))}>Select differing</button></Tip>
-          <button disabled={!sel} onClick={() => ctl.setSelected(new Set())}>Clear</button>
+          <Tip label="Select every differing row in the whole tree"><button disabled={!result} onClick={() => ctl.setSelected(new Set(result!.rows.filter((r) => r.status !== "identical" && !ctl.hide.has(r.status)).map((r) => r.p)))}><Ic.ListChecks /> Select differing</button></Tip>
+          <button disabled={!sel} onClick={() => ctl.setSelected(new Set())}><Ic.Eraser /> Clear</button>
         </>
       )}
       <span className="muted fd-count">{sel} selected</span>
-      <Tip label="Leave compare mode (Esc)"><button className="cmp-exit" onClick={ctl.exit}>Exit compare</button></Tip>
+      <Tip label="Leave compare mode (Esc)"><button className="cmp-exit" onClick={ctl.exit}><Ic.LogOut /> Exit compare</button></Tip>
     </div>
       {side === "left" && showOpts && (
         <div className="cmp-pop fd-opts" role="group" aria-label="Compare options">
@@ -706,9 +708,9 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
               Save current options as
               <input type="text" value={presetName} placeholder="name" onChange={(e) => setPresetName(e.target.value)} />
             </label>
-            <button disabled={!presetName.trim()} onClick={() => (ctl.savePreset(presetName.trim()), setPresetName(""))}>Save preset</button>
-            <button disabled={!st.preset} onClick={ctl.deletePreset}>Delete preset</button>
-            <button className="primary" onClick={() => (setShowOpts(false), ctl.start())}>Apply and compare</button>
+            <button disabled={!presetName.trim()} onClick={() => (ctl.savePreset(presetName.trim()), setPresetName(""))}><Ic.Save /> Save preset</button>
+            <button disabled={!st.preset} onClick={ctl.deletePreset}><Ic.Trash2 /> Delete preset</button>
+            <button className="primary" onClick={() => (setShowOpts(false), ctl.start())}><Ic.GitCompareArrows /> Apply and compare</button>
           </div>
         </div>
       )}
@@ -786,8 +788,8 @@ export function SyncDialog({ ctl }: { ctl: CompareCtl }) {
             {exec.plan.notes.map((x) => <p key={x} className="muted">{x}</p>)}
             <PlanList steps={exec.plan.steps} />
             <div className="modal-actions">
-              <button onClick={ctl.closeExec}>Cancel</button>
-              <button className="primary" onClick={ctl.runExec} disabled={exec.plan.steps.every((s) => s.op === "skip")}>Run</button>
+              <button onClick={ctl.closeExec}><Ic.X /> Cancel</button>
+              <button className="primary" onClick={ctl.runExec} disabled={exec.plan.steps.every((s) => s.op === "skip")}><Ic.Play /> Run</button>
             </div>
           </>
         )}
@@ -801,8 +803,8 @@ export function SyncDialog({ ctl }: { ctl: CompareCtl }) {
             </p>
             <p className="muted">This runs on the server as a job (see Jobs in the sidebar): you can close this window and it keeps going.</p>
             <div className="modal-actions">
-              <button onClick={ctl.stopExec}>Stop</button>
-              <button onClick={ctl.closeExec}>Close, keep running</button>
+              <button onClick={ctl.stopExec}><Ic.Square /> Stop</button>
+              <button onClick={ctl.closeExec}><Ic.X /> Close, keep running</button>
             </div>
           </>
         )}
@@ -810,7 +812,7 @@ export function SyncDialog({ ctl }: { ctl: CompareCtl }) {
           <>
             <p role="status">{exec.canceled ? "Stopped" : "Finished"}: {exec.done} step(s) run, {exec.errors.length} failed.</p>
             {exec.errors.length > 0 && <ul className="fd-errs">{exec.errors.map((e) => <li key={e}>{e}</li>)}</ul>}
-            <div className="modal-actions"><button className="primary" onClick={ctl.closeExec}>Close and compare again</button></div>
+            <div className="modal-actions"><button className="primary" onClick={ctl.closeExec}><Ic.RefreshCw /> Close and compare again</button></div>
           </>
         )}
       </div>

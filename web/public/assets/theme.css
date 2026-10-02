@@ -26,8 +26,9 @@
   color-scheme: dark;
 
   /* Registered palette — every color literal derives from these. */
-  --bg: #000000;
-  --surface: #0a0a0a;
+  --bg: #0c0c0e;
+  --surface: #151518;
+  --surface-1: #151518;
   --fg: #ffffff;
   --muted: #737373;
   --border: #242424;
@@ -36,23 +37,28 @@
 
   /* Derived (alpha and oklch mixes of the palette only). */
   --fg-soft: rgba(255, 255, 255, 0.78);
-  --surface-2: rgba(255, 255, 255, 0.045);
-  --surface-3: rgba(255, 255, 255, 0.08);
+  --surface-2: #1e1e22;
+  --surface-3: #29292e;
   --border-strong: rgba(255, 255, 255, 0.18);
   --accent-fill: #2563eb;
   --accent-fill-hover: #1d3f9e;
   --accent-tint: rgba(79, 140, 255, 0.12);
   --accent-line: rgba(79, 140, 255, 0.38);
-  --shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
-  --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.4);
-  --header-bg: rgba(0, 0, 0, 0.86);
+  /* Flat surfaces separated by soft shadows instead of borders (three steps). */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-3: 0 14px 36px rgba(0, 0, 0, 0.65), 0 2px 8px rgba(0, 0, 0, 0.45);
+  --shadow: var(--shadow-3);
+  --shadow-soft: var(--shadow-2);
+  --header-bg: var(--surface);
+  --radius-btn: 6px;
 
   --font: 'Montserrat', system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --radius: 8px;
   --radius-sm: 6px;
-  --pill: 999px;
+  --pill: 6px;
   --gutter: clamp(1rem, 3vw, 2rem);
   --wide: 78rem;
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
@@ -62,21 +68,25 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #ffffff;
+  --bg: #e9ebef;
   --surface: #ffffff;
+  --surface-1: #ffffff;
   --fg: #000000;
   --fg-soft: rgba(0, 0, 0, 0.72);
   --muted: rgba(0, 0, 0, 0.58);
-  --surface-2: rgba(0, 0, 0, 0.035);
-  --surface-3: rgba(0, 0, 0, 0.06);
+  --surface-2: #f3f4f6;
+  --surface-3: #e4e6ea;
   --border: rgba(0, 0, 0, 0.13);
   --border-strong: rgba(0, 0, 0, 0.3);
   --accent-tint: rgba(79, 140, 255, 0.09);
   --accent-line: rgba(29, 63, 158, 0.45);
   --accent-text: #1d3f9e;
-  --shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
-  --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.08);
-  --header-bg: rgba(255, 255, 255, 0.88);
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.12), 0 0 0 0 transparent;
+  --shadow-2: 0 2px 8px rgba(16, 24, 40, 0.12), 0 1px 2px rgba(16, 24, 40, 0.1);
+  --shadow-3: 0 14px 36px rgba(16, 24, 40, 0.2), 0 2px 8px rgba(16, 24, 40, 0.1);
+  --shadow: var(--shadow-3);
+  --shadow-soft: var(--shadow-2);
+  --header-bg: var(--surface);
 }
 :root { --accent-text: var(--accent); }
 
@@ -255,8 +265,6 @@ a.index-row { transition: background var(--fast) var(--ease); }
 .site-header {
   position: sticky; top: 0; z-index: 50;
   background: var(--header-bg);
-  backdrop-filter: blur(0.6rem);
-  -webkit-backdrop-filter: blur(0.6rem);
   border-bottom: 1px solid var(--border);
 }
 .site-header__inner {
@@ -492,7 +500,6 @@ select.field__input {
   position: fixed; inset: 0; z-index: 90;
   display: grid; place-items: center; padding: 1rem;
   background: rgba(0, 0, 0, 0.66);
-  backdrop-filter: blur(3px);
 }
 .modal {
   width: min(30rem, 100%);

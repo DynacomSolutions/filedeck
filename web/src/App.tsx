@@ -19,6 +19,7 @@ import { ChevronDown, ChevronRight, GitCompareArrows, Keyboard, Star, X } from "
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
+import * as Ic from "lucide-react";
 
 /** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = merge as a tab). */
 function DockSlot({ id, dragging, onDock, children }: { id: string; dragging: string | null; onDock: (src: string, target: string, zone: DropZone) => void; children: React.ReactNode }) {
@@ -196,15 +197,15 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
           </button>
           {open[n.name] && (
             <ul className="mounts">
-              <li><button onClick={() => onOpen(n.name, "/")}>/ (root)</button></li>
-              <li><button onClick={() => onTrash(n.name)}>Trash</button></li>
+              <li><button onClick={() => onOpen(n.name, "/")}><Ic.HardDrive /> / (root)</button></li>
+              <li><button onClick={() => onTrash(n.name)}><Ic.Trash2 /> Trash</button></li>
               {(mounts[n.name] ?? []).map((m) => (
                 <li key={m.mountpoint}>
                   <Tip label={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}${m.readOnly ? " - read-only" : ""}`}>
                   <button
                     onClick={() => onOpen(n.name, m.mountpoint)}
                   >
-                    {m.mountpoint}
+                    <Ic.HardDrive /> {m.mountpoint}
                     {m.network && <span className={"net-badge" + (m.unreachable ? " bad" : "")}>{m.netKind ?? "network"}</span>}
                     {m.readOnly && <span className="net-badge">read-only</span>}
                     <span className="bar"><i style={{ width: `${m.total ? Math.round((m.used / m.total) * 100) : 0}%` }} /></span>
@@ -221,7 +222,7 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       {network.map((n) => (
         <Tip key={n.name} label={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : " - unreachable"}`}>
           <button className="side-node" onClick={() => onOpen(n.name, "/")}>
-            <span className={"dot " + (n.online ? "on" : "off")} /> {n.name}
+            <span className={"dot " + (n.online ? "on" : "off")} /> <Ic.Network /> {n.name}
             <span className="net-badge">{(n.type ?? "net").toUpperCase()}</span>
           </button>
         </Tip>
@@ -452,8 +453,11 @@ export function App() {
 
   return (
     <div className="app">
+      <CompareCtx.Provider value={cmp}>
+      <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><ThemeMenu /></>} />
+      <div className="app-col">
       <header className="site-header">
-        <div className="site-header__inner shell">
+        <div className="site-header__inner">
           <SelectionBar
             refs={Object.values(sels).flat()}
             panelCount={Object.keys(sels).length}
@@ -466,27 +470,23 @@ export function App() {
             onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
             onStatus={setStatus}
           />
-          <span className="status" role="status">{status}</span>
           <div className="site-header__actions">
             {diffMark && (
               <Tip label="Clear diff mark">
-                <button className="btn btn--ghost btn--sm" onClick={() => setDiffMark(null)}>
-                  Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)} <X />
+                <button onClick={() => setDiffMark(null)}>
+                  <Ic.Diff /> <span className="bl">Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)}</span> <X />
                 </button>
               </Tip>
             )}
             <Tip label={compareWhyNot ?? "Compare two panels in place (folder compare, file diff, sync)"}>
-              <button className="btn btn--ghost btn--sm" aria-label="Compare panels" disabled={!!compareWhyNot} onClick={compareClick}><GitCompareArrows /> Compare panels</button>
+              <button aria-label="Compare panels" disabled={!!compareWhyNot} onClick={compareClick}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
             </Tip>
-            <ThemeMenu />
-            <Tip label="Keyboard shortcuts" shortcut="?"><button className="btn btn--ghost btn--sm" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
+                        <Tip label="Keyboard shortcuts" shortcut="?"><button onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
           </div>
         </div>
       </header>
       {cmpMenu && <ContextMenu x={cmpMenu.x} y={cmpMenu.y} items={cmpMenu.items} onClose={() => setCmpMenu(null)} />}
-      <CompareCtx.Provider value={cmp}>
       <div className="body">
-        <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><JobsTray nodes={nodes} /></>} />
         <main className="main" aria-label="File panels">
           <h1 className="visually-hidden">Files</h1>
           {tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
@@ -496,6 +496,7 @@ export function App() {
             </Suspense>
           )}
         </main>
+      </div>
       </div>
       {cmp && <SyncDialog ctl={cmp} />}
       </CompareCtx.Provider>

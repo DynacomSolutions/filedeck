@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type ArchiveFormat } from "./api";
+import * as Ic from "lucide-react";
 
 export function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
   const form = useRef<HTMLFormElement>(null);
@@ -73,8 +74,8 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
       {groups.length > 1 && <p className="muted">The items sit in {groups.length} folders, so {groups.length} archives are made (each next to its items).</p>}
       {err && <div className="fp-err">{err}</div>}
       <div className="modal-actions">
-        <button type="button" onClick={onClose}>Cancel</button>
-        <button type="submit" onClick={() => void go()}>Compress</button>
+        <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
+        <button type="submit" onClick={() => void go()}><Ic.Archive /> Compress</button>
       </div>
     </Modal>
   );
@@ -115,8 +116,8 @@ export function ExtractDialog({
       </label>
       {err && <div className="fp-err">{err}</div>}
       <div className="modal-actions">
-        <button type="button" onClick={onClose}>Cancel</button>
-        <button type="submit" onClick={() => void go()}>Extract</button>
+        <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
+        <button type="submit" onClick={() => void go()}><Ic.PackageOpen /> Extract</button>
       </div>
     </Modal>
   );

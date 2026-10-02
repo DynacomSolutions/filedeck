@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, fmtDate, fmtMode, fmtSize, stat, type Entry, type JobView, type PermsResult, type Props, type SizeResult } from "./api";
 import { Modal } from "./ArchiveDialog";
+import * as Ic from "lucide-react";
 
 const TYPE: Record<Entry["type"], string> = { file: "File", dir: "Folder", symlink: "Symbolic link", other: "Special file" };
 const GRID: [string, number, number, number][] = [
@@ -157,10 +158,10 @@ export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStat
                 </span>
               ) : sj && live(sj) ? (
                 <span>
-                  Calculating... {sj.progress.entries.toLocaleString()} entries, {fmtSize(sj.progress.bytes)} <button type="button" onClick={sizeJob.cancel}>Cancel</button>
+                  Calculating... {sj.progress.entries.toLocaleString()} entries, {fmtSize(sj.progress.bytes)} <button type="button" onClick={sizeJob.cancel}><Ic.X /> Cancel</button>
                 </span>
               ) : (
-                <button type="button" onClick={() => void calc()}>{sj?.state === "canceled" ? "Calculate again" : "Calculate size"}</button>
+                <button type="button" onClick={() => void calc()}><Ic.Calculator /> {sj?.state === "canceled" ? "Calculate again" : "Calculate size"}</button>
               )}
             </dd>
           </div>
@@ -171,7 +172,7 @@ export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStat
           <legend>Permissions</legend>
           <table className="perm-grid">
             <thead>
-              <tr><th /><th>Read</th><th>Write</th><th>Execute</th></tr>
+              <tr><th><span className="visually-hidden">Class</span></th><th>Read</th><th>Write</th><th>Execute</th></tr>
             </thead>
             <tbody>
               {GRID.map(([who, ...bits]) => (
@@ -230,16 +231,16 @@ export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStat
           )}
           {permJob.job && live(permJob.job) && (
             <div className="muted">
-              Applying... {permJob.job.progress.entries.toLocaleString()} entries <button type="button" onClick={permJob.cancel}>Cancel</button>
+              Applying... {permJob.job.progress.entries.toLocaleString()} entries <button type="button" onClick={permJob.cancel}><Ic.X /> Cancel</button>
             </div>
           )}
           <div className="modal-actions">
-            <button type="button" disabled={!dirty || busy} onClick={() => void apply()}>{busy ? "Applying..." : "Apply permissions"}</button>
+            <button type="button" disabled={!dirty || busy} onClick={() => void apply()}><Ic.ShieldCheck /> {busy ? "Applying..." : "Apply permissions"}</button>
           </div>
         </fieldset>
       )}
       <div className="modal-actions">
-        <button type="submit" onClick={onClose}>Close</button>
+        <button type="submit" onClick={onClose}><Ic.X /> Close</button>
       </div>
     </Modal>
   );

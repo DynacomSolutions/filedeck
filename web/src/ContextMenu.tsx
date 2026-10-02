@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronRight } from "lucide-react";
+import { Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, Trash2, Upload, X, ArrowLeft, ArrowRight, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
   | "sep"
@@ -16,6 +16,17 @@ export type MenuItem =
     };
 
 type Item = Exclude<MenuItem, "sep">;
+/** Icon for a menu row, chosen from its label so every item carries one (flat lucide line icon, 16px). */
+const ICONS: [RegExp, LucideIcon][] = [
+  [/^Open trash/i, Trash2], [/^Open in new tab|^New tab|^Duplicate tab/i, SquarePlus], [/^Open/i, FolderOpen],
+  [/^Remove bookmark/i, StarOff], [/bookmark/i, Star], [/^Preview/i, Eye], [/^Edit link|^Edit/i, FilePen], [/^Cut/i, Scissors], [/^Copy path/i, Copy],
+  [/^Copy to|^Copy/i, Copy], [/^Paste/i, ClipboardPaste], [/^Rename/i, Pencil], [/^Duplicate/i, CopyPlus], [/^Compress/i, Archive], [/^Extract/i, PackageOpen],
+  [/^Download/i, Download], [/^Move to trash|^Delete left|^Delete right/i, Trash2], [/^Delete/i, CircleX], [/^Properties/i, Info], [/^New file/i, FilePlus],
+  [/^New folder/i, FolderPlus], [/^New symbolic/i, Link], [/^Select all/i, SquareCheck], [/^Upload/i, Upload], [/^Refresh/i, RefreshCw],
+  [/^Exit compare/i, LogOut], [/^Compare|^Selected in/i, GitCompareArrows], [/^Mark for diff|^Diff/i, Diff], [/^Move left/i, ArrowLeft], [/^Move right/i, ArrowRight],
+  [/^Move to|^Move/i, FolderInput], [/^Close/i, X], [/^No other/i, X],
+];
+const iconFor = (label: string): LucideIcon => ICONS.find(([re]) => re.test(label))?.[1] ?? MousePointer2;
 const actionable = (items: MenuItem[]) => items.map((it, i) => [it, i] as const).filter((p): p is readonly [Item, number] => p[0] !== "sep" && !p[0].disabled).map((p) => p[1]);
 
 function Menu({ items, x, y, onClose, depth = 0, onLeft }: { items: MenuItem[]; x: number; y: number; onClose: () => void; depth?: number; onLeft?: () => void }) {
@@ -93,7 +104,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft }: { items: MenuItem[]; 
               }}
               onClick={() => run(it)}
             >
-              <span>{it.label}</span>
+              <span className="ctx-l">{(() => { const I = iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
               {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
             </button>
             {it.sub && openSub === i && (
@@ -106,7 +117,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft }: { items: MenuItem[]; 
       )}
     </div>
   );
-  return depth === 0 ? createPortal(body, document.body) : body;
+  return depth === 0 ? createPortal(<div role="region" aria-label="Context menu">{body}</div>, document.body) : body;
 }
 
 /** Context menu at viewport coordinates; closes on outside click, Escape, scroll or resize. */

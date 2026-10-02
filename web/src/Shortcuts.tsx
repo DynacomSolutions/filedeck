@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import * as Ic from "lucide-react";
 
 const GROUPS: { title: string; rows: [string, string][] }[] = [
   {
@@ -78,7 +79,7 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
           </section>
         ))}
         <div className="modal-actions">
-          <button type="submit" onClick={onClose}>Close</button>
+          <button type="submit" onClick={onClose}><Ic.X /> Close</button>
         </div>
       </div>
     </div>
