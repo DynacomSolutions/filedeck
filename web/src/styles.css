@@ -79,7 +79,22 @@ input[type=checkbox]{accent-color:var(--accent)}
 .fp.active{border-color:var(--accent-line)}.fp.drop{outline:2px dashed var(--accent);outline-offset:-4px}
 /* a panel header is two fixed rows (path, then actions that scroll sideways when they do not fit): every panel header has the same height, so side-by-side lists line up */
 .fp-bar{flex:none;box-sizing:border-box;height:72px;display:flex;flex-direction:column;justify-content:center;gap:.25rem;padding:0 .65rem;border-bottom:1px solid var(--border)}
-.crumbs{display:flex;flex-wrap:nowrap;flex:none;height:22px;align-items:center;min-width:0;font-size:.84rem;white-space:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}.crumbs button{flex:none}
+.addr{position:relative;display:flex;align-items:center;height:22px;min-width:0;flex:none}
+.addr>.tip:last-child{flex:1 0 28px;display:flex;min-width:28px}
+.addr-edit{flex:1;height:22px;min-height:0;padding:0;border:0;border-radius:6px;background:transparent}
+.addr-edit:hover:not(:disabled){background:var(--surface-2);border:0}
+.addr-in{flex:1;width:100%;height:22px;min-height:0;box-sizing:border-box;padding:0 1.6rem 0 .5rem;border:0!important;border-radius:6px;background:var(--surface-2)!important;color:var(--fg);font:inherit;font-size:.84rem;font-weight:600;box-shadow:0 0 0 2px var(--accent-line);outline:none}
+.addr-in.bad{box-shadow:0 0 0 2px var(--accent)}
+.addr>.tip:has(.addr-warn){position:absolute;right:.4rem;top:3px;flex:none;min-width:0;width:16px;height:16px}
+.addr-warn{display:block;width:16px;height:16px;color:var(--accent-text)}.addr-warn svg{width:16px;height:16px}
+.addr-list{position:fixed;z-index:90;margin:0;padding:.3rem;list-style:none;max-height:18rem;overflow-y:auto;background:var(--surface);border-radius:6px;box-shadow:var(--shadow);font-size:.82rem}
+.addr-list li{display:flex;align-items:center;gap:.5rem;padding:.3rem .5rem;border-radius:6px;cursor:pointer}
+.addr-list li.cur{background:var(--surface-3)}
+.addr-list svg{flex:none;width:14px;height:14px;color:var(--muted)}
+.addr-uri{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.addr-kind{flex:none;color:var(--muted);font-size:.7rem}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.crumbs{display:flex;flex-wrap:nowrap;flex:0 1 auto;height:22px;align-items:center;min-width:0;font-size:.84rem;white-space:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}.crumbs button{flex:none}
 .crumbs button{border:0;background:transparent;padding:0 .15rem;min-height:0;color:var(--fg);font-weight:600}
 .crumbs button:hover:not(:disabled){background:transparent;color:var(--accent-text)}
 .crumbs button:first-child{color:var(--muted)}

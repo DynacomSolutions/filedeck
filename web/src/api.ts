@@ -364,8 +364,8 @@ export const api = {
       .then((r) => j<{ nodes: NodeInfo[]; sources?: NodeInfo[] }>(r))
       .then((r) => ({ nodes: [...r.nodes.map((n) => ({ ...n, kind: "node" as const })), ...(r.sources ?? []).map((s) => ({ ...s, kind: "source" as const }))] })),
   mounts: (node: string) => fetch(`${nodeBase(node)}/api/mounts`).then((r) => j<{ mounts: Mount[] }>(r)),
-  list: (node: string, path: string, hidden: boolean) =>
-    fetch(`${nodeBase(node)}/api/fs/list?path=${enc(path)}${hidden ? "&hidden=1" : ""}`).then((r) =>
+  list: (node: string, path: string, hidden: boolean, signal?: AbortSignal) =>
+    fetch(`${nodeBase(node)}/api/fs/list?path=${enc(path)}${hidden ? "&hidden=1" : ""}`, { signal }).then((r) =>
       j<{ path: string; entries: Entry[]; truncated: boolean }>(r),
     ),
   mkdir: (node: string, path: string) => post(node, "mkdir", { path }),
@@ -444,7 +444,7 @@ export const canEdit = (e: Entry) =>
   (e.type === "file" || (e.type === "symlink" && !e.linkDir)) && e.size <= MAX_EDIT && !NOT_TEXT.has(e.name.slice(e.name.lastIndexOf(".") + 1).toLowerCase());
 
 export const mediaInfo = (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/mediainfo?path=${enc(path)}`).then((r) => j<MediaInfo>(r));
-export const stat = (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/stat?path=${enc(path)}`).then((r) => j<Entry>(r));
+export const stat = (node: string, path: string, signal?: AbortSignal) => fetch(`${nodeBase(node)}/api/fs/stat?path=${enc(path)}`, { signal }).then((r) => j<Entry>(r));
 /** Create an empty file (fails with 409 when it exists). */
 export const createFile = (node: string, path: string) => api.writeText(node, path, "", null);
 const MODE_BITS = "rwxrwxrwx";

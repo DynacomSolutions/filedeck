@@ -11,6 +11,8 @@ interface Props {
   shortcut?: string;
   /** Truncated-text mode: the wrapper fills the cell and ellipsises. */
   fill?: boolean;
+  /** Keep the tooltip open while true (an error that appears under a control that already has focus). */
+  forceOpen?: boolean;
   children: ReactElement<{ "aria-describedby"?: string }>;
 }
 
@@ -19,13 +21,14 @@ interface Props {
  * delay) and on keyboard focus, closes on leave, blur and Esc, stays inside the viewport and is linked to
  * its control with aria-describedby. Replaces the native `title` attribute.
  */
-export function Tip({ label, shortcut, fill, children }: Props) {
+export function Tip({ label, shortcut, fill, forceOpen, children }: Props) {
   const id = useId();
   const wrap = useRef<HTMLSpanElement>(null);
   const bubble = useRef<HTMLDivElement>(null);
   const timer = useRef<number | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const shown = open || !!forceOpen;
   const has = label !== undefined && label !== null && label !== "";
 
   const show = useCallback((delay: number) => {
@@ -41,7 +44,7 @@ export function Tip({ label, shortcut, fill, children }: Props) {
 
   // Place under the control, flip above when there is no room, and keep inside the viewport.
   useLayoutEffect(() => {
-    if (!open || !wrap.current || !bubble.current) return;
+    if (!shown || !wrap.current || !bubble.current) return;
     const a = wrap.current.getBoundingClientRect();
     const b = bubble.current.getBoundingClientRect();
     const vw = document.documentElement.clientWidth;
@@ -51,7 +54,7 @@ export function Tip({ label, shortcut, fill, children }: Props) {
     y = Math.max(4, Math.min(y, vh - b.height - 4));
     const x = Math.max(4, Math.min(a.left + a.width / 2 - b.width / 2, vw - b.width - 4));
     setPos({ x, y });
-  }, [open, label, shortcut]);
+  }, [shown, label, shortcut]);
 
   // Esc dismisses (WCAG 1.4.13) without leaving the control.
   useEffect(() => {
@@ -62,11 +65,11 @@ export function Tip({ label, shortcut, fill, children }: Props) {
   }, [open, hide]);
 
   if (!has) return children;
-  const child = isValidElement(children) ? cloneElement(children, { "aria-describedby": open ? id : undefined }) : children;
+  const child = isValidElement(children) ? cloneElement(children, { "aria-describedby": shown ? id : undefined }) : children;
   return (
     <span ref={wrap} className={"tip" + (fill ? " tip--fill" : "")} onMouseEnter={() => show(DELAY)} onMouseLeave={hide} onFocus={() => show(150)} onBlur={hide} onPointerDown={hide}>
       {child}
-      {open &&
+      {shown &&
         createPortal(
           <div ref={bubble} id={id} role="tooltip" className="tip-bubble" style={pos ? { left: pos.x, top: pos.y } : { left: 0, top: 0, visibility: "hidden" }}>
             {label}

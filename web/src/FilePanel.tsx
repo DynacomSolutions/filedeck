@@ -14,6 +14,7 @@ import { deleteSpec, downloadRefs, groupRefs, refOf, trashSpec, type SelRef } fr
 import type { FileRef } from "./EditorViews";
 import { SearchView } from "./Search";
 import { wheelX } from "./scrollx";
+import { AddressBar } from "./AddressBar";
 import { CompareBar, CompareBody, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
@@ -249,6 +250,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
     setSel(new Set([full]));
     setAnchor(full);
     setCursor(full);
+  };
+  /** Address bar: go to a folder, optionally selecting a file in it (also when it is already the open folder). */
+  const goTo = (n: string, p: string, select?: string) => {
+    if (select) {
+      scrollTo.current = select;
+      onClearOthers();
+      setSel(new Set([select]));
+      setAnchor(select);
+      setCursor(select);
+    }
+    onNavigate(n, p);
   };
   const openHit = (rel: string, h: { t: Entry["type"] }) => {
     const full = hitPath(rel);
@@ -796,18 +808,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
           }
         }}
       >
-        <nav className="crumbs" aria-label="Breadcrumb" onWheel={wheelX}>
-          <Tip label={`Root of ${node}`}>
-            <button onClick={() => onNavigate(node, "/")} onContextMenu={(e) => showMenu(e, folderItems("/", false))}>
-              {node}:
-            </button>
-          </Tip>
-          {crumbs.map((c, i) => (
-            <button key={i} onClick={() => onNavigate(node, "/" + crumbs.slice(0, i + 1).join("/"))} onContextMenu={(e) => showMenu(e, folderItems("/" + crumbs.slice(0, i + 1).join("/"), false))}>
-              /{c}
-            </button>
-          ))}
-        </nav>
+        <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         <div className="fp-actions" onWheel={wheelX}>
           <Tip label="Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels"><button aria-label="Pick this panel" aria-pressed={panelPicked} className={panelPicked ? "marked" : ""} onClick={onTogglePanel}><SquareCheck /></button></Tip>
           <Tip label="Search under this folder" shortcut="Ctrl+Shift+F"><button aria-label="Search under this folder" className={leaf.sr ? "marked" : ""} aria-pressed={!!leaf.sr} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}><Search /></button></Tip>
