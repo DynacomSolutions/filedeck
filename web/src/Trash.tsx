@@ -98,7 +98,7 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
   return (
     <div
       ref={root}
-      className="ed trash"
+      className="ed trash over"
       role="dialog"
       aria-label={`Trash on ${node}`}
       tabIndex={-1}

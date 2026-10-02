@@ -626,8 +626,6 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
 
 export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: Side; otherLabel: string }) {
   const { st, result } = ctl;
-  const [showOpts, setShowOpts] = useState(false);
-  const [presetName, setPresetName] = useState("");
   const o = st.opts;
   const c = result?.files;
   const n = (s: DiffStatus) => (!c ? 0 : s === "identical" ? c.identical : s === "different" ? c.different : s === "left-only" ? c.leftOnly : s === "right-only" ? c.rightOnly : c.error);
@@ -656,7 +654,6 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
               {MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select>
           </label>
-          <Tip label="Tolerance, filters, depth and presets"><button onClick={() => setShowOpts((v) => !v)} aria-expanded={showOpts}><Ic.SlidersHorizontal /> Options</button></Tip>
           <button className="primary" onClick={() => (ctl.running ? ctl.cancel() : ctl.start())}>{ctl.running ? <Ic.X /> : <Ic.RefreshCw />} {ctl.running ? "Cancel" : "Compare again"}</button>
           <span className="fd-sep" />
           <span className="fd-sync" role="group" aria-label="Sync selected rows">
@@ -672,8 +669,30 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
       <span className="muted fd-count">{sel} selected</span>
       <Tip label="Leave compare mode (Esc)"><button className="cmp-exit" onClick={ctl.exit}><Ic.LogOut /> Exit compare</button></Tip>
     </div>
-      {side === "left" && showOpts && (
-        <div className="cmp-pop fd-opts" role="group" aria-label="Compare options">
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ sidebar: what the compare found */
+
+/** Warnings from the diff job, per side, as a short label plus the full text for the tooltip. */
+function warnRow(w: string): { side: "Left" | "Right" | ""; short: string; full: string } {
+  const side = /\bleft\b/i.test(w) ? "Left" : /\bright\b/i.test(w) ? "Right" : "";
+  const cut = /more than (\d+) entries/.exec(w);
+  const deep = /deeper than (\d+) levels/.exec(w);
+  const bad = /^(\d+) entr/.exec(w);
+  const short = cut ? `cut off at ${cut[1]} entries` : deep ? `deeper than ${deep[1]} levels` : bad ? `${bad[1]} unreadable` : w;
+  const hint = cut ? " Raise \"Max entries per side\" in the compare Options (up to 500000) and compare again." : deep ? " Raise \"Max depth\" in the compare Options." : "";
+  return { side, short, full: w + (w.endsWith(".") ? "" : ".") + hint };
+}
+
+/** Compare options live inline in the sidebar's Compare section (no popover over the panels). */
+function CompareOptions({ ctl }: { ctl: CompareCtl }) {
+  const { st } = ctl;
+  const o = st.opts;
+  const [presetName, setPresetName] = useState("");
+  return (
+        <div className="fd-opts side-opts" role="group" aria-label="Compare options">
           <label>
             Time tolerance (s)
             <input type="number" min={0} step={1} value={o.toleranceSec} onChange={(e) => ctl.setOpts({ ...o, toleranceSec: Number(e.target.value) })} />
@@ -710,30 +729,16 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
             </label>
             <button disabled={!presetName.trim()} onClick={() => (ctl.savePreset(presetName.trim()), setPresetName(""))}><Ic.Save /> Save preset</button>
             <button disabled={!st.preset} onClick={ctl.deletePreset}><Ic.Trash2 /> Delete preset</button>
-            <button className="primary" onClick={() => (setShowOpts(false), ctl.start())}><Ic.GitCompareArrows /> Apply and compare</button>
+            <button className="primary" onClick={() => ctl.start()}><Ic.GitCompareArrows /> Apply and compare</button>
           </div>
         </div>
-      )}
-    </div>
   );
-}
-
-/* ------------------------------------------------------------------ sidebar: what the compare found */
-
-/** Warnings from the diff job, per side, as a short label plus the full text for the tooltip. */
-function warnRow(w: string): { side: "Left" | "Right" | ""; short: string; full: string } {
-  const side = /\bleft\b/i.test(w) ? "Left" : /\bright\b/i.test(w) ? "Right" : "";
-  const cut = /more than (\d+) entries/.exec(w);
-  const deep = /deeper than (\d+) levels/.exec(w);
-  const bad = /^(\d+) entr/.exec(w);
-  const short = cut ? `cut off at ${cut[1]} entries` : deep ? `deeper than ${deep[1]} levels` : bad ? `${bad[1]} unreadable` : w;
-  const hint = cut ? " Raise \"Max entries per side\" in the compare Options (up to 500000) and compare again." : deep ? " Raise \"Max depth\" in the compare Options." : "";
-  return { side, short, full: w + (w.endsWith(".") ? "" : ".") + hint };
 }
 
 /** Compare status in the sidebar, so the panel headers keep only controls: progress, errors, totals, per-side warnings. */
 export function CompareInfo() {
   const ctl = useCompareCtl();
+  const [optsOpen, setOptsOpen] = useState(false);
   if (!ctl) return null;
   const { st, result, job, running, err } = ctl;
   const files = result ? result.files.identical + result.files.different + result.files.leftOnly + result.files.rightOnly + result.files.error : 0;
@@ -766,6 +771,10 @@ export function CompareInfo() {
           })}
         </>
       )}
+      <button type="button" className="side-opts-toggle" aria-expanded={optsOpen} onClick={() => setOptsOpen((v) => !v)}>
+        {optsOpen ? <ChevronDown /> : <ChevronRight />} <Ic.SlidersHorizontal /> Options
+      </button>
+      {optsOpen && <CompareOptions ctl={ctl} />}
     </section>
   );
 }

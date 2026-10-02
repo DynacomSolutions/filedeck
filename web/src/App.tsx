@@ -369,17 +369,25 @@ export function App() {
   const [cmpMenu, setCmpMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const panelCount = tree ? leaves(tree).length : 0;
   const compareWhyNot = panelCount < 2 ? "Compare needs two panels: open a second one with a Split button in a panel header." : null;
-  const compareClick = (e: React.MouseEvent) => {
-    if (!tree || compareWhyNot) return;
-    const all = leaves(tree);
+  /** Left-click: the picked pair, else the only two panels, else the focused panel against the next one. Right-click offers every other panel. */
+  const compareAnchor = () => {
+    const all = leaves(tree!);
     const picked = panelSel.filter((p) => all.some((l) => l.id === p));
-    if (picked.length === 2) return startCompare(picked[0]!, picked[1]!);
     const anchor = picked.length === 1 ? picked[0]! : all.some((l) => l.id === activeId) ? activeId : all[0]!.id;
-    const others = all.filter((l) => l.id !== anchor);
-    if (others.length === 1) return startCompare(anchor, others[0]!.id);
+    return { all, picked, anchor };
+  };
+  const compareClick = () => {
+    if (!tree || compareWhyNot) return;
+    const { all, picked, anchor } = compareAnchor();
+    if (picked.length === 2) return startCompare(picked[0]!, picked[1]!);
+    startCompare(anchor, all[(all.findIndex((l) => l.id === anchor) + 1) % all.length]!.id);
+  };
+  const compareChoose = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!tree || compareWhyNot) return;
+    const { all, anchor } = compareAnchor();
     const al = all.find((l) => l.id === anchor)!;
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setCmpMenu({ x: r.left, y: r.bottom + 2, items: others.map((l): MenuItem => ({ label: `Compare ${al.node}:${al.path} with ${l.node}:${l.path}`, onSelect: () => startCompare(anchor, l.id) })) });
+    setCmpMenu({ x: e.clientX, y: e.clientY, items: all.filter((l) => l.id !== anchor).map((l): MenuItem => ({ label: `Compare ${al.node}:${al.path} with ${l.node}:${l.path}`, onSelect: () => startCompare(anchor, l.id) })) });
   };
   const patchSizes = (sid: string, sizes: number[]) =>
     setTree((t) => {
@@ -475,7 +483,7 @@ export function App() {
           onSelection={(refs) => reportSel(t.id, refs)}
           onClearOthers={() => clearOthers(t.id)}
           onTogglePanel={() => togglePanel(t.id)}
-          next={nx ? { node: nx.node, path: nx.path } : null}
+          next={nx ? { node: nx.node, path: nx.path, id: nx.id } : null}
           onSwitch={(d) => switchPanel(t.id, d)}
           onHelp={() => setHelp(true)}
           onTrash={(node) => setTrash({ node, volume: "" })}
@@ -533,8 +541,8 @@ export function App() {
                 </button>
               </Tip>
             )}
-            <Tip label={compareWhyNot ?? "Compare two panels in place (folder compare, file diff, sync)"}>
-              <button aria-label="Compare panels" disabled={!!compareWhyNot} onClick={compareClick}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
+            <Tip label={compareWhyNot ?? "Compare two panels in place (the two picked panels, else the focused panel with the next one). Right-click to choose the other panel."}>
+              <button aria-label="Compare panels" disabled={!!compareWhyNot} onClick={compareClick} onContextMenu={compareChoose}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
             </Tip>
                         <Tip label="Keyboard shortcuts" shortcut="?"><button onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
           </div>
@@ -545,6 +553,11 @@ export function App() {
         <main className="main" aria-label="File panels">
           <h1 className="visually-hidden">Files</h1>
           {tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
+          {trash && (
+            <Suspense fallback={null}>
+              <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => setTrash(null)} onStatus={setStatus} />
+            </Suspense>
+          )}
           {diff && (
             <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
               <DiffViewer overlay left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />
@@ -555,11 +568,6 @@ export function App() {
       </div>
       {cmp && <SyncDialog ctl={cmp} />}
       </CompareCtx.Provider>
-      {trash && (
-        <Suspense fallback={null}>
-          <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => setTrash(null)} onStatus={setStatus} />
-        </Suspense>
-      )}
       {help && <ShortcutHelp onClose={() => setHelp(false)} />}
     </div>
   );

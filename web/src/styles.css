@@ -443,7 +443,7 @@ svg.lucide{display:inline-block}
 .side-row{display:flex;align-items:center}.side-scroll .side-row button.side-twisty{flex:none;width:auto;padding:.3rem .2rem;color:var(--muted)}.side-scroll .side-row button.side-node{flex:1;min-width:0}.side-twisty svg.lucide{vertical-align:-3px}
 
 /* ---- compare status in the sidebar ---- */
-.side-cmp{flex:none;min-width:0;padding:.6rem .7rem;border-top:1px solid var(--border);font-size:.76rem;max-height:30vh;overflow:auto}
+.side-cmp{flex:none;min-width:0;padding:.6rem .7rem;border-top:1px solid var(--border);font-size:.76rem;max-height:50vh;overflow:auto}
 .side-cmp h2{margin:.1rem .5rem .4rem}
 .side-cmp p{margin:.15rem .5rem}
 .side-cmp-roots{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -542,3 +542,13 @@ select option{background:var(--surface);color:var(--fg)}
 .crumbs button{gap:.25rem}.crumbs svg.lucide{width:14px;height:14px}
 .addr-edit{justify-content:flex-end;padding:0 .4rem;color:var(--muted)}.addr-edit svg.lucide{width:12px;height:12px;opacity:.55}.addr-edit:hover svg.lucide{opacity:1}
 .addr-edit{box-shadow:none}.addr-edit:hover:not(:disabled){background:var(--surface-3)}
+
+/* ---- compare options inline in the sidebar; sort and create inline in the panel ---- */
+.side-opts-toggle{display:flex;justify-content:flex-start;align-items:center;gap:.35rem;width:100%;margin-top:.3rem;padding:.3rem .5rem;border:0;background:transparent;box-shadow:none;font-size:.76rem;font-weight:600;color:var(--fg-soft)}
+.side-opts-toggle svg.lucide{width:14px;height:14px}
+.fd-opts.side-opts{grid-template-columns:minmax(0,1fr);padding:.2rem .5rem .4rem}
+.side-opts .fd-presets{display:flex;flex-direction:column;align-items:stretch;gap:6px}
+.side-opts .fd-presets button{justify-content:flex-start}
+tr.creating td.name,.tile.creating .tile-name{display:flex;align-items:center;gap:.4rem}.tile.creating .tile-name{display:block}
+tr.creating input,.tile.creating input{width:100%;min-width:0}
+.side-opts .fd-presets label{min-width:0}

@@ -33,6 +33,11 @@ const DOCKS: { dock: Dock; icon: LucideIcon; label: string }[] = [
   { dock: "top", icon: PanelTop, label: "Dock preview top" },
   { dock: "bottom", icon: PanelBottom, label: "Dock preview bottom" },
 ];
+const SORTS: { key: SortKey; name: string; ascText: string; descText: string; asc: LucideIcon; desc: LucideIcon }[] = [
+  { key: "name", name: "name", ascText: "A to Z", descText: "Z to A", asc: Ic.ArrowDownAZ, desc: Ic.ArrowUpZA },
+  { key: "mtime", name: "date modified", ascText: "oldest first", descText: "newest first", asc: Ic.CalendarArrowUp, desc: Ic.CalendarArrowDown },
+  { key: "size", name: "size", ascText: "smallest first", descText: "largest first", asc: Ic.ArrowUpNarrowWide, desc: Ic.ArrowDownNarrowWide },
+];
 export type { Leaf };
 
 interface Props {
@@ -67,7 +72,7 @@ interface Props {
   onClearOthers: () => void;
   onTogglePanel: () => void;
   /** the panel F5/F6 copy and move to (the next panel in layout order), if any */
-  next: { node: string; path: string } | null;
+  next: { node: string; path: string; id: string } | null;
   /** Tab / Shift+Tab: move focus to the next / previous panel */
   /** move to the neighbouring panel; false when there is none in that direction (Tab then leaves the panels normally) */
   onSwitch: (dir: 1 | -1) => boolean;
@@ -111,6 +116,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const secRef = useRef<HTMLElement>(null);
   const [over, setOver] = useState<string | null>(null); // "." = panel itself, else folder path
   const [renaming, setRenaming] = useState<string | null>(null);
+  /** New file/folder typed straight into a row at the top of the listing (no dialog). */
+  const [creating, setCreating] = useState<"file" | "folder" | null>(null);
   const [dialog, setDialog] = useState<"compress" | "extract" | { k: "compress"; extra: SelRef[] } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [modal, setModal] = useState<Modal | null>(null);
@@ -332,6 +339,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, items });
   };
+  const startCreate = (dir: string, type: "file" | "folder") => (dir === path && !cside && !leaf.sr ? setCreating(type) : setModal({ k: "new", dir, type }));
   const rowItems = (picked: Entry[], extra: SelRef[] = others): MenuItem[] => {
     const one = picked.length === 1 ? picked[0]! : undefined;
         const pasteDir = one && isDirEntry(one) ? one.path : path;
@@ -372,8 +380,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const folderItems = (dir: string, here: boolean): MenuItem[] => [
     ...(here ? [] : ([{ label: "Open", onSelect: () => onNavigate(node, dir) }, { label: "Open in new panel", onSelect: () => onOpenPanel(node, dir) }, { label: "Open in new tab", onSelect: () => newTab({ node, path: dir }) }] as MenuItem[])),
     { label: isBookmarked(marks, { node, path: dir }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: dir }) },
-    { label: "New file...", onSelect: () => setModal({ k: "new", dir, type: "file" }) },
-    { label: "New folder...", onSelect: () => setModal({ k: "new", dir, type: "folder" }) },
+    { label: "New file...", onSelect: () => startCreate(dir, "file") },
+    { label: "New folder...", onSelect: () => startCreate(dir, "folder") },
     { label: "New symbolic link...", onSelect: () => setModal({ k: "link", dir }) },
     { label: pasteLabel, hint: here ? "Ctrl+V" : undefined, disabled: !clip, onSelect: () => void paste(dir) },
     ...(here ? ([{ label: "Select all", hint: "Ctrl+A", onSelect: () => setSel(new Set(entries.map((x) => x.path))) }, { label: "Upload...", onSelect: () => fileInput.current?.click() }, { label: "Upload folder...", onSelect: () => folderInput.current?.click() }, { label: "Refresh", onSelect: refresh }] as MenuItem[]) : []),
@@ -555,6 +563,26 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     ) : (
       <span className="nm">{en.name}</span>
     );
+  const createInput = creating ? (
+    <input
+      autoFocus
+      aria-label={creating === "file" ? "Name of the new file" : "Name of the new folder"}
+      placeholder={creating === "file" ? "New file name, Enter to create" : "New folder name, Enter to create"}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={() => setCreating(null)}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") return setCreating(null);
+        if (e.key !== "Enter") return;
+        const v = e.currentTarget.value.trim();
+        if (!v || v.includes("/") || v === "." || v === "..") return setErr("Enter a plain name without slashes");
+        const target = join(path, v);
+        const kind = creating;
+        setCreating(null);
+        void run(`Create ${kind}`, () => (kind === "file" ? createFile(node, target) : api.mkdir(node, target))).then(() => scrollTo.current = target);
+      }}
+    />
+  ) : null;
   const searchView = leaf.sr ? (
     <SearchView node={node} dir={path} hidden={hidden} form={leaf.sr} onForm={setSearch} onClose={() => (setSearch(undefined), setTimeout(() => secRef.current?.focus(), 0))} onReveal={revealHit} onOpen={openHit} onStatus={onStatus} />
   ) : null;
@@ -580,6 +608,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       >
         {view === "grid" ? (
           <div className="fp-grid" role="listbox" aria-label="Files" aria-multiselectable="true">
+            {createInput && (
+              <div className="tile creating">
+                <div className="tile-img"><span className="tile-ico">{creating === "file" ? <Ic.FilePlus /> : <Ic.FolderPlus />}</span></div>
+                <div className="tile-name">{createInput}</div>
+              </div>
+            )}
             {visible.map((en) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
@@ -596,6 +630,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             <tr>{th("name", "Name")}{th("size", "Size")}{th("mtime", "Modified")}</tr>
           </thead>
           <tbody>
+            {createInput && (
+              <tr className="creating">
+                <td className="name">{creating === "file" ? <Ic.FilePlus className="ico" /> : <Ic.FolderPlus className="ico" />}{createInput}</td>
+                <td className="num" />
+                <td className="num" />
+              </tr>
+            )}
             {visible.map((en) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
@@ -620,7 +661,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           </tbody>
         </table>
         )}
-        {!entries.length && !err && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
+        {!entries.length && !err && !creating && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
         {entries.length > 0 && !visible.length && <div className="muted pad">No entries match the filter.</div>}
       </div>
   );
@@ -717,7 +758,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (key === "F4") return selEntries.length === 1 && canEdit(selEntries[0]!) && (setEditing({ node, path: selEntries[0]!.path }), true);
       if (key === "F5") return toOther("copy"), true;
       if (key === "F6") return toOther("move"), true;
-      if (key === "F7") return setModal({ k: "new", dir: path, type: "folder" }), true;
+      if (key === "F7") return startCreate(path, "folder"), true;
       if (key === "Delete") {
         const refs = combine(selEntries);
         if (!refs.length) return false;
@@ -822,17 +863,26 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           <Tip label="Search under this folder" shortcut="Ctrl+Shift+F"><button aria-label="Search under this folder" className={leaf.sr ? "marked" : ""} aria-pressed={!!leaf.sr} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}><Search /></button></Tip>
           <Tip label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"}><button aria-label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"} aria-pressed={view === "grid"} className={view === "grid" ? "marked" : ""} onClick={() => onPatch({ w: view === "grid" ? undefined : "g" })}>{view === "grid" ? <List /> : <LayoutGrid />}</button></Tip>
           {view === "grid" && (
-            <select className="fp-sort" aria-label="Sort" value={sort.key + ":" + (sort.asc ? "a" : "d")} onChange={(e) => { const [key, d] = e.target.value.split(":"); setSort(() => ({ key: key as SortKey, asc: d === "a" })); }}>
-              <option value="name:a">Name A-Z</option><option value="name:d">Name Z-A</option>
-              <option value="mtime:d">Newest first</option><option value="mtime:a">Oldest first</option>
-              <option value="size:d">Largest first</option><option value="size:a">Smallest first</option>
-            </select>
+            <span className="pv-dock" role="group" aria-label="Sort by">
+              {SORTS.map((s) => {
+                const on = sort.key === s.key;
+                const Icon = on && !sort.asc ? s.desc : s.asc;
+                const label = `Sort by ${s.name}${on ? `, ${sort.asc ? s.ascText : s.descText} (click to reverse)` : ""}`;
+                return (
+                  <Tip key={s.key} label={label}>
+                    <button type="button" className={"pv-dockbtn" + (on ? " on" : "")} aria-pressed={on} aria-label={label} onClick={() => setSort((c) => ({ key: s.key, asc: c.key === s.key ? !c.asc : s.key === "name" }))}>
+                      <Icon />
+                    </button>
+                  </Tip>
+                );
+              })}
+            </span>
           )}
           <Tip label={isBookmarked(marks, here) ? "Remove this folder from the bookmarks" : "Bookmark this folder"}><button aria-label={isBookmarked(marks, here) ? "Remove this folder from the bookmarks" : "Bookmark this folder"} aria-pressed={isBookmarked(marks, here)} className={isBookmarked(marks, here) ? "marked" : ""} onClick={() => toggleMark(here)}><Star fill={isBookmarked(marks, here) ? "currentColor" : "none"} /></button></Tip>
           <Tip label="New tab with this folder" shortcut="Alt+T"><button aria-label="New tab with this folder" onClick={() => newTab()}><SquarePlus /></button></Tip>
           <Tip label="Up one folder"><button aria-label="Up one folder" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}><ArrowUp /></button></Tip>
-          <Tip label="New folder"><button aria-label="New folder" onClick={() => setModal({ k: "new", dir: path, type: "folder" })}><FolderPlus /></button></Tip>
-          <Tip label="New file"><button aria-label="New file" onClick={() => setModal({ k: "new", dir: path, type: "file" })}><FilePlus /></button></Tip>
+          <Tip label="New folder"><button aria-label="New folder" onClick={() => startCreate(path, "folder")}><FolderPlus /></button></Tip>
+          <Tip label="New file"><button aria-label="New file" onClick={() => startCreate(path, "file")}><FilePlus /></button></Tip>
           <Tip label="Upload"><button aria-label="Upload" onClick={() => fileInput.current?.click()}><Upload /></button></Tip>
           <Tip label="Rename" shortcut="F2"><button aria-label="Rename" disabled={sel.size !== 1} onClick={() => setRenaming([...sel][0] ?? null)}><Pencil /></button></Tip>
           <Tip label="Edit in the editor"><button aria-label="Edit in the editor" disabled={!selEntries.length || selEntries.length !== 1 || !selEntries.every(canEdit)} onClick={() => selEntries[0] && setEditing({ node, path: selEntries[0].path })}><FilePen /></button></Tip>
@@ -844,19 +894,21 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               onClick={() => onDiff(combine(selEntries).map((r) => ({ node: r.node, path: r.path })))}
             ><Diff /></button>
           </Tip>
-          <Tip label={cside ? "Exit compare mode" : "Compare this panel with another panel, in place"}>
+          <Tip label={cside ? "Exit compare mode" : "Compare this panel with the next panel, in place (right-click to choose another panel)"}>
             <button
               aria-label={cside ? "Exit compare mode" : "Compare with another panel"}
               aria-pressed={!!cside}
               className={cside ? "marked" : ""}
-              onClick={(e) => {
+              onClick={() => {
                 if (cside && cmpCtl) return cmpCtl.exit();
                 if (!peers.length) return onStatus("Open a second panel first (split button)");
                 const pickedPeers = peers.filter((p) => p.picked);
                 if (panelPicked && pickedPeers.length === 1) return onCompare(pickedPeers[0]!.id);
-                if (peers.length === 1) return onCompare(peers[0]!.id);
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                setMenu({ x: r.left, y: r.bottom + 2, items: peers.map((pr): MenuItem => ({ label: `Compare with ${peerLabel(pr)}`, onSelect: () => onCompare(pr.id) })) });
+                onCompare(next?.id ?? peers[0]!.id);
+              }}
+              onContextMenu={(e) => {
+                if (cside || !peers.length) return;
+                showMenu(e, peers.map((pr): MenuItem => ({ label: `Compare with ${peerLabel(pr)}`, onSelect: () => onCompare(pr.id) })));
               }}
             ><GitCompareArrows /></button>
           </Tip>
