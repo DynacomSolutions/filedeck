@@ -2,10 +2,8 @@
 export interface Brand {
   name: string;
   title: string;
-  logo?: { light: string; dark: string };
   icon: string;
-  links: { label: string; url: string }[];
   themeKey: string;
 }
-const DEFAULT: Brand = { name: "Filedeck", title: "Filedeck", icon: "/favicon.svg", links: [], themeKey: "filedeck-theme" };
+const DEFAULT: Brand = { name: "Filedeck", title: "Filedeck", icon: "/favicon.svg", themeKey: "filedeck-theme" };
 export const brand: Brand = { ...DEFAULT, ...((window as unknown as { __FILEDECK__?: Partial<Brand> }).__FILEDECK__ ?? {}) };

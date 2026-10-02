@@ -23,11 +23,13 @@ input[type=checkbox]{accent-color:var(--accent)}
 .muted{color:var(--muted)}.pad{padding:1rem}
 .app{display:flex;flex-direction:column;height:100dvh;min-height:0}
 
-/* ---- header (same chrome as the worktrees page) ---- */
+/* ---- header: one fixed-height row (name, selection actions, then Compare/theme/help) ---- */
 .app>.site-header{flex:none}
 .app .site-header__inner.shell{width:100%;max-width:none;margin-inline:0;padding-inline:var(--gutter)}
-.site-header__inner{min-height:64px}
-.site-header .status{flex:1;min-width:0;font-size:.78rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.site-header__inner{height:52px;min-height:0;gap:.8rem;box-sizing:border-box;overflow:hidden}
+.site-header__actions{flex:none;gap:.2rem}
+.site-header .brand-name{flex:none}
+.site-header .status{flex:0 0 11rem;min-width:0;font-size:.78rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btn--ghost{display:inline-flex;align-items:center;border:0;border-radius:var(--pill);background:transparent}
 .btn--ghost:hover:not(:disabled){border:0;background:var(--surface-2);color:var(--fg)}
 .theme-menu{position:relative}
@@ -346,7 +348,6 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 @media(max-width:700px){
   .site-header__inner{flex-wrap:nowrap;gap:.4rem}
-  .site-header__actions a.btn{display:none}
   .site-header .status{display:none}
   .body{flex-direction:column}
   .side{flex:0 0 auto;max-height:26vh;border-right:0;border-bottom:1px solid var(--border)}
@@ -378,8 +379,8 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 
 /* ---- selection across panels ---- */
 /* the selection toolbar is always there at one height; nothing moves when a selection starts or ends */
-.selbar{flex:none;box-sizing:border-box;height:42px;display:flex;flex-wrap:nowrap;gap:0 .8rem;align-items:center;padding:0 .8rem;border-bottom:1px solid var(--accent-line);background:var(--accent-tint);font-size:.82rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
-.selbar>.tip{flex:0 0 20rem;min-width:8rem;overflow:hidden}.selbar b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.selbar{flex:1 1 0;min-width:0;height:100%;display:flex;flex-wrap:nowrap;gap:0 .8rem;align-items:center;font-size:.82rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.selbar>.tip{flex:0 0 15rem;min-width:6rem;overflow:hidden}.selbar b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .selbar-actions{display:flex;flex-wrap:nowrap;gap:.3rem;flex:none}.selbar-actions>.tip{flex:none}.selbar-actions button{white-space:nowrap}
 .fp.picked{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
 .fp.picked .fp-bar{background:var(--accent-tint)}

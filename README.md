@@ -41,7 +41,7 @@ Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDEC
 
 Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
-`FILEDECK_BRAND` is JSON: `{"name","title","icon","logo":{"light","dark"},"links":[{"label","url"}],"css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links.
+`FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help).
 
 ## Contributing
 

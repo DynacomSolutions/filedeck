@@ -87,7 +87,7 @@ test("parseMounts filters pseudo filesystems and decodes escapes", () => {
   assert.deepEqual(m.map((x) => x.mountpoint), ["/", "/mnt/my disk"]);
 });
 
-test("hub fills branding into index.html and the neutral default has no links", async () => {
+test("hub fills branding into index.html and ignores logo and links", async () => {
   fs.writeFileSync(path.join(tmp, "index.html"), "<title>%%TITLE%%</title><link href=\"%%ICON%%\">%%BRANDCSS%%<script>%%BOOT%%</script>");
   const mk = async (env: Record<string, string>) => {
     const s = await new Promise<ReturnType<typeof serve>>((res) => {
@@ -101,12 +101,12 @@ test("hub fills branding into index.html and the neutral default has no links", 
   };
   const neutral = await mk({});
   assert.match(neutral.html, /<title>Filedeck<\/title>/);
-  assert.match(neutral.html, /"links":\[\]/);
+  assert.ok(!neutral.html.includes("links"));
   assert.match(neutral.html, /"themeKey":"filedeck-theme"/);
   assert.equal(neutral.deep, neutral.html);
-  const branded = await mk({ FILEDECK_BRAND: JSON.stringify({ name: "Acme <b>", links: [{ label: "Docs", url: "https://docs.example/" }, { label: "bad", url: "javascript:alert(1)" }], logo: { light: "/l.svg", dark: "/d.svg" }, themeKey: "acme-theme", css: "/assets/brand/theme.css" }) });
+  const branded = await mk({ FILEDECK_BRAND: JSON.stringify({ name: "Acme <b>", links: [{ label: "Docs", url: "https://docs.example/" }], logo: { light: "/l.svg", dark: "/d.svg" }, icon: "javascript:alert(1)", themeKey: "acme-theme", css: "/assets/brand/theme.css" }) });
   assert.match(branded.html, /<title>Acme &#60;b&#62;<\/title>/);
-  assert.match(branded.html, /"links":\[\{"label":"Docs","url":"https:\/\/docs.example\/"\}\]/);
+  assert.ok(!branded.html.includes("docs.example") && !branded.html.includes("/l.svg"));
   assert.ok(!branded.html.includes("javascript:"));
   assert.ok(!branded.html.includes("<b>"));
   assert.match(branded.html, /"themeKey":"acme-theme"/);

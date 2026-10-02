@@ -1,6 +1,7 @@
 // Selection that spans panels: every panel reports what it has selected, App merges the reports,
 // and the actions here run on the combined list (hub jobs take items from any node).
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { api, canEdit, fileUrl, zipUrl, type Entry, type OpSpec } from "./api";
 import { setClip } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -90,13 +91,10 @@ export interface BarProps {
   onClear: () => void;
   onDiff: (a: SelRef, b: SelRef) => void;
   /** starts the compare (picked panels, the only two panels, or a picker) */
-  onCompare: (e: React.MouseEvent) => void;
-  /** why Compare panels is unavailable, or null when it is enabled */
-  compareWhyNot: string | null;
   onStatus: (m: string) => void;
 }
 
-export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff, onCompare, compareWhyNot, onStatus }: BarProps) {
+export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff, onStatus }: BarProps) {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [compress, setCompress] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -125,7 +123,7 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
   const text = `${refs.length ? summary(refs, nPanels) : "0 selected"}${picked.length > 0 ? `${refs.length ? "; " : " - "}${picked.length} panel${picked.length === 1 ? "" : "s"} picked` : ""}`;
   const clip = (mode: "copy" | "cut") => () => (setClip({ mode, items: refs.map((r) => ({ node: r.node, path: r.path })) }), onStatus(`${mode === "copy" ? "Copied" : "Cut"} ${refs.length} item(s) to the file clipboard`));
   return (
-    // Always present at a fixed height: nothing moves when a selection starts or ends.
+    // Lives inside the page header (fixed height, always present): nothing moves when a selection starts or ends.
     <div className="selbar" onWheel={wheelX} role="region" aria-label="Selection across panels">
       <Tip label={text}><b role="status">{text}</b></Tip>
       <span className="selbar-actions">
@@ -140,13 +138,11 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
         <Tip label={diffable ? "Diff the two selected files" : "Select exactly two regular files (in one or two panels) to diff them."}>
           <button disabled={!diffable} onClick={() => diffable && onDiff(refs[0]!, refs[1]!)}>Diff files</button>
         </Tip>
-        <Tip label={compareWhyNot ?? "Compare two panels in place: the two picked ones (Shift/Ctrl+click a panel header), else the focused panel with another"}>
-          <button disabled={!!compareWhyNot} onClick={onCompare}>Compare panels</button>
-        </Tip>
         <Tip label={refs.length || picked.length ? "Clear the selection and picked panels" : "Nothing is selected."}>
           <button disabled={!refs.length && !picked.length} onClick={onClear}>Clear</button>
         </Tip>
       </span>
+      {createPortal(<>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {compress && <CompressDialog groups={groupRefs(refs)} onClose={() => setCompress(false)} onStatus={onStatus} />}
       {confirm && (
@@ -159,6 +155,7 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
           onConfirm={() => void queue("Delete", deleteSpec(refs))}
         />
       )}
+      </>, document.body)}
     </div>
   );
 }
