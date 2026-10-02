@@ -40,6 +40,8 @@ interface Props {
   active: boolean;
   onFocus: () => void;
   onNavigate: (node: string, path: string) => void;
+  /** open node:path in a new panel beside this one, optionally with a file selected */
+  onOpenPanel: (node: string, path: string, select?: string) => void;
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
   /** HTML5 drag props that make the panel header the drag handle for docking */
@@ -84,7 +86,7 @@ type Modal =
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose, dragProps, onDock, onPatch, onDiff, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
@@ -191,8 +193,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   useEffect(() => {
     onSelection(entries.filter((e) => sel.has(e.path)).map((e) => refOf(leaf.id, node, e)));
   }, [sel, entries, node]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A request made before this panel existed (a new panel opened with a selection) is not for it.
+  const seenClear = useRef(clearReq?.n);
   useEffect(() => {
-    if (clearReq && clearReq.except !== leaf.id) setSel((s) => (s.size ? new Set() : s));
+    if (clearReq && clearReq.n !== seenClear.current && clearReq.except !== leaf.id) setSel((s) => (s.size ? new Set() : s));
   }, [clearReq]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A finished hub job (copy, move, delete...) changes what this folder holds.
@@ -335,10 +339,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
       { label: one && isDirEntry(one) ? "Open folder" : "Open", disabled: !one || extra.length > 0, hint: "Enter", onSelect: () => one && openFile(one) },
       ...(one && isDirEntry(one)
         ? ([
+            { label: "Open in new panel", onSelect: () => onOpenPanel(node, one.path) },
             { label: "Open in new tab", onSelect: () => newTab({ node, path: one.path }) },
             { label: isBookmarked(marks, { node, path: one.path }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: one.path }) },
           ] as MenuItem[])
-        : []),
+        : one
+          ? ([{ label: "Show in new panel", onSelect: () => onOpenPanel(node, parent(one.path), one.path) }] as MenuItem[])
+          : []),
       { label: "Preview", disabled: !one || isDirEntry(one), onSelect: () => setClosedFor(null) },
       { label: "Edit", disabled: !one || !canEdit(one), onSelect: () => one && setEditing({ node, path: one.path }) },
       ...diffItems(picked, extra),
@@ -363,7 +370,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onSplit, onClose,
   };
   /** Menu for a folder itself: empty space in the listing, or a breadcrumb. */
   const folderItems = (dir: string, here: boolean): MenuItem[] => [
-    ...(here ? [] : ([{ label: "Open", onSelect: () => onNavigate(node, dir) }, { label: "Open in new tab", onSelect: () => newTab({ node, path: dir }) }] as MenuItem[])),
+    ...(here ? [] : ([{ label: "Open", onSelect: () => onNavigate(node, dir) }, { label: "Open in new panel", onSelect: () => onOpenPanel(node, dir) }, { label: "Open in new tab", onSelect: () => newTab({ node, path: dir }) }] as MenuItem[])),
     { label: isBookmarked(marks, { node, path: dir }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: dir }) },
     { label: "New file...", onSelect: () => setModal({ k: "new", dir, type: "file" }) },
     { label: "New folder...", onSelect: () => setModal({ k: "new", dir, type: "folder" }) },

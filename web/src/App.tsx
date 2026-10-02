@@ -151,16 +151,49 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus]);
 }
 
-function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
+type How = "here" | "panel" | "tab";
+
+function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
   const [mounts, setMounts] = useState<Record<string, Mount[]>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const load = (n: string) => {
+    if (!mounts[n]) api.mounts(n).then((r) => setMounts((m) => ({ ...m, [n]: r.mounts }))).catch(() => setMounts((m) => ({ ...m, [n]: [] })));
+  };
   const toggle = (n: string) => {
     setOpen((o) => ({ ...o, [n]: !o[n] }));
-    if (!mounts[n]) api.mounts(n).then((r) => setMounts((m) => ({ ...m, [n]: r.mounts }))).catch(() => setMounts((m) => ({ ...m, [n]: [] })));
+    load(n);
   };
   const cluster = nodes.filter((n) => n.kind !== "source");
   const network = nodes.filter((n) => n.kind === "source");
   const marks = useBookmarks();
+  /** Plain click: the active panel goes there. Middle or Ctrl/Cmd+click: a new panel beside it. Right-click: the context menu. Never a popup on a plain click. */
+  const link = (node: string, path: string, then?: () => void) => ({
+    onClick: (e: React.MouseEvent) => {
+      onOpen(node, path, e.ctrlKey || e.metaKey ? "panel" : "here");
+      then?.();
+    },
+    onMouseDown: (e: React.MouseEvent) => {
+      if (e.button === 1) e.preventDefault(); // no middle-click autoscroll
+    },
+    onAuxClick: (e: React.MouseEvent) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      onOpen(node, path, "panel");
+    },
+    onContextMenu: (e: React.MouseEvent) => {
+      e.preventDefault();
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: [
+          { label: "Open here", onSelect: () => onOpen(node, path, "here") },
+          { label: "Open in new panel", hint: "Middle-click", onSelect: () => onOpen(node, path, "panel") },
+          { label: "Open in new tab", onSelect: () => onOpen(node, path, "tab") },
+        ],
+      });
+    },
+  });
   return (
     <aside className="side">
       <div className="side-brand">
@@ -179,7 +212,7 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
         {marks.map((b) => (
           <li key={b.node + "\0" + b.path}>
             <Tip label={`${b.node}:${b.path}`}>
-              <button className="mark-open" onClick={() => onOpen(b.node, b.path)}>
+              <button className="mark-open" {...link(b.node, b.path)}>
                 <Star className="mark-star" fill="currentColor" /> {bookmarkLabel(b)} <span className="muted mark-node">{b.node}</span>
               </button>
             </Tip>
@@ -192,19 +225,20 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       <h2>Nodes</h2>
       {cluster.map((n) => (
         <div key={n.name}>
-          <button className="side-node" onClick={() => toggle(n.name)}>
-            <span className={"dot " + (n.online ? "on" : "off")} /> {open[n.name] ? <ChevronDown /> : <ChevronRight />} {n.name}
-          </button>
+          <div className="side-row">
+            <button className="side-twisty" aria-expanded={!!open[n.name]} aria-label={`${open[n.name] ? "Collapse" : "Expand"} ${n.name}`} onClick={() => toggle(n.name)}>{open[n.name] ? <ChevronDown /> : <ChevronRight />}</button>
+            <button className="side-node" {...link(n.name, "/", () => { setOpen((o) => ({ ...o, [n.name]: true })); load(n.name); })}>
+              <span className={"dot " + (n.online ? "on" : "off")} /> {n.name}
+            </button>
+          </div>
           {open[n.name] && (
             <ul className="mounts">
-              <li><button onClick={() => onOpen(n.name, "/")}><Ic.HardDrive /> / (root)</button></li>
+              <li><button {...link(n.name, "/")}><Ic.HardDrive /> / (root)</button></li>
               <li><button onClick={() => onTrash(n.name)}><Ic.Trash2 /> Trash</button></li>
               {(mounts[n.name] ?? []).map((m) => (
                 <li key={m.mountpoint}>
                   <Tip label={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}${m.readOnly ? " - read-only" : ""}`}>
-                  <button
-                    onClick={() => onOpen(n.name, m.mountpoint)}
-                  >
+                  <button {...link(n.name, m.mountpoint)}>
                     <Ic.HardDrive /> {m.mountpoint}
                     {m.network && <span className={"net-badge" + (m.unreachable ? " bad" : "")}>{m.netKind ?? "network"}</span>}
                     {m.readOnly && <span className="net-badge">read-only</span>}
@@ -221,7 +255,7 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       {network.length > 0 && <h2>Network</h2>}
       {network.map((n) => (
         <Tip key={n.name} label={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : " - unreachable"}`}>
-          <button className="side-node" onClick={() => onOpen(n.name, "/")}>
+          <button className="side-node" {...link(n.name, "/")}>
             <span className={"dot " + (n.online ? "on" : "off")} /> <Ic.Network /> {n.name}
             <span className="net-badge">{(n.type ?? "net").toUpperCase()}</span>
           </button>
@@ -229,6 +263,7 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       ))}
       </div>
       {footer}
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </aside>
   );
 }
@@ -353,6 +388,25 @@ export function App() {
     });
   const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path, sr: undefined } : l));
   const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path, sr: undefined } : l));
+  /** A new panel split beside the given one (default: the active one) at node:path, optionally with a file selected there. */
+  const openPanel = (node: string, path: string, select?: string, beside = activeId) => {
+    const fresh: Leaf = { kind: "leaf", id: id(), node, path, ...(select ? { sel: select } : {}) };
+    update((l) => (l.id === beside ? { kind: "split", id: id(), dir: "horizontal", children: [l, fresh] } : l));
+    setActiveId(fresh.id);
+  };
+  /** A new tab in the active panel. */
+  const openTab = (node: string, path: string) =>
+    update((l) => {
+      if (l.id !== activeId) return l;
+      const tabs = l.tabs ?? [{ node: l.node, path: l.path }];
+      if (tabs.length >= MAX_TABS) {
+        setStatus(`At most ${MAX_TABS} tabs per panel`);
+        return l;
+      }
+      const ti = l.ti ?? 0;
+      return { ...l, tabs: [...tabs.slice(0, ti + 1), { node, path }, ...tabs.slice(ti + 1)], ti: ti + 1, node, path, sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined };
+    });
+  const openFromSide = (node: string, path: string, how: How) => (how === "panel" ? openPanel(node, path) : how === "tab" ? openTab(node, path) : openInActive(node, path));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
 
@@ -408,6 +462,7 @@ export function App() {
           active={t.id === activeId}
           onFocus={() => setActiveId(t.id)}
           onNavigate={navigate(t.id)}
+          onOpenPanel={(n, p, sel) => openPanel(n, p, sel, t.id)}
           onSplit={split(t.id)}
           onPatch={(p) => patchLeaf(t.id, p)}
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
@@ -454,7 +509,7 @@ export function App() {
   return (
     <div className="app">
       <CompareCtx.Provider value={cmp}>
-      <Sidebar nodes={nodes} onOpen={openInActive} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><ThemeMenu /></>} />
+      <Sidebar nodes={nodes} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><ThemeMenu /></>} />
       <div className="app-col">
       <header className="site-header">
         <div className="site-header__inner">

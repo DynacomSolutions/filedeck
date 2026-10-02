@@ -440,6 +440,7 @@ button.cmp-twisty:hover{color:var(--fg);background:var(--surface-3)}.cmp-twisty 
 svg.lucide{display:inline-block}
 .ln-target{white-space:nowrap}.ln-target svg.lucide{width:12px;height:12px;vertical-align:-2px}
 .side-node svg.lucide{vertical-align:-3px}
+.side-row{display:flex;align-items:center}.side-scroll .side-row button.side-twisty{flex:none;width:auto;padding:.3rem .2rem;color:var(--muted)}.side-scroll .side-row button.side-node{flex:1;min-width:0}.side-twisty svg.lucide{vertical-align:-3px}
 
 /* ---- compare status in the sidebar ---- */
 .side-cmp{flex:none;min-width:0;padding:.6rem .7rem;border-top:1px solid var(--border);font-size:.76rem;max-height:30vh;overflow:auto}
