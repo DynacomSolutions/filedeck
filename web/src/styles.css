@@ -29,7 +29,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .site-header__inner{height:52px;min-height:0;gap:.8rem;box-sizing:border-box;overflow:hidden}
 .site-header__actions{flex:none;gap:.2rem}
 .site-header .brand-name{flex:none}
-.site-header .status{flex:0 0 11rem;min-width:0;font-size:.78rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.site-header .status{flex:0 1 auto;max-width:14rem;min-width:0;font-size:.78rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btn--ghost{display:inline-flex;align-items:center;border:0;border-radius:var(--pill);background:transparent}
 .btn--ghost:hover:not(:disabled){border:0;background:var(--surface-2);color:var(--fg)}
 .theme-menu{position:relative}
@@ -379,7 +379,7 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 
 /* ---- selection across panels ---- */
 /* the selection toolbar is always there at one height; nothing moves when a selection starts or ends */
-.selbar{flex:1 1 0;min-width:0;height:100%;display:flex;flex-wrap:nowrap;gap:0 .8rem;align-items:center;font-size:.82rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.selbar{flex:1 1 auto;min-width:0;height:100%;display:flex;flex-wrap:nowrap;gap:0 .8rem;align-items:center;font-size:.82rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .selbar>.tip{flex:0 0 15rem;min-width:6rem;overflow:hidden}.selbar b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .selbar-actions{display:flex;flex-wrap:nowrap;gap:.3rem;flex:none}.selbar-actions>.tip{flex:none}.selbar-actions button{white-space:nowrap}
 .fp.picked{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
