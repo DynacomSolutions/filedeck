@@ -657,3 +657,12 @@ select option{background:var(--surface);color:var(--fg)}
 .pp-actions{display:flex;justify-content:flex-end}
 .pp .props>div{grid-template-columns:5.5rem 1fr}
 .pv-imgsk{position:absolute;inset:.8rem;border-radius:var(--radius-btn);background:var(--surface-2);animation:sk-in .01s linear .12s backwards}
+/* compare: parent row and loading placeholders */
+.cmp-row.up{cursor:pointer;color:var(--muted)}
+.cmp-row.up:hover{filter:none;background:var(--surface-2)}
+.cmp-row .fl{display:flex;align-items:center;gap:.5rem;height:22px}.cmp-row .fl .ico{flex:none;margin:0}
+.cmp-row.up .up-btn{display:inline-flex;align-items:center;justify-content:flex-start;flex:1;min-height:0;height:22px;padding:0;box-shadow:none;background:transparent;font:inherit;font-weight:600;color:var(--muted);border-radius:var(--radius-btn)}
+.cmp-row.up .up-btn:hover:not(:disabled){background:transparent;color:var(--fg)}
+.cmp-row.up .up-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent)}
+.cmp-row.skel{animation:sk-in .01s linear .12s backwards}
+.cmp-row.skel:hover{filter:none}

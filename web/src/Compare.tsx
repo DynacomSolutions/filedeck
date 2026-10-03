@@ -1,6 +1,7 @@
 // In-place folder compare (Total Commander / WinMerge style): two open panels show the two
 // sides of one diff result, rows aligned by relative path, scrolling and navigation synced.
 // The diff itself is the existing hub job (/api/diff/jobs); sync actions are one hub op job.
+import { useSettings } from "./settings";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronRight, CircleAlert, Equal, EqualNot, TriangleAlert, type LucideIcon } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffMode, type DiffResult, type JobView, type Loc, type OpJob, type SyncStepSpec } from "./api";
@@ -504,8 +505,12 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
       if (ctl.scrollers.current[side] === el) ctl.scrollers.current[side] = null;
     };
   }, [side]); // eslint-disable-line react-hooks/exhaustive-deps
-  const first = Math.max(0, Math.floor(Math.max(0, top - HEAD_H) / ROW_H) - 6);
-  const last = Math.min(ctl.rows.length, Math.ceil((top + h) / ROW_H) + 6);
+  // The parent row (setting: "..", "Up" or hidden) sits above the aligned rows on both sides, so row 0 still lines up. Only inside a sub-folder of the compare.
+  const { upRow } = useSettings();
+  const showUp = upRow !== "hidden" && !!ctl.st.rel;
+  const upH = showUp ? ROW_H : 0;
+  const first = Math.max(0, Math.floor(Math.max(0, top - HEAD_H - upH) / ROW_H) - 6);
+  const last = Math.min(ctl.rows.length, Math.ceil((top + h - upH) / ROW_H) + 6);
   const sel = ctl.selected;
   const rowMenu = (e: React.MouseEvent, n: CNode) => {
     e.preventDefault();
@@ -540,6 +545,20 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
           <span>Modified</span>
           <span />
         </div>
+        {showUp && (
+          <div className="cmp-row up" role="row" style={{ position: "relative", height: ROW_H }} onClick={ctl.up}>
+            <span className="cmp-name"><span className="fl"><Ic.CornerLeftUp className="ico" /><button type="button" className="up-btn" aria-label="Up one folder">{upRow === "up" ? "Up" : ".."}</button></span></span>
+            <span /><span /><span />
+          </div>
+        )}
+        {ctl.running && !ctl.rows.length && Array.from({ length: 10 }, (_, i) => (
+          <div key={i} className="cmp-row skel" role="presentation" aria-hidden="true" style={{ position: "relative", height: ROW_H }}>
+            <span><span className="sk sk-ico" /><span className="sk sk-nm" style={{ width: `${[7, 11, 9, 13, 8][i % 5]}rem` }} /></span>
+            <span><span className="sk sk-num" style={{ "--w": "3rem" } as React.CSSProperties} /></span>
+            <span><span className="sk sk-num" style={{ "--w": "7rem" } as React.CSSProperties} /></span>
+            <span />
+          </div>
+        ))}
         <div style={{ height: ctl.rows.length * ROW_H, position: "relative" }}>
           {ctl.rows.slice(first, last).map((n, k) => {
             const r = n.row;
@@ -585,7 +604,8 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
     if (e.shiftKey) ctl.click({ shiftKey: true, ctrlKey: false, metaKey: false }, n);
     else ctl.setSelected(new Set(withDescendants(n)));
     document.querySelectorAll<HTMLElement>(`.cmp-scroll`).forEach((sc) => {
-      const y = HEAD_H + rows.indexOf(n) * ROW_H;
+      const off = sc.querySelector(".cmp-row.up") ? ROW_H : 0;
+      const y = HEAD_H + off + rows.indexOf(n) * ROW_H;
       if (y - HEAD_H < sc.scrollTop) sc.scrollTop = y - HEAD_H;
       else if (y + ROW_H > sc.scrollTop + sc.clientHeight) sc.scrollTop = y + ROW_H - sc.clientHeight;
     });
