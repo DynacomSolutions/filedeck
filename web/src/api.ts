@@ -264,7 +264,6 @@ export interface DiffApiOptions {
   include: string;
   exclude: string;
   depth: number;
-  maxEntries: number;
 }
 export type { DiffStatus };
 export interface DiffSide {
@@ -276,7 +275,10 @@ export interface DiffSide {
 export interface DiffRow {
   p: string;
   rp?: string;
-  status: DiffStatus;
+  /** "pending" until the row is final (progressive compare) */
+  status: DiffStatus | "pending";
+  mask?: number;
+  listed?: boolean;
   l?: DiffSide;
   r?: DiffSide;
   newer?: "left" | "right";
@@ -300,6 +302,35 @@ export interface DiffResult {
   hashedBytes: number;
   warnings: string[];
   durationMs: number;
+}
+
+/** Live state of a compare session (the hub keeps the rows; the SPA reads them per folder). */
+export interface DiffStats {
+  dirsScanned: number;
+  dirsQueued: number;
+  entries: number;
+  hashed: number;
+  hashQueued: number;
+  hashedBytes: number;
+  cacheHits: number;
+  cacheMisses: number;
+  startedAt: number;
+  finishedAt?: number;
+  rev: number;
+  warnings: string[];
+}
+export type DiffJobView = JobView & { stats?: DiffStats; files?: DiffCounts; dirs?: DiffCounts };
+export interface DiffFolder {
+  rel: string;
+  listed: boolean;
+  status: DiffStatus | "pending";
+  rows: DiffRow[];
+  rev: number;
+}
+async function ndjson<T>(r: Response): Promise<T[]> {
+  if (!r.ok) await j<unknown>(r);
+  const text = await r.text();
+  return text ? text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as T) : [];
 }
 
 export interface TrashItem {
@@ -468,7 +499,13 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ left, right, options }),
     }).then((r) => j<JobView>(r)),
-  diffJob: (id: string) => fetch(`/api/diff/jobs/${id}`).then((r) => j<JobView>(r)),
+  diffJob: (id: string) => fetch(`/api/diff/jobs/${id}`).then((r) => j<DiffJobView>(r)),
+  diffRows: (id: string, rel: string, signal?: AbortSignal) => fetch(`/api/diff/jobs/${id}/rows?rel=${encodeURIComponent(rel)}`, { signal }).then((r) => j<DiffFolder>(r)),
+  diffFocus: (id: string, rels: string[]) =>
+    fetch(`/api/diff/jobs/${id}/focus`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rels }) }).then((r) => j<unknown>(r)),
+  diffSubtree: (id: string, rels: string[]) =>
+    fetch(`/api/diff/jobs/${id}/subtree`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ rels }) }).then((r) => ndjson<DiffRow>(r)),
+  diffPaths: (id: string, statuses: string[]) => fetch(`/api/diff/jobs/${id}/paths?status=${statuses.join(",")}`).then((r) => ndjson<string>(r)),
   diffResult: (id: string) => fetch(`/api/diff/jobs/${id}/result`).then((r) => j<DiffResult>(r)),
   cancelDiff: (id: string) => fetch(`/api/diff/jobs/${id}/cancel`, { method: "POST" }).then((r) => j<JobView>(r)),
   dismissDiff: (id: string) => fetch(`/api/diff/jobs/${id}`, { method: "DELETE" }).then((r) => j<unknown>(r)),

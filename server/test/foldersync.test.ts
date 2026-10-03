@@ -82,6 +82,6 @@ test("folder diff state round-trips through the app URL and ignores junk", () =>
   assert.ok(decodeState(bad) && !decodeState(bad)?.folder);
   const clamped = decodeState("?s=" + encodeURIComponent(JSON.stringify({ t: { i: "p3", d: "h", k: [{ i: "p1", n: "node-a", p: "/" }, { i: "p2", n: "node-a", p: "/" }] }, a: "p1", g: { l: ["a", "/a"], r: ["b", "/b"], a: "p1", b: "p2", m: "bogus", d: 9999, n: -4 } })));
   assert.equal(clamped?.folder?.opts.mode, "quick");
-  assert.equal(clamped?.folder?.opts.depth, 64);
-  assert.equal(clamped?.folder?.opts.maxEntries, 1);
+  assert.equal(clamped?.folder?.opts.depth, 256);
+  assert.ok(!("maxEntries" in (clamped?.folder?.opts ?? {}))); // the old entry cap in shared links is ignored
 });

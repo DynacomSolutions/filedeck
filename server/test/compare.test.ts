@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildIndex, flatten, joinRoot, listFolder, relUnder, rightRel, sharedRel, withDescendants } from "../../web/src/compareModel.ts";
+import { buildIndex, flatten, flattenFolders, keepRow, joinRoot, listFolder, relUnder, rightRel, sharedRel, withDescendants } from "../../web/src/compareModel.ts";
 import { decodeState, encodeState, DEFAULT_UI, type Tree } from "../../web/src/urlState.ts";
 
 const F = (s = 1, m = 0) => ({ t: "file" as const, s, m });
@@ -83,4 +83,23 @@ test("compare state, multi selection and picked panels survive the URL", () => {
   // a compare naming a panel that is not in the layout is dropped
   const bad = "?s=" + encodeURIComponent(decodeURIComponent(url.slice(3)).replace('"b":"p2"', '"b":"p9"'));
   assert.equal(decodeState(bad)?.folder, undefined);
+});
+
+test("progressive rows: pending rows always show, unlisted folders show placeholders, masks keep folders under filters", () => {
+  const folders = new Map([
+    ["", { listed: true, rows: [
+      { p: "b.txt", status: "identical" as const, l: F(), r: F() },
+      { p: "dir", status: "pending" as const, l: D, r: D, mask: 2, listed: true },
+      { p: "same", status: "identical" as const, l: D, r: D, mask: 1, listed: true },
+    ] }],
+    ["dir", { listed: false, rows: [] }],
+  ]);
+  const hideIdentical = new Set(["identical"] as const);
+  assert.deepEqual(flattenFolders(folders, "", hideIdentical, new Set()).map((f) => f.n.row.p), ["dir"]);
+  const open = flattenFolders(folders, "", new Set(), new Set(["dir"]));
+  assert.deepEqual(open.map((f) => [f.n.skel ?? false, f.depth]), [[false, 0], [true, 1], [false, 0], [false, 0]]);
+  // a folder not fetched yet: three placeholder rows
+  assert.equal(flattenFolders(new Map(), "", new Set(), new Set()).filter((f) => f.n.skel).length, 3);
+  assert.ok(keepRow({ p: "x", status: "identical", l: D, r: D, mask: 1 | 4 }, hideIdentical));
+  assert.ok(!keepRow({ p: "x", status: "identical", l: D, r: D, mask: 1 }, hideIdentical));
 });

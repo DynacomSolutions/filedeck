@@ -2,10 +2,10 @@
 // sides of one diff result, rows aligned by relative path, scrolling and navigation synced.
 // The diff itself is the existing hub job (/api/diff/jobs); sync actions are one hub op job.
 import { useSettings } from "./settings";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronRight, CircleAlert, Equal, EqualNot, TriangleAlert, type LucideIcon } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronRight, CircleAlert, Equal, EqualNot, LoaderCircle, TriangleAlert, type LucideIcon } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffMode, type DiffResult, type JobView, type Loc, type OpJob, type SyncStepSpec } from "./api";
-import { buildIndex, flatten, joinRoot, rightRel, relUnder, sharedRel, withDescendants, type CNode } from "./compareModel";
+import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffCounts, type DiffJobView, type DiffMode, type DiffRow, type DiffStats, type Loc, type OpJob, type SyncStepSpec } from "./api";
+import { flattenFolders, joinRoot, relUnder, type CNode, type FolderData } from "./compareModel";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
@@ -16,12 +16,12 @@ import * as Ic from "lucide-react";
 
 /* ------------------------------------------------------------------ options and presets */
 
-const MODES: { id: DiffMode; label: string; help: string }[] = [
-  { id: "name", label: "Name only", help: "Present on both sides means identical" },
-  { id: "size", label: "Size", help: "Same size" },
-  { id: "mtime", label: "Modified time", help: "Same mtime within the tolerance" },
-  { id: "quick", label: "Quick (size + time, then hash)", help: "Size differs: different. Size and time match: identical. Otherwise compare sha256 on the agents" },
-  { id: "content", label: "Content (sha256)", help: "Equal size, then sha256 computed on each node; no file data crosses nodes" },
+export const MODES: { id: DiffMode; label: string; short: string; help: string }[] = [
+  { id: "name", label: "Name only", short: "Name", help: "Present on both sides means identical" },
+  { id: "size", label: "Size", short: "Size", help: "Same size means identical" },
+  { id: "mtime", label: "Modified time", short: "Time", help: "Same modified time (within the tolerance) means identical" },
+  { id: "quick", label: "Quick (size + time, then hash)", short: "Quick", help: "Size differs: different. Size and time match: identical. Otherwise sha256 is compared on the nodes" },
+  { id: "content", label: "Content (sha256)", short: "Content", help: "Equal size, then sha256 computed on each node; no file data crosses nodes" },
 ];
 const toApi = (o: UiOpts): DiffApiOptions => ({
   mode: o.mode,
@@ -31,7 +31,6 @@ const toApi = (o: UiOpts): DiffApiOptions => ({
   include: o.include,
   exclude: o.exclude,
   depth: o.depth,
-  maxEntries: o.maxEntries,
 });
 const PRESET_KEY = "filedeck-folderdiff-presets";
 type Presets = Record<string, UiOpts>;
@@ -86,8 +85,9 @@ export type Side = "left" | "right";
 export interface CompareCtl {
   st: FolderState;
   sideOf: (panelId: string) => Side | null;
-  result: DiffResult | null;
-  job: JobView | null;
+  /** live totals of the running or finished compare (null before the first status) */
+  summary: CompareSummary | null;
+  job: DiffJobView | null;
   running: boolean;
   err: string;
   rows: CNode[];
@@ -105,8 +105,11 @@ export interface CompareCtl {
   go: (rel: string) => void;
   up: () => void;
   exit: () => void;
-  start: () => void;
+  start: (opts?: UiOpts) => void;
   cancel: () => void;
+  selectDiffering: () => void;
+  /** a row plus every loaded row below it */
+  descend: (n: CNode) => string[];
   setOpts: (o: UiOpts) => void;
   setPreset: (p: string) => void;
   toggleStatus: (s: DiffStatus) => void;
@@ -123,6 +126,17 @@ export interface CompareCtl {
   onStatus: (m: string) => void;
   filtersActive: boolean;
 }
+export interface CompareSummary {
+  files: DiffCounts;
+  dirs: DiffCounts;
+  stats: DiffStats;
+  done: boolean;
+  /** folders scanned per second (recent) */
+  rate: number;
+}
+const EMPTY: DiffCounts = { identical: 0, different: 0, leftOnly: 0, rightOnly: 0, error: 0 };
+const nameOfRel = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 export const CompareCtx = createContext<CompareCtl | null>(null);
 export const useCompareCtl = () => useContext(CompareCtx);
 
@@ -140,20 +154,21 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   const st = state;
   const stRef = useRef(st);
   stRef.current = st;
-  const [job, setJob] = useState<JobView | null>(null);
+  const [job, setJob] = useState<DiffJobView | null>(null);
+  /** the hub session (kept after the job finishes, so folders can still be read); dismissed on exit or restart */
   const [jobId, setJobId] = useState("");
   const [err, setErr] = useState("");
-  const [result, setResult] = useState<DiffResult | null>(null);
+  const [folders, setFolders] = useState<ReadonlyMap<string, FolderData>>(new Map());
+  const [rate, setRate] = useState(0);
   const [selected, setSelectedState] = useState<Set<string>>(new Set());
   const [cursor, setCursor] = useState<string | null>(null);
   const [exec, setExec] = useState<Exec | null>(null);
   const [presets, setPresets] = useState<Presets>(loadPresets);
   const scrollers = useRef<{ left: HTMLElement | null; right: HTMLElement | null }>({ left: null, right: null });
-  const idx = useMemo(() => (result ? buildIndex(result.rows) : null), [result]);
   const hide = useMemo(() => new Set<DiffStatus>(st?.hide ?? []), [st?.hide]);
   const rel = st?.rel ?? "";
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const flat = useMemo(() => (idx ? flatten(idx, rel, hide, expanded) : []), [idx, rel, hide, expanded]);
+  const flat = useMemo(() => (jobId ? flattenFolders(folders, rel, hide, expanded) : []), [jobId, folders, rel, hide, expanded]);
   const rows = useMemo(() => flat.map((f) => f.n), [flat]);
   const depths = useMemo(() => new Map(flat.map((f) => [f.n.row.p, f.depth])), [flat]);
   const toggleOpen = (p: string) =>
@@ -164,15 +179,29 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     });
   const running = job !== null && (job.state === "queued" || job.state === "running");
   const setSelected = (s: Set<string>) => setSelectedState(s);
+  /** right spelling of a shared relative folder (only differs when names match ignoring case) */
+  const rightRelOf = useCallback(
+    (r: string) => {
+      if (!r) return r;
+      const row = folders.get(parentOf(r))?.rows.find((x) => x.p === r);
+      return row?.rp ?? r;
+    },
+    [folders],
+  );
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (opts?: UiOpts) => {
     const s = stRef.current;
     if (!s) return;
     setErr("");
-    setResult(null);
     setSelectedState(new Set());
+    setFolders(new Map());
+    setRate(0);
+    setJobId((old) => {
+      if (old) api.cancelDiff(old).catch(() => undefined).finally(() => api.dismissDiff(old).catch(() => undefined));
+      return "";
+    });
     try {
-      const j = await api.startDiff(s.left, s.right, toApi(s.opts));
+      const j = await api.startDiff(s.left, s.right, toApi(opts ?? s.opts));
       setJob(j);
       setJobId(j.id);
     } catch (e) {
@@ -185,11 +214,15 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   useEffect(() => {
     if (!st) {
       ran.current = false;
-      setResult(null);
       setJob(null);
+      setFolders(new Map());
       setErr("");
       setExec(null);
       setSelectedState(new Set());
+      setJobId((old) => {
+        if (old) api.cancelDiff(old).catch(() => undefined).finally(() => api.dismissDiff(old).catch(() => undefined));
+        return "";
+      });
       return;
     }
     if (!ran.current) {
@@ -198,44 +231,81 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     }
   }, [!st]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll the hub job; fetch the result once it is done.
+  // Folders on screen: the current one and every expanded one below it. The hub lists and hashes these first.
+  const visible = useMemo(() => [rel, ...[...expanded].filter((p) => !rel || p.startsWith(rel + "/"))], [rel, expanded]);
+  const visibleKey = visible.join("\u0000");
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const fetchFolders = useCallback(async (id: string, rels: string[]) => {
+    const got = await Promise.all(rels.map((r) => api.diffRows(id, r).catch(() => null)));
+    setFolders((old) => {
+      const next = new Map(old);
+      got.forEach((f, i) => {
+        if (f) next.set(rels[i] as string, { listed: f.listed, rows: f.rows });
+      });
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    if (!jobId) return;
+    api.diffFocus(jobId, visible).catch(() => undefined);
+    const missing = visible.filter((r) => !folders.has(r));
+    if (missing.length) void fetchFolders(jobId, missing);
+  }, [jobId, visibleKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll the session: totals and progress every tick; visible folders again whenever any row changed.
   useEffect(() => {
     if (!jobId) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let rev = -1;
+    let last: { t: number; dirs: number } | null = null;
     const tick = async () => {
       try {
         const j = await api.diffJob(jobId);
         if (!live) return;
         setJob(j);
-        if (j.state === "done") {
-          const r = await api.diffResult(jobId);
-          if (!live) return;
-          setResult(r);
-          setJobId("");
-          api.dismissDiff(jobId).catch(() => undefined);
-          return;
+        const stt = j.stats;
+        if (stt) {
+          const now = Date.now();
+          if (last && now > last.t) {
+            const inst = ((stt.dirsScanned - last.dirs) * 1000) / (now - last.t);
+            setRate((r) => (r ? r * 0.6 + inst * 0.4 : inst));
+          }
+          last = { t: now, dirs: stt.dirsScanned };
+          if (stt.rev !== rev) {
+            rev = stt.rev;
+            await fetchFolders(jobId, visibleRef.current);
+          }
         }
         if (j.state === "failed" || j.state === "canceled") {
           setErr(j.state === "failed" ? (j.error ?? "Comparison failed") : "Comparison canceled");
-          setJobId("");
           return;
         }
+        if (j.state === "done") return;
       } catch (e) {
-        if (live) {
-          setErr((e as Error).message);
-          setJobId("");
-        }
+        if (live) setErr((e as Error).message);
         return;
       }
-      timer = setTimeout(() => void tick(), 400);
+      if (live) timer = setTimeout(() => void tick(), 500);
     };
     void tick();
     return () => {
       live = false;
       clearTimeout(timer);
     };
-  }, [jobId]);
+  }, [jobId, fetchFolders]);
+
+  /** A row plus every loaded row below it (folders not loaded yet are taken whole by the sync planner). */
+  const withLoaded = useCallback(
+    (n: CNode, out: string[] = []): string[] => {
+      if (n.skel) return out;
+      out.push(n.row.p);
+      if (n.isDir) for (const r of folders.get(n.row.p)?.rows ?? []) withLoaded({ row: r, name: nameOfRel(r.p), isDir: (r.l?.t ?? r.r?.t) === "dir", children: [] }, out);
+      return out;
+    },
+    [folders],
+  );
 
   /* ---------- navigation: both panels always show the same relative folder ---------- */
   const lp = st ? leafOf(st.lp) : undefined;
@@ -253,21 +323,21 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
       const l = leafOf(s.lp);
       const r = leafOf(s.rp);
       if (l) patchLeaf(s.lp, { node: s.left.node, path: joinRoot(s.left.path, to), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
-      if (r) patchLeaf(s.rp, { node: s.right.node, path: joinRoot(s.right.path, rightRel(idx, to)), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
+      if (r) patchLeaf(s.rp, { node: s.right.node, path: joinRoot(s.right.path, rightRelOf(to)), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
       setCursor(null);
       setSelectedState(new Set());
       setExpanded(new Set());
       scrollers.current.left?.scrollTo?.({ top: 0 });
       scrollers.current.right?.scrollTo?.({ top: 0 });
     },
-    [idx, leafOf, patchLeaf, setState],
+    [rightRelOf, leafOf, patchLeaf, setState],
   );
   // A panel that navigated by itself (breadcrumb, Up, back button) drags the other one along; leaving the
   // compared roots ends the compare.
   useEffect(() => {
     if (!st || !lp || !rp) return;
     const wantL = joinRoot(st.left.path, st.rel);
-    const wantR = joinRoot(st.right.path, rightRel(idx, st.rel));
+    const wantR = joinRoot(st.right.path, rightRelOf(st.rel));
     const okL = lp.node === st.left.node && lp.path === wantL;
     const okR = rp.node === st.right.node && rp.path === wantR;
     if (okL && okR) return;
@@ -279,13 +349,18 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
       setState(() => null);
       return;
     }
-    go(fromLeft ? r : sharedRel(idx, r));
+    go(fromLeft ? r : sharedOf(r));
   }, [st?.rel, st?.left, st?.right, lp?.node, lp?.path, rp?.node, rp?.path]); // eslint-disable-line react-hooks/exhaustive-deps
   // A closed panel ends the compare.
   useEffect(() => {
     if (st && (!lp || !rp)) setState(() => null);
   }, [st, lp, rp, setState]);
 
+  /** shared relative folder for a right-panel relative folder (differs only for ignore-case matches) */
+  function sharedOf(rightSpelling: string): string {
+    for (const f of folders.values()) for (const x of f.rows) if (x.rp === rightSpelling) return x.p;
+    return rightSpelling;
+  }
   const up = () => {
     if (!rel) return;
     go(rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
@@ -294,6 +369,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     const s = stRef.current;
     if (!s) return;
     const r = n.row;
+    if (n.skel) return;
     if (n.isDir) return go(r.p);
     if (!r.l || !r.r) return onStatus(`${r.p} exists only on the ${r.l ? "left" : "right"} side`);
     if (r.l.t !== "file" || r.r.t !== "file") return onStatus("Only regular files can be diffed");
@@ -302,17 +378,18 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   };
 
   const click: CompareCtl["click"] = (e, n) => {
+    if (n.skel) return;
     setCursor(n.row.p);
     if (e.shiftKey && cursor) {
       const a = rows.findIndex((x) => x.row.p === cursor);
       const b = rows.findIndex((x) => x.row.p === n.row.p);
       if (a >= 0 && b >= 0) {
         const next = new Set<string>();
-        for (const x of rows.slice(Math.min(a, b), Math.max(a, b) + 1)) withDescendants(x).forEach((p) => next.add(p));
+        for (const x of rows.slice(Math.min(a, b), Math.max(a, b) + 1)) withLoaded(x).forEach((p) => next.add(p));
         return setSelectedState(next);
       }
     }
-    const all = withDescendants(n);
+    const all = withLoaded(n);
     if (e.ctrlKey || e.metaKey) {
       setSelectedState((s) => {
         const next = new Set(s);
@@ -351,11 +428,34 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   };
 
   /* ---------- sync ---------- */
-  const filtersActive = !!(st && (st.opts.include.trim() || st.opts.exclude.trim() || st.opts.ignoreHidden)) || (result?.warnings.length ?? 0) > 0;
-  const preview = (action: SyncAction) => {
-    if (!result) return;
-    const plan = planSync(result.rows, selected, action, { wholeDirs: !filtersActive });
+  const warnings = job?.stats?.warnings ?? [];
+  const filtersActive = !!(st && (st.opts.include.trim() || st.opts.exclude.trim() || st.opts.ignoreHidden)) || warnings.length > 0;
+  /** The plan needs every row under the selection, including folders never opened: the hub streams them. */
+  const preview = async (action: SyncAction) => {
+    if (!jobId || !selected.size) return;
+    const sel = [...selected];
+    const tops = sel.filter((p) => !sel.some((q) => q !== p && p.startsWith(q + "/")));
+    let all: DiffRow[];
+    try {
+      all = await api.diffSubtree(jobId, tops);
+    } catch (e) {
+      return onStatus((e as Error).message);
+    }
+    const final = all.filter((r) => r.status !== "pending") as (DiffRow & { status: DiffStatus })[];
+    if (final.length < all.length) onStatus(`${all.length - final.length} selected rows are still being compared and were left out`);
+    const picked = new Set(selected);
+    for (const r of final) if (tops.some((t) => r.p === t || r.p.startsWith(t + "/"))) picked.add(r.p);
+    const plan = planSync(final, picked, action, { wholeDirs: !filtersActive });
     setExec({ action, plan, state: "plan", done: 0, errors: [], canceled: false });
+  };
+  const selectDiffering = async () => {
+    if (!jobId) return;
+    const want = DIFF_STATUSES.filter((x) => x !== "identical" && !hide.has(x));
+    try {
+      setSelectedState(new Set(await api.diffPaths(jobId, want)));
+    } catch (e) {
+      onStatus((e as Error).message);
+    }
   };
   /** The plan becomes one hub job: it keeps running when the compare or the browser is closed. */
   const runExec = async () => {
@@ -410,10 +510,11 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   };
 
   if (!st) return null;
+  const summary: CompareSummary | null = job?.stats ? { files: job.files ?? EMPTY, dirs: job.dirs ?? EMPTY, stats: job.stats, done: job.state === "done", rate } : null;
   return {
     st,
     sideOf: (id) => (id === st.lp ? "left" : id === st.rp ? "right" : null),
-    result,
+    summary,
     job,
     running,
     err,
@@ -431,12 +532,14 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     go,
     up,
     exit,
-    start: () => void start(),
+    start: (o?: UiOpts) => void start(o),
     cancel: () => jobId && void api.cancelDiff(jobId).catch(() => undefined),
+    selectDiffering: () => void selectDiffering(),
+    descend: (n: CNode) => withLoaded(n),
     setOpts,
     setPreset,
     toggleStatus,
-    preview,
+    preview: (a: SyncAction) => void preview(a),
     exec,
     runExec: () => void runExec(),
     stopExec: () => exec?.jobId && void api.opAction(exec.jobId, "cancel"),
@@ -457,6 +560,14 @@ const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
 function Cell({ n, side, ctl }: { n: CNode; side: Side; ctl: CompareCtl }) {
   const r = n.row;
+  if (n.skel)
+    return (
+      <>
+        <span className="cmp-name" style={{ paddingLeft: ctl.depthOf(r.p) * 16 }}><span className="cmp-twisty" aria-hidden="true" /><span className="sk sk-ico" /><span className="sk sk-nm" style={{ width: `${[7, 11, 9, 13, 8][r.p.length % 5]}rem` }} /></span>
+        <span className="num"><span className="sk sk-num" style={{ "--w": "3rem" } as React.CSSProperties} /></span>
+        <span><span className="sk sk-num" style={{ "--w": "7rem" } as React.CSSProperties} /></span>
+      </>
+    );
   const d = side === "left" ? r.l : r.r;
   const spelling = side === "right" && r.rp ? nameOf(r.rp) : n.name;
   if (!d) return <span className="cmp-ph" aria-label={`Not on the ${side} side`} />;
@@ -569,22 +680,30 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
                 aria-selected={sel.has(r.p)}
                 data-rel={r.p}
                 data-status={r.status}
-                className={"cmp-row st-" + r.status + (sel.has(r.p) ? " sel" : "") + (ctl.cursor === r.p ? " cur" : "") + (!(side === "left" ? r.l : r.r) ? " ph" : "")}
+                aria-busy={r.status === "pending" || undefined}
+                className={"cmp-row st-" + r.status + (n.skel ? " skel" : "") + (sel.has(r.p) ? " sel" : "") + (ctl.cursor === r.p ? " cur" : "") + (!n.skel && !(side === "left" ? r.l : r.r) ? " ph" : "")}
                 style={{ top: (first + k) * ROW_H, height: ROW_H }}
                 onClick={(e) => ctl.click(e, n)}
                 onDoubleClick={() => ctl.open(n)}
                 onContextMenu={(e) => rowMenu(e, n)}
               >
                 <Cell n={n} side={side} ctl={ctl} />
-                <span className="cmp-status" title={r.why ?? STATUS[r.status].label}>
-                  {(() => { const I = STATUS[r.status].Icon; return <I aria-hidden="true" />; })()}
-                  <span className="visually-hidden">{STATUS[r.status].label}</span>
-                </span>
+                {r.status === "pending" ? (
+                  <span className="cmp-status" title={n.skel ? "Listing this folder" : n.isDir ? "Comparing what is inside" : "Comparing"}>
+                    <LoaderCircle className="cmp-spin" aria-hidden="true" />
+                    <span className="visually-hidden">{n.skel ? "Loading" : "Comparing"}</span>
+                  </span>
+                ) : (
+                  <span className="cmp-status" title={r.why ?? STATUS[r.status].label}>
+                    {(() => { const I = STATUS[r.status].Icon; return <I aria-hidden="true" />; })()}
+                    <span className="visually-hidden">{STATUS[r.status].label}</span>
+                  </span>
+                )}
               </div>
             );
           })}
         </div>
-        {!ctl.rows.length && !ctl.running && ctl.result && <div className="cmp-empty muted">Nothing to show here with the current filters.</div>}
+        {!ctl.rows.length && !ctl.running && ctl.summary && <div className="cmp-empty muted">Nothing to show here with the current filters.</div>}
        </div>
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
@@ -602,7 +721,7 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
     if (!n) return;
     ctl.setCursor(n.row.p);
     if (e.shiftKey) ctl.click({ shiftKey: true, ctrlKey: false, metaKey: false }, n);
-    else ctl.setSelected(new Set(withDescendants(n)));
+    else ctl.setSelected(new Set(ctl.descend(n)));
     document.querySelectorAll<HTMLElement>(`.cmp-scroll`).forEach((sc) => {
       const off = sc.querySelector(".cmp-row.up") ? ROW_H : 0;
       const y = HEAD_H + off + rows.indexOf(n) * ROW_H;
@@ -634,7 +753,7 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
     return !!n && n.isDir && (ctl.expanded.has(n.row.p) && ctl.toggleOpen(n.row.p), true);
   }
   if (k === "Backspace" || (e.altKey && k === "ArrowUp")) return ctl.up(), true;
-  if (mod && k.toLowerCase() === "a") return ctl.setSelected(new Set(rows.flatMap((n) => withDescendants(n)))), true;
+  if (mod && k.toLowerCase() === "a") return ctl.setSelected(new Set(rows.flatMap((n) => ctl.descend(n)))), true;
   if (k === "Escape") return ctl.selected.size > 0 ? (ctl.setSelected(new Set()), true) : (ctl.exit(), true);
   if (k === "F5") return ctl.selected.size > 0 && (ctl.preview(side === "left" ? "copy-lr" : "copy-rl"), true);
   if (k === "F6") return ctl.selected.size > 0 && (ctl.preview(side === "left" ? "copy-lr" : "copy-rl"), true);
@@ -645,9 +764,10 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
 /* ------------------------------------------------------------------ view: toolbar in the panel header */
 
 export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: Side; otherLabel: string }) {
-  const { st, result } = ctl;
+  const { st, summary } = ctl;
   const o = st.opts;
-  const c = result?.files;
+  const c = summary?.files;
+  const mode = MODES.find((m) => m.id === o.mode);
   const n = (s: DiffStatus) => (!c ? 0 : s === "identical" ? c.identical : s === "different" ? c.different : s === "left-only" ? c.leftOnly : s === "right-only" ? c.rightOnly : c.error);
   const sel = ctl.selected.size;
   return (
@@ -661,19 +781,16 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
           if (s === "error" && !n(s)) return null;
           return (
             <button key={s} className={"fd-tog st-" + s} aria-pressed={!ctl.hide.has(s)} onClick={() => ctl.toggleStatus(s)}>
-              {(() => { const I = STATUS[s].Icon; return <I aria-hidden="true" />; })()} {STATUS[s].label}{result ? ` ${n(s)}` : ""}
+              {(() => { const I = STATUS[s].Icon; return <I aria-hidden="true" />; })()} {STATUS[s].label} <span className="fd-n">{summary ? n(s).toLocaleString() : ""}</span>
             </button>
           );
         })}
       </span>
       {side === "left" && (
         <>
-          <label className="cmp-mode">
-            <span className="visually-hidden">Compare by</span>
-            <select value={o.mode} title={MODES.find((m) => m.id === o.mode)?.help} onChange={(e) => ctl.setOpts({ ...o, mode: e.target.value as DiffMode })}>
-              {MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-            </select>
-          </label>
+          <Tip label={`Compare by ${mode?.label ?? o.mode}: ${mode?.help ?? ""}. Change it under Compare in the sidebar.`}>
+            <span className="cmp-mode-label"><Ic.Scale aria-hidden="true" /> By {mode?.short ?? o.mode}</span>
+          </Tip>
           <button className="primary" onClick={() => (ctl.running ? ctl.cancel() : ctl.start())}>{ctl.running ? <Ic.X /> : <Ic.RefreshCw />} {ctl.running ? "Cancel" : "Compare again"}</button>
           <span className="fd-sep" />
           <span className="fd-sync" role="group" aria-label="Sync selected rows">
@@ -682,7 +799,7 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
             <Tip label="Move selected left items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-left")}><Ic.Trash2 /> Delete left</button></Tip>
             <Tip label="Move selected right items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-right")}><Ic.Trash2 /> Delete right</button></Tip>
           </span>
-          <Tip label="Select every differing row in the whole tree"><button disabled={!result} onClick={() => ctl.setSelected(new Set(result!.rows.filter((r) => r.status !== "identical" && !ctl.hide.has(r.status)).map((r) => r.p)))}><Ic.ListChecks /> Select differing</button></Tip>
+          <Tip label="Select every differing row in the whole tree"><button disabled={!summary} onClick={ctl.selectDiffering}><Ic.ListChecks /> Select differing</button></Tip>
           <button disabled={!sel} onClick={() => ctl.setSelected(new Set())}><Ic.Eraser /> Clear</button>
         </>
       )}
@@ -695,15 +812,39 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
 
 /* ------------------------------------------------------------------ sidebar: what the compare found */
 
-/** Warnings from the diff job, per side, as a short label plus the full text for the tooltip. */
-function warnRow(w: string): { side: "Left" | "Right" | ""; short: string; full: string } {
-  const side = /\bleft\b/i.test(w) ? "Left" : /\bright\b/i.test(w) ? "Right" : "";
-  const cut = /more than (\d+) entries/.exec(w);
+/** Warnings from the compare (depth limit, unreadable folders) as a short label plus the full text for the tooltip. */
+function warnRow(w: string): { short: string; full: string } {
   const deep = /deeper than (\d+) levels/.exec(w);
-  const bad = /^(\d+) entr/.exec(w);
-  const short = cut ? `cut off at ${cut[1]} entries` : deep ? `deeper than ${deep[1]} levels` : bad ? `${bad[1]} unreadable` : w;
-  const hint = cut ? " Raise \"Max entries per side\" in the compare Options (up to 500000) and compare again." : deep ? " Raise \"Max depth\" in the compare Options." : "";
-  return { side, short, full: w + (w.endsWith(".") ? "" : ".") + hint };
+  return { short: deep ? `deeper than ${deep[1]} levels skipped` : w, full: w + (w.endsWith(".") ? "" : ".") + (deep ? " Raise \"Max depth\" in the compare Options." : "") };
+}
+
+/** "Compare by": always visible in the sidebar, one click re-runs the compare in the new mode. */
+function ModeControl({ ctl }: { ctl: CompareCtl }) {
+  const o = ctl.st.opts;
+  return (
+    <>
+    <p className="side-cmp-cap muted" id="cmp-by">Compare by</p>
+    <div className="cmp-seg" role="radiogroup" aria-labelledby="cmp-by">
+      {MODES.map((m) => (
+        <Tip key={m.id} label={`${m.label}: ${m.help}`}>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={o.mode === m.id}
+            onClick={() => {
+              if (o.mode === m.id) return;
+              const next = { ...o, mode: m.id };
+              ctl.setOpts(next);
+              ctl.start(next);
+            }}
+          >
+            {m.short}
+          </button>
+        </Tip>
+      ))}
+    </div>
+    </>
+  );
 }
 
 /** Compare options live inline in the sidebar's Compare section (no popover over the panels). */
@@ -727,11 +868,7 @@ function CompareOptions({ ctl }: { ctl: CompareCtl }) {
           </label>
           <label>
             Max depth
-            <input type="number" min={1} max={64} value={o.depth} onChange={(e) => ctl.setOpts({ ...o, depth: Number(e.target.value) })} />
-          </label>
-          <label>
-            Max entries per side (up to 500000)
-            <input type="number" min={1} max={500000} step={10000} value={o.maxEntries} onChange={(e) => ctl.setOpts({ ...o, maxEntries: Number(e.target.value) })} />
+            <input type="number" min={1} max={256} value={o.depth} onChange={(e) => ctl.setOpts({ ...o, depth: Number(e.target.value) })} />
           </label>
           <label className="chk"><input type="checkbox" checked={o.ignoreCase} onChange={(e) => ctl.setOpts({ ...o, ignoreCase: e.target.checked })} /> Ignore case in names</label>
           <label className="chk"><input type="checkbox" checked={o.ignoreHidden} onChange={(e) => ctl.setOpts({ ...o, ignoreHidden: e.target.checked })} /> Ignore hidden files</label>
@@ -760,37 +897,45 @@ export function CompareInfo() {
   const ctl = useCompareCtl();
   const [optsOpen, setOptsOpen] = useState(false);
   if (!ctl) return null;
-  const { st, result, job, running, err } = ctl;
-  const files = result ? result.files.identical + result.files.different + result.files.leftOnly + result.files.rightOnly + result.files.error : 0;
-  const dirs = result ? result.dirs.identical + result.dirs.different + result.dirs.leftOnly + result.dirs.rightOnly + result.dirs.error : 0;
+  const { st, summary, job, running, err } = ctl;
+  const sum = (c: DiffCounts) => c.identical + c.different + c.leftOnly + c.rightOnly + c.error;
+  const s = summary?.stats;
+  const secs = s ? ((s.finishedAt ?? Date.now()) - s.startedAt) / 1000 : 0;
+  const lookups = s ? s.cacheHits + s.cacheMisses : 0;
   return (
     <section className="side-cmp" aria-label="Compare status">
       <h2>Compare</h2>
       <Tip label={`${st.left.node}:${st.left.path}  vs  ${st.right.node}:${st.right.path}`}>
         <p className="side-cmp-roots muted">{st.left.node}:{st.left.path} vs {st.right.node}:{st.right.path}</p>
       </Tip>
+      <ModeControl ctl={ctl} />
       {err && <p className="side-cmp-err" role="alert">{err}</p>}
-      {running && job && (
-        <div className="side-cmp-run" role="status">
-          <b>{job.state === "queued" ? "Queued" : "Comparing"}</b>
-          {job.progress.totalEntries > 0 ? <progress aria-label="Comparison progress" max={Math.max(1, job.progress.totalBytes)} value={job.progress.bytes} /> : <progress aria-label="Comparison progress" />}
-          <span className="muted">{job.progress.totalEntries > 0 ? `${job.progress.entries} / ${job.progress.totalEntries} hashed` : `${job.progress.entries} entries found`}</span>
-        </div>
-      )}
-      {result && (
-        <>
-          <p className="side-cmp-line">{files} files, {dirs} folders in {(result.durationMs / 1000).toFixed(1)} s</p>
-          {result.hashedFiles > 0 && <p className="side-cmp-line muted">{result.hashedFiles} pairs hashed, {fmtSize(result.hashedBytes)} read</p>}
-          {result.warnings.map((w) => {
-            const x = warnRow(w);
-            return (
-              <Tip key={w} label={x.full}>
-                <p className="side-cmp-warn" role="alert"><TriangleAlert aria-hidden="true" /> <span>{x.side ? `${x.side}: ` : ""}{x.short}</span></p>
-              </Tip>
-            );
-          })}
-        </>
-      )}
+      {/* Fixed two-line block while running and after, so the sidebar does not jump as numbers change. */}
+      <div className="side-cmp-run" role="status" aria-live="polite">
+        {running && job?.state === "queued" && <><b>Queued</b><progress aria-label="Comparison progress" /></>}
+        {s && (
+          <>
+            <span className="side-cmp-line">
+              <b>{running ? "Comparing" : "Done"}</b> {s.dirsScanned.toLocaleString()} folders{running && summary ? ` · ${Math.round(summary.rate).toLocaleString()}/s` : ` in ${secs.toFixed(1)} s`}
+              {running && s.dirsQueued > 0 ? ` · ${s.dirsQueued.toLocaleString()} queued` : ""}
+            </span>
+            {running ? <progress aria-label="Comparison progress" /> : null}
+            <span className="muted">
+              {summary ? `${sum(summary.files).toLocaleString()} files, ${sum(summary.dirs).toLocaleString()} folders` : `${s.entries.toLocaleString()} entries`}
+              {s.hashed + s.hashQueued > 0 ? ` · ${s.hashed.toLocaleString()}${running && s.hashQueued > 0 ? ` / ${(s.hashed + s.hashQueued).toLocaleString()}` : ""} hashed (${fmtSize(s.hashedBytes)})` : ""}
+            </span>
+            {lookups > 0 && <span className="muted">Index: {Math.round((100 * s.cacheHits) / lookups)}% of folder listings from cache</span>}
+          </>
+        )}
+      </div>
+      {(s?.warnings ?? []).map((w) => {
+        const x = warnRow(w);
+        return (
+          <Tip key={w} label={x.full}>
+            <p className="side-cmp-warn" role="alert"><TriangleAlert aria-hidden="true" /> <span>{x.short}</span></p>
+          </Tip>
+        );
+      })}
       <button type="button" className="side-opts-toggle" aria-expanded={optsOpen} onClick={() => setOptsOpen((v) => !v)}>
         {optsOpen ? <ChevronDown /> : <ChevronRight />} <Ic.SlidersHorizontal /> Options
       </button>

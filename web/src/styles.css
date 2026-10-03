@@ -666,3 +666,22 @@ select option{background:var(--surface);color:var(--fg)}
 .cmp-row.up .up-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent)}
 .cmp-row.skel{animation:sk-in .01s linear .12s backwards}
 .cmp-row.skel:hover{filter:none}
+/* progressive compare: rows not final yet are dulled with a spinner; folders still being listed show static placeholder rows */
+.cmp-row.st-pending>span:not(.cmp-status){opacity:.55}
+.cmp-row.skel{pointer-events:none}
+.cmp-spin{width:15px;height:15px;color:var(--muted);animation:cmp-rot 1s linear infinite}
+@keyframes cmp-rot{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.cmp-spin{animation:none}}
+/* "Compare by" segmented control in the sidebar (same look as the theme selector) and the mode label in the panel bar */
+.side-cmp p.side-cmp-cap{margin:.4rem .5rem 0;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+.cmp-seg{display:flex;gap:2px;margin:.2rem .5rem .45rem;padding:2px;background:var(--surface-2);border-radius:var(--radius-btn);box-shadow:var(--shadow-1) inset}
+.cmp-seg .tip{flex:1;display:flex}
+.cmp-seg button{flex:1;min-width:0;min-height:26px;padding:0 .1rem;font-size:.72rem;font-weight:600;color:var(--muted);border-radius:calc(var(--radius-btn) - 2px);box-shadow:none;background:transparent;border:0}
+.cmp-seg button[aria-checked=true]{background:var(--surface);color:var(--fg);box-shadow:var(--shadow-1)}
+.cmp-seg button:hover:not([aria-checked=true]){background:var(--surface-3);color:var(--fg)}
+.cmp-mode-label{display:inline-flex;align-items:center;gap:.3rem;white-space:nowrap;font-size:.8rem;color:var(--muted);cursor:default}
+.cmp-mode-label svg{width:14px;height:14px}
+/* progress block: fixed lines that never wrap, and counts with a reserved width, so nothing moves while numbers grow */
+.side-cmp-run{min-height:4.9em}
+.side-cmp-run>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fd-tog .fd-n{display:inline-block;min-width:7ch;text-align:left;font-variant-numeric:tabular-nums}

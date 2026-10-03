@@ -66,7 +66,6 @@ export interface UiOpts {
   include: string;
   exclude: string;
   depth: number;
-  maxEntries: number;
 }
 export const DEFAULT_UI: UiOpts = {
   mode: "quick",
@@ -75,8 +74,7 @@ export const DEFAULT_UI: UiOpts = {
   ignoreHidden: false,
   include: "",
   exclude: "",
-  depth: 32,
-  maxEntries: 250000,
+  depth: 64,
 };
 export const FOLDER_MODES: DiffMode[] = ["name", "size", "mtime", "quick", "content"];
 /** An open folder diff: both folders, the options and the preset they came from. */
@@ -183,7 +181,6 @@ export function encodeState(s: AppState): string {
     if (o.include) g.i = o.include;
     if (o.exclude) g.x = o.exclude;
     if (o.depth !== DEFAULT_UI.depth) g.d = o.depth;
-    if (o.maxEntries !== DEFAULT_UI.maxEntries) g.n = o.maxEntries;
     if (preset) g.p = preset;
     w.g = g;
   }
@@ -280,8 +277,7 @@ function folderFromWire(g: unknown, ids: string[]): FolderState | null {
       ignoreHidden: o.h === 1,
       include: str(o.i) ? o.i : "",
       exclude: str(o.x) ? o.x : "",
-      depth: num(o.d, DEFAULT_UI.depth, 1, 64),
-      maxEntries: num(o.n, DEFAULT_UI.maxEntries, 1, 500000),
+      depth: num(o.d, DEFAULT_UI.depth, 1, 256),
     },
   };
 }
