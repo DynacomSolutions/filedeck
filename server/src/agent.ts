@@ -255,7 +255,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const jobs = registerArchiveRoutes(app, cfg);
   registerPdfRoutes(app, cfg);
   registerPropsRoutes(app, cfg, jobs);
-  registerDiffRoutes(app, cfg);
+  const index = registerDiffRoutes(app, cfg);
+  (app as unknown as { close: () => Promise<void> }).close = async () => index.close();
   registerSearchRoutes(app, cfg);
   registerThumbRoutes(app, cfg);
   registerTranscodeRoutes(app, cfg);

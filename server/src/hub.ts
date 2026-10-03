@@ -48,7 +48,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const sourceOpts = { maxUpload: cfg.maxUpload, maxEdit: cfg.maxEdit, hashConcurrency: cfg.hashConcurrency, walkMaxEntries: cfg.walkMaxEntries, searchConcurrency: cfg.searchConcurrency, searchMaxFileBytes: cfg.searchMaxFileBytes, searchMaxBytes: cfg.searchMaxBytes, thumbs: makeThumbnailer(cfg) };
   for (const [name, s] of sources) {
     if (agents.has(name)) throw new Error(`source ${name} collides with a node of the same name`);
-    const sapp = createSourceApp(name, s.backend, sourceOpts);
+    const sapp = createSourceApp(name, s.backend, { ...sourceOpts, indexFile: cfg.indexDir ? path.join(cfg.indexDir, `source-${name}.db`) : "" });
     agents.set(name, { fetch: (rest, init) => Promise.resolve(sapp.fetch(new Request("http://source" + rest, init))) });
   }
   // Reachability of a source is cached briefly so the sidebar poll does not open a connection per request.
@@ -95,7 +95,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   });
 
   // Folder diff jobs run here: the hub reads both agents' listings and asks each agent to hash its own files.
-  registerHubDiff(app, agents);
+  registerHubDiff(app, agents, cfg.mode === "hub" ? cfg.diffDir : "");
   // Bulk copy/move/trash/delete/sync run as hub jobs (survive the browser closing, pausable, conflict policy).
   registerOps(app, agents, (n) => sources.has(n));
 

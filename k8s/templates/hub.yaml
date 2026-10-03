@@ -71,6 +71,11 @@ spec:
             - name: FILEDECK_BRAND
               value: {{ .Values.brand | toJson | quote }}
             {{- end }}
+            # Compare engine: per-session row spill files and the network-source index (emptyDir, never user data).
+            - name: FILEDECK_DIFF_DIR
+              value: /var/cache/filedeck/diff
+            - name: FILEDECK_INDEX_DIR
+              value: /var/cache/filedeck/index
             {{- if .Values.sources }}
             # Network sources: only non-secret fields. Credentials are read from the Secret volumes below.
             - name: FILEDECK_SOURCES
@@ -99,6 +104,8 @@ spec:
           volumeMounts:
             - name: vault
               mountPath: /var/lib/filedeck-vault
+            - name: cache
+              mountPath: /var/cache/filedeck
             {{- if .Values.sources }}
             # smbclient (SMB sources) keeps small state files; the root filesystem is read-only.
             - name: tmp
@@ -115,6 +122,10 @@ spec:
         - name: vault
           persistentVolumeClaim:
             claimName: {{ include "filedeck.name" . }}-vault
+        # Compare rows spill here instead of the heap, so a compare of any size stays inside the memory limit.
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.hub.cacheVolume }}
         {{- if .Values.sources }}
         - name: tmp
           emptyDir:

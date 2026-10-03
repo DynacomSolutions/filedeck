@@ -23,6 +23,11 @@ export interface Config {
   /** folder diff: agent-side concurrent hash streams and walk entry ceiling */
   hashConcurrency: number;
   walkMaxEntries: number;
+  /** compare index: SQLite directory (empty = in memory), inotify watch budget, concurrent directory listings; hub: session spill dir */
+  indexDir: string;
+  indexWatches: number;
+  listConcurrency: number;
+  diffDir: string;
   /** search: concurrent searches per agent, per-file and total content bytes read */
   searchConcurrency: number;
   searchMaxFileBytes: number;
@@ -95,6 +100,10 @@ export function loadConfig(env = process.env): Config {
     jobConcurrency: Number(env.FILEDECK_JOB_CONCURRENCY ?? 2),
     hashConcurrency: Number(env.FILEDECK_HASH_CONCURRENCY ?? 4),
     walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
+    indexDir: env.FILEDECK_INDEX_DIR ?? "",
+    indexWatches: Number(env.FILEDECK_INDEX_WATCHES ?? 32768),
+    listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
+    diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),
     searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 2),
     searchMaxFileBytes: Number(env.FILEDECK_SEARCH_MAX_FILE ?? 8 * 1024 * 1024),
     searchMaxBytes: Number(env.FILEDECK_SEARCH_MAX_BYTES ?? 512 * 1024 * 1024),

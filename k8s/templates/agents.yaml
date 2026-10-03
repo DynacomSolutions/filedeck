@@ -64,6 +64,12 @@ spec:
               value: /var/cache/filedeck
             - name: FILEDECK_THUMB_CACHE_MAX
               value: {{ $.Values.agent.thumbCacheBytes | quote }}
+            # Compare index (SQLite: listings + content hashes) on the node itself, outside any browsed data,
+            # so it survives pod restarts and re-runs of a compare are served from it.
+            - name: FILEDECK_INDEX_DIR
+              value: /var/lib/filedeck/index
+            - name: FILEDECK_INDEX_WATCHES
+              value: {{ $.Values.agent.indexWatches | quote }}
           ports:
             - name: http
               containerPort: {{ $.Values.port }}
@@ -99,6 +105,8 @@ spec:
               mountPath: /tmp
             - name: thumbs
               mountPath: /var/cache/filedeck
+            - name: index
+              mountPath: /var/lib/filedeck
       volumes:
         - name: host
           hostPath:
@@ -109,6 +117,10 @@ spec:
         - name: thumbs
           emptyDir:
             sizeLimit: {{ $.Values.agent.thumbCacheVolume }}
+        - name: index
+          hostPath:
+            path: /var/lib/filedeck
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

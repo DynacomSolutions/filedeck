@@ -327,7 +327,7 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
     assert.equal(fs.readFileSync(path.join(srcSide, "d/only-node.txt"), "utf8"), "from the node");
     assert.equal(fs.readFileSync(path.join(srcSide, "diff.txt"), "utf8"), "node-AAAA");
     assert.equal(fs.readFileSync(path.join(nodeSide, "only-src.txt"), "utf8"), "from the source");
-    assert.ok(Object.values(st(await job(["n1", "/xcmp"], ["nas", "/xcmp"]))).every((v) => v === "identical"));
+    { const all = st(await job(["n1", "/xcmp"], ["nas", "/xcmp"])); assert.ok(Object.values(all).every((v) => v === "identical"), JSON.stringify(all)); }
 
     await sync([{ kind: "trash", node: "nas", path: "/xcmp/only-src.txt" }, { kind: "trash", node: "n1", path: "/xcmp/same.txt" }]);
     assert.equal(fs.existsSync(path.join(srcSide, "only-src.txt")), false);

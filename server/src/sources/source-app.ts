@@ -8,6 +8,7 @@ import { cleanVirtual, virtualJoin } from "../paths.ts";
 import { compileGlobs } from "../glob.ts";
 import { Semaphore, type WalkEntry, type WalkOpts, type WalkSummary } from "../walk.ts";
 import { walkResponse } from "../diff-routes.ts";
+import { IndexCache, type IdxEntry } from "../index-cache.ts";
 import { THUMB_MAX_IMAGE_BYTES, thumbKind, thumbResponse, type Thumbnailer } from "../thumbs.ts";
 import { SearchGate, parseSearch, searchTree } from "../search.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "./types.ts";
@@ -50,6 +51,8 @@ export interface SourceAppOptions {
   searchConcurrency?: number;
   searchMaxFileBytes?: number;
   searchMaxBytes?: number;
+  /** SQLite file for this source's compare index (listings revalidated by directory mtime, hashes by size + mtime); empty = in memory */
+  indexFile?: string;
   /** image thumbnails for the SPA grid (videos need a seekable file, so they have none on sources) */
   thumbs?: Thumbnailer;
 }
@@ -64,6 +67,26 @@ const DIR_STAT: SourceStat = { type: "dir", size: 0, mtime: 0, mode: 0o755 };
 export function createSourceApp(name: string, backend: SourceBackend, o: SourceAppOptions) {
   const app = new Hono();
   const hashes = new Semaphore(Math.max(1, o.hashConcurrency));
+  const index = new IndexCache(o.indexFile || ":memory:", {
+    async statDir(p) {
+      const s = p === "/" ? DIR_STAT : await backend.stat(p);
+      if (!s) throw new FsError(404, "not found");
+      if (s.type !== "dir") throw new FsError(400, "not a directory");
+      return { ino: 0, mtime: s.mtime };
+    },
+    async readDir(p) {
+      return (await backend.list(p))
+        .filter((it) => it.name !== "." && it.name !== "..")
+        .map((it): IdxEntry => ({ n: it.name, t: it.type, s: it.type === "dir" ? 0 : it.size, m: Math.floor(it.mtime), i: 0 }));
+    },
+  }, { ttlMs: 10 * 60_000 });
+
+  // Anything this app writes makes the stored listings of this source untrustworthy (mtimes on network shares are coarse).
+  app.use("*", async (c, next) => {
+    if (c.req.method !== "GET" && c.req.method !== "HEAD") index.invalidateListings(true);
+    await next();
+    if (c.req.method !== "GET" && c.req.method !== "HEAD") index.invalidateListings(true);
+  });
 
   app.onError((e, c) => {
     const { status, message } = ops.mapError(e);
@@ -356,13 +379,16 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       const s = await need(p);
       if (s.type === "dir") throw new FsError(400, "is a directory");
       if (s.type !== "file") throw new FsError(400, "not a regular file");
-      const h = createHash("sha256");
-      if (s.size > 0) {
-        const stream = await backend.read(p);
-        signal.addEventListener("abort", () => stream.destroy(), { once: true });
-        for await (const ch of stream as AsyncIterable<Buffer>) h.update(ch);
-      }
-      return { path: p, size: s.size, mtime: Math.floor(s.mtime), sha256: h.digest("hex") };
+      const got = await index.hash(p, { size: s.size, mtime: Math.floor(s.mtime), ino: 0 }, async () => {
+        const h = createHash("sha256");
+        if (s.size > 0) {
+          const stream = await backend.read(p);
+          signal.addEventListener("abort", () => stream.destroy(), { once: true });
+          for await (const ch of stream as AsyncIterable<Buffer>) h.update(ch);
+        }
+        return h.digest("hex");
+      });
+      return { path: p, size: s.size, mtime: Math.floor(s.mtime), sha256: got.sha256, cached: got.cached };
     }, signal);
     return c.json(r);
   });
@@ -410,6 +436,14 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     }
     return summary;
   }
+  app.get("/api/fs/lsdir", async (c) => {
+    const p = norm(c.req.query("path") ?? "/");
+    const out = await index.list(p);
+    return c.json({ path: p, cached: out.cached, entries: out.entries });
+  });
+  app.get("/api/fs/index-changes", (c) => c.json({ seq: 0, reset: false, dirs: [] }));
+  app.get("/api/fs/index-stats", (c) => c.json({ enabled: index.enabled, ...index.stats }));
+
   app.get("/api/fs/walk", async (c) => {
     const q = c.req.query.bind(c.req);
     const opts: WalkOpts = {

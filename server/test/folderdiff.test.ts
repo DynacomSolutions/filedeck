@@ -138,8 +138,8 @@ test("classify: type mismatch, dirs, symlinks", () => {
 test("normalizeOptions validates and clamps", () => {
   const o = normalizeOptions({ mode: "content", depth: 9999, maxEntries: 1e12, concurrency: 0, exclude: "*.log, .git/" });
   assert.equal(o.mode, "content");
-  assert.equal(o.depth, 64);
-  assert.equal(o.maxEntries, 500_000);
+  assert.equal(o.depth, 256);
+  assert.ok(!("maxEntries" in o)); // there is no entry cap any more; old clients may still send it
   assert.equal(o.concurrency, 1);
   assert.deepEqual(o.exclude, ["*.log", ".git/"]);
   assert.deepEqual(normalizeOptions(undefined), DEFAULT_OPTIONS);
@@ -266,14 +266,16 @@ test("ignore case, ignore hidden, include and exclude globs", async () => {
   assert.ok(m["only-left.txt"]);
 });
 
-test("depth and entry caps are enforced and reported", async () => {
+test("depth limit is reported; there is no entry cap", async () => {
   fixture();
   const shallow = await run({ mode: "name", depth: 1 });
   assert.ok(!shallow.rows.some((r) => r.p.includes("/")));
   assert.ok(shallow.warnings.some((w) => /deeper than 1/.test(w)));
-  const capped = await run({ mode: "name", maxEntries: 5 });
-  assert.ok(capped.rows.length <= 10);
-  assert.ok(capped.warnings.some((w) => /more than 5 entries/.test(w)));
+  for (let i = 0; i < 3000; i++) write(L, `many/f${i}.txt`, "x", T0);
+  const all = await run({ mode: "name", dirConcurrency: 3 });
+  assert.equal(all.rows.filter((r) => r.p.startsWith("many/")).length, 3000);
+  assert.equal(by(all)["many"]?.status, "left-only");
+  assert.ok(!all.warnings.some((w) => /entries/.test(w)));
 });
 
 test("unreadable hash target becomes an error row, not a failed job", async () => {
@@ -356,7 +358,7 @@ test("hub: folder diff job across two nodes with agent-side hashing, then cross-
   let state = "";
   for (let i = 0; i < 100 && state !== "done"; i++) {
     state = ((await (await fetch(`${hubUrl}/api/diff/jobs/${id}`)).json()) as { state: string }).state;
-    if (state === "failed") assert.fail("job failed");
+    if (state === "failed") assert.fail("job failed: " + JSON.stringify(await (await fetch(`${hubUrl}/api/diff/jobs/${id}`)).json()));
     await new Promise((r) => setTimeout(r, 50));
   }
   assert.equal(state, "done");
