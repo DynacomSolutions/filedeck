@@ -552,3 +552,37 @@ select option{background:var(--surface);color:var(--fg)}
 tr.creating td.name,.tile.creating .tile-name{display:flex;align-items:center;gap:.4rem}.tile.creating .tile-name{display:block}
 tr.creating input,.tile.creating input{width:100%;min-width:0}
 .side-opts .fd-presets label{min-width:0}
+
+/* ---- panel header: one compact row (up, address bar, controls, more); the red active outline is an inset overlay so no ancestor can clip it ---- */
+.fp::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:40;box-shadow:inset 0 0 0 2px transparent}
+.fp.active,.fp.picked,.fp.active.picked{box-shadow:var(--shadow-2)}
+.fp.picked::after{box-shadow:inset 0 0 0 2px var(--accent-line)}
+.fp.active::after,.fp.active.picked::after{box-shadow:inset 0 0 0 2px var(--accent)}
+.fp-bar{height:40px;flex-direction:row;justify-content:flex-start;align-items:center;gap:4px;padding:0 .5rem}
+.fp-up,.fp-actions button{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;min-height:28px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--fg)}
+.fp-up:hover:not(:disabled),.fp-actions button:hover:not(:disabled){background:var(--surface-3)}
+.fp-up:disabled,.fp-actions button:disabled{opacity:.4;cursor:default}
+.fp-up svg,.fp-actions button svg,.addr-recent svg{width:16px;height:16px}
+.fp-actions{height:28px;flex:none;gap:4px;overflow:visible}
+.fp-actions button.marked{background:var(--accent-tint);color:var(--accent-text)}
+.addr{flex:1 1 auto;min-width:190px;height:28px;padding:0 2px;border-radius:6px;background:var(--surface);cursor:text}
+.addr>.tip{flex:none;display:flex}
+.addr>.tip:has(.addr-fill){flex:1 1 24px;min-width:24px;height:100%}
+.crumbs{height:28px}
+.crumb{display:inline-flex;align-items:center;flex:none}.crumb>.tip{display:inline-flex}
+.crumbs button{height:24px;border-radius:6px;padding:0 .3rem;cursor:pointer}
+.crumbs button:hover:not(:disabled){background:var(--surface-3);color:var(--fg)}
+.crumbs button.here{color:var(--fg)}
+.crumbs .crumb-sep{width:18px;padding:0;color:var(--muted)}
+.crumbs .crumb-sep svg.lucide{width:14px;height:14px;transition:transform var(--fast) var(--ease)}
+.crumbs .crumb-sep.open{background:var(--surface-3)}.crumbs .crumb-sep.open svg.lucide{transform:rotate(90deg)}
+.addr-fill{display:block;flex:1 1 24px;min-width:24px;height:100%;border-radius:6px;outline:none}
+.addr-fill:focus-visible{box-shadow:inset 0 0 0 2px var(--accent-line)}
+.addr-recent{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;min-height:0;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--muted)}
+.addr-recent:hover:not(:disabled),.addr-recent.open{background:var(--surface-3);color:var(--fg)}
+.addr-in{height:28px}
+.addr>.tip:has(.addr-warn){position:absolute;right:30px;top:6px;flex:none;min-width:0;width:16px;height:16px}
+.addr-pop{z-index:120}
+.addr-head{padding:.3rem .5rem .15rem;color:var(--muted);font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.addr-pop li.on .addr-uri{font-weight:700}
+.addr-pop li.dim{color:var(--muted);cursor:default}

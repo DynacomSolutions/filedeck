@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { File as FileIcon, Folder, History, Server, Star, TriangleAlert } from "lucide-react";
+import { createPortal } from "react-dom";
+import { File as FileIcon, Folder, History, Server, Star, TriangleAlert, type LucideIcon } from "lucide-react";
 import { api, parent, stat, type NodeInfo } from "./api";
 import { fmtAddr, fuzzy, itemUri, parseAddress, splitTyped, type Where } from "./address";
 import { useBookmarks } from "./bookmarks";
@@ -20,6 +21,7 @@ interface Item {
 const ICON = { node: Server, dir: Folder, file: FileIcon, bookmark: Star, recent: History } as const;
 const KIND = { node: "node", dir: "folder", file: "file", bookmark: "bookmark", recent: "recent" } as const;
 const MAX_ITEMS = 40;
+const crumbsOf = (p: string) => p.split("/").filter(Boolean);
 
 let nodeCache: { at: number; list: NodeInfo[] } | null = null;
 const loadNodes = async (): Promise<NodeInfo[]> => {
@@ -28,6 +30,99 @@ const loadNodes = async (): Promise<NodeInfo[]> => {
   nodeCache = { at: Date.now(), list };
   return list;
 };
+
+/** One row of a small popup list: `head` rows are captions (not selectable). */
+interface PopItem {
+  key: string;
+  label: string;
+  Icon?: LucideIcon;
+  /** the row for the current location (preselected) */
+  on?: boolean;
+  head?: boolean;
+  pick?: () => void;
+}
+interface Anchor {
+  left: number;
+  top: number;
+  bottom: number;
+}
+const anchorOf = (el: Element): Anchor => {
+  const r = el.getBoundingClientRect();
+  return { left: r.left, top: r.top, bottom: r.bottom };
+};
+
+/** Small popup list under an anchor (Explorer-style folder lists, recent locations): arrows, Enter, Esc, outside click. */
+function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem[]; label: string; onClose: () => void }) {
+  const ref = useRef<HTMLUListElement>(null);
+  const rows = items.map((it, i) => [it, i] as const).filter(([it]) => !it.head).map(([, i]) => i);
+  const first = Math.max(0, items.findIndex((i) => i.on));
+  const [cur, setCur] = useState(first);
+  const [pos, setPos] = useState<{ left: number; top: number; maxH: number; width: number } | null>(null);
+  useEffect(() => setCur(first), [first, items.length]);
+  useLayoutEffect(() => {
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const width = Math.min(380, vw - 8);
+    const below = vh - anchor.bottom - 12;
+    const above = anchor.top - 12;
+    const up = below < 180 && above > below;
+    const maxH = Math.min(320, up ? above : below);
+    setPos({ left: Math.max(4, Math.min(anchor.left, vw - width - 4)), top: up ? Math.max(4, anchor.top - 4 - Math.min(maxH, 32 + items.length * 28)) : anchor.bottom + 4, maxH, width });
+  }, [anchor, items.length]);
+  useEffect(() => {
+    ref.current?.focus({ preventScroll: true });
+    const down = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && onClose();
+    const away = () => onClose();
+    window.addEventListener("mousedown", down, true);
+    window.addEventListener("resize", away);
+    window.addEventListener("blur", away);
+    return () => {
+      window.removeEventListener("mousedown", down, true);
+      window.removeEventListener("resize", away);
+      window.removeEventListener("blur", away);
+    };
+  }, [onClose]);
+  useEffect(() => {
+    ref.current?.querySelector(`[data-i="${cur}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [cur, pos]);
+  const run = (it?: PopItem) => {
+    if (!it?.pick) return;
+    onClose();
+    it.pick();
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    const at = rows.indexOf(cur);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (rows.length) setCur(rows[(Math.max(at, 0) + (e.key === "ArrowDown" ? (at < 0 ? 0 : 1) : -1) + rows.length) % rows.length]!);
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      if (rows.length) setCur(rows[e.key === "Home" ? 0 : rows.length - 1]!);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      run(items[cur]);
+    } else if (e.key === "Escape" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    }
+  };
+  return createPortal(
+    <ul ref={ref} role="menu" aria-label={label} tabIndex={-1} className="addr-list addr-pop" style={pos ? { left: pos.left, top: pos.top, maxHeight: pos.maxH, width: pos.width } : { left: -9999, top: 0 }} onKeyDown={onKey}>
+      {items.map((it, i) =>
+        it.head ? (
+          <li key={it.key} role="presentation" className="addr-head">{it.label}</li>
+        ) : (
+          <li key={it.key} data-i={i} role="menuitem" aria-current={it.on ? "true" : undefined} className={(i === cur ? "cur " : "") + (it.on ? "on" : "") + (it.pick ? "" : " dim")} onMouseMove={() => it.pick && cur !== i && setCur(i)} onClick={() => run(it)}>
+            {it.Icon && <it.Icon aria-hidden="true" />}
+            <span className="addr-uri">{it.label}</span>
+          </li>
+        ),
+      )}
+    </ul>,
+    document.body,
+  );
+}
 
 interface Props {
   node: string;
@@ -53,7 +148,10 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const [busy, setBusy] = useState(false);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const input = useRef<HTMLInputElement>(null);
-  const editBtn = useRef<HTMLButtonElement>(null);
+  const editBtn = useRef<HTMLSpanElement>(null);
+  const [pop, setPop] = useState<{ kind: "dir"; path: string; anchor: Anchor; items: PopItem[] } | { kind: "recent"; anchor: Anchor; items: PopItem[] } | null>(null);
+  const visited = useRef<Where[]>([]);
+  const closePop = useCallback(() => setPop(null), []);
   const navRef = useRef<HTMLElement>(null);
   const skipFocus = useRef(false);
   const listId = useId();
@@ -62,7 +160,11 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const [box, setBox] = useState<{ left: number; top: number; width: number } | null>(null);
   const crumbs = path.split("/").filter(Boolean);
 
-  useEffect(() => pushRecent({ node, path }), [node, path]);
+  useEffect(() => {
+    pushRecent({ node, path });
+    visited.current = [{ node, path }, ...visited.current.filter((w) => w.node !== node || w.path !== path)].slice(0, 15);
+    setPop(null);
+  }, [node, path]);
   useEffect(() => {
     if (!editing && navRef.current) navRef.current.scrollLeft = navRef.current.scrollWidth;
   }, [node, path, editing]);
@@ -256,6 +358,43 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     [editing, items, box, cur, listId, busy, nodes],
   );
 
+  /** Explorer-style: the chevron after a segment lists that folder's sub-folders. */
+  const openDirs = async (dirPath: string, btn: HTMLElement) => {
+    if (pop?.kind === "dir" && pop.path === dirPath) return setPop(null);
+    const anchor = anchorOf(btn);
+    const next = crumbs[crumbsOf(dirPath).length];
+    setPop({ kind: "dir", path: dirPath, anchor, items: [{ key: "load", label: "Loading..." }] });
+    let items: PopItem[];
+    try {
+      const r = await api.list(node, dirPath, hidden);
+      items = r.entries
+        .filter((e) => e.type === "dir" || !!e.linkDir)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }))
+        .slice(0, 400)
+        .map((e) => {
+          const p = (dirPath === "/" ? "" : dirPath) + "/" + e.name;
+          return { key: p, label: e.name, Icon: Folder, ...(e.name === next ? { on: true } : {}), pick: () => onGo(node, p) };
+        });
+      if (!items.length) items = [{ key: "none", label: "No sub-folders" }];
+    } catch (e) {
+      items = [{ key: "err", label: (e as Error).message || "Cannot list this folder" }];
+    }
+    setPop((p) => (p?.kind === "dir" && p.path === dirPath ? { ...p, items } : p));
+  };
+  const openRecents = (btn: HTMLElement) => {
+    if (pop?.kind === "recent") return setPop(null);
+    const here0 = (w: Where) => w.node === node && w.path === path;
+    const go = (w: Where): PopItem => ({ key: fmtAddr(w.node, w.path), label: fmtAddr(w.node, w.path), Icon: Folder, pick: () => onGo(w.node, w.path) });
+    const mine = visited.current.filter((w) => !here0(w));
+    const seen = new Set(visited.current.map((w) => fmtAddr(w.node, w.path)));
+    const global = getRecents().filter((w) => !seen.has(fmtAddr(w.node, w.path))).slice(0, 15);
+    const items: PopItem[] = [
+      ...(mine.length ? [{ key: "h1", label: "This panel", head: true }, ...mine.map(go)] : []),
+      ...(global.length ? [{ key: "h2", label: "Recent locations", head: true }, ...global.map(go)] : []),
+    ];
+    setPop({ kind: "recent", anchor: anchorOf(btn), items: items.length ? items : [{ key: "none", label: "No recent locations yet" }] });
+  };
+
   if (editing) {
     return (
       <div className="addr">
@@ -288,26 +427,41 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       </div>
     );
   }
+  const segs = [{ label: node + ":", path: "/" }, ...crumbs.map((c, i) => ({ label: c, path: "/" + crumbs.slice(0, i + 1).join("/") }))];
   return (
-    <div className="addr">
+    <div className="addr" onMouseDown={(e) => {
+      // empty space inside the bar (not a segment, chevron or the recents button) starts text editing
+      if (e.button === 0 && e.currentTarget.contains(e.target as Node) && !(e.target as Element).closest("button")) {
+        e.preventDefault();
+        begin();
+      }
+    }}>
       <nav className="crumbs" aria-label="Breadcrumb" ref={navRef} onWheel={wheelX}>
-        <Tip label={`Root of ${node}`}>
-          <button onClick={() => onGo(node, "/")} onContextMenu={(e) => onCrumbMenu(e, "/")}>
-            <Ic.HardDrive /> {node}:
-          </button>
-        </Tip>
-        {crumbs.map((c, i) => {
-          const p = "/" + crumbs.slice(0, i + 1).join("/");
-          return (
-            <button key={i} onClick={() => onGo(node, p)} onContextMenu={(e) => onCrumbMenu(e, p)}>
-              <Ic.Folder /> {c}
-            </button>
-          );
-        })}
+        {segs.map((sg, i) => (
+          <span className="crumb" key={sg.path}>
+            <Tip label={i === 0 ? `Root of ${node}` : sg.path}>
+              <button type="button" className={i === segs.length - 1 ? "here" : ""} onClick={() => onGo(node, sg.path)} onContextMenu={(e) => onCrumbMenu(e, sg.path)}>
+                {i === 0 ? <Ic.HardDrive aria-hidden="true" /> : null}
+                {sg.label}
+              </button>
+            </Tip>
+            <Tip label={`Folders in ${sg.path}`}>
+              <button type="button" className={"crumb-sep" + (pop?.kind === "dir" && pop.path === sg.path ? " open" : "")} aria-label={`Folders in ${sg.path}`} aria-haspopup="menu" aria-expanded={pop?.kind === "dir" && pop.path === sg.path} onClick={(e) => void openDirs(sg.path, e.currentTarget)}>
+                <Ic.ChevronRight aria-hidden="true" />
+              </button>
+            </Tip>
+          </span>
+        ))}
       </nav>
       <Tip label="Edit the address" shortcut="Ctrl+L">
-        <button ref={editBtn} type="button" className="addr-edit" aria-label="Edit address" onFocus={() => !skipFocus.current && begin()} onClick={begin}><Ic.Pencil aria-hidden="true" /></button>
+        <span ref={editBtn} className="addr-fill" role="button" tabIndex={0} aria-label="Edit address" onFocus={() => !skipFocus.current && begin()} />
       </Tip>
+      <Tip label="Recent locations">
+        <button type="button" className={"addr-recent" + (pop?.kind === "recent" ? " open" : "")} aria-label="Recent locations" aria-haspopup="menu" aria-expanded={pop?.kind === "recent"} onClick={(e) => openRecents(e.currentTarget)}>
+          <Ic.History aria-hidden="true" />
+        </button>
+      </Tip>
+      {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} onClose={closePop} />}
     </div>
   );
 }

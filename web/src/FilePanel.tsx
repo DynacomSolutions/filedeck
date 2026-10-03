@@ -1,5 +1,5 @@
 import { PANEL_MIME } from "./dock";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
 import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploads";
@@ -19,7 +19,7 @@ import { CompareBar, CompareBody, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
 import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
-import { ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
+import { Ellipsis, Eye, EyeOff, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
 import * as Ic from "lucide-react";
@@ -114,6 +114,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const [filterOpen, setFilterOpen] = useState(!!leaf.q);
   const filterInput = useRef<HTMLInputElement>(null);
   const secRef = useRef<HTMLElement>(null);
+  const barRef = useRef<HTMLElement>(null);
   const [over, setOver] = useState<string | null>(null); // "." = panel itself, else folder path
   const [renaming, setRenaming] = useState<string | null>(null);
   /** New file/folder typed straight into a row at the top of the listing (no dialog). */
@@ -787,6 +788,59 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     }
   }
   const horizontal = dock === "left" || dock === "right";
+  // ---- panel controls, one row with the address bar: what does not fit moves into the "more" menu ----
+  type Ctl = { id: string; label: string; icon: React.ReactNode; pressed?: boolean; disabled?: boolean; run: () => void; ctx?: (e: React.MouseEvent) => void };
+  const marked = isBookmarked(marks, here);
+  const compareRun = () => {
+    if (cside && cmpCtl) return cmpCtl.exit();
+    if (!peers.length) return onStatus("Open a second panel first (split button)");
+    const pickedPeers = peers.filter((p) => p.picked);
+    if (panelPicked && pickedPeers.length === 1) return onCompare(pickedPeers[0]!.id);
+    onCompare(next?.id ?? peers[0]!.id);
+  };
+  const controls: Ctl[] = [
+    { id: "view", label: view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid", icon: view === "grid" ? <List /> : <LayoutGrid />, pressed: view === "grid", run: () => onPatch({ w: view === "grid" ? undefined : "g" }) },
+    ...(view === "grid"
+      ? SORTS.map((s): Ctl => {
+          const on = sort.key === s.key;
+          const Icon = on && !sort.asc ? s.desc : s.asc;
+          return { id: "sort-" + s.key, label: `Sort by ${s.name}${on ? `, ${sort.asc ? s.ascText : s.descText} (click to reverse)` : ""}`, icon: <Icon />, pressed: on, run: () => setSort((c) => ({ key: s.key, asc: c.key === s.key ? !c.asc : s.key === "name" })) };
+        })
+      : []),
+    { id: "search", label: "Search under this folder (Ctrl+Shift+F)", icon: <Search />, pressed: !!leaf.sr, run: () => setSearch(leaf.sr ? undefined : EMPTY_SEARCH) },
+    { id: "hidden", label: hidden ? "Hide hidden files" : "Show hidden files", icon: hidden ? <Eye /> : <EyeOff />, pressed: hidden, run: () => setHidden(!hidden) },
+    {
+      id: "compare",
+      label: cside ? "Exit compare mode" : "Compare with another panel (right-click to choose which)",
+      icon: <GitCompareArrows />,
+      pressed: !!cside,
+      run: compareRun,
+      ctx: (e) => {
+        if (cside || !peers.length) return;
+        showMenu(e, peers.map((pr): MenuItem => ({ label: `Compare with ${peerLabel(pr)}`, onSelect: () => onCompare(pr.id) })));
+      },
+    },
+    { id: "mark", label: marked ? "Remove this folder from the bookmarks" : "Bookmark this folder", icon: <Star fill={marked ? "currentColor" : "none"} />, pressed: marked, run: () => toggleMark(here) },
+    { id: "tab", label: "New tab with this folder (Alt+T)", icon: <SquarePlus />, run: () => newTab() },
+    { id: "pick", label: "Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels", icon: <SquareCheck />, pressed: panelPicked, run: onTogglePanel },
+    { id: "splitH", label: "Split right", icon: <Columns2 />, run: () => onSplit("horizontal") },
+    { id: "splitV", label: "Split down", icon: <Rows2 />, run: () => onSplit("vertical") },
+    ...(onClose ? [{ id: "close", label: "Close panel", icon: <X />, run: () => onClose() } as Ctl] : []),
+  ];
+  const [cap, setCap] = useState(99);
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    // room = row width - paddings - up button - the address bar's minimum - the more button; one icon button is 28px plus a 4px gap
+    const measure = () => setCap(Math.max(0, Math.floor((el.clientWidth - 21 - 32 - 190 - 32) / 32)));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const shown = controls.slice(0, cap);
+  const more = controls.slice(cap);
+
   const first = dock === "left" || dock === "top";
 
   return (
@@ -846,6 +900,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         </div>
       )}
       <header
+        ref={barRef}
         className="fp-bar"
         {...dragProps}
         onClick={(e) => {
@@ -857,70 +912,20 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           }
         }}
       >
+        <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
-        <div className="fp-actions" onWheel={wheelX}>
-          <Tip label="Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels"><button aria-label="Pick this panel" aria-pressed={panelPicked} className={panelPicked ? "marked" : ""} onClick={onTogglePanel}><SquareCheck /></button></Tip>
-          <Tip label="Search under this folder" shortcut="Ctrl+Shift+F"><button aria-label="Search under this folder" className={leaf.sr ? "marked" : ""} aria-pressed={!!leaf.sr} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}><Search /></button></Tip>
-          <Tip label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"}><button aria-label={view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid"} aria-pressed={view === "grid"} className={view === "grid" ? "marked" : ""} onClick={() => onPatch({ w: view === "grid" ? undefined : "g" })}>{view === "grid" ? <List /> : <LayoutGrid />}</button></Tip>
-          {view === "grid" && (
-            <span className="pv-dock" role="group" aria-label="Sort by">
-              {SORTS.map((s) => {
-                const on = sort.key === s.key;
-                const Icon = on && !sort.asc ? s.desc : s.asc;
-                const label = `Sort by ${s.name}${on ? `, ${sort.asc ? s.ascText : s.descText} (click to reverse)` : ""}`;
-                return (
-                  <Tip key={s.key} label={label}>
-                    <button type="button" className={"pv-dockbtn" + (on ? " on" : "")} aria-pressed={on} aria-label={label} onClick={() => setSort((c) => ({ key: s.key, asc: c.key === s.key ? !c.asc : s.key === "name" }))}>
-                      <Icon />
-                    </button>
-                  </Tip>
-                );
-              })}
-            </span>
-          )}
-          <Tip label={isBookmarked(marks, here) ? "Remove this folder from the bookmarks" : "Bookmark this folder"}><button aria-label={isBookmarked(marks, here) ? "Remove this folder from the bookmarks" : "Bookmark this folder"} aria-pressed={isBookmarked(marks, here)} className={isBookmarked(marks, here) ? "marked" : ""} onClick={() => toggleMark(here)}><Star fill={isBookmarked(marks, here) ? "currentColor" : "none"} /></button></Tip>
-          <Tip label="New tab with this folder" shortcut="Alt+T"><button aria-label="New tab with this folder" onClick={() => newTab()}><SquarePlus /></button></Tip>
-          <Tip label="Up one folder"><button aria-label="Up one folder" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}><ArrowUp /></button></Tip>
-          <Tip label="New folder"><button aria-label="New folder" onClick={() => startCreate(path, "folder")}><FolderPlus /></button></Tip>
-          <Tip label="New file"><button aria-label="New file" onClick={() => startCreate(path, "file")}><FilePlus /></button></Tip>
-          <Tip label="Upload"><button aria-label="Upload" onClick={() => fileInput.current?.click()}><Upload /></button></Tip>
-          <Tip label="Rename" shortcut="F2"><button aria-label="Rename" disabled={sel.size !== 1} onClick={() => setRenaming([...sel][0] ?? null)}><Pencil /></button></Tip>
-          <Tip label="Edit in the editor"><button aria-label="Edit in the editor" disabled={!selEntries.length || selEntries.length !== 1 || !selEntries.every(canEdit)} onClick={() => selEntries[0] && setEditing({ node, path: selEntries[0].path })}><FilePen /></button></Tip>
-          <Tip label={diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another"}>
-            <button
-              aria-label="Diff files"
-              className={diffMarked ? "marked" : ""}
-              disabled={!combine(selEntries).length || combine(selEntries).length > 2 || !combine(selEntries).every((r) => r.editable)}
-              onClick={() => onDiff(combine(selEntries).map((r) => ({ node: r.node, path: r.path })))}
-            ><Diff /></button>
+        <div className="fp-actions">
+          {shown.map((c) => (
+            <Tip key={c.id} label={c.label}>
+              <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={c.pressed ? "marked" : ""} disabled={c.disabled} onClick={c.run} onContextMenu={c.ctx}>{c.icon}</button>
+            </Tip>
+          ))}
+          <Tip label={more.length ? "More actions" : "Folder actions"}>
+            <button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setMenu({ x: r.right - 4, y: r.bottom + 4, items: [...more.map((c): MenuItem => ({ label: c.label, disabled: c.disabled, onSelect: c.run })), ...(more.length ? (["sep"] as MenuItem[]) : []), ...folderItems(path, true)] });
+            }}><Ellipsis /></button>
           </Tip>
-          <Tip label={cside ? "Exit compare mode" : "Compare this panel with the next panel, in place (right-click to choose another panel)"}>
-            <button
-              aria-label={cside ? "Exit compare mode" : "Compare with another panel"}
-              aria-pressed={!!cside}
-              className={cside ? "marked" : ""}
-              onClick={() => {
-                if (cside && cmpCtl) return cmpCtl.exit();
-                if (!peers.length) return onStatus("Open a second panel first (split button)");
-                const pickedPeers = peers.filter((p) => p.picked);
-                if (panelPicked && pickedPeers.length === 1) return onCompare(pickedPeers[0]!.id);
-                onCompare(next?.id ?? peers[0]!.id);
-              }}
-              onContextMenu={(e) => {
-                if (cside || !peers.length) return;
-                showMenu(e, peers.map((pr): MenuItem => ({ label: `Compare with ${peerLabel(pr)}`, onSelect: () => onCompare(pr.id) })));
-              }}
-            ><GitCompareArrows /></button>
-          </Tip>
-          <Tip label="Download (several items or folders as a zip)"><button aria-label="Download" disabled={!combine(selEntries).length} onClick={() => download(selEntries)}><Download /></button></Tip>
-          <Tip label="Compress selection"><button aria-label="Compress selection" disabled={!combine(selEntries).length} onClick={() => setDialog("compress")}><Archive /></button></Tip>
-          <Tip label="Extract archive"><button aria-label="Extract archive" disabled={!(sel.size === 1 && entries.some((x) => x.path === [...sel][0] && x.type === "file" && isArchive(x.name)))} onClick={() => setDialog("extract")}><PackageOpen /></button></Tip>
-          <Tip label="Move to trash"><button aria-label="Move to trash" disabled={!combine(selEntries).length} onClick={() => void trashEntries(selEntries)}><Trash2 /></button></Tip>
-          <Tip label="Delete permanently"><button aria-label="Delete permanently" disabled={!combine(selEntries).length} onClick={() => setModal({ k: "del", refs: combine(selEntries) })}><CircleX /></button></Tip>
-          <label className="chk"><input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} /> hidden</label>
-          <Tip label="Split right"><button aria-label="Split right" onClick={() => onSplit("horizontal")}><Columns2 /></button></Tip>
-          <Tip label="Split down"><button aria-label="Split down" onClick={() => onSplit("vertical")}><Rows2 /></button></Tip>
-          {onClose && <Tip label="Close panel"><button aria-label="Close panel" onClick={onClose}><X /></button></Tip>}
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
             const files = Array.from(e.target.files ?? []);
             e.target.value = "";
