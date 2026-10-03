@@ -26,6 +26,8 @@ export interface Config {
   /** compare index: SQLite directory (empty = in memory), inotify watch budget, concurrent directory listings; hub: session spill dir */
   indexDir: string;
   indexWatches: number;
+  /** compare index: trust an unwatched listing with an unchanged directory mtime for this long */
+  indexRevalidateMs: number;
   listConcurrency: number;
   diffDir: string;
   /** search: concurrent searches per agent, per-file and total content bytes read */
@@ -102,6 +104,7 @@ export function loadConfig(env = process.env): Config {
     walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
     indexDir: env.FILEDECK_INDEX_DIR ?? "",
     indexWatches: Number(env.FILEDECK_INDEX_WATCHES ?? 32768),
+    indexRevalidateMs: Number(env.FILEDECK_INDEX_REVALIDATE_MS ?? 30 * 60_000),
     listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
     diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),
     searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 2),

@@ -227,3 +227,41 @@ test("hub: an open compare follows inotify on the agents and updates the changed
     await (b as unknown as { close: () => Promise<void> }).close();
   }
 });
+
+test("index: without a live watch a listing is revalidated by directory mtime within the window", async () => {
+  for (let i = 0; i < 3; i++) write(`rv/d${i}/f.txt`, "x");
+  const db = path.join(tmp, "rv-index.db");
+  const ix = new IndexCache(db, localReader(), { maxWatches: 1, ttlMs: 60_000 });
+  for (let i = 0; i < 3; i++) await ix.list(path.join(tmp, `rv/d${i}`));
+  // d0 lost its watch (budget 1) but nothing changed: served from the index after one stat
+  assert.equal((await ix.list(path.join(tmp, "rv/d0"))).cached, true);
+  // a new entry changes the directory mtime: read again
+  await wait(15);
+  write("rv/d1/new.txt", "n");
+  const d1 = await ix.list(path.join(tmp, "rv/d1"));
+  assert.equal(d1.cached, false);
+  assert.ok(d1.entries.some((e) => e.n === "new.txt"));
+  ix.close();
+  // after a restart (no watches at all) the window still applies
+  const again = new IndexCache(db, localReader(), { ttlMs: 60_000 });
+  assert.equal((await again.list(path.join(tmp, "rv/d2"))).cached, true);
+  again.close();
+  // outside the window everything is read again
+  const strict = new IndexCache(db, localReader(), { ttlMs: 1 });
+  await wait(5);
+  assert.equal((await strict.list(path.join(tmp, "rv/d2"))).cached, false);
+  strict.close();
+});
+
+test("index: a watched folder that saw an in-place edit is never trusted by mtime", async () => {
+  write("rv2/f.txt", "aaaa");
+  const ix = new IndexCache(":memory:", localReader(), { ttlMs: 60_000 });
+  const dir = path.join(tmp, "rv2");
+  await ix.list(dir);
+  fs.writeFileSync(path.join(dir, "f.txt"), "bbbbbbbb"); // size changes, directory mtime does not
+  for (let i = 0; i < 50 && ix.changes(0).dirs.length === 0; i++) await wait(20);
+  const got = await ix.list(dir);
+  assert.equal(got.cached, false);
+  assert.equal(got.entries.find((e) => e.n === "f.txt")?.s, 8);
+  ix.close();
+});

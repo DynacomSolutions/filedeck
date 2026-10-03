@@ -8,12 +8,16 @@ import { createRequire } from "node:module";
  * SQLite so a second compare of the same trees is served mostly from disk.
  *
  * Freshness rules:
- *  - a listing is trusted as-is only while an inotify watch on that directory
- *    has been live since it was read (any event marks it dirty), or, for
- *    network sources (no watches), while the directory mtime is unchanged and
- *    the listing is younger than `ttlMs`;
- *  - everything else is re-read (readdir + lstat) and the stored rows are
- *    replaced, so un-watched areas are revalidated on every use;
+ *  - a listing is trusted as-is while an inotify watch on that directory has
+ *    been live since it was read (any event marks it dirty);
+ *  - without a live watch (beyond the watch budget, after a restart, network
+ *    sources) it is trusted while the directory's inode and mtime are
+ *    unchanged and the listing is younger than `ttlMs`: entries added, removed
+ *    or renamed change the directory mtime, an in-place edit of a file does
+ *    not, so a full re-read every `ttlMs` bounds that staleness (hashes are
+ *    always checked against a fresh stat of the file);
+ *  - everything else, and any directory a watch saw change, is re-read
+ *    (readdir + lstat) and its stored rows are replaced;
  *  - a stored hash is reused only while (inode, size, mtime) of the file match
  *    what was hashed, so any change to size or mtime invalidates it.
  *
@@ -168,7 +172,7 @@ export class IndexCache {
     if (row) {
       let fresh = false;
       if (this.watched.has(dir) && !this.dirty.has(dir)) fresh = true;
-      else if (!this.reader.watch && this.o.ttlMs && now - row.listed_at < this.o.ttlMs) {
+      else if (this.o.ttlMs && !this.dirty.has(dir) && now - row.listed_at < this.o.ttlMs) {
         const st = await this.reader.statDir(dir);
         fresh = st.mtime === row.mtime && st.ino === row.ino && st.mtime > 0;
       }

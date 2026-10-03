@@ -62,7 +62,7 @@ export function registerDiffRoutes(app: Hono, cfg: Config): IndexCache {
   const root = cfg.root;
   const hashes = new Semaphore(Math.max(1, cfg.hashConcurrency));
   const lists = new Semaphore(Math.max(1, cfg.listConcurrency));
-  const index = new IndexCache(cfg.indexDir ? path.join(cfg.indexDir, `index-${cfg.node}.db`) : ":memory:", localReader(), { maxWatches: cfg.indexWatches });
+  const index = new IndexCache(cfg.indexDir ? path.join(cfg.indexDir, `index-${cfg.node}.db`) : ":memory:", localReader(), { maxWatches: cfg.indexWatches, ttlMs: cfg.indexRevalidateMs });
 
   app.get("/api/fs/hash", async (c) => {
     const signal = c.req.raw.signal;

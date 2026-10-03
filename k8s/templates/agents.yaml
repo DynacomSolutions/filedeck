@@ -70,6 +70,8 @@ spec:
               value: /var/lib/filedeck/index
             - name: FILEDECK_INDEX_WATCHES
               value: {{ $.Values.agent.indexWatches | quote }}
+            - name: FILEDECK_INDEX_REVALIDATE_MS
+              value: {{ $.Values.agent.indexRevalidateMs | quote }}
           ports:
             - name: http
               containerPort: {{ $.Values.port }}
