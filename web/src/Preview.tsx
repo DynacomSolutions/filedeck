@@ -3,6 +3,7 @@ import { SkeletonLines } from "./Skeleton";
 import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
 import { OfficeView } from "./OfficeView";
+import { PdfView } from "./PdfView";
 import { LEGACY_OFFICE, OFFICE_EXT } from "./officeParse";
 import { HexView } from "./HexView";
 import { MarkdownView } from "./MarkdownView";
@@ -78,7 +79,7 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
         ) : AUD.includes(e) ? (
           <MediaPlayer node={node} path={entry.path} name={entry.name} kind="audio" />
         ) : e === "pdf" ? (
-          <iframe src={url} title={entry.name} sandbox="allow-same-origin" />
+          <PdfView node={node} path={entry.path} name={entry.name} />
         ) : isOffice ? (
           <OfficeView node={node} path={entry.path} ext={e} size={entry.size} />
         ) : LEGACY_OFFICE.includes(e) ? (

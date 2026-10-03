@@ -170,6 +170,8 @@ export interface CompressOpts {
 export type OverwritePolicy = "rename" | "overwrite" | "skip";
 export const ARCHIVE_EXT = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4", ".tgz", ".tbz2", ".txz", ".tzst", ".tar", ".zip", ".7z", ".7z.001", ".zip.001", ".jar", ".war", ".whl", ".rar"];
 export const isArchive = (name: string) => ARCHIVE_EXT.some((e) => name.toLowerCase().endsWith(e));
+/** A decrypted copy of a password-protected PDF (the hub adds the saved password; it never reaches the browser). */
+export const pdfDecryptedUrl = (node: string, path: string) => `${nodeBase(node)}/api/pdf/decrypted?path=${enc(path)}`;
 /** Streamed zip of several direct children of `dir` (files and folders). */
 export const zipUrl = (node: string, dir: string, names: string[]) =>
   `${nodeBase(node)}/api/fs/zip?dir=${enc(dir)}${names.map((n) => `&name=${enc(n)}`).join("")}`;
@@ -442,6 +444,12 @@ export const api = {
     fetch(`${nodeBase(node)}/api/archive/list?path=${enc(path)}${limit ? `&limit=${limit}` : ""}`, { headers: pwHeaders(password) }).then(async (r) => {
       const saved = r.headers.get("x-filedeck-pw-source") === "saved";
       return { ...(await j<{ entries: ArchiveEntry[]; truncated: boolean; bytes: number; encrypted?: boolean }>(r)), usedSaved: saved };
+    }),
+  /** Is this PDF password protected? A saved password (hub vault) or the typed one is used server-side; `usedSaved` says the hub supplied it. */
+  pdfStatus: (node: string, path: string, password?: Pw) =>
+    fetch(`${nodeBase(node)}/api/pdf/status?path=${enc(path)}`, { headers: pwHeaders(password) }).then(async (r) => {
+      const saved = r.headers.get("x-filedeck-pw-source") === "saved";
+      return { ...(await j<{ encrypted: boolean; locked: boolean }>(r)), usedSaved: saved };
     }),
   vaultList: () => fetch("/api/vault").then((r) => j<{ entries: VaultEntry[]; persistent: boolean; ttlSeconds: number; maxHours: number }>(r)),
   vaultForget: (id: string) => fetch(`/api/vault/${enc(id)}`, { method: "DELETE" }).then((r) => j<unknown>(r)),

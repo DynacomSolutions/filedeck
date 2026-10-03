@@ -1,7 +1,7 @@
 import { SkeletonLines } from "./Skeleton";
 import { useEffect, useState } from "react";
 import { fileUrl } from "./api";
-import { MAX_ZIP, parseOffice, type OfficeDoc } from "./officeParse";
+import { MAX_ZIP, isEncryptedOffice, parseOffice, type OfficeDoc } from "./officeParse";
 import * as Ic from "lucide-react";
 
 /** Read-only text rendering of Word, Excel, PowerPoint, OpenDocument and CSV files, parsed in the browser. */
@@ -9,15 +9,18 @@ export function OfficeView({ node, path, ext, size }: { node: string; path: stri
   const [doc, setDoc] = useState<OfficeDoc | null>(null);
   const [err, setErr] = useState("");
   const [sheet, setSheet] = useState(0);
+  const [locked, setLocked] = useState(false);
   useEffect(() => {
     let live = true;
     setDoc(null);
     setErr("");
     setSheet(0);
+    setLocked(false);
     if (size > MAX_ZIP) return void setErr(`Too large to preview here (over ${MAX_ZIP / 1024 / 1024} MiB). Download it instead.`);
     fetch(fileUrl(node, path))
       .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((b) => {
+        if (isEncryptedOffice(ext, b)) return void (live && setLocked(true));
         const d = parseOffice(ext, b);
         if (live) setDoc(d);
       })
@@ -26,6 +29,13 @@ export function OfficeView({ node, path, ext, size }: { node: string; path: stri
       live = false;
     };
   }, [node, path, ext, size]);
+  if (locked) {
+    return (
+      <div className="pv-empty muted pv-locked" role="alert">
+        <Ic.Lock /> This document is password protected. Office encryption cannot be opened in the preview: download it and open it with its password.
+      </div>
+    );
+  }
   if (err) return <div className="pv-empty muted" role="alert">{err}</div>;
   if (!doc) return <SkeletonLines lines={10} />;
   if (doc.kind === "doc") {

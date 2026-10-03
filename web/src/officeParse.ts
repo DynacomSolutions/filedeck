@@ -279,3 +279,23 @@ export function parseOffice(ext: string, buf: ArrayBuffer): OfficeDoc {
   }
   throw new Error("unsupported format");
 }
+
+/**
+ * Password-protected Office files cannot be rendered here (decrypting them needs the full Office crypto
+ * suite). Detect them so the viewer can say so instead of reporting a parse error: encrypted OOXML is an OLE
+ * compound file rather than a zip, and encrypted OpenDocument lists `encryption-data` in its manifest.
+ */
+export function isEncryptedOffice(ext: string, buf: ArrayBuffer): boolean {
+  const head = new Uint8Array(buf, 0, Math.min(8, buf.byteLength));
+  const cfb = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1].every((b, i) => head[i] === b);
+  if (["docx", "xlsx", "pptx"].includes(ext)) return cfb;
+  if (["odt", "ods", "odp"].includes(ext)) {
+    try {
+      const files = unzipSync(new Uint8Array(buf), { filter: (f) => f.name === "META-INF/manifest.xml" });
+      return (entry(files, "META-INF/manifest.xml") ?? "").includes("encryption-data");
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
