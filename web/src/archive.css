@@ -15,3 +15,4 @@
 .av-table .lk{width:22px;text-align:center}.av-table .lk svg{width:13px;height:13px;vertical-align:-2px}
 .ad-rem{display:flex;flex-wrap:wrap;gap:.3rem 1.1rem}.ad-rem .chk{font-size:.78rem;font-weight:500;color:var(--fg);text-transform:none;letter-spacing:0;display:inline-flex;gap:.4rem;align-items:center}
 .ad-saved{min-height:1.6rem;display:flex;align-items:center}
+.av-table td.name svg.lucide-lock{margin-left:.4rem}

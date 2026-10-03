@@ -28,7 +28,7 @@ const ROUTES: { method: string; rest: string; from: "query" | "body" }[] = [
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 const MAX_BODY = 1024 * 1024;
-const jsonErr = (status: number, error: string, code?: string) => new Response(JSON.stringify({ error, ...(code ? { code } : {}) }), { status, headers: { "content-type": "application/json" } });
+const jsonErr = (status: number, error: string) => new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json" } });
 
 export const isPasswordRoute = (method: string, rest: string) => ROUTES.some((r) => r.method === method && r.rest === rest);
 
@@ -104,7 +104,7 @@ export async function proxyWithVault(o: {
     }
   };
 
-  let hit: { password: string; id: string } | undefined;
+  let hit: { password: string; id: string; scope: Scope } | undefined;
   if (typed) headers.set("x-filedeck-password", b64(typed));
   else if (file && file.startsWith("/")) {
     hit = o.vault.get(o.node, file, undefined, false);
@@ -112,16 +112,29 @@ export async function proxyWithVault(o: {
     if (hit) headers.set("x-filedeck-password", b64(hit.password));
   }
 
-  const init: RequestInit & { duplex?: string } = { method: o.method, headers, signal: o.signal, redirect: "manual" };
-  if (bodyText !== undefined) {
-    init.body = bodyText;
-    headers.delete("content-length"); // re-serialised by fetch
+  const send = (h: Headers) => {
+    const init: RequestInit & { duplex?: string } = { method: o.method, headers: h, signal: o.signal, redirect: "manual" };
+    if (bodyText !== undefined) {
+      init.body = bodyText;
+      h.delete("content-length"); // re-serialised by fetch
+    } else if (o.method !== "GET" && o.method !== "HEAD") {
+      init.body = o.body;
+      init.duplex = "half";
+    }
+    return o.target.fetch(o.rest + o.search, init);
+  };
+  let r = await send(new Headers(headers));
+  if (hit && !typed && r.status === 401) {
+    // The saved password does not open this file. A file's own entry is stale (changed or re-encrypted), so it is
+    // forgotten; a folder entry is only a guess for this file and keeps serving the others in the folder. Either way
+    // the request is repeated without it, so whatever needs no password (an archive's file names) still works.
+    if (hit.scope === "file") o.vault.forget(hit.id);
+    await r.body?.cancel().catch(() => undefined);
+    const bare = new Headers(headers);
+    bare.delete("x-filedeck-password");
+    hit = undefined;
+    r = await send(bare);
   }
-  else if (o.method !== "GET" && o.method !== "HEAD") {
-    init.body = o.body;
-    init.duplex = "half";
-  }
-  const r = await o.target.fetch(o.rest + o.search, init);
   const used = r.headers.get("x-filedeck-pw") === "ok";
   const out = new Headers(r.headers);
   out.delete("x-filedeck-pw");
@@ -133,12 +146,6 @@ export async function proxyWithVault(o: {
   if (used && typed && save !== "no" && file && file.startsWith("/")) {
     const where = scope === "folder" ? path.posix.dirname(file) : file;
     o.vault.put(o.node, where, typed, { remember: save === "forever", scope, fid: scope === "file" ? await fidOf() : undefined });
-  }
-  if (hit && !typed && r.status === 401) {
-    // the saved password no longer works (changed or re-encrypted): forget it and ask again
-    o.vault.forget(hit.id);
-    await r.body?.cancel().catch(() => undefined);
-    return jsonErr(401, "the saved password no longer works", "password_required");
   }
   return new Response(r.body, { status: r.status, headers: out });
 }

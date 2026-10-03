@@ -48,8 +48,10 @@ export function PdfView({ node, path, name }: { node: string; path: string; name
   }, [node, path]);
 
   if (state === "loading") return <div className="pv-empty muted">Loading...</div>;
-  if (state === "open") return <iframe src={fileUrl(node, path)} title={name} sandbox="allow-same-origin" />;
-  if (state === "decrypted") return <iframe src={pdfDecryptedUrl(node, path)} title={name} sandbox="allow-same-origin" />;
+  // No `sandbox` attribute: Chromium's PDF viewer refuses to load inside a sandboxed frame (the document would show
+  // "blocked"). The agent already serves PDFs with `Content-Security-Policy: sandbox`, which keeps the content isolated.
+  if (state === "open") return <iframe src={fileUrl(node, path)} title={name} />;
+  if (state === "decrypted") return <iframe src={pdfDecryptedUrl(node, path)} title={name} />;
   return (
     <div className="av-lock">
       <b><Ic.Lock /> This PDF is password protected</b>

@@ -57,7 +57,9 @@ export interface SzProc {
 
 /** Run 7zz with the password (if any) on stdin; `text` is a bounded, scrubbed tail of stderr + stdout noise. */
 export function runSz(args: string[], opts: { cwd?: string; password?: string; signal?: AbortSignal; onLine?: (l: string) => void; stdinExtra?: string } = {}): SzProc {
-  const child = spawn(sevenZip(), args, { cwd: opts.cwd, env: ENV, stdio: ["pipe", "pipe", "pipe"] });
+  // 7-Zip sizes its thread pool from the host's core count (128 here), not the pod's CPU limit; two threads is plenty.
+  const withThreads = [args[0]!, "-mmt=2", ...args.slice(1)];
+  const child = spawn(sevenZip(), withThreads, { cwd: opts.cwd, env: ENV, stdio: ["pipe", "pipe", "pipe"] });
   const stdin = child.stdin as Writable;
   stdin.on("error", () => undefined);
   // two lines: 7-Zip asks twice when creating an encrypted archive

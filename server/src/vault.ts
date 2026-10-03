@@ -200,7 +200,7 @@ export class Vault {
    * another path (renamed or moved), else the nearest folder entry above it.
    * A use refreshes the sliding TTL (never past the absolute cap); `touch: false` peeks without counting as a use.
    */
-  get(node: string, p: string, fid?: string, touch = true): { password: string; id: string; remembered: boolean } | undefined {
+  get(node: string, p: string, fid?: string, touch = true): { password: string; id: string; remembered: boolean; scope: Scope } | undefined {
     this.purge();
     const pth = normPath(p);
     let row = this.db.prepare("SELECT * FROM entries WHERE node = ? AND scope = 'file' AND path = ?").get(node, pth) as Row | undefined;
@@ -216,7 +216,7 @@ export class Vault {
       return undefined;
     }
     if (touch) this.touch(row.id);
-    return { password, id: row.id, remembered: !!row.remembered };
+    return { password, id: row.id, remembered: !!row.remembered, scope: row.scope };
   }
 
   /** Record a use: pushes the sliding expiry out (never past the absolute cap). */

@@ -263,8 +263,17 @@ test("hub: a typed password is saved, reused without the client sending it, and 
     hub.vault.put("t", "/docs/one.zip", "stale");
     const stale = await ext("/docs/one.zip");
     assert.equal(stale.status, 401);
-    assert.equal(((await stale.json()) as { code: string }).code, "password_required");
+    assert.equal(((await stale.json()) as { code: string }).code, "password_required"); // retried without the stale password
     assert.equal(hub.vault.list().length, 0);
+
+    // a folder entry that does not open one particular file is kept (it still serves the rest of the folder)
+    hub.vault.put("t", "/docs", "not-for-this-one", { scope: "folder" });
+    const guess = await ext("/docs/one.zip");
+    assert.equal(guess.status, 401);
+    assert.equal(hub.vault.list().length, 1);
+    // ...and a listing (names are visible without the password) still works instead of failing on the wrong guess
+    assert.equal((await list("/docs/one.zip")).status, 200);
+    hub.vault.forgetAll();
 
     // forget all + per-row
     hub.vault.put("t", "/docs/a.zip", "1");
