@@ -4,7 +4,7 @@ import type { CSSProperties } from "react";
 const NAME_W = [46, 62, 38, 54, 70, 44, 58, 34, 66, 50, 42, 60];
 
 /** Placeholder list rows with the metrics of real rows (same cells, same 22 px line), so data replaces them without moving anything. Static, no shimmer. */
-export function SkeletonRows({ rows = 12, cols = 3 }: { rows?: number; cols?: number }) {
+export function SkeletonRows({ rows = 12, cols = 3, search = false }: { rows?: number; cols?: number; search?: boolean }) {
   return (
     <>
       {Array.from({ length: rows }, (_, i) => (
@@ -13,8 +13,10 @@ export function SkeletonRows({ rows = 12, cols = 3 }: { rows?: number; cols?: nu
             <span className="sk sk-ico" />
             <span className="sk sk-nm" style={{ width: `${NAME_W[i % NAME_W.length]! / 4}rem`, maxWidth: "70%" }} />
           </td>
+          {search && <td className="sr-dir"><span className="sk sk-num" style={{ "--w": "8rem" } as CSSProperties} /></td>}
           {cols > 1 && <td className="num"><span className="sk sk-num" style={{ "--w": "3.4rem" } as CSSProperties} /></td>}
           {cols > 2 && <td className="num"><span className="sk sk-num" style={{ "--w": "7.2rem" } as CSSProperties} /></td>}
+          {search && <td />}
         </tr>
       ))}
     </>

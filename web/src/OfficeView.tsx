@@ -1,3 +1,4 @@
+import { SkeletonLines } from "./Skeleton";
 import { useEffect, useState } from "react";
 import { fileUrl } from "./api";
 import { MAX_ZIP, parseOffice, type OfficeDoc } from "./officeParse";
@@ -26,7 +27,7 @@ export function OfficeView({ node, path, ext, size }: { node: string; path: stri
     };
   }, [node, path, ext, size]);
   if (err) return <div className="pv-empty muted" role="alert">{err}</div>;
-  if (!doc) return <div className="pv-empty muted">Loading...</div>;
+  if (!doc) return <SkeletonLines lines={10} />;
   if (doc.kind === "doc") {
     return (
       <article className="pv-md pv-office" aria-label="Document text">

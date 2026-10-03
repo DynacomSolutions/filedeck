@@ -1,3 +1,4 @@
+import { SkeletonLines } from "./Skeleton";
 import { useEffect, useState } from "react";
 import { fileUrl } from "./api";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from "lucide-react";
@@ -76,7 +77,7 @@ export function HexView({ node, path, size }: { node: string; path: string; size
         </form>
       </div>
       {err && <div className="fp-err" role="alert">{err}</div>}
-      {bytes === null && !err && <div className="pv-empty muted">Loading...</div>}
+      {bytes === null && !err && <SkeletonLines lines={12} />}
       {bytes && size === 0 && <div className="pv-empty muted">Empty file</div>}
       <pre className="pv-hexdump" aria-label="Hex dump" tabIndex={0}>
         {rows.map((r) => (

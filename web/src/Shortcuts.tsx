@@ -30,6 +30,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
     title: "Act",
     rows: [
       ["F2", "Rename"],
+      ["Alt+Enter", "Properties in the side panel"],
       ["F4", "Edit in the built-in editor"],
       ["F5", "Copy selection to the next panel"],
       ["F6", "Move selection to the next panel"],

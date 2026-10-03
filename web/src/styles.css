@@ -646,3 +646,14 @@ select option{background:var(--surface);color:var(--fg)}
 .theme-seg .tip{flex:1;display:flex;min-width:0}.theme-seg .tip button{flex:1;width:100%}
 .ft .cr .ico{margin:0}
 .tile.creating input:focus,.tile-name input:focus{box-shadow:inset 0 0 0 2px var(--accent)}
+
+/* ---- side panel: Preview | Properties switch, properties body ---- */
+.pv-extra{margin-left:auto;display:inline-flex;align-items:center;gap:.6rem;align-self:center}
+.pv-extra .pv-dock{margin-left:0}
+.pv-body{position:relative}
+.pv-body.pp-body{display:block;align-items:initial}
+.pp{padding:.8rem;display:flex;flex-direction:column;gap:.8rem;min-width:0;text-align:left}
+.pp .perm{padding:.7rem .8rem}
+.pp-actions{display:flex;justify-content:flex-end}
+.pp .props>div{grid-template-columns:5.5rem 1fr}
+.pv-imgsk{position:absolute;inset:.8rem;border-radius:var(--radius-btn);background:var(--surface-2);animation:sk-in .01s linear .12s backwards}

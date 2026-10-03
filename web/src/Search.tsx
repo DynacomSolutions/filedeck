@@ -1,3 +1,4 @@
+import { SkeletonRows } from "./Skeleton";
 import { Tip } from "./Tooltip";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fmtDate, fmtSize, searchStream, type SearchDone, type SearchHit } from "./api";
@@ -166,6 +167,7 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
             <tr><th>Name</th><th>Folder</th><th className="size">Size</th><th className="mtime">Modified</th><th /></tr>
           </thead>
           <tbody>
+            {running && !hits.length && <SkeletonRows rows={8} search />}
             {hits.map((h, i) => (
               <tr key={h.p} data-i={i} className={i === cur ? "sel cur" : ""} onClick={() => setCur(i)} onDoubleClick={() => onReveal(h.p)}>
                 <td className="name">

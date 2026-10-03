@@ -1,3 +1,4 @@
+import { SkeletonLines } from "./Skeleton";
 import { useEffect, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import { Marked } from "marked";
@@ -80,7 +81,7 @@ export function MarkdownView({ node, path }: { node: string; path: string }) {
     return () => ctl.abort();
   }, [node, path]);
   const html = useMemo(() => (text === null ? "" : renderMarkdown(text, node, path.slice(0, path.lastIndexOf("/")) || "/")), [text, node, path]);
-  if (text === null) return <div className="pv-empty muted">Loading...</div>;
+  if (text === null) return <SkeletonLines lines={10} />;
   return (
     <div className="pv-mdwrap">
       <div className="pv-tabs" role="tablist" aria-label="Markdown view">

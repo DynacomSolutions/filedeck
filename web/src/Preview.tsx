@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { SkeletonLines } from "./Skeleton";
 import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
 import { OfficeView } from "./OfficeView";
@@ -16,8 +17,9 @@ const AUD = AUDIO_EXT;
 const TXT = ["txt", "log", "json", "yaml", "yml", "ts", "tsx", "js", "css", "html", "xml", "csv", "tsv", "sh", "py", "toml", "ini", "conf", "go", "rs"];
 
 function Text({ url }: { url: string }) {
-  const [t, setT] = useState("loading...");
+  const [t, setT] = useState<string | null>(null);
   useEffect(() => {
+    setT(null);
     const ctl = new AbortController();
     fetch(url, { headers: { range: "bytes=0-262143" }, signal: ctl.signal })
       .then((r) => r.text())
@@ -25,7 +27,20 @@ function Text({ url }: { url: string }) {
       .catch(() => setT("(could not load)"));
     return () => ctl.abort();
   }, [url]);
+  if (t === null) return <SkeletonLines lines={10} />;
   return <pre className="pv-text">{t}</pre>;
+}
+
+/** The image fades in once decoded; until then a placeholder block holds the space. */
+function Img({ url, alt }: { url: string; alt: string }) {
+  const [ok, setOk] = useState(false);
+  useEffect(() => setOk(false), [url]);
+  return (
+    <>
+      {!ok && <div className="pv-imgsk" role="status" aria-label="Loading" />}
+      <img src={url} alt={alt} style={ok ? undefined : { opacity: 0, position: "absolute" }} onLoad={() => setOk(true)} onError={() => setOk(true)} />
+    </>
+  );
 }
 
 export function Preview({ node, entry, onEdit, extra }: { node: string; entry: Entry; onEdit: (node: string, path: string) => void; extra?: ReactNode }) {
@@ -57,7 +72,7 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
         ) : isArchive(entry.name) ? (
           <ArchiveView node={node} entry={entry} />
         ) : IMG.includes(e) ? (
-          <img src={url} alt={entry.name} />
+          <Img url={url} alt={entry.name} />
         ) : VID.includes(e) ? (
           <MediaPlayer node={node} path={entry.path} name={entry.name} kind="video" />
         ) : AUD.includes(e) ? (

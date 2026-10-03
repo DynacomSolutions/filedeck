@@ -8,7 +8,7 @@ import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { ConfirmDialog, LinkDialog, NameDialog } from "./Dialogs";
-import { PropertiesDialog } from "./Properties";
+import { PropertiesMulti, PropertiesPanel } from "./Properties";
 import { copyText, getClip, setClip, useClip } from "./clipboard";
 import { deleteSpec, downloadRefs, groupRefs, refOf, trashSpec, type SelRef } from "./Selection";
 import type { FileRef } from "./EditorViews";
@@ -32,10 +32,10 @@ const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.
 /** Rows put in the DOM at first and added per step while scrolling. */
 const RENDER_STEP = 400;
 const DOCKS: { dock: Dock; icon: LucideIcon; label: string }[] = [
-  { dock: "left", icon: PanelLeft, label: "Dock preview left" },
-  { dock: "right", icon: PanelRight, label: "Dock preview right" },
-  { dock: "top", icon: PanelTop, label: "Dock preview top" },
-  { dock: "bottom", icon: PanelBottom, label: "Dock preview bottom" },
+  { dock: "left", icon: PanelLeft, label: "Dock side panel left" },
+  { dock: "right", icon: PanelRight, label: "Dock side panel right" },
+  { dock: "top", icon: PanelTop, label: "Dock side panel top" },
+  { dock: "bottom", icon: PanelBottom, label: "Dock side panel bottom" },
 ];
 const SORTS: { key: SortKey; name: string; ascText: string; descText: string; asc: LucideIcon; desc: LucideIcon }[] = [
   { key: "name", name: "name", ascText: "A to Z", descText: "Z to A", asc: Ic.ArrowDownAZ, desc: Ic.ArrowUpZA },
@@ -91,7 +91,6 @@ type Modal =
   | { k: "link"; dir: string; existing?: Entry }
   | { k: "new"; dir: string; type: "file" | "folder" }
   | { k: "del"; refs: SelRef[] }
-  | { k: "props"; path: string; entry?: Entry };
 const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
@@ -153,7 +152,21 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // A narrow panel (phone, deep split) always stacks the preview underneath; the saved dock is kept for wide panels.
   const dock: Dock = narrow ? "bottom" : (leaf.pv?.dock ?? "right");
   const pvSize = leaf.pv?.size ?? 40;
-  const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize } });
+  /** the side panel shows the Properties tab (details of the selection, or of the folder when nothing is selected) instead of the Preview */
+  const propsOpen = leaf.pv?.tab === "props";
+  const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize, ...(propsOpen ? { tab: "props" as const } : {}) } });
+  const setTab = (tab: "props" | undefined) => onPatch({ pv: { dock: leaf.pv?.dock ?? "right", size: pvSize, ...(tab ? { tab } : {}) } });
+  /** a folder named from a breadcrumb menu (not part of the selection); dropped as soon as the selection or folder changes */
+  const [propsFor, setPropsFor] = useState<string | null>(null);
+  const openProps = (forPath?: string) => {
+    setClosedFor(null);
+    setPropsFor(forPath ?? null);
+    setTab("props");
+  };
+  const showPreview = () => {
+    setClosedFor(null);
+    setTab(undefined);
+  };
 
   useEffect(() => {
     let live = true;
@@ -210,6 +223,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   useEffect(() => {
     if (closedFor && closedFor !== only?.path) setClosedFor(null);
   }, [only?.path, closedFor]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => setPropsFor(null), [sel, node, path]);
   // Mirror a single selection into the URL once the listing has confirmed it exists.
   useEffect(() => {
     if (!entries.length && sel.size) return; // a deep-linked selection waits for the listing
@@ -395,7 +409,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       { label: "Move to trash", hint: "Del", danger: true, onSelect: () => void trashEntries(picked, extra) },
       { label: "Delete permanently...", hint: "Shift+Del", danger: true, onSelect: () => setModal({ k: "del", refs: combine(picked, extra) }) },
       "sep",
-      { label: "Properties", disabled: !one, onSelect: () => one && setModal({ k: "props", path: one.path, entry: one }) },
+      { label: "Properties", hint: "Alt+Enter", onSelect: () => openProps() },
     ];
   };
   /** Menu for a folder itself: empty space in the listing, or a breadcrumb. */
@@ -412,7 +426,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { label: "Copy path", onSelect: () => void copyPaths([dir]) },
     { label: "Open trash", onSelect: () => onTrash(node) },
     "sep",
-    { label: "Properties", onSelect: () => setModal({ k: "props", path: dir }) },
+    { label: "Properties", hint: here ? "Alt+Enter" : undefined, onSelect: () => openProps(here ? undefined : dir) },
   ];
 
   const drop = async (e: React.DragEvent, destDir: string) => {
@@ -457,26 +471,78 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
 
+  const closeSide = () => {
+    if (editing) return setEditing(null);
+    if (propsOpen) {
+      // Closing Properties must not reveal the preview of a selected file: mark that one closed too.
+      setClosedFor(only && !isDirEntry(only) ? only.path : null);
+      setPropsFor(null);
+      return setTab(undefined);
+    }
+    if (only) setClosedFor(only.path);
+  };
   const paneExtra = (
-    <span className="pv-dock" role="group" aria-label="Preview position">
-      {DOCKS.map((d) => (
-        <Tip key={d.dock} label={d.label}>
-          <button type="button" className={"pv-dockbtn" + (dock === d.dock ? " on" : "")} aria-pressed={dock === d.dock} aria-label={d.label} onClick={() => setDock(d.dock)}>
-            <d.icon />
+    <span className="pv-extra">
+      {!editing && (
+        <span className="pv-dock pv-switch" role="group" aria-label="Side panel content">
+          <Tip label={previewEntry || (only && !isDirEntry(only) && !only.broken) ? "Preview the selected file" : "Select one file to preview it"}>
+            <button type="button" className={"pv-dockbtn" + (!propsOpen ? " on" : "")} aria-pressed={!propsOpen} disabled={propsOpen && !(only && !isDirEntry(only) && !only.broken)} aria-label="Preview" onClick={showPreview}><Ic.Eye /></button>
+          </Tip>
+          <Tip label="Properties of the selection (the folder when nothing is selected)" shortcut="Alt+Enter">
+            <button type="button" className={"pv-dockbtn" + (propsOpen ? " on" : "")} aria-pressed={propsOpen} aria-label="Properties" onClick={() => openProps()}><Ic.Info /></button>
+          </Tip>
+        </span>
+      )}
+      <span className="pv-dock" role="group" aria-label="Side panel position">
+        {DOCKS.map((d) => (
+          <Tip key={d.dock} label={d.label}>
+            <button type="button" className={"pv-dockbtn" + (dock === d.dock ? " on" : "")} aria-pressed={dock === d.dock} aria-label={d.label} onClick={() => setDock(d.dock)}>
+              <d.icon />
+            </button>
+          </Tip>
+        ))}
+        <Tip label={propsOpen && !editing ? "Close properties" : "Close preview"}>
+          <button
+            type="button"
+            className="pv-dockbtn"
+            aria-label={propsOpen && !editing ? "Close properties" : "Close preview"}
+            onClick={closeSide}
+          >
+            <X />
           </button>
         </Tip>
-      ))}
-      <Tip label="Close preview">
-        <button type="button" className="pv-dockbtn" aria-label="Close preview" onClick={() => (editing ? setEditing(null) : only && setClosedFor(only.path))}>
-          <X />
-        </button>
-      </Tip>
+      </span>
     </span>
   );
+  const propsKey = propsFor ?? (sel.size === 1 ? [...sel][0]! : sel.size === 0 ? path : null);
+  const propsPane =
+    propsKey !== null ? (
+      <div className="pv">
+        <div className="pv-head">
+          <Tip label={propsKey}><b>{propsKey === "/" ? `${node}:/` : base(propsKey)}</b></Tip>
+          <span className="muted">{propsFor ? "Folder" : sel.size === 0 ? "This folder" : "Selected"}</span>
+          {paneExtra}
+        </div>
+        <div className="pv-body pp-body">
+          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && sel.size === 1 && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} />
+        </div>
+      </div>
+    ) : (
+      <div className="pv">
+        <div className="pv-head">
+          <b>{sel.size.toLocaleString()} items</b>
+          <span className="muted">Selected</span>
+          {paneExtra}
+        </div>
+        <div className="pv-body pp-body"><PropertiesMulti entries={selEntries} /></div>
+      </div>
+    );
   const pane = cside ? null : editing ? (
     <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
       <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
     </Suspense>
+  ) : propsOpen ? (
+    propsPane
   ) : previewEntry ? (
     <Preview node={node} entry={previewEntry} onEdit={(n, p) => setEditing({ node: n, path: p })} extra={paneExtra} />
   ) : null;
@@ -828,6 +894,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (key === "End") return moveTo(visible.length - 1), true;
       if (key === "PageDown") return moveTo(idx + 10), true;
       if (key === "PageUp") return moveTo(idx - 10), true;
+      if (key === "Enter" && e.altKey && !mod) return (propsOpen && !editing ? closeSide() : openProps()), true;
       if (key === "Enter" && !mod) {
         const en = visible[idx];
         return !!en && (open(en), true);
@@ -887,6 +954,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       : []),
     { id: "search", label: "Search under this folder (Ctrl+Shift+F)", icon: <Search />, pressed: !!leaf.sr, run: () => setSearch(leaf.sr ? undefined : EMPTY_SEARCH) },
     { id: "hidden", label: hidden ? "Hide hidden files" : "Show hidden files", icon: hidden ? <Eye /> : <EyeOff />, pressed: hidden, run: () => setHidden(!hidden) },
+    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing, run: () => (propsOpen && !editing ? closeSide() : openProps()) },
     {
       id: "compare",
       label: cside ? "Exit compare mode" : "Compare with another panel (right-click to choose which)",
@@ -1050,7 +1118,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       {err && <div className="fp-err">{err}</div>}
       {pane ? (
         <Group key={dock} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
-          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock, size: v } }); }}>
+          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock, size: v, ...(propsOpen ? { tab: "props" as const } : {}) } }); }}>
           {first && <Panel id="pv" minSize="15%">{pane}</Panel>}
           {first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
           <Panel id="list" minSize="20%">{listing}</Panel>
@@ -1098,7 +1166,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           onConfirm={() => void queueOp("Delete", deleteSpec(modal.refs))}
         />
       )}
-      {modal?.k === "props" && <PropertiesDialog node={node} path={modal.path} entry={modal.entry} onClose={() => setModal(null)} onChanged={refresh} onStatus={onStatus} />}
       {(dialog === "compress" || (typeof dialog === "object" && dialog?.k === "compress")) && (
         <CompressDialog groups={groupRefs(combine(selEntries, typeof dialog === "object" && dialog ? dialog.extra : others))} onClose={() => setDialog(null)} onStatus={onStatus} />
       )}

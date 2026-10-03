@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, fmtDate, fmtMode, fmtSize, stat, type Entry, type JobView, type PermsResult, type Props, type SizeResult } from "./api";
-import { Modal } from "./ArchiveDialog";
+import { SkeletonLines } from "./Skeleton";
 import * as Ic from "lucide-react";
 
 const TYPE: Record<Entry["type"], string> = { file: "File", dir: "Folder", symlink: "Symbolic link", other: "Special file" };
@@ -39,8 +39,11 @@ function useJob(node: string) {
   return { job, watch, cancel: () => job && live(job) && void api.cancelJob(node, job.id) };
 }
 
-/** Details of one entry, with recursive size, chmod and chown. */
-export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStatus }: { node: string; path: string; entry?: Entry; onClose: () => void; onChanged: () => void; onStatus: (m: string) => void }) {
+/**
+ * Details of one entry for the properties pane, with recursive size, chmod and chown. The pane remounts it (key) when the selection
+ * changes, so every item starts from its own state; a folder-size job still running for the previous item is cancelled.
+ */
+export function PropertiesPanel({ node, path, entry, onChanged, onStatus }: { node: string; path: string; entry?: Entry; onChanged: () => void; onStatus: (m: string) => void }) {
   const [p, setP] = useState<Props | null>(null);
   const [basic, setBasic] = useState<Entry | null>(entry ?? null);
   const [err, setErr] = useState("");
@@ -53,6 +56,15 @@ export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStat
   const [busy, setBusy] = useState(false);
   const sizeJob = useJob(node);
   const permJob = useJob(node);
+  const running = useRef({ node, size: sizeJob, perm: permJob });
+  running.current = { node, size: sizeJob, perm: permJob };
+  useEffect(
+    () => () => {
+      const r = running.current;
+      for (const j of [r.size.job, r.perm.job]) if (j && live(j)) void api.cancelJob(r.node, j.id).catch(() => undefined);
+    },
+    [],
+  );
 
   const load = () =>
     api
@@ -134,9 +146,9 @@ export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStat
 
   const sj = sizeJob.job;
   return (
-    <Modal title="Properties" onClose={onClose} wide>
+    <div className="pp" aria-busy={!p && !basic && !err}>
       {err && <div className="fp-err" role="alert">{err}</div>}
-      {!p && !basic && !err && <div className="muted">Loading...</div>}
+      {!p && !basic && !err && <SkeletonLines lines={7} />}
       <dl className="props">
         {rows.map(([k, v]) => (
           <div key={k}>
@@ -167,6 +179,7 @@ export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStat
           </div>
         )}
       </dl>
+      {!p && (basic || err) && !err && <SkeletonLines lines={5} />}
       {p && p.type !== "other" && (
         <fieldset className="perm" disabled={busy}>
           <legend>Permissions</legend>
@@ -234,14 +247,27 @@ export function PropertiesDialog({ node, path, entry, onClose, onChanged, onStat
               Applying... {permJob.job.progress.entries.toLocaleString()} entries <button type="button" onClick={permJob.cancel}><Ic.X /> Cancel</button>
             </div>
           )}
-          <div className="modal-actions">
+          <div className="pp-actions">
             <button type="button" disabled={!dirty || busy} onClick={() => void apply()}><Ic.ShieldCheck /> {busy ? "Applying..." : "Apply permissions"}</button>
           </div>
         </fieldset>
       )}
-      <div className="modal-actions">
-        <button type="submit" onClick={onClose}><Ic.X /> Close</button>
-      </div>
-    </Modal>
+    </div>
+  );
+}
+
+/** Several items selected: counts and the total size of the files among them. */
+export function PropertiesMulti({ entries }: { entries: Entry[] }) {
+  const dirs = entries.filter((e) => e.type === "dir" || e.linkDir).length;
+  const files = entries.filter((e) => e.type === "file").length;
+  const bytes = entries.reduce((n, e) => (e.type === "file" ? n + e.size : n), 0);
+  return (
+    <div className="pp">
+      <dl className="props">
+        <div><dt>Selected</dt><dd>{entries.length.toLocaleString()} items</dd></div>
+        <div><dt>Files</dt><dd>{files.toLocaleString()} · {fmtSize(bytes)} ({bytes.toLocaleString()} bytes)</dd></div>
+        <div><dt>Folders</dt><dd>{dirs.toLocaleString()} <span className="muted">(select one folder to calculate its size)</span></dd></div>
+      </dl>
+    </div>
   );
 }
