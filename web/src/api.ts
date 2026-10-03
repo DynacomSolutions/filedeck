@@ -51,15 +51,36 @@ export const nodeBase = (node: string) => `/api/nodes/${enc(node)}`;
 export const fileUrl = (node: string, path: string, kind: "read" | "download" = "read") =>
   `${nodeBase(node)}/api/fs/${kind}?path=${enc(path)}`;
 
+/** A failed API call; `code` is set for the machine-readable cases (password_required, password_incorrect). */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public code?: string,
+  ) {
+    super(message);
+  }
+}
+export type PasswordState = "required" | "incorrect";
+/** Whether an error means "ask for (or re-ask) a password". */
+export const passwordState = (e: unknown): PasswordState | null =>
+  e instanceof ApiError ? (e.code === "password_required" ? "required" : e.code === "password_incorrect" ? "incorrect" : null) : null;
+/** Passwords travel base64 in a header, never in a URL or JSON body (so they stay out of logs). */
+export const pwHeaders = (password?: string): Record<string, string> =>
+  password ? { "x-filedeck-password": btoa(String.fromCharCode(...new TextEncoder().encode(password))) } : {};
+
 async function j<T>(r: Response): Promise<T> {
   if (!r.ok) {
     let msg = r.statusText;
+    let code: string | undefined;
     try {
-      msg = ((await r.json()) as { error?: string }).error ?? msg;
+      const b = (await r.json()) as { error?: string; code?: string };
+      msg = b.error ?? msg;
+      code = b.code;
     } catch {
       /* not json */
     }
-    throw new Error(msg);
+    throw new ApiError(msg, r.status, code);
   }
   return (await r.json()) as T;
 }
@@ -110,18 +131,27 @@ export interface ArchiveEntry {
   size: number;
   date: string;
   link?: string;
+  encrypted?: boolean;
 }
-export type ArchiveFormat = "zip" | "tar.gz" | "tar.zst" | "7z";
-export const ARCHIVE_EXT = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4", ".tgz", ".tbz2", ".txz", ".tzst", ".tar", ".zip", ".7z", ".jar", ".war", ".whl", ".rar"];
+export type ArchiveFormat = "zip" | "tar.gz" | "tar.zst" | "tar.xz" | "7z";
+export interface CompressOpts {
+  level?: number;
+  encryptHeaders?: boolean;
+  splitBytes?: number;
+  exclude?: string[];
+  destDir?: string;
+}
+export type OverwritePolicy = "rename" | "overwrite" | "skip";
+export const ARCHIVE_EXT = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4", ".tgz", ".tbz2", ".txz", ".tzst", ".tar", ".zip", ".7z", ".7z.001", ".zip.001", ".jar", ".war", ".whl", ".rar"];
 export const isArchive = (name: string) => ARCHIVE_EXT.some((e) => name.toLowerCase().endsWith(e));
 /** Streamed zip of several direct children of `dir` (files and folders). */
 export const zipUrl = (node: string, dir: string, names: string[]) =>
   `${nodeBase(node)}/api/fs/zip?dir=${enc(dir)}${names.map((n) => `&name=${enc(n)}`).join("")}`;
 
-const postJob = (node: string, kind: string, body: unknown) =>
+const postJob = (node: string, kind: string, body: unknown, password?: string) =>
   fetch(`${nodeBase(node)}/api/jobs/${kind}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...pwHeaders(password) },
     body: JSON.stringify(body),
   })
     .then((r) => j<JobView>(r))
@@ -375,16 +405,16 @@ export const api = {
   copy: (node: string, from: string[], toDir: string, o: SyncOpts = {}) => post(node, "copy", { from, toDir, ...o }),
   trash: (node: string, paths: string[]) => post(node, "trash", { paths }),
   remove: (node: string, paths: string[]) => post(node, "delete", { paths }),
-  startCompress: (node: string, dir: string, names: string[], format: ArchiveFormat, name: string) =>
-    postJob(node, "compress", { dir, names, format, name }),
-  startExtract: (node: string, path: string, destDir: string, subfolder: boolean) =>
-    postJob(node, "extract", { path, destDir, subfolder }),
+  startCompress: (node: string, dir: string, names: string[], format: ArchiveFormat, name: string, o: CompressOpts = {}, password?: string) =>
+    postJob(node, "compress", { dir, names, format, name, ...o }, password),
+  startExtract: (node: string, path: string, destDir: string, subfolder: boolean, o: { overwrite?: OverwritePolicy; entries?: string[] } = {}, password?: string) =>
+    postJob(node, "extract", { path, destDir, subfolder, ...o }, password),
   jobs: (node: string) => fetch(`${nodeBase(node)}/api/jobs`).then((r) => j<{ jobs: JobView[] }>(r)),
   cancelJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}/cancel`, { method: "POST" }).then((r) => j<JobView>(r)),
   dismissJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}`, { method: "DELETE" }).then((r) => j<unknown>(r)),
-  archiveList: (node: string, path: string) =>
-    fetch(`${nodeBase(node)}/api/archive/list?path=${enc(path)}`).then((r) =>
-      j<{ entries: ArchiveEntry[]; truncated: boolean; bytes: number }>(r),
+  archiveList: (node: string, path: string, password?: string, limit?: number) =>
+    fetch(`${nodeBase(node)}/api/archive/list?path=${enc(path)}${limit ? `&limit=${limit}` : ""}`, { headers: pwHeaders(password) }).then((r) =>
+      j<{ entries: ArchiveEntry[]; truncated: boolean; bytes: number; encrypted?: boolean }>(r),
     ),
   transfer: (src: { node: string; path: string }, dst: { node: string; dir: string }, op: "copy" | "move", o: SyncOpts = {}) =>
     fetch("/api/transfer", {

@@ -34,7 +34,7 @@ export interface Entry {
 
 export class FsError extends Error {
   constructor(
-    public status: 400 | 403 | 404 | 409 | 413 | 415 | 428 | 429 | 500 | 501 | 502 | 504 | 507,
+    public status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 428 | 429 | 500 | 501 | 502 | 504 | 507,
     message: string,
     public extra?: Record<string, unknown>,
   ) {

@@ -10,7 +10,7 @@ import type { MiddlewareHandler } from "hono";
 export type AuditSink = (line: string) => void;
 
 const QUERY_KEYS = ["path", "dir", "name", "from", "to", "id", "volume", "node"];
-const BODY_KEYS = ["path", "paths", "from", "to", "toDir", "dir", "name", "node", "volume", "ids", "target", "op", "items", "src", "dst"];
+const BODY_KEYS = ["path", "paths", "from", "to", "toDir", "dir", "name", "node", "volume", "ids", "target", "op", "items", "src", "dst", "destDir", "format", "entries", "overwrite", "level", "exclude"];
 const MAX_BODY = 256 * 1024;
 const MAX_VALUES = 20;
 const MAX_STR = 512;

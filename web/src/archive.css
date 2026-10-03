@@ -1,0 +1,15 @@
+/* Compress / Extract dialogs and the archive browser. Every field is always rendered (disabled when it does not apply) so nothing shifts. */
+.ad-grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
+.ad-grid .ad-span,.ad-grid .ad-excl{grid-column:1/-1}
+.ad-row{display:grid;grid-template-columns:1fr 78px;gap:.4rem}
+.modal input[type=number],.modal input[type=password],.modal textarea,.av-lock input[type=password]{width:100%;color:var(--fg);border:0;border-radius:var(--radius-btn);background:var(--surface-2);box-shadow:var(--shadow-1);padding:.4rem .6rem;font:inherit;font-size:.88rem;text-transform:none;letter-spacing:0}
+.modal textarea{resize:vertical;min-height:4.4rem;font-family:var(--mono,ui-monospace,monospace);font-size:.8rem}
+.modal input:disabled,.modal select:disabled,.modal textarea:disabled{opacity:.5;cursor:not-allowed}
+.ad-note{margin:0;min-height:2.6em;font-size:.78rem}
+.ad-err{min-height:1.3em;color:var(--accent-text);font-size:.8rem;font-weight:500}
+.ad-pw-in{display:flex;align-items:center;gap:.5rem}.ad-pw-in svg{flex:none;width:16px;height:16px}
+@media (max-width:560px){.ad-grid{grid-template-columns:1fr}}
+.av-lock{display:flex;flex-direction:column;gap:.6rem;align-items:flex-start;padding:1.2rem;max-width:420px}
+.av-lock form{display:flex;flex-direction:column;gap:.6rem;width:100%}
+.av-table .sel{width:32px}.av-table td.sel,.av-table th.sel{text-align:center;padding:0}
+.av-table .lk{width:22px;text-align:center}.av-table .lk svg{width:13px;height:13px;vertical-align:-2px}

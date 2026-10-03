@@ -40,7 +40,9 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.onError((e, c) => {
     const { status, message } = ops.mapError(e);
     if (status === 500) console.error("agent error", e);
-    return c.json({ error: message }, status as 400);
+    // 401 password_required / password_incorrect carry a machine-readable code for the client's prompt
+    const extra = e instanceof ops.FsError && e.status === 401 ? e.extra : undefined;
+    return c.json({ error: message, ...extra }, status as 400);
   });
 
   app.get("/healthz", (c) => c.text("ok"));

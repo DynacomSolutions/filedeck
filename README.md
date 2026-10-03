@@ -31,7 +31,7 @@ A bare clone of `server/`, `web/` and the top-level files builds and tests witho
 
 ```sh
 npm ci
-npm run typecheck && npm test        # server tests (some need ffmpeg and bsdtar, and skip without them)
+npm run typecheck && npm test        # server tests (some need ffmpeg, bsdtar and 7zz, and skip without them)
 npm run build
 FILEDECK_ROOT=$HOME npm run dev:agent      # agent on :8080
 HUB_URL=http://127.0.0.1:8080 npm run dev:web   # Vite dev server, /api proxied
@@ -46,6 +46,12 @@ Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDEC
 Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
 `FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help).
+
+## Archives and passwords
+
+Compress offers zip, 7z, tar.gz, tar.zst and tar.xz with a compression level (store to ultra), exclude patterns (one glob per line), an archive name and a destination folder. Zip and 7z can also be password protected (zip uses AES-256; a 7z can additionally encrypt its file names) and split into volumes (`name.7z.001`, `.002`, ...; open the first part to browse or extract the set). Extract takes a destination, a subfolder switch, an overwrite policy (keep both, replace, skip) and, for password-protected archives, a password; the archive browser can extract just the ticked entries.
+
+Passwords are read by 7-Zip (`7zz`) from its standard input. They never appear on a command line, in a URL, in a job record, in an error message or in the audit log (the audit log only records an allow-list of path-like fields, and archive passwords travel in the `x-filedeck-password` request header, base64 encoded, which is never logged). Encrypted archives are extracted by 7-Zip into a private staging folder and then sanitised the same way as every other extraction (no links or special files, entry and size caps, permission bits dropped) before anything is moved into place. Names are validated from the archive listing first, so a hostile archive is refused before 7-Zip writes anything.
 
 ## Contributing
 

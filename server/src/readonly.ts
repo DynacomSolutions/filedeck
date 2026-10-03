@@ -49,7 +49,7 @@ export function writeTargets(method: string, route: string, query: (k: string) =
     case "/api/trash/empty":
       return b("volume");
     case "/api/jobs/compress":
-      return b("dir");
+      return [...b("dir"), ...b("destDir")];
     case "/api/jobs/extract":
       return b("destDir");
   }

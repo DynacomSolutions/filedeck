@@ -5,6 +5,7 @@ import * as ops from "./fsops.ts";
 import * as ar from "./archive.ts";
 import { Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
+import { passwordFromHeader } from "./sevenzip.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -34,7 +35,13 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   const limits: ar.ArchiveLimits = { maxEntries: cfg.archiveMaxEntries, maxBytes: cfg.archiveMaxBytes };
   const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message);
 
-  app.get("/api/archive/list", async (c) => c.json(await ar.listArchive(root, c.req.query("path") ?? "")));
+  // The password (if any) arrives base64-encoded in `x-filedeck-password`, never in a URL or a body, so it is not audit-logged.
+  const pw = (c: Context) => passwordFromHeader(c.req.header("x-filedeck-password"));
+
+  app.get("/api/archive/list", async (c) => {
+    const lim = Number(c.req.query("limit"));
+    return c.json(await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c)));
+  });
 
   // Multi-select / folder download: a zip streamed straight to the client.
   app.on(["GET", "HEAD"], "/api/fs/zip", async (c) => {
@@ -64,16 +71,27 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   app.delete("/api/jobs/:id", (c) => (jobs.dismiss(c.req.param("id")) ? c.json({ ok: true }) : c.json({ error: "not found or still active" }, 404)));
 
   app.post("/api/jobs/compress", async (c) => {
-    const b = await body<{ dir?: string; names?: string[]; format?: string; name?: string }>(c);
-    const plan = await ar.prepareCompress(root, str(b.dir, "dir"), strs(b.names, "names"), str(b.format, "format"), b.name);
+    const b = await body<{ dir?: string; names?: string[]; format?: string; name?: string; level?: number; encryptHeaders?: boolean; splitBytes?: number; exclude?: string[]; destDir?: string }>(c);
+    const plan = await ar.prepareCompress(root, str(b.dir, "dir"), strs(b.names, "names"), str(b.format, "format"), b.name, {
+      level: b.level,
+      encryptHeaders: b.encryptHeaders === true,
+      splitBytes: b.splitBytes,
+      exclude: b.exclude === undefined ? [] : strs(b.exclude, "exclude"),
+      destDir: b.destDir === undefined ? undefined : str(b.destDir, "destDir"),
+      password: pw(c),
+    });
     const job = jobs.create("compress", `Compress ${plan.names.length} item(s) to ${plan.outName}`, (ctl) => ar.runCompress(plan, limits, ctl));
     return c.json(job, 202);
   });
 
   app.post("/api/jobs/extract", async (c) => {
-    const b = await body<{ path?: string; destDir?: string; subfolder?: boolean }>(c);
-    const plan = await ar.prepareExtract(root, str(b.path, "path"), str(b.destDir, "destDir"), b.subfolder !== false);
-    const job = jobs.create("extract", `Extract ${plan.archiveName}`, (ctl) => ar.runExtract(plan, limits, ctl));
+    const b = await body<{ path?: string; destDir?: string; subfolder?: boolean; overwrite?: string; entries?: string[] }>(c);
+    const plan = await ar.prepareExtract(root, str(b.path, "path"), str(b.destDir, "destDir"), b.subfolder !== false, {
+      overwrite: b.overwrite as ar.OverwritePolicy | undefined,
+      entries: b.entries === undefined ? [] : strs(b.entries, "entries"),
+      password: pw(c),
+    });
+    const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => ar.runExtract(plan, limits, ctl));
     return c.json(job, 202);
   });
 
