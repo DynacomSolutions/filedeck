@@ -902,9 +902,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     const handled = (() => {
       if (e.altKey && e.shiftKey && !mod && key.startsWith("Arrow") && onDock) return onDock(key);
       // While the search results are open the panel's own selection is hidden: no file operations by key.
-      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "twTW[]".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
+      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "twTW[]nurcNURC".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
       if (key === "?" && !mod) return onHelp(), true;
       if (e.altKey && !mod && key.toLowerCase() === "t") return newTab(), true;
+      // Folder actions that used to live only in the header "more" menu (also in the right-click menu of the list and the breadcrumb).
+      if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "n") return startCreate(path, "file"), true;
+      if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "u") return fileInput.current?.click(), true;
+      if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "r") return refresh(), true;
+      if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "c") return void copyPaths([path]), true;
       if (e.altKey && !mod && key.toLowerCase() === "w") return tabs.length > 1 && (closeTab(ti), true);
       if (e.altKey && !mod && (key === "]" || key === "[") && tabs.length > 1) return selectTab((ti + (key === "]" ? 1 : -1) + tabs.length) % tabs.length), true;
       // Tab hops between panels only from the list itself, and never wraps: otherwise it would be a keyboard trap.
@@ -1019,13 +1024,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   useLayoutEffect(() => {
     const el = barRef.current;
     if (!el) return;
-    // room = row width - paddings - up button - the address bar's minimum - the more button; one icon button is 28px plus a 4px gap
-    const measure = () => setCap(Math.max(0, Math.floor((el.clientWidth - 21 - 32 - 190 - 32) / 32)));
+    // room = row width - paddings - up button - the address bar's minimum; one icon button is 28px plus a 4px gap.
+    // The more button (one more slot) exists only when not everything fits.
+    const measure = () => {
+      const room = el.clientWidth - 21 - 32 - 190;
+      setCap(controls.length * 32 <= room ? controls.length : Math.max(0, Math.floor((room - 32) / 32)));
+    };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [controls.length]);
   const shown = controls.slice(0, cap);
   const more = controls.slice(cap);
 
@@ -1108,12 +1117,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={c.pressed ? "marked" : ""} disabled={c.disabled} onClick={c.run} onContextMenu={c.ctx}>{c.icon}</button>
             </Tip>
           ))}
-          <Tip label={more.length ? "More actions" : "Folder actions"}>
-            <button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              setMenu({ x: r.right - 4, y: r.bottom + 4, items: [...more.map((c): MenuItem => ({ label: c.label, disabled: c.disabled, onSelect: c.run })), ...(more.length ? (["sep"] as MenuItem[]) : []), ...folderItems(path, true)] });
-            }}><Ellipsis /></button>
-          </Tip>
+          {more.length > 0 && (
+            <Tip label="More actions">
+              <button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setMenu({ x: r.right - 4, y: r.bottom + 4, items: [...more.map((c): MenuItem => ({ label: c.label, disabled: c.disabled, onSelect: c.run })), "sep", ...folderItems(path, true)] });
+              }}><Ellipsis /></button>
+            </Tip>
+          )}
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
             const files = Array.from(e.target.files ?? []);
             e.target.value = "";

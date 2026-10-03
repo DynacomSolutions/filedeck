@@ -35,6 +35,8 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["F5", "Copy selection to the next panel"],
       ["F6", "Move selection to the next panel"],
       ["F7", "New folder"],
+      ["Alt+N / Alt+U", "New file / upload files into this folder"],
+      ["Alt+R / Alt+C", "Refresh the folder / copy its path"],
       ["Del", "Move to trash"],
       ["Shift+Del", "Delete permanently (asks first)"],
       ["Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste (across panels and nodes)"],
