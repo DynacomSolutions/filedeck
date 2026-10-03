@@ -260,6 +260,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     let timer: ReturnType<typeof setTimeout> | undefined;
     let rev = -1;
     let last: { t: number; dirs: number } | null = null;
+    let delay = 500;
     const tick = async () => {
       try {
         const j = await api.diffJob(jobId);
@@ -282,12 +283,13 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
           setErr(j.state === "failed" ? (j.error ?? "Comparison failed") : "Comparison canceled");
           return;
         }
-        if (j.state === "done") return;
+        // A finished compare stays live: the hub follows both sides' change feeds, so keep reading (more slowly).
+        delay = j.state === "done" ? 1500 : 500;
       } catch (e) {
         if (live) setErr((e as Error).message);
         return;
       }
-      if (live) timer = setTimeout(() => void tick(), 500);
+      if (live) timer = setTimeout(() => void tick(), delay);
     };
     void tick();
     return () => {
@@ -900,7 +902,8 @@ export function CompareInfo() {
   const { st, summary, job, running, err } = ctl;
   const sum = (c: DiffCounts) => c.identical + c.different + c.leftOnly + c.rightOnly + c.error;
   const s = summary?.stats;
-  const secs = s ? ((s.finishedAt ?? Date.now()) - s.startedAt) / 1000 : 0;
+  // duration of the compare itself (the job), not of later live updates
+  const secs = job?.startedAt ? ((job.finishedAt ?? Date.now()) - job.startedAt) / 1000 : 0;
   const lookups = s ? s.cacheHits + s.cacheMisses : 0;
   return (
     <section className="side-cmp" aria-label="Compare status">
@@ -916,7 +919,7 @@ export function CompareInfo() {
         {s && (
           <>
             <span className="side-cmp-line">
-              <b>{running ? "Comparing" : "Done"}</b> {s.dirsScanned.toLocaleString()} folders{running && summary ? ` · ${Math.round(summary.rate).toLocaleString()}/s` : ` in ${secs.toFixed(1)} s`}
+              <b>{running ? "Comparing" : s.finishedAt ? "Done" : "Updating"}</b> {s.dirsScanned.toLocaleString()} folders{running && summary ? ` · ${Math.round(summary.rate).toLocaleString()}/s` : ` in ${secs.toFixed(1)} s`}
               {running && s.dirsQueued > 0 ? ` · ${s.dirsQueued.toLocaleString()} queued` : ""}
             </span>
             {running ? <progress aria-label="Comparison progress" /> : null}
@@ -925,6 +928,11 @@ export function CompareInfo() {
               {s.hashed + s.hashQueued > 0 ? ` · ${s.hashed.toLocaleString()}${running && s.hashQueued > 0 ? ` / ${(s.hashed + s.hashQueued).toLocaleString()}` : ""} hashed (${fmtSize(s.hashedBytes)})` : ""}
             </span>
             {lookups > 0 && <span className="muted">Index: {Math.round((100 * s.cacheHits) / lookups)}% of folder listings from cache</span>}
+            {!running && s.live && (
+              <Tip label="Changes on either side (seen by the nodes' file watchers) update the affected rows without comparing again">
+                <span className="muted side-cmp-live"><Ic.Radio aria-hidden="true" /> Live: following changes</span>
+              </Tip>
+            )}
           </>
         )}
       </div>

@@ -112,6 +112,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
         return { left, right, options, ...s.counts(), hashedFiles: s.stats.hashed, hashedBytes: s.stats.hashedBytes, warnings: s.warnings, durationMs: Date.now() - t0 };
       });
       sessions.set(job.id, sess);
+      sess.startLive(); // follow both agents' change feeds while the compare is open
       meta.set(job.id, { left, right, options });
       prune();
       return c.json(strip(job), 202);

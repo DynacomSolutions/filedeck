@@ -93,6 +93,19 @@ interface DbRow {
   job: number;
 }
 
+interface Kid {
+  k: string;
+  p: string;
+  rp: string | null;
+  l: LsEntry | null;
+  r: LsEntry | null;
+  st: number;
+  why: string | null;
+  newer: number;
+  fin: number;
+  job: number;
+}
+
 const COLS = "id, parent, p, rp, depth, d, lt, ls, lm, ll, rt, rs, rm, rl, st, why, newer, mask, pend, fin, job";
 
 export class CompareSession {
@@ -121,6 +134,13 @@ export class CompareSession {
     t[st] = (t[st] ?? 0) + by;
   }
   private closed = false;
+  private running = false;
+  private liveTimer: NodeJS.Timeout | undefined;
+  private liveAbort = new AbortController();
+  /** change-feed positions per side; -1 until the first poll sets the baseline */
+  private seq: [number, number] = [-1, -1];
+  /** folders that changed while they were being listed: re-listed on the next poll */
+  private retry = new Set<string>();
 
   constructor(
     private left: DirSource,
@@ -142,12 +162,21 @@ export class CompareSession {
       CREATE INDEX rows_p ON rows(p);
       CREATE INDEX rows_job ON rows(job, depth, id);
       CREATE INDEX rows_kid_job ON rows(parent, job);
+      CREATE INDEX rows_rp ON rows(rp) WHERE rp IS NOT NULL;
     `);
     const p = (s: string) => db.prepare(s);
     this.q = {
       ins: p("INSERT INTO rows (parent, k, p, rp, depth, d, lt, ls, lm, ll, rt, rs, rm, rl, st, why, newer, mask, fin, job) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
       byId: p(`SELECT ${COLS} FROM rows WHERE id = ?`),
       byP: p(`SELECT ${COLS} FROM rows WHERE p = ? ORDER BY id LIMIT 1`),
+      byRp: p(`SELECT ${COLS} FROM rows WHERE rp = ? ORDER BY id LIMIT 1`),
+      setAgg: p("UPDATE rows SET pend = ?, mask = ?, st = ?, why = ?, fin = ? WHERE id = ?"),
+      setTimes: p("UPDATE rows SET lm = ?, rm = ? WHERE id = ?"),
+      kidAgg: p("SELECT DISTINCT st, mask, fin FROM rows WHERE parent = ?"),
+      kidOpen: p("SELECT count(*) AS n FROM rows WHERE parent = ? AND fin = 0"),
+      subTally: p("SELECT d, st, count(*) AS n FROM rows WHERE fin = 1 AND (id = ? OR (p >= ? AND p < ?)) GROUP BY d, st"),
+      subDel: p("DELETE FROM rows WHERE id = ? OR (p >= ? AND p < ?)"),
+      queuedBy: p("SELECT job, count(*) AS n FROM rows WHERE job IN (1, 3) GROUP BY job"),
       kids: p(`SELECT ${COLS} FROM rows WHERE parent = ?`),
       setJob: p("UPDATE rows SET job = ? WHERE id = ?"),
       nextList: p("SELECT id FROM rows WHERE job = 1 ORDER BY depth, id LIMIT ?"),
@@ -174,6 +203,16 @@ export class CompareSession {
 
   /** Run until every queued listing and hash is done. Throws on cancel or when a root cannot be listed. */
   async run(signal: AbortSignal, progress?: Progress): Promise<void> {
+    this.running = true;
+    delete this.stats.finishedAt;
+    try {
+      await this.runLoop(signal, progress);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  private async runLoop(signal: AbortSignal, progress?: Progress): Promise<void> {
     const dirConc = Math.max(1, Math.min(32, this.o.dirConcurrency ?? 16));
     const hashConc = Math.max(1, this.o.concurrency);
     const inflight = new Set<Promise<void>>();
@@ -267,7 +306,7 @@ export class CompareSession {
       hasL ? get(this.left, r.p).catch((e: Error) => e) : Promise.resolve([] as LsEntry[]),
       hasR ? get(this.right, rightRel).catch((e: Error) => e) : Promise.resolve([] as LsEntry[]),
     ]);
-    if (signal.aborted) return;
+    if (signal.aborted || !this.q.byId!.get(id)) return; // canceled, or dropped by a live update meanwhile
     if (L instanceof Error || R instanceof Error) {
       const e = (L instanceof Error ? L : R) as Error;
       const side = L instanceof Error ? "left" : "right";
@@ -278,63 +317,78 @@ export class CompareSession {
       if (!r.fin) this.finish(id, BIT.error, e.message || "could not read folder");
       return;
     }
-    const join = (base: string, n: string) => (base ? `${base}/${n}` : n);
-    const rmap = new Map<string, LsEntry>();
-    for (const e of R) if (this.wanted(join(rightRel, e.n), e) && !rmap.has(this.key(e.n))) rmap.set(this.key(e.n), e);
-    const childDepth = r.depth + 1;
+    const kids = this.children(r, L, R);
     let pend = 0;
     let mask = 0;
-    let n = 0;
     let newDirs = 0;
     let newHashes = 0;
     const db = this.db;
-    const ins = this.q.ins!;
-    const side = (e: LsEntry): Side => ({ t: e.t, s: e.s, m: e.m, ...(e.l !== undefined ? { l: e.l } : {}) });
-    const put = (k: string, p: string, rp: string | null, l: LsEntry | null, rr: LsEntry | null, st: number, why: string | null, newer: number, fin: number, job: number) => {
-      const d = (l ?? rr)!.t === "dir" ? 1 : 0;
-      ins.run(id, k, p, rp, childDepth, d, l?.t ?? null, l?.s ?? null, l?.m ?? null, l?.l ?? null, rr?.t ?? null, rr?.s ?? null, rr?.m ?? null, rr?.l ?? null, st, why, newer, st, fin, job);
-      n++;
-      if (job === J.LIST) newDirs++;
-      if (job === J.HASH) newHashes++;
-      if (fin) (mask |= st), this.count(d, st);
-      else pend++;
-    };
     db.exec("BEGIN");
     try {
-      const seen = new Set<string>();
-      for (const l of L) {
-        const p = join(r.p, l.n);
-        if (!this.wanted(p, l)) continue;
-        const k = this.key(l.n);
-        if (seen.has(k)) continue; // two left names equal ignoring case: the first one wins, like the right side
-        seen.add(k);
-        const rr = hasR ? rmap.get(k) : undefined;
-        if (!rr) {
-          put(k, p, null, l, null, BIT["left-only"], null, 0, 1, l.t === "dir" ? J.LIST : J.DONE);
-          continue;
-        }
-        rmap.delete(k);
-        const rp = join(rightRel, rr.n);
-        const v = classify(side(l), side(rr), this.o);
-        const rpCol = rp !== p ? rp : null;
-        if (v.status === "pending-dir") put(k, p, rpCol, l, rr, 0, null, 0, 0, J.LIST);
-        else if (v.status === "pending-hash") put(k, p, rpCol, l, rr, 0, null, 0, 0, J.HASH);
-        else put(k, p, rpCol, l, rr, BIT[v.status], ("why" in v && v.why) || null, "newer" in v && v.newer ? (v.newer === "left" ? 1 : 2) : 0, 1, J.DONE);
+      for (const c of kids) {
+        this.insert(id, r.depth + 1, c);
+        if (c.job === J.LIST) newDirs++;
+        if (c.job === J.HASH) newHashes++;
+        if (c.fin) mask |= c.st;
+        else pend++;
       }
-      for (const [k, rr] of rmap) put(k, join(r.p, rr.n), join(rightRel, rr.n) !== join(r.p, rr.n) ? join(rightRel, rr.n) : null, null, rr, BIT["right-only"], null, 0, 1, rr.t === "dir" ? J.LIST : J.DONE);
       this.q.listed!.run(pend, mask, id);
       db.exec("COMMIT");
     } catch (e) {
       db.exec("ROLLBACK");
       throw e;
     }
-    this.stats.entries += n;
+    this.stats.entries += kids.length;
     this.stats.dirsScanned++;
     this.stats.dirsQueued += newDirs - 1;
     this.stats.hashQueued += newHashes;
     this.bump(r.p);
     // A one-sided folder already has its status; a two-sided one is final once nothing below is open.
     if (!r.fin && pend === 0) this.finish(id, mask & NOT_IDENTICAL ? BIT.different : BIT.identical, mask & NOT_IDENTICAL ? "contents differ" : null);
+  }
+
+  /** The child rows a folder should have for two listings (classified; folders and equal-size files queued). */
+  private children(r: DbRow, L: LsEntry[], R: LsEntry[]): Kid[] {
+    const hasR = r.rt === "dir";
+    const rightRel = r.rp ?? r.p;
+    const join = (base: string, n: string) => (base ? `${base}/${n}` : n);
+    const rmap = new Map<string, LsEntry>();
+    for (const e of R) if (this.wanted(join(rightRel, e.n), e) && !rmap.has(this.key(e.n))) rmap.set(this.key(e.n), e);
+    const side = (e: LsEntry): Side => ({ t: e.t, s: e.s, m: e.m, ...(e.l !== undefined ? { l: e.l } : {}) });
+    const out: Kid[] = [];
+    const seen = new Set<string>();
+    for (const l of L) {
+      const p = join(r.p, l.n);
+      if (!this.wanted(p, l)) continue;
+      const k = this.key(l.n);
+      if (seen.has(k)) continue; // two left names equal ignoring case: the first one wins, like the right side
+      seen.add(k);
+      const rr = hasR ? rmap.get(k) : undefined;
+      if (!rr) {
+        out.push({ k, p, rp: null, l, r: null, st: BIT["left-only"], why: null, newer: 0, fin: 1, job: l.t === "dir" ? J.LIST : J.DONE });
+        continue;
+      }
+      rmap.delete(k);
+      const rp = join(rightRel, rr.n);
+      const v = classify(side(l), side(rr), this.o);
+      const rpCol = rp !== p ? rp : null;
+      if (v.status === "pending-dir") out.push({ k, p, rp: rpCol, l, r: rr, st: 0, why: null, newer: 0, fin: 0, job: J.LIST });
+      else if (v.status === "pending-hash") out.push({ k, p, rp: rpCol, l, r: rr, st: 0, why: null, newer: 0, fin: 0, job: J.HASH });
+      else out.push({ k, p, rp: rpCol, l, r: rr, st: BIT[v.status], why: ("why" in v && v.why) || null, newer: "newer" in v && v.newer ? (v.newer === "left" ? 1 : 2) : 0, fin: 1, job: J.DONE });
+    }
+    for (const [k, rr] of rmap) {
+      const p = join(r.p, rr.n);
+      const rp = join(rightRel, rr.n);
+      out.push({ k, p, rp: rp !== p ? rp : null, l: null, r: rr, st: BIT["right-only"], why: null, newer: 0, fin: 1, job: rr.t === "dir" ? J.LIST : J.DONE });
+    }
+    return out;
+  }
+  private insert(parent: number, depth: number, c: Kid) {
+    const d = (c.l ?? c.r)!.t === "dir" ? 1 : 0;
+    const l = c.l;
+    const rr = c.r;
+    this.q.ins!.run(parent, c.k, c.p, c.rp, depth, d, l?.t ?? null, l?.s ?? null, l?.m ?? null, l?.l ?? null, rr?.t ?? null, rr?.s ?? null, rr?.m ?? null, rr?.l ?? null, c.st, c.why, c.newer, c.st, c.fin, c.job);
+    if (c.fin) this.count(d, c.st);
   }
 
   private async hashOne(id: number, signal: AbortSignal) {
@@ -352,6 +406,7 @@ export class CompareSession {
         if (Math.abs(dm) > this.o.toleranceMs) newer = dm > 0 ? 1 : 2;
       }
       this.stats.hashedBytes += (r.ls ?? 0) * 2;
+      if (!this.q.byId!.get(id)) return; // dropped by a live update meanwhile
     } catch (e) {
       if (signal.aborted) {
         this.q.setJob!.run(J.HASH, id);
@@ -389,6 +444,145 @@ export class CompareSession {
     this.stats.rev++;
     if (this.changed.size < 2048) this.changed.add(rel);
     else this.changedOverflow = true;
+  }
+
+  /* ------------------------------------------------------------------ live updates */
+
+  /**
+   * Follow both sides' change feeds (inotify on the agents): every changed folder this compare has listed is
+   * listed again, its rows are updated in place (unchanged rows and subtrees stay), new work is compared, and
+   * the folder's ancestors get their status recomputed.
+   */
+  startLive(intervalMs = 2000) {
+    if (this.liveTimer || this.closed || (!this.left.changes && !this.right.changes)) return;
+    this.stats.live = true;
+    const tick = async () => {
+      try {
+        await this.pollChanges();
+      } catch {
+        /* agent briefly unreachable: try again next tick */
+      }
+      if (!this.closed) {
+        this.liveTimer = setTimeout(() => void tick(), intervalMs);
+        this.liveTimer.unref?.();
+      }
+    };
+    this.liveTimer = setTimeout(() => void tick(), intervalMs);
+    this.liveTimer.unref?.();
+  }
+
+  /** One round of the change feeds (exposed for tests). */
+  async pollChanges(): Promise<number> {
+    const signal = this.liveAbort.signal;
+    const targets = new Set<number>();
+    const want = (side: 0 | 1, rel: string) => {
+      const r = (side === 1 ? (this.q.byRp!.get(rel) ?? this.q.byP!.get(rel)) : this.q.byP!.get(rel)) as unknown as DbRow | undefined;
+      if (!r || !r.d) return;
+      if (side === 1 && r.rp && r.rp !== rel) return;
+      if (r.job === J.DONE) targets.add(r.id);
+      else if (r.job === J.LISTING) this.retry.add(`${side}:${rel}`);
+    };
+    const old = [...this.retry];
+    this.retry.clear();
+    for (const x of old) want(Number(x[0]) as 0 | 1, x.slice(2));
+    for (const [i, src] of [this.left, this.right].entries()) {
+      if (!src.changes) continue;
+      const since = this.seq[i] as number;
+      const ch = await src.changes(Math.max(0, since), signal);
+      this.seq[i] = ch.seq;
+      if (since < 0) continue; // first poll: baseline only
+      if (ch.reset) for (const rel of this.focus) want(i as 0 | 1, rel);
+      for (const d of ch.dirs) want(i as 0 | 1, d);
+    }
+    let n = 0;
+    for (const id of targets) {
+      if (n++ >= 256 || this.closed) break;
+      await this.relist(id, signal);
+    }
+    return targets.size;
+  }
+
+  private async relist(id: number, signal: AbortSignal) {
+    const r = this.q.byId!.get(id) as unknown as DbRow | undefined;
+    if (!r || !r.d || r.job !== J.DONE || r.depth >= this.o.depth) return;
+    let L: LsEntry[] = [];
+    let R: LsEntry[] = [];
+    try {
+      [L, R] = await Promise.all([
+        r.lt === "dir" ? this.left.list(r.p, signal).then((x) => x.entries) : Promise.resolve([]),
+        r.rt === "dir" ? this.right.list(r.rp ?? r.p, signal).then((x) => x.entries) : Promise.resolve([]),
+      ]);
+    } catch {
+      return; // gone or unreadable now: its parent's change event will drop it
+    }
+    const cur = this.q.byId!.get(id) as unknown as DbRow | undefined;
+    if (this.closed || !cur || cur.job !== J.DONE) return;
+    const have = new Map((this.q.kids!.all(id) as unknown as (DbRow & { k?: string })[]).map((x) => [this.key(x.p.slice(x.p.lastIndexOf("/") + 1)), x]));
+    const same = (h: DbRow, c: Kid) => {
+      const eq = (t: string | null, sz: number | null, m: number | null, l: string | null, e: LsEntry | null) =>
+        (t ?? null) === (e?.t ?? null) && (t === "dir" || ((sz ?? null) === (e?.s ?? null) && (m ?? null) === (e?.m ?? null) && (l ?? null) === (e?.l ?? null)));
+      return h.p === c.p && (h.rp ?? null) === c.rp && eq(h.lt, h.ls, h.lm, h.ll, c.l) && eq(h.rt, h.rs, h.rm, h.rl, c.r);
+    };
+    let changed = false;
+    this.db.exec("BEGIN");
+    try {
+      for (const c of this.children(cur, L, R)) {
+        // match on the stored name's key (rows written before keep their spelling)
+        const h = have.get(c.k);
+        have.delete(c.k);
+        if (h && same(h, c)) {
+          if (h.d && (h.lm !== (c.l?.m ?? null) || h.rm !== (c.r?.m ?? null))) this.q.setTimes!.run(c.l?.m ?? null, c.r?.m ?? null, h.id);
+          continue;
+        }
+        if (h) this.drop(h);
+        this.insert(id, cur.depth + 1, c);
+        changed = true;
+      }
+      for (const h of have.values()) {
+        this.drop(h);
+        changed = true;
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+    if (!changed) return;
+    for (const x of this.q.queuedBy!.all() as { job: number; n: number }[]) x.job === J.LIST ? (this.stats.dirsQueued = x.n) : (this.stats.hashQueued = x.n);
+    this.bump(cur.p);
+    this.refreshUp(id);
+    if (!this.running && !this.closed) void this.run(signal).catch(() => undefined);
+    else this.kick();
+  }
+
+  /** Remove a row and everything below it, taking its final rows out of the tallies. */
+  private drop(h: DbRow) {
+    const lo = h.p + "/";
+    const hi = h.p + "0";
+    for (const x of this.q.subTally!.all(h.id, lo, hi) as { d: number; st: number; n: number }[]) this.count(x.d, x.st, -x.n);
+    this.q.subDel!.run(h.id, lo, hi);
+  }
+
+  /** Recompute a two-sided folder's status from its children, then its ancestors' (after a live update). */
+  private refreshUp(id: number) {
+    for (let at = id; at; ) {
+      const r = this.q.byId!.get(at) as unknown as DbRow | undefined;
+      if (!r) return;
+      if (r.lt !== "dir" || r.rt !== "dir") return; // one-sided: its own status does not depend on what is inside
+      let mask = 0;
+      for (const x of this.q.kidAgg!.all(at) as { st: number; mask: number; fin: number }[]) if (x.fin) mask |= x.st | x.mask;
+      const open = (this.q.kidOpen!.get(at) as { n: number }).n;
+      const fin = open === 0 && r.job === J.DONE ? 1 : 0;
+      const st = fin ? (mask & NOT_IDENTICAL ? BIT.different : BIT.identical) : 0;
+      const why = st === BIT.different ? "contents differ" : null;
+      if (r.p !== "") {
+        if (r.fin) this.count(r.d, r.st, -1);
+        if (fin) this.count(r.d, st);
+      }
+      this.q.setAgg!.run(open, mask, st, why, fin, at);
+      this.bump(r.p.includes("/") ? r.p.slice(0, r.p.lastIndexOf("/")) : "");
+      at = r.parent;
+    }
   }
 
   /* ------------------------------------------------------------------ reads for the UI */
@@ -464,6 +658,8 @@ export class CompareSession {
   close() {
     if (this.closed) return;
     this.closed = true;
+    clearTimeout(this.liveTimer);
+    this.liveAbort.abort();
     this.kick();
     try {
       this.db.close();

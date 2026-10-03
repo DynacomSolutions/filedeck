@@ -317,9 +317,11 @@ export interface DiffStats {
   startedAt: number;
   finishedAt?: number;
   rev: number;
+  /** the hub follows both sides' change feeds for this compare */
+  live?: boolean;
   warnings: string[];
 }
-export type DiffJobView = JobView & { stats?: DiffStats; files?: DiffCounts; dirs?: DiffCounts };
+export type DiffJobView = JobView & { startedAt?: number; finishedAt?: number; stats?: DiffStats; files?: DiffCounts; dirs?: DiffCounts };
 export interface DiffFolder {
   rel: string;
   listed: boolean;

@@ -10,6 +10,9 @@ import { DEFAULT_OPTIONS } from "../src/folderdiff.ts";
 import { localSource } from "../src/folderdiff.ts";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
+import { createHub } from "../src/hub.ts";
+import { serve } from "@hono/node-server";
+import type { AddressInfo } from "node:net";
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-cmp-")));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -142,4 +145,85 @@ test("session: rows stay pending while their subtree is still open", async () =>
   await done;
   assert.equal(sess.folder("")!.rows[0]!.status, "identical");
   sess.close();
+});
+
+test("live: a change on one side re-lists that folder, updates its rows, counts and every ancestor", async () => {
+  write("live/L/a/b/f.txt", "same");
+  write("live/R/a/b/f.txt", "same");
+  write("live/L/a/b/g.txt", "g");
+  write("live/R/a/b/g.txt", "g");
+  write("live/L/top.txt", "t");
+  write("live/R/top.txt", "t");
+  const feeds: [string[], string[]] = [[], []];
+  let seq = 0;
+  const withFeed = (src: DirSource, i: 0 | 1): DirSource => ({
+    ...src,
+    changes: async () => ({ seq: ++seq, dirs: feeds[i].splice(0), reset: false }),
+  });
+  const sess = new CompareSession(withFeed(localSource(path.join(tmp, "live/L"), "/"), 0), withFeed(localSource(path.join(tmp, "live/R"), "/"), 1), { ...DEFAULT_OPTIONS, mode: "content" });
+  await sess.run(new AbortController().signal);
+  assert.equal(sess.folder("")!.status, "identical");
+  assert.equal(sess.counts().files.identical, 3);
+  await sess.pollChanges(); // baseline
+  // right side: f.txt changes content (same size), g.txt is removed, h.txt appears
+  write("live/R/a/b/f.txt", "SAME");
+  fs.rmSync(path.join(tmp, "live/R/a/b/g.txt"));
+  write("live/R/a/b/h.txt", "h");
+  feeds[1].push("a/b");
+  assert.equal(await sess.pollChanges(), 1);
+  for (let i = 0; i < 100 && sess.folder("a/b")!.rows.some((r) => r.status === "pending"); i++) await wait(10);
+  const rows = Object.fromEntries(sess.folder("a/b")!.rows.map((r) => [r.p, r.status]));
+  assert.deepEqual(rows, { "a/b/f.txt": "different", "a/b/g.txt": "left-only", "a/b/h.txt": "right-only" });
+  for (let i = 0; i < 100 && sess.folder("")!.status !== "different"; i++) await wait(10);
+  assert.equal(sess.folder("a")!.rows[0]!.status, "different"); // a/b
+  assert.equal(sess.folder("")!.rows.find((r) => r.p === "a")!.status, "different");
+  assert.equal(sess.folder("")!.status, "different");
+  const c = sess.counts();
+  assert.deepEqual([c.files.identical, c.files.different, c.files.leftOnly, c.files.rightOnly], [1, 1, 1, 1]);
+  assert.deepEqual([c.dirs.identical, c.dirs.different], [0, 2]);
+  // and back: restoring the right side makes everything identical again
+  write("live/R/a/b/f.txt", "same");
+  write("live/R/a/b/g.txt", "g");
+  fs.rmSync(path.join(tmp, "live/R/a/b/h.txt"));
+  feeds[1].push("a/b");
+  await sess.pollChanges();
+  for (let i = 0; i < 100 && sess.folder("")!.status !== "identical"; i++) await wait(10);
+  assert.equal(sess.folder("")!.status, "identical");
+  assert.equal(sess.counts().files.identical, 3);
+  assert.equal(sess.counts().dirs.different, 0);
+  sess.close();
+});
+
+test("hub: an open compare follows inotify on the agents and updates the changed row by itself", async () => {
+  write("hublive/A/d/x.txt", "one");
+  write("hublive/B/d/x.txt", "one");
+  const open = (app: { fetch: never }) => new Promise<ReturnType<typeof serve>>((res) => { const s: ReturnType<typeof serve> = serve({ fetch: app.fetch, port: 0 }, () => res(s)); });
+  const port = (s: ReturnType<typeof serve>) => (s.address() as AddressInfo).port;
+  const ag = (n: string) => createAgent(loadConfig({ FILEDECK_ROOT: path.join(tmp, "hublive", n), FILEDECK_NODE: n, FILEDECK_INDEX_DIR: path.join(tmp, "hublive-idx") } as never));
+  const a = ag("A");
+  const b = ag("B");
+  const sa = await open(a as never);
+  const sb = await open(b as never);
+  const sh = await open(createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, FILEDECK_DIFF_DIR: path.join(tmp, "hublive-diff"), NODES: `A=http://127.0.0.1:${port(sa)},B=http://127.0.0.1:${port(sb)}` } as never)) as never);
+  const H = `http://127.0.0.1:${port(sh)}`;
+  try {
+    const r = await fetch(H + "/api/diff/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ left: { node: "A", path: "/" }, right: { node: "B", path: "/" }, options: { mode: "content" } }) });
+    const { id } = (await r.json()) as { id: string };
+    const rowsOf = async (rel: string) => ((await (await fetch(`${H}/api/diff/jobs/${id}/rows?rel=${rel}`)).json()) as { rows: { p: string; status: string }[] }).rows;
+    for (let i = 0; i < 200 && (await (await fetch(`${H}/api/diff/jobs/${id}`)).json() as { state: string }).state !== "done"; i++) await wait(20);
+    assert.equal((await rowsOf("d"))[0]?.status, "identical");
+    await wait(2500); // first live poll sets the baseline
+    write("hublive/B/d/x.txt", "two");
+    let st = "";
+    for (let i = 0; i < 100 && st !== "different"; i++) {
+      await wait(100);
+      st = (await rowsOf("d"))[0]?.status ?? "";
+    }
+    assert.equal(st, "different");
+    assert.equal((await rowsOf(""))[0]?.status, "different"); // the folder above follows
+  } finally {
+    for (const s of [sh, sa, sb]) s.close();
+    await (a as unknown as { close: () => Promise<void> }).close();
+    await (b as unknown as { close: () => Promise<void> }).close();
+  }
 });
