@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Monitor, Moon, Sun, type LucideIcon } from "lucide-react";
 import { brand } from "./brand";
+import { Tip } from "./Tooltip";
 
 type Pref = "light" | "dark" | "auto";
 
@@ -40,15 +41,17 @@ export function ThemeMenu() {
     e.preventDefault();
     const n = OPTIONS[(i + d + OPTIONS.length) % OPTIONS.length]!;
     pick(n.value);
-    (e.currentTarget.parentElement?.querySelector(`[data-v="${n.value}"]`) as HTMLElement | null)?.focus();
+    (e.currentTarget.closest("[role=radiogroup]")?.querySelector(`[data-v="${n.value}"]`) as HTMLElement | null)?.focus();
   };
 
   return (
     <div className="theme-seg" role="radiogroup" aria-label="Theme">
       {OPTIONS.map(({ value, label, Icon }, i) => (
-        <button key={value} type="button" data-v={value} role="radio" aria-checked={pref === value} tabIndex={pref === value ? 0 : -1} onClick={() => pick(value)} onKeyDown={(e) => move(e, i)}>
-          <Icon aria-hidden="true" /> {label}
-        </button>
+        <Tip key={value} label={label}>
+          <button type="button" data-v={value} role="radio" aria-label={label} aria-checked={pref === value} tabIndex={pref === value ? 0 : -1} onClick={() => pick(value)} onKeyDown={(e) => move(e, i)}>
+            <Icon aria-hidden="true" />
+          </button>
+        </Tip>
       ))}
     </div>
   );

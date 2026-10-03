@@ -13,6 +13,7 @@ import { useBookmarks, removeBookmark, bookmarkLabel } from "./bookmarks";
 import { ThemeMenu } from "./ThemeMenu";
 import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
+import { SettingsView } from "./SettingsView";
 import { CompareCtx, CompareInfo, SyncDialog, useCompare } from "./Compare";
 import { SelectionBar, type SelRef } from "./Selection";
 import { ChevronDown, ChevronRight, GitCompareArrows, Keyboard, Star, X } from "lucide-react";
@@ -87,7 +88,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
   const prev = useRef<Record<string, { node: string; path: string; ti?: number }> | null>(null);
   const fromPop = useRef(false);
@@ -97,7 +98,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   useEffect(() => {
     if (!tree) return;
     const paths = pathsOf(tree);
-    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(panelSel.length ? { panelSel } : {}) });
+    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(panelSel.length ? { panelSel } : {}), ...(settings ? { settings } : {}) });
     latest.current.url = url;
     latest.current.paths = paths;
     let changed: string | undefined;
@@ -119,7 +120,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     } catch {
       /* history unavailable (sandboxed frame) */
     }
-  }, [tree, active, diff, folder, trash, panelSel]);
+  }, [tree, active, diff, folder, trash, panelSel, settings]);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
@@ -274,6 +275,7 @@ export function App() {
   const [activeId, setActiveId] = useState(initial?.active ?? "");
   const [status, setStatus] = useState("");
   const [trash, setTrash] = useState<TrashState | null>(initial?.trash ?? null);
+  const [settingsOpen, setSettingsOpen] = useState(initial?.settings ?? false);
   const [help, setHelp] = useState(false);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -350,7 +352,7 @@ export function App() {
     setPanelSel((p) => (p.every((k) => ids.has(k)) ? p : p.filter((k) => ids.has(k))));
   }, [tree]);
 
-  useUrlHistory(tree, activeId, diff, compare, trash, panelSel, setTree, setStatus);
+  useUrlHistory(tree, activeId, diff, compare, trash, panelSel, settingsOpen, setTree, setStatus);
 
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => { const m = t ? mapTree(t, fn) : t; return m ? syncTree(m) : m; });
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
@@ -517,7 +519,7 @@ export function App() {
   return (
     <div className="app">
       <CompareCtx.Provider value={cmp}>
-      <Sidebar nodes={nodes} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><ThemeMenu /></>} />
+      <Sidebar nodes={nodes} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => setSettingsOpen((o) => !o)}><Ic.Settings /></button></Tip></div></>} />
       <div className="app-col">
       <header className="site-header">
         <div className="site-header__inner">
@@ -558,6 +560,7 @@ export function App() {
               <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => setTrash(null)} onStatus={setStatus} />
             </Suspense>
           )}
+          {settingsOpen && <SettingsView onClose={() => setSettingsOpen(false)} />}
           {diff && (
             <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
               <DiffViewer overlay left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />

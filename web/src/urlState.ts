@@ -112,6 +112,8 @@ export interface AppState {
   folder?: FolderState;
   /** panels picked as a whole (Shift/Ctrl+click on the panel header) */
   panelSel?: string[];
+  /** the settings view is open */
+  settings?: boolean;
 }
 
 // Compact wire format (short keys keep shared links readable).
@@ -127,6 +129,8 @@ interface Wire {
   r?: [string, string];
   /** panels selected as a whole */
   ps?: string[];
+  /** settings view open */
+  se?: 1;
   /** folder compare: l/r roots, a/b panel ids, u current relative folder, f hidden statuses, then only the options that differ from the defaults */
   g?: { l: [string, string]; r: [string, string]; a: string; b: string; u?: string; f?: string; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
 }
@@ -165,6 +169,7 @@ export function encodeState(s: AppState): string {
   const w: Wire = { t: toWire(s.tree), a: s.active };
   if (s.trash) w.r = [s.trash.node, s.trash.volume];
   if (s.panelSel?.length) w.ps = s.panelSel;
+  if (s.settings) w.se = 1;
   if (s.diff) w.f = [[s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
   if (s.folder) {
     const { left, right, opts: o, preset, lp, rp, rel, hide } = s.folder;
@@ -301,7 +306,7 @@ export function decodeState(search: string): AppState | null {
     const trash = Array.isArray(r) && str(r[0]) && typeof r[1] === "string" ? { node: r[0], volume: r[1] } : undefined;
     const folder = folderFromWire(w.g, ids);
     const panelSel = Array.isArray(w.ps) ? w.ps.filter((x) => str(x) && ids.includes(x)) : [];
-    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}) };
+    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}) };
   } catch {
     return null;
   }

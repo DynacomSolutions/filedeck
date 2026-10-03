@@ -15,18 +15,22 @@ import type { FileRef } from "./EditorViews";
 import { SearchView } from "./Search";
 import { wheelX } from "./scrollx";
 import { AddressBar } from "./AddressBar";
-import { CompareBar, CompareBody, compareKey, useCompareCtl } from "./Compare";
+import { CompareBar, CompareBody, ROW_H, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
 import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
-import { Ellipsis, Eye, EyeOff, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
+import { Ellipsis, Eye, EyeOff, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
+import { useSettings } from "./settings";
+import { SkeletonRows, SkeletonTiles } from "./Skeleton";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
 
+/** Rows put in the DOM at first and added per step while scrolling. */
+const RENDER_STEP = 400;
 const DOCKS: { dock: Dock; icon: LucideIcon; label: string }[] = [
   { dock: "left", icon: PanelLeft, label: "Dock preview left" },
   { dock: "right", icon: PanelRight, label: "Dock preview right" },
@@ -88,6 +92,7 @@ type Modal =
   | { k: "new"; dir: string; type: "file" | "folder" }
   | { k: "del"; refs: SelRef[] }
   | { k: "props"; path: string; entry?: Entry };
+const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
@@ -95,6 +100,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
+  /** the listing for node:path is still on its way (a refresh of a shown folder keeps its rows and is not "loading") */
+  const [loading, setLoading] = useState(true);
+  const listKey = useRef("");
+  const { upRow } = useSettings();
+  /** rows rendered so far: a folder with tens of thousands of entries fills the DOM in steps as it is scrolled */
+  const [limit, setLimit] = useState(RENDER_STEP);
   const [hidden, setHiddenState] = useState(leaf.hidden ?? false);
   const [sort, setSortState] = useState<{ key: SortKey; asc: boolean }>(leaf.sort ?? { key: "name", asc: true });
   const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sels ?? (leaf.sel ? [leaf.sel] : [])));
@@ -146,15 +157,25 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
 
   useEffect(() => {
     let live = true;
+    const key = `${node}\0${path}\0${hidden}`;
+    if (listKey.current !== key) {
+      // A different folder: drop the old rows so skeleton rows (not the previous folder) hold the space until the list arrives.
+      listKey.current = key;
+      setEntries([]);
+      setLoading(true);
+      setLimit(RENDER_STEP);
+    }
     api
       .list(node, path, hidden)
       .then((r) => {
         if (!live) return;
         setEntries(r.entries);
+        setLoading(false);
         setErr(r.truncated ? "Listing truncated" : "");
-        setSel((s) => new Set([...s].filter((p) => r.entries.some((e) => e.path === p))));
+        const known = new Set(r.entries.map((e) => e.path));
+        setSel((s) => new Set([...s].filter((p) => known.has(p))));
       })
-      .catch((e: Error) => live && (setErr(e.message), setEntries([])));
+      .catch((e: Error) => live && (setErr(e.message), setEntries([]), setLoading(false)));
     return () => {
       live = false;
     };
@@ -566,6 +587,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     );
   const createInput = creating ? (
     <input
+      className="cr-input"
       autoFocus
       aria-label={creating === "file" ? "Name of the new file" : "Name of the new folder"}
       placeholder={creating === "file" ? "New file name, Enter to create" : "New folder name, Enter to create"}
@@ -584,6 +606,34 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       }}
     />
   ) : null;
+  // ---- parent-folder row (setting: "..", "Up" or hidden); not part of the entries, so never selected or counted ----
+  const parentPath = path === "/" ? null : parent(path);
+  const showUp = parentPath !== null && upRow !== "hidden";
+  const upLabel = upRow === "up" ? "Up" : "..";
+  const upDrop = {
+    onDragOver: (e: React.DragEvent) => parentPath !== null && dragOver(e, UP_DROP),
+    onDrop: (e: React.DragEvent) => parentPath !== null && drop(e, parentPath),
+  };
+  const goUp = () => {
+    onFocus();
+    if (parentPath !== null) onNavigate(node, parentPath);
+  };
+  const rowsShown = visible.length > limit ? visible.slice(0, limit) : visible;
+  const remaining = visible.length - rowsShown.length;
+  const moreEl = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = moreEl.current;
+    if (!el || remaining <= 0 || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver((ents) => ents.some((x) => x.isIntersecting) && setLimit((l) => l + RENDER_STEP * 2), { root: el.closest(".fp-scroll"), rootMargin: "800px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [remaining > 0, limit, view]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The cursor (keyboard End/PageDown, a revealed hit) may be past the rows rendered so far.
+  useEffect(() => {
+    if (!cursor) return;
+    const i = visible.findIndex((x) => x.path === cursor);
+    if (i >= limit) setLimit(i + RENDER_STEP);
+  }, [cursor, visible, limit]);
   const searchView = leaf.sr ? (
     <SearchView node={node} dir={path} hidden={hidden} form={leaf.sr} onForm={setSearch} onClose={() => (setSearch(undefined), setTimeout(() => secRef.current?.focus(), 0))} onReveal={revealHit} onOpen={openHit} onStatus={onStatus} />
   ) : null;
@@ -608,14 +658,21 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }}
       >
         {view === "grid" ? (
-          <div className="fp-grid" role="listbox" aria-label="Files" aria-multiselectable="true">
+          <div className="fp-grid" role="listbox" aria-label="Files" aria-multiselectable="true" aria-busy={loading}>
+            {showUp && (
+              <div className={"tile up" + (over === UP_DROP ? " drop" : "")} onClick={goUp} {...upDrop}>
+                <div className="tile-img"><span className="tile-ico"><CornerLeftUp /></span></div>
+                <div className="tile-name"><button type="button" className="up-btn" aria-label={`Up one folder to ${parentPath}`}>{upLabel}</button></div>
+              </div>
+            )}
+            {loading && <SkeletonTiles />}
             {createInput && (
               <div className="tile creating">
                 <div className="tile-img"><span className="tile-ico">{creating === "file" ? <Ic.FilePlus /> : <Ic.FolderPlus />}</span></div>
                 <div className="tile-name">{createInput}</div>
               </div>
             )}
-            {visible.map((en) => {
+            {rowsShown.map((en) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
                 <div key={en.path} role="option" aria-selected={sel.has(en.path)} {...itemProps(en, isDir, "tile ")}>
@@ -624,21 +681,35 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 </div>
               );
             })}
+            {remaining > 0 && <div ref={(el) => void (moreEl.current = el)} className="more-tiles" aria-hidden="true" />}
           </div>
         ) : (
-        <table className="ft">
+        <table className="ft" aria-busy={loading}>
           <thead>
             <tr>{th("name", "Name")}{th("size", "Size")}{th("mtime", "Modified")}</tr>
           </thead>
           <tbody>
-            {createInput && (
-              <tr className="creating">
-                <td className="name">{creating === "file" ? <Ic.FilePlus className="ico" /> : <Ic.FolderPlus className="ico" />}{createInput}</td>
+            {showUp && (
+              <tr className={"up" + (over === UP_DROP ? " drop" : "")} onClick={goUp} {...upDrop}>
+                <td className="name">
+                  <div className="fl">
+                    <CornerLeftUp className="ico" />
+                    <button type="button" className="up-btn" aria-label={`Up one folder to ${parentPath}`}>{upLabel}</button>
+                  </div>
+                </td>
                 <td className="num" />
                 <td className="num" />
               </tr>
             )}
-            {visible.map((en) => {
+            {loading && <SkeletonRows />}
+            {createInput && (
+              <tr className="creating">
+                <td className="name" colSpan={3}>
+                  <div className="cr">{creating === "file" ? <Ic.FilePlus className="ico" /> : <Ic.FolderPlus className="ico" />}{createInput}</div>
+                </td>
+              </tr>
+            )}
+            {rowsShown.map((en) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
                 <tr key={en.path} {...itemProps(en, isDir, "")}>
@@ -659,10 +730,15 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 </tr>
               );
             })}
+            {remaining > 0 && (
+              <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * ROW_H }}>
+                <td colSpan={3} />
+              </tr>
+            )}
           </tbody>
         </table>
         )}
-        {!entries.length && !err && !creating && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
+        {!loading && !entries.length && !err && !creating && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
         {entries.length > 0 && !visible.length && <div className="muted pad">No entries match the filter.</div>}
       </div>
   );
@@ -680,9 +756,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   useEffect(() => {
     const p = scrollTo.current;
     if (!p || !entries.some((e) => e.path === p)) return;
+    const at = visible.findIndex((e) => e.path === p);
+    if (at >= limit) return setLimit(at + RENDER_STEP); // render the target first; this effect runs again
     scrollTo.current = null;
     setTimeout(() => secRef.current?.querySelector(`[data-path="${CSS.escape(p)}"]`)?.scrollIntoView({ block: "center" }), 0);
-  }, [entries]);
+  }, [entries, limit]); // eslint-disable-line react-hooks/exhaustive-deps
   const toOther = (op: "copy" | "move") => {
     if (!next) return onStatus("Open a second panel first (split button)");
     const refs = combine(selEntries);

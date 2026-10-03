@@ -549,8 +549,6 @@ select option{background:var(--surface);color:var(--fg)}
 .fd-opts.side-opts{grid-template-columns:minmax(0,1fr);padding:.2rem .5rem .4rem}
 .side-opts .fd-presets{display:flex;flex-direction:column;align-items:stretch;gap:6px}
 .side-opts .fd-presets button{justify-content:flex-start}
-tr.creating td.name,.tile.creating .tile-name{display:flex;align-items:center;gap:.4rem}.tile.creating .tile-name{display:block}
-tr.creating input,.tile.creating input{width:100%;min-width:0}
 .side-opts .fd-presets label{min-width:0}
 
 /* ---- panel header: one compact row (up, address bar, controls, more); the red active outline is an inset overlay so no ancestor can clip it ---- */
@@ -586,3 +584,65 @@ tr.creating input,.tile.creating input{width:100%;min-width:0}
 .addr-head{padding:.3rem .5rem .15rem;color:var(--muted);font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .addr-pop li.on .addr-uri{font-weight:700}
 .addr-pop li.dim{color:var(--muted);cursor:default}
+/* ---- list rows: no passive hairlines (hover / selection backgrounds carry legibility); the 1px stays as a transparent border so row height is unchanged ---- */
+.ft th,.ft td,.cmp-row,.cmp-head{border-bottom:1px solid transparent}
+.ft th{background:var(--surface-2)}
+.ft td.name{display:table-cell}
+/* up row: first row of a folder, clickable, never a selectable entry */
+.ft tr.up,.tile.up{cursor:pointer}
+.ft tr.up:hover td,.tile.up:hover{background:var(--surface-2)}
+.ft tr.up td{color:var(--muted)}
+.ft .fl{display:flex;align-items:center;gap:.5rem;height:22px}.ft .fl .ico{flex:none;margin:0}
+.ft tr.up .up-btn,.tile.up .up-btn{display:inline-flex;align-items:center;justify-content:flex-start;min-height:0;height:22px;flex:1;padding:0;box-shadow:none;background:transparent;font:inherit;font-weight:600;color:var(--muted);vertical-align:middle;border-radius:var(--radius-btn)}
+.ft tr.up .up-btn:hover:not(:disabled),.tile.up .up-btn:hover:not(:disabled){background:transparent;color:var(--fg)}
+.ft tr.up .up-btn:focus-visible,.tile.up .up-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent)}
+.tile.up .up-btn{width:auto;justify-content:center}
+.tile.up .tile-name{display:flex;justify-content:center}
+.ft tr.up.drop,.tile.up.drop{outline:2px solid var(--accent);outline-offset:-2px}
+/* inline new file / folder row: input spans the whole name cell, same height as a row */
+.ft tr.creating td.name{padding-top:.5rem;padding-bottom:.5rem;max-width:none;overflow:visible}
+.ft .cr{display:flex;align-items:center;gap:.5rem;margin:-4px 0}
+.ft .cr .ico{flex:none}
+.cr-input,.ft td.name input{flex:1 1 auto;min-width:0;width:100%;height:30px;box-sizing:border-box;border-radius:var(--radius-btn);background:var(--surface-2);box-shadow:var(--shadow-1);font-weight:600;margin:-4px 0;vertical-align:middle}
+.ft .cr .cr-input{margin:0}
+.cr-input:focus,.ft td.name input:focus,.tile-name input:focus{outline:none;box-shadow:0 0 0 2px var(--accent)}
+.tile.creating .tile-name{display:block}
+.tile.creating input{width:100%;min-width:0;box-sizing:border-box;height:28px;text-align:center}
+/* loading placeholders: static, subtle, matching row / tile metrics, shown after a short delay so quick loads do not flash */
+.sk{display:inline-block;height:12px;border-radius:6px;background:var(--surface-3);vertical-align:middle;max-width:100%}
+.ft tr.skel,.tile.skel{animation:sk-in .01s linear .12s backwards}
+@keyframes sk-in{from{opacity:0}to{opacity:1}}
+.ft tr.skel td{color:transparent}
+.sk-ico{width:16px;height:16px;margin-right:.5rem;border-radius:var(--radius-btn)}
+.sk-nm{height:12px}
+.sk-num{width:var(--w,4rem)}
+.tile.skel .tile-img{background:var(--surface-2)}
+.tile.skel .tile-name{display:flex;justify-content:center;height:2.4em;align-items:flex-start}
+.sk-tile{height:10px;margin-top:.3rem}
+.sk-lines{display:flex;flex-direction:column;gap:.7rem;padding:.9rem;width:100%;box-sizing:border-box;animation:sk-in .01s linear .12s backwards}
+.sk-lines .sk{display:block;height:11px}
+.more-tiles{grid-column:1/-1;height:2px}
+.ft tr.more td{padding:0;border:0}
+/* settings view and its sidebar entry */
+.side-foot{flex:none;display:flex;align-items:center;gap:.4rem;margin:.55rem .7rem .7rem}
+.side-foot .theme-seg{flex:1;min-width:0;margin:0}
+.side-foot .tip{flex:none;display:inline-flex}
+.side-set{flex:none;width:32px;min-height:32px;padding:0;background:var(--surface-2);color:var(--muted);box-shadow:var(--shadow-1)}
+.side-set[aria-pressed=true]{background:var(--accent-tint);color:var(--fg)}
+.side-set svg{width:16px;height:16px}
+.set-body{overflow:auto;padding:1.2rem var(--gutter)}
+.set-sec{max-width:42rem;display:flex;flex-direction:column;gap:.7rem}
+.set-sec h2{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:0}
+.set-sec p{margin:0;font-size:.84rem}
+.set-opts{display:flex;flex-direction:column;gap:.4rem}
+.set-opt{display:flex;align-items:center;gap:.7rem;padding:.6rem .8rem;border-radius:var(--radius-btn);background:var(--surface-2);box-shadow:var(--shadow-1);cursor:pointer;font-size:.86rem}
+.set-opt:hover{background:var(--surface-3)}
+.set-opt.on{background:var(--accent-tint)}
+.set-opt input{position:absolute;opacity:0;pointer-events:none}
+.set-opt:focus-within{box-shadow:0 0 0 2px var(--accent)}
+.set-opt svg{flex:none;width:16px;height:16px}
+.set-opt>span{display:flex;flex-direction:column;gap:.1rem}
+.set-opt>span .muted{font-size:.78rem}
+.theme-seg .tip{flex:1;display:flex;min-width:0}.theme-seg .tip button{flex:1;width:100%}
+.ft .cr .ico{margin:0}
+.tile.creating input:focus,.tile-name input:focus{box-shadow:inset 0 0 0 2px var(--accent)}
