@@ -27,9 +27,7 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-        {{- if $withSecrets }}
-        fsGroup: 1000 # lets the non-root hub read the mounted source Secrets (mode 0440)
-        {{- end }}
+        fsGroup: 1000 # lets the non-root hub read the mounted source Secrets (mode 0440) and write the vault volume
       containers:
         - name: hub
           image: {{ include "filedeck.image" . | quote }}
@@ -51,6 +49,22 @@ spec:
                   name: {{ .Values.agentToken.secretName }}
                   key: {{ .Values.agentToken.key }}
             {{- end }}
+            # Saved-password vault: the AES key comes from a Secret created out of band (never in Git); the sqlite file
+            # lives on its own small volume, not in user data. A missing Secret leaves the vault memory-only.
+            - name: FILEDECK_VAULT_FILE
+              value: /var/lib/filedeck-vault/vault.sqlite
+            {{- if .Values.vault.keySecret }}
+            - name: FILEDECK_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vault.keySecret }}
+                  key: {{ .Values.vault.key }}
+                  optional: true
+            {{- end }}
+            - name: FILEDECK_VAULT_TTL_SECONDS
+              value: {{ .Values.vault.ttlSeconds | quote }}
+            - name: FILEDECK_VAULT_MAX_HOURS
+              value: {{ .Values.vault.maxHours | quote }}
             - name: NODES
               value: {{ range $i, $n := .Values.nodes }}{{ if $i }},{{ end }}{{ $n.name }}=http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}
             {{- if .Values.brand }}
@@ -82,8 +96,10 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
-          {{- if .Values.sources }}
           volumeMounts:
+            - name: vault
+              mountPath: /var/lib/filedeck-vault
+            {{- if .Values.sources }}
             # smbclient (SMB sources) keeps small state files; the root filesystem is read-only.
             - name: tmp
               mountPath: /tmp
@@ -94,10 +110,16 @@ spec:
               readOnly: true
             {{- end }}
             {{- end }}
+            {{- end }}
       volumes:
+        - name: vault
+          persistentVolumeClaim:
+            claimName: {{ include "filedeck.name" . }}-vault
+        {{- if .Values.sources }}
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
+        {{- end }}
         {{- range .Values.sources }}
         {{- if .secretRef }}
         # optional: a missing Secret leaves the source offline ("credentials are missing") instead of blocking the hub.
@@ -108,7 +130,6 @@ spec:
             defaultMode: 0440
         {{- end }}
         {{- end }}
-          {{- end }}
 ---
 apiVersion: v1
 kind: Service

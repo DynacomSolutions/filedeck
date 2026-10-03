@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { SavedPasswords } from "./SavedPasswords";
 import { Tip } from "./Tooltip";
 import { UP_ROWS, setSettings, useSettings, type UpRow } from "./settings";
 import * as Ic from "lucide-react";
@@ -43,6 +44,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
             })}
           </div>
         </section>
+        <SavedPasswords />
       </div>
     </div>
   );

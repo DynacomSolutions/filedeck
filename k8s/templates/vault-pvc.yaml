@@ -1,0 +1,19 @@
+# Small volume for the saved-password vault (sqlite, AES-GCM encrypted rows). Kept when the release is removed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "filedeck.name" . }}-vault
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Delete=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.vault.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.vault.storage }}

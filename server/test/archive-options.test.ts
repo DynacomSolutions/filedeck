@@ -135,6 +135,7 @@ test("archive cannot be written inside the items being archived; bad options are
   assert.equal(await bad({ format: "tar.gz", splitBytes: 1_000_000 }), 400);
   assert.equal(await bad({ format: "zip", encryptHeaders: true }, "pw"), 400); // headers: 7z only
   assert.equal(await bad({}, "line\nbreak"), 400);
+  assert.equal(await bad({}, "pässword"), 400); // zip passwords are ASCII only (7-Zip limit)
   assert.equal(await bad({ splitBytes: 10 }), 400);
 });
 

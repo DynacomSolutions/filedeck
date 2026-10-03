@@ -1,6 +1,8 @@
 import type { Hono, Context } from "hono";
 import { Readable } from "node:stream";
 import path from "node:path";
+import fs from "node:fs/promises";
+import { resolveRead } from "./paths.ts";
 import * as ops from "./fsops.ts";
 import * as ar from "./archive.ts";
 import { Jobs } from "./jobs.ts";
@@ -40,7 +42,17 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.get("/api/archive/list", async (c) => {
     const lim = Number(c.req.query("limit"));
-    return c.json(await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c)));
+    const { passwordUsed, ...res } = await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c));
+    // tells the hub the password was needed and right (so it may save it); stripped before the client sees it
+    return c.json(res, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
+  });
+
+  // Inode+size identity of a file, so the hub's vault can find a saved password after a rename or move.
+  app.get("/api/fs/fid", async (c) => {
+    const r = resolveRead(root, c.req.query("path") ?? "");
+    const st = await fs.stat(r.real);
+    if (!st.isFile()) throw bad("not a regular file");
+    return c.json({ fid: `${st.ino}:${st.size}` });
   });
 
   // Multi-select / folder download: a zip streamed straight to the client.
@@ -92,7 +104,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
       password: pw(c),
     });
     const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => ar.runExtract(plan, limits, ctl));
-    return c.json(job, 202);
+    return c.json(job, 202, plan.viaSz ? { "x-filedeck-pw": "ok" } : {});
   });
 
   return jobs;

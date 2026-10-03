@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseBrand, type Brand } from "./brand.ts";
@@ -44,6 +45,11 @@ export interface Config {
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
   sources: SourceConfig[];
   sourceSecretDir: string;
+  /** hub: saved-password vault. Without `vaultKey` it lives in memory only. */
+  vaultFile: string;
+  vaultKey: string | undefined;
+  vaultTtlMs: number;
+  vaultMaxMs: number;
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -57,6 +63,19 @@ export function parseNodes(s: string | undefined) {
       if (i < 1) throw new Error(`bad NODES entry: ${x}`);
       return { name: x.slice(0, i), url: x.slice(i + 1).replace(/\/$/, "") };
     });
+}
+
+/** The vault secret: `FILEDECK_VAULT_KEY`, or the contents of the file named by `FILEDECK_VAULT_KEY_FILE` (a mounted Secret). Never logged. */
+function readVaultKey(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.FILEDECK_VAULT_KEY) return env.FILEDECK_VAULT_KEY;
+  if (env.FILEDECK_VAULT_KEY_FILE) {
+    try {
+      return readFileSync(env.FILEDECK_VAULT_KEY_FILE, "utf8").trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 export function loadConfig(env = process.env): Config {
@@ -90,5 +109,9 @@ export function loadConfig(env = process.env): Config {
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",
+    vaultFile: env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite",
+    vaultKey: readVaultKey(env),
+    vaultTtlMs: Number(env.FILEDECK_VAULT_TTL_SECONDS ?? 30 * 60) * 1000,
+    vaultMaxMs: Number(env.FILEDECK_VAULT_MAX_HOURS ?? 24) * 3600_000,
   };
 }

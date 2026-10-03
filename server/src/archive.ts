@@ -302,12 +302,14 @@ export async function listArchive(root: string, p: string, limit = 5000, passwor
   if (szCapable(r.real)) {
     try {
       const l = await listSz(r.real, password, signal, limit);
+      // a supplied password for an encrypted archive is checked now, so a wrong one is a clear 401 (and a right one can be saved)
+      if (l.encrypted && password) await verifyPassword(r.real, l.entries, password, signal);
       let total = 0;
       const entries: ListedEntry[] = l.entries.map((e) => {
         if (e.type === "file") total += e.size;
         return { name: e.name, type: e.type, size: e.size, date: e.date, ...(e.encrypted ? { encrypted: true } : {}) };
       });
-      return { path: r.virtual, entries, truncated: l.truncated, bytes: total, encrypted: l.encrypted };
+      return { path: r.virtual, entries, truncated: l.truncated, bytes: total, encrypted: l.encrypted, passwordUsed: l.encrypted && !!password };
     } catch (e) {
       if (e instanceof PasswordError) throw e; // else: let bsdtar try (and report) the format
     }
@@ -319,7 +321,7 @@ export async function listArchive(root: string, p: string, limit = 5000, passwor
     entries.push(e);
     total += e.type === "file" ? e.size : 0;
   });
-  return { path: r.virtual, entries, truncated: stopped, bytes: total, encrypted: false };
+  return { path: r.virtual, entries, truncated: stopped, bytes: total, encrypted: false, passwordUsed: false };
 }
 
 export type OverwritePolicy = "rename" | "overwrite" | "skip";
@@ -662,6 +664,7 @@ export async function prepareCompress(root: string, dir: string, names: string[]
   if (o.level !== undefined && (!Number.isInteger(o.level) || o.level < 0 || o.level > 9)) throw new ArchiveError(400, "level must be 0 to 9");
   const password = validPassword(o.password);
   if (password && !spec.encrypt) throw new ArchiveError(400, "password protection is only available for zip and 7z");
+  if (password && f === "zip" && /[^\x20-\x7e]/.test(password)) throw new ArchiveError(400, "zip passwords can only use plain ASCII characters (a 7z password can use any)");
   if (o.encryptHeaders && (f !== "7z" || !password)) throw new ArchiveError(400, "header encryption needs a password and the 7z format");
   if (o.splitBytes !== undefined && (!spec.split || !Number.isInteger(o.splitBytes) || o.splitBytes < MIN_VOLUME || o.splitBytes > 1024 ** 4)) {
     throw new ArchiveError(400, spec.split ? "volume size must be between 64 KiB and 1 TiB" : "split volumes are only available for zip and 7z");

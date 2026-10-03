@@ -65,9 +65,35 @@ export type PasswordState = "required" | "incorrect";
 /** Whether an error means "ask for (or re-ask) a password". */
 export const passwordState = (e: unknown): PasswordState | null =>
   e instanceof ApiError ? (e.code === "password_required" ? "required" : e.code === "password_incorrect" ? "incorrect" : null) : null;
+/**
+ * A password the user typed, plus what to do with it: by default the hub keeps it encrypted with a sliding
+ * expiry; `remember` keeps it until forgotten; `folder` applies it to every file in the same folder.
+ */
+export interface Pw {
+  password: string;
+  remember?: boolean;
+  folder?: boolean;
+}
 /** Passwords travel base64 in a header, never in a URL or JSON body (so they stay out of logs). */
-export const pwHeaders = (password?: string): Record<string, string> =>
-  password ? { "x-filedeck-password": btoa(String.fromCharCode(...new TextEncoder().encode(password))) } : {};
+export const pwHeaders = (pw?: Pw): Record<string, string> =>
+  pw?.password
+    ? {
+        "x-filedeck-password": btoa(String.fromCharCode(...new TextEncoder().encode(pw.password))),
+        "x-filedeck-save": pw.remember ? "forever" : "ttl",
+        "x-filedeck-scope": pw.folder ? "folder" : "file",
+      }
+    : {};
+
+export interface VaultEntry {
+  id: string;
+  node: string;
+  scope: "file" | "folder";
+  path: string;
+  remembered: boolean;
+  createdAt: number;
+  lastUsed: number;
+  expiresAt: number | null;
+}
 
 async function j<T>(r: Response): Promise<T> {
   if (!r.ok) {
@@ -148,7 +174,7 @@ export const isArchive = (name: string) => ARCHIVE_EXT.some((e) => name.toLowerC
 export const zipUrl = (node: string, dir: string, names: string[]) =>
   `${nodeBase(node)}/api/fs/zip?dir=${enc(dir)}${names.map((n) => `&name=${enc(n)}`).join("")}`;
 
-const postJob = (node: string, kind: string, body: unknown, password?: string) =>
+const postJob = (node: string, kind: string, body: unknown, password?: Pw) =>
   fetch(`${nodeBase(node)}/api/jobs/${kind}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...pwHeaders(password) },
@@ -405,17 +431,23 @@ export const api = {
   copy: (node: string, from: string[], toDir: string, o: SyncOpts = {}) => post(node, "copy", { from, toDir, ...o }),
   trash: (node: string, paths: string[]) => post(node, "trash", { paths }),
   remove: (node: string, paths: string[]) => post(node, "delete", { paths }),
-  startCompress: (node: string, dir: string, names: string[], format: ArchiveFormat, name: string, o: CompressOpts = {}, password?: string) =>
+  startCompress: (node: string, dir: string, names: string[], format: ArchiveFormat, name: string, o: CompressOpts = {}, password?: Pw) =>
     postJob(node, "compress", { dir, names, format, name, ...o }, password),
-  startExtract: (node: string, path: string, destDir: string, subfolder: boolean, o: { overwrite?: OverwritePolicy; entries?: string[] } = {}, password?: string) =>
+  startExtract: (node: string, path: string, destDir: string, subfolder: boolean, o: { overwrite?: OverwritePolicy; entries?: string[] } = {}, password?: Pw) =>
     postJob(node, "extract", { path, destDir, subfolder, ...o }, password),
   jobs: (node: string) => fetch(`${nodeBase(node)}/api/jobs`).then((r) => j<{ jobs: JobView[] }>(r)),
   cancelJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}/cancel`, { method: "POST" }).then((r) => j<JobView>(r)),
   dismissJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}`, { method: "DELETE" }).then((r) => j<unknown>(r)),
-  archiveList: (node: string, path: string, password?: string, limit?: number) =>
-    fetch(`${nodeBase(node)}/api/archive/list?path=${enc(path)}${limit ? `&limit=${limit}` : ""}`, { headers: pwHeaders(password) }).then((r) =>
-      j<{ entries: ArchiveEntry[]; truncated: boolean; bytes: number; encrypted?: boolean }>(r),
-    ),
+  archiveList: (node: string, path: string, password?: Pw, limit?: number) =>
+    fetch(`${nodeBase(node)}/api/archive/list?path=${enc(path)}${limit ? `&limit=${limit}` : ""}`, { headers: pwHeaders(password) }).then(async (r) => {
+      const saved = r.headers.get("x-filedeck-pw-source") === "saved";
+      return { ...(await j<{ entries: ArchiveEntry[]; truncated: boolean; bytes: number; encrypted?: boolean }>(r)), usedSaved: saved };
+    }),
+  vaultList: () => fetch("/api/vault").then((r) => j<{ entries: VaultEntry[]; persistent: boolean; ttlSeconds: number; maxHours: number }>(r)),
+  vaultForget: (id: string) => fetch(`/api/vault/${enc(id)}`, { method: "DELETE" }).then((r) => j<unknown>(r)),
+  vaultForgetAll: () => fetch("/api/vault", { method: "DELETE" }).then((r) => j<{ removed: number }>(r)),
+  vaultForgetPath: (node: string, path: string) =>
+    fetch("/api/vault/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node, path }) }).then((r) => j<{ removed: number }>(r)),
   transfer: (src: { node: string; path: string }, dst: { node: string; dir: string }, op: "copy" | "move", o: SyncOpts = {}) =>
     fetch("/api/transfer", {
       method: "POST",

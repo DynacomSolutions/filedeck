@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, fmtSize, parent, passwordState, type ArchiveEntry, type Entry } from "./api";
-import { ExtractDialog, PasswordInput } from "./ArchiveDialog";
+import { api, fmtSize, parent, passwordState, type ArchiveEntry, type Entry, type Pw } from "./api";
+import { ExtractDialog, PasswordInput, RememberOptions } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
@@ -12,8 +12,10 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
   const [data, setData] = useState<Listing | null>(null);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
-  const [pw, setPw] = useState<string | undefined>(undefined);
+  const [pw, setPw] = useState<Pw | undefined>(undefined);
   const [draft, setDraft] = useState("");
+  const [remember, setRemember] = useState(false);
+  const [folder, setFolder] = useState(false);
   const [lock, setLock] = useState<"required" | "incorrect" | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<string[] | null>(null);
@@ -66,10 +68,11 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              if (draft) setPw(draft);
+              if (draft) setPw({ password: draft, remember, folder });
             }}
           >
             <PasswordInput value={draft} onChange={setDraft} state={lock} />
+            <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} />
             <div className="ad-err" role="alert">{lock === "incorrect" ? "Wrong password." : ""}</div>
             <button type="submit" disabled={!draft}><Ic.LockOpen /> Unlock</button>
           </form>

@@ -12,6 +12,8 @@ import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
 import { renderIndex } from "./brand.ts";
 import { audit, type AuditSink } from "./audit.ts";
+import { Vault } from "./vault.ts";
+import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
 
 /** Where a request for a node or a network source goes. Agents are HTTP; sources run inside the hub. */
 export interface Target {
@@ -30,9 +32,14 @@ function clean(h: Headers, keepLength: boolean): Headers {
 }
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink) {
-  const app = new Hono() as Hono & { close(): Promise<void> };
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault };
   app.use("*", audit("hub", auditSink));
-  app.close = async () => void (await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined))));
+  const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
+  app.vault = vault;
+  app.close = async () => {
+    vault.close();
+    await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined)));
+  };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => fetch(n.url + rest, withAgentToken(init, cfg.agentToken)) }]));
   const sources = buildSources(cfg);
   for (const [name, backend] of Object.entries(injected ?? {})) {
@@ -202,6 +209,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     }
   });
 
+  registerVaultRoutes(app, vault, (n) => cfg.nodes.some((x) => x.name === n));
+
   // Reverse proxy: /api/nodes/<node>/<rest> -> <agent>/<rest>
   app.all("/api/nodes/:node/*", async (c) => {
     const target = agents.get(c.req.param("node"));
@@ -222,6 +231,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       if (len) (init.headers as Headers).set("content-length", len);
     }
     try {
+      if (isPasswordRoute(c.req.method, rest)) {
+        // encrypted archives / PDFs: the vault supplies (and saves) the password
+        const r = await proxyWithVault({ vault, node: c.req.param("node"), target, method: c.req.method, rest, search: url.search, headers: init.headers as Headers, body: c.req.raw.body, signal: c.req.raw.signal });
+        return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
+      }
       const r = await target.fetch(rest + url.search, init);
       return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
     } catch (e) {

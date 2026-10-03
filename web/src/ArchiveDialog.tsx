@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, passwordState, type ArchiveFormat, type OverwritePolicy } from "./api";
+import { api, passwordState, type ArchiveFormat, type OverwritePolicy, type Pw } from "./api";
+import { Tip } from "./Tooltip";
 import "./archive.css";
 import * as Ic from "lucide-react";
 
@@ -83,6 +84,7 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
     const volBytes = vol.trim() === "" ? undefined : Math.round(Number(vol) * unit);
     if (spec.encrypt && pw !== pw2) return setErr("The two passwords do not match.");
     if (/[\r\n]/.test(pw)) return setErr("A password cannot contain a line break.");
+    if (format === "zip" && /[^\x20-\x7e]/.test(pw)) return setErr("Zip passwords can only use plain ASCII characters. Use 7z for any characters.");
     if (volBytes !== undefined && (!Number.isFinite(volBytes) || volBytes < 64 * 1024)) return setErr("Volume size must be at least 64 KB.");
     const exclude = excl.split("\n").map((x) => x.trim()).filter(Boolean);
     setBusy(true);
@@ -101,7 +103,7 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
             ...(spec.split && volBytes ? { splitBytes: volBytes } : {}),
             ...(canHdr && hdr ? { encryptHeaders: true } : {}),
           },
-          spec.encrypt && pw ? pw : undefined,
+          spec.encrypt && pw ? { password: pw } : undefined,
         );
         onStatus(`Started: ${j.title}`);
       }
@@ -179,22 +181,41 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
 }
 
 /** Password row for a locked archive; `state` says why it is shown. */
-export function PasswordInput({ value, onChange, state, disabled, label = "Password" }: { value: string; onChange: (v: string) => void; state: "none" | "required" | "incorrect"; disabled?: boolean; label?: string }) {
+export type LockState = "none" | "required" | "incorrect" | "saved";
+export function PasswordInput({ value, onChange, state, disabled, label = "Password" }: { value: string; onChange: (v: string) => void; state: LockState; disabled?: boolean; label?: string }) {
   return (
     <label className="ad-pw">
       {label}
       <span className="ad-pw-in">
-        {state === "none" ? <Ic.LockOpen /> : <Ic.Lock />}
+        {state === "none" ? <Ic.LockOpen /> : state === "saved" ? <Ic.KeyRound /> : <Ic.Lock />}
         <input
           type="password"
           autoComplete="off"
           value={value}
-          disabled={disabled ?? state === "none"}
-          placeholder={state === "none" ? "Not password protected" : state === "incorrect" ? "Wrong password, try again" : "This archive is password protected"}
+          disabled={disabled ?? (state === "none" || state === "saved")}
+          placeholder={state === "none" ? "Not password protected" : state === "saved" ? "Using the saved password" : state === "incorrect" ? "Wrong password, try again" : "This archive is password protected"}
           onChange={(e) => onChange(e.target.value)}
         />
       </span>
     </label>
+  );
+}
+
+/** Remember / folder switches shown under a password field. Unticked, the hub keeps the password encrypted for a sliding window (24 h at most). */
+export function RememberOptions({ remember, setRemember, folder, setFolder, disabled }: { remember: boolean; setRemember: (v: boolean) => void; folder: boolean; setFolder: (v: boolean) => void; disabled?: boolean }) {
+  return (
+    <div className="ad-rem">
+      <Tip label="Without this the server still keeps the password, encrypted, while you keep using it (it expires after a short idle time and always after 24 hours). With it, it is kept until you choose Forget saved password.">
+        <label className="chk">
+          <input type="checkbox" checked={remember} disabled={disabled} onChange={(e) => setRemember(e.target.checked)} /> Remember
+        </label>
+      </Tip>
+      <Tip label="Also use this password for every other file in this folder.">
+        <label className="chk">
+          <input type="checkbox" checked={folder} disabled={disabled} onChange={(e) => setFolder(e.target.checked)} /> Use for all files in this folder
+        </label>
+      </Tip>
+    </div>
   );
 }
 
@@ -212,15 +233,17 @@ export function ExtractDialog({
   defaultDest: string;
   /** archive entries chosen in the archive browser; empty or missing extracts everything */
   entries?: string[];
-  password?: string;
+  password?: Pw;
   onClose: () => void;
   onStatus: (m: string) => void;
 }) {
   const [dest, setDest] = useState(defaultDest);
   const [sub, setSub] = useState(!entries?.length);
   const [policy, setPolicy] = useState<OverwritePolicy>("rename");
-  const [pw, setPw] = useState(initialPw ?? "");
-  const [lock, setLock] = useState<"none" | "required" | "incorrect">(initialPw ? "required" : "none");
+  const [pw, setPw] = useState(initialPw?.password ?? "");
+  const [remember, setRemember] = useState(initialPw?.remember ?? false);
+  const [folder, setFolder] = useState(initialPw?.folder ?? false);
+  const [lock, setLock] = useState<LockState>(initialPw ? "required" : "none");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   // Detect protection up front: the password row switches on instead of failing the job later.
@@ -228,7 +251,7 @@ export function ExtractDialog({
     let live = true;
     api
       .archiveList(node, archive, initialPw, 1)
-      .then((d) => live && d.encrypted && setLock("required"))
+      .then((d) => live && d.encrypted && setLock(d.usedSaved ? "saved" : "required"))
       .catch((e) => live && passwordState(e) && setLock("required"));
     return () => {
       live = false;
@@ -238,7 +261,7 @@ export function ExtractDialog({
     setErr("");
     setBusy(true);
     try {
-      const j = await api.startExtract(node, archive, dest, sub, { overwrite: policy, ...(entries?.length ? { entries } : {}) }, lock !== "none" && pw ? pw : undefined);
+      const j = await api.startExtract(node, archive, dest, sub, { overwrite: policy, ...(entries?.length ? { entries } : {}) }, lock !== "none" && lock !== "saved" && pw ? { password: pw, remember, folder } : undefined);
       onStatus(`Started: ${j.title}`);
       onClose();
     } catch (e) {
@@ -267,6 +290,13 @@ export function ExtractDialog({
         </select>
       </label>
       <PasswordInput value={pw} onChange={setPw} state={lock} />
+      <div className="ad-saved">
+        {lock === "saved" ? (
+          <button type="button" className="link" onClick={() => setLock("required")}><Ic.KeyRound /> Use a different password</button>
+        ) : (
+          <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} disabled={lock === "none"} />
+        )}
+      </div>
       <div className="ad-err" role="alert">{err}</div>
       <div className="modal-actions">
         <button type="button" onClick={onClose}><Ic.X /> Cancel</button>

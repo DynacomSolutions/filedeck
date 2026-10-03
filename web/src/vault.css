@@ -1,0 +1,11 @@
+/* Settings > Saved passwords. Fixed column widths and a reserved note line, so refreshing never moves the layout. */
+.vault-note{min-height:1.4em;display:flex;align-items:center;gap:.4rem}.vault-note svg{width:14px;height:14px;flex:none}
+.vault-bar{display:flex;gap:.4rem;align-items:center}.vault-count{margin-left:auto;font-size:.78rem}
+.vault-wrap{overflow-x:auto;max-width:100%}
+.vault-table{table-layout:fixed;min-width:44rem;width:100%}
+.vault-table .vault-loc{width:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vault-table .vault-scope{width:9.5rem}.vault-table .vault-kept{width:7.5rem}.vault-table .vault-date{width:8.8rem}.vault-table .vault-act{width:6.5rem;text-align:right}
+.vault-table td,.vault-table th{white-space:nowrap}
+.vault-empty{padding:1rem .6rem}
+.vault-sec{max-width:64rem}
+.set-body>.set-sec+.set-sec{margin-top:1.8rem}

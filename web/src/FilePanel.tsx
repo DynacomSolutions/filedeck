@@ -375,6 +375,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, items });
   };
+  /** Drop saved archive/PDF passwords for these files or folders (and everything below them). */
+  const forgetPasswords = (paths: string[]) =>
+    void Promise.all(paths.map((p) => api.vaultForgetPath(node, p)))
+      .then((rs) => {
+        const n = rs.reduce((a, r) => a + r.removed, 0);
+        onStatus(n ? `Forgot ${n} saved password(s)` : "No saved password here");
+      })
+      .catch((e: Error) => onStatus(e.message));
   const startCreate = (dir: string, type: "file" | "folder") => (dir === path && !cside && !leaf.sr ? setCreating(type) : setModal({ k: "new", dir, type }));
   const rowItems = (picked: Entry[], extra: SelRef[] = others): MenuItem[] => {
     const one = picked.length === 1 ? picked[0]! : undefined;
@@ -403,6 +411,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       { label: "Duplicate", disabled: extra.length > 0, onSelect: () => void duplicate(picked) },
       { label: "Compress...", onSelect: () => setDialog(extra.length ? { k: "compress", extra } : "compress") },
       { label: "Extract...", disabled: !(one && one.type === "file" && isArchive(one.name)), onSelect: () => setDialog("extract") },
+      { label: "Forget saved password", disabled: !picked.some((x) => isDirEntry(x) || isArchive(x.name) || /\.pdf$/i.test(x.name)), onSelect: () => forgetPasswords(picked.map((x) => x.path)) },
       { label: picked.length + extra.length === 1 && one!.type === "file" ? "Download" : "Download as zip", onSelect: () => download(picked, extra) },
       "sep",
       { label: picked.length + extra.length > 1 ? "Copy paths" : "Copy path", onSelect: () => void copyPaths(combine(picked, extra).map((x) => x.path)) },
@@ -424,6 +433,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     "sep",
     ...compareItems(),
     { label: "Copy path", onSelect: () => void copyPaths([dir]) },
+    { label: "Forget saved password", onSelect: () => forgetPasswords([dir]) },
     { label: "Open trash", onSelect: () => onTrash(node) },
     "sep",
     { label: "Properties", hint: here ? "Alt+Enter" : undefined, onSelect: () => openProps(here ? undefined : dir) },
