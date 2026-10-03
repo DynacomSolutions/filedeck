@@ -539,6 +539,42 @@ export interface SearchDone {
 }
 
 /** Streams a search (NDJSON from the agent) and reports each batch; abort the signal to cancel the walk on the node. */
+/**
+ * The folder listing, streamed when the node supports it (the agent sends NDJSON batches in the default order, so a folder with tens of
+ * thousands of entries paints its first rows at once); sources that answer with plain JSON are handled the same way as one batch.
+ * `onBatch` gets every batch as it arrives; the resolved value says whether the listing was cut off.
+ */
+export async function listStream(node: string, path: string, hidden: boolean, signal: AbortSignal, onBatch: (entries: Entry[]) => void): Promise<{ truncated: boolean }> {
+  const r = await fetch(`${nodeBase(node)}/api/fs/list?path=${enc(path)}&stream=1${hidden ? "&hidden=1" : ""}`, { signal });
+  if (!r.ok) await j<unknown>(r);
+  if (!(r.headers.get("content-type") ?? "").includes("ndjson") || !r.body) {
+    const v = (await r.json()) as { entries: Entry[]; truncated: boolean };
+    onBatch(v.entries);
+    return { truncated: v.truncated };
+  }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let done: { truncated: boolean } | null = null;
+  for (;;) {
+    const { value, done: end } = await reader.read();
+    buf += dec.decode(value, { stream: !end });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const o = JSON.parse(line) as { e?: Entry[]; done?: { truncated: boolean }; error?: string };
+      if (o.error) throw new Error(o.error);
+      if (o.e) onBatch(o.e);
+      if (o.done) done = o.done;
+    }
+    if (end) break;
+  }
+  if (!done) throw new Error("listing ended unexpectedly");
+  return done;
+}
+
 export async function searchStream(node: string, path: string, f: SearchForm, hidden: boolean, signal: AbortSignal, onBatch: (hits: SearchHit[], scanned: number) => void): Promise<SearchDone> {
   const qs = new URLSearchParams({ path, q: f.q, mode: f.mode, ic: f.ic ? "1" : "0", content: f.content, cre: f.cre ? "1" : "0", cic: f.cic ? "1" : "0", types: f.types });
   if (hidden) qs.set("hidden", "1");

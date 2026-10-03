@@ -1,7 +1,7 @@
 import { PANEL_MIME } from "./dock";
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { api, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
+import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
 import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploads";
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
@@ -91,6 +91,7 @@ type Modal =
   | { k: "link"; dir: string; existing?: Entry }
   | { k: "new"; dir: string; type: "file" | "folder" }
   | { k: "del"; refs: SelRef[] }
+const natural = new Intl.Collator(undefined, { numeric: true }); // shared: localeCompare with options builds a collator per call
 const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
@@ -103,6 +104,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const [loading, setLoading] = useState(true);
   const listKey = useRef("");
   const { upRow } = useSettings();
+  /** more entries of the open folder are still arriving */
+  const [streaming, setStreaming] = useState(false);
+  const sortRef = useRef<{ key: SortKey; asc: boolean }>({ key: "name", asc: true });
   /** rows rendered so far: a folder with tens of thousands of entries fills the DOM in steps as it is scrolled */
   const [limit, setLimit] = useState(RENDER_STEP);
   const [hidden, setHiddenState] = useState(leaf.hidden ?? false);
@@ -117,6 +121,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     setSortState(n);
     onPatch({ sort: n.key === "name" && n.asc ? undefined : n });
   };
+  sortRef.current = sort;
   const [anchor, setAnchor] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | null>(leaf.sel ?? null);
   const view = leaf.w === "g" ? "grid" : "list";
@@ -171,34 +176,60 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   useEffect(() => {
     let live = true;
     const key = `${node}\0${path}\0${hidden}`;
-    if (listKey.current !== key) {
+    const fresh = listKey.current !== key;
+    if (fresh) {
       // A different folder: drop the old rows so skeleton rows (not the previous folder) hold the space until the list arrives.
       listKey.current = key;
       setEntries([]);
       setLoading(true);
       setLimit(RENDER_STEP);
     }
-    api
-      .list(node, path, hidden)
+    // A folder just opened in the default order shows its rows as they stream in (they arrive in that order, so nothing moves);
+    // a refresh, or another sort order, waits for the whole listing and swaps it in at once.
+    const progressive = fresh && sortRef.current.key === "name" && sortRef.current.asc;
+    const got: Entry[] = [];
+    let flush = 0;
+    const show = () => {
+      flush = 0;
+      if (!live) return;
+      setEntries(got.slice());
+      setLoading(false);
+    };
+    const ctl = new AbortController();
+    listStream(node, path, hidden, ctl.signal, (batch) => {
+      got.push(...batch);
+      if (!progressive || !live) return;
+      setStreaming(true);
+      if (!flush) flush = window.setTimeout(show, got.length === batch.length ? 0 : 120);
+    })
       .then((r) => {
         if (!live) return;
-        setEntries(r.entries);
+        window.clearTimeout(flush);
+        setEntries(got);
         setLoading(false);
+        setStreaming(false);
         setErr(r.truncated ? "Listing truncated" : "");
-        const known = new Set(r.entries.map((e) => e.path));
+        const known = new Set(got.map((e) => e.path));
         setSel((s) => new Set([...s].filter((p) => known.has(p))));
       })
-      .catch((e: Error) => live && (setErr(e.message), setEntries([]), setLoading(false)));
+      .catch((e: Error) => live && (window.clearTimeout(flush), setErr(e.message), setEntries([]), setLoading(false), setStreaming(false)));
     return () => {
       live = false;
+      window.clearTimeout(flush);
+      ctl.abort();
     };
   }, [node, path, hidden, tick]);
 
   // Live feed: refresh when the watched directory changes.
   useEffect(() => {
     const es = new EventSource(`${nodeBase(node)}/api/events?path=${encodeURIComponent(path)}`);
-    es.addEventListener("change", refresh);
-    return () => es.close();
+    // A busy folder (a temp dir, a build output) fires many change events: relist at most once per 700 ms, after the last one.
+    let t = 0;
+    es.addEventListener("change", () => {
+      window.clearTimeout(t);
+      t = window.setTimeout(refresh, 700);
+    });
+    return () => (window.clearTimeout(t), es.close());
   }, [node, path, refresh]);
 
   const sorted = useMemo(() => {
@@ -207,7 +238,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     f.sort((a, b) => {
       const d = dirFirst(a) - dirFirst(b);
       if (d) return d;
-      const c = sort.key === "name" ? a.name.localeCompare(b.name, undefined, { numeric: true }) : a[sort.key] - b[sort.key];
+      const c = sort.key === "name" ? natural.compare(a.name, b.name) : a[sort.key] - b[sort.key];
       return sort.asc ? c : -c;
     });
     return f;
@@ -814,6 +845,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           </tbody>
         </table>
         )}
+        {streaming && <div className="muted pad fp-streaming" role="status">Loading entries... {entries.length.toLocaleString()} so far</div>}
         {!loading && !entries.length && !err && !creating && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
         {entries.length > 0 && !visible.length && <div className="muted pad">No entries match the filter.</div>}
       </div>

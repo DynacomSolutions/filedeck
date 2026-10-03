@@ -49,9 +49,36 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.get("/api/info", (c) => c.json({ node: cfg.node, root: cfg.root, watches: watches.size, readOnly: cfg.readOnly }));
   app.get("/api/mounts", async (c) => c.json({ mounts: (await listMounts(root, cfg.procMounts)).map((m) => (isReadOnly(cfg.readOnly, m.mountpoint) ? { ...m, readOnly: true } : m)) }));
 
-  app.get("/api/fs/list", async (c) =>
-    c.json(await ops.list(root, c.req.query("path") ?? "/", c.req.query("hidden") === "1")),
-  );
+  app.get("/api/fs/list", async (c) => {
+    const p = c.req.query("path") ?? "/";
+    const hidden = c.req.query("hidden") === "1";
+    if (c.req.query("stream") !== "1") return c.json(await ops.list(root, p, hidden));
+    // NDJSON: {"e":[entries]} batches in the default order, then {"done":{path,truncated}} (or {"error"} if it fails midway).
+    const gen = ops.listStream(root, p, hidden);
+    const first = await gen.next(); // a bad path fails here, with a proper status
+    const enc = new TextEncoder();
+    const line = (v: unknown) => enc.encode(JSON.stringify(v) + "\n");
+    const out = (v: IteratorResult<Awaited<ReturnType<typeof gen.next>>["value"]>) => (v.done ? null : "entries" in v.value ? line({ e: v.value.entries }) : line({ done: v.value.done }));
+    let pending: typeof first | null = first;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(ctl) {
+        try {
+          const r = pending ?? (await gen.next());
+          pending = null;
+          const o = out(r as never);
+          if (o) ctl.enqueue(o);
+          if (r.done || ("done" in (r.value ?? {}))) ctl.close();
+        } catch (e) {
+          ctl.enqueue(line({ error: ops.mapError(e).message }));
+          ctl.close();
+        }
+      },
+      cancel() {
+        void gen.return(undefined as never);
+      },
+    });
+    return new Response(body, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store" } });
+  });
   app.get("/api/fs/stat", async (c) => c.json(await ops.stat(root, c.req.query("path") ?? "/")));
 
   const serve = async (c: import("hono").Context, download: boolean) => {

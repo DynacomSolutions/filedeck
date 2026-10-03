@@ -118,6 +118,42 @@ export async function list(root: string, p: string, hidden: boolean) {
   return { path: r.virtual, entries: out, truncated };
 }
 
+/** The order the file list shows by default (folders first, then natural name order); the web app sorts the same way. */
+const natural = new Intl.Collator(undefined, { numeric: true }); // one collator: localeCompare with options builds a new one per call, far too slow for 20 000 names
+export const listOrder = (a: { name: string; dir: boolean }, b: { name: string; dir: boolean }) => Number(b.dir) - Number(a.dir) || natural.compare(a.name, b.name);
+
+/**
+ * The same listing as `list`, in the default order and in batches, so a huge folder can paint its first rows while the rest is still
+ * being read. Names and types come from one readdir; only symbolic links need a stat before sorting (a link to a folder sorts as a folder).
+ */
+export async function* listStream(root: string, p: string, hidden: boolean, batchSize = 500): AsyncGenerator<{ entries: Entry[] } | { done: { path: string; truncated: boolean } }> {
+  const r = resolveRead(root, p);
+  const st = await fs.stat(r.real);
+  if (!st.isDirectory()) throw new FsError(400, "not a directory");
+  const dirents = (await fs.readdir(r.real, { withFileTypes: true })).filter((d) => d.name !== TRASH_DIR && (hidden || !d.name.startsWith(".")));
+  const truncated = dirents.length > MAX_LIST;
+  const links = new Map<string, Entry>();
+  const linkNames = dirents.filter((d) => d.isSymbolicLink()).map((d) => d.name);
+  for (let i = 0; i < linkNames.length; i += 64) {
+    const got = await Promise.all(linkNames.slice(i, i + 64).map((n) => toEntry(root, r.virtual, r.real, n)));
+    for (const g of got) if (g) links.set(g.name, g);
+  }
+  const rows = dirents
+    .map((d) => ({ name: d.name, dir: d.isDirectory() || !!links.get(d.name)?.linkDir }))
+    .sort(listOrder)
+    .slice(0, MAX_LIST);
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const out: Entry[] = [];
+    const slice = rows.slice(i, i + batchSize);
+    for (let k = 0; k < slice.length; k += 64) {
+      const got = await Promise.all(slice.slice(k, k + 64).map((x) => links.get(x.name) ?? toEntry(root, r.virtual, r.real, x.name)));
+      for (const g of got) if (g) out.push(g);
+    }
+    if (out.length) yield { entries: out };
+  }
+  yield { done: { path: r.virtual, truncated } };
+}
+
 export async function stat(root: string, p: string) {
   const r = resolveWrite(root, p); // lstat semantics for the final component
   const parent = path.posix.dirname(r.virtual);
