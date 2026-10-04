@@ -72,16 +72,26 @@ spec:
               value: {{ $.Values.agent.indexWatches | quote }}
             - name: FILEDECK_INDEX_REVALIDATE_MS
               value: {{ $.Values.agent.indexRevalidateMs | quote }}
+            # Keep the V8 heap well under the container memory limit so the GC works before the cgroup would OOM-kill.
+            - name: NODE_OPTIONS
+              value: {{ $.Values.agent.nodeOptions | quote }}
           ports:
             - name: http
               containerPort: {{ $.Values.port }}
+          # /healthz is answered by the same Node event loop as everything else, and the hostPath volumes sit on shared
+          # hosts whose disks and CPUs spike (node-a load averaged 100+ while this agent was killed every ten minutes).
+          # The 1s default timeout turned any such stall into a restart; the real fix is keeping blocking work off the
+          # loop (index trim runs in a worker), these only stop a short stall from killing the pod.
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 5
+            timeoutSeconds: {{ $.Values.agent.probes.timeoutSeconds }}
           livenessProbe:
             httpGet: {path: /healthz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: {{ $.Values.agent.probes.timeoutSeconds }}
+            failureThreshold: {{ $.Values.agent.probes.livenessFailureThreshold }}
           resources:
             {{- toYaml $.Values.agent.resources | nindent 12 }}
           securityContext:
