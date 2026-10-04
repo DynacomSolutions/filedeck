@@ -58,13 +58,15 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
         <span className="muted">
           {fmtSize(entry.size)} · {fmtDate(entry.mtime)}
         </span>
+        <span className="pv-acts">
         {canEdit(entry) && (
-          <Tip label="Open in the editor"><button className="link" onClick={() => onEdit(node, entry.path)}><Ic.FilePen /> Edit</button></Tip>
+          <Tip label="Open in the editor"><button type="button" onClick={() => onEdit(node, entry.path)}><Ic.FilePen /> Edit</button></Tip>
         )}
         {entry.size > 0 && known && (
-          <Tip label="Show the raw bytes as a hex dump"><button className="link" aria-pressed={hex} onClick={() => setHex(!hex)}>{hex ? <Ic.Eye /> : <Ic.Binary />} {hex ? "Preview" : "Hex"}</button></Tip>
+          <Tip label="Show the raw bytes as a hex dump"><button type="button" aria-pressed={hex} onClick={() => setHex(!hex)}>{hex ? <Ic.Eye /> : <Ic.Binary />} {hex ? "Preview" : "Hex"}</button></Tip>
         )}
-        <a href={fileUrl(node, entry.path, "download")}><Ic.Download /> Download</a>
+        <Tip label="Download this file"><a className="btn-a" role="button" href={fileUrl(node, entry.path, "download")} download><Ic.Download /> Download</a></Tip>
+        </span>
         {extra}
       </div>
       <div className="pv-body">

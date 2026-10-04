@@ -292,7 +292,7 @@ export function ExtractDialog({
       <PasswordInput value={pw} onChange={setPw} state={lock} />
       <div className="ad-saved">
         {lock === "saved" ? (
-          <button type="button" className="link" onClick={() => setLock("required")}><Ic.KeyRound /> Use a different password</button>
+          <button type="button" onClick={() => setLock("required")}><Ic.KeyRound /> Use a different password</button>
         ) : (
           <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} disabled={lock === "none"} />
         )}

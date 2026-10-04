@@ -85,7 +85,7 @@ export function MediaPlayer({ node, path, name, kind }: { node: string; path: st
           {failed && (
             <span role="alert" className="pv-trans-err">
               Could not play this file (the transcoder may be busy, or the file is not valid media).{" "}
-              <button className="link" onClick={() => { setFailed(false); setTries((n) => n + 1); }}><Ic.RotateCw /> Retry</button>
+              <button type="button" onClick={() => { setFailed(false); setTries((n) => n + 1); }}><Ic.RotateCw /> Retry</button>
             </span>
           )}
         </div>

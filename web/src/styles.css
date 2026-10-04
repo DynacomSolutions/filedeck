@@ -15,6 +15,12 @@ button{display:inline-flex;align-items:center;justify-content:center;gap:var(--b
 button:disabled{opacity:.45;cursor:not-allowed}
 button:hover:not(:disabled){background:var(--surface-3)}
 button.btn{min-height:44px}
+a.btn-a{display:inline-flex;align-items:center;justify-content:center;gap:var(--btn-gap);font:inherit;color:var(--fg);background:var(--surface-2);box-shadow:var(--shadow-1);border-radius:var(--radius-btn);padding:0 .8rem;min-height:30px;font-size:.8rem;font-weight:600;line-height:1.2;cursor:pointer;text-decoration:none;box-sizing:border-box;transition:background var(--fast) var(--ease),color var(--fast) var(--ease)}
+a.btn-a:hover{background:var(--surface-3)}
+.pv-head .pv-acts{display:inline-flex;align-items:center;gap:.35rem;margin-left:auto}
+.pv-head .pv-acts>*,.pv-head .pv-acts button,.pv-head a.btn-a{min-height:28px;height:28px;box-sizing:border-box}
+.pv-head .pv-acts+.pv-extra{margin-left:0}
+.pv-head .pv-extra .pv-dockbtn{min-height:28px;height:28px}
 a{color:var(--accent-text)}
 input[type=text],input:not([type]),input[type=search]{background:var(--surface-2);border:0;box-shadow:var(--shadow-1);color:var(--fg);border-radius:var(--radius-btn);padding:.3rem .6rem;font:inherit;font-size:.88rem}
 input[type=text]:hover,input:not([type]):hover{border-color:var(--muted)}
@@ -117,7 +123,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .ico{margin-right:.45rem}
 
 /* preview */
-.pv-head{display:flex;flex-wrap:wrap;gap:.25rem .7rem;align-items:baseline;padding:.65rem .8rem;border-bottom:1px solid var(--border);font-size:.8rem}.pv-head b{overflow-wrap:anywhere}
+.pv-head{display:flex;flex-wrap:wrap;gap:.35rem .7rem;align-items:center;padding:.65rem .8rem;border-bottom:1px solid var(--border);font-size:.8rem}.pv-head b{overflow-wrap:anywhere}
 .pv-body{flex:1;min-height:0;overflow:auto;display:flex;align-items:flex-start;justify-content:center}
 .pv-body img,.pv-body video{max-width:100%;max-height:100%;object-fit:contain}.pv-body audio{width:100%;margin:1rem}.pv-body iframe{width:100%;height:100%;border:0;background:#fff}
 .pv-text{margin:0;padding:.7rem;font:.78rem/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;width:100%}
@@ -131,8 +137,6 @@ input[type=checkbox]{accent-color:var(--accent)}
 .ed-banner{display:flex;flex-wrap:wrap;gap:.5rem .8rem;align-items:center;padding:.5rem var(--gutter);background:var(--accent-tint);border-bottom:1px solid var(--accent-line);color:var(--fg);font-size:.82rem}.ed-banner.err{border-color:var(--border)}
 .ed-body{flex:1;min-height:0;position:relative}
 .pill{display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:var(--radius-btn);padding:.1rem .6rem;font-size:.7rem;font-weight:700;letter-spacing:.03em}
-button.link{border:0;background:transparent;color:var(--accent-text);padding:0;min-height:0;text-decoration:underline;font-weight:500}
-button.link:hover:not(:disabled){background:transparent}
 
 /* jobs: collapsible tray at the bottom of the sidebar */
 .jobs{flex:none;border-top:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;max-height:45%;min-height:0}
@@ -271,7 +275,7 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 /* hub jobs: conflict question, per-item list */
 .job-ask{margin:.4rem 0;padding:.5rem .6rem;border:1px solid var(--accent-line);background:var(--accent-tint);border-radius:var(--radius-sm);font-size:.74rem;display:grid;gap:.4rem}
 .job-ask-btns{display:flex;flex-wrap:wrap;gap:.35rem}.job-ask-btns button{padding:0 .6rem;min-height:24px;font-size:.72rem}
-.job-more{margin-top:.25rem;padding:0 .5rem;min-height:22px;font-size:.68rem;background:transparent;border:0;color:var(--muted);text-decoration:underline;cursor:pointer}
+.job-more{margin-top:.25rem;padding:0 .6rem;min-height:24px;font-size:.7rem}
 .job-items{margin:.3rem 0 0;max-height:12rem;overflow:auto;font-size:.7rem}
 .job-items .it{display:flex;gap:.4rem;padding:.12rem 0;align-items:baseline;flex-wrap:wrap}.job-items .it-l{overflow-wrap:anywhere}.job-items .it.failed .it-s{color:var(--accent)}
 
@@ -512,7 +516,7 @@ kbd{border:0;box-shadow:var(--shadow-1);border-radius:var(--radius-btn)}
 .ft th{border-bottom:1px solid var(--border)}
 .ft td{border-bottom:1px solid var(--border)}
 /* quiet buttons: no resting fill or shadow */
-.fp-actions button,.pv-dockbtn,.fp-tab-x,.fp-tab-new,.mark-rm,.crumbs button,button.link,.jobs-toggle,.job-more,.cmp-twisty,.tr-tabs button:not(.on),.theme-seg button:not([aria-checked=true]){box-shadow:none;background:transparent;border:0}
+.fp-actions button,.pv-dockbtn,.fp-tab-x,.fp-tab-new,.mark-rm,.crumbs button,.jobs-toggle,.cmp-twisty,.tr-tabs button:not(.on),.theme-seg button:not([aria-checked=true]){box-shadow:none;background:transparent;border:0}
 .fp-actions button:hover:not(:disabled){background:var(--surface-3)}
 .fp-actions button.marked,.pv-dockbtn.on,.tr-tabs button.on,.fd-tog[aria-pressed=true]{background:var(--accent-tint);box-shadow:none;border:0}
 button.primary{border:0;background:var(--accent-fill);color:#fff}
