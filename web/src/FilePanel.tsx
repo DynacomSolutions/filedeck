@@ -18,7 +18,7 @@ import { AddressBar } from "./AddressBar";
 import { CompareBar, CompareBody, ROW_H, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
-import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
+import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey, type TabLoc } from "./urlState";
 import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
@@ -66,11 +66,11 @@ interface Props {
   onCompare: (peerId: string) => void;
   /** the other panels, for "diff with..." / "compare with..." menu entries */
   peers: { id: string; node: string; path: string; sel?: string; picked?: boolean }[];
-  /** items selected in the other panels: Shift/Ctrl+click adds to them, a plain click clears them, and actions here run on the lot */
+  /** items selected in the other panels: Shift/Ctrl+click adds to them, a plain click drops them from the action selection (their active items stay), and actions here run on the lot */
   others: SelRef[];
   /** this panel is picked as a whole (Shift/Ctrl+click on its header) */
   panelPicked: boolean;
-  /** a plain selection elsewhere asks every other panel to drop its selection */
+  /** a plain selection elsewhere asks every other panel to drop its items from the action selection (each keeps its own active item) */
   clearReq: { except: string; n: number } | null;
   onSelection: (refs: SelRef[]) => void;
   onClearOthers: () => void;
@@ -111,7 +111,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const [limit, setLimit] = useState(RENDER_STEP);
   const [hidden, setHiddenState] = useState(leaf.hidden ?? false);
   const [sort, setSortState] = useState<{ key: SortKey; asc: boolean }>(leaf.sort ?? { key: "name", asc: true });
-  const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sels ?? (leaf.sel ? [leaf.sel] : [])));
+  const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sels ?? (leaf.sel && !leaf.ns ? [leaf.sel] : [])));
   const setHidden = (h: boolean) => {
     setHiddenState(h);
     onPatch({ hidden: h || undefined });
@@ -123,7 +123,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   sortRef.current = sort;
   const [anchor, setAnchor] = useState<string | null>(null);
+  /** the panel's ACTIVE item: drives its preview/properties and is never touched by actions in other panels (the action selection is `sel`) */
   const [cursor, setCursor] = useState<string | null>(leaf.sel ?? null);
+  const cursorRef = useRef(cursor);
+  cursorRef.current = cursor;
+  const selRef = useRef(sel);
+  selRef.current = sel;
+  /** the previous listing's paths in display order, to pick the next sibling when the active item disappears */
+  const orderRef = useRef<string[]>([]);
   const view = leaf.w === "g" ? "grid" : "list";
   const filter = leaf.q ?? "";
   const [filterOpen, setFilterOpen] = useState(!!leaf.q);
@@ -157,7 +164,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // A narrow panel (phone, deep split) always stacks the preview underneath; the saved dock is kept for wide panels.
   const dock: Dock = narrow ? "bottom" : (leaf.pv?.dock ?? "right");
   const pvSize = leaf.pv?.size ?? 40;
-  /** the side panel shows the Properties tab (details of the selection, or of the folder when nothing is selected) instead of the Preview */
+  /** the side panel shows the Properties tab (details of the active item) instead of the Preview */
   const propsOpen = leaf.pv?.tab === "props";
   const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize, ...(propsOpen ? { tab: "props" as const } : {}) } });
   const setTab = (tab: "props" | undefined) => onPatch({ pv: { dock: leaf.pv?.dock ?? "right", size: pvSize, ...(tab ? { tab } : {}) } });
@@ -210,7 +217,27 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         setStreaming(false);
         setErr(r.truncated ? "Listing truncated" : "");
         const known = new Set(got.map((e) => e.path));
-        setSel((s) => new Set([...s].filter((p) => known.has(p))));
+        const act = cursorRef.current;
+        let nextActive = act;
+        if (act && !known.has(act)) {
+          // The active item vanished (trashed, moved, renamed, external change): the next sibling in the old display order takes over,
+          // else the previous one; an emptied folder leaves no active item. A different folder never inherits an item.
+          nextActive = null;
+          const old = orderRef.current;
+          const at = fresh ? -1 : old.indexOf(act);
+          if (at >= 0) {
+            for (let k = at + 1; k < old.length && !nextActive; k++) if (known.has(old[k]!)) nextActive = old[k]!;
+            for (let k = at - 1; k >= 0 && !nextActive; k--) if (known.has(old[k]!)) nextActive = old[k]!;
+          }
+        }
+        const was = selRef.current;
+        const kept = [...was].filter((p) => known.has(p));
+        const nextSel = kept.length === 0 && act && was.has(act) && nextActive ? new Set([nextActive]) : new Set(kept);
+        if (nextActive !== act) {
+          setCursor(nextActive);
+          setAnchor(nextActive);
+        }
+        setSel((s) => (nextSel.size === s.size && [...nextSel].every((p) => s.has(p)) ? s : nextSel));
       })
       .catch((e: Error) => live && (window.clearTimeout(flush), setErr(e.message), setEntries([]), setLoading(false), setStreaming(false)));
     return () => {
@@ -249,20 +276,24 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     return q ? sorted.filter((e) => e.name.toLowerCase().includes(q)) : sorted;
   }, [sorted, filter]);
 
-  const only = sel.size === 1 ? entries.find((e) => e.path === [...sel][0]) : undefined;
+  orderRef.current = sorted.map((e) => e.path);
+  const activeEntry = cursor ? entries.find((e) => e.path === cursor) : undefined;
+  /** the item the side panel shows: the active one, unless several items are selected here */
+  const only = sel.size <= 1 ? activeEntry : undefined;
   const previewEntry = only && only.type !== "dir" && !only.linkDir && !only.broken && closedFor !== only.path ? only : null; // a broken link has nothing to preview
   useEffect(() => {
-    if (closedFor && closedFor !== only?.path) setClosedFor(null);
-  }, [only?.path, closedFor]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => setPropsFor(null), [sel, node, path]);
-  // Mirror a single selection into the URL once the listing has confirmed it exists.
+    if (closedFor && closedFor !== cursor) setClosedFor(null);
+  }, [cursor, closedFor]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => setPropsFor(null), [sel, cursor, node, path]);
+  // Mirror the active item and the selection into the URL once the listing has confirmed they exist.
   useEffect(() => {
-    if (!entries.length && sel.size) return; // a deep-linked selection waits for the listing
-    const v = sel.size === 1 ? [...sel][0] : undefined;
+    if (!entries.length && (sel.size || cursor)) return; // a deep-linked selection waits for the listing
+    const v = cursor ?? undefined;
     const many = sel.size > 1 && sel.size <= MAX_SELS ? [...sel].sort() : undefined;
+    const ns = cursor && !sel.has(cursor) ? (true as const) : undefined;
     const old = leaf.sels ? [...leaf.sels].sort() : undefined;
-    if (v !== leaf.sel || many?.join("\0") !== old?.join("\0")) onPatch({ sel: v, sels: many });
-  }, [sel, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (v !== leaf.sel || ns !== leaf.ns || many?.join("\0") !== old?.join("\0")) onPatch({ sel: v, sels: many, ns });
+  }, [sel, cursor, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
   // Report the selection upward so the other panels and the selection bar see it.
   useEffect(() => {
     onSelection(entries.filter((e) => sel.has(e.path)).map((e) => refOf(leaf.id, node, e)));
@@ -270,6 +301,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // A request made before this panel existed (a new panel opened with a selection) is not for it.
   const seenClear = useRef(clearReq?.n);
   useEffect(() => {
+    // The active item stays: only the action selection is dropped.
     if (clearReq && clearReq.n !== seenClear.current && clearReq.except !== leaf.id) setSel((s) => (s.size ? new Set() : s));
   }, [clearReq]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -467,7 +499,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { label: "Forget saved password", onSelect: () => forgetPasswords([dir]) },
     { label: "Open trash", onSelect: () => onTrash(node) },
     "sep",
-    { label: "Properties", hint: here ? "Alt+Enter" : undefined, onSelect: () => openProps(here ? undefined : dir) },
+    { label: "Properties", hint: here ? "Alt+Enter" : undefined, onSelect: () => openProps(dir) },
   ];
 
   const drop = async (e: React.DragEvent, destDir: string) => {
@@ -529,7 +561,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           <Tip label={previewEntry || (only && !isDirEntry(only) && !only.broken) ? "Preview the selected file" : "Select one file to preview it"}>
             <button type="button" className={"pv-dockbtn" + (!propsOpen ? " on" : "")} aria-pressed={!propsOpen} disabled={propsOpen && !(only && !isDirEntry(only) && !only.broken)} aria-label="Preview" onClick={showPreview}><Ic.Eye /></button>
           </Tip>
-          <Tip label="Properties of the selection (the folder when nothing is selected)" shortcut="Alt+Enter">
+          <Tip label="Properties of the active item" shortcut="Alt+Enter">
             <button type="button" className={"pv-dockbtn" + (propsOpen ? " on" : "")} aria-pressed={propsOpen} aria-label="Properties" onClick={() => openProps()}><Ic.Info /></button>
           </Tip>
         </span>
@@ -555,20 +587,20 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       </span>
     </span>
   );
-  const propsKey = propsFor ?? (sel.size === 1 ? [...sel][0]! : sel.size === 0 ? path : null);
+  const propsKey = propsFor ?? (sel.size > 1 ? null : cursor);
   const propsPane =
     propsKey !== null ? (
       <div className="pv">
         <div className="pv-head">
           <Tip label={propsKey}><b>{propsKey === "/" ? `${node}:/` : base(propsKey)}</b></Tip>
-          <span className="muted">{propsFor ? "Folder" : sel.size === 0 ? "This folder" : "Selected"}</span>
+          <span className="muted">{propsFor ? "Folder" : "Active"}</span>
           {paneExtra}
         </div>
         <div className="pv-body pp-body">
-          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && sel.size === 1 && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} />
+          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} />
         </div>
       </div>
-    ) : (
+    ) : sel.size > 1 ? (
       <div className="pv">
         <div className="pv-head">
           <b>{sel.size.toLocaleString()} items</b>
@@ -577,7 +609,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         </div>
         <div className="pv-body pp-body"><PropertiesMulti entries={selEntries} /></div>
       </div>
-    );
+    ) : null; // no active item: no side panel at all (no placeholder, no folder fallback)
   const pane = cside ? null : editing ? (
     <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
       <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
@@ -590,24 +622,36 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // ---- tabs: several folders per panel; `node`/`path` stay the active tab's, the list lives in the URL ----
   const marks = useBookmarks();
   const here = { node, path };
-  const tabs: Loc[] = leaf.tabs ?? [here];
+  /** every tab with its own active item, selection and closed preview; the open tab's live state replaces its stored one */
+  const curTab: TabLoc = {
+    node,
+    path,
+    ...(cursor ? { sel: cursor } : {}),
+    ...(cursor && !sel.has(cursor) ? { ns: true as const } : {}),
+    ...(sel.size > 1 && sel.size <= MAX_SELS ? { sels: [...sel].sort() } : {}),
+    ...(closedFor ? { closed: closedFor } : {}),
+  };
+  const tabs: TabLoc[] = (leaf.tabs ?? [here]).map((t, k) => (k === Math.min(leaf.ti ?? 0, (leaf.tabs?.length ?? 1) - 1) ? curTab : t));
   const ti = Math.min(leaf.ti ?? 0, tabs.length - 1);
   const [tabDrag, setTabDrag] = useState<number | null>(null);
-  const applyTabs = (list: Loc[], idx: number, reset: boolean) => {
+  const applyTabs = (list: TabLoc[], idx: number, reset: boolean) => {
     const t = list[idx]!;
     onPatch({
       tabs: list.length > 1 ? list : undefined,
       ti: list.length > 1 && idx > 0 ? idx : undefined,
       node: t.node,
       path: t.path,
-      ...(reset ? { sel: undefined, closed: undefined, sr: undefined, q: undefined } : {}),
+      // the tab's own active item, selection and preview state come back with it
+      ...(reset ? { sel: t.sel, sels: t.sels, ns: t.ns, closed: t.closed, sr: undefined, q: undefined } : {}),
     });
     if (reset) {
-      setSel(new Set());
+      setSel(new Set(t.sels ?? (t.sel && !t.ns ? [t.sel] : [])));
+      setCursor(t.sel ?? null);
+      setAnchor(t.sel ?? null);
       setFilterOpen(false);
     }
   };
-  const newTab = (at: Loc = here) => {
+  const newTab = (at: TabLoc = here) => {
     if (tabs.length >= MAX_TABS) return onStatus(`At most ${MAX_TABS} tabs per panel`);
     const list = [...tabs.slice(0, ti + 1), at, ...tabs.slice(ti + 1)];
     applyTabs(list, ti + 1, at.node !== node || at.path !== path);
@@ -649,7 +693,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // Shared by the list rows and the grid tiles: selection, open, context menu, drag and drop.
   const itemProps = (en: Entry, isDir: boolean, cls: string) => ({
     "data-path": en.path,
-    className: cls + (sel.has(en.path) ? "sel " : "") + (cursor === en.path ? "cur " : "") + (over === en.path ? "drop" : ""),
+    className: cls + (sel.has(en.path) ? "sel " : "") + (cursor === en.path ? (sel.has(en.path) ? "cur " : "cur act ") : "") + (over === en.path ? "drop" : ""),
     draggable: true,
     onClick: (e: React.MouseEvent) => click(e, en),
     onDoubleClick: () => open(en),
@@ -662,12 +706,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         onClearOthers();
         setSel(new Set([en.path]));
         setAnchor(en.path);
+        setCursor(en.path);
       }
       showMenu(e, rowItems(picked, inSel ? others : []));
     },
     onDragStart: (e: React.DragEvent) => {
       const paths = sel.has(en.path) ? selected() : [en.path];
-      if (!sel.has(en.path)) (onClearOthers(), setSel(new Set([en.path])));
+      if (!sel.has(en.path)) (onClearOthers(), setSel(new Set([en.path])), setCursor(en.path));
       setDrag(e, { node, paths });
     },
     onDragOver: isDir ? (e: React.DragEvent) => dragOver(e, en.path) : undefined,
@@ -754,9 +799,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           // Tabbing into the list selects the first entry so the arrow keys have somewhere to start. A mouse click
           // also focuses the list but must not: selecting (and scrolling to) the first row between mousedown and
           // mouseup made clicks on rows further down land elsewhere. :focus-visible is true for keyboard focus only.
-          if (e.target === e.currentTarget && sel.size === 0 && visible[0] && e.currentTarget.matches(":focus-visible")) selectOnly(visible[0].path);
+          if (e.target === e.currentTarget && sel.size === 0 && e.currentTarget.matches(":focus-visible")) {
+            const keep = cursor ? visible.find((x) => x.path === cursor) : undefined;
+            const go = keep ?? visible[0];
+            if (go) selectOnly(go.path);
+          }
         }}
-        onClick={(e) => e.target === e.currentTarget && (onClearOthers(), setSel(new Set()))}
+        onClick={(e) => e.target === e.currentTarget && (onClearOthers(), setSel(new Set()), setCursor(null))}
         onContextMenu={(e) => {
           onFocus();
           onClearOthers();
@@ -941,7 +990,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (key === "End") return moveTo(visible.length - 1), true;
       if (key === "PageDown") return moveTo(idx + 10), true;
       if (key === "PageUp") return moveTo(idx - 10), true;
-      if (key === "Enter" && e.altKey && !mod) return (propsOpen && !editing ? closeSide() : openProps()), true;
+      if (key === "Enter" && e.altKey && !mod) return (propsOpen && !editing && propsPane ? closeSide() : openProps()), true;
       if (key === "Enter" && !mod) {
         const en = visible[idx];
         return !!en && (open(en), true);
@@ -962,7 +1011,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (key === "Escape") {
         if (filter || filterOpen) return onPatch({ q: undefined }), setFilterOpen(false), true;
         if (others.length) onClearOthers();
-        return (sel.size > 0 || others.length > 0) && (setSel(new Set()), true);
+        return (sel.size > 0 || others.length > 0 || !!cursor) && (setSel(new Set()), setCursor(null), true);
       }
       if (key === "ContextMenu" || (e.shiftKey && key === "F10")) {
         const row = cursor ? secRef.current?.querySelector(`[data-path="${CSS.escape(cursor)}"]`) : null;
@@ -1001,7 +1050,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       : []),
     { id: "search", label: "Search under this folder (Ctrl+Shift+F)", icon: <Search />, pressed: !!leaf.sr, run: () => setSearch(leaf.sr ? undefined : EMPTY_SEARCH) },
     { id: "hidden", label: hidden ? "Hide hidden files" : "Show hidden files", icon: hidden ? <Eye /> : <EyeOff />, pressed: hidden, run: () => setHidden(!hidden) },
-    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing, run: () => (propsOpen && !editing ? closeSide() : openProps()) },
+    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing && !!propsPane, run: () => (propsOpen && !editing && propsPane ? closeSide() : (!cursor && sel.size === 0 && onStatus("Select an item to see its properties"), openProps())) },
     {
       id: "compare",
       label: cside ? "Exit compare mode" : "Compare with another panel (right-click to choose which)",

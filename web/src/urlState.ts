@@ -6,6 +6,14 @@ export interface FileRef {
 export type Loc = FileRef;
 export type DiffMode = "name" | "size" | "mtime" | "content" | "quick";
 
+/** A tab: its folder plus the tab's own active item, selection and closed preview (kept while another tab is shown). */
+export interface TabLoc extends Loc {
+  sel?: string;
+  sels?: string[];
+  ns?: true;
+  closed?: string;
+}
+
 export type Dock = "left" | "right" | "top" | "bottom";
 export type SortKey = "name" | "size" | "mtime";
 
@@ -32,8 +40,10 @@ export interface Leaf {
   id: string;
   node: string;
   path: string;
-  /** the single selected entry (path), when exactly one is selected */
+  /** the panel's ACTIVE item (path): the cursor that drives its preview/properties; independent of the action selection */
   sel?: string;
+  /** the active item is not part of the action selection (a plain click in another panel dropped it) */
+  ns?: true;
   /** every selected path when several are selected here (capped; a selection can also span several panels) */
   sels?: string[];
   sort?: { key: SortKey; asc: boolean };
@@ -51,7 +61,7 @@ export interface Leaf {
   /** view mode: absent = list, "g" = thumbnail grid */
   w?: "g";
   /** tabs (every tab's folder, in order); absent = a single location. `node`/`path` above are always the active tab's. */
-  tabs?: Loc[];
+  tabs?: TabLoc[];
   /** index of the active tab in `tabs` */
   ti?: number;
 }
@@ -115,7 +125,8 @@ export interface AppState {
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 1; v?: [string, number] | [string, number, "p"]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: [string, string][]; ti?: number };
+type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 1; v?: [string, number] | [string, number, "p"]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
+type WTab = { s?: string; m?: string[]; x?: 1; c?: string };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
@@ -137,7 +148,8 @@ const toWire = (t: Tree): WTree => {
   if (t.kind === "split") return { i: t.id, d: t.dir === "horizontal" ? "h" : "v", k: t.children.map(toWire), ...(t.sizes ? { z: t.sizes.map((x) => Math.round(x * 10) / 10) } : {}) };
   const w: WLeaf = { i: t.id, n: t.node, p: t.path };
   if (t.sel) w.s = t.sel;
-  else if (t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
+  if (t.ns) w.x = 1;
+  if (t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
   if (t.sort && (t.sort.key !== "name" || !t.sort.asc)) w.o = `${t.sort.key}:${t.sort.asc ? "a" : "d"}`;
   if (t.hidden) w.h = 1;
   if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
@@ -146,7 +158,16 @@ const toWire = (t: Tree): WTree => {
   if (t.q) w.q = t.q;
   if (t.w === "g") w.w = "g";
   if (t.tabs && t.tabs.length > 1) {
-    w.tb = t.tabs.map((x) => [x.node, x.path]);
+    w.tb = t.tabs.map((x, i) => {
+      // the active tab's own state lives on the panel itself
+      if (i === (t.ti ?? 0)) return [x.node, x.path];
+      const o: WTab = {};
+      if (x.sel) o.s = x.sel;
+      if (x.ns) o.x = 1;
+      if (x.sels && x.sels.length > 1) o.m = x.sels.slice(0, MAX_SELS);
+      if (x.closed) o.c = x.closed;
+      return Object.keys(o).length ? [x.node, x.path, o] : [x.node, x.path];
+    });
     if (t.ti) w.ti = t.ti;
   }
   if (t.sr) {
@@ -203,7 +224,8 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (!str(o.n) || !str(o.p)) return null;
   const leaf: Leaf = { kind: "leaf", id: o.i, node: o.n, path: o.p };
   if (str(o.s)) leaf.sel = o.s;
-  else if (Array.isArray(o.m) && o.m.length > 1 && o.m.length <= MAX_SELS && o.m.every(str)) leaf.sels = o.m as string[];
+  if (o.x === 1 && leaf.sel) leaf.ns = true;
+  if (Array.isArray(o.m) && o.m.length > 1 && o.m.length <= MAX_SELS && o.m.every(str)) leaf.sels = o.m as string[];
   if (str(o.o)) {
     const [key, dir] = o.o.split(":");
     if (key === "name" || key === "size" || key === "mtime") leaf.sort = { key, asc: dir !== "d" };
@@ -215,7 +237,16 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (str(o.q) && o.q) leaf.q = o.q;
   if (o.w === "g") leaf.w = "g";
   if (Array.isArray(o.tb) && o.tb.length > 1 && o.tb.length <= MAX_TABS && o.tb.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]) && x[1].startsWith("/"))) {
-    leaf.tabs = (o.tb as [string, string][]).map(([node, path]) => ({ node, path }));
+    leaf.tabs = (o.tb as [string, string, WTab?][]).map(([node, path, t]) => {
+      const tab: TabLoc = { node, path };
+      if (t && typeof t === "object") {
+        if (str(t.s)) tab.sel = t.s;
+        if (t.x === 1 && tab.sel) tab.ns = true;
+        if (Array.isArray(t.m) && t.m.length > 1 && t.m.length <= MAX_SELS && t.m.every(str)) tab.sels = t.m as string[];
+        if (str(t.c)) tab.closed = t.c;
+      }
+      return tab;
+    });
     leaf.ti = typeof o.ti === "number" && Number.isInteger(o.ti) && o.ti >= 0 && o.ti < leaf.tabs.length ? o.ti : 0;
     leaf.tabs[leaf.ti] = { node: leaf.node, path: leaf.path };
   }
@@ -235,6 +266,18 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
 };
 
 export const MAX_TABS = 16;
+
+/** The panel's own tab state (active item, selection, closed preview) as stored on a tab entry. */
+export const tabOf = (l: Leaf): TabLoc => ({
+  node: l.node,
+  path: l.path,
+  ...(l.sel ? { sel: l.sel } : {}),
+  ...(l.ns ? { ns: true as const } : {}),
+  ...(l.sels ? { sels: l.sels } : {}),
+  ...(l.closed ? { closed: l.closed } : {}),
+});
+/** Leaf fields that a tab entry restores when it becomes the panel's tab. */
+export const fromTab = (t: TabLoc): Pick<Leaf, "node" | "path" | "sel" | "sels" | "ns" | "closed"> => ({ node: t.node, path: t.path, sel: t.sel, sels: t.sels, ns: t.ns, closed: t.closed });
 
 /** Keeps `tabs[ti]` equal to the panel's own node/path (navigation edits the active tab in place). Same object when nothing changes. */
 export function syncTabs(l: Leaf): Leaf {

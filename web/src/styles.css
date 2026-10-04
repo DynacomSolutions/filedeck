@@ -225,6 +225,8 @@ button.primary{border-color:var(--accent);color:var(--accent)}
 .fp:focus{outline:none}
 .ft tr.cur{box-shadow:inset 2px 0 0 var(--accent)}
 .fp:not(:focus-within) .ft tr.cur{box-shadow:none}
+/* an active item that is not in the action selection (another panel was clicked): a quiet marker instead of the selection tint */
+.fp:not(:focus-within) .ft tr.cur.act{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--border-strong)}
 .fp-filter{padding:.4rem .65rem}
 .fp-filter input{width:100%}
 .kbd-help{outline:none;max-height:calc(100dvh - 48px);overflow:auto}
@@ -260,6 +262,11 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .perm-row select{background:transparent;color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:.3rem .5rem;font:inherit;font-size:.84rem}
 .perm-row select option{background:var(--surface)}
 .perm-hint{font-size:.72rem}
+.perm-spin{display:inline-flex;width:15px;height:15px;flex:none;align-items:center;justify-content:center}
+.perm-field{display:flex;align-items:center;gap:.4rem;text-transform:none;letter-spacing:0}
+.perm-row input[aria-invalid=true]{box-shadow:inset 0 0 0 1.5px var(--danger,#d33)}
+.perm-special>summary{cursor:pointer;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem}
+.perm-special[open]>summary{margin-bottom:.5rem}
 .props dd button{min-height:26px;font-size:.76rem}
 /* hub jobs: conflict question, per-item list */
 .job-ask{margin:.4rem 0;padding:.5rem .6rem;border:1px solid var(--accent-line);background:var(--accent-tint);border-radius:var(--radius-sm);font-size:.74rem;display:grid;gap:.4rem}
@@ -286,7 +293,7 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .fp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(8.5rem,1fr));gap:.5rem;padding:.6rem}
 .tile{display:flex;flex-direction:column;gap:.3rem;padding:.4rem;border:1px solid transparent;border-radius:var(--radius-sm);min-width:0;cursor:default;transition:background var(--fast) var(--ease)}
 .tile:hover{background:var(--surface-2)}.tile.sel{background:var(--accent-tint);border-color:var(--accent-line)}.tile.drop{outline:2px solid var(--accent);outline-offset:-2px}
-.fp:not(:focus-within) .tile.cur{box-shadow:none}.tile.cur{box-shadow:inset 0 0 0 1px var(--accent)}
+.fp:not(:focus-within) .tile.cur{box-shadow:none}.fp:not(:focus-within) .tile.cur.act{background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--border-strong)}.tile.cur{box-shadow:inset 0 0 0 1px var(--accent)}
 .tile-img{position:relative;aspect-ratio:4/3;display:grid;place-items:center;background:var(--surface-2);border-radius:var(--radius-sm);overflow:hidden}
 .tile-img img{width:100%;height:100%;object-fit:contain;display:block}
 .tile-ico{font-size:2.4rem;opacity:.75}

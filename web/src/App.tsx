@@ -3,7 +3,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
+import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, tabOf, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
@@ -408,13 +408,14 @@ export function App() {
   const openTab = (node: string, path: string) =>
     update((l) => {
       if (l.id !== activeId) return l;
-      const tabs = l.tabs ?? [{ node: l.node, path: l.path }];
+      const ti0 = l.ti ?? 0;
+      const tabs = (l.tabs ?? [tabOf(l)]).map((t, k) => (k === ti0 ? tabOf(l) : t));
       if (tabs.length >= MAX_TABS) {
         setStatus(`At most ${MAX_TABS} tabs per panel`);
         return l;
       }
       const ti = l.ti ?? 0;
-      return { ...l, tabs: [...tabs.slice(0, ti + 1), { node, path }, ...tabs.slice(ti + 1)], ti: ti + 1, node, path, sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined };
+      return { ...l, tabs: [...tabs.slice(0, ti + 1), { node, path }, ...tabs.slice(ti + 1)], ti: ti + 1, node, path, sel: undefined, sels: undefined, ns: undefined, closed: undefined, sr: undefined, q: undefined };
     });
   const openFromSide = (node: string, path: string, how: How) => (how === "panel" ? openPanel(node, path) : how === "tab" ? openTab(node, path) : openInActive(node, path));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
