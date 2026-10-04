@@ -125,11 +125,19 @@ export function registerTranscodeRoutes(app: Hono, cfg: Config) {
     }
     active++;
     const child = spawnTool(cfg.ffmpeg, transcodeArgs(kind, t), f.fh.fd);
+    // The slot frees as soon as the response body ends or the client goes away, not only when
+    // ffmpeg has fully exited, so a client that finished reading can immediately start the next one.
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      active--;
+    };
     let done = false;
     const finish = () => {
+      release();
       if (done) return;
       done = true;
-      active--;
       clearTimeout(timer);
       void f.fh.close().catch(() => undefined);
     };
@@ -137,7 +145,15 @@ export function registerTranscodeRoutes(app: Hono, cfg: Config) {
     child.on("close", finish);
     child.on("error", finish);
     child.stdout!.on("error", () => child.kill("SIGKILL"));
-    c.req.raw.signal.addEventListener("abort", () => child.kill("SIGKILL"), { once: true });
+    child.stdout!.on("close", release);
+    c.req.raw.signal.addEventListener(
+      "abort",
+      () => {
+        child.kill("SIGKILL");
+        release();
+      },
+      { once: true },
+    );
     return new Response(Readable.toWeb(child.stdout!) as ReadableStream, {
       status: 200,
       headers: {
