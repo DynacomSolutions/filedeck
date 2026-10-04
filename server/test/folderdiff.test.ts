@@ -297,7 +297,9 @@ test("cancel stops the comparison", async () => {
   const jobs = new Jobs(1);
   const j = jobs.create("folderdiff", "t", (c) => compareTrees(localSource(L, "/"), localSource(R, "/"), { ...DEFAULT_OPTIONS, mode: "content" }, c));
   jobs.cancel(j.id);
-  await new Promise((r) => setTimeout(r, 50));
+  // Cancel is cooperative: the state flips once the aborted walk settles, which depends on fs latency.
+  const deadline = Date.now() + 5000;
+  while (["queued", "running"].includes(jobs.get(j.id)?.state ?? "") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
   assert.ok(["canceled", "done"].includes(jobs.get(j.id)?.state ?? ""));
 });
 
@@ -389,6 +391,7 @@ test("hub: folder diff job across two nodes with agent-side hashing, then cross-
 });
 
 after(() => {
-  for (const s of srvs) s.close();
+  // The last test cancels a job mid-walk; its in-flight node-to-node request would keep close() pending and hang the runner.
+  for (const s of srvs) { s.close(); (s as unknown as { closeAllConnections?: () => void }).closeAllConnections?.(); }
   for (const d of [rootA, rootB]) if (d) fs.rmSync(d, { recursive: true, force: true });
 });
