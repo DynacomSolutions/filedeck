@@ -19,7 +19,7 @@ import { CompareBar, CompareBody, ROW_H, compareKey, useCompareCtl } from "./Com
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
 import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey, type TabLoc } from "./urlState";
-import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
+import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowLeft, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
 import { useSettings } from "./settings";
@@ -995,6 +995,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         const en = visible[idx];
         return !!en && (open(en), true);
       }
+      if (e.altKey && !mod && (key === "ArrowLeft" || key === "ArrowRight")) return histGo(key === "ArrowLeft" ? -1 : 1), true;
       if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return path !== "/" && (onNavigate(node, parent(path)), true);
       if (key === "F2") return selEntries.length === 1 && (setRenaming(selEntries[0]!.path), true);
       if (key === "F4") return selEntries.length === 1 && canEdit(selEntries[0]!) && (setEditing({ node, path: selEntries[0]!.path }), true);
@@ -1039,7 +1040,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     if (panelPicked && pickedPeers.length === 1) return onCompare(pickedPeers[0]!.id);
     onCompare(next?.id ?? peers[0]!.id);
   };
-  const controls: Ctl[] = [
+  const viewCtl: Ctl[] = [
     { id: "view", label: view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid", icon: view === "grid" ? <List /> : <LayoutGrid />, pressed: view === "grid", run: () => onPatch({ w: view === "grid" ? undefined : "g" }) },
     ...(view === "grid"
       ? SORTS.map((s): Ctl => {
@@ -1050,9 +1051,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       : []),
     { id: "search", label: "Search under this folder (Ctrl+Shift+F)", icon: <Search />, pressed: !!leaf.sr, run: () => setSearch(leaf.sr ? undefined : EMPTY_SEARCH) },
     { id: "hidden", label: hidden ? "Hide hidden files" : "Show hidden files", icon: hidden ? <Eye /> : <EyeOff />, pressed: hidden, run: () => setHidden(!hidden) },
-    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing && !!propsPane, run: () => (propsOpen && !editing && propsPane ? closeSide() : (!cursor && sel.size === 0 && onStatus("Select an item to see its properties"), openProps())) },
+  ];
+  const rightCtl: Ctl[] = [
     {
       id: "compare",
+      gap: true,
       label: cside ? "Exit compare mode" : "Compare with another panel (right-click to choose which)",
       icon: <GitCompareArrows />,
       pressed: !!cside,
@@ -1065,28 +1068,36 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { id: "mark", label: marked ? "Remove this folder from the bookmarks" : "Bookmark this folder", icon: <Star fill={marked ? "currentColor" : "none"} />, pressed: marked, run: () => toggleMark(here) },
     { id: "tab", label: "New tab with this folder (Alt+T)", icon: <SquarePlus />, run: () => newTab() },
     { id: "pick", label: "Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels", icon: <SquareCheck />, pressed: panelPicked, run: onTogglePanel },
+    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing && !!propsPane, run: () => (propsOpen && !editing && propsPane ? closeSide() : (!cursor && sel.size === 0 && onStatus("Select an item to see its properties"), openProps())) },
+  ];
+  const paneCtl: Ctl[] = [
     { id: "splitH", label: "Split right", icon: <Columns2 />, run: () => onSplit("horizontal") },
     { id: "splitV", label: "Split down", icon: <Rows2 />, run: () => onSplit("vertical") },
     ...(onClose ? [{ id: "close", label: "Close panel", icon: <X />, run: () => onClose() } as Ctl] : []),
   ];
-  const [cap, setCap] = useState(99);
-  useLayoutEffect(() => {
-    const el = barRef.current;
-    if (!el) return;
-    // room = row width - paddings - up button - the address bar's minimum; one icon button is 28px plus a 4px gap.
-    // The more button (one more slot) exists only when not everything fits.
-    const measure = () => {
-      const room = el.clientWidth - 21 - 32 - 190;
-      setCap(controls.length * 32 <= room ? controls.length : Math.max(0, Math.floor((room - 32) / 32)));
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [controls.length]);
-  const shown = controls.slice(0, cap);
-  const more = controls.slice(cap);
-
+  // per-pane back/forward history of the folders this panel showed
+  const histRef = useRef<{ s: { node: string; path: string }[]; i: number; skip: boolean }>({ s: [], i: -1, skip: false });
+  const [, histTick] = useState(0);
+  useEffect(() => {
+    const h = histRef.current;
+    if (h.skip) h.skip = false;
+    else if (!h.s[h.i] || h.s[h.i]!.node !== node || h.s[h.i]!.path !== path) {
+      h.s = [...h.s.slice(0, h.i + 1), { node, path }].slice(-50);
+      h.i = h.s.length - 1;
+    }
+    histTick((n) => n + 1);
+  }, [node, path]);
+  const histGo = (d: number) => {
+    const h = histRef.current;
+    const t = h.s[h.i + d];
+    if (!t) return;
+    h.i += d;
+    h.skip = true;
+    onNavigate(t.node, t.path);
+    histTick((n) => n + 1);
+  };
+  const canBack = histRef.current.i > 0;
+  const canFwd = histRef.current.i < histRef.current.s.length - 1;
   // ---- second header row: file and folder actions (the same ones the context menus offer), flat icons; what does not fit moves into its own "more" menu ----
   const sole = selEntries.length === 1 ? selEntries[0]! : undefined;
   const anySel = combine(selEntries).length > 0;
@@ -1118,26 +1129,40 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { id: "delete", label: "Delete permanently", hint: "Shift+Del", icon: <CircleX />, disabled: !anySel, run: () => setModal({ k: "del", refs: combine(selEntries) }) },
   ];
   const toolsRef = useRef<HTMLDivElement>(null);
-  const [toolCap, setToolCap] = useState(99);
+  // one toolbar: [view/sort/hidden/search] | [file actions] | [compare/bookmark/tab/pick/properties].
+  // On overflow the file actions move into "more" first (last first), then the right group, then the view group.
+  const allTools: Ctl[] = [...viewCtl, ...tools, ...rightCtl];
+  const [hiddenN, setHiddenN] = useState(0);
+  const dropOrder = useMemo(() => {
+    const ids = (l: Ctl[]) => l.map((c) => c.id);
+    return [...ids(tools).reverse(), ...ids(rightCtl), ...ids(viewCtl).reverse()];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allTools.length]);
   useLayoutEffect(() => {
     const el = toolsRef.current;
     if (!el) return;
     // an icon button is 28px plus a 4px gap, a group start adds a 6px gap; the more button takes one slot and exists only on overflow
     const measure = () => {
       const room = el.clientWidth - 16;
-      const width = (n: number) => tools.slice(0, n).reduce((w, c, i) => w + 32 + (c.gap && i > 0 ? 6 : 0), 0);
-      if (width(tools.length) <= room) return setToolCap(tools.length);
-      let n = tools.length;
-      while (n > 0 && width(n) + 32 > room) n--;
-      setToolCap(n);
+      const width = (l: Ctl[]) => l.reduce((w, c, i) => w + 32 + (c.gap && i > 0 ? 6 : 0), 0);
+      let n = 0;
+      while (n < dropOrder.length) {
+        const gone = new Set(dropOrder.slice(0, n));
+        const left = allTools.filter((c) => !gone.has(c.id));
+        if (width(left) + (n > 0 ? 32 : 0) <= room) break;
+        n++;
+      }
+      setHiddenN(n);
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [tools.length]);
-  const toolsShown = tools.slice(0, toolCap);
-  const toolsMore = tools.slice(toolCap);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dropOrder, allTools.length, view, sort.key]);
+  const goneIds = new Set(dropOrder.slice(0, hiddenN));
+  const toolsShown = allTools.filter((c) => !goneIds.has(c.id));
+  const toolsMore = allTools.filter((c) => goneIds.has(c.id));
 
   const first = dock === "left" || dock === "top";
 
@@ -1211,33 +1236,27 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }}
       >
       <div className="fp-row">
+        <Tip label="Back" shortcut="Alt+Left"><button type="button" className="fp-up" aria-label="Back" disabled={!canBack} onClick={() => histGo(-1)}><ArrowLeft /></button></Tip>
+        <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
         <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         <div className="fp-actions">
-          {shown.map((c) => (
+          {paneCtl.map((c) => (
             <Tip key={c.id} label={c.label} shortcut={c.hint}>
-              <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={c.pressed ? "marked" : ""} disabled={c.disabled} onClick={c.run} onContextMenu={c.ctx}>{c.icon}</button>
+              <button type="button" aria-label={c.label} onClick={c.run}>{c.icon}</button>
             </Tip>
           ))}
-          {more.length > 0 && (
-            <Tip label="More actions">
-              <button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                setMenu({ x: r.right - 4, y: r.bottom + 4, items: more.map((c): MenuItem => ({ label: c.label, disabled: c.disabled, onSelect: c.run })) });
-              }}><Ellipsis /></button>
-            </Tip>
-          )}
         </div>
       </div>
       <div className="fp-tools" ref={toolsRef} role="toolbar" aria-label="File and folder actions">
         {toolsShown.map((c, i) => (
           <Tip key={c.id} label={c.label} shortcut={c.hint}>
-            <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={(c.pressed ? "marked" : "") + (c.gap && i > 0 ? " gap" : "")} disabled={c.disabled} onClick={c.run}>{c.icon}</button>
+            <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={(c.pressed ? "marked" : "") + (c.gap && i > 0 ? " gap" : "")} disabled={c.disabled} onClick={c.run} onContextMenu={c.ctx}>{c.icon}</button>
           </Tip>
         ))}
         {toolsMore.length > 0 && (
-          <Tip label="More file actions">
-            <button type="button" aria-label="More file actions" aria-haspopup="menu" onClick={(e) => {
+          <Tip label="More actions">
+            <button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
               setMenu({ x: r.right - 4, y: r.bottom + 4, items: toolsMore.map((c): MenuItem => ({ label: c.label, hint: c.hint, disabled: c.disabled, onSelect: c.run })) });
             }}><Ellipsis /></button>

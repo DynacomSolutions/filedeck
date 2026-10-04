@@ -706,3 +706,7 @@ select option{background:var(--surface);color:var(--fg)}
 .side-cmp-live svg{width:12px;height:12px;vertical-align:-1px}
 .side-cmp-run>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fd-tog .fd-n{display:inline-block;min-width:7ch;text-align:left;font-variant-numeric:tabular-nums}
+/* row 1 = navigation + address bar + pane buttons only; the address bar shrinks, the row never overflows */
+.fp-row .addr{min-width:40px}
+.fp-row{overflow:hidden}
+.fp-row>.tip{flex:none;display:inline-flex}
