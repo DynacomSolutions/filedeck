@@ -422,8 +422,14 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
             <span className="addr-warn"><TriangleAlert aria-hidden="true" /></span>
           </Tip>
         )}
+        <Tip label="Recent locations">
+          <button type="button" className={"addr-recent" + (pop?.kind === "recent" ? " open" : "")} aria-label="Recent locations" aria-haspopup="menu" aria-expanded={pop?.kind === "recent"} onMouseDown={(e) => e.preventDefault()} onClick={(e) => openRecents(e.currentTarget)}>
+            <Ic.History aria-hidden="true" />
+          </button>
+        </Tip>
         <span className="sr-only" role="status">{error || (items.length ? `${items.length} suggestion${items.length === 1 ? "" : "s"}` : "")}</span>
         {list}
+        {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} onClose={closePop} />}
       </div>
     );
   }

@@ -19,7 +19,7 @@ import { CompareBar, CompareBody, ROW_H, compareKey, useCompareCtl } from "./Com
 import { Thumb } from "./Thumb";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
 import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
-import { Ellipsis, Eye, EyeOff, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
+import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
 import { useSettings } from "./settings";
@@ -981,7 +981,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   }
   const horizontal = dock === "left" || dock === "right";
   // ---- panel controls, one row with the address bar: what does not fit moves into the "more" menu ----
-  type Ctl = { id: string; label: string; icon: React.ReactNode; pressed?: boolean; disabled?: boolean; run: () => void; ctx?: (e: React.MouseEvent) => void };
+  type Ctl = { id: string; label: string; hint?: string; gap?: boolean; icon: React.ReactNode; pressed?: boolean; disabled?: boolean; run: () => void; ctx?: (e: React.MouseEvent) => void };
   const marked = isBookmarked(marks, here);
   const compareRun = () => {
     if (cside && cmpCtl) return cmpCtl.exit();
@@ -1037,6 +1037,58 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   }, [controls.length]);
   const shown = controls.slice(0, cap);
   const more = controls.slice(cap);
+
+  // ---- second header row: file and folder actions (the same ones the context menus offer), flat icons; what does not fit moves into its own "more" menu ----
+  const sole = selEntries.length === 1 ? selEntries[0]! : undefined;
+  const anySel = combine(selEntries).length > 0;
+  const tools: Ctl[] = [
+    { id: "newFile", label: "New file", hint: "Alt+N", gap: true, icon: <FilePlus />, run: () => startCreate(path, "file") },
+    { id: "newFolder", label: "New folder", hint: "F7", icon: <FolderPlus />, run: () => startCreate(path, "folder") },
+    { id: "newLink", label: "New symbolic link", icon: <Link2 />, run: () => setModal({ k: "link", dir: path }) },
+    { id: "upload", label: "Upload files", hint: "Alt+U", icon: <Upload />, run: () => fileInput.current?.click() },
+    { id: "uploadDir", label: "Upload a folder", icon: <FolderUp />, run: () => folderInput.current?.click() },
+    { id: "paste", label: pasteLabel, hint: "Ctrl+V", icon: <ClipboardPaste />, disabled: !clip, run: () => void paste(path) },
+    { id: "refresh", label: "Refresh", hint: "Alt+R", icon: <RefreshCw />, run: refresh },
+    { id: "copyPath", label: selEntries.length > 1 ? "Copy paths" : "Copy path", hint: "Alt+C", icon: <Copy />, run: () => void copyPaths(selEntries.length ? selEntries.map((x) => x.path) : [path]) },
+    { id: "selAll", label: "Select all", hint: "Ctrl+A", icon: <ListChecks />, disabled: !entries.length, run: () => setSel(new Set(entries.map((x) => x.path))) },
+    { id: "rename", label: "Rename", hint: "F2", gap: true, icon: <Pencil />, disabled: sel.size !== 1 || others.length > 0, run: () => setRenaming([...sel][0] ?? null) },
+    { id: "duplicate", label: "Duplicate", icon: <CopyPlus />, disabled: !selEntries.length || others.length > 0, run: () => void duplicate(selEntries) },
+    { id: "edit", label: "Edit in the editor", hint: "F4", icon: <FilePen />, disabled: !sole || !canEdit(sole), run: () => sole && setEditing({ node, path: sole.path }) },
+    {
+      id: "diff",
+      label: diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another",
+      icon: <Diff />,
+      pressed: !!diffMarked,
+      disabled: !combine(selEntries).length || combine(selEntries).length > 2 || !combine(selEntries).every((r) => r.editable),
+      run: () => onDiff(combine(selEntries).map((r) => ({ node: r.node, path: r.path }))),
+    },
+    { id: "download", label: "Download (several items or folders as a zip)", gap: true, icon: <Download />, disabled: !anySel, run: () => download(selEntries) },
+    { id: "compress", label: "Compress selection", icon: <Archive />, disabled: !anySel, run: () => setDialog("compress") },
+    { id: "extract", label: "Extract archive", icon: <PackageOpen />, disabled: !(sel.size === 1 && !!sole && sole.type === "file" && isArchive(sole.name)), run: () => setDialog("extract") },
+    { id: "trash", label: "Move to trash", hint: "Del", gap: true, icon: <Trash2 />, disabled: !anySel, run: () => void trashEntries(selEntries) },
+    { id: "delete", label: "Delete permanently", hint: "Shift+Del", icon: <CircleX />, disabled: !anySel, run: () => setModal({ k: "del", refs: combine(selEntries) }) },
+  ];
+  const toolsRef = useRef<HTMLDivElement>(null);
+  const [toolCap, setToolCap] = useState(99);
+  useLayoutEffect(() => {
+    const el = toolsRef.current;
+    if (!el) return;
+    // an icon button is 28px plus a 4px gap, a group start adds a 6px gap; the more button takes one slot and exists only on overflow
+    const measure = () => {
+      const room = el.clientWidth - 16;
+      const width = (n: number) => tools.slice(0, n).reduce((w, c, i) => w + 32 + (c.gap && i > 0 ? 6 : 0), 0);
+      if (width(tools.length) <= room) return setToolCap(tools.length);
+      let n = tools.length;
+      while (n > 0 && width(n) + 32 > room) n--;
+      setToolCap(n);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [tools.length]);
+  const toolsShown = tools.slice(0, toolCap);
+  const toolsMore = tools.slice(toolCap);
 
   const first = dock === "left" || dock === "top";
 
@@ -1109,11 +1161,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           }
         }}
       >
+      <div className="fp-row">
         <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         <div className="fp-actions">
           {shown.map((c) => (
-            <Tip key={c.id} label={c.label}>
+            <Tip key={c.id} label={c.label} shortcut={c.hint}>
               <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={c.pressed ? "marked" : ""} disabled={c.disabled} onClick={c.run} onContextMenu={c.ctx}>{c.icon}</button>
             </Tip>
           ))}
@@ -1121,25 +1174,41 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             <Tip label="More actions">
               <button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => {
                 const r = e.currentTarget.getBoundingClientRect();
-                setMenu({ x: r.right - 4, y: r.bottom + 4, items: [...more.map((c): MenuItem => ({ label: c.label, disabled: c.disabled, onSelect: c.run })), "sep", ...folderItems(path, true)] });
+                setMenu({ x: r.right - 4, y: r.bottom + 4, items: more.map((c): MenuItem => ({ label: c.label, disabled: c.disabled, onSelect: c.run })) });
               }}><Ellipsis /></button>
             </Tip>
           )}
-          <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
+        </div>
+      </div>
+      <div className="fp-tools" ref={toolsRef} role="toolbar" aria-label="File and folder actions">
+        {toolsShown.map((c, i) => (
+          <Tip key={c.id} label={c.label} shortcut={c.hint}>
+            <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={(c.pressed ? "marked" : "") + (c.gap && i > 0 ? " gap" : "")} disabled={c.disabled} onClick={c.run}>{c.icon}</button>
+          </Tip>
+        ))}
+        {toolsMore.length > 0 && (
+          <Tip label="More file actions">
+            <button type="button" aria-label="More file actions" aria-haspopup="menu" onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setMenu({ x: r.right - 4, y: r.bottom + 4, items: toolsMore.map((c): MenuItem => ({ label: c.label, hint: c.hint, disabled: c.disabled, onSelect: c.run })) });
+            }}><Ellipsis /></button>
+          </Tip>
+        )}
+        <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
             const files = Array.from(e.target.files ?? []);
             e.target.value = "";
             if (!files.length) return;
             enqueueUpload(node, path, pickedFromInput(files));
             onStatus(`Uploading ${files.length} file(s) (see Jobs)`);
           }} />
-          <input ref={folderInput} type="file" hidden {...({ webkitdirectory: "", directory: "" } as object)} onChange={(e) => {
+        <input ref={folderInput} type="file" hidden {...({ webkitdirectory: "", directory: "" } as object)} onChange={(e) => {
             const files = Array.from(e.target.files ?? []);
             e.target.value = "";
             if (!files.length) return;
             enqueueUpload(node, path, pickedFromInput(files));
             onStatus(`Uploading folder, ${files.length} file(s) (see Jobs)`);
           }} />
-        </div>
+      </div>
       </header>
       {cside && cmpCtl && <CompareBar ctl={cmpCtl} side={cside} otherLabel={cside === "left" ? `${cmpCtl.st.right.node}:${cmpCtl.st.right.path}` : `${cmpCtl.st.left.node}:${cmpCtl.st.left.path}`} />}
       {filterOpen && !cside && (
