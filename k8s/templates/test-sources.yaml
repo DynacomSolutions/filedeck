@@ -1,0 +1,184 @@
+{{- $ts := .Values.testSources | default dict }}
+{{- if $ts.enabled }}
+{{- $name := include "filedeck.name" . }}
+# Scratch network servers for live-testing the sources (see `testSources` in values.yaml). Each has its own
+# emptyDir, a ClusterIP Service inside the namespace only (no ingress, no Mapping), and is reachable from the hub only.
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: {{ $ts.secretName }}
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test-source
+spec:
+  encryptedData:
+    {{- toYaml $ts.sealed | nindent 4 }}
+  template:
+    metadata:
+      name: {{ $ts.secretName }}
+      labels:
+        {{- include "filedeck.labels" . | nindent 8 }}
+        app.kubernetes.io/component: test-source
+    type: Opaque
+{{- /* name, port, image, command/args, env, root-level pieces */}}
+{{- $servers := list
+  (dict "kind" "sftp" "port" 2022 "image" $ts.images.rclone "root" false "data" "/data"
+    "command" (list "rclone") "args" (list "serve" "sftp" "/data" "--addr" ":2022")
+    "env" (list
+      (dict "name" "RCLONE_USER" "key" "username")
+      (dict "name" "RCLONE_PASS" "key" "password")))
+  (dict "kind" "webdav" "port" 8080 "image" $ts.images.rclone "root" false "data" "/data"
+    "command" (list "rclone") "args" (list "serve" "webdav" "/data" "--addr" ":8080")
+    "env" (list
+      (dict "name" "RCLONE_USER" "key" "username")
+      (dict "name" "RCLONE_PASS" "key" "password")))
+  (dict "kind" "s3" "port" 8080 "image" $ts.images.rclone "root" false "data" "/data"
+    "command" (list "sh" "-c") "args" (list "mkdir -p /data/data && RCLONE_AUTH_KEY=\"$S3_ACCESS_KEY,$S3_SECRET_KEY\" exec rclone serve s3 /data --addr :8080")
+    "env" (list
+      (dict "name" "S3_ACCESS_KEY" "key" "accessKeyId")
+      (dict "name" "S3_SECRET_KEY" "key" "secretAccessKey")))
+  (dict "kind" "smb" "port" 445 "image" $ts.images.samba "root" true "data" "/shared"
+    "command" (list) "args" (list)
+    "env" (list
+      (dict "name" "USER" "key" "username")
+      (dict "name" "PASS" "key" "password")))
+}}
+{{- range $s := $servers }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-test-{{ $s.kind }}
+  labels:
+    {{- include "filedeck.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: test-source
+    filedeck.Filedeck/test-source: {{ $s.kind }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/component: test-source
+      filedeck.Filedeck/test-source: {{ $s.kind }}
+  template:
+    metadata:
+      labels:
+        {{- include "filedeck.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: test-source
+        filedeck.Filedeck/test-source: {{ $s.kind }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        {{- if not $s.root }}
+        fsGroup: 1000
+        {{- end }}
+      containers:
+        - name: server
+          image: {{ $s.image | quote }}
+          {{- if $s.command }}
+          command:
+            {{- toYaml $s.command | nindent 12 }}
+          args:
+            {{- toYaml $s.args | nindent 12 }}
+          {{- end }}
+          env:
+            {{- range $e := $s.env }}
+            - name: {{ $e.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ts.secretName }}
+                  key: {{ $e.key }}
+            {{- end }}
+            {{- if eq $s.kind "smb" }}
+            - name: NAME
+              value: Shared
+            {{- else }}
+            - name: HOME
+              value: /tmp
+            - name: RCLONE_CACHE_DIR
+              value: /tmp
+            {{- end }}
+          ports:
+            - name: server
+              containerPort: {{ $s.port }}
+          readinessProbe:
+            tcpSocket: {port: server}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: server}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml $ts.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            {{- if not $s.root }}
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ $s.data }}
+            {{- if not $s.root }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: {{ $ts.volume }}
+        {{- if not $s.root }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-test-{{ $s.kind }}
+  labels:
+    {{- include "filedeck.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: test-source
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+    app.kubernetes.io/component: test-source
+    filedeck.Filedeck/test-source: {{ $s.kind }}
+  ports:
+    - name: server
+      port: {{ $s.port }}
+      targetPort: server
+{{- end }}
+---
+# Only the hub may reach the scratch servers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-test-source
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test-source
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/component: test-source
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ $name }}
+              app.kubernetes.io/component: hub
+{{- end }}
