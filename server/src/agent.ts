@@ -15,6 +15,7 @@ import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
 import { registerGitRoutes } from "./git-routes.ts";
 import { registerSearchRoutes } from "./search.ts";
+import { registerGitWorktreeRoutes } from "./git-worktrees.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
 import { registerTranscodeRoutes } from "./transcode.ts";
 import { agentAuth } from "./agent-auth.ts";
@@ -262,6 +263,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   registerGitDiffRoutes(app, cfg);
   (app as unknown as { close: () => Promise<void> }).close = async () => index.close();
   registerSearchRoutes(app, cfg);
+  registerGitWorktreeRoutes(app, cfg);
   registerThumbRoutes(app, cfg);
   registerTranscodeRoutes(app, cfg);
 

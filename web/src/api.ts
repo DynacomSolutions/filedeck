@@ -441,7 +441,31 @@ export interface PermsResult {
   errors: number;
 }
 
+export interface Worktree {
+  /** virtual path on the node; null when outside the agent's folders */
+  path: string | null;
+  gitPath: string;
+  name: string;
+  main: boolean;
+  bare: boolean;
+  branch: string | null;
+  detached: boolean;
+  head: string;
+  locked: boolean;
+  lockReason?: string;
+  prunable: boolean;
+  dirty: boolean | null;
+  current: boolean;
+}
+export interface WorktreeList {
+  repo: string | null;
+  bare: boolean;
+  worktrees: Worktree[];
+  truncated: boolean;
+}
+
 export const api = {
+  worktrees: (node: string, path: string) => fetch(`${nodeBase(node)}/api/git/worktrees?path=${enc(path)}`).then((r) => j<WorktreeList>(r)),
   startOp: (spec: OpSpec) =>
     opReq("", "POST", spec)
       .then((r) => j<OpJob>(r))

@@ -767,3 +767,18 @@ select option{background:var(--surface);color:var(--fg)}
 .git-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tile-git .git-pill{flex-wrap:wrap;justify-content:center;white-space:normal;row-gap:0}
 .tile-git .git-br{max-width:100%}
+/* Worktrees side-panel tab */
+.wt-body{display:block;overflow:auto}
+.wt-list{list-style:none;margin:0;padding:.35rem;display:flex;flex-direction:column;gap:.25rem}
+.wt-row{display:flex;flex-direction:column;align-items:stretch;gap:.15rem;width:100%;min-height:44px;box-sizing:border-box;padding:.45rem .6rem;text-align:left;border:1px solid transparent;border-radius:var(--radius-sm);background:transparent;color:var(--fg);font-size:.8rem}
+button.wt-row:hover{background:var(--surface-2)}
+.wt-row.cur{background:var(--accent-tint);border-color:var(--accent-line)}
+.wt-row.off{opacity:.65}
+.wt-top{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .45rem}
+.wt-top svg{width:14px;height:14px;flex:none;color:var(--muted)}
+.wt-name{overflow-wrap:anywhere}
+.wt-sub,.wt-path{font:.74rem var(--mono);overflow-wrap:anywhere}
+.wt-pill{display:inline-flex;align-items:center;gap:.2rem;padding:0 .4rem;border:1px solid var(--border);border-radius:999px;background:var(--pill-bg);font-size:.68rem;line-height:1.5;color:var(--fg-soft,var(--fg))}
+.wt-pill svg{width:11px;height:11px;color:inherit}
+.wt-pill.on{border-color:var(--accent-line);color:var(--accent-text,var(--accent))}
+.wt-pill.warn{border-color:var(--accent-line);color:var(--warn)}

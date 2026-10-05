@@ -51,7 +51,7 @@ export interface Leaf {
   sort?: { key: SortKey; asc: boolean };
   hidden?: boolean;
   /** preview sub-panel placement and size (percent of the panel) */
-  pv?: { dock: Dock; size: number; /** "props": the sub-panel shows the Properties tab instead of the Preview */ tab?: "props" };
+  pv?: { dock: Dock; size: number; /** "props": the sub-panel shows the Properties tab, "wt" the Worktrees list, instead of the Preview */ tab?: "props" | "wt" };
   /** path whose preview the user closed */
   closed?: string;
   /** file open in the panel's editor */
@@ -142,7 +142,7 @@ export interface AppState {
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 1; v?: [string, number] | [string, number, "p"]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
+type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 1; v?: [string, number] | [string, number, "p" | "w"]; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
 type WTab = { s?: string; m?: string[]; x?: 1; c?: string };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
@@ -171,7 +171,7 @@ const toWire = (t: Tree): WTree => {
   if (t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
   if (t.sort && (t.sort.key !== "name" || !t.sort.asc)) w.o = `${t.sort.key}:${t.sort.asc ? "a" : "d"}`;
   if (t.hidden) w.h = 1;
-  if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
+  if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, t.pv.tab === "wt" ? "w" : "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
   if (t.closed) w.c = t.closed;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
   if (t.q) w.q = t.q;
@@ -254,7 +254,7 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
     if (key === "name" || key === "size" || key === "mtime") leaf.sort = { key, asc: dir !== "d" };
   }
   if (o.h === 1) leaf.hidden = true;
-  if (Array.isArray(o.v) && DOCKS.includes(o.v[0] as string) && typeof o.v[1] === "number" && o.v[1] >= 10 && o.v[1] <= 90) leaf.pv = { dock: o.v[0] as Dock, size: o.v[1], ...(o.v[2] === "p" ? { tab: "props" as const } : {}) };
+  if (Array.isArray(o.v) && DOCKS.includes(o.v[0] as string) && typeof o.v[1] === "number" && o.v[1] >= 10 && o.v[1] <= 90) leaf.pv = { dock: o.v[0] as Dock, size: o.v[1], ...(o.v[2] === "p" ? { tab: "props" as const } : o.v[2] === "w" ? { tab: "wt" as const } : {}) };
   if (str(o.c)) leaf.closed = o.c;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
   if (str(o.q) && o.q) leaf.q = o.q;
