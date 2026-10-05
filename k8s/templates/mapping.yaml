@@ -1,3 +1,5 @@
+{{- if .Values.mapping.enabled }}
+{{- /* Optional Emissary / Ambassador Mapping (off by default; any other ingress can route to the hub Service). */}}
 # Timeouts are load-bearing for file transfers and the SSE change feed:
 # - timeout_ms: 0 disables the request timeout (no limit for long-running downloads/uploads).
 # - idle_timeout_ms: 3600000 (1 hour) closes connections idle longer than an hour.
@@ -7,17 +9,18 @@
 apiVersion: getambassador.io/v3alpha1
 kind: Mapping
 metadata:
-  name: {{ .Values.mapping.name }}
+  name: {{ default (printf "%s-public" (include "filedeck.name" .)) .Values.mapping.name }}
   labels:
     {{- include "filedeck.labels" . | nindent 4 }}
     app.kubernetes.io/component: hub
 spec:
   ambassador_id:
-    - --apiVersion-v3alpha1-only--default
-  hostname: {{ .Values.mapping.host | quote }}
+    - {{ .Values.mapping.ambassadorId | quote }}
+  hostname: {{ required "mapping.host is required when mapping.enabled" .Values.mapping.host | quote }}
   prefix: /
   service: {{ printf "%s.%s:%v" (include "filedeck.name" .) .Release.Namespace .Values.service.port | quote }}
   timeout_ms: 0
   idle_timeout_ms: 3600000
   cluster_idle_timeout_ms: 0
   cluster_max_connection_lifetime_ms: 0
+{{- end }}

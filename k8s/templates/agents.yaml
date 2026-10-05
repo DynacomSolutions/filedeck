@@ -5,9 +5,12 @@ kind: Deployment
 metadata:
   name: {{ include "filedeck.agentName" . }}
   labels:
-    {{- include "filedeck.labels" $ | nindent 4 }}
+    {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (include "filedeck.agentInstance" (dict "root" $ "node" .))) | nindent 4 }}
     app.kubernetes.io/component: agent
-    filedeck.example.invalid/node: {{ .nodeName }}
+  {{- with $.Values.agent.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: 1
   strategy:
@@ -16,17 +19,18 @@ spec:
     matchLabels:
       app.kubernetes.io/name: {{ include "filedeck.name" $ }}
       app.kubernetes.io/component: agent
-      filedeck.example.invalid/node: {{ .nodeName }}
+      app.kubernetes.io/instance: {{ include "filedeck.agentInstance" (dict "root" $ "node" .) }}
   template:
     metadata:
       labels:
-        {{- include "filedeck.labels" $ | nindent 8 }}
+        {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (include "filedeck.agentInstance" (dict "root" $ "node" .))) | nindent 8 }}
         app.kubernetes.io/component: agent
-        filedeck.example.invalid/node: {{ .nodeName }}
     spec:
       automountServiceAccountToken: false
+      {{- with .nodeName }}
       nodeSelector:
-        kubernetes.io/hostname: {{ .nodeName | quote }}
+        kubernetes.io/hostname: {{ . | quote }}
+      {{- end }}
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -79,7 +83,7 @@ spec:
             - name: http
               containerPort: {{ $.Values.port }}
           # /healthz is answered by the same Node event loop as everything else, and the hostPath volumes sit on shared
-          # hosts whose disks and CPUs spike (node-a load averaged 100+ while this agent was killed every ten minutes).
+          # hosts whose disks and CPUs spike (load averages above 100 were seen, and the agent was killed every ten minutes).
           # The 1s default timeout turned any such stall into a restart; the real fix is keeping blocking work off the
           # loop (index trim runs in a worker), these only stop a short stall from killing the pod.
           readinessProbe:
@@ -139,15 +143,14 @@ kind: Service
 metadata:
   name: {{ include "filedeck.agentName" . }}
   labels:
-    {{- include "filedeck.labels" $ | nindent 4 }}
+    {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (include "filedeck.agentInstance" (dict "root" $ "node" .))) | nindent 4 }}
     app.kubernetes.io/component: agent
-    filedeck.example.invalid/node: {{ .nodeName }}
 spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: {{ include "filedeck.name" $ }}
     app.kubernetes.io/component: agent
-    filedeck.example.invalid/node: {{ .nodeName }}
+    app.kubernetes.io/instance: {{ include "filedeck.agentInstance" (dict "root" $ "node" .) }}
   ports:
     - name: http
       port: {{ $.Values.port }}

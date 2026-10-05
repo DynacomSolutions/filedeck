@@ -22,10 +22,12 @@ There are no user accounts: put it behind a trusted network boundary (a VPN, a p
 | `Dockerfile`, `package.json`, `tsconfig.base.json` | Image and workspace | core |
 | `web/public/assets/theme.css`, `fonts/` | Bundled theme tokens and fonts | core: neutral theme; Montserrat is SIL OFL 1.1 (`fonts/OFL.txt`) |
 | `deploy/brand/` | Logos and palette (`theme.css`, referenced by `brand.css`) for one deployment, copied into the image at `/assets/brand` when the folder exists | deployment |
-| `k8s/` | Helm chart (hub, one agent per node, network policy, ingress mapping) | deployment |
-| `../.github/workflows/filedeck-image.yml` | Test, build, scan, publish, pin on main | deployment |
+| `k8s/` | Generic Helm chart (hub, one agent per node, vault volume and key job, network policy, optional Emissary mapping and scratch network servers) with neutral defaults; `npm run check:neutral` covers it | core |
+| `../.github/workflows/filedeck-image.yml` | Test, build, scan, publish, pin on main | deployment (infra repo) |
 
-A bare clone of `server/`, `web/` and the top-level files builds and tests without `deploy/`, `k8s/` or the workflow.
+Deployment values (nodes, image, hosts, brand, sources) are not part of the chart: they live in a values file in the infra repository (`filedeck/values.yaml` there), passed with `-f` or an Argo CD `valueFiles` source.
+
+A bare clone of `server/`, `web/` and the top-level files builds and tests without `deploy/` or the workflow.
 
 ## Develop
 
@@ -38,6 +40,33 @@ HUB_URL=http://127.0.0.1:8080 npm run dev:web   # Vite dev server, /api proxied
 ```
 
 To run both modes locally: start an agent (`FILEDECK_MODE=agent FILEDECK_ROOT=/some/dir PORT=8081`) and a hub (`FILEDECK_MODE=hub NODES=local=http://127.0.0.1:8081 FILEDECK_STATIC=web/dist PORT=8080`).
+
+## Install with Helm
+
+The chart in `k8s/` installs a hub and one agent per entry in `nodes`. There is no public image: build `Dockerfile` (`docker build -t <registry>/filedeck:<tag> .`), push it where the cluster can pull from, then:
+
+```sh
+helm install filedeck ./k8s -n filedeck --create-namespace \
+  --set image.repository=<registry>/filedeck --set image.tag=<tag>
+kubectl -n filedeck port-forward svc/filedeck 8080:80   # then open http://127.0.0.1:8080
+```
+
+The defaults give one agent (`local`, any node) that browses the node's filesystem. Values you will most likely set (all documented in `k8s/values.yaml`):
+
+| Value | Meaning |
+|---|---|
+| `image.repository`, `image.tag`, `image.digest` | The image; a `digest` wins over `tag` |
+| `nodes[]` | One agent each: `name` (shown in the UI) and `nodeName` (Kubernetes node; empty = any) |
+| `agent.readOnlyPaths` | Virtual paths no agent may change (default `/proc`, `/sys`) |
+| `agentToken.secretName` | Existing Secret holding a shared hub-to-agent token (empty = none) |
+| `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key with an Argo CD PreSync hook; without Argo CD set `vault.keyJob.enabled=false` and create the Secret yourself |
+| `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
+| `sources[]` | Network sources (SFTP, WebDAV, S3, SMB) and the Secrets holding their credentials |
+| `brand` | Name, title, stylesheet, logos and links (neutral "Filedeck" when empty) |
+| `mapping.enabled`, `mapping.host` | Optional Emissary / Ambassador Mapping to the hub; with another ingress route to the `filedeck` Service yourself |
+| `testSources.*` | Scratch SFTP, WebDAV, S3 and SMB servers for trying the sources (off; needs SealedSecret ciphertext in `testSources.sealed`) |
+
+Agents run as root with the node's `/` mounted read-write, and there are no user accounts: keep the hub on a trusted network and leave the NetworkPolicy and `agentToken` in place. Each agent is selected by the label `app.kubernetes.io/instance: <release>-agent-<name>`.
 
 ## Configuration (environment)
 

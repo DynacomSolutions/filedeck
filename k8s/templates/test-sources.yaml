@@ -50,9 +50,12 @@ kind: Deployment
 metadata:
   name: {{ $name }}-test-{{ $s.kind }}
   labels:
-    {{- include "filedeck.labels" $ | nindent 4 }}
+    {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (printf "%s-test-%s" $.Release.Name $s.kind)) | nindent 4 }}
     app.kubernetes.io/component: test-source
-    filedeck.Filedeck/test-source: {{ $s.kind }}
+  {{- with $ts.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: 1
   strategy:
@@ -61,13 +64,12 @@ spec:
     matchLabels:
       app.kubernetes.io/name: {{ $name }}
       app.kubernetes.io/component: test-source
-      filedeck.Filedeck/test-source: {{ $s.kind }}
+      app.kubernetes.io/instance: {{ printf "%s-test-%s" $.Release.Name $s.kind }}
   template:
     metadata:
       labels:
-        {{- include "filedeck.labels" $ | nindent 8 }}
+        {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (printf "%s-test-%s" $.Release.Name $s.kind)) | nindent 8 }}
         app.kubernetes.io/component: test-source
-        filedeck.Filedeck/test-source: {{ $s.kind }}
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -153,7 +155,7 @@ spec:
   selector:
     app.kubernetes.io/name: {{ $name }}
     app.kubernetes.io/component: test-source
-    filedeck.Filedeck/test-source: {{ $s.kind }}
+    app.kubernetes.io/instance: {{ printf "%s-test-%s" $.Release.Name $s.kind }}
   ports:
     - name: server
       port: {{ $s.port }}

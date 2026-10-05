@@ -17,6 +17,6 @@
     "build": "npm run build -w server && npm run build -w web",
     "dev:agent": "FILEDECK_MODE=agent FILEDECK_ROOT=${FILEDECK_ROOT:-$HOME} npm run dev -w server",
     "dev:web": "npm run dev -w web",
-    "check:neutral": "! grep -rIil -e Filedeck server/src server/test web/src web/index.html web/public Dockerfile tsconfig.base.json README.md"
+    "check:neutral": "! grep -rIil -e Filedeck server/src server/test web/src web/index.html web/public Dockerfile tsconfig.base.json README.md k8s && ! grep -rIil -e project -e node-a -e node-a -e node-b -e registry.s k8s"
   }
 }
