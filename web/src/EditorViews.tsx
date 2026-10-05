@@ -13,7 +13,7 @@ export interface FileRef {
 }
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
-const OPTS: MonacoEditor.IStandaloneEditorConstructionOptions = {
+export const OPTS: MonacoEditor.IStandaloneEditorConstructionOptions = {
   automaticLayout: true,
   minimap: { enabled: false },
   scrollBeyondLastLine: false,
@@ -45,7 +45,7 @@ function useLeaveGuard(dirty: boolean) {
   }, [dirty]);
 }
 
-const useTheme = () => {
+export const useTheme = () => {
   const [t, setT] = useState(monacoTheme);
   useEffect(() => {
     const mo = new MutationObserver(() => setT(monacoTheme()));

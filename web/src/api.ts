@@ -335,6 +335,42 @@ async function ndjson<T>(r: Response): Promise<T[]> {
   return text ? text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as T) : [];
 }
 
+/** Pull request diff (read-only git on the node that holds the repository). */
+export interface GitSide {
+  ref: string;
+  sha: string;
+}
+export interface GitFile {
+  path: string;
+  oldPath?: string;
+  status: "A" | "M" | "D" | "R";
+  add: number | null;
+  del: number | null;
+  binary: boolean;
+  similarity?: number;
+}
+export interface GitDiff {
+  base: GitSide;
+  head: GitSide;
+  mergeBase: string;
+  files: GitFile[];
+  truncated: boolean;
+  note?: string;
+  pr?: number;
+}
+export interface GitBlob {
+  size: number;
+  binary: boolean;
+  tooLarge: boolean;
+  content: string;
+}
+export interface GitRefs {
+  bare: boolean;
+  refs: string[];
+  prs: { n: number; subject: string }[];
+}
+const gitUrl = (node: string, what: string, q: Record<string, string>) => `${nodeBase(node)}/api/git/${what}?${Object.entries(q).map(([k, v]) => `${k}=${enc(v)}`).join("&")}`;
+
 export interface TrashItem {
   id: string;
   name: string;
@@ -435,6 +471,10 @@ export const api = {
     trashPost<{ results: TrashResult[] }>(node, "restore", { volume, ids, ...o }),
   trashDelete: (node: string, volume: string, ids: string[]) => trashPost<{ results: TrashResult[] }>(node, "delete", { volume, ids }),
   trashEmpty: (node: string, volume: string, olderThanDays?: number) => trashPost<{ removed: number; failed: number }>(node, "empty", { volume, ...(olderThanDays !== undefined ? { olderThanDays } : {}) }),
+  gitRefs: (node: string, path: string) => fetch(gitUrl(node, "refs", { path })).then((r) => j<GitRefs>(r)),
+  gitDiff: (node: string, path: string, what: { pr: number } | { base: string; head: string }) =>
+    fetch(gitUrl(node, "diff", { path, ...("pr" in what ? { pr: String(what.pr) } : what) })).then((r) => j<GitDiff>(r)),
+  gitBlob: (node: string, path: string, sha: string, file: string) => fetch(gitUrl(node, "blob", { path, sha, file })).then((r) => j<GitBlob>(r)),
   readText: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/text?path=${enc(path)}`).then((r) => j<TextFile>(r)),
   /** Save with optimistic concurrency. `etag` null creates a new file. 409 -> ConflictError with the current etag. */
   writeText: async (node: string, path: string, content: string, etag: string | null): Promise<WriteResult> => {

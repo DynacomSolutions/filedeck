@@ -9,6 +9,7 @@ import { Watches } from "./watch.ts";
 import { registerArchiveRoutes } from "./archive-routes.ts";
 import { registerPdfRoutes } from "./pdf.ts";
 import { registerDiffRoutes } from "./diff-routes.ts";
+import { registerGitDiffRoutes } from "./git-diff-routes.ts";
 import * as trash from "./trash.ts";
 import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
@@ -256,6 +257,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   registerPdfRoutes(app, cfg);
   registerPropsRoutes(app, cfg, jobs);
   const index = registerDiffRoutes(app, cfg);
+  registerGitDiffRoutes(app, cfg);
   (app as unknown as { close: () => Promise<void> }).close = async () => index.close();
   registerSearchRoutes(app, cfg);
   registerThumbRoutes(app, cfg);

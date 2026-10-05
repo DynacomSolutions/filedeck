@@ -112,11 +112,26 @@ export interface TrashState {
   volume: string;
 }
 
+/** Open pull request diff: the repository folder, what is compared (a PR number, or two refs) and the file open in the diff. */
+export interface PrState {
+  node: string;
+  path: string;
+  /** pull request number; absent = compare two refs */
+  pr?: number;
+  base?: string;
+  head?: string;
+  /** file (new path) open in the diff */
+  file?: string;
+  /** inline instead of side-by-side */
+  inline?: boolean;
+}
+
 export interface AppState {
   tree: Tree;
   active: string;
   trash?: TrashState;
   diff?: { left: FileRef; right: FileRef };
+  prDiff?: PrState;
   folder?: FolderState;
   /** panels picked as a whole (Shift/Ctrl+click on the panel header) */
   panelSel?: string[];
@@ -140,6 +155,8 @@ interface Wire {
   ps?: string[];
   /** settings view open */
   se?: 1;
+  /** pull request diff: node, repository path, then only what is set */
+  pd?: { n: string; p: string; r?: number; b?: string; h?: string; f?: string; i?: 1 };
   /** folder compare: l/r roots, a/b panel ids, u current relative folder, f hidden statuses, then only the options that differ from the defaults */
   g?: { l: [string, string]; r: [string, string]; a: string; b: string; u?: string; f?: string; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
 }
@@ -189,6 +206,10 @@ export function encodeState(s: AppState): string {
   if (s.trash) w.r = [s.trash.node, s.trash.volume];
   if (s.panelSel?.length) w.ps = s.panelSel;
   if (s.settings) w.se = 1;
+  if (s.prDiff) {
+    const d = s.prDiff;
+    w.pd = { n: d.node, p: d.path, ...(d.pr ? { r: d.pr } : {}), ...(d.base ? { b: d.base } : {}), ...(d.head ? { h: d.head } : {}), ...(d.file ? { f: d.file } : {}), ...(d.inline ? { i: 1 as const } : {}) };
+  }
   if (s.diff) w.f = [[s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
   if (s.folder) {
     const { left, right, opts: o, preset, lp, rp, rel, hide } = s.folder;
@@ -344,8 +365,13 @@ export function decodeState(search: string): AppState | null {
     const r = w.r;
     const trash = Array.isArray(r) && str(r[0]) && typeof r[1] === "string" ? { node: r[0], volume: r[1] } : undefined;
     const folder = folderFromWire(w.g, ids);
+    const pd = w.pd;
+    const prDiff: PrState | undefined =
+      pd && typeof pd === "object" && str(pd.n) && str(pd.p) && pd.p.startsWith("/")
+        ? { node: pd.n, path: pd.p, ...(typeof pd.r === "number" && Number.isInteger(pd.r) && pd.r > 0 ? { pr: pd.r } : {}), ...(str(pd.b) ? { base: pd.b.slice(0, 256) } : {}), ...(str(pd.h) ? { head: pd.h.slice(0, 256) } : {}), ...(str(pd.f) ? { file: pd.f.slice(0, 4096) } : {}), ...(pd.i === 1 ? { inline: true } : {}) }
+        : undefined;
     const panelSel = Array.isArray(w.ps) ? w.ps.filter((x) => str(x) && ids.includes(x)) : [];
-    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}) };
+    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(prDiff ? { prDiff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}) };
   } catch {
     return null;
   }

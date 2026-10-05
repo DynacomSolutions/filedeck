@@ -3,10 +3,11 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, tabOf, type FolderState, type Leaf, type Tree, type TrashState } from "./urlState";
+import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, tabOf, type FolderState, type Leaf, type PrState, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
+const PrDiffView = lazy(() => import("./PrDiff").then((m) => ({ default: m.PrDiffView })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
 import { useBookmarks, removeBookmark, bookmarkLabel } from "./bookmarks";
@@ -88,7 +89,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, prDiff: PrState | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
   const prev = useRef<Record<string, { node: string; path: string; ti?: number }> | null>(null);
   const fromPop = useRef(false);
@@ -98,7 +99,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   useEffect(() => {
     if (!tree) return;
     const paths = pathsOf(tree);
-    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(panelSel.length ? { panelSel } : {}), ...(settings ? { settings } : {}) });
+    const url = encodeState({ tree, active, ...(diff ? { diff } : {}), ...(prDiff ? { prDiff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(panelSel.length ? { panelSel } : {}), ...(settings ? { settings } : {}) });
     latest.current.url = url;
     latest.current.paths = paths;
     let changed: string | undefined;
@@ -120,7 +121,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     } catch {
       /* history unavailable (sandboxed frame) */
     }
-  }, [tree, active, diff, folder, trash, panelSel, settings]);
+  }, [tree, active, diff, prDiff, folder, trash, panelSel, settings]);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
@@ -288,6 +289,7 @@ export function App() {
     return () => window.removeEventListener("keydown", h);
   }, []);
   const [diff, setDiff] = useState<{ left: FileRef; right: FileRef } | null>(initial?.diff ?? null);
+  const [prDiff, setPrDiff] = useState<PrState | null>(initial?.prDiff ?? null);
   const [diffMark, setDiffMark] = useState<FileRef | null>(null);
   const onDiff = (files: FileRef[]) => {
     if (files.length === 2) {
@@ -352,7 +354,7 @@ export function App() {
     setPanelSel((p) => (p.every((k) => ids.has(k)) ? p : p.filter((k) => ids.has(k))));
   }, [tree]);
 
-  useUrlHistory(tree, activeId, diff, compare, trash, panelSel, settingsOpen, setTree, setStatus);
+  useUrlHistory(tree, activeId, diff, prDiff, compare, trash, panelSel, settingsOpen, setTree, setStatus);
 
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => { const m = t ? mapTree(t, fn) : t; return m ? syncTree(m) : m; });
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
@@ -490,6 +492,7 @@ export function App() {
           onSwitch={(d) => switchPanel(t.id, d)}
           onHelp={() => setHelp(true)}
           onTrash={(node) => setTrash({ node, volume: "" })}
+          onPrDiff={(node, path) => setPrDiff({ node, path })}
           peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel, picked: panelSel.includes(l.id) }))}
           onStatus={setStatus}
         />
@@ -562,6 +565,11 @@ export function App() {
             </Suspense>
           )}
           {settingsOpen && <SettingsView onClose={() => setSettingsOpen(false)} />}
+          {prDiff && (
+            <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
+              <PrDiffView state={prDiff} onState={setPrDiff} onClose={() => setPrDiff(null)} onStatus={setStatus} />
+            </Suspense>
+          )}
           {diff && (
             <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
               <DiffViewer overlay left={diff.left} right={diff.right} onClose={() => setDiff(null)} onStatus={setStatus} />

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
+import { Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
   | "sep"
@@ -18,7 +18,7 @@ export type MenuItem =
 type Item = Exclude<MenuItem, "sep">;
 /** Icon for a menu row, chosen from its label so every item carries one (flat lucide line icon, 16px). */
 const ICONS: [RegExp, LucideIcon][] = [
-  [/^Open trash/i, Trash2], [/^Open in new panel|^Show in new panel/i, Columns2], [/^Open here/i, FolderOpen], [/^Open in new tab|^New tab|^Duplicate tab/i, SquarePlus], [/^Open/i, FolderOpen],
+  [/^Open trash/i, Trash2], [/^Pull request diff/i, GitPullRequest], [/^Open in new panel|^Show in new panel/i, Columns2], [/^Open here/i, FolderOpen], [/^Open in new tab|^New tab|^Duplicate tab/i, SquarePlus], [/^Open/i, FolderOpen],
   [/^Remove bookmark/i, StarOff], [/bookmark/i, Star], [/^Preview/i, Eye], [/^Edit link|^Edit/i, FilePen], [/^Cut/i, Scissors], [/^Copy path/i, Copy],
   [/^Copy to|^Copy/i, Copy], [/^Paste/i, ClipboardPaste], [/^Rename/i, Pencil], [/^Duplicate/i, CopyPlus], [/^Compress/i, Archive], [/^Extract/i, PackageOpen], [/^Forget saved/i, KeyRound],
   [/^Download/i, Download], [/^Move to trash|^Delete left|^Delete right/i, Trash2], [/^Delete/i, CircleX], [/^Properties/i, Info], [/^New file/i, FilePlus],
