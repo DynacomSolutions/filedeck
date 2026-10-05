@@ -120,11 +120,51 @@ export async function list(root: string, p: string, hidden: boolean) {
 
 /** The order the file list shows by default (folders first, then natural name order); the web app sorts the same way. */
 const natural = new Intl.Collator(undefined, { numeric: true }); // one collator: localeCompare with options builds a new one per call, far too slow for 20 000 names
-export const listOrder = (a: { name: string; dir: boolean }, b: { name: string; dir: boolean }) => Number(b.dir) - Number(a.dir) || natural.compare(a.name, b.name);
+// Names the collator calls equal ("01" and "1") fall back to code-unit order, so the order is total and a partial selection agrees with a full sort.
+export const listOrder = (a: { name: string; dir: boolean }, b: { name: string; dir: boolean }) =>
+  Number(b.dir) - Number(a.dir) || natural.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
+/** The `k` first rows of `rows` in `listOrder` without sorting all of them: a bounded max-heap, one comparison per row in the usual case. */
+export function smallest<T extends { name: string; dir: boolean }>(rows: T[], k: number): T[] {
+  if (rows.length <= k) return rows.slice().sort(listOrder);
+  const heap: T[] = []; // max-heap: heap[0] is the last row of the best k so far
+  const up = (i: number) => {
+    while (i > 0) {
+      const q = (i - 1) >> 1;
+      if (listOrder(heap[i]!, heap[q]!) <= 0) break;
+      [heap[i], heap[q]] = [heap[q]!, heap[i]!];
+      i = q;
+    }
+  };
+  const down = (i: number) => {
+    for (;;) {
+      let m = i;
+      for (const c of [2 * i + 1, 2 * i + 2]) if (c < heap.length && listOrder(heap[c]!, heap[m]!) > 0) m = c;
+      if (m === i) return;
+      [heap[i], heap[m]] = [heap[m]!, heap[i]!];
+      i = m;
+    }
+  };
+  for (const r of rows) {
+    if (heap.length < k) {
+      heap.push(r);
+      up(heap.length - 1);
+    } else if (listOrder(r, heap[0]!) < 0) {
+      heap[0] = r;
+      down(0);
+    }
+  }
+  return heap.sort(listOrder);
+}
+
+/** Rows in the first batch: few, so the first paint is quick; later batches use the full batch size. */
+export const FIRST_BATCH = 100;
 
 /**
- * The same listing as `list`, in the default order and in batches, so a huge folder can paint its first rows while the rest is still
- * being read. Names and types come from one readdir; only symbolic links need a stat before sorting (a link to a folder sorts as a folder).
+ * The same listing as `list`, in the default order and in batches, so a huge folder paints its first rows while the rest is still being
+ * prepared. Names and types come from one readdir; only symbolic links need a stat before ordering (a link to a folder sorts as a folder).
+ * The first batch is picked by a partial selection and sent before the remaining names are sorted, and the details of the next batch are
+ * read while the current one is on its way out.
  */
 export async function* listStream(root: string, p: string, hidden: boolean, batchSize = 500): AsyncGenerator<{ entries: Entry[] } | { done: { path: string; truncated: boolean } }> {
   const r = resolveRead(root, p);
@@ -132,23 +172,35 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
   if (!st.isDirectory()) throw new FsError(400, "not a directory");
   const dirents = (await fs.readdir(r.real, { withFileTypes: true })).filter((d) => d.name !== TRASH_DIR && (hidden || !d.name.startsWith(".")));
   const truncated = dirents.length > MAX_LIST;
-  const links = new Map<string, Entry>();
+  // A link only needs one stat to be ordered (is its target a folder?); its full entry is built with the rest of its batch.
+  const linkDir = new Set<string>();
   const linkNames = dirents.filter((d) => d.isSymbolicLink()).map((d) => d.name);
-  for (let i = 0; i < linkNames.length; i += 64) {
-    const got = await Promise.all(linkNames.slice(i, i + 64).map((n) => toEntry(root, r.virtual, r.real, n)));
-    for (const g of got) if (g) links.set(g.name, g);
-  }
-  const rows = dirents
-    .map((d) => ({ name: d.name, dir: d.isDirectory() || !!links.get(d.name)?.linkDir }))
-    .sort(listOrder)
-    .slice(0, MAX_LIST);
-  for (let i = 0; i < rows.length; i += batchSize) {
+  const isDir = async (n: string) => {
+    try {
+      if ((await fs.stat(resolveRead(root, virtualJoin(r.virtual, n)).real)).isDirectory()) linkDir.add(n); // confined, never the container fs
+    } catch {
+      /* broken or looping link: sorts with the files */
+    }
+  };
+  for (let i = 0; i < linkNames.length; i += 256) await Promise.all(linkNames.slice(i, i + 256).map(isDir));
+  const all = dirents.map((d) => ({ name: d.name, dir: d.isDirectory() || linkDir.has(d.name) }));
+  const details = async (slice: { name: string }[]) => {
     const out: Entry[] = [];
-    const slice = rows.slice(i, i + batchSize);
     for (let k = 0; k < slice.length; k += 64) {
-      const got = await Promise.all(slice.slice(k, k + 64).map((x) => links.get(x.name) ?? toEntry(root, r.virtual, r.real, x.name)));
+      const got = await Promise.all(slice.slice(k, k + 64).map((x) => toEntry(root, r.virtual, r.real, x.name)));
       for (const g of got) if (g) out.push(g);
     }
+    return out;
+  };
+  const head = smallest(all, Math.min(FIRST_BATCH, batchSize, MAX_LIST));
+  const first = await details(head);
+  if (first.length) yield { entries: first };
+  const seen = new Set(head.map((h) => h.name));
+  const rest = all.filter((x) => !seen.has(x.name)).sort(listOrder).slice(0, Math.max(0, MAX_LIST - head.length));
+  let ahead = details(rest.slice(0, batchSize));
+  for (let i = 0; i < rest.length; i += batchSize) {
+    const out = await ahead;
+    ahead = details(rest.slice(i + batchSize, i + 2 * batchSize));
     if (out.length) yield { entries: out };
   }
   yield { done: { path: r.virtual, truncated } };
