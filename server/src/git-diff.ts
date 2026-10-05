@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
+import { BASE_ARGS, filterNeutralisedEnv, gitEnv } from "./git.ts";
 
 /**
  * Read-only git for the pull request diff view. Everything here runs `git` next to the data (a work tree or a bare
@@ -24,24 +25,16 @@ export interface RunOpts {
 }
 
 /** Runs `git <args>` in `cwd`. Resolves with the exit code (never rejects on a non-zero exit); kills on timeout or output cap. */
-export function runGit(cwd: string, args: string[], o: RunOpts = {}): Promise<GitRun> {
+export async function runGit(cwd: string, args: string[], o: RunOpts = {}): Promise<GitRun> {
   const maxBytes = o.maxBytes ?? 8 * 1024 * 1024;
   const timeoutMs = o.timeoutMs ?? 20_000;
+  const extra: NodeJS.ProcessEnv = { HOME: "/nonexistent", LANG: "C" };
+  if (o.ceiling) extra.GIT_CEILING_DIRECTORIES = o.ceiling;
+  // The repository's config belongs to someone else: git.ts neutralises its fsmonitor, hooks, pager and content filters.
+  const env = await filterNeutralisedEnv(cwd, args, gitEnv(extra));
+  if (!env) throw new FsError(504, "git configuration could not be read");
   return new Promise((resolve, reject) => {
-    const env: NodeJS.ProcessEnv = {
-      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-      HOME: "/nonexistent",
-      LANG: "C",
-      LC_ALL: "C",
-      GIT_OPTIONAL_LOCKS: "0",
-      GIT_TERMINAL_PROMPT: "0",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_NO_REPLACE_OBJECTS: "1",
-    };
-    if (o.ceiling) env.GIT_CEILING_DIRECTORIES = o.ceiling;
-    // core.fsmonitor/hooksPath/pager come from the repository's own config, which belongs to someone else: neutralise them.
-    const p = spawn("git", ["-c", "safe.directory=*", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.pager=cat", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn("git", [...BASE_ARGS, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let n = 0;
     let truncated = false;

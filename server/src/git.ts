@@ -34,7 +34,111 @@ export interface GitOpts {
   raw?: boolean;
 }
 
-const BASE_ARGS = ["-c", "safe.directory=*", "-c", "core.fsmonitor=false", "-c", "core.quotepath=off", "-c", "core.pager=cat", "-c", "color.ui=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"];
+export const BASE_ARGS = [
+  "-c", "safe.directory=*", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.quotepath=off", "-c", "core.pager=cat",
+  "-c", "color.ui=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.untrackedCache=false",
+  // status asks each submodule's own `git status` for its dirty state, which would run the submodule's own filters:
+  // only the recorded commit is compared
+  "-c", "diff.ignoreSubmodules=dirty", "-c", "status.submoduleSummary=false",
+];
+
+/**
+ * Subcommands that only read objects and refs: they never run a clean, smudge or process filter, so they skip the
+ * config probe. Anything else is probed, so a new kind of call is safe by default.
+ */
+const OBJECT_ONLY = new Set(["rev-parse", "check-ref-format", "cat-file", "for-each-ref", "rev-list", "merge-base", "log", "show", "stash", "remote", "config"]);
+
+/** The subcommand of an argument list that starts with `--git-dir X [--work-tree Y]` options. */
+function subcommand(args: string[]): { lead: string[]; sub: string } {
+  let i = 0;
+  while (i < args.length && args[i]!.startsWith("--")) i += args[i] === "--git-dir" || args[i] === "--work-tree" ? 2 : 1;
+  return { lead: args.slice(0, i), sub: args[i] ?? "" };
+}
+
+/** Runs a tiny Git command and collects its output (no filters involved: it only reads configuration). */
+function probe(cwd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("git", [...BASE_ARGS, ...args], { cwd, stdio: ["ignore", "pipe", "ignore"], env });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let done = false;
+    const finish = (code: number | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ code, out: Buffer.concat(chunks).toString("utf8") });
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(null);
+    }, timeoutMs);
+    timer.unref();
+    child.stdout.on("data", (d: Buffer) => {
+      size += d.length;
+      if (size <= 1024 * 1024) chunks.push(d);
+    });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => finish(code));
+  });
+}
+
+/**
+ * Environment that replaces every content filter the repository's effective configuration defines (its own config,
+ * `include.path` and `includeIf` files; the user's and the system's are already off) by a no-op, so `git status` and
+ * friends never run a command a repository named: with `* filter=x` in `.gitattributes` or `.git/info/attributes` and
+ * `filter.x.clean` in the config, Git runs that command as the agent user whenever a file's stat data differs from the
+ * index. Environment config (`GIT_CONFIG_COUNT`) is used rather than `-c`, which cannot carry a driver name with `=` in it.
+ * `GIT_ATTR_SOURCE` is not used: it hides `.gitattributes` from the work tree, which would also drop `eol` and `text`
+ * rules and report CRLF files as modified, and it does not cover `.git/info/attributes`.
+ * Returns null when the probe failed or timed out: the caller must then not run the command.
+ */
+export async function filterNeutralisedEnv(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv | null> {
+  const { lead, sub } = subcommand(args);
+  if (OBJECT_ONLY.has(sub)) return env;
+  const r = await probe(cwd, [...lead, "config", "-z", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$"], env, 5000);
+  // 1: no such key. 128 and the like: not a repository, the real command fails the same way (and no filter can apply)
+  if (r.code === null) return null;
+  if (r.code !== 0) return env;
+  const names = new Set<string>();
+  for (const rec of r.out.split("\0")) {
+    const key = rec.split("\n", 1)[0]!;
+    const m = /^filter\.(.+)\.(?:clean|smudge|process)$/s.exec(key);
+    if (m) names.add(m[1]!);
+  }
+  if (names.size === 0) return env;
+  const out: NodeJS.ProcessEnv = { ...env };
+  let n = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
+  const set = (k: string, v: string) => {
+    out[`GIT_CONFIG_KEY_${n}`] = k;
+    out[`GIT_CONFIG_VALUE_${n}`] = v;
+    n++;
+  };
+  for (const name of names) {
+    set(`filter.${name}.clean`, "cat");
+    set(`filter.${name}.smudge`, "cat");
+    set(`filter.${name}.process`, "");
+    set(`filter.${name}.required`, "false");
+  }
+  out.GIT_CONFIG_COUNT = String(n);
+  return out;
+}
+
+/** The environment every agent Git command runs in. */
+export function gitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: os.tmpdir(),
+    LC_ALL: "C",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_ASKPASS: "true",
+    GIT_PAGER: "cat",
+    GIT_NO_REPLACE_OBJECTS: "1",
+    ...extra,
+  };
+}
 
 /** At most this many Git processes at once on a node, so a big listing never floods the host. */
 const MAX_PROCS = 4;
@@ -55,24 +159,15 @@ async function slot<T>(fn: () => Promise<T>): Promise<T> {
 export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<GitRun & { buf: Buffer }> {
   const timeoutMs = o.timeoutMs ?? 10_000;
   const maxBytes = o.maxBytes ?? 8 * 1024 * 1024;
-  return slot(
-    () =>
-      new Promise((resolve) => {
+  return slot(async () => {
+    const env = await filterNeutralisedEnv(cwd, args, gitEnv());
+    if (!env) return { code: null, stdout: "", stderr: "git configuration could not be read", timedOut: true, truncated: false, buf: Buffer.alloc(0) };
+    return await new Promise<GitRun & { buf: Buffer }>((resolve) => {
         const child = spawn("git", [...BASE_ARGS, ...args], {
           cwd,
           stdio: ["ignore", "pipe", "pipe"],
           detached: true, // its own process group, so a timeout takes helper processes (aliases, filters) down too
-          env: {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
-            HOME: os.tmpdir(),
-            LC_ALL: "C",
-            GIT_OPTIONAL_LOCKS: "0",
-            GIT_TERMINAL_PROMPT: "0",
-            GIT_CONFIG_NOSYSTEM: "1",
-            GIT_CONFIG_GLOBAL: "/dev/null",
-            GIT_ASKPASS: "true",
-            GIT_PAGER: "cat",
-          },
+          env,
         });
         const out: Buffer[] = [];
         let size = 0;
@@ -118,8 +213,8 @@ export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<Gi
           finish(null);
         });
         child.on("close", (code) => finish(code));
-      }),
-  );
+    });
+  });
 }
 
 /** A revision name that cannot be mistaken for an option or contain odd operators. */
@@ -170,6 +265,13 @@ async function looksBare(dir: string): Promise<boolean> {
   return h && o && r;
 }
 
+/** Git's own test for a git directory: HEAD, objects and refs (a linked worktree's admin directory gets them from its commondir). */
+async function isGitDir(dir: string): Promise<boolean> {
+  if (!(await exists(path.join(dir, "HEAD")))) return false;
+  const cd = await fs.readFile(path.join(dir, "commondir"), "utf8").then((t) => path.resolve(dir, t.trim()), () => null);
+  return looksBare(cd ?? dir);
+}
+
 /** Is `dir` itself a repository root (a `.git` entry in it, or a bare repository)? */
 export async function repoAt(root: string, dir: string): Promise<Repo | null> {
   if (path.basename(dir) === ".git") return null;
@@ -180,10 +282,11 @@ export async function repoAt(root: string, dir: string): Promise<Repo | null> {
   } catch {
     st = null;
   }
-  if (st?.isDirectory()) return { kind: "worktree", workDir: dir, gitDir: dotgit, commonDir: dotgit, root };
+  // a `.git` that is not a valid repository is skipped, as Git does: the search goes on in the folders above
+  if (st?.isDirectory()) return (await isGitDir(dotgit)) ? { kind: "worktree", workDir: dir, gitDir: dotgit, commonDir: dotgit, root } : null;
   if (st?.isFile()) {
     const gd = await gitFileTarget(root, dotgit);
-    if (!gd) return null;
+    if (!gd || !(await isGitDir(gd))) return null;
     const cd = await fs.readFile(path.join(gd, "commondir"), "utf8").then((t) => path.resolve(gd, t.trim()), () => null);
     // a submodule's git directory sits inside the superproject's `.git/modules`, with no commondir: it is an ordinary work tree
     return { kind: cd ? "linked" : "worktree", workDir: dir, gitDir: gd, commonDir: cd ?? gd, root };
