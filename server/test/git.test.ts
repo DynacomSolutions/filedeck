@@ -152,6 +152,31 @@ test("a bare repository is recognised and shows its branch", async () => {
   assert.equal(inside.repo?.summary.kind, "bare");
 });
 
+test("a bare repository with a stray empty .git folder or a bogus .git file is still bare", async () => {
+  for (const [name, stray] of [["bare-emptydir.git", "dir"], ["bare-bogusfile.git", "file"]] as const) {
+    const d = real(`/home/${name}`);
+    fs.mkdirSync(d, { recursive: true });
+    git(d, "init", "-q", "--bare");
+    if (stray === "dir") fs.mkdirSync(path.join(d, ".git"));
+    else fs.writeFileSync(path.join(d, ".git"), "gitdir: /nonexistent/nowhere\n");
+    assert.equal((await status("/home")).children[name]?.kind, "bare", name);
+    assert.equal((await status(`/home/${name}`)).repo?.summary.kind, "bare", name);
+    const info = await get<{ repo: { kind: string } | null }>(`/api/git/info?path=${encodeURIComponent(`/home/${name}`)}`);
+    assert.equal(info.repo?.kind, "bare", name);
+  }
+});
+
+test("a folder with an empty .git that is not bare either is skipped and the search goes on upwards", async () => {
+  const d = real("/home/main/stray");
+  fs.mkdirSync(path.join(d, ".git"), { recursive: true });
+  const s = await status("/home/main/stray");
+  assert.equal(s.repo?.summary.kind, "worktree");
+  assert.equal((await status("/home/main")).children.stray, undefined);
+  const nonRepo = real("/home/plain/emptygit");
+  fs.mkdirSync(path.join(nonRepo, ".git"), { recursive: true });
+  assert.equal((await status("/home/plain/emptygit")).repo, undefined);
+});
+
 test("a linked worktree, whose .git file names an absolute host path, is read through the root", async () => {
   const main = real("/home/main");
   const wt = real("/home/wt-feature");

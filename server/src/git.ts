@@ -282,16 +282,17 @@ export async function repoAt(root: string, dir: string): Promise<Repo | null> {
   } catch {
     st = null;
   }
-  // a `.git` that is not a valid repository is skipped, as Git does: the search goes on in the folders above
-  if (st?.isDirectory()) return (await isGitDir(dotgit)) ? { kind: "worktree", workDir: dir, gitDir: dotgit, commonDir: dotgit, root } : null;
+  // a `.git` that is not a valid repository is skipped, as Git does: the bare check still runs, then the search goes on above
+  if (st?.isDirectory() && (await isGitDir(dotgit))) return { kind: "worktree", workDir: dir, gitDir: dotgit, commonDir: dotgit, root };
   if (st?.isFile()) {
     const gd = await gitFileTarget(root, dotgit);
-    if (!gd || !(await isGitDir(gd))) return null;
-    const cd = await fs.readFile(path.join(gd, "commondir"), "utf8").then((t) => path.resolve(gd, t.trim()), () => null);
-    // a submodule's git directory sits inside the superproject's `.git/modules`, with no commondir: it is an ordinary work tree
-    return { kind: cd ? "linked" : "worktree", workDir: dir, gitDir: gd, commonDir: cd ?? gd, root };
+    if (gd && (await isGitDir(gd))) {
+      const cd = await fs.readFile(path.join(gd, "commondir"), "utf8").then((t) => path.resolve(gd, t.trim()), () => null);
+      // a submodule's git directory sits inside the superproject's `.git/modules`, with no commondir: it is an ordinary work tree
+      return { kind: cd ? "linked" : "worktree", workDir: dir, gitDir: gd, commonDir: cd ?? gd, root };
+    }
   }
-  if (!st && (await looksBare(dir))) return { kind: "bare", workDir: dir, gitDir: dir, commonDir: dir, root };
+  if (await looksBare(dir)) return { kind: "bare", workDir: dir, gitDir: dir, commonDir: dir, root };
   return null;
 }
 
