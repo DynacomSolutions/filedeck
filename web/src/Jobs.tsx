@@ -207,9 +207,13 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   nodesRef.current = nodes;
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const busy = useRef(false);
+  const again = useRef(false);
 
   const poll = useCallback(async () => {
-    if (busy.current) return;
+    if (busy.current) {
+      again.current = true; // a poll is in flight with the old selection: run once more when it ends
+      return;
+    }
     busy.current = true;
     const next: Record<string, JobView[]> = {};
     const opsP = api.opJobs().then((r) => r.jobs, () => [] as OpJob[]);
@@ -240,7 +244,16 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     const active = opList.some(opLive) || Object.values(next).some((l) => l.some(live));
     clearTimeout(timer.current);
     timer.current = setTimeout(() => void poll(), active ? 700 : 10000);
+    if (again.current) {
+      again.current = false;
+      void poll();
+    }
   }, []);
+
+  // Expanding a job's items fetches them at once; without live jobs the regular poll is 10 s apart.
+  useEffect(() => {
+    if (open) void poll();
+  }, [open, poll]);
 
   useEffect(() => {
     void poll();

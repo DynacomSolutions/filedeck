@@ -151,15 +151,24 @@ export async function listSz(real: string, password: string | undefined, signal:
   let buf = "";
   let stopped = false;
   let proc: SzProc;
+  // Encryption is a per-file flag, so a listing cut at `limit` keeps reading (without keeping entries)
+  // until the first file entry has been seen: a folder-first archive is still recognised as encrypted.
+  let sawFile = false;
+  let enc = false;
   const push = (block: string) => {
     const e = parseSlt(block);
-    if (e && !stopped) {
-      if (entries.length >= limit) {
+    if (!e || stopped) return;
+    if (e.type === "file") {
+      sawFile = true;
+      if (e.encrypted) enc = true;
+    }
+    if (entries.length >= limit) {
+      if (sawFile) {
         stopped = true;
         proc.child.kill("SIGKILL");
         proc.child.stdout?.destroy();
-      } else entries.push(e);
-    }
+      }
+    } else entries.push(e);
   };
   proc = runSz(["l", "-slt", "-ba", "-spd", "--", real], {
     password,
@@ -174,7 +183,7 @@ export async function listSz(real: string, password: string | undefined, signal:
   const { code, text } = await proc.done;
   if (buf && !stopped) push(buf);
   if (!stopped && code !== 0) szFailure(code, text, password, "cannot read archive");
-  return { entries, truncated: stopped, encrypted: entries.some((e) => e.encrypted) };
+  return { entries, truncated: stopped, encrypted: enc || entries.some((e) => e.encrypted) };
 }
 
 /**

@@ -269,3 +269,20 @@ test("audit never records a password sent in a body or header", needTool, async 
   assert.ok(lines.includes("/api/jobs/compress"));
   assert.ok(!lines.includes(SECRET) && !lines.includes(b64(SECRET)) && !lines.toLowerCase().includes("password"));
 });
+
+test("encryption is detected when the first entry is a folder, and the listing stops early", needSz, async () => {
+  const { listSz, sevenZip } = await import("../src/sevenzip.ts");
+  const pw = "t70-test-password";
+  const run = (args: string[]) => spawnSync(sevenZip(), args, { cwd: path.join(tmp, "src") });
+  for (const [name, extra] of [["t70.zip", ["-tzip", "-mem=AES256"]], ["t70.7z", ["-t7z"]], ["t70h.7z", ["-t7z", "-mhe=on"]]] as const) {
+    const out = path.join(tmp, "src", name);
+    assert.equal(run(["a", ...extra, `-p${pw}`, out, "sub"]).status, 0, name);
+    const first = await listSz(out, pw, AbortSignal.timeout(30_000), 1);
+    assert.equal(first.encrypted, true, `${name}: encrypted even though the first entry is a folder`);
+    assert.equal(first.entries.length, 1, `${name}: only the requested number of entries is kept`);
+  }
+  // plain archive stays unencrypted
+  const plain = path.join(tmp, "src", "t70-plain.zip");
+  assert.equal(run(["a", "-tzip", plain, "sub"]).status, 0);
+  assert.equal((await listSz(plain, undefined, AbortSignal.timeout(30_000), 1)).encrypted, false);
+});
