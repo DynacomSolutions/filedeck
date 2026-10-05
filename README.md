@@ -23,7 +23,7 @@ There are no user accounts: put it behind a trusted network boundary (a VPN, a p
 | `web/public/assets/theme.css`, `fonts/` | Bundled theme tokens and fonts | core: neutral theme; Montserrat is SIL OFL 1.1 (`fonts/OFL.txt`) |
 | `deploy/brand/` | Logos and palette (`theme.css`, referenced by `brand.css`) for one deployment, copied into the image at `/assets/brand` when the folder exists | deployment |
 | `k8s/` | Helm chart (hub, one agent per node, network policy, ingress mapping) | deployment |
-| `../.github/workflows/filedeck-image.yml` | Test, build, scan, publish, open a pin PR | deployment |
+| `../.github/workflows/filedeck-image.yml` | Test, build, scan, publish, pin on main | deployment |
 
 A bare clone of `server/`, `web/` and the top-level files builds and tests without `deploy/`, `k8s/` or the workflow.
 
