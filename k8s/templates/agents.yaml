@@ -1,4 +1,5 @@
-{{- range .Values.nodes }}
+{{- range $i, $n := .Values.nodes }}
+{{- with $n }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -7,7 +8,13 @@ metadata:
   labels:
     {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (include "filedeck.agentInstance" (dict "root" $ "node" .))) | nindent 4 }}
     app.kubernetes.io/component: agent
-  {{- with $.Values.agent.annotations }}
+  {{- $ann := deepCopy ($.Values.agent.annotations | default dict) }}
+  {{- if $.Values.agent.stagger }}
+  {{- /* One Argo CD sync wave per agent: the next agent is only touched once the previous one is Ready, so at most
+         one node's agent is down while an image change rolls out (each Deployment is Recreate). */}}
+  {{- $_ := set $ann "argocd.argoproj.io/sync-wave" (printf "%d" (add 1 $i)) }}
+  {{- end }}
+  {{- with $ann }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -155,4 +162,5 @@ spec:
     - name: http
       port: {{ $.Values.port }}
       targetPort: http
+{{- end }}
 {{- end }}

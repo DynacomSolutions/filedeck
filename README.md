@@ -57,6 +57,7 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 |---|---|
 | `image.repository`, `image.tag`, `image.digest` | The image; a `digest` wins over `tag` |
 | `nodes[]` | One agent each: `name` (shown in the UI) and `nodeName` (Kubernetes node; empty = any) |
+| `agent.stagger` | Under Argo CD, roll agents one at a time (agent N in sync wave N+1, in `nodes` order); default on, ignored by plain Helm |
 | `agent.readOnlyPaths` | Virtual paths no agent may change (default `/proc`, `/sys`) |
 | `agentToken.secretName` | Existing Secret holding a shared hub-to-agent token (empty = none) |
 | `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key with an Argo CD PreSync hook; without Argo CD set `vault.keyJob.enabled=false` and create the Secret yourself |
