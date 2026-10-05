@@ -1,3 +1,4 @@
+import type { FsError } from "./fsops.ts";
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { readFile } from "node:fs/promises";
@@ -52,11 +53,12 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     agents.set(name, { fetch: (rest, init) => Promise.resolve(sapp.fetch(new Request("http://source" + rest, init))) });
   }
   // Reachability of a source is cached briefly so the sidebar poll does not open a connection per request.
-  const pingCache = new Map<string, { at: number; ok: boolean }>();
+  const pingCache = new Map<string, { at: number; ok: boolean; reason?: string }>();
   const sourceOnline = async (name: string) => {
     const hit = pingCache.get(name);
-    if (hit && Date.now() - hit.at < 10_000) return hit.ok;
+    if (hit && Date.now() - hit.at < 10_000) return hit;
     let ok = false;
+    let reason: string | undefined;
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
@@ -66,13 +68,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
         }),
       ]);
       ok = true;
-    } catch {
+    } catch (e) {
       ok = false;
+      // Only a fixed code is reported, never the error text (hosts, users and key details stay out of the API).
+      if ((e as FsError | undefined)?.extra?.reason === "hostkey") reason = "host-key-changed";
     } finally {
       clearTimeout(timer);
     }
-    pingCache.set(name, { at: Date.now(), ok });
-    return ok;
+    const res = { at: Date.now(), ok, ...(reason ? { reason } : {}) };
+    pingCache.set(name, res);
+    return res;
   };
 
   app.get("/healthz", (c) => c.text("ok"));
@@ -89,7 +94,10 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       }),
     );
     const srcs = await Promise.all(
-      [...sources.values()].map(async ({ config }) => ({ name: config.name, type: config.type, host: config.host, online: await sourceOnline(config.name) })),
+      [...sources.values()].map(async ({ config }) => {
+        const s = await sourceOnline(config.name);
+        return { name: config.name, type: config.type, host: config.host, online: s.ok, ...(s.reason ? { offlineReason: s.reason } : {}) };
+      }),
     );
     return c.json({ nodes, sources: srcs });
   });

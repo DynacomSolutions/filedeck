@@ -14,7 +14,8 @@ export interface TestSftp {
 }
 
 /** Minimal in-process SFTP server over a local directory, for tests. Password auth only. */
-export async function startSftp(root: string, user: string, password: string): Promise<TestSftp> {
+export async function startSftp(root: string, user: string, password: string, port = 0): Promise<TestSftp> {
+  // a fresh host key per start, like rclone serve sftp without --key
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "pkcs1", format: "pem" } });
   const real = (p: string) => {
     const r = path.resolve(root, "." + path.posix.resolve("/", p));
@@ -152,7 +153,7 @@ export async function startSftp(root: string, user: string, password: string): P
     });
     client.on("error", () => undefined);
   });
-  await new Promise<void>((res) => server.listen(0, "127.0.0.1", res));
+  await new Promise<void>((res) => server.listen(port, "127.0.0.1", res));
   return {
     port: (server.address() as AddressInfo).port,
     root,

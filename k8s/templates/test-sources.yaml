@@ -20,10 +20,13 @@ spec:
         {{- include "filedeck.labels" . | nindent 8 }}
         app.kubernetes.io/component: test-source
     type: Opaque
+{{- /* A `hostKey` in `sealed` becomes the SFTP server's fixed host key (rclone otherwise makes a new one on every start,
+       which a pinned or remembered host key then refuses). */}}
+{{- $hostKey := hasKey ($ts.sealed | default dict) "hostKey" }}
 {{- /* name, port, image, command/args, env, root-level pieces */}}
 {{- $servers := list
   (dict "kind" "sftp" "port" 2022 "image" $ts.images.rclone "root" false "data" "/data"
-    "command" (list "rclone") "args" (list "serve" "sftp" "/data" "--addr" ":2022")
+    "command" (list "rclone") "args" (concat (list "serve" "sftp" "/data" "--addr" ":2022") (ternary (list "--key" "/etc/filedeck/hostkey/hostKey") (list) $hostKey))
     "env" (list
       (dict "name" "RCLONE_USER" "key" "username")
       (dict "name" "RCLONE_PASS" "key" "password")))
@@ -133,6 +136,11 @@ spec:
             - name: tmp
               mountPath: /tmp
             {{- end }}
+            {{- if and $hostKey (eq $s.kind "sftp") }}
+            - name: hostkey
+              mountPath: /etc/filedeck/hostkey
+              readOnly: true
+            {{- end }}
       volumes:
         - name: data
           emptyDir:
@@ -141,6 +149,14 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
+        {{- end }}
+        {{- if and $hostKey (eq $s.kind "sftp") }}
+        - name: hostkey
+          secret:
+            secretName: {{ $ts.secretName }}
+            items:
+              - {key: hostKey, path: hostKey}
+            defaultMode: 0440
         {{- end }}
 ---
 apiVersion: v1

@@ -256,7 +256,7 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
       {!cluster.length && <p className="muted">No nodes</p>}
       {network.length > 0 && <h2>Network</h2>}
       {network.map((n) => (
-        <Tip key={n.name} label={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : " - unreachable"}`}>
+        <Tip key={n.name} label={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : n.offlineReason === "host-key-changed" ? " - host key changed, connection refused" : " - unreachable"}`}>
           <button className="side-node" {...link(n.name, "/")}>
             <span className={"dot " + (n.online ? "on" : "off")} /> <Ic.Network /> {n.name}
             <span className="net-badge">{(n.type ?? "net").toUpperCase()}</span>

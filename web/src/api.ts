@@ -37,6 +37,8 @@ export interface NodeInfo {
   /** source protocol, e.g. "sftp" */
   type?: string;
   host?: string;
+  /** why a source is offline when the hub knows: "host-key-changed" (SFTP server key is not the pinned or remembered one) */
+  offlineReason?: string;
 }
 
 const enc = encodeURIComponent;

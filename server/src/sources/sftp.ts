@@ -27,6 +27,9 @@ export function sftpError(e: unknown, fallback = "remote error"): FsError {
   return new FsError(502, fallback);
 }
 
+/** Message of the error raised when the server's host key is not the pinned or the remembered one. */
+export const HOST_KEY_CHANGED = "host key changed: the server's key is not the pinned or remembered one";
+
 export interface SftpOptions {
   /** base64 sha256 of the server's host key (as `ssh-keygen -lf` prints without the SHA256: prefix); empty = trust and remember the first key */
   hostKeySha256?: string;
@@ -78,13 +81,14 @@ export class SftpBackend implements SourceBackend {
     if (!c.username) throw new FsError(502, "source credentials are missing");
     const conn = new Client();
     const pinned = this.opts.hostKeySha256?.replace(/^SHA256:/, "").replace(/=+$/, "");
+    let keyRefused = false;
     const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
       // a failed attempt (bad credentials, unreachable) must not leave a half-open connection behind
       const fail = (e: Error) => {
         conn.destroy();
         reject(e);
       };
-      conn.on("error", (e) => fail(sftpError(e, "connection failed")));
+      conn.on("error", (e) => fail(keyRefused ? new FsError(502, HOST_KEY_CHANGED, { reason: "hostkey" }) : sftpError(e, "connection failed")));
       conn.on("ready", () => {
         conn.sftp((err, s) => (err ? fail(sftpError(err, "sftp unavailable")) : resolve(s)));
       });
@@ -99,9 +103,11 @@ export class SftpBackend implements SourceBackend {
         hostHash: "sha256",
         hostVerifier: (hash: string) => {
           const got = Buffer.from(hash, "hex").toString("base64").replace(/=+$/, ""); // ssh2 hands over hex
-          if (pinned) return got === pinned;
-          // No pin configured: trust the first key and refuse a change while this process lives.
-          if (this.seenKey && this.seenKey !== got) return false;
+          const changed = pinned ? got !== pinned : this.seenKey !== null && this.seenKey !== got; // no pin: trust the first key, refuse a change while this process lives
+          if (changed) {
+            keyRefused = true;
+            return false;
+          }
           this.seenKey = got;
           return true;
         },
