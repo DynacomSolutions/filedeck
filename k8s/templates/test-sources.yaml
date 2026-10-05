@@ -32,11 +32,11 @@ spec:
     "env" (list
       (dict "name" "RCLONE_USER" "key" "username")
       (dict "name" "RCLONE_PASS" "key" "password")))
-  (dict "kind" "s3" "port" 8080 "image" $ts.images.rclone "root" false "data" "/data"
-    "command" (list "sh" "-c") "args" (list "mkdir -p /data/data && exec rclone serve s3 /data --addr :8080 --auth-key \"$S3_ACCESS_KEY,$S3_SECRET_KEY\"")
+  (dict "kind" "s3" "port" 8080 "image" $ts.images.minio "root" false "data" "/data"
+    "command" (list "sh" "-c") "args" (list "mkdir -p /data/data && exec minio server /data --address :8080 --console-address 127.0.0.1:9001")
     "env" (list
-      (dict "name" "S3_ACCESS_KEY" "key" "accessKeyId")
-      (dict "name" "S3_SECRET_KEY" "key" "secretAccessKey")))
+      (dict "name" "MINIO_ROOT_USER" "key" "accessKeyId")
+      (dict "name" "MINIO_ROOT_PASSWORD" "key" "secretAccessKey")))
   (dict "kind" "smb" "port" 445 "image" $ts.images.samba "root" true "data" "/shared"
     "command" (list) "args" (list)
     "env" (list
