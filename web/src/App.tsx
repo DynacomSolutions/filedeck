@@ -544,7 +544,7 @@ export function App() {
             {diffMark && (
               <Tip label="Clear diff mark">
                 <button onClick={() => setDiffMark(null)}>
-                  <Ic.Diff /> <span className="bl">Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)}</span> <X />
+                  <Ic.Diff /> <span className="bl diffmark-label">Diff mark: {diffMark.path.slice(diffMark.path.lastIndexOf("/") + 1)}</span> <X />
                 </button>
               </Tip>
             )}

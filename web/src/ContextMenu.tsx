@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
+import { Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
   | "sep"
@@ -23,7 +23,7 @@ const ICONS: [RegExp, LucideIcon][] = [
   [/^Copy to|^Copy/i, Copy], [/^Paste/i, ClipboardPaste], [/^Rename/i, Pencil], [/^Duplicate/i, CopyPlus], [/^Compress/i, Archive], [/^Extract/i, PackageOpen], [/^Forget saved/i, KeyRound],
   [/^Download/i, Download], [/^Move to trash|^Delete left|^Delete right/i, Trash2], [/^Delete/i, CircleX], [/^Properties/i, Info], [/^New file/i, FilePlus],
   [/^New folder/i, FolderPlus], [/^New symbolic/i, Link], [/^Select all/i, SquareCheck], [/^Upload/i, Upload], [/^Refresh/i, RefreshCw],
-  [/^Exit compare/i, LogOut], [/^Compare|^Selected in/i, GitCompareArrows], [/^Mark for diff|^Diff/i, Diff], [/^Move left/i, ArrowLeft], [/^Move right/i, ArrowRight],
+  [/^Clear/i, Eraser], [/^Exit compare/i, LogOut], [/^Compare|^Selected in/i, GitCompareArrows], [/^Mark for diff|^Diff/i, Diff], [/^Move left/i, ArrowLeft], [/^Move right/i, ArrowRight],
   [/^Move to|^Move/i, FolderInput], [/^Close/i, X], [/^No other/i, X],
 ];
 const iconFor = (label: string): LucideIcon => ICONS.find(([re]) => re.test(label))?.[1] ?? MousePointer2;

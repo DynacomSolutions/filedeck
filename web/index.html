@@ -14,7 +14,8 @@
       (function () {
         try {
           var p = localStorage.getItem((window.__FILEDECK__ || {}).themeKey || "filedeck-theme");
-          if (p === "light" || p === "dark") document.documentElement.dataset.theme = p;
+          if (p !== "light" && p !== "dark") p = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          document.documentElement.dataset.theme = p;
         } catch (e) {}
       })();
     </script>

@@ -383,7 +383,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
 
   const click = (e: React.MouseEvent, en: Entry) => {
     onFocus();
-    setCursor(en.path);
+    // Ctrl/Cmd on a selected item deselects it: the active item then follows what is left (nothing: the open folder).
+    const off = (e.ctrlKey || e.metaKey) && !e.shiftKey && sel.has(en.path);
+    if (off) {
+      const rest = [...sel].filter((x) => x !== en.path);
+      setCursor(rest.length === 1 ? rest[0]! : rest.length === 0 ? null : en.path);
+    } else setCursor(en.path);
     // Plain click selects here and nowhere else; Shift (range) and Ctrl/Cmd (toggle) keep the other panels' selections.
     if (!e.shiftKey && !e.ctrlKey && !e.metaKey) onClearOthers();
     if (e.shiftKey && anchor) {
@@ -644,13 +649,15 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       </span>
     </span>
   );
-  const propsKey = propsFor ?? (sel.size > 1 ? null : cursor);
+  // Nothing selected: Properties shows the open folder itself.
+  const folderProps = !propsFor && sel.size <= 1 && !cursor;
+  const propsKey = propsFor ?? (sel.size > 1 ? null : cursor ?? path);
   const propsPane =
     propsKey !== null ? (
       <div className="pv">
         <div className="pv-head">
           <Tip label={propsKey}><b>{propsKey === "/" ? `${node}:/` : base(propsKey)}</b></Tip>
-          <span className="muted">{propsFor ? "Folder" : "Active"}</span>
+          <span className="muted">{propsFor || folderProps ? "Folder" : "Active"}</span>
           {paneExtra}
         </div>
         <div className="pv-body pp-body">
@@ -1132,7 +1139,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { id: "mark", label: marked ? "Remove this folder from the bookmarks" : "Bookmark this folder", icon: <Star fill={marked ? "currentColor" : "none"} />, pressed: marked, run: () => toggleMark(here) },
     { id: "tab", label: "New tab with this folder (Alt+T)", icon: <SquarePlus />, run: () => newTab() },
     { id: "pick", label: "Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels", icon: <SquareCheck />, pressed: panelPicked, run: onTogglePanel },
-    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing && !!propsPane, run: () => (propsOpen && !editing && propsPane ? closeSide() : (!cursor && sel.size === 0 && onStatus("Select an item to see its properties"), openProps())) },
+    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing && !!propsPane, run: () => (propsOpen && !editing && propsPane ? closeSide() : openProps()) },
     { id: "wt", label: "Worktrees of this folder's Git repository in the side panel", icon: <Ic.GitBranch />, pressed: wtOpen && !editing, run: toggleWorktrees },
   ];
   const paneCtl: Ctl[] = [

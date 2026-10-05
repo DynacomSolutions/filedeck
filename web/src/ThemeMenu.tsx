@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Monitor, Moon, Sun, type LucideIcon } from "lucide-react";
 import { brand } from "./brand";
 import { Tip } from "./Tooltip";
@@ -21,14 +21,25 @@ const stored = (): Pref => {
   }
 };
 
+const resolve = (p: Pref): "light" | "dark" =>
+  p !== "auto" ? p : window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+
 /** Light / Dark / Auto segmented control pinned to the sidebar bottom; the storage key comes from the deployment branding so sibling pages can share the choice. */
 export function ThemeMenu() {
   const [pref, setPref] = useState<Pref>(stored);
 
+  // The attribute always holds the resolved scheme; Auto re-resolves live when the system setting changes.
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolve(pref);
+    if (pref !== "auto" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const f = () => (document.documentElement.dataset.theme = resolve("auto"));
+    mq.addEventListener("change", f);
+    return () => mq.removeEventListener("change", f);
+  }, [pref]);
+
   const pick = (p: Pref) => {
     setPref(p);
-    if (p === "auto") delete document.documentElement.dataset.theme;
-    else document.documentElement.dataset.theme = p;
     try {
       localStorage.setItem(KEY, p === "auto" ? "system" : p);
     } catch {
