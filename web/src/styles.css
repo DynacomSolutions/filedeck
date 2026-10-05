@@ -736,3 +736,34 @@ select option{background:var(--surface);color:var(--fg)}
   .prd-body{flex-direction:column}
   .prd-files{flex:0 0 38%;border-right:0;border-bottom:1px solid var(--border)}
 }
+
+/* Git status (work-item) and details (work-item): everything from the theme tokens; state is told by letters and text, not colour alone. */
+.git-pill{display:inline-flex;align-items:center;gap:.3rem;max-width:100%;padding:.05rem .45rem;border:1px solid var(--border-strong);border-radius:var(--radius-btn);background:var(--surface-2);color:var(--fg);font-size:.7rem;font-weight:600;line-height:1.35;vertical-align:middle;white-space:nowrap}
+.git-pill svg{width:12px;height:12px;flex:none;color:var(--muted)}
+.git-pill[data-dirty]{border-color:var(--accent-line);background:var(--accent-tint)}
+.git-pill.pending{color:var(--muted)}
+.git-br{overflow:hidden;text-overflow:ellipsis;max-width:9rem}
+.git-n{display:inline-flex;align-items:center;font-variant-numeric:tabular-nums}
+.git-n svg{margin-right:1px}
+.git-u{color:var(--muted)}
+.git-c{color:var(--accent-text,var(--accent));font-weight:800}
+.git-st{display:inline-block;min-width:1.2rem;padding:0 .3rem;border:1px solid var(--border-strong);border-radius:var(--radius-btn);background:var(--surface-2);color:var(--fg);font:700 .68rem/1.4 var(--mono);text-align:center;letter-spacing:.05em}
+.git-st[data-st*="M"],.git-st[data-st*="S"],.git-st[data-st*="C"]{border-color:var(--accent-line);background:var(--accent-tint)}
+.git-st[data-st="U"],.git-st[data-st="I"]{color:var(--muted)}
+.ft th.git-th{cursor:default}
+.ft td.git-td{width:1%;padding-top:.4rem;padding-bottom:.4rem}
+.tile-git{display:flex;justify-content:center;min-width:0;overflow:hidden}
+.git-chip{flex:none;display:flex;align-items:center;margin:0 .35rem;max-width:16rem}
+.git-inline{display:none}
+@media(max-width:700px){.git-th,.ft td.git-td{display:none}.git-inline{display:block;margin-top:.1rem}.git-chip .git-n{display:none}.git-chip .git-br{max-width:5rem}}
+.git-sec .props>div{grid-template-columns:5.5rem 1fr}
+.git-sec code{font-family:var(--mono);font-size:.78rem}
+.git-list{margin-top:.4rem}
+.git-list summary{cursor:pointer;font-size:.8rem;font-weight:700}
+.git-list ul{list-style:none;margin:.3rem 0 0;padding:0;display:flex;flex-direction:column;gap:.15rem;max-height:14rem;overflow:auto}
+.git-list li{display:flex;align-items:center;gap:.25rem;min-width:0}
+.git-list li>button{min-height:26px;font-size:.76rem}
+.git-list li>button.git-item{flex:1 1 auto;min-width:0;justify-content:flex-start;text-align:left;overflow:hidden}
+.git-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tile-git .git-pill{flex-wrap:wrap;justify-content:center;white-space:normal;row-gap:0}
+.tile-git .git-br{max-width:100%}

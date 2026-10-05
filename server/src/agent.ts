@@ -13,6 +13,7 @@ import { registerGitDiffRoutes } from "./git-diff-routes.ts";
 import * as trash from "./trash.ts";
 import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
+import { registerGitRoutes } from "./git-routes.ts";
 import { registerSearchRoutes } from "./search.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
 import { registerTranscodeRoutes } from "./transcode.ts";
@@ -256,6 +257,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const jobs = registerArchiveRoutes(app, cfg);
   registerPdfRoutes(app, cfg);
   registerPropsRoutes(app, cfg, jobs);
+  registerGitRoutes(app, cfg);
   const index = registerDiffRoutes(app, cfg);
   registerGitDiffRoutes(app, cfg);
   (app as unknown as { close: () => Promise<void> }).close = async () => index.close();

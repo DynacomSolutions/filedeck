@@ -17,6 +17,8 @@ import { wheelX } from "./scrollx";
 import { AddressBar } from "./AddressBar";
 import { CompareBar, CompareBody, ROW_H, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
+import { gitApi, type GitListing } from "./git";
+import { GitBadge, GitPill } from "./GitUi";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
 import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey, type TabLoc } from "./urlState";
 import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowLeft, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, GitPullRequest, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
@@ -61,6 +63,8 @@ interface Props {
   onPatch: (p: Partial<Leaf>) => void;
   /** Two selected files diff directly; one selected file is marked, then paired with the next. */
   onDiff: (files: { node: string; path: string }[]) => void;
+  /** open the diff editor with the file at HEAD on the left and the file itself on the right */
+  onDiffHead?: (node: string, path: string) => void;
   diffMarked: boolean;
   /** Compare this panel with another one in place (both panels switch to compare mode). */
   onCompare: (peerId: string) => void;
@@ -98,13 +102,15 @@ const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onPrDiff, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onPrDiff, onStatus }: Props) {
   const { node, path } = leaf;
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
   /** the listing for node:path is still on its way (a refresh of a shown folder keeps its rows and is not "loading") */
   const [loading, setLoading] = useState(true);
   const listKey = useRef("");
+  /** Git state of the open folder (work-item): fetched after the listing has painted, never part of it */
+  const [git, setGit] = useState<GitListing | null>(null);
   const { upRow } = useSettings();
   /** more entries of the open folder are still arriving */
   const [streaming, setStreaming] = useState(false);
@@ -190,6 +196,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       // A different folder: drop the old rows so skeleton rows (not the previous folder) hold the space until the list arrives.
       listKey.current = key;
       setEntries([]);
+      setGit(null);
       setLoading(true);
       setLimit(RENDER_STEP);
     }
@@ -260,6 +267,39 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     });
     return () => (window.clearTimeout(t), es.close());
   }, [node, path, refresh]);
+
+  // Git status for the folder, asked for once its listing is on screen. A change event (tick) asks for a fresh read; a repository too big to
+  // read within the agent's time budget answers "pending" and is asked again shortly, while the listing stays as it is.
+  useEffect(() => {
+    if (loading) return;
+    let live = true;
+    let timer = 0;
+    let tries = 0;
+    const ctl = new AbortController();
+    const ask = (fresh: boolean) =>
+      gitApi.status(node, path, fresh, ctl.signal).then(
+        (g) => {
+          if (!live) return;
+          setGit(g);
+          if (g.pending && ++tries <= 8) timer = window.setTimeout(() => ask(false), 1500);
+        },
+        () => live && setGit(null),
+      );
+    void ask(tick > 0);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+      ctl.abort();
+    };
+  }, [node, path, loading, tick]);
+  const gitMark = (en: Entry, isDir: boolean) => {
+    if (!git) return null;
+    const child = isDir ? git.children[en.name] : undefined;
+    if (child) return <GitPill s={child} />;
+    const st = git.entries[en.name] ?? git.base;
+    return st ? <GitBadge letters={st} /> : null;
+  };
+  const gitCol = !!git && (Object.keys(git.children).length > 0 || Object.keys(git.entries).length > 0 || !!git.base);
 
   const sorted = useMemo(() => {
     const f = [...entries];
@@ -600,7 +640,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           {paneExtra}
         </div>
         <div className="pv-body pp-body">
-          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} />
+          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} onReveal={(p) => goTo(node, parent(p), p)} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
         </div>
       </div>
     ) : sel.size > 1 ? (
@@ -837,6 +877,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 <div key={en.path} role="option" aria-selected={sel.has(en.path)} {...itemProps(en, isDir, "tile ")}>
                   <Thumb node={node} entry={en} isDir={isDir} />
                   <Tip label={en.name} fill><div className="tile-name">{nameEditor(en)}</div></Tip>
+                  {gitMark(en, isDir) && <div className="tile-git">{gitMark(en, isDir)}</div>}
                 </div>
               );
             })}
@@ -845,7 +886,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         ) : (
         <table className="ft" aria-busy={loading}>
           <thead>
-            <tr>{th("name", "Name")}{th("size", "Size")}{th("mtime", "Modified")}</tr>
+            <tr>{th("name", "Name")}{gitCol && <th className="git-th">Git</th>}{th("size", "Size")}{th("mtime", "Modified")}</tr>
           </thead>
           <tbody>
             {showUp && (
@@ -856,6 +897,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                     <button type="button" className="up-btn" aria-label={`Up one folder to ${parentPath}`}>{upLabel}</button>
                   </div>
                 </td>
+                {gitCol && <td />}
                 <td className="num" />
                 <td className="num" />
               </tr>
@@ -863,7 +905,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             {loading && <SkeletonRows />}
             {createInput && (
               <tr className="creating">
-                <td className="name" colSpan={3}>
+                <td className="name" colSpan={gitCol ? 4 : 3}>
                   <div className="cr">{creating === "file" ? <Ic.FilePlus className="ico" /> : <Ic.FolderPlus className="ico" />}{createInput}</div>
                 </td>
               </tr>
@@ -875,6 +917,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                   <td className="name">
                     <FileIcon className="ico" dir={isDir} type={en.type} />
                     {nameEditor(en)}
+                    {gitCol && <div className="git-inline">{gitMark(en, isDir)}</div>}
                     {en.type === "symlink" && (
                       <Tip label={en.broken ? `Broken link: ${en.target ?? ""} does not exist` : `Link to ${en.target ?? ""}`}>
                         <span className={"ln-target" + (en.broken ? " broken" : "")}>
@@ -884,6 +927,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                       </Tip>
                     )}
                   </td>
+                  {gitCol && <td className="git-td">{gitMark(en, isDir)}</td>}
                   <td className="num">{isDir ? "" : fmtSize(en.size)}</td>
                   <td className="num">{fmtDate(en.mtime)}</td>
                 </tr>
@@ -891,7 +935,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             })}
             {remaining > 0 && (
               <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * ROW_H }}>
-                <td colSpan={3} />
+                <td colSpan={gitCol ? 4 : 3} />
               </tr>
             )}
           </tbody>
@@ -1244,6 +1288,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
         <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
+        {git?.repo && !leaf.sr && <span className="git-chip"><GitPill s={git.repo.summary} /></span>}
         <div className="fp-actions">
           {paneCtl.map((c) => (
             <Tip key={c.id} label={c.label} shortcut={c.hint}>

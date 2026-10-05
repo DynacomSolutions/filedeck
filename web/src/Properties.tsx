@@ -3,6 +3,7 @@ import { api, fmtDate, fmtMode, fmtSize, stat, type Entry, type JobView, type Pe
 import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
+import { GitSection } from "./GitUi";
 
 const TYPE: Record<Entry["type"], string> = { file: "File", dir: "Folder", symlink: "Symbolic link", other: "Special file" };
 const GRID: [string, number, number, number][] = [
@@ -44,7 +45,7 @@ function useJob(node: string) {
  * Details of one entry for the properties pane, with recursive size, chmod and chown. The pane remounts it (key) when the selection
  * changes, so every item starts from its own state; a folder-size job still running for the previous item is cancelled.
  */
-export function PropertiesPanel({ node, path, entry, onChanged, onStatus }: { node: string; path: string; entry?: Entry; onChanged: () => void; onStatus: (m: string) => void }) {
+export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTick = 0, onReveal, onDiffHead }: { node: string; path: string; entry?: Entry; onChanged: () => void; onStatus: (m: string) => void; gitTick?: number; onReveal?: (p: string) => void; onDiffHead?: (p: string) => void }) {
   const [p, setP] = useState<Props | null>(null);
   const [basic, setBasic] = useState<Entry | null>(entry ?? null);
   const [err, setErr] = useState("");
@@ -210,6 +211,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus }: { no
           </div>
         )}
       </dl>
+      {p && onReveal && onDiffHead && <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onDiffHead={onDiffHead} />}
       {!p && (basic || err) && !err && <SkeletonLines lines={5} />}
       {p && p.type !== "other" && (
         <fieldset className="perm" disabled={busy !== null}>

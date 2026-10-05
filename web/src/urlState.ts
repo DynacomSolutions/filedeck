@@ -4,6 +4,8 @@ export interface FileRef {
   path: string;
 }
 export type Loc = FileRef;
+/** One side of a diff: a file, or (left side only) the file at a Git revision. */
+export type DiffRef = FileRef & { rev?: string };
 export type DiffMode = "name" | "size" | "mtime" | "content" | "quick";
 
 /** A tab: its folder plus the tab's own active item, selection and closed preview (kept while another tab is shown). */
@@ -130,7 +132,7 @@ export interface AppState {
   tree: Tree;
   active: string;
   trash?: TrashState;
-  diff?: { left: FileRef; right: FileRef };
+  diff?: { left: DiffRef; right: FileRef };
   prDiff?: PrState;
   folder?: FolderState;
   /** panels picked as a whole (Shift/Ctrl+click on the panel header) */
@@ -148,7 +150,7 @@ type WTree = WLeaf | WSplit;
 interface Wire {
   t: WTree;
   a: string;
-  f?: [[string, string], [string, string]];
+  f?: [[string, string, string?], [string, string]];
   /** trash browser: node, volume */
   r?: [string, string];
   /** panels selected as a whole */
@@ -210,7 +212,7 @@ export function encodeState(s: AppState): string {
     const d = s.prDiff;
     w.pd = { n: d.node, p: d.path, ...(d.pr ? { r: d.pr } : {}), ...(d.base ? { b: d.base } : {}), ...(d.head ? { h: d.head } : {}), ...(d.file ? { f: d.file } : {}), ...(d.inline ? { i: 1 as const } : {}) };
   }
-  if (s.diff) w.f = [[s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
+  if (s.diff) w.f = [s.diff.left.rev ? [s.diff.left.node, s.diff.left.path, s.diff.left.rev] : [s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
   if (s.folder) {
     const { left, right, opts: o, preset, lp, rp, rel, hide } = s.folder;
     const g: NonNullable<Wire["g"]> = { l: [left.node, left.path], r: [right.node, right.path], a: lp, b: rp };
@@ -360,7 +362,7 @@ export function decodeState(search: string): AppState | null {
     const f = w.f;
     const diff =
       Array.isArray(f) && f.length === 2 && f.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]))
-        ? { left: { node: f[0][0], path: f[0][1] }, right: { node: f[1][0], path: f[1][1] } }
+        ? { left: { node: f[0][0], path: f[0][1], ...(typeof f[0][2] === "string" && /^[\w./~^@-]{1,100}$/.test(f[0][2]) && !f[0][2].startsWith("-") ? { rev: f[0][2] } : {}) }, right: { node: f[1][0], path: f[1][1] } }
         : undefined;
     const r = w.r;
     const trash = Array.isArray(r) && str(r[0]) && typeof r[1] === "string" ? { node: r[0], volume: r[1] } : undefined;

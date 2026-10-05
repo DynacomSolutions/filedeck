@@ -23,6 +23,7 @@ WORKDIR /app
 # libarchive's bsdtar does zip/tar.*/7z encode and decode for the archive jobs, 7zip (7zz) the password-protected
 # (AES-256 zip, 7z with header encryption) and split-volume archives;
 # qpdf decrypts password-protected PDFs for the preview (the password arrives on stdin);
+# git backs the read-only Git status and details (server/src/git.ts; also used by its tests);
 # samba-client's smbclient backs the SMB network sources (hub mode);
 # ffmpeg makes the image/video thumbnails (run as an unprivileged child, see server/src/thumbs.ts);
 # git (read-only, never writes) backs the pull request diff view of a repository folder;

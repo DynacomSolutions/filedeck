@@ -480,6 +480,7 @@ export function App() {
           onPatch={(p) => patchLeaf(t.id, p)}
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
           onDiff={onDiff}
+          onDiffHead={(n, p) => setDiff({ left: { node: n, path: p, rev: "HEAD" }, right: { node: n, path: p } })}
           diffMarked={diffMark !== null}
           onCompare={(peer) => startCompare(t.id, peer)}
           others={Object.entries(sels).filter(([k]) => k !== t.id).flatMap(([, v]) => v)}

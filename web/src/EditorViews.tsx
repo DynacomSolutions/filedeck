@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DiffEditor, Editor } from "@monaco-editor/react";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { ConflictError, api, fmtSize, type TextFile } from "./api";
+import { gitApi } from "./git";
 import { modelUri, monacoTheme } from "./monacoSetup";
 import { ArrowLeftRight } from "lucide-react";
 import * as Ic from "lucide-react";
@@ -10,6 +11,8 @@ import * as Ic from "lucide-react";
 export interface FileRef {
   node: string;
   path: string;
+  /** a Git revision to show the file at instead of the file itself (only the left side of a diff; read-only) */
+  rev?: string;
 }
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
@@ -193,14 +196,14 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: 
   const load = useCallback(() => {
     setErr("");
     setConflict(null);
-    Promise.all([api.readText(left.node, left.path), api.readText(right.node, right.path)])
+    Promise.all([left.rev ? gitApi.show(left.node, left.path, left.rev) : api.readText(left.node, left.path), api.readText(right.node, right.path)])
       .then(([a, b]) => {
         setL(a);
         setR(b);
         setRText(b.content);
       })
       .catch((e: Error) => setErr(e.message));
-  }, [left.node, left.path, right.node, right.path]);
+  }, [left.node, left.path, left.rev, right.node, right.path]);
   useEffect(load, [load]);
 
   const save = useCallback(
@@ -237,13 +240,14 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: 
     <div className={"ed" + (overlay ? " over" : "")} role="region" aria-label="File diff">
       <div className="ed-head" role="group" aria-label="Diff toolbar">
         <b>Diff</b>
-        <Tip label={`${left.node}:${left.path}`}><span className="muted ed-pair">{left.node}:{left.path}</span></Tip>
+        <Tip label={`${left.rev ? left.rev + " of " : ""}${left.node}:${left.path}`}><span className="muted ed-pair">{left.rev ? `${left.rev}:` : ""}{left.node}:{left.path}</span></Tip>
         <ArrowLeftRight className="muted" />
         <span className="muted ed-pair">
           {dirty && <Tip label="Unsaved changes"><span className="dirty-dot" role="img" aria-label="Unsaved changes" /></Tip>}
           {right.node}:{right.path}
         </span>
         {same && <span className="pill">identical</span>}
+        {left.rev && (l as { absent?: boolean } | null)?.absent && <span className="pill">not in {left.rev}</span>}
         <span className="ed-spacer" />
         <Tip label="Toggle side-by-side / inline">
           <button onClick={() => setInline((v) => !v)} aria-pressed={inline}>
@@ -258,7 +262,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: 
       <div className="ed-body">
         {l && r && (
           <DiffEditor
-            originalModelPath={modelUri(left.node, left.path) + "?side=left"}
+            originalModelPath={modelUri(left.node, left.path) + "?side=left" + (left.rev ? `&rev=${encodeURIComponent(left.rev)}` : "")}
             modifiedModelPath={modelUri(right.node, right.path) + "?side=right"}
             keepCurrentOriginalModel
             keepCurrentModifiedModel
