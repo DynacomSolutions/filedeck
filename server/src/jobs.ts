@@ -22,6 +22,19 @@ export interface JobView {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** queued jobs only: what is ahead of this one */
+  queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
+}
+
+/**
+ * Optional lanes: a running job that `isBig` stops counting against `concurrency`, so a small job queued behind
+ * long ones still starts. `maxTotal` bounds how many jobs run at once, big ones included.
+ */
+export interface JobLanes {
+  isBig: (j: JobView) => boolean;
+  maxTotal: number;
+  /** how often running jobs are re-checked for being big */
+  checkMs?: number;
 }
 
 export interface JobCtl {
@@ -32,6 +45,7 @@ export interface JobCtl {
 interface Job extends JobView {
   run: (ctl: JobCtl) => Promise<unknown>;
   abort: AbortController;
+  big?: boolean;
 }
 
 /** In-memory background job queue: bounded concurrency, progress, cancel. */
@@ -42,7 +56,9 @@ export class Jobs {
     private concurrency = 2,
     private keep = 100,
     private mapErr: (e: unknown) => string = (e) => (e as Error)?.message ?? "failed",
+    private lanes?: JobLanes,
   ) {}
+  private timer?: ReturnType<typeof setInterval>;
 
   create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>): JobView {
     const job: Job = {
@@ -62,8 +78,15 @@ export class Jobs {
   }
 
   private view(j: Job): JobView {
-    const { run: _r, abort: _a, ...v } = j;
-    return { ...v, progress: { ...j.progress } };
+    const { run: _r, abort: _a, big: _b, ...v } = j;
+    const out: JobView = { ...v, progress: { ...j.progress } };
+    if (j.state === "queued") {
+      const all = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt);
+      const me = all.indexOf(j);
+      const ahead = all.filter((x, i) => x.state === "running" || (x.state === "queued" && i < me));
+      out.queue = { position: ahead.length, ahead: ahead.map((x) => ({ id: x.id, title: x.title, state: x.state })) };
+    }
+    return out;
   }
 
   list(): JobView[] {
@@ -103,10 +126,36 @@ export class Jobs {
     for (const j of finished.slice(0, Math.max(0, finished.length - this.keep))) this.jobs.delete(j.id);
   }
 
+  private canStart(): boolean {
+    if (!this.lanes) return this.running < this.concurrency;
+    let big = 0;
+    for (const j of this.jobs.values()) if (j.state === "running" && j.big) big++;
+    return this.running - big < this.concurrency && this.running < this.lanes.maxTotal;
+  }
+
+  /** Mark long-running jobs big (sticky) and start what that frees room for. */
+  private recheck() {
+    let any = false;
+    for (const j of this.jobs.values()) {
+      if (j.state !== "running") continue;
+      any = true;
+      if (!j.big && this.lanes!.isBig(this.view(j))) j.big = true;
+    }
+    if (!any && this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    this.pump();
+  }
+
   private pump() {
     for (const j of this.jobs.values()) {
-      if (this.running >= this.concurrency) return;
+      if (!this.canStart()) return;
       if (j.state !== "queued") continue;
+      if (this.lanes && !this.timer) {
+        this.timer = setInterval(() => this.recheck(), this.lanes.checkMs ?? 1000);
+        this.timer.unref();
+      }
       this.running++;
       j.state = "running";
       j.startedAt = Date.now();

@@ -286,6 +286,12 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
         // A finished compare stays live: the hub follows both sides' change feeds, so keep reading (more slowly).
         delay = j.state === "done" ? 1500 : 500;
       } catch (e) {
+        if (live && /not found/i.test((e as Error).message)) {
+          // the hub dropped this compare while nobody was reading it (idle tab): run it again
+          live = false;
+          void start();
+          return;
+        }
         if (live) setErr((e as Error).message);
         return;
       }
@@ -915,7 +921,24 @@ export function CompareInfo() {
       {err && <p className="side-cmp-err" role="alert">{err}</p>}
       {/* Fixed two-line block while running and after, so the sidebar does not jump as numbers change. */}
       <div className="side-cmp-run" role="status" aria-live="polite">
-        {running && job?.state === "queued" && <><b>Queued</b><progress aria-label="Comparison progress" /></>}
+        {running && job?.state === "queued" && (
+          <>
+            <b>{job.queue?.ahead.length ? `Queued behind ${job.queue.ahead.length} ${job.queue.ahead.length === 1 ? "job" : "jobs"}` : "Queued"}</b>
+            <progress aria-label="Comparison progress" />
+            {job.queue?.ahead.length ? (
+              <ul className="side-cmp-ahead" aria-label="Jobs ahead of this compare">
+                {job.queue.ahead.map((a) => (
+                  <li key={a.id}>
+                    <span className="muted side-cmp-ahead-title">{a.title.replace(/^Compare /, "")}</span>
+                    <button type="button" className="side-cmp-ahead-cancel" aria-label={`Cancel ${a.title}`} onClick={() => void api.cancelDiff(a.id).catch(() => undefined)}>
+                      <Ic.X aria-hidden="true" /> Cancel
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </>
+        )}
         {s && (
           <>
             <span className="side-cmp-line">

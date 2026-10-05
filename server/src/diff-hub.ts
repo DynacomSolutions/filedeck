@@ -19,33 +19,55 @@ async function agentError(r: Response, what: string): Promise<FsError> {
   return new FsError(status as 400, `${what}: ${msg}`);
 }
 
+/**
+ * Run one request under its own AbortController that follows `parent`. fetch() and Request attach an abort listener
+ * to whatever signal they are given and only drop it when garbage collected, so handing every request the long-lived
+ * job signal piles up listeners (MaxListenersExceededWarning past 1 600). Here the parent only ever carries one
+ * listener per request in flight, removed as soon as the request settles.
+ */
+export async function withAbort<T>(parent: AbortSignal, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (parent.aborted) throw parent.reason ?? new DOMException("aborted", "AbortError");
+  const ac = new AbortController();
+  const onAbort = () => ac.abort(parent.reason);
+  parent.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await fn(ac.signal);
+  } finally {
+    parent.removeEventListener("abort", onAbort);
+    ac.abort(); // frees fetch's listener and any unread body
+  }
+}
+
 /** DirSource that talks to one agent (or network source) over HTTP; listings and hashes run next to the data. */
 export function agentSource(base: Target, vpath: string, label: string): DirSource {
   const at = (rel: string) => (rel ? (vpath === "/" ? "" : vpath) + "/" + rel : vpath);
   return {
-    async list(rel, signal) {
-      const r = await base.fetch(`/api/fs/lsdir?path=${encodeURIComponent(at(rel))}`, { signal });
-      if (!r.ok) throw await agentError(r, `${label} folder`);
-      const j = (await r.json()) as { entries: LsEntry[]; cached?: boolean };
-      return { entries: j.entries, cached: j.cached === true };
-    },
-    async hash(rel, signal) {
-      const r = await base.fetch(`/api/fs/hash?path=${encodeURIComponent(at(rel))}`, { signal });
-      if (!r.ok) throw await agentError(r, "hash");
-      return ((await r.json()) as { sha256: string }).sha256;
-    },
-    async changes(since, signal) {
-      const r = await base.fetch(`/api/fs/index-changes?since=${since}`, { signal });
-      if (!r.ok) throw await agentError(r, `${label} changes`);
-      const j = (await r.json()) as { seq: number; dirs: string[]; reset: boolean };
-      const pre = vpath === "/" ? "" : vpath;
-      const dirs: string[] = [];
-      for (const d of j.dirs) {
-        if (d === vpath) dirs.push("");
-        else if (d.startsWith(pre + "/")) dirs.push(d.slice(pre.length + 1));
-      }
-      return { seq: j.seq, dirs, reset: j.reset };
-    },
+    list: (rel, signal) =>
+      withAbort(signal, async (s) => {
+        const r = await base.fetch(`/api/fs/lsdir?path=${encodeURIComponent(at(rel))}`, { signal: s });
+        if (!r.ok) throw await agentError(r, `${label} folder`);
+        const j = (await r.json()) as { entries: LsEntry[]; cached?: boolean };
+        return { entries: j.entries, cached: j.cached === true };
+      }),
+    hash: (rel, signal) =>
+      withAbort(signal, async (s) => {
+        const r = await base.fetch(`/api/fs/hash?path=${encodeURIComponent(at(rel))}`, { signal: s });
+        if (!r.ok) throw await agentError(r, "hash");
+        return ((await r.json()) as { sha256: string }).sha256;
+      }),
+    changes: (since, signal) =>
+      withAbort(signal, async (s) => {
+        const r = await base.fetch(`/api/fs/index-changes?since=${since}`, { signal: s });
+        if (!r.ok) throw await agentError(r, `${label} changes`);
+        const j = (await r.json()) as { seq: number; dirs: string[]; reset: boolean };
+        const pre = vpath === "/" ? "" : vpath;
+        const dirs: string[] = [];
+        for (const d of j.dirs) {
+          if (d === vpath) dirs.push("");
+          else if (d.startsWith(pre + "/")) dirs.push(d.slice(pre.length + 1));
+        }
+        return { seq: j.seq, dirs, reset: j.reset };
+      }),
   };
 }
 
@@ -54,12 +76,35 @@ interface Loc {
   path: string;
 }
 
-export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = ""): Jobs {
-  const jobs = new Jobs(2, 20, (e) => {
-    if (e instanceof FsError) return e.message;
-    if ((e as Error)?.name === "AbortError") return "canceled";
-    return "agent unreachable";
-  });
+export interface HubDiffOptions {
+  /** a compare nobody has read for this long is cancelled and its session removed */
+  graceMs?: number;
+  /** a running compare counts as big (stops holding an interactive slot) after this long or this many entries */
+  bigAfterMs?: number;
+  bigEntries?: number;
+}
+
+export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs {
+  const envGrace = Number(process.env.FILEDECK_DIFF_GRACE_MS);
+  const graceMs = o.graceMs ?? (envGrace > 0 ? envGrace : 120_000);
+  const bigAfterMs = o.bigAfterMs ?? 8_000;
+  const bigEntries = o.bigEntries ?? 10_000;
+  // Two interactive slots; a compare that runs long or scans a lot stops counting, so small ones start beside it. At most 4 run at once.
+  const jobs = new Jobs(
+    2,
+    20,
+    (e) => {
+      if (e instanceof FsError) return e.message;
+      if ((e as Error)?.name === "AbortError") return "canceled";
+      return "agent unreachable";
+    },
+    { isBig: (j) => (j.startedAt !== undefined && Date.now() - j.startedAt > bigAfterMs) || j.progress.entries > bigEntries, maxTotal: 4, checkMs: Math.min(1000, Math.max(20, bigAfterMs / 4)) },
+  );
+  /** last time a client read each compare; unread ones are cleaned up after graceMs */
+  const seen = new Map<string, number>();
+  const touch = (id: string) => {
+    if (jobs.get(id)) seen.set(id, Date.now());
+  };
   const meta = new Map<string, { left: Loc; right: Loc; options: DiffOptions }>();
   /** live sessions (rows spill to one SQLite file each under diffDir); closed when their job is dismissed or evicted */
   const sessions = new Map<string, CompareSession>();
@@ -69,8 +114,24 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
   }
   const prune = () => {
     for (const id of meta.keys()) if (!jobs.get(id)) meta.delete(id);
+    for (const id of seen.keys()) if (!jobs.get(id)) seen.delete(id);
     for (const [id, s] of sessions) if (!jobs.get(id)) (s.close(), sessions.delete(id));
   };
+
+  const sweep = () => {
+    const now = Date.now();
+    for (const j of jobs.list()) {
+      if (now - (seen.get(j.id) ?? j.createdAt) < graceMs) continue;
+      jobs.cancel(j.id); // a running one settles shortly; the next sweep dismisses it
+      if (jobs.dismiss(j.id)) {
+        sessions.get(j.id)?.close();
+        sessions.delete(j.id);
+      }
+    }
+    prune();
+  };
+  const sweeper = setInterval(sweep, Math.max(20, Math.min(10_000, graceMs / 2)));
+  sweeper.unref();
 
   const loc = (v: unknown, what: string): Loc => {
     const o = v as Partial<Loc> | null;
@@ -95,6 +156,8 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     return Response.json({ error: m.message }, { status: m.status });
   };
 
+  app.use("/api/diff/jobs/:id", async (c, next) => (touch(c.req.param("id")), next()));
+  app.use("/api/diff/jobs/:id/*", async (c, next) => (touch(c.req.param("id")), next()));
   app.post("/api/diff/jobs", async (c) => {
     try {
       const b = (await c.req.json().catch(() => null)) as { left?: unknown; right?: unknown; options?: unknown } | null;
@@ -112,6 +175,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
         return { left, right, options, ...s.counts(), hashedFiles: s.stats.hashed, hashedBytes: s.stats.hashedBytes, warnings: s.warnings, durationMs: Date.now() - t0 };
       });
       sessions.set(job.id, sess);
+      seen.set(job.id, Date.now());
       sess.startLive(); // follow both agents' change feeds while the compare is open
       meta.set(job.id, { left, right, options });
       prune();

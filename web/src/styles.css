@@ -782,3 +782,7 @@ button.wt-row:hover{background:var(--surface-2)}
 .wt-pill svg{width:11px;height:11px;color:inherit}
 .wt-pill.on{border-color:var(--accent-line);color:var(--accent-text,var(--accent))}
 .wt-pill.warn{border-color:var(--accent-line);color:var(--warn)}
+.side-cmp-ahead{list-style:none;margin:.1rem 0 0;padding:0;display:flex;flex-direction:column;gap:.15rem;max-height:7.5em;overflow:auto}
+.side-cmp-ahead li{display:flex;align-items:center;gap:.5rem;min-width:0}
+.side-cmp-ahead-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-cmp-ahead-cancel{flex:none;padding:.1rem .4rem;font-size:.85em}.side-cmp-ahead-cancel svg{width:12px;height:12px;vertical-align:-1px}
