@@ -121,12 +121,12 @@ export class S3Backend implements SourceBackend {
       );
       for (const d of r.CommonPrefixes ?? []) {
         const name = (d.Prefix ?? "").slice(prefix.length).replace(/\/$/, "");
-        if (name) out.push({ name, type: "dir", size: 0, mtime: 0, mode: 0o755 });
+        if (name) out.push({ name, type: "dir", size: 0, mtime: null, mode: 0o755 });
       }
       for (const f of r.Contents ?? []) {
         const name = (f.Key ?? "").slice(prefix.length);
         if (!name || name.endsWith("/")) continue; // the folder's own marker
-        out.push({ name, type: "file", size: f.Size ?? 0, mtime: f.LastModified?.getTime() ?? 0, mode: 0o644 });
+        out.push({ name, type: "file", size: f.Size ?? 0, mtime: f.LastModified?.getTime() ?? null, mode: 0o644 });
       }
       token = r.IsTruncated ? r.NextContinuationToken : undefined;
     } while (token);
@@ -135,16 +135,16 @@ export class S3Backend implements SourceBackend {
   }
 
   async stat(p: string): Promise<SourceStat | null> {
-    if (cleanVirtual(p).length === 0) return { type: "dir", size: 0, mtime: 0, mode: 0o755 };
+    if (cleanVirtual(p).length === 0) return { type: "dir", size: 0, mtime: null, mode: 0o755 };
     try {
       const h = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: this.key(p) }));
-      return { type: "file", size: h.ContentLength ?? 0, mtime: h.LastModified?.getTime() ?? 0, mode: 0o644 };
+      return { type: "file", size: h.ContentLength ?? 0, mtime: h.LastModified?.getTime() ?? null, mode: 0o644 };
     } catch (e) {
       const err = s3Error(e, "stat");
       if (err.status !== 404) throw err;
     }
     const r = await this.send(() => this.client.send(new ListObjectsV2Command({ Bucket: this.bucket, Prefix: this.dirKey(p), MaxKeys: 1 })), "stat");
-    return (r.KeyCount ?? r.Contents?.length ?? 0) > 0 ? { type: "dir", size: 0, mtime: 0, mode: 0o755 } : null;
+    return (r.KeyCount ?? r.Contents?.length ?? 0) > 0 ? { type: "dir", size: 0, mtime: null, mode: 0o755 } : null;
   }
 
   async read(p: string, range?: { start: number; end: number }): Promise<Readable> {

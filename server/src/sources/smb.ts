@@ -54,7 +54,7 @@ export function parseLs(out: string): SourceEntry[] {
     const [, name, attr, size, date] = m as unknown as [string, string, string, string, string];
     const isDir = attr.includes("D");
     const t = Date.parse(date.replace(/\s+/g, " ") + " UTC"); // server times carry no zone; treat as UTC consistently
-    res.push({ name, type: isDir ? "dir" : "file", size: isDir ? 0 : Number(size), mtime: Number.isFinite(t) ? t : 0, mode: isDir ? 0o755 : attr.includes("R") ? 0o444 : 0o644 });
+    res.push({ name, type: isDir ? "dir" : "file", size: isDir ? 0 : Number(size), mtime: Number.isFinite(t) ? t : null, mode: isDir ? 0o755 : attr.includes("R") ? 0o444 : 0o644 });
   }
   return res;
 }
@@ -196,7 +196,7 @@ export class SmbBackend implements SourceBackend {
   }
 
   async stat(p: string): Promise<SourceStat | null> {
-    if (cleanVirtual(p).length === 0) return { type: "dir", size: 0, mtime: 0, mode: 0o755 };
+    if (cleanVirtual(p).length === 0) return { type: "dir", size: 0, mtime: null, mode: 0o755 };
     try {
       const out = await this.run(`ls ${this.q(this.win(p))}`, undefined, "stat");
       const e = parseLs(out)[0];

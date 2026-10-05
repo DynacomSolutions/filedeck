@@ -51,6 +51,12 @@ test("s3: folder rename copies every key then deletes; empty folders are markers
     assert.equal(await b.stat("/a"), null);
     assert.deepEqual((await b.list("/b")).map((e) => [e.name, e.type]).sort(), [["empty", "dir"], ["x.txt", "file"], ["y.txt", "file"]]);
     assert.equal((await b.stat("/b/empty"))?.type, "dir");
+    // folders (key prefixes) have no modification time: unknown (null), not the epoch; files keep theirs
+    const ls = await b.list("/b");
+    assert.equal(ls.find((e) => e.name === "empty")?.mtime, null);
+    assert.ok((ls.find((e) => e.name === "x.txt")?.mtime ?? 0) > 0);
+    assert.equal((await b.stat("/b/empty"))?.mtime, null);
+    assert.equal((await b.stat("/"))?.mtime, null);
     await assert.rejects(() => b.rename("/nope", "/z", false), /not found/);
   } finally {
     await b.close();

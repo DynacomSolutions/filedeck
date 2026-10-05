@@ -4,8 +4,8 @@ import type { Readable } from "node:stream";
 export interface SourceStat {
   type: "file" | "dir" | "symlink" | "other";
   size: number;
-  /** milliseconds since the epoch */
-  mtime: number;
+  /** milliseconds since the epoch; null when the backend has no modification time (S3 prefixes) */
+  mtime: number | null;
   mode: number;
 }
 export interface SourceEntry extends SourceStat {

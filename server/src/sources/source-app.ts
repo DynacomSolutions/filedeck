@@ -57,7 +57,7 @@ export interface SourceAppOptions {
   thumbs?: Thumbnailer;
 }
 
-const DIR_STAT: SourceStat = { type: "dir", size: 0, mtime: 0, mode: 0o755 };
+const DIR_STAT: SourceStat = { type: "dir", size: 0, mtime: null, mode: 0o755 };
 
 /**
  * Exposes one network backend with the agents' HTTP surface, so the hub can
@@ -72,12 +72,12 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       const s = p === "/" ? DIR_STAT : await backend.stat(p);
       if (!s) throw new FsError(404, "not found");
       if (s.type !== "dir") throw new FsError(400, "not a directory");
-      return { ino: 0, mtime: s.mtime };
+      return { ino: 0, mtime: s.mtime ?? 0 };
     },
     async readDir(p) {
       return (await backend.list(p))
         .filter((it) => it.name !== "." && it.name !== "..")
-        .map((it): IdxEntry => ({ n: it.name, t: it.type, s: it.type === "dir" ? 0 : it.size, m: Math.floor(it.mtime), i: 0 }));
+        .map((it): IdxEntry => ({ n: it.name, t: it.type, s: it.type === "dir" ? 0 : it.size, m: Math.floor(it.mtime ?? 0), i: 0 }));
     },
   }, { ttlMs: 10 * 60_000 });
 
@@ -309,7 +309,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       }
     } else if (s.type === "file") {
       const rs = s.size === 0 ? Readable.from([]) : await backend.read(from);
-      await backend.write(to, rs, { overwrite, mtime: s.mtime, size: s.size });
+      await backend.write(to, rs, { overwrite, mtime: s.mtime ?? undefined, size: s.size });
     }
     // symlinks and special files are not copied
   }
@@ -379,7 +379,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
       const s = await need(p);
       if (s.type === "dir") throw new FsError(400, "is a directory");
       if (s.type !== "file") throw new FsError(400, "not a regular file");
-      const got = await index.hash(p, { size: s.size, mtime: Math.floor(s.mtime), ino: 0 }, async () => {
+      const got = await index.hash(p, { size: s.size, mtime: Math.floor(s.mtime ?? 0), ino: 0 }, async () => {
         const h = createHash("sha256");
         if (s.size > 0) {
           const stream = await backend.read(p);
@@ -388,7 +388,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
         }
         return h.digest("hex");
       });
-      return { path: p, size: s.size, mtime: Math.floor(s.mtime), sha256: got.sha256, cached: got.cached };
+      return { path: p, size: s.size, mtime: Math.floor(s.mtime ?? 0), sha256: got.sha256, cached: got.cached };
     }, signal);
     return c.json(r);
   });
@@ -424,7 +424,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
           break;
         }
         total++;
-        out.push({ p: rel, t: it.type, s: isDir ? 0 : it.size, m: Math.floor(it.mtime) });
+        out.push({ p: rel, t: it.type, s: isDir ? 0 : it.size, m: Math.floor(it.mtime ?? 0) });
         if (isDir) {
           if (dir.depth < w.depth) subdirs.push({ virtual: virtualJoin(dir.virtual, it.name), rel, depth: dir.depth + 1 });
           else summary.depthLimited = true;

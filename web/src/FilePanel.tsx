@@ -317,7 +317,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     f.sort((a, b) => {
       const d = dirFirst(a) - dirFirst(b);
       if (d) return d;
-      const c = sort.key === "name" ? natural.compare(a.name, b.name) : a[sort.key] - b[sort.key];
+      if (sort.key === "mtime") {
+        // unknown times (no modification time at the source) stay together at the end, either direction
+        const ua = !a.mtime, ub = !b.mtime;
+        if (ua || ub) return ua && ub ? natural.compare(a.name, b.name) : ua ? 1 : -1;
+      }
+      const c = sort.key === "name" ? natural.compare(a.name, b.name) : (a[sort.key] ?? 0) - (b[sort.key] ?? 0);
       return sort.asc ? c : -c;
     });
     return f;

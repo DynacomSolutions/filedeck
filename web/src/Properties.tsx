@@ -169,7 +169,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
   const sz = p?.size ?? basic?.size;
   if (type && type !== "dir" && sz !== undefined) rows.push(["Size", `${fmtSize(sz)} (${sz.toLocaleString()} bytes)` + (p && p.type === "file" ? ` · ${fmtSize(p.diskBytes)} on disk` : "")]);
   const mt = p?.mtime ?? basic?.mtime;
-  if (mt !== undefined) rows.push(["Modified", fmtDate(mt)]);
+  if (fmtDate(mt)) rows.push(["Modified", fmtDate(mt)]);
   if (p) {
     rows.push(["Accessed", fmtDate(p.atime)], ["Changed", fmtDate(p.ctime)]);
     if (p.volume) rows.push(["Volume", `${p.volume.mountpoint} · ${p.volume.fstype}${p.volume.network ? ` (${p.volume.netKind ?? "network"})` : ""} · ${fmtSize(p.volume.free)} free of ${fmtSize(p.volume.total)}`]);

@@ -4,7 +4,8 @@ export interface Entry {
   path: string;
   type: "file" | "dir" | "symlink" | "other";
   size: number;
-  mtime: number;
+  /** null when the source has no modification time (S3 folders) */
+  mtime: number | null;
   mode: number;
   linkDir?: boolean;
   /** symlinks: the link text as stored */
@@ -610,7 +611,7 @@ export function fmtSize(n: number): string {
   } while (n >= 1024 && i < u.length - 1);
   return `${n.toFixed(n < 10 ? 1 : 0)} ${u[i]}`;
 }
-export const fmtDate = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+export { fmtDate } from "./fmtDate";
 
 export const MAX_EDIT = 5 * 1024 * 1024;
 const NOT_TEXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "mp4", "m4v", "webm", "mov", "mkv", "avi", "wmv", "flv", "mpg", "mpeg", "wma", "aiff", "mp3", "m4a", "ogg", "wav", "flac", "opus", "pdf", "zip", "gz", "tgz", "7z", "xz", "bz2", "tar", "iso", "bin", "exe", "so"]);
@@ -725,4 +726,4 @@ export function thumbKind(name: string): "image" | "video" | "svg" | null {
   const e = name.slice(i + 1).toLowerCase();
   return e === "svg" ? "svg" : THUMB_IMAGE.has(e) ? "image" : THUMB_VIDEO.has(e) ? "video" : null;
 }
-export const thumbUrl = (node: string, path: string, mtime: number, retry = 0) => `${nodeBase(node)}/api/fs/thumb?path=${enc(path)}&m=${Math.floor(mtime)}${retry ? "&r=" + retry : ""}`;
+export const thumbUrl = (node: string, path: string, mtime: number | null, retry = 0) => `${nodeBase(node)}/api/fs/thumb?path=${enc(path)}&m=${Math.floor(mtime ?? 0)}${retry ? "&r=" + retry : ""}`;

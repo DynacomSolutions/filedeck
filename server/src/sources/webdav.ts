@@ -85,7 +85,7 @@ export class WebdavBackend implements SourceBackend {
           name: "",
           type: isDir ? "dir" : "file",
           size: isDir ? 0 : Number(prop.getcontentlength ?? 0) || 0,
-          mtime: Number.isFinite(mt) ? mt : 0,
+          mtime: Number.isFinite(mt) ? mt : null,
           mode: isDir ? 0o755 : 0o644,
         },
       });

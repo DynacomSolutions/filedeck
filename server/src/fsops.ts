@@ -22,7 +22,7 @@ export interface Entry {
   path: string;
   type: "file" | "dir" | "symlink" | "other";
   size: number;
-  mtime: number;
+  mtime: number | null;
   mode: number;
   /** For symlinks: whether the target resolves to a directory */
   linkDir?: boolean;
