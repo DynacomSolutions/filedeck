@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import * as Ic from "lucide-react";
 import { api, fmtDate, type WorktreeList } from "./api";
 import { gitApi, shortHash, stateText, type GitCommit, type GitInfo, type GitSummary } from "./git";
+import { GitInlineDiff } from "./GitInlineDiff";
 import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
 
@@ -141,9 +142,10 @@ function GitWorktrees({ node, root, onOpen, hrefFor }: { node: string; root: str
 }
 
 /** Git details for the Properties panel: branch, upstream, last commit, stash, remotes, worktrees, change lists and the HEAD diff. */
-export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorktree, worktreeHref, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onDiffHead: (p: string) => void; onOpenWorktree?: (path: string) => void; worktreeHref?: (path: string) => string; onApplicability?: (available: boolean | null) => void }) {
+export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktreeHref, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onOpenWorktree?: (path: string) => void; worktreeHref?: (path: string) => string; onApplicability?: (available: boolean | null) => void }) {
   const [info, setInfo] = useState<GitInfo | null>(null);
   const [err, setErr] = useState("");
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     let live = true;
     onApplicability?.(null);
@@ -159,6 +161,12 @@ export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorkt
   if (!info) return <SkeletonLines lines={3} />;
   const r = info.repo;
   if (!r) return null;
+  const toggleDiff = (occurrence: string) => setExpanded((current) => {
+    const next = new Set(current);
+    if (next.has(occurrence)) next.delete(occurrence);
+    else next.add(occurrence);
+    return next;
+  });
   const s = r.summary;
   const rows: [string, React.ReactNode][] = [];
   const rel = (p: string) => (r.root === "/" ? p : p.slice(r.root.length)).replace(/^\//, "") || ".";
@@ -188,30 +196,39 @@ export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorkt
       </dl>
       {onOpenWorktree && worktreeHref && <GitWorktrees key={`${node}\0${r.root}`} node={node} root={r.root} onOpen={onOpenWorktree} hrefFor={worktreeHref} />}
       {f && (
-        <div className="perm-row">
-          <Tip label="Open the file next to its content at the last commit (HEAD) in the diff editor">
-            <button type="button" onClick={() => onDiffHead(path)}><Ic.Diff /> Diff against HEAD</button>
-          </Tip>
-        </div>
+        <>
+          <div className="perm-row">
+            <Tip label={expanded.has(`file:${path}`) ? "Collapse the HEAD diff" : "Show the HEAD diff inline"}>
+              <button type="button" aria-expanded={expanded.has(`file:${path}`)} onClick={() => toggleDiff(`file:${path}`)}><Ic.Diff /> {expanded.has(`file:${path}`) ? "Hide diff" : "Diff against HEAD"}</button>
+            </Tip>
+          </div>
+          {expanded.has(`file:${path}`) && <GitInlineDiff node={node} path={path} />}
+        </>
       )}
       {GROUPS.map(([k, name]) =>
         r.counts[k] ? (
           <details key={k} className="git-list">
             <summary>{name} ({r.counts[k].toLocaleString()})</summary>
             <ul>
-              {r.lists[k].map((it) => (
-                <li key={it.path}>
-                  <button type="button" className="git-item" onClick={() => onReveal(it.path)}>
-                    {it.dir ? <Ic.Folder /> : <Ic.File />}
+              {r.lists[k].map((it) => {
+                const occurrence = `${k}:${it.path}`;
+                const open = expanded.has(occurrence);
+                return <li key={occurrence} className={open ? "git-change open" : "git-change"}>
+                  <button type="button" className="git-item" onClick={() => it.dir ? onReveal(it.path) : toggleDiff(occurrence)} aria-expanded={!it.dir ? open : undefined} aria-label={it.dir ? `Open ${rel(it.path)}` : `${open ? "Collapse" : "Expand"} diff for ${rel(it.path)}`}>
+                    {it.dir ? <Ic.Folder /> : open ? <Ic.ChevronDown aria-hidden="true" /> : <Ic.ChevronRight aria-hidden="true" />}
                     <span>{rel(it.path)}</span>
                   </button>
+                  <Tip label={it.dir ? "Open folder" : "Open file"}>
+                    <button type="button" aria-label={`Open ${rel(it.path)}`} onClick={(event) => { event.stopPropagation(); onReveal(it.path); }}><Ic.FolderOpen /></button>
+                  </Tip>
                   {!it.dir && (
-                    <Tip label="Diff against HEAD">
-                      <button type="button" aria-label={`Diff ${rel(it.path)} against HEAD`} onClick={() => onDiffHead(it.path)}><Ic.Diff /></button>
+                    <Tip label={open ? "Collapse diff" : "Diff against HEAD inline"}>
+                      <button type="button" aria-label={`${open ? "Collapse" : "Expand"} ${rel(it.path)} diff`} aria-expanded={open} onClick={(event) => { event.stopPropagation(); toggleDiff(occurrence); }}><Ic.Diff /></button>
                     </Tip>
                   )}
+                  {open && !it.dir && <GitInlineDiff node={node} path={it.path} />}
                 </li>
-              ))}
+              })}
             </ul>
             {r.counts[k] > r.lists[k].length && <div className="muted perm-hint">Showing the first {r.listCap} of {r.counts[k].toLocaleString()}.</div>}
           </details>

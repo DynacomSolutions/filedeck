@@ -274,7 +274,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
       </section>
       {p && onReveal && onDiffHead && (
         <section id={`${tabBase}-git-panel`} className="props-tabpanel" role="tabpanel" aria-labelledby={`${tabBase}-git-tab`} tabIndex={0} hidden={activeTab !== "git"}>
-          <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onDiffHead={onDiffHead} onOpenWorktree={onOpenWorktree} worktreeHref={worktreeHref} onApplicability={setGitAvailable} />
+          <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onOpenWorktree={onOpenWorktree} worktreeHref={worktreeHref} onApplicability={setGitAvailable} />
         </section>
       )}
       {p && p.type !== "other" && (

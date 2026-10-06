@@ -792,6 +792,10 @@ select option{background:var(--surface);color:var(--fg)}
 .git-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .git-worktrees{border-top:1px solid var(--line);margin-top:.55rem;padding-top:.45rem}
 .git-worktrees h4{margin:0;font-size:.8rem}
+.git-list li.git-change{flex-wrap:wrap}
+.git-inline-diff{flex:1 0 100%;width:100%;min-width:0;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-2);overflow:hidden}
+.git-inline-diff-meta{padding:.35rem .5rem;font-size:.72rem;border-bottom:1px solid var(--line)}
+.git-inline-diff-editor{height:280px;min-height:180px;position:relative}
 .tile-git .git-pill{flex-wrap:wrap;justify-content:center;white-space:normal;row-gap:0}
 .tile-git .git-br{max-width:100%}
 /* Worktrees side-panel tab */
