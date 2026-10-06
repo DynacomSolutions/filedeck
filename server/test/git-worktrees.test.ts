@@ -6,7 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { decodeState, encodeState, leaves, type Tree } from "../../web/src/urlState.ts";
+import { decodeState, leaves } from "../../web/src/urlState.ts";
 import { parsePorcelain } from "../src/git-worktrees.ts";
 
 let tmp: string, app: ReturnType<typeof createAgent>;
@@ -163,8 +163,10 @@ test("host-path records resolve through the root (container mount)", async () =>
   assert.equal(body.worktrees.find((w) => w.name === "proj")!.dirty, false);
 });
 
-test("the Worktrees side panel survives a URL round trip", () => {
-  const tree: Tree = { kind: "leaf", id: "p1", node: "n", path: "/a", pv: { dock: "left", size: 35, tab: "wt" } };
-  const back = decodeState(encodeState({ tree, active: "p1" }));
-  assert.deepEqual(leaves(back!.tree)[0]!.pv, { dock: "left", size: 35, tab: "wt" });
+test("legacy Worktrees side-panel URLs restore the repository Git tab", () => {
+  const wire = { t: { i: "p1", n: "n", p: "/a", v: ["left", 35, "w"] }, a: "p1" };
+  const back = decodeState(`?s=${encodeURIComponent(JSON.stringify(wire))}`);
+  const leaf = leaves(back!.tree)[0]!;
+  assert.deepEqual(leaf.pv, { dock: "left", size: 35, tab: "props" });
+  assert.equal(leaf.pt, "git");
 });

@@ -173,6 +173,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 
 /* per-panel preview dock controls */
 .pv-dock{margin-left:auto;display:inline-flex;gap:.15rem;align-self:center}
+.pv-dock select{min-height:44px;max-width:9rem;padding:0 .45rem;font-size:.78rem;color:var(--fg);background:var(--surface-1);border:1px solid var(--border);border-radius:var(--radius-sm)}
 .pv-dockbtn{min-height:24px;min-width:26px;padding:0 .35rem;font-size:.8rem;border-color:transparent;color:var(--muted)}
 .pv-dockbtn.on{color:var(--fg);border-color:var(--border-strong);background:var(--surface-2)}
 .ed.inline,.ed.in-pane{position:relative;inset:auto;z-index:auto;height:100%}
