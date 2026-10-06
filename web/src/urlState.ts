@@ -130,6 +130,12 @@ export interface PrState {
   inline?: boolean;
 }
 
+/** A sync preview view can be reconstructed from the selected relative paths. */
+export interface SyncState {
+  action: "copy-lr" | "copy-rl" | "delete-left" | "delete-right";
+  paths: string[];
+}
+
 export interface AppState {
   tree: Tree;
   active: string;
@@ -141,6 +147,10 @@ export interface AppState {
   panelSel?: string[];
   /** the settings view is open */
   settings?: boolean;
+  /** keyboard shortcut reference is open */
+  help?: boolean;
+  /** sync plan view currently open */
+  sync?: SyncState;
 }
 
 // Compact wire format (short keys keep shared links readable).
@@ -159,6 +169,10 @@ interface Wire {
   ps?: string[];
   /** settings view open */
   se?: 1;
+  /** keyboard shortcut reference open */
+  sh?: 1;
+  /** sync plan action and selected relative paths */
+  sy?: [SyncState["action"], string[]];
   /** pull request diff: node, repository path, then only what is set */
   pd?: { n: string; p: string; r?: number; b?: string; h?: string; f?: string; i?: 1 };
   /** folder compare: l/r roots, a/b panel ids, u current relative folder, f hidden statuses, then only the options that differ from the defaults */
@@ -211,6 +225,8 @@ export function encodeState(s: AppState): string {
   if (s.trash) w.r = [s.trash.node, s.trash.volume];
   if (s.panelSel?.length) w.ps = s.panelSel;
   if (s.settings) w.se = 1;
+  if (s.help) w.sh = 1;
+  if (s.folder && s.sync?.paths.length) w.sy = [s.sync.action, s.sync.paths];
   if (s.prDiff) {
     const d = s.prDiff;
     w.pd = { n: d.node, p: d.path, ...(d.pr ? { r: d.pr } : {}), ...(d.base ? { b: d.base } : {}), ...(d.head ? { h: d.head } : {}), ...(d.file ? { f: d.file } : {}), ...(d.inline ? { i: 1 as const } : {}) };
@@ -377,7 +393,11 @@ export function decodeState(search: string): AppState | null {
         ? { node: pd.n, path: pd.p, ...(typeof pd.r === "number" && Number.isInteger(pd.r) && pd.r > 0 ? { pr: pd.r } : {}), ...(str(pd.b) ? { base: pd.b.slice(0, 256) } : {}), ...(str(pd.h) ? { head: pd.h.slice(0, 256) } : {}), ...(str(pd.f) ? { file: pd.f.slice(0, 4096) } : {}), ...(pd.i === 1 ? { inline: true } : {}) }
         : undefined;
     const panelSel = Array.isArray(w.ps) ? w.ps.filter((x) => str(x) && ids.includes(x)) : [];
-    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(prDiff ? { prDiff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}) };
+    const sy = w.sy;
+    const sync = folder && Array.isArray(sy) && ["copy-lr", "copy-rl", "delete-left", "delete-right"].includes(sy[0]) && Array.isArray(sy[1]) && sy[1].length > 0 && sy[1].length <= 500 && sy[1].every((p) => str(p) && p.length <= 4096)
+      ? { action: sy[0] as SyncState["action"], paths: sy[1] as string[] }
+      : undefined;
+    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(prDiff ? { prDiff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}), ...(w.sh === 1 ? { help: true } : {}), ...(sync ? { sync } : {}) };
   } catch {
     return null;
   }
