@@ -29,6 +29,7 @@ import { resolvePanelPreferences, setSettings, useSettings } from "./settings";
 import { SkeletonRows, SkeletonTiles } from "./Skeleton";
 import { TransferDestination, type TransferKind } from "./TransferDestination";
 import { usePresentation } from "./presentation";
+import { nextLetterMatch } from "./letterNavigation";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -1037,7 +1038,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   function onKeyDown(e: React.KeyboardEvent) {
     if (menu || modal || dialog) return;
     const t = e.target as HTMLElement;
-    if (t.closest("input,textarea,select,[contenteditable=true],.monaco-editor")) return;
+    if (t.closest('input,textarea,select,[contenteditable=true],.monaco-editor,dialog,[role="dialog"]')) return;
     if (t.closest("button") && (e.key === "Enter" || e.key === " ")) return;
     if (cside && cmpCtl && e.key !== "Tab" && !(e.altKey && e.key !== "ArrowUp")) {
       if (compareKey(cmpCtl, cside, e)) (e.preventDefault(), e.stopPropagation());
@@ -1068,6 +1069,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (e.altKey && e.shiftKey && !mod && key.startsWith("Arrow") && onDock) return onDock(key);
       // While the search results are open the panel's own selection is hidden: no file operations by key.
       if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "twTW[]nurcNURC".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
+      if (!mod && !e.altKey && /^\p{L}$/u.test(key)) {
+        const match = nextLetterMatch(visible, cursor, key);
+        if (match) {
+          selectOnly(match.path);
+          return true;
+        }
+      }
       if (key === "?" && !mod) return onHelp(), true;
       if (e.altKey && !mod && key.toLowerCase() === "t") return newTab(), true;
       // Folder actions that used to live only in the header "more" menu (also in the right-click menu of the list and the breadcrumb).
