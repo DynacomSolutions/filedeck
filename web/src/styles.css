@@ -734,7 +734,7 @@ select option{background:var(--surface);color:var(--fg)}
 .fp-row .addr{min-width:40px}
 .fp-row{overflow:visible}
 .fp-row>.tip{flex:none;display:inline-flex}
-@media(max-width:360px){.fp-row>.tip:has(.fp-up[aria-label="Back"]),.fp-row>.tip:has(.fp-up[aria-label="Forward"]){display:none}}
+@media(max-width:360px){.fp-bar{height:132px}.fp-row{height:88px;flex-wrap:wrap;align-content:flex-start}.fp-row .addr{min-width:88px}}
 
 /* pull request diff */
 .prd:focus{outline:none}
