@@ -16,7 +16,7 @@ There are no user accounts: put it behind a trusted network boundary (a VPN, a p
 ## Layout
 
 | Path | What |
-|---|---|---|
+|---|---|
 | `server/` | Agent and hub (TypeScript, Hono, Node 22) and its tests |
 | `web/` | The app (React, Vite, Monaco) |
 | `Dockerfile`, `package.json`, `tsconfig.base.json` | Image and workspace |

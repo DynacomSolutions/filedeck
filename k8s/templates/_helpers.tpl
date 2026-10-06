@@ -15,13 +15,18 @@
 {{- end -}}
 
 {{- /* The common labels with app.kubernetes.io/instance set explicitly, for objects selected one by one
-       (an agent per node, a scratch server per kind): `dict "root" $ "instance" "<release>-agent-<node>"`. */}}
+       (an agent per node, a scratch server per kind): `dict "root" $ "instance" "<release>-agent-<node>"`.
+       `chartLabel` is optional and is used only where a pod template needs a stable upgrade label. */}}
 {{- define "filedeck.instanceLabels" -}}
 app.kubernetes.io/name: {{ include "filedeck.name" .root }}
 app.kubernetes.io/instance: {{ .instance }}
 app.kubernetes.io/part-of: filedeck
 app.kubernetes.io/managed-by: {{ .root.Release.Service }}
+{{- if .chartLabel }}
+helm.sh/chart: {{ .chartLabel }}
+{{- else }}
 helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version | replace "+" "_" }}
+{{- end }}
 {{- end -}}
 
 {{- define "filedeck.agentName" -}}

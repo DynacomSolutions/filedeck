@@ -104,6 +104,8 @@ sources: []
 testSources:
   enabled: false
   secretName: filedeck-test-sources
+  # Optional stable chart label for scratch pod templates during chart upgrades. Empty keeps the current chart version.
+  podChartLabel: ""
   images:
     # rclone 1.75.1 (multi-arch index digest)
     rclone: rclone/rclone@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5

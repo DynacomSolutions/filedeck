@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate stable release tag and chart versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must be a stable semver vMAJOR.MINOR.PATCH: $tag" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          chart_version=$(awk '$1 == "version:" {print $2}' k8s/Chart.yaml)
+          app_version=$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' k8s/Chart.yaml)
+          test "$chart_version" = "$version"
+          test "$app_version" = "$version"
+          printf 'FILEDECK_RELEASE_TAG=%s\nFILEDECK_RELEASE_VERSION=%s\n' "$tag" "$version" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libarchive-tools 7zip qpdf ffmpeg git smbclient
+          command -v bsdtar
+          command -v 7zz
+          command -v qpdf
+          command -v ffmpeg
+          command -v git
+          command -v smbclient
+      - run: npm ci --no-audit --no-fund
+        timeout-minutes: 5
+      - name: Verify the tagged release
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck
+          npm run build
+          npm test -w server -- --test-reporter=tap | node scripts/check-test-skips.mjs
+          npm run check:neutral
+        timeout-minutes: 20
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - name: Package chart
+        run: |
+          mkdir -p dist
+          helm lint k8s
+          helm package k8s --destination dist
+          test -f "dist/filedeck-${FILEDECK_RELEASE_VERSION}.tgz"
+        timeout-minutes: 5
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          no-cache: true
+          tags: ghcr.io/dynacomsolutions/filedeck:${{ env.FILEDECK_RELEASE_VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.FILEDECK_RELEASE_VERSION }}
+            org.opencontainers.image.title=Filedeck
+            org.opencontainers.image.description=Web file manager with per-node agents and a hub
+      - name: Create GitHub release and upload chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$FILEDECK_RELEASE_TAG" "dist/filedeck-${FILEDECK_RELEASE_VERSION}.tgz" --repo "$GITHUB_REPOSITORY" --title "Filedeck $FILEDECK_RELEASE_TAG" --generate-notes

@@ -71,7 +71,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (printf "%s-test-%s" $.Release.Name $s.kind)) | nindent 8 }}
+        {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (printf "%s-test-%s" $.Release.Name $s.kind) "chartLabel" $ts.podChartLabel) | nindent 8 }}
         app.kubernetes.io/component: test-source
     spec:
       automountServiceAccountToken: false
