@@ -91,7 +91,7 @@ const GROUPS = [
 ] as const;
 
 /** Git details for the Properties panel: branch, upstream, last commit, stash, remotes, worktree link, change lists and the HEAD diff. */
-export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorktrees, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onDiffHead: (p: string) => void; onOpenWorktrees?: () => void; onApplicability?: (available: boolean | null) => void }) {
+export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorktrees, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onDiffHead: (p: string) => void; onOpenWorktrees?: (repoRoot: string) => void; onApplicability?: (available: boolean | null) => void }) {
   const [info, setInfo] = useState<GitInfo | null>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
@@ -138,7 +138,7 @@ export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorkt
       </dl>
       {onOpenWorktrees && (
         <div className="perm-row">
-          <button type="button" onClick={onOpenWorktrees}><Ic.GitBranch /> All worktrees</button>
+          <button type="button" onClick={() => onOpenWorktrees(r.root)}><Ic.GitBranch /> All worktrees</button>
         </div>
       )}
       {f && (

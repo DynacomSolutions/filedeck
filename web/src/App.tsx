@@ -546,8 +546,8 @@ export function App() {
       const go = (n: Tree): Tree => (n.kind === "leaf" ? n : n.id === sid ? { ...n, sizes } : { ...n, children: n.children.map(go) });
       return t ? go(t) : t;
     });
-  const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path, sr: undefined } : l));
-  const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path, sr: undefined } : l));
+  const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path, sr: undefined, wtPath: undefined } : l));
+  const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path, sr: undefined, wtPath: undefined } : l));
   /** A new panel split beside the given one (default: the active one) at node:path, optionally with a file selected there. */
   const openPanel = (node: string, path: string, select?: string, beside = activeId) => {
     const fresh: Leaf = { kind: "leaf", id: id(), node, path, ...(select ? { sel: select } : {}) };

@@ -30,7 +30,17 @@ const entry = (path, mode = originalMode) => ({
   name: path.split('/').at(-1), path, type: 'file', size: 128,
   mtime: 1791264000000, mode,
 });
-const gitInfo = (path) => path.startsWith('/work/') ? {
+const gitInfo = (path) => scope === 't75-worktrees' && path.startsWith('/parent-repo') ? {
+  repo: {
+    root: path.startsWith('/parent-repo/nested-repo/') ? '/parent-repo/nested-repo' : '/parent-repo',
+    kind: 'worktree', rel: path.slice('/parent-repo/'.length),
+    summary: { kind: 'worktree', branch: 'fixture', head: '0123456789abcdef', staged: 0, modified: 0, untracked: 0, conflicted: 0 },
+    lastCommit: null, stash: 0, remotes: [],
+    lists: { staged: [], modified: [], untracked: [], conflicted: [] },
+    counts: { staged: 0, modified: 0, untracked: 0, conflicted: 0 }, listCap: 100,
+    file: { tracked: true, letters: '', lastCommit: null },
+  },
+} : path.startsWith('/work/') ? {
   repo: {
     root: '/work', kind: 'worktree', rel: path.slice('/work/'.length),
     summary: { kind: 'worktree', branch: 'fixture', head: '0123456789abcdef', staged: 0, modified: 0, untracked: 0, conflicted: 0 },
@@ -74,7 +84,9 @@ async function installFixture(page) {
         const rows = path === '/' ? [{ name: 'destination', path: '/destination', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }] : [];
         return json({ path, entries: rows, truncated: false });
       }
-      const rows = path === '/work'
+      const rows = scope === 't75-worktrees' && path === '/parent-repo/nested-repo/sub'
+        ? [entry('/parent-repo/nested-repo/sub/current.txt')]
+        : path === '/work'
         ? [entry(tracked, fakeMode), entry('/work/readme.md'), entry('/work/package.zip'), { name: 'subdir', path: '/work/subdir', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }]
         : path === '/'
           ? [entry(plain, fakeMode), { name: 'work', path: '/work', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }]
@@ -98,12 +110,17 @@ async function installFixture(page) {
     if (pathname.endsWith('/api/git/info')) return json(gitInfo(url.searchParams.get('path') || '/'));
     if (pathname.endsWith('/api/git/status')) return json({ repo: null, entries: {}, children: {}, pending: false });
     if (pathname.endsWith('/api/git/worktrees')) {
-      worktreeRequests.push(url.searchParams.get('path') || '/');
-      if (scope === 't75-worktrees') return json({ repo: '/work', bare: false, truncated: false, worktrees: [
-        { path: '/work', gitPath: '/host/work', name: 'main', main: true, bare: false, branch: 'main', detached: false, head: '01234567', locked: false, prunable: false, dirty: false, current: true },
-        { path: '/work-feature', gitPath: '/host/work-feature', name: 'feature-checkout', main: false, bare: false, branch: 'feature', detached: false, head: '89abcdef', locked: false, prunable: false, dirty: true, current: false },
-        { path: '/work-release', gitPath: '/host/work-release', name: 'release-checkout', main: false, bare: false, branch: 'release/next', detached: false, head: 'fedcba98', locked: false, prunable: false, dirty: false, current: false },
-      ] });
+      const queriedPath = url.searchParams.get('path') || '/';
+      worktreeRequests.push(queriedPath);
+      if (scope === 't75-worktrees') {
+        const nested = queriedPath.startsWith('/parent-repo/nested-repo');
+        const root = nested ? '/parent-repo/nested-repo' : queriedPath.startsWith('/parent-repo') ? '/parent-repo' : '/work';
+        const names = nested ? ['nested-main', 'nested-unrelated'] : root === '/parent-repo' ? ['parent-main', 'parent-feature', 'parent-release'] : ['main', 'feature-checkout', 'release-checkout'];
+        return json({ repo: root, bare: false, truncated: false, worktrees: names.map((name, i) => ({
+          path: i === 0 ? root : `${root}-${name}`, gitPath: `/host/${name}`, name, main: i === 0, bare: false,
+          branch: i === 0 ? 'main' : name, detached: false, head: '01234567', locked: false, prunable: false, dirty: false, current: i === 0,
+        })) });
+      }
       return json({ worktrees: [] });
     }
     if (pathname.endsWith('/api/fs/perms') && req.method() === 'POST') {
@@ -464,6 +481,38 @@ async function verifyGitWorktrees(browser) {
     await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
   } finally {
     await context.close();
+  }
+
+  const nestedPath = '/parent-repo/nested-repo/sub';
+  const { context: nestedContext, page: nestedPage } = await openPage(browser, { state: appState({ path: nestedPath, selected: `${nestedPath}/current.txt` }) });
+  try {
+    await nestedPage.locator('nav[aria-label="Breadcrumb"] button').filter({ hasText: 'parent-repo' }).click({ button: 'right' });
+    await nestedPage.getByRole('menuitem', { name: 'Properties', exact: true }).click();
+    await nestedPage.getByRole('tab', { name: 'Git', exact: true }).click();
+    await nestedPage.getByRole('button', { name: 'All worktrees', exact: true }).click();
+    await nestedPage.locator('.wt-list').waitFor({ state: 'visible' });
+    for (const name of ['parent-main', 'parent-feature', 'parent-release']) {
+      await nestedPage.locator('.wt-name', { hasText: name }).waitFor({ state: 'visible' });
+    }
+    assert.ok(!await nestedPage.locator('.wt-name', { hasText: 'nested-unrelated' }).count(), 'breadcrumb Properties must list the parent repository, not the nested current-folder repository');
+    assert.ok(worktreeRequests.includes('/parent-repo'), 'the Git section repository root should be the worktrees API context');
+    const parentWorktreesURL = nestedPage.url();
+    const wire = JSON.parse(new URL(parentWorktreesURL).searchParams.get('s'));
+    assert.equal(wire.t.wp, '/parent-repo', 'the breadcrumb repository context should be encoded in the URL');
+    await nestedPage.reload();
+    for (const name of ['parent-main', 'parent-feature', 'parent-release']) {
+      await nestedPage.locator('.wt-name', { hasText: name }).waitFor({ state: 'visible' });
+    }
+    assert.equal(worktreeRequests.at(-1), '/parent-repo', 'reload should restore the parent repository context');
+    await nestedPage.getByRole('button', { name: 'Settings' }).click();
+    await nestedPage.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+    await nestedPage.goBack();
+    await nestedPage.locator('.wt-name', { hasText: 'parent-feature' }).waitFor({ state: 'visible' });
+    assert.equal(nestedPage.url(), parentWorktreesURL, 'Back should restore the worktrees route with parent context');
+    await nestedPage.goForward();
+    await nestedPage.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+  } finally {
+    await nestedContext.close();
   }
 }
 
