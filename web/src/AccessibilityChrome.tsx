@@ -15,7 +15,7 @@ function pageTitle() {
     : "";
   const separator = locationText.lastIndexOf(" on ");
   const location: [string, string] | null = separator < 0 ? null : [locationText.slice(0, separator), locationText.slice(separator + 4)];
-  if (location) return `${location[1]} · ${location[2]} · ${APP_TITLE}`;
+  if (location) return `${location[0]} · ${location[1]} · ${APP_TITLE}`;
 
   return `Files · ${APP_TITLE}`;
 }
