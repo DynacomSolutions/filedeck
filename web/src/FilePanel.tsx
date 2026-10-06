@@ -1027,6 +1027,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (compareKey(cmpCtl, cside, e)) (e.preventDefault(), e.stopPropagation());
       return;
     }
+    // File-selection and row actions belong to the file viewport. Let tabs,
+    // toolbar buttons, and other focusable widgets keep their own Home/End,
+    // Delete, Ctrl+A, and arrow-key behaviour. Alt panel commands remain
+    // available from panel chrome for keyboard users.
+    const inFileArea = e.target === e.currentTarget || !!t.closest(".fp-scroll");
+    if (!inFileArea && !e.altKey) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key;
     const hasText = !!window.getSelection()?.toString();
