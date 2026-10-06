@@ -8,8 +8,13 @@ function pageTitle() {
   if (dialogLabel) return `${dialogLabel} · ${APP_TITLE}`;
 
   const focusedList = document.activeElement?.closest<HTMLElement>(".fp-scroll[aria-label]");
-  const label = focusedList?.getAttribute("aria-label");
-  const location = label?.match(/^Files in (.+?) on (.+?)\. Arrow keys select, Enter opens\.$/);
+  const activeList = document.querySelector<HTMLElement>(".fp.active .fp-scroll[aria-label]");
+  const label = (focusedList ?? activeList)?.getAttribute("aria-label");
+  const locationText = label?.startsWith("Files in ") && label.endsWith(". Arrow keys select, Enter opens.")
+    ? label.slice("Files in ".length, -". Arrow keys select, Enter opens.".length)
+    : "";
+  const separator = locationText.lastIndexOf(" on ");
+  const location: [string, string] | null = separator < 0 ? null : [locationText.slice(0, separator), locationText.slice(separator + 4)];
   if (location) return `${location[1]} · ${location[2]} · ${APP_TITLE}`;
 
   return `Files · ${APP_TITLE}`;
@@ -28,7 +33,7 @@ export function AccessibilityChrome() {
       document.title = pageTitle();
     };
     const observer = new MutationObserver(updateTitle);
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "aria-modal", "hidden"] });
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "aria-modal", "class", "hidden"] });
     document.addEventListener("focusin", updateTitle);
     updateTitle();
 
