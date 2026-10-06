@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { cssColourToHex, DEFAULT_PRESENTATION, normalizePresentation } from "../src/presentation.ts";
+import { cssColourToHex, DEFAULT_PRESENTATION, minimumParagraphSpace, normalizePresentation } from "../src/presentation.ts";
+
+const presentationSettingsSource = readFileSync(new URL("../src/PresentationSettings.tsx", import.meta.url), "utf8");
 
 test("presentation preferences preserve chosen reading adjustments", () => {
   assert.deepEqual(normalizePresentation({ foreground: "#102030", background: "#fefefe", font: "serif", fontSize: 20, lineHeight: 1.8, paragraphSpace: 2.7, lineMeasure: 95 }), {
@@ -18,6 +21,18 @@ test("default presentation normalizes unchanged and paragraph spacing rounds cle
   assert.deepEqual(normalizePresentation(DEFAULT_PRESENTATION), DEFAULT_PRESENTATION);
   assert.equal(normalizePresentation({ lineHeight: 1.6, paragraphSpace: 0 }).paragraphSpace, 2.4);
   assert.equal(normalizePresentation({ lineHeight: 1.7, paragraphSpace: 0 }).paragraphSpace, 2.6);
+  assert.equal(minimumParagraphSpace(1.6), 2.4);
+  assert.equal(minimumParagraphSpace(1.7), 2.6);
+});
+
+test("presentation range controls have explicit labels and reset to defaults", () => {
+  for (const id of ["presentation-size", "presentation-line-height", "presentation-paragraph-space", "presentation-line-measure"]) {
+    assert.match(presentationSettingsSource, new RegExp(`<label htmlFor="${id}">`));
+    assert.match(presentationSettingsSource, new RegExp(`<input id="${id}"`));
+  }
+  assert.match(presentationSettingsSource, /min=\{minimumParagraphSpace\(s\.lineHeight\)\}/);
+  assert.match(presentationSettingsSource, /value=\{s\.paragraphSpace\}/);
+  assert.match(presentationSettingsSource, /setPresentation\(DEFAULT_PRESENTATION\)/);
 });
 
 test("paragraph spacing remains at least 1.5 times the selected line height", () => {
