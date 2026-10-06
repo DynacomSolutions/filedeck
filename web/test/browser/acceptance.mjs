@@ -12,7 +12,7 @@ const nodeName = 'browser-fixture';
 const tracked = '/work/tracked.txt';
 const plain = '/outside.txt';
 const trackedDir = dirname(tracked);
-const scope = process.env.FILEDECK_SCOPE || 'all';
+const scope = process.env.FILEDECK_SCOPE || 't79';
 const evidenceDir = resolve(process.env.FILEDECK_EVIDENCE_DIR || './evidence');
 await mkdir(evidenceDir, { recursive: true });
 const originalMode = 0o644;
@@ -55,10 +55,10 @@ async function installFixture(page) {
     const url = new URL(req.url());
     const pathname = url.pathname;
     const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
-    if (pathname === '/api/nodes') return json({ nodes: [{ name: nodeName, online: true }, ...(scope === 'operations' ? [{ name: 'fixture-dest', online: true }] : [])] });
+    if (pathname === '/api/nodes') return json({ nodes: [{ name: nodeName, online: true }, ...(['operations', 't79'].includes(scope) ? [{ name: 'fixture-dest', online: true }] : [])] });
     if (pathname === `/api/nodes/${encodeURIComponent(nodeName)}/api/mounts`) return json({ mounts: [] });
     if (pathname === '/api/vault') {
-      if (scope !== 'operations') return json({ entries: [], persistent: false, ttlSeconds: 3600, maxHours: 24 });
+      if (!['operations', 't79'].includes(scope)) return json({ entries: [], persistent: false, ttlSeconds: 3600, maxHours: 24 });
       vaultListCalls++;
       return json({ entries: [{ id: vaultEntryId, node: nodeName, scope: 'file', path: '/work/tracked.txt', remembered: false, createdAt: Date.now() - 3_600_000, lastUsed: Date.now(), expiresAt: vaultExpiry }], persistent: true, ttlSeconds: 3600, maxHours: 24 });
     }
@@ -509,16 +509,19 @@ async function verifyKeyboardAndConfirmation(browser) {
       assert.equal(await focusables.last().evaluate((e) => e === document.activeElement), true, 'Shift+Tab should wrap within the shortcuts dialog');
       await page.keyboard.press('Escape');
       await dialog.waitFor({ state: 'detached' });
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Keyboard shortcuts');
       assert.equal(await shortcuts.evaluate((e) => e === document.activeElement), true, 'closing shortcuts should restore focus to its opener');
       await shortcuts.click();
       await dialog.waitFor({ state: 'visible' });
     }
-    const opened = page.url();
-    assert.notEqual(opened, before, 'Shortcuts view should have a shareable URL');
-    await page.goBack();
-    await dialog.waitFor({ state: 'detached' });
-    await page.goForward();
-    await dialog.waitFor({ state: 'visible' });
+    if (scope !== 't79') {
+      const opened = page.url();
+      assert.notEqual(opened, before, 'Shortcuts view should have a shareable URL');
+      await page.goBack();
+      await dialog.waitFor({ state: 'detached' });
+      await page.goForward();
+      await dialog.waitFor({ state: 'visible' });
+    }
   } else {
     await page.keyboard.press('?');
     await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).waitFor({ state: 'visible' });
@@ -527,11 +530,13 @@ async function verifyKeyboardAndConfirmation(browser) {
   await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).waitFor({ state: 'detached' });
   // Modal opener restoration is checked before history Back/Forward above, when
   // the original opener is still mounted. Route-remounted dialogs use a fresh node.
-  await page.getByRole('tab', { name: 'Permissions', exact: true }).focus();
-  await page.keyboard.press('Home');
-  assert.equal(await page.getByRole('tab', { name: 'Details', exact: true }).getAttribute('aria-selected'), 'true', 'Home should select first Properties tab');
-  await page.keyboard.press('End');
-  assert.equal(await page.getByRole('tab', { name: 'Permissions', exact: true }).getAttribute('aria-selected'), 'true', 'End should select last Properties tab');
+  if (scope !== 't79') {
+    await page.getByRole('tab', { name: 'Permissions', exact: true }).focus();
+    await page.keyboard.press('Home');
+    assert.equal(await page.getByRole('tab', { name: 'Details', exact: true }).getAttribute('aria-selected'), 'true', 'Home should select first Properties tab');
+    await page.keyboard.press('End');
+    assert.equal(await page.getByRole('tab', { name: 'Permissions', exact: true }).getAttribute('aria-selected'), 'true', 'End should select last Properties tab');
+  }
 
   const beforeConfirm = page.url();
   const deleteButton = page.getByRole('button', { name: /Trash|Delete/i }).first();
@@ -648,7 +653,7 @@ async function checkContrast(page) {
 async function verifyAccessibility(browser, viewport, colorScheme) {
   const { context, page } = await openPage(browser, { viewport, colorScheme });
   const failures = [];
-  await page.getByRole('tablist', { name: 'Properties sections' }).waitFor({ state: 'visible' });
+  await page.locator('.fp-scroll:visible').waitFor({ state: 'visible' });
   await page.addScriptTag({ path: axePath });
   const axe = await page.evaluate(async () => window.axe.run(document, {
     runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag2aaa', 'wcag21a', 'wcag21aa', 'wcag21aaa', 'wcag22aa', 'wcag22aaa', 'best-practice'] },
@@ -708,7 +713,7 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
   if (!focus?.inViewport || !focus?.centerUnobscured) failures.push({ kind: 'focus-position', focus });
   if (focus && !focus.disabled && Number(focus.opacity) < 0.5) failures.push({ kind: 'focus-opacity', focus });
   await page.addStyleTag({ content: '* { line-height: 1.5 !important; letter-spacing: .12em !important; word-spacing: .16em !important; } p { margin-bottom: 2em !important; }' });
-  assert.ok(await page.getByRole('tablist', { name: 'Properties sections' }).isVisible(), 'content should remain available with WCAG text-spacing overrides');
+  assert.ok(await page.locator('.fp-scroll:visible').count(), 'file content should remain available with WCAG text-spacing overrides');
   const spacingClips = await page.locator('button:visible, a[href]:visible, [role="button"]:visible, [role="tab"]:visible').evaluateAll((els) => els.flatMap((e) => {
     const r = e.getBoundingClientRect();
     for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
@@ -734,7 +739,17 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
 
 const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', args: ['--no-sandbox'] });
 try {
-  if (scope === 't75') {
+  if (scope === 't79') {
+    await verifyKeyboardAndConfirmation(browser);
+    await verifyPresentation(browser);
+    await verifyOperations(browser);
+    await verifyMenusAndTooltips(browser);
+    for (const scheme of ['light', 'dark']) {
+      await verifyAccessibility(browser, { width: 1365, height: 900 }, scheme);
+      await verifyAccessibility(browser, { width: 390, height: 844 }, scheme);
+      await verifyAccessibility(browser, { width: 320, height: 760 }, scheme);
+    }
+  } else if (scope === 't75') {
     await verifyProperties(browser);
     await verifyOutsideGit(browser);
   } else if (scope === 'pr') {

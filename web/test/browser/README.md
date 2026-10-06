@@ -1,6 +1,6 @@
 # Browser accessibility regressions
 
-This optional Chromium check exercises the real Filedeck UI with a deterministic fake API. It covers keyboard-operable Properties tabs and context menus, modal focus trapping and restoration, tooltip keyboard/pointer dismissal, 44 CSS-pixel targets, axe serious/critical findings, text spacing, and narrow viewport reflow. It never calls a live Filedeck API.
+This optional Chromium check exercises the real Filedeck UI with a deterministic fake API. Its default `t79` scope covers modal focus, context menus and tooltips, presentation preferences, keyboard folder transfer, vault expiry extension, contrast, 44 CSS-pixel targets, text spacing and narrow viewport reflow. It never calls a live Filedeck API. `FILEDECK_SCOPE=t75` adds the Properties tabs, while `FILEDECK_SCOPE=t76` adds URL/history workflows. Use `FILEDECK_SCOPE=all` only on a combined candidate containing those changes.
 
 From this directory, install the small test dependencies and a Chromium browser once:
 
