@@ -2,6 +2,12 @@ name: Kind default install
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Released chart version to install, without the v prefix
+        required: false
+        default: "0.2.0"
+        type: string
 
 permissions:
   contents: read
@@ -22,10 +28,21 @@ jobs:
           wait: 60s
 
       - name: Download the released chart archive
-        run: curl --fail --location --retry 3 --output filedeck-0.1.0.tgz "https://github.com/${GITHUB_REPOSITORY}/releases/download/v0.1.0/filedeck-0.1.0.tgz"
+        env:
+          FILEDECK_VERSION: ${{ inputs.version || '0.2.0' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$FILEDECK_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Chart version must be a stable semver MAJOR.MINOR.PATCH: $FILEDECK_VERSION" >&2
+            exit 1
+          fi
+          archive="filedeck-${FILEDECK_VERSION}.tgz"
+          curl --fail --location --retry 3 --output "$archive" "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${FILEDECK_VERSION}/${archive}"
         timeout-minutes: 5
       - name: Install the chart with its defaults
-        run: helm install filedeck ./filedeck-0.1.0.tgz --namespace filedeck --create-namespace --wait --timeout 5m
+        env:
+          FILEDECK_VERSION: ${{ inputs.version || '0.2.0' }}
+        run: helm install filedeck "./filedeck-${FILEDECK_VERSION}.tgz" --namespace filedeck --create-namespace --wait --timeout 5m
         timeout-minutes: 7
       - name: Wait for hub, agent and vault key Job
         run: |
