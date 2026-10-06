@@ -91,19 +91,20 @@ const GROUPS = [
 ] as const;
 
 /** Git details for the Properties panel: branch, upstream, last commit, stash, remotes, worktree link, change lists and the HEAD diff. */
-export function GitSection({ node, path, tick, onReveal, onDiffHead }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onDiffHead: (p: string) => void }) {
+export function GitSection({ node, path, tick, onReveal, onDiffHead, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onDiffHead: (p: string) => void; onApplicability?: (available: boolean | null) => void }) {
   const [info, setInfo] = useState<GitInfo | null>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
     let live = true;
+    onApplicability?.(null);
     void gitApi.info(node, path, tick > 0).then(
-      (v) => live && (setInfo(v), setErr("")),
-      (e: Error) => live && setErr(e.message),
+      (v) => live && (setInfo(v), setErr(""), onApplicability?.(!!v.repo)),
+      (e: Error) => live && (setErr(e.message), onApplicability?.(false)),
     );
     return () => {
       live = false;
     };
-  }, [node, path, tick]);
+  }, [node, path, tick, onApplicability]);
   if (err) return <div className="muted perm-hint">Git details unavailable: {err}</div>;
   if (!info) return <SkeletonLines lines={3} />;
   const r = info.repo;
