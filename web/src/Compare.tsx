@@ -113,7 +113,7 @@ export interface CompareCtl {
   setOpts: (o: UiOpts) => void;
   setPreset: (p: string) => void;
   toggleStatus: (s: DiffStatus) => void;
-  preview: (a: SyncAction) => void;
+  preview: (a: SyncAction, paths?: string[]) => void;
   exec: Exec | null;
   runExec: () => void;
   stopExec: () => void;
@@ -439,9 +439,10 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   const warnings = job?.stats?.warnings ?? [];
   const filtersActive = !!(st && (st.opts.include.trim() || st.opts.exclude.trim() || st.opts.ignoreHidden)) || warnings.length > 0;
   /** The plan needs every row under the selection, including folders never opened: the hub streams them. */
-  const preview = async (action: SyncAction) => {
-    if (!jobId || !selected.size) return;
-    const sel = [...selected];
+  const preview = async (action: SyncAction, paths?: string[]) => {
+    const chosen = paths ?? [...selected];
+    if (!jobId || !chosen.length) return;
+    const sel = chosen;
     const tops = sel.filter((p) => !sel.some((q) => q !== p && p.startsWith(q + "/")));
     let all: DiffRow[];
     try {
@@ -451,7 +452,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     }
     const final = all.filter((r) => r.status !== "pending") as (DiffRow & { status: DiffStatus })[];
     if (final.length < all.length) onStatus(`${all.length - final.length} selected rows are still being compared and were left out`);
-    const picked = new Set(selected);
+    const picked = new Set(chosen);
     for (const r of final) if (tops.some((t) => r.p === t || r.p.startsWith(t + "/"))) picked.add(r.p);
     const plan = planSync(final, picked, action, { wholeDirs: !filtersActive });
     setExec({ action, plan, state: "plan", done: 0, errors: [], canceled: false });
@@ -547,7 +548,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     setOpts,
     setPreset,
     toggleStatus,
-    preview: (a: SyncAction) => void preview(a),
+    preview: (a: SyncAction, paths?: string[]) => void preview(a, paths),
     exec,
     runExec: () => void runExec(),
     stopExec: () => exec?.jobId && void api.opAction(exec.jobId, "cancel"),
