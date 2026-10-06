@@ -32,5 +32,26 @@ body { font-family: var(--presentation-font); font-size: var(--presentation-size
 .presentation-field input[type=color] { grid-column: 1 / -1; width: 100%; min-height: 44px; padding: .25rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); }
 .presentation-field input[type=range], .presentation-field select { grid-column: 1 / -1; width: 100%; min-height: 44px; }
 .presentation-field output { color: var(--fg); font-variant-numeric: tabular-nums; }
-.presentation-field button { grid-column: 1 / -1; justify-self: start; min-height: 44px; color: var(--accent-text); text-decoration: underline; }
+.presentation-field button { grid-column: 1 / -1; justify-self: start; min-height: 44px; color: var(--accent-text); text-decoration: none; }
 .presentation-reset { min-height: 44px; align-self: start; padding-inline: .8rem; border: 1px solid var(--border-strong); border-radius: var(--radius-btn); }
+
+/* At high zoom the mobile breakpoint is reached on desktop too. Keep the
+   Properties controls in normal flow so they remain visible and operable. */
+@media (max-width: 700px) {
+  [data-user-presentation] .side { max-height: 45dvh; overflow-y: auto; }
+  [data-user-presentation] .side-scroll { flex: 1 1 auto; min-height: 3rem; }
+  [data-user-presentation] .jobs { max-height: 30%; }
+  [data-user-presentation] .pv { min-width: 0; overflow: auto; }
+  [data-user-presentation] .pv-head { align-items: flex-start; min-width: 0; }
+  [data-user-presentation] .pv-head > .pv-extra { flex: 1 1 100%; width: 100%; min-width: 0; margin-left: 0; flex-wrap: wrap; }
+  [data-user-presentation] .pv-extra > .pv-switch,
+  [data-user-presentation] .pv-extra > .pv-dock { flex: 1 1 auto; min-width: 0; margin-left: 0; flex-wrap: wrap; }
+  [data-user-presentation] .pv-dockbtn { min-width: 44px; min-height: 44px; height: auto; }
+  [data-user-presentation] .props-tabs { flex-wrap: wrap; overflow: visible; }
+  [data-user-presentation] .props-tabs button { min-height: 44px; }
+  [data-user-presentation] .props>div,
+  [data-user-presentation] .pp .props>div { grid-template-columns: minmax(0, 1fr); gap: .2rem; }
+  [data-user-presentation] .cmp-inner { min-width: 0; }
+  [data-user-presentation] .cmp-head,
+  [data-user-presentation] .cmp-row { grid-template-columns: minmax(0, 1fr) 26px; }
+}

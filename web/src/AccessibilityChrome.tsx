@@ -67,5 +67,5 @@ export function AccessibilityChrome() {
     };
   }, []);
 
-  return <a className="skip-link" href="#filedeck-main">Skip to file panels</a>;
+  return <a className="skip-navigation" data-nav href="#filedeck-main">Skip to file panels</a>;
 }
