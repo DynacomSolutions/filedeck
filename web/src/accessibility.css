@@ -65,7 +65,7 @@ button.primary:hover:not(:disabled) {
   border: 1px solid var(--a11y-control-boundary) !important;
 }
 
-.skip-link {
+.skip-navigation {
   position: fixed;
   z-index: 1000;
   top: .5rem;
@@ -77,10 +77,10 @@ button.primary:hover:not(:disabled) {
   background: var(--surface);
   color: var(--fg);
   font-weight: 700;
-  text-decoration: underline;
+  text-decoration: none;
 }
 
-.skip-link:focus {
+.skip-navigation:focus {
   transform: translateY(0);
 }
 
