@@ -1,9 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { api, fmtDate, fmtMode, fmtSize, stat, type Entry, type JobView, type PermsResult, type Props, type SizeResult } from "./api";
 import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 import { GitSection } from "./GitUi";
+
+type PropsTab = "details" | "git" | "permissions";
+const PROP_TABS: { id: PropsTab; label: string }[] = [
+  { id: "details", label: "Details" },
+  { id: "git", label: "Git" },
+  { id: "permissions", label: "Permissions" },
+];
 
 const TYPE: Record<Entry["type"], string> = { file: "File", dir: "Folder", symlink: "Symbolic link", other: "Special file" };
 const GRID: [string, number, number, number][] = [
@@ -45,7 +52,7 @@ function useJob(node: string) {
  * Details of one entry for the properties pane, with recursive size, chmod and chown. The pane remounts it (key) when the selection
  * changes, so every item starts from its own state; a folder-size job still running for the previous item is cancelled.
  */
-export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTick = 0, onReveal, onDiffHead }: { node: string; path: string; entry?: Entry; onChanged: () => void; onStatus: (m: string) => void; gitTick?: number; onReveal?: (p: string) => void; onDiffHead?: (p: string) => void }) {
+export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTick = 0, onReveal, onDiffHead, selectedTab = "details", onTabChange }: { node: string; path: string; entry?: Entry; onChanged: () => void; onStatus: (m: string) => void; gitTick?: number; onReveal?: (p: string) => void; onDiffHead?: (p: string) => void; selectedTab?: PropsTab; onTabChange: (tab: PropsTab) => void }) {
   const [p, setP] = useState<Props | null>(null);
   const [basic, setBasic] = useState<Entry | null>(entry ?? null);
   const [err, setErr] = useState("");
@@ -58,8 +65,13 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
   const [busy, setBusy] = useState<"mode" | "owner" | "group" | "tree" | null>(null);
   /** an error from the last permission change, shown next to the controls */
   const [permErr, setPermErr] = useState("");
+  const [gitAvailable, setGitAvailable] = useState<boolean | null>(null);
   /** what is typed in the octal box while it is being edited (null = show the live mode) */
   const [oct, setOct] = useState<string | null>(null);
+  const [ownerDraft, setOwnerDraft] = useState(false);
+  const [groupDraft, setGroupDraft] = useState(false);
+  const tabBase = useId().replace(/:/g, "");
+  const tabRefs = useRef<Partial<Record<PropsTab, HTMLButtonElement | null>>>({});
   const sizeJob = useJob(node);
   const permJob = useJob(node);
   const running = useRef({ node, size: sizeJob, perm: permJob });
@@ -131,17 +143,21 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
       setBusy(null);
     }
   };
-  /** Octal box: Enter or leaving it applies a valid 3-4 digit value; anything else goes back to the live mode. */
+  /** Octal box: Enter or its Apply button applies a valid 3-4 digit value. */
   const commitOct = () => {
     if (oct === null) return;
     const v = oct;
-    setOct(null);
-    if (!octOk(v)) return;
+    if (!octOk(v)) {
+      setPermErr("Enter a three or four digit octal mode, using digits 0 to 7.");
+      return;
+    }
     const m = parseInt(v, 8);
+    setOct(null);
+    setPermErr("");
     setMode(m);
     if (p && m !== p.mode) void apply("mode", { mode: m });
   };
-  /** Owner and group apply as soon as the field is committed (Enter or leaving it). */
+  /** Owner and group apply only when explicitly committed with Enter or Apply. */
   const commitName = (field: "owner" | "group") => {
     if (!p) return;
     const v = (field === "owner" ? owner : group).trim();
@@ -151,10 +167,15 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
   };
   const nameKeys = (field: "owner" | "group") => (e: React.KeyboardEvent<HTMLInputElement>) => {
     e.stopPropagation();
-    if (e.key === "Enter") e.currentTarget.blur();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      field === "owner" ? setOwnerDraft(false) : setGroupDraft(false);
+      commitName(field);
+    }
     else if (e.key === "Escape") {
       e.preventDefault();
-      field === "owner" ? setOwner(origOwner) : setGroup(origGroup);
+      if (field === "owner") { setOwner(origOwner); setOwnerDraft(false); }
+      else { setGroup(origGroup); setGroupDraft(false); }
     }
   };
   const slot = (f: NonNullable<typeof busy>) => <span className="perm-spin" aria-hidden={busy !== f}>{busy === f && <Ic.Loader className="cmp-spin" role="status" aria-label="Applying" />}</span>;
@@ -177,10 +198,47 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
   } else if (basic) rows.push(["Mode", `${fmtMode(basic.mode, basic.type)}  ${octal(basic.mode)}`]);
 
   const sj = sizeJob.job;
+  const permissionsAvailable = p ? p.type !== "other" : err ? false : null;
+  const activeTab: PropsTab = selectedTab === "git" && gitAvailable === true
+    ? "git"
+    : selectedTab === "permissions" && permissionsAvailable === true
+      ? "permissions"
+      : "details";
+  const tabs = PROP_TABS.filter(({ id }) => id === "details" || (id === "git" && gitAvailable === true) || (id === "permissions" && permissionsAvailable === true));
+  const tabKey = (e: React.KeyboardEvent<HTMLButtonElement>, current: PropsTab) => {
+    const at = tabs.findIndex((tab) => tab.id === current);
+    const next = e.key === "ArrowRight" ? (at + 1) % tabs.length
+      : e.key === "ArrowLeft" ? (at + tabs.length - 1) % tabs.length
+        : e.key === "Home" ? 0
+          : e.key === "End" ? tabs.length - 1 : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    const tab = tabs[next]!.id;
+    onTabChange(tab);
+    tabRefs.current[tab]?.focus();
+  };
   return (
     <div className="pp" aria-busy={!p && !basic && !err}>
       {err && <div className="fp-err" role="alert">{err}</div>}
       {!p && !basic && !err && <SkeletonLines lines={7} />}
+      <div className="props-tabs" role="tablist" aria-label="Properties sections">
+        {tabs.map(({ id, label }) => (
+          <button
+            key={id}
+            ref={(el) => { tabRefs.current[id] = el; }}
+            type="button"
+            id={`${tabBase}-${id}-tab`}
+            role="tab"
+            aria-selected={activeTab === id}
+            aria-controls={`${tabBase}-${id}-panel`}
+            tabIndex={activeTab === id ? 0 : -1}
+            className={activeTab === id ? "on" : ""}
+            onClick={() => onTabChange(id)}
+            onKeyDown={(e) => tabKey(e, id)}
+          >{label}</button>
+        ))}
+      </div>
+      <section id={`${tabBase}-details-panel`} className="props-tabpanel" role="tabpanel" aria-labelledby={`${tabBase}-details-tab`} tabIndex={0} hidden={activeTab !== "details"}>
       <dl className="props">
         {rows.map(([k, v]) => (
           <div key={k}>
@@ -211,9 +269,15 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
           </div>
         )}
       </dl>
-      {p && onReveal && onDiffHead && <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onDiffHead={onDiffHead} />}
       {!p && (basic || err) && !err && <SkeletonLines lines={5} />}
+      </section>
+      {p && onReveal && onDiffHead && (
+        <section id={`${tabBase}-git-panel`} className="props-tabpanel" role="tabpanel" aria-labelledby={`${tabBase}-git-tab`} tabIndex={0} hidden={activeTab !== "git"}>
+          <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onDiffHead={onDiffHead} onApplicability={setGitAvailable} />
+        </section>
+      )}
       {p && p.type !== "other" && (
+        <section id={`${tabBase}-permissions-panel`} className="props-tabpanel" role="tabpanel" aria-labelledby={`${tabBase}-permissions-tab`} tabIndex={0} hidden={activeTab !== "permissions"}>
         <fieldset className="perm" disabled={busy !== null}>
           <legend>Permissions</legend>
           <table className="perm-grid">
@@ -254,19 +318,24 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
                 }}
                 onKeyDown={(e) => {
                   e.stopPropagation();
-                  if (e.key === "Enter") e.currentTarget.blur();
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitOct();
+                  }
                   else if (e.key === "Escape") {
                     e.preventDefault();
                     setOct(null);
                     setMode(p.mode);
                   }
                 }}
-                onBlur={commitOct}
+                onBlur={() => {
+                  if (oct !== null && !octOk(oct)) setPermErr("Enter a three or four digit octal mode, using digits 0 to 7.");
+                }}
               />
             </label>
             <span className="muted">{fmtMode(mode, p.type)}</span>
             {slot("mode")}
-            <button type="button" disabled={!modeChanged || busy !== null || (oct !== null && !octOk(oct))} onClick={() => (setOct(null), void apply("mode", { mode }))}><Ic.ShieldCheck /> Apply</button>
+            <button type="button" aria-label="Apply mode" disabled={!modeChanged || busy !== null || (oct !== null && !octOk(oct))} onClick={() => (setOct(null), void apply("mode", { mode }))}><Ic.ShieldCheck /> Apply</button>
           </div>
           <details className="perm-special">
             <summary>Special bits</summary>
@@ -281,22 +350,24 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
             </div>
           </details>
           <div className="perm-row">
-            <label>
-              Owner
+            <div className="perm-name">
+              <label htmlFor={`${tabBase}-owner`}>Owner</label>
               <span className="perm-field">
-                <input aria-label="Owner" value={owner} onChange={(e) => setOwner(e.target.value)} onKeyDown={nameKeys("owner")} onBlur={() => commitName("owner")} />
+                <input id={`${tabBase}-owner`} value={owner} onChange={(e) => (setOwner(e.target.value), setOwnerDraft(true))} onKeyDown={nameKeys("owner")} />
                 {slot("owner")}
               </span>
-            </label>
-            <label>
-              Group
+              <button type="button" aria-label="Apply owner" disabled={!ownerDraft || !owner.trim() || busy !== null} onClick={() => (setOwnerDraft(false), commitName("owner"))}>Apply</button>
+            </div>
+            <div className="perm-name">
+              <label htmlFor={`${tabBase}-group`}>Group</label>
               <span className="perm-field">
-                <input aria-label="Group" value={group} onChange={(e) => setGroup(e.target.value)} onKeyDown={nameKeys("group")} onBlur={() => commitName("group")} />
+                <input id={`${tabBase}-group`} value={group} onChange={(e) => (setGroup(e.target.value), setGroupDraft(true))} onKeyDown={nameKeys("group")} />
                 {slot("group")}
               </span>
-            </label>
+              <button type="button" aria-label="Apply group" disabled={!groupDraft || !group.trim() || busy !== null} onClick={() => (setGroupDraft(false), commitName("group"))}>Apply</button>
+            </div>
           </div>
-          <div className="muted perm-hint">Owner and group apply when you press Enter or leave the field. Names come from the host; a number is taken as an id.</div>
+          <div className="muted perm-hint">Owner and group changes apply when you press Enter or choose Apply. Names come from the host; a number is taken as an id.</div>
           {isDir && (
             <div className="perm-row">
               <select aria-label="Apply to" value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
@@ -304,8 +375,13 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
                 <option value="files">Files only</option>
                 <option value="dirs">Folders only</option>
               </select>
-              <Tip label="Set the mode, owner and group shown above on everything inside this folder">
-                <button type="button" disabled={busy !== null} onClick={() => void apply("tree", { mode, owner: owner.trim() || origOwner, group: group.trim() || origGroup }, true)}><Ic.FolderTree /> Apply to contents</button>
+              <Tip label="Set the mode, owner and group shown above on the selected files or folders inside this folder">
+                <button type="button" disabled={busy !== null} onClick={() => {
+                  const target = scope === "files" ? "files only" : scope === "dirs" ? "folders only" : "files and folders";
+                  if (window.confirm(`Apply mode ${octal(mode)}, owner ${owner.trim() || origOwner}, and group ${group.trim() || origGroup} to ${target} inside ${path}? This changes permissions on every matching item.`)) {
+                    void apply("tree", { mode, owner: owner.trim() || origOwner, group: group.trim() || origGroup }, true);
+                  }
+                }}><Ic.FolderTree /> Apply to contents</button>
               </Tip>
               {slot("tree")}
             </div>
@@ -317,6 +393,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
             </div>
           )}
         </fieldset>
+        </section>
       )}
     </div>
   );
