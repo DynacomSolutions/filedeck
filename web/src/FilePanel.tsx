@@ -21,7 +21,7 @@ import { Thumb } from "./Thumb";
 import { gitApi, type GitListing } from "./git";
 import { GitBadge, GitPill } from "./GitUi";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
-import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type SearchForm, type SortKey, type TabLoc } from "./urlState";
+import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, encodeState, type Dock, type Leaf, type Loc, type SearchForm, type SortKey, type TabLoc } from "./urlState";
 import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowLeft, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, GitPullRequest, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
@@ -692,7 +692,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           {paneExtra}
         </div>
         <div className="pv-body pp-body">
-          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} selectedTab={leaf.pt ?? "details"} onTabChange={(pt) => onPatch({ pt })} onReveal={(p) => goTo(node, parent(p), p)} onOpenWorktrees={(repoRoot) => { setClosedFor(null); setPropsFor(null); setTab("wt", repoRoot); }} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
+          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} selectedTab={leaf.pt ?? "details"} onTabChange={(pt) => onPatch({ pt })} onReveal={(p) => goTo(node, parent(p), p)} onOpenWorktree={(p) => { setClosedFor(null); setPropsFor(null); onNavigate(node, p); }} worktreeHref={(p) => encodeState({ tree: { kind: "leaf", id: leaf.id, node, path: p, pv: { dock: leaf.pv?.dock ?? "right", size: leaf.pv?.size ?? 40, tab: "props" }, pt: "git" }, active: leaf.id })} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
         </div>
       </div>
     ) : sel.size > 1 ? (
