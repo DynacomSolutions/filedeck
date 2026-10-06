@@ -37,6 +37,8 @@ const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.
 
 /** Rows put in the DOM at first and added per step while scrolling. */
 const RENDER_STEP = 400;
+const selectionEchoKey = (node: string, path: string, sel: string | null | undefined, ns: boolean | undefined, sels: readonly string[] | undefined) =>
+  JSON.stringify([node, path, sel ?? null, !!ns, sels ? [...sels].sort() : []]);
 const DOCKS: { dock: Dock; icon: LucideIcon; label: string }[] = [
   { dock: "left", icon: PanelLeft, label: "Dock side panel left" },
   { dock: "right", icon: PanelRight, label: "Dock side panel right" },
@@ -147,9 +149,20 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   cursorRef.current = cursor;
   const selRef = useRef(sel);
   selRef.current = sel;
+  /** Selection patches can arrive back through the URL after a newer keyboard event. */
+  const pendingSelectionEchoes = useRef<string[]>([]);
   // Browser history restores a new URL-backed leaf into the mounted panel.
   // Keep the panel's local interaction state in step with that restored state.
   useEffect(() => {
+    pendingSelectionEchoes.current = [];
+  }, [node, path]);
+  useEffect(() => {
+    const incoming = selectionEchoKey(node, path, leaf.sel, leaf.ns, leaf.sels);
+    const echo = pendingSelectionEchoes.current.indexOf(incoming);
+    if (echo >= 0) {
+      pendingSelectionEchoes.current.splice(0, echo + 1);
+      return;
+    }
     const next = new Set(leaf.sels ?? (leaf.sel && !leaf.ns ? [leaf.sel] : []));
     setSel((current) => current.size === next.size && [...next].every((path) => current.has(path)) ? current : next);
     setCursor((current) => current === (leaf.sel ?? null) ? current : leaf.sel ?? null);
@@ -399,7 +412,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     const many = sel.size > 1 && sel.size <= MAX_SELS ? [...sel].sort() : undefined;
     const ns = cursor && !sel.has(cursor) ? (true as const) : undefined;
     const old = leaf.sels ? [...leaf.sels].sort() : undefined;
-    if (v !== leaf.sel || ns !== leaf.ns || many?.join("\0") !== old?.join("\0")) onPatch({ sel: v, sels: many, ns });
+    if (v !== leaf.sel || ns !== leaf.ns || many?.join("\0") !== old?.join("\0")) {
+      pendingSelectionEchoes.current.push(selectionEchoKey(node, path, v, ns, many));
+      if (pendingSelectionEchoes.current.length > 32) pendingSelectionEchoes.current.splice(0, pendingSelectionEchoes.current.length - 32);
+      onPatch({ sel: v, sels: many, ns });
+    }
   }, [sel, cursor, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
   // Report the selection upward so the other panels and the selection bar see it.
   useEffect(() => {
