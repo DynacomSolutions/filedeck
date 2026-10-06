@@ -6,7 +6,7 @@ on:
       version:
         description: Released chart version to install, without the v prefix
         required: false
-        default: "0.2.1"
+        default: "0.2.2"
         type: string
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
 
       - name: Download the released chart archive
         env:
-          FILEDECK_VERSION: ${{ inputs.version || '0.2.1' }}
+          FILEDECK_VERSION: ${{ inputs.version || '0.2.2' }}
         run: |
           set -euo pipefail
           if [[ ! "$FILEDECK_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -41,7 +41,7 @@ jobs:
         timeout-minutes: 5
       - name: Install the chart with its defaults
         env:
-          FILEDECK_VERSION: ${{ inputs.version || '0.2.1' }}
+          FILEDECK_VERSION: ${{ inputs.version || '0.2.2' }}
         run: helm install filedeck "./filedeck-${FILEDECK_VERSION}.tgz" --namespace filedeck --create-namespace --wait --timeout 5m
         timeout-minutes: 7
       - name: Wait for hub, agent and vault key Job
