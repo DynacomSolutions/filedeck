@@ -1,21 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { DiffEditor } from "@monaco-editor/react";
-import * as monaco from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
-import { modelUri, monacoTheme } from "./monacoSetup";
+import { languageForPath, modelUri, monacoTheme } from "./monacoSetup";
 import type { TextFile } from "./api";
-
-const base = (path: string) => path.slice(path.lastIndexOf("/") + 1).toLowerCase();
-
-function languageForPath(path: string): string | undefined {
-  const name = base(path);
-  const languages = monaco.languages.getLanguages();
-  const named = languages.find((language) => language.filenames?.some((filename) => filename.toLowerCase() === name));
-  if (named) return named.id;
-  return languages
-    .filter((language) => language.extensions?.some((extension) => name.endsWith(extension.toLowerCase())))
-    .sort((a, b) => Math.max(...(b.extensions ?? []).map((extension) => extension.length)) - Math.max(...(a.extensions ?? []).map((extension) => extension.length)))[0]?.id;
-}
 
 const OPTIONS: MonacoEditor.IStandaloneDiffEditorConstructionOptions = {
   automaticLayout: true,
@@ -27,6 +14,7 @@ const OPTIONS: MonacoEditor.IStandaloneDiffEditorConstructionOptions = {
   originalEditable: false,
   renderSideBySide: true,
   useInlineViewWhenSpaceIsLimited: false,
+  scrollbar: { vertical: "hidden", handleMouseWheel: false, alwaysConsumeMouseWheel: false },
 };
 
 function useTheme() {
@@ -47,6 +35,7 @@ function useTheme() {
 
 export function GitInlineDiffEditor({ node, path, head, working, modelId }: { node: string; path: string; head: TextFile; working: TextFile; modelId: string }) {
   const editorRef = useRef<MonacoEditor.IStandaloneDiffEditor | null>(null);
+  const [contentHeight, setContentHeight] = useState(180);
   const theme = useTheme();
   const modelRoot = modelUri(node, path);
   const modelSuffix = encodeURIComponent(modelId);
@@ -62,6 +51,17 @@ export function GitInlineDiffEditor({ node, path, head, working, modelId }: { no
     }
     setTimeout(() => models.forEach((model) => model?.dispose()), 0);
   }, []);
+  const updateContentHeight = (editor: MonacoEditor.IStandaloneDiffEditor) => {
+    const original = editor.getOriginalEditor();
+    const modified = editor.getModifiedEditor();
+    const update = () => setContentHeight(Math.max(180, Math.ceil(Math.max(original.getContentHeight(), modified.getContentHeight())) + 8));
+    update();
+    const originalSub = original.onDidContentSizeChange(update);
+    const modifiedSub = modified.onDidContentSizeChange(update);
+    return () => { originalSub.dispose(); modifiedSub.dispose(); };
+  };
+  const resizeRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeRef.current?.(), []);
   return (
     <DiffEditor
       originalLanguage={language}
@@ -72,9 +72,10 @@ export function GitInlineDiffEditor({ node, path, head, working, modelId }: { no
       modified={working.content}
       theme={theme}
       options={OPTIONS}
+      height={contentHeight}
       keepCurrentOriginalModel
       keepCurrentModifiedModel
-      onMount={(editor) => { editorRef.current = editor; }}
+      onMount={(editor) => { editorRef.current = editor; resizeRef.current?.(); resizeRef.current = updateContentHeight(editor); }}
       loading={<div className="pad muted">Loading editor...</div>}
     />
   );

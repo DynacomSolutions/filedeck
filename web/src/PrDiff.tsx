@@ -4,7 +4,7 @@ import type { editor as MonacoEditor } from "monaco-editor";
 import * as Ic from "lucide-react";
 import { api, fmtSize, type GitBlob, type GitDiff, type GitFile, type GitRefs } from "./api";
 import { OPTS, useTheme } from "./EditorViews";
-import { modelUri } from "./monacoSetup";
+import { languageForPath, modelUri } from "./monacoSetup";
 import { Tip } from "./Tooltip";
 import type { PrState } from "./urlState";
 import { useDialogFocus } from "./dialogFocus";
@@ -265,6 +265,8 @@ function FileDiff({ state, data, file, onInline }: { state: PrState; data: GitDi
             keepCurrentModifiedModel
             original={a.state === "ok" ? a.blob.content : ""}
             modified={b.state === "ok" ? b.blob.content : ""}
+            originalLanguage={languageForPath(file.path)}
+            modifiedLanguage={languageForPath(file.path)}
             theme={theme}
             options={{ ...OPTS, renderSideBySide: !state.inline, originalEditable: false, readOnly: true, useInlineViewWhenSpaceIsLimited: false }}
             onMount={(e) => {

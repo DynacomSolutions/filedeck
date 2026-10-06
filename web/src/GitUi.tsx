@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
 import * as Ic from "lucide-react";
-import { api, fmtDate, type WorktreeList } from "./api";
+import { api, fmtDate, type GitBlob, type GitDiff, type GitFile, type TextFile, type WorktreeList } from "./api";
 import { gitApi, shortHash, stateText, type GitCommit, type GitInfo, type GitSummary } from "./git";
 import { GitInlineDiff } from "./GitInlineDiff";
 import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
 
 const plural = (n: number, w: string) => `${n.toLocaleString()} ${w}`;
+const GitInlineDiffEditor = lazy(() => import("./GitInlineDiffEditor").then((module) => ({ default: module.GitInlineDiffEditor })));
 
 /** A sentence for the tooltip and screen readers: where the repository is and what changed. */
 export function summaryText(s: GitSummary): string {
@@ -84,6 +85,109 @@ const commitLine = (c: GitCommit) => (
   </>
 );
 
+type BranchDiffState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "unavailable"; message: string } | { kind: "ready"; data: GitDiff; baseRef: string };
+
+/** Repository-wide branch-versus-main comparison. It is based on committed refs, independent of worktree dirtiness. */
+function GitBranchDiff({ node, root, branch, headSha, tick }: { node: string; root: string; branch: string | null; headSha: string | null; tick: number }) {
+  const [state, setState] = useState<BranchDiffState>({ kind: "loading" });
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const didInitializeComparison = useRef(false);
+  const scope = `${node}\0${root}\0`;
+  useEffect(() => {
+    let live = true;
+    void api.gitRefs(node, root).then(async (refs) => {
+      const baseRef = refs.refs.includes("main") ? "main" : refs.refs.includes("origin/main") ? "origin/main" : null;
+      if (!baseRef) {
+        if (live) setState({ kind: "unavailable", message: "Branch comparison unavailable: neither main nor origin/main exists in this repository." });
+        return;
+      }
+      try {
+        const data = await api.gitDiff(node, root, { base: baseRef, head: "HEAD" });
+        if (live) {
+          setState({ kind: "ready", data, baseRef });
+          if (!didInitializeComparison.current) {
+            didInitializeComparison.current = true;
+            if (data.files[0]) setExpanded(new Set([scope + data.files[0].path]));
+          }
+        }
+      } catch (error) {
+        if (live) setState({ kind: "error", message: `Branch comparison unavailable: ${(error as Error).message}` });
+      }
+    }, (error: Error) => live && setState({ kind: "error", message: `Branch comparison unavailable: ${error.message}` }));
+    return () => { live = false; };
+  }, [node, root, branch, headSha, tick]);
+
+  if (state.kind === "loading") return <section className="git-branch-diff" data-testid="git-branch-diff" aria-label="Branch comparison"><h4>Branch diff</h4><div className="muted perm-hint" role="status">Loading comparison with main...</div></section>;
+  if (state.kind === "unavailable" || state.kind === "error") return <section className="git-branch-diff" data-testid="git-branch-diff" aria-label="Branch comparison"><h4>Branch diff</h4><div className="muted perm-hint" role="status">{state.message}</div></section>;
+  const { data, baseRef } = state;
+  const branchName = branch ?? `detached at ${shortHash(data.head.sha)}`;
+  return (
+    <section className="git-branch-diff" data-testid="git-branch-diff" data-base-ref={baseRef} data-head-sha={data.head.sha} aria-label="Branch comparison">
+      <h4>Branch diff: {branchName} against {baseRef} ({data.mergeBase.slice(0, 8)} merge base)</h4>
+      {data.note && <div className="muted perm-hint">{data.note}</div>}
+      {data.files.length === 0 ? <div className="muted perm-hint" role="status">No committed branch changes compared with {baseRef}.</div> : (
+        <ul className="git-branch-files" aria-label="Changed files against main">
+          {data.files.map((file) => {
+            const occurrence = scope + file.path;
+            const open = expanded.has(occurrence);
+            return <li key={file.path} data-testid="git-branch-diff-file" data-path={file.path} className={open ? "open" : ""}>
+              <div className="git-branch-file-head" data-testid="git-branch-diff-file-header">
+                <button type="button" className="git-item" aria-expanded={open} onClick={() => setExpanded((current) => {
+                  const next = new Set(current);
+                  if (open) next.delete(occurrence); else next.add(occurrence);
+                  return next;
+                })}>
+                  {open ? <Ic.ChevronDown aria-hidden="true" /> : <Ic.ChevronRight aria-hidden="true" />}
+                  <span>{file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}</span>
+                  <span className="git-branch-file-status">{file.status}</span>
+                </button>
+                <span className="muted git-branch-file-count">{file.binary ? "binary" : `+${file.add ?? 0} −${file.del ?? 0}`}</span>
+              </div>
+              {open && <GitBranchFileDiff node={node} root={root} data={data} file={file} />}
+            </li>;
+          })}
+        </ul>
+      )}
+      {data.truncated && <div className="muted perm-hint">The changed-file list is truncated.</div>}
+    </section>
+  );
+}
+
+function GitBranchFileDiff({ node, root, data, file }: { node: string; root: string; data: GitDiff; file: GitFile }) {
+  const [state, setState] = useState<{ kind: "loading" } | { kind: "error"; message: string } | { kind: "message"; text: string } | { kind: "ready"; base: TextFile; head: TextFile }>({ kind: "loading" });
+  const modelId = useId().replace(/:/g, "");
+  useEffect(() => {
+    let live = true;
+    setState({ kind: "loading" });
+    if (file.binary) {
+      setState({ kind: "message", text: "Binary file. No text diff." });
+      return () => { live = false; };
+    }
+    const read = (sha: string, path: string): Promise<GitBlob> => api.gitBlob(node, root, sha, path);
+    const oldPath = file.oldPath ?? file.path;
+    Promise.all([
+      file.status === "A" ? Promise.resolve<GitBlob>({ size: 0, binary: false, tooLarge: false, content: "" }) : read(data.base.sha, oldPath),
+      file.status === "D" ? Promise.resolve<GitBlob>({ size: 0, binary: false, tooLarge: false, content: "" }) : read(data.head.sha, file.path),
+    ]).then(([base, head]) => {
+      if (!live) return;
+      if (base.binary || head.binary) setState({ kind: "message", text: `Binary file. ${base.size.toLocaleString()} bytes before, ${head.size.toLocaleString()} bytes after.` });
+      else if (base.tooLarge || head.tooLarge) setState({ kind: "message", text: `File is too large to diff here (${base.size.toLocaleString()} bytes before, ${head.size.toLocaleString()} bytes after).` });
+      else {
+        const asTextFile = (path: string, blob: GitBlob): TextFile => ({ path, content: blob.content, size: blob.size, mtime: 0, etag: "" });
+        setState({ kind: "ready", base: asTextFile(oldPath, base), head: asTextFile(file.path, head) });
+      }
+    }, (error: Error) => live && setState({ kind: "error", message: error.message }));
+    return () => { live = false; };
+  }, [node, root, data.base.sha, data.head.sha, file.path, file.oldPath, file.status, file.binary]);
+  return <div className="git-inline-diff" data-testid="git-branch-diff-editor" data-path={file.path}>
+    <div className="git-inline-diff-meta muted">{file.oldPath ? `${file.oldPath} → ${file.path} · ` : ""}{data.base.ref} versus {data.head.ref} (read-only)</div>
+    {state.kind === "loading" && <div className="pad muted" role="status">Loading committed file versions...</div>}
+    {state.kind === "error" && <div className="ed-banner err" role="alert">Unable to load committed diff: {state.message}</div>}
+    {state.kind === "message" && <div className="pad muted" role="status">{state.text}</div>}
+    {state.kind === "ready" && <div className="git-inline-diff-editor git-content-editor"><Suspense fallback={<div className="pad muted" role="status">Loading editor...</div>}><GitInlineDiffEditor node={node} path={file.path} head={state.base} working={state.head} modelId={modelId} /></Suspense></div>}
+  </div>;
+}
+
 const GROUPS = [
   ["conflicted", "Conflicted"],
   ["staged", "Staged"],
@@ -148,7 +252,6 @@ export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktre
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     let live = true;
-    onApplicability?.(null);
     void gitApi.info(node, path, tick > 0).then(
       (v) => live && (setInfo(v), setErr(""), onApplicability?.(!!v.repo)),
       (e: Error) => live && (setErr(e.message), onApplicability?.(false)),
@@ -195,9 +298,10 @@ export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktre
         ))}
       </dl>
       {onOpenWorktree && worktreeHref && <GitWorktrees key={`${node}\0${r.root}`} node={node} root={r.root} onOpen={onOpenWorktree} hrefFor={worktreeHref} />}
+      {r.kind !== "bare" && <GitBranchDiff key={`${node}\0${r.root}`} node={node} root={r.root} branch={s.branch ?? null} headSha={s.head ?? null} tick={tick} />}
       {f && (
         <>
-          <div className="perm-row">
+          <div className="perm-row git-file-diff-head">
             <Tip label={expanded.has(`file:${path}`) ? "Collapse the HEAD diff" : "Show the HEAD diff inline"}>
               <button type="button" aria-expanded={expanded.has(`file:${path}`)} onClick={() => toggleDiff(`file:${path}`)}><Ic.Diff /> {expanded.has(`file:${path}`) ? "Hide diff" : "Diff against HEAD"}</button>
             </Tip>
@@ -214,6 +318,7 @@ export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktre
                 const occurrence = `${k}:${it.path}`;
                 const open = expanded.has(occurrence);
                 return <li key={occurrence} className={open ? "git-change open" : "git-change"}>
+                  <div className="git-change-head">
                   <button type="button" className="git-item" onClick={() => it.dir ? onReveal(it.path) : toggleDiff(occurrence)} aria-expanded={!it.dir ? open : undefined} aria-label={it.dir ? `Open ${rel(it.path)}` : `${open ? "Collapse" : "Expand"} diff for ${rel(it.path)}`}>
                     {it.dir ? <Ic.Folder /> : open ? <Ic.ChevronDown aria-hidden="true" /> : <Ic.ChevronRight aria-hidden="true" />}
                     <span>{rel(it.path)}</span>
@@ -226,6 +331,7 @@ export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktre
                       <button type="button" aria-label={`${open ? "Collapse" : "Expand"} ${rel(it.path)} diff`} aria-expanded={open} onClick={(event) => { event.stopPropagation(); toggleDiff(occurrence); }}><Ic.Diff /></button>
                     </Tip>
                   )}
+                  </div>
                   {open && !it.dir && <GitInlineDiff node={node} path={it.path} />}
                 </li>
               })}

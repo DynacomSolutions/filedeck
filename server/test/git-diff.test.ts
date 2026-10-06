@@ -51,6 +51,10 @@ before(() => {
   git(tmp, "clone", "-q", "--mirror", w, m);
   git(m, "update-ref", "refs/pull/1/head", headSha);
   git(m, "update-ref", "refs/pull/2/head", mainSha);
+  git(w, "worktree", "add", "-q", path.join(tmp, "linked"), "feature");
+  // The agent sees the source volume mounted at /host, so host-absolute Git
+  // metadata must be translated through the configured root by findRepo.
+  fs.writeFileSync(path.join(tmp, "linked", ".git"), "gitdir: /work/.git/worktrees/linked\n");
   fs.mkdirSync(path.join(tmp, "plain"));
   app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
 });
@@ -101,6 +105,33 @@ test("two refs in a work tree, three-dot semantics", async () => {
   const rev = await diff("path=/work&base=" + headSha + "&head=" + mainSha);
   assert.equal(rev.status, 200);
   assert.ok(byPath(rev.body.files, "other.txt"));
+});
+
+test("refs, branch diff and committed blobs resolve through a linked worktree's gitdir file", async () => {
+  const refsRes = await app.request("/api/git/refs?path=/linked");
+  assert.equal(refsRes.status, 200);
+  const refs = await refsRes.json() as { bare: boolean; refs: string[] };
+  assert.equal(refs.bare, false);
+  assert.ok(refs.refs.includes("main") && refs.refs.includes("feature"));
+
+  const compared = await diff("path=/linked&base=main&head=HEAD");
+  assert.equal(compared.status, 200, JSON.stringify(compared.body));
+  assert.equal(compared.body.head.sha, headSha);
+  assert.equal(compared.body.mergeBase, baseSha);
+  assert.ok(byPath(compared.body.files, "added.txt"));
+
+  const blobRes = await app.request(`/api/git/blob?path=/linked&sha=${headSha}&file=mod.txt`);
+  assert.equal(blobRes.status, 200);
+  const blob = await blobRes.json() as { content: string };
+  assert.equal(blob.content, "one\nTWO\nthree\nfour\n");
+
+  const nestedRefs = await app.request("/api/git/refs?path=/linked/old");
+  assert.equal(nestedRefs.status, 200);
+  const nestedDiff = await diff("path=/linked/old&base=main&head=HEAD");
+  assert.equal(nestedDiff.status, 200, JSON.stringify(nestedDiff.body));
+  assert.ok(byPath(nestedDiff.body.files, "added.txt"), "nested folders still compare repository-wide");
+  const nestedBlob = await app.request(`/api/git/blob?path=/linked/old&sha=${headSha}&file=mod.txt`);
+  assert.equal(nestedBlob.status, 200);
 });
 
 test("a PR whose head is already in the default branch is reported, not an error", async () => {

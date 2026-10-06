@@ -82,9 +82,11 @@ const REF_CHARS = /^[A-Za-z0-9._/@+#=,-]+$/;
 export interface GitCtx {
   cwd: string;
   ceiling?: string;
+  /** Explicit repository location for linked worktrees and bare mirrors. */
+  args?: string[];
 }
 
-const git = (c: GitCtx, args: string[], o: RunOpts = {}) => runGit(c.cwd, args, { ...o, ceiling: c.ceiling });
+const git = (c: GitCtx, args: string[], o: RunOpts = {}) => runGit(c.cwd, [...(c.args ?? []), ...args], { ...o, ceiling: c.ceiling });
 
 /** Confirms `cwd` is inside a git repository and says whether it is bare. */
 export async function repoInfo(c: GitCtx): Promise<{ bare: boolean }> {
