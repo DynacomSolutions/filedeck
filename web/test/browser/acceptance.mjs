@@ -20,6 +20,7 @@ const originalMode = 0o644;
 const changedMode = 0o600;
 const permCalls = [];
 const opCalls = [];
+const worktreeRequests = [];
 const vaultEntryId = 'fixture-vault-entry';
 let vaultExpiry = Date.now() + 30_000;
 let vaultListCalls = 0;
@@ -96,7 +97,15 @@ async function installFixture(page) {
     }
     if (pathname.endsWith('/api/git/info')) return json(gitInfo(url.searchParams.get('path') || '/'));
     if (pathname.endsWith('/api/git/status')) return json({ repo: null, entries: {}, children: {}, pending: false });
-    if (pathname.endsWith('/api/git/worktrees')) return json({ worktrees: [] });
+    if (pathname.endsWith('/api/git/worktrees')) {
+      worktreeRequests.push(url.searchParams.get('path') || '/');
+      if (scope === 't75-worktrees') return json({ repo: '/work', bare: false, truncated: false, worktrees: [
+        { path: '/work', gitPath: '/host/work', name: 'main', main: true, bare: false, branch: 'main', detached: false, head: '01234567', locked: false, prunable: false, dirty: false, current: true },
+        { path: '/work-feature', gitPath: '/host/work-feature', name: 'feature-checkout', main: false, bare: false, branch: 'feature', detached: false, head: '89abcdef', locked: false, prunable: false, dirty: true, current: false },
+        { path: '/work-release', gitPath: '/host/work-release', name: 'release-checkout', main: false, bare: false, branch: 'release/next', detached: false, head: 'fedcba98', locked: false, prunable: false, dirty: false, current: false },
+      ] });
+      return json({ worktrees: [] });
+    }
     if (pathname.endsWith('/api/fs/perms') && req.method() === 'POST') {
       const body = req.postDataJSON();
       permCalls.push(body);
@@ -424,6 +433,38 @@ async function verifyOutsideGit(browser) {
   await page.getByRole('tablist', { name: 'Properties sections' }).waitFor({ state: 'visible' });
   assert.equal(await page.getByRole('tab', { name: 'Git', exact: true }).count(), 0, 'Git tab must be hidden outside a repository');
   await context.close();
+}
+
+async function verifyGitWorktrees(browser) {
+  const { context, page } = await openPage(browser);
+  try {
+    const gitTab = page.getByRole('tab', { name: 'Git', exact: true });
+    await gitTab.waitFor({ state: 'visible' });
+    await gitTab.click();
+    const link = page.getByRole('button', { name: 'All worktrees', exact: true });
+    await link.waitFor({ state: 'visible' });
+    await link.click();
+    await page.locator('.wt-list').waitFor({ state: 'visible' });
+    for (const name of ['main', 'feature-checkout', 'release-checkout']) {
+      await page.locator('.wt-name', { hasText: name }).waitFor({ state: 'visible' });
+    }
+    assert.ok(worktreeRequests.includes('/work'), 'the existing worktrees API must receive the repository context');
+    assert.match(page.url(), /[?&]s=/, 'opening all worktrees must update URL state');
+    const worktreesURL = page.url();
+    await page.reload();
+    await page.locator('.wt-name', { hasText: 'feature-checkout' }).waitFor({ state: 'visible' });
+    assert.ok(worktreeRequests.length >= 2, 'reloading the worktrees route should reload the complete list');
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+    await page.goBack();
+    await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'detached' });
+    assert.equal(page.url(), worktreesURL, 'Back should restore the worktrees route URL');
+    await page.locator('.wt-name', { hasText: 'release-checkout' }).waitFor({ state: 'visible' });
+    await page.goForward();
+    await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+  } finally {
+    await context.close();
+  }
 }
 
 async function verifyHistoryAndDirectLinks(browser) {
@@ -885,6 +926,8 @@ try {
   } else if (scope === 't75') {
     await verifyProperties(browser);
     await verifyOutsideGit(browser);
+  } else if (scope === 't75-worktrees') {
+    await verifyGitWorktrees(browser);
   } else if (scope === 'pr') {
     await verifyPrDirectLink(browser);
   } else if (scope === 'propskeys') {
