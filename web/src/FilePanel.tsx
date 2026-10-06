@@ -711,7 +711,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     </Suspense>
   ) : gitDiff ? (
     <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
-      <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inline onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
+      <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inPane onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
     </Suspense>
   ) : wtOpen ? (
     <WorktreesPane node={node} path={leaf.wtPath ?? path} extra={paneExtra} onOpen={(p) => onNavigate(node, p)} onMenu={(e, p) => showMenu(e, folderItems(p, false))} />

@@ -61,7 +61,7 @@ export interface Leaf {
   /** file open in the panel's editor */
   edit?: FileRef;
   /** Git HEAD diff shown in this panel's side pane */
-  gitDiff?: FileRef;
+  gitDiff?: FileRef & { rev?: "HEAD" };
   /** name filter (Ctrl+F) */
   q?: string;
   /** open search (under this panel's folder) */
