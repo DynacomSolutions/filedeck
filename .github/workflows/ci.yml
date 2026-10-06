@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      server: ${{ steps.detect.outputs.server }}
+      web: ${{ steps.detect.outputs.web }}
+      chart: ${{ steps.detect.outputs.chart }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            echo 'server=true' >> "$GITHUB_OUTPUT"
+            echo 'web=true' >> "$GITHUB_OUTPUT"
+            echo 'chart=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          server=false
+          web=false
+          chart=false
+          while IFS= read -r file; do
+            case "$file" in
+              server/*) server=true ;;
+              web/*) web=true; server=true ;;
+              k8s/*|scripts/*) chart=true ;;
+              package.json|package-lock.json|tsconfig.base.json|Dockerfile|.github/workflows/*)
+                server=true; web=true; chart=true ;;
+            esac
+          done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "server=$server" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "chart=$chart" >> "$GITHUB_OUTPUT"
+
+  server:
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install test tools
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient
+          command -v bsdtar
+          command -v 7zz
+          command -v qpdf
+          command -v ffmpeg
+          command -v git
+          command -v smbclient
+      - run: npm ci --no-audit --no-fund
+        timeout-minutes: 5
+      - run: npm run typecheck -w server
+        timeout-minutes: 5
+      - run: npm run build -w server
+        timeout-minutes: 5
+      - name: Run server tests, including tool-dependent tests
+        run: npm test -w server
+        timeout-minutes: 15
+
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+        timeout-minutes: 5
+      - run: npm run typecheck -w web
+        timeout-minutes: 5
+      - run: npm run build -w web
+        timeout-minutes: 10
+
+  chart:
+    needs: changes
+    if: needs.changes.outputs.chart == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - run: helm lint k8s
+        timeout-minutes: 5
+      - run: npm run check:neutral
+        timeout-minutes: 2
+
+  aggregate:
+    if: always()
+    needs: [changes, server, web, chart]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report required checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "changes=${{ needs.changes.result }}"
+          echo "server=${{ needs.server.result }}"
+          echo "web=${{ needs.web.result }}"
+          echo "chart=${{ needs.chart.result }}"
+          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.web.result }}" "${{ needs.chart.result }}"; do
+            if [[ "$result" == failure || "$result" == cancelled ]]; then
+              exit 1
+            fi
+          done
+          exit 0

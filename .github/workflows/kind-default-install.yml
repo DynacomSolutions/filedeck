@@ -1,0 +1,65 @@
+name: Kind default install
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: filedeck-smoke
+          wait: 60s
+
+      - name: Download the released chart archive
+        run: curl --fail --location --retry 3 --output filedeck-0.1.0.tgz "https://github.com/${GITHUB_REPOSITORY}/releases/download/v0.1.0/filedeck-0.1.0.tgz"
+        timeout-minutes: 5
+      - name: Install the chart with its defaults
+        run: helm install filedeck ./filedeck-0.1.0.tgz --namespace filedeck --create-namespace --wait --timeout 5m
+        timeout-minutes: 7
+      - name: Wait for hub, agent and vault key Job
+        run: |
+          kubectl --namespace filedeck wait --for=condition=available deployment/filedeck-hub --timeout=180s
+          kubectl --namespace filedeck wait --for=condition=available deployment/filedeck-agent-local --timeout=180s
+          kubectl --namespace filedeck wait --for=condition=complete job/filedeck-vault-key --timeout=180s
+          kubectl --namespace filedeck logs job/filedeck-vault-key
+        timeout-minutes: 7
+      - name: Check health, node visibility and persistent vault readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl get nodes
+          kubectl --namespace filedeck port-forward service/filedeck 18080:80 >/tmp/filedeck-port-forward.log 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+          health_ready=false
+          for _ in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:18080/healthz; then
+              health_ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$health_ready" != true ]]; then
+            echo "Health check did not succeed after 60 attempts." >&2
+            exit 1
+          fi
+          test "$(curl --fail --silent http://127.0.0.1:18080/healthz)" = ok
+          nodes=$(curl --fail --silent http://127.0.0.1:18080/api/nodes)
+          echo "$nodes"
+          test "$(echo "$nodes" | jq -r '.nodes[0].name')" = local
+          test "$(echo "$nodes" | jq -r '.nodes[0].online')" = true
+          vault=$(curl --fail --silent http://127.0.0.1:18080/api/vault)
+          echo "$vault"
+          test "$(echo "$vault" | jq -r '.persistent')" = true
+        timeout-minutes: 5

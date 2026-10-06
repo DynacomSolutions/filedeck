@@ -1,4 +1,4 @@
-/* Self-hosted Montserrat. Cluster CSP is default-src 'self'; no Google Fonts. */
+/* Self-hosted Montserrat; no external font requests. */
 @font-face {
   font-family: "Montserrat";
   font-style: normal;

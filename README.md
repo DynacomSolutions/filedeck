@@ -15,19 +15,17 @@ There are no user accounts: put it behind a trusted network boundary (a VPN, a p
 
 ## Layout
 
-| Path | What | Core or deployment |
+| Path | What |
 |---|---|---|
-| `server/` | Agent and hub (TypeScript, Hono, Node 22) and its tests | core |
-| `web/` | The app (React, Vite, Monaco) | core |
-| `Dockerfile`, `package.json`, `tsconfig.base.json` | Image and workspace | core |
-| `web/public/assets/theme.css`, `fonts/` | Bundled theme tokens and fonts | core: neutral theme; Montserrat is SIL OFL 1.1 (`fonts/OFL.txt`) |
-| `deploy/brand/` | Logos and palette (`theme.css`, referenced by `brand.css`) for one deployment, copied into the image at `/assets/brand` when the folder exists | deployment |
-| `k8s/` | Generic Helm chart (hub, one agent per node, vault volume and key job, network policy, optional Emissary mapping and scratch network servers) with neutral defaults; `npm run check:neutral` covers it | core |
-| `../.github/workflows/filedeck-image.yml` | Test, build, scan, publish, pin on main | deployment (infra repo) |
+| `server/` | Agent and hub (TypeScript, Hono, Node 22) and its tests |
+| `web/` | The app (React, Vite, Monaco) |
+| `Dockerfile`, `package.json`, `tsconfig.base.json` | Image and workspace |
+| `web/public/assets/theme.css`, `web/public/assets/fonts/` | Bundled theme tokens and fonts; Montserrat is SIL OFL 1.1 (`web/public/assets/fonts/OFL.txt`) |
+| `k8s/` | Generic Helm chart with neutral defaults; `npm run check:neutral` checks chart defaults |
 
-Deployment values (nodes, image, hosts, brand, sources) are not part of the chart: they live in a values file in the infra repository (`filedeck/values.yaml` there), passed with `-f` or an Argo CD `valueFiles` source.
+Deployment values (nodes, image, hosts, branding and sources) belong in a separate values file passed with `-f` or an Argo CD `valueFiles` source. The optional `brand.cssContent` value lets an installation mount its own stylesheet without changing the image.
 
-A bare clone of `server/`, `web/` and the top-level files builds and tests without `deploy/` or the workflow.
+The repository contains the application, generic Helm chart and public build workflows.
 
 ## Develop
 
@@ -43,11 +41,10 @@ To run both modes locally: start an agent (`FILEDECK_MODE=agent FILEDECK_ROOT=/s
 
 ## Install with Helm
 
-The chart in `k8s/` installs a hub and one agent per entry in `nodes`. There is no public image: build `Dockerfile` (`docker build -t <registry>/filedeck:<tag> .`), push it where the cluster can pull from, then:
+Download the chart archive attached to the [latest GitHub release](https://github.com/DynacomSolutions/filedeck/releases), then install it without overrides to try the default configuration:
 
 ```sh
-helm install filedeck ./k8s -n filedeck --create-namespace \
-  --set image.repository=<registry>/filedeck --set image.tag=<tag>
+helm install filedeck ./filedeck-0.1.0.tgz -n filedeck --create-namespace
 kubectl -n filedeck port-forward svc/filedeck 8080:80   # then open http://127.0.0.1:8080
 ```
 
@@ -60,10 +57,10 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `agent.stagger` | Under Argo CD, roll agents one at a time (agent N in sync wave N+1, in `nodes` order); default on, ignored by plain Helm |
 | `agent.readOnlyPaths` | Virtual paths no agent may change (default `/proc`, `/sys`) |
 | `agentToken.secretName` | Existing Secret holding a shared hub-to-agent token (empty = none) |
-| `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key with an Argo CD PreSync hook; without Argo CD set `vault.keyJob.enabled=false` and create the Secret yourself |
+| `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key before the hub starts; check vault health after installation |
 | `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
 | `sources[]` | Network sources (SFTP, WebDAV, S3, SMB) and the Secrets holding their credentials |
-| `brand` | Name, title, stylesheet, logos and links (neutral "Filedeck" when empty) |
+| `brand` | `name`, `title`, `icon`, `css` and `themeKey`; `cssContent` is chart-only (neutral "Filedeck" when empty) |
 | `mapping.enabled`, `mapping.host` | Optional Emissary / Ambassador Mapping to the hub; with another ingress route to the `filedeck` Service yourself |
 | `testSources.*` | Scratch SFTP, WebDAV, S3 and SMB servers for trying the sources (off; needs SealedSecret ciphertext in `testSources.sealed`) |
 
@@ -91,13 +88,13 @@ Filedeck has no user accounts: whoever can reach the page is the user. To spare 
 
 - **What is stored.** The password, encrypted with AES-256-GCM (a fresh IV per row, the row id as authenticated data), in a small sqlite file on its own volume (`filedeck-vault`, never inside user data). The location (node and path), scope, timestamps and expiry are stored in clear so Settings can list them. The AES key is derived (HKDF-SHA256) from a Kubernetes Secret created out of band, `filedeck-vault-key` (key `key`, any random value of 16 or more bytes; see `vault` in `k8s/values.yaml` for the command). It is mounted as an environment variable (or `FILEDECK_VAULT_KEY_FILE`) and is never logged or printed. Without the Secret the vault is memory only and Settings says so.
 - **Lifetime.** Default: a sliding window (`vault.ttlSeconds`, 30 minutes idle) that every use renews, capped at `vault.maxHours` (24 h) after the password was entered, then it must be typed again. With **Remember** ticked it is kept until forgotten. **Use for all files in this folder** saves it for the folder and everything below it (the nearest folder entry wins; a file's own entry wins over a folder's). Entries are found by node and path, falling back to inode and size so a renamed or moved file still matches.
-- **Who can use it.** Anyone who can reach the hub (that is, anyone on the private-network) can open a file whose password is saved, exactly as they can open any unprotected file: the vault does not authenticate people, it only saves typing. Do not store a password you would not want every user of this Filedeck to be able to use. Someone with access to the cluster Secrets and the volume can decrypt the vault; the encryption protects the file at rest (backups, a copied volume), not against the operator.
-- **What leaves the hub.** The hub sends a saved password to the agent that owns the file, in a request header on the cluster network (agents are only reachable from the hub and, if configured, require the shared agent token), and only for the request that needs it. Agents hand it to 7-Zip on stdin. Passwords are never returned to the browser, never put in URLs, job records, error messages or the audit log.
+- **Who can use it.** Anyone who can reach the hub (that is, anyone with network access to the hub) can open a file whose password is saved, exactly as they can open any unprotected file: the vault does not authenticate people, it only saves typing. Do not store a password you would not want every user of this Filedeck to be able to use. Someone with access to the cluster Secrets and the volume can decrypt the vault; the encryption protects the file at rest (backups, a copied volume), not against the operator.
+- **What leaves the hub.** The hub sends a saved password to the agent that owns the file, in a request header over the private application network (agents are only reachable from the hub and, if configured, require the shared agent token), and only for the request that needs it. Agents hand it to 7-Zip on stdin. Passwords are never returned to the browser, never put in URLs, job records, error messages or the audit log.
 - **Managing it.** Right-click a file or folder, **Forget saved password** (removes its own entry, entries beneath a folder, and any folder entry above that would still unlock it). Settings, **Saved passwords** lists every entry (location, scope, remembered or expiring, last used, expires at) with **Forget** per row and **Forget all**; the values are never shown.
 
 ## Contributing
 
-- Keep the core free of company or deployment names: hostnames, registries, logos and link targets belong in `deploy/`, the chart values or `FILEDECK_BRAND`. `npm run check:neutral` fails on the identifiers it knows.
+- Keep the core free of deployment-specific hostnames, logos, colours and link targets; use chart values or `FILEDECK_BRAND`. `npm run check:neutral` checks generic chart defaults. Publication history is reviewed separately when preparing a release.
 - Colours, fonts and spacing come from the theme tokens in `theme.css` (`var(--fg)`, `var(--border)` ...), never literals. Navigation state (panels, folders, sort, selection, open viewers) lives in the URL, see `web/src/urlState.ts`.
 - Every path that touches the filesystem goes through `paths.ts` (`resolveRead`, `resolveWrite`) and, for the actual open or change, `openChecked` or `pinParent`/`pinDir`. A new mutating route must be listed in `server/src/readonly.ts` so read-only volumes cover it.
 - Add a test beside each change (`server/test/*.test.ts`, `node --test` with `tsx`). Web changes are checked in a browser at desktop and phone width, dark and light, and with the keyboard.

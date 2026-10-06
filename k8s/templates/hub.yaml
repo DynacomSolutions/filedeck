@@ -20,6 +20,10 @@ spec:
       labels:
         {{- include "filedeck.labels" . | nindent 8 }}
         app.kubernetes.io/component: hub
+      {{- if .Values.brand.cssContent }}
+      annotations:
+        checksum/brand-css: {{ .Values.brand.cssContent | sha256sum | quote }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
       nodeSelector:
@@ -69,7 +73,7 @@ spec:
               value: {{ range $i, $n := .Values.nodes }}{{ if $i }},{{ end }}{{ $n.name }}=http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}
             {{- if .Values.brand }}
             - name: FILEDECK_BRAND
-              value: {{ .Values.brand | toJson | quote }}
+              value: {{ omit .Values.brand "cssContent" | toJson | quote }}
             {{- end }}
             # Compare engine: per-session row spill files and the network-source index (emptyDir, never user data).
             - name: FILEDECK_DIFF_DIR
@@ -106,6 +110,12 @@ spec:
               mountPath: /var/lib/filedeck-vault
             - name: cache
               mountPath: /var/cache/filedeck
+            {{- if .Values.brand.cssContent }}
+            - name: brand-css
+              mountPath: /app/web/assets/brand/theme.css
+              subPath: theme.css
+              readOnly: true
+            {{- end }}
             {{- if .Values.sources }}
             # smbclient (SMB sources) keeps small state files; the root filesystem is read-only.
             - name: tmp
@@ -126,6 +136,11 @@ spec:
         - name: cache
           emptyDir:
             sizeLimit: {{ .Values.hub.cacheVolume }}
+        {{- if .Values.brand.cssContent }}
+        - name: brand-css
+          configMap:
+            name: {{ include "filedeck.name" . }}-brand-css
+        {{- end }}
         {{- if .Values.sources }}
         - name: tmp
           emptyDir:

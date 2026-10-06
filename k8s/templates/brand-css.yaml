@@ -1,0 +1,11 @@
+{{- if .Values.brand.cssContent }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "filedeck.name" . }}-brand-css
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+data:
+  theme.css: |
+{{ .Values.brand.cssContent | indent 4 }}
+{{- end }}

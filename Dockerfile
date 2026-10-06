@@ -10,11 +10,8 @@ COPY web/package.json web/
 RUN npm ci --no-audit --no-fund
 COPY server server
 COPY web web
-# Optional deployment overlay: a `deploy/brand/` folder (theme colours) is served from /assets/brand. The wildcard keeps a
-# bare clone of the core (no deploy/ folder) building; package.json is only there so the COPY always has a source.
-COPY package.json deploy* deploy-in/
-RUN npm run build \
- && if [ -d deploy-in/brand ]; then mkdir -p web/dist/assets/brand && cp deploy-in/brand/* web/dist/assets/brand/; fi \
+RUN npm run typecheck \
+ && npm run build \
  && npm test && npm prune --omit=dev --workspace=server
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
