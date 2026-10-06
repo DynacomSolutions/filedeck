@@ -40,3 +40,8 @@ test("dark AAA muted token wins over the dark-theme legacy override", () => {
     assert.ok(contrast("#b8b8c2", background) >= 7, `muted text must reach 7:1 on ${background}`);
   }
 });
+
+test("address edit target keeps its 44px minimum when breadcrumbs shrink", () => {
+  assert.match(styles, /\.addr>\.tip:has\(\.addr-fill\)\{[^}]*min-width:44px/);
+  assert.match(styles, /\.addr-fill\{[^}]*flex:1 1 44px;min-width:44px/);
+});
