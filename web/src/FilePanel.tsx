@@ -192,6 +192,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // A narrow panel (phone, deep split) always stacks the preview underneath; the saved dock is kept for wide panels.
   const dock: Dock = narrow ? "bottom" : (leaf.pv?.dock ?? "right");
   const pvSize = leaf.pv?.size ?? 40;
+  const dockSelectRef = useRef<HTMLSelectElement>(null);
+  const restoreDockSelectFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!restoreDockSelectFocus.current) return;
+    restoreDockSelectFocus.current = false;
+    dockSelectRef.current?.focus();
+  }, [leaf.pv?.dock]);
   /** the side panel shows the Properties tab (details of the active item) instead of the Preview */
   const propsOpen = leaf.pv?.tab === "props";
   const pvTab = leaf.pv?.tab;
@@ -647,7 +654,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       )}
       <span className="pv-dock">
         <label className="sr-only" htmlFor={`pv-dock-${leaf.id}`}>Side panel position</label>
-        <select id={`pv-dock-${leaf.id}`} aria-label="Side panel position" value={dock} onChange={(e) => setDock(e.target.value as Dock)}>
+        <select ref={dockSelectRef} id={`pv-dock-${leaf.id}`} aria-label="Side panel position" value={dock} onChange={(e) => {
+          const next = e.target.value as Dock;
+          if (document.activeElement === e.currentTarget && next !== (leaf.pv?.dock ?? "right")) restoreDockSelectFocus.current = true;
+          setDock(next);
+        }}>
           {DOCKS.map((d) => <option key={d.dock} value={d.dock}>{d.label.replace("Dock side panel ", "")}</option>)}
         </select>
         {!gitDiff && (
