@@ -238,7 +238,18 @@ async function verifyPresentation(browser) {
     await page.getByRole('dialog', { name: 'Settings' }).getByRole('slider', { name: 'Text size' }).waitFor({ state: 'visible' });
     assert.equal(await page.getByRole('slider', { name: 'Text size' }).inputValue(), '32', 'presentation preference should restore after reload');
     await page.getByRole('button', { name: 'Reset reading presentation' }).click();
-    await page.waitForFunction(() => !localStorage.getItem('filedeck.presentation'));
+    const defaults = { foreground: '', background: '', font: 'system', fontSize: 16, lineHeight: 1.6, paragraphSpace: 2.4, lineMeasure: 80 };
+    await page.waitForFunction(() => document.querySelector('[aria-label="Text size"]')?.value === '16' && !document.documentElement.hasAttribute('data-user-presentation'));
+    assert.equal(await page.getByRole('slider', { name: 'Text size' }).inputValue(), '16', 'reset should restore the text size control');
+    assert.equal(await page.locator('html').getAttribute('data-user-presentation'), null, 'reset should remove the user presentation marker');
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('filedeck.presentation'))), defaults, 'reset should persist default presentation values');
+    await page.reload();
+    await opener.click();
+    const restoredDialog = page.getByRole('dialog', { name: 'Settings' });
+    await restoredDialog.getByRole('slider', { name: 'Text size' }).waitFor({ state: 'visible' });
+    assert.equal(await restoredDialog.getByRole('slider', { name: 'Text size' }).inputValue(), '16', 'default text size should restore after reset and reload');
+    assert.equal(await page.locator('html').getAttribute('data-user-presentation'), null, 'default presentation should remain unmarked after reload');
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('filedeck.presentation'))), defaults, 'default presentation values should remain persisted after reload');
   } finally {
     await context.close();
   }
