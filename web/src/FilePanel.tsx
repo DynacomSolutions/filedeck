@@ -27,6 +27,7 @@ import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
 import { useSettings } from "./settings";
 import { SkeletonRows, SkeletonTiles } from "./Skeleton";
+import { TransferDestination, type TransferKind } from "./TransferDestination";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -97,6 +98,7 @@ interface Props {
 type Modal =
   | { k: "link"; dir: string; existing?: Entry }
   | { k: "new"; dir: string; type: "file" | "folder" }
+  | { k: "transfer"; kind: TransferKind; refs: SelRef[] }
   | { k: "del"; refs: SelRef[] }
 const natural = new Intl.Collator(undefined, { numeric: true }); // shared: localeCompare with options builds a collator per call
 const UP_DROP = "\0up";
@@ -529,6 +531,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       "sep",
       { label: "Cut", hint: "Ctrl+X", onSelect: () => setClipboard("cut", picked, extra) },
       { label: "Copy", hint: "Ctrl+C", onSelect: () => setClipboard("copy", picked, extra) },
+      { label: "Copy to folder...", onSelect: () => setModal({ k: "transfer", kind: "copy", refs: combine(picked, extra) }) },
+      { label: "Move to folder...", onSelect: () => setModal({ k: "transfer", kind: "move", refs: combine(picked, extra) }) },
       { label: pasteLabel + (pasteDir !== path ? " into folder" : ""), hint: "Ctrl+V", disabled: !clip, onSelect: () => void paste(pasteDir) },
       "sep",
       ...(one && one.type === "symlink" ? ([{ label: "Edit link target...", onSelect: () => setModal({ k: "link", dir: path, existing: one }) }] as MenuItem[]) : []),
@@ -1422,6 +1426,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             onStatus(modal.existing ? `Retargeted ${at}` : `Created link ${at}`);
             refresh();
           }}
+        />
+      )}
+      {modal?.k === "transfer" && (
+        <TransferDestination
+          kind={modal.kind}
+          items={modal.refs}
+          initialNode={node}
+          initialPath={path}
+          onClose={() => setModal(null)}
+          onChoose={(targetNode, targetDir) => void transferOp(modal.kind, modal.refs.map(({ node: sourceNode, path: sourcePath }) => ({ node: sourceNode, path: sourcePath })), targetNode, targetDir)}
         />
       )}
       {modal?.k === "del" && (
