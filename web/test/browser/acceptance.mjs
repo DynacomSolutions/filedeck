@@ -891,6 +891,8 @@ try {
     await verifyPropsTabKeySequence(browser);
   } else if (scope === 'presentation') {
     await verifyPresentation(browser);
+  } else if (scope === 'a11y320light') {
+    await verifyAccessibility(browser, { width: 320, height: 760 }, 'light');
   } else if (scope === 'a11y') {
     await verifyAccessibilityScope(browser);
   } else if (scope === 'measurements') {
