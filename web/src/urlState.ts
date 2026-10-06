@@ -64,8 +64,8 @@ export interface Leaf {
   q?: string;
   /** open search (under this panel's folder) */
   sr?: SearchForm;
-  /** view mode: absent = list, "g" = thumbnail grid */
-  w?: "g";
+  /** view mode: absent = use the browser default, "g" = grid, "l" = list */
+  w?: "g" | "l";
   /** tabs (every tab's folder, in order); absent = a single location. `node`/`path` above are always the active tab's. */
   tabs?: TabLoc[];
   /** index of the active tab in `tabs` */
@@ -178,7 +178,7 @@ export function viewCloseTarget(index: number, routeStart: number): number | nul
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
+type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 0 | 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g" | "l"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
 type WTab = { s?: string; m?: string[]; x?: 1; c?: string };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
@@ -209,15 +209,15 @@ const toWire = (t: Tree): WTree => {
   if (t.sel) w.s = t.sel;
   if (t.ns) w.x = 1;
   if (t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
-  if (t.sort && (t.sort.key !== "name" || !t.sort.asc)) w.o = `${t.sort.key}:${t.sort.asc ? "a" : "d"}`;
-  if (t.hidden) w.h = 1;
+  if (t.sort) w.o = `${t.sort.key}:${t.sort.asc ? "a" : "d"}`;
+  if (typeof t.hidden === "boolean") w.h = t.hidden ? 1 : 0;
   if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, t.pv.tab === "wt" ? "w" : "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
   if (t.pt && t.pt !== "details") w.pt = t.pt;
   if (t.pv?.tab === "wt" && t.wtPath) w.wp = t.wtPath;
   if (t.closed) w.c = t.closed;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
   if (t.q) w.q = t.q;
-  if (t.w === "g") w.w = "g";
+  if (t.w) w.w = t.w;
   if (t.tabs && t.tabs.length > 1) {
     w.tb = t.tabs.map((x, i) => {
       // the active tab's own state lives on the panel itself
@@ -297,14 +297,14 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
     const [key, dir] = o.o.split(":");
     if (key === "name" || key === "size" || key === "mtime") leaf.sort = { key, asc: dir !== "d" };
   }
-  if (o.h === 1) leaf.hidden = true;
+  if (o.h === 0 || o.h === 1) leaf.hidden = o.h === 1;
   if (Array.isArray(o.v) && DOCKS.includes(o.v[0] as string) && typeof o.v[1] === "number" && o.v[1] >= 10 && o.v[1] <= 90) leaf.pv = { dock: o.v[0] as Dock, size: o.v[1], ...(o.v[2] === "p" ? { tab: "props" as const } : o.v[2] === "w" ? { tab: "wt" as const } : {}) };
   if (o.pt === "details" || o.pt === "git" || o.pt === "permissions") leaf.pt = o.pt;
   if (str(o.wp) && o.wp.startsWith("/")) leaf.wtPath = o.wp;
   if (str(o.c)) leaf.closed = o.c;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
   if (str(o.q) && o.q) leaf.q = o.q;
-  if (o.w === "g") leaf.w = "g";
+  if (o.w === "g" || o.w === "l") leaf.w = o.w;
   if (Array.isArray(o.tb) && o.tb.length > 1 && o.tb.length <= MAX_TABS && o.tb.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]) && x[1].startsWith("/"))) {
     leaf.tabs = (o.tb as [string, string, WTab?][]).map(([node, path, t]) => {
       const tab: TabLoc = { node, path };

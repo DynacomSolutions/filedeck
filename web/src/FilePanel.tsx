@@ -25,7 +25,7 @@ import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, type Dock, type Leaf, type Loc, type 
 import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowLeft, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, GitPullRequest, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
-import { useSettings } from "./settings";
+import { resolvePanelPreferences, setSettings, useSettings } from "./settings";
 import { SkeletonRows, SkeletonTiles } from "./Skeleton";
 import { TransferDestination, type TransferKind } from "./TransferDestination";
 import { usePresentation } from "./presentation";
@@ -117,23 +117,25 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const listKey = useRef("");
   /** Git state of the open folder (work-item): fetched after the listing has painted, never part of it */
   const [git, setGit] = useState<GitListing | null>(null);
-  const { upRow } = useSettings();
+  const settings = useSettings();
+  const { upRow } = settings;
+  const preferences = resolvePanelPreferences(settings, leaf);
   /** more entries of the open folder are still arriving */
   const [streaming, setStreaming] = useState(false);
   const sortRef = useRef<{ key: SortKey; asc: boolean }>({ key: "name", asc: true });
   /** rows rendered so far: a folder with tens of thousands of entries fills the DOM in steps as it is scrolled */
   const [limit, setLimit] = useState(RENDER_STEP);
-  const [hidden, setHiddenState] = useState(leaf.hidden ?? false);
-  const [sort, setSortState] = useState<{ key: SortKey; asc: boolean }>(leaf.sort ?? { key: "name", asc: true });
+  const hidden = preferences.hidden;
+  const sort = preferences.sort;
   const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sels ?? (leaf.sel && !leaf.ns ? [leaf.sel] : [])));
   const setHidden = (h: boolean) => {
-    setHiddenState(h);
-    onPatch({ hidden: h || undefined });
+    setSettings({ showHidden: h });
+    onPatch({ hidden: h });
   };
   const setSort = (fn: (s: { key: SortKey; asc: boolean }) => { key: SortKey; asc: boolean }) => {
     const n = fn(sort);
-    setSortState(n);
-    onPatch({ sort: n.key === "name" && n.asc ? undefined : n });
+    setSettings({ sort: n });
+    onPatch({ sort: n });
   };
   sortRef.current = sort;
   const [anchor, setAnchor] = useState<string | null>(null);
@@ -154,7 +156,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   }, [leaf.sel, leaf.ns, leaf.sels]);
   /** the previous listing's paths in display order, to pick the next sibling when the active item disappears */
   const orderRef = useRef<string[]>([]);
-  const view = leaf.w === "g" ? "grid" : "list";
+  const view = preferences.view;
   const filter = leaf.q ?? "";
   const [filterOpen, setFilterOpen] = useState(!!leaf.q);
   const filterInput = useRef<HTMLInputElement>(null);
@@ -1144,7 +1146,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     onCompare(next?.id ?? peers[0]!.id);
   };
   const viewCtl: Ctl[] = [
-    { id: "view", label: view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid", icon: view === "grid" ? <List /> : <LayoutGrid />, pressed: view === "grid", run: () => onPatch({ w: view === "grid" ? undefined : "g" }) },
+    { id: "view", label: view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid", icon: view === "grid" ? <List /> : <LayoutGrid />, pressed: view === "grid", run: () => {
+      const next = view === "grid" ? "list" : "grid";
+      setSettings({ view: next });
+      onPatch({ w: next === "grid" ? "g" : "l" });
+    } },
     ...(view === "grid"
       ? SORTS.map((s): Ctl => {
           const on = sort.key === s.key;
