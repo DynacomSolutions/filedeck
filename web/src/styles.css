@@ -691,12 +691,12 @@ select option{background:var(--surface);color:var(--fg)}
 .perm-name button{min-height:32px}
 .pp-actions{display:flex;justify-content:flex-end}
 .pp .props>div{grid-template-columns:5.5rem 1fr}
-/* The Properties pane shares a short, resizable dock on narrow screens.
-   Let the outer pane scroll so its dock controls and tab panels remain reachable. */
+/* The Properties body owns scrolling on every screen size so sticky Git rows
+   stay anchored to the same right-hand scrollport. */
 @media(max-width:700px){
-  .fp .pv{overflow-x:hidden;overflow-y:auto}
+  .fp .pv{overflow:hidden}
   .fp .pv-head{flex:0 0 auto;min-width:0;align-items:flex-start}
-  .fp .pv-body.pp-body{flex:0 0 auto;min-height:max(14rem,35dvh);overflow:visible}
+  .fp .pv-body.pp-body{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto}
   .fp .props-tabs{flex-wrap:wrap;overflow:visible}
   .fp .pp .props>div{grid-template-columns:minmax(0,1fr);gap:.2rem}
 }
@@ -785,7 +785,7 @@ select option{background:var(--surface);color:var(--fg)}
 .git-sec code{font-family:var(--mono);font-size:.78rem}
 .git-list{margin-top:.4rem}
 .git-list summary{cursor:pointer;font-size:.8rem;font-weight:700}
-.git-list ul{list-style:none;margin:.3rem 0 0;padding:0;display:flex;flex-direction:column;gap:.15rem;max-height:14rem;overflow:auto}
+.git-list ul{list-style:none;margin:.3rem 0 0;padding:0;display:flex;flex-direction:column;gap:.15rem}
 .git-list li{display:flex;align-items:center;gap:.25rem;min-width:0}
 .git-list li>button{min-height:26px;font-size:.76rem}
 .git-list li>button.git-item{flex:1 1 auto;min-width:0;justify-content:flex-start;text-align:left;overflow:hidden}
@@ -793,9 +793,21 @@ select option{background:var(--surface);color:var(--fg)}
 .git-worktrees{border-top:1px solid var(--line);margin-top:.55rem;padding-top:.45rem}
 .git-worktrees h4{margin:0;font-size:.8rem}
 .git-list li.git-change{flex-wrap:wrap}
+.git-change-head,.git-branch-file-head,.git-file-diff-head{position:sticky;top:0;z-index:3;background:var(--surface);border-bottom:1px solid var(--line)}
+.git-change-head{display:flex;align-items:center;gap:.25rem;flex:1 0 100%;min-width:0}
+.git-branch-diff{margin-top:.55rem;border-top:1px solid var(--line);padding-top:.45rem}
+.git-branch-diff h4{margin:0 0 .4rem;font-size:.8rem}
+.git-branch-files{list-style:none;margin:.3rem 0 0;padding:0;display:flex;flex-direction:column;gap:.25rem}
+.git-branch-files li{display:flex;flex-direction:column;min-width:0;border:1px solid var(--line);border-radius:var(--radius-sm);overflow:visible}
+.git-branch-file-head{display:flex;align-items:center;gap:.25rem;width:100%;padding:.15rem .25rem}
+.git-branch-file-head .git-item{flex:1 1 auto;min-width:0;justify-content:flex-start;text-align:left}
+.git-branch-file-status,.git-branch-file-count{flex:none;font-size:.72rem}
+.git-branch-file-head .git-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.git-file-diff-head{padding:.2rem 0}
 .git-inline-diff{flex:1 0 100%;width:100%;min-width:0;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface-2);overflow:hidden}
 .git-inline-diff-meta{padding:.35rem .5rem;font-size:.72rem;border-bottom:1px solid var(--line)}
-.git-inline-diff-editor{height:280px;min-height:180px;position:relative}
+.git-inline-diff-editor{min-height:180px;position:relative}
+.git-inline-diff-editor.git-content-editor{min-height:0}
 .tile-git .git-pill{flex-wrap:wrap;justify-content:center;white-space:normal;row-gap:0}
 .tile-git .git-br{max-width:100%}
 /* Worktrees side-panel tab */

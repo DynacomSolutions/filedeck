@@ -28,3 +28,14 @@ export const monacoTheme = () => {
 
 /** Monaco picks the language from the model URI; this is the display name for the header. */
 export const modelUri = (node: string, path: string) => `inmemory://filedeck/${encodeURIComponent(node)}${path.split("/").map(encodeURIComponent).join("/")}`;
+
+/** Resolve Monaco's bundled language by exact filename first, then longest matching extension. */
+export function languageForPath(path: string): string | undefined {
+  const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+  const languages = monaco.languages.getLanguages();
+  const named = languages.find((language) => language.filenames?.some((filename) => filename.toLowerCase() === name));
+  if (named) return named.id;
+  return languages
+    .filter((language) => language.extensions?.some((extension) => name.endsWith(extension.toLowerCase())))
+    .sort((a, b) => Math.max(...(b.extensions ?? []).map((extension) => extension.length)) - Math.max(...(a.extensions ?? []).map((extension) => extension.length)))[0]?.id;
+}

@@ -691,7 +691,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           <span className="muted">{propsFor || folderProps ? "Folder" : "Active"}</span>
           {paneExtra}
         </div>
-        <div className="pv-body pp-body">
+        <div className="pv-body pp-body" data-testid="git-branch-diff-scroll">
           <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} selectedTab={leaf.pt ?? "details"} onTabChange={(pt) => onPatch({ pt })} onReveal={(p) => goTo(node, parent(p), p)} onOpenWorktree={(p) => { setClosedFor(null); setPropsFor(null); onNavigate(node, p); }} worktreeHref={(p) => encodeState({ tree: { kind: "leaf", id: leaf.id, node, path: p, pv: { dock: leaf.pv?.dock ?? "right", size: leaf.pv?.size ?? 40, tab: "props" }, pt: "git" }, active: leaf.id })} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
         </div>
       </div>

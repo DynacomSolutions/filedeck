@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import fs from "node:fs/promises";
 import { FsError } from "./fsops.ts";
 import { resolveRead } from "./paths.ts";
+import { findRepo, repoArgs, repoCwd } from "./git.ts";
 import { ceilingFor, listRefs, prDiff, readBlob, repoInfo, type DiffInput, type GitCtx } from "./git-diff.ts";
 import type { Config } from "./config.ts";
 
@@ -16,7 +17,9 @@ export function registerGitDiffRoutes(app: Hono, cfg: Config): void {
   const ctx = async (p: string | undefined): Promise<GitCtx> => {
     const r = resolveRead(cfg.root, p ?? "");
     if (!(await fs.stat(r.real)).isDirectory()) throw new FsError(400, "not a folder");
-    const c = { cwd: r.real, ceiling: ceilingFor(cfg.root) };
+    const repo = await findRepo(cfg.root, r.real);
+    if (!repo) throw new FsError(400, "not a git repository");
+    const c = { cwd: repoCwd(repo), args: repoArgs(repo), ceiling: ceilingFor(cfg.root) };
     await repoInfo(c);
     return c;
   };
