@@ -837,9 +837,13 @@ a.wt-row:hover{background:var(--surface-2)}
 
 /* WCAG 2.2 AAA controls: preserve a 44px hit area and visible keyboard focus. */
 :where(button, a[href], input, select, textarea, [tabindex="0"], [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"]):focus-visible {
-  outline: 2px solid #000 !important;
+  outline: 2px solid var(--accent) !important;
   outline-offset: 1px !important;
-  box-shadow: 0 0 0 5px #fff !important;
+  box-shadow: none !important;
+}
+:where(.fp-tools button, .fp-up, .fp-actions button, .crumbs button, .addr-fill, .addr-in, .addr-base, .addr-recent):focus-visible {
+  outline: none !important;
+  box-shadow: inset 0 0 0 2px var(--accent-line) !important;
 }
 :where(button, a[href], input, select, textarea, [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"]) {
   min-width: 44px !important;
