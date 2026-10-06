@@ -25,3 +25,14 @@ test("Git HEAD diff URL state rejects relative file paths", () => {
   assert.equal(restored?.tree.kind, "leaf");
   if (restored?.tree.kind === "leaf") assert.equal(restored.tree.gitDiff, undefined);
 });
+
+test("legacy worktrees side-panel URLs restore Properties on the Git tab", () => {
+  const legacy = `?s=${encodeURIComponent(JSON.stringify({ t: { i: "p1", n: "node-a", p: "/work", v: ["right", 40, "w"] }, a: "p1" }))}`;
+  const restored = decodeState(legacy);
+
+  assert.equal(restored?.tree.kind, "leaf");
+  if (restored?.tree.kind === "leaf") {
+    assert.deepEqual(restored.tree.pv, { dock: "right", size: 40, tab: "props" });
+    assert.equal(restored.tree.pt, "git");
+  }
+});

@@ -51,7 +51,7 @@ export interface Leaf {
   sort?: { key: SortKey; asc: boolean };
   hidden?: boolean;
   /** preview sub-panel placement and size (percent of the panel) */
-  pv?: { dock: Dock; size: number; /** "props": the sub-panel shows the Properties tab, "wt" the Worktrees list, instead of the Preview */ tab?: "props" | "wt" };
+  pv?: { dock: Dock; size: number; /** "props": the sub-panel shows Properties instead of the Preview */ tab?: "props" };
   /** active section within this panel's Properties view; details is the default */
   pt?: "details" | "git" | "permissions";
   /** repository root explicitly selected from Properties while the Worktrees tab is open */
@@ -213,9 +213,9 @@ const toWire = (t: Tree): WTree => {
   if (t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
   if (t.sort) w.o = `${t.sort.key}:${t.sort.asc ? "a" : "d"}`;
   if (typeof t.hidden === "boolean") w.h = t.hidden ? 1 : 0;
-  if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, t.pv.tab === "wt" ? "w" : "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
+  if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
   if (t.pt && t.pt !== "details") w.pt = t.pt;
-  if (t.pv?.tab === "wt" && t.wtPath) w.wp = t.wtPath;
+  if (t.wtPath) w.wp = t.wtPath;
   if (t.closed) w.c = t.closed;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
   if (t.gitDiff) w.gd = [t.gitDiff.node, t.gitDiff.path];
@@ -301,8 +301,10 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
     if (key === "name" || key === "size" || key === "mtime") leaf.sort = { key, asc: dir !== "d" };
   }
   if (o.h === 0 || o.h === 1) leaf.hidden = o.h === 1;
-  if (Array.isArray(o.v) && DOCKS.includes(o.v[0] as string) && typeof o.v[1] === "number" && o.v[1] >= 10 && o.v[1] <= 90) leaf.pv = { dock: o.v[0] as Dock, size: o.v[1], ...(o.v[2] === "p" ? { tab: "props" as const } : o.v[2] === "w" ? { tab: "wt" as const } : {}) };
+  const legacyWorktreesSidePane = Array.isArray(o.v) && o.v[2] === "w";
+  if (Array.isArray(o.v) && DOCKS.includes(o.v[0] as string) && typeof o.v[1] === "number" && o.v[1] >= 10 && o.v[1] <= 90) leaf.pv = { dock: o.v[0] as Dock, size: o.v[1], ...(o.v[2] === "p" || legacyWorktreesSidePane ? { tab: "props" as const } : {}) };
   if (o.pt === "details" || o.pt === "git" || o.pt === "permissions") leaf.pt = o.pt;
+  if (legacyWorktreesSidePane && o.pt === undefined) leaf.pt = "git";
   if (str(o.wp) && o.wp.startsWith("/")) leaf.wtPath = o.wp;
   if (str(o.c)) leaf.closed = o.c;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };

@@ -6,7 +6,6 @@ import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploa
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
-import { WorktreesPane } from "./Worktrees";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { ConfirmDialog, LinkDialog, NameDialog } from "./Dialogs";
 import { PropertiesMulti, PropertiesPanel } from "./Properties";
@@ -195,11 +194,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const pvSize = leaf.pv?.size ?? 40;
   /** the side panel shows the Properties tab (details of the active item) instead of the Preview */
   const propsOpen = leaf.pv?.tab === "props";
-  /** the side panel shows the Worktrees list of the repository this folder belongs to */
-  const wtOpen = leaf.pv?.tab === "wt";
   const pvTab = leaf.pv?.tab;
   const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize, ...(pvTab ? { tab: pvTab } : {}) } });
-  const setTab = (tab: "props" | "wt" | undefined, wtPath?: string) => onPatch({ pv: { dock: leaf.pv?.dock ?? "right", size: pvSize, ...(tab ? { tab } : {}) }, wtPath: tab === "wt" ? wtPath : undefined });
+  const setTab = (tab: "props" | undefined) => onPatch({ pv: { dock: leaf.pv?.dock ?? "right", size: pvSize, ...(tab ? { tab } : {}) } });
   /** a folder named from a breadcrumb menu (not part of the selection); dropped as soon as the selection or folder changes */
   const [propsFor, setPropsFor] = useState<string | null>(null);
   const openProps = (forPath?: string) => {
@@ -210,12 +207,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const showPreview = () => {
     setClosedFor(null);
     setTab(undefined);
-  };
-  const toggleWorktrees = () => {
-    if (wtOpen) return setTab(undefined);
-    setClosedFor(null);
-    setPropsFor(null);
-    setTab("wt");
   };
 
   useEffect(() => {
@@ -634,7 +625,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const closeSide = () => {
     if (gitDiff) return setGitDiff(null);
     if (editing) return setEditing(null);
-    if (wtOpen) return setTab(undefined);
     if (propsOpen) {
       // Closing Properties must not reveal the preview of a selected file: mark that one closed too.
       setClosedFor(only && !isDirEntry(only) ? only.path : null);
@@ -648,30 +638,24 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       {!editing && !gitDiff && (
         <span className="pv-dock pv-switch" role="group" aria-label="Side panel content">
           <Tip label={previewEntry || (only && !isDirEntry(only) && !only.broken) ? "Preview the selected file" : "Select one file to preview it"}>
-            <button type="button" className={"pv-dockbtn" + (!propsOpen && !wtOpen ? " on" : "")} aria-pressed={!propsOpen && !wtOpen} disabled={(propsOpen || wtOpen) && !(only && !isDirEntry(only) && !only.broken)} aria-label="Preview" onClick={showPreview}><Ic.Eye /></button>
+            <button type="button" className={"pv-dockbtn" + (!propsOpen ? " on" : "")} aria-pressed={!propsOpen} disabled={propsOpen && !(only && !isDirEntry(only) && !only.broken)} aria-label="Preview" onClick={showPreview}><Ic.Eye /></button>
           </Tip>
           <Tip label="Properties of the active item" shortcut="Alt+Enter">
             <button type="button" className={"pv-dockbtn" + (propsOpen ? " on" : "")} aria-pressed={propsOpen} aria-label="Properties" onClick={() => openProps()}><Ic.Info /></button>
           </Tip>
-          <Tip label="Worktrees of this folder's Git repository">
-            <button type="button" className={"pv-dockbtn" + (wtOpen ? " on" : "")} aria-pressed={wtOpen} aria-label="Worktrees" onClick={toggleWorktrees}><Ic.GitBranch /></button>
-          </Tip>
         </span>
       )}
-      <span className="pv-dock" role="group" aria-label="Side panel position">
-        {DOCKS.map((d) => (
-          <Tip key={d.dock} label={d.label}>
-            <button type="button" className={"pv-dockbtn" + (dock === d.dock ? " on" : "")} aria-pressed={dock === d.dock} aria-label={d.label} onClick={() => setDock(d.dock)}>
-              <d.icon />
-            </button>
-          </Tip>
-        ))}
+      <span className="pv-dock">
+        <label className="sr-only" htmlFor={`pv-dock-${leaf.id}`}>Side panel position</label>
+        <select id={`pv-dock-${leaf.id}`} aria-label="Side panel position" value={dock} onChange={(e) => setDock(e.target.value as Dock)}>
+          {DOCKS.map((d) => <option key={d.dock} value={d.dock}>{d.label.replace("Dock side panel ", "")}</option>)}
+        </select>
         {!gitDiff && (
-          <Tip label={wtOpen && !editing ? "Close worktrees" : propsOpen && !editing ? "Close properties" : "Close preview"}>
+          <Tip label={propsOpen && !editing ? "Close properties" : "Close preview"}>
             <button
               type="button"
               className="pv-dockbtn"
-              aria-label={wtOpen && !editing ? "Close worktrees" : propsOpen && !editing ? "Close properties" : "Close preview"}
+              aria-label={propsOpen && !editing ? "Close properties" : "Close preview"}
               onClick={closeSide}
             >
               <X />
@@ -714,8 +698,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
       <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inPane onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
     </Suspense>
-  ) : wtOpen ? (
-    <WorktreesPane node={node} path={leaf.wtPath ?? path} extra={paneExtra} onOpen={(p) => onNavigate(node, p)} onMenu={(e, p) => showMenu(e, folderItems(p, false))} />
   ) : propsOpen ? (
     propsPane
   ) : previewEntry ? (
@@ -1198,7 +1180,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { id: "tab", label: "New tab with this folder (Alt+T)", icon: <SquarePlus />, run: () => newTab() },
     { id: "pick", label: "Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels", icon: <SquareCheck />, pressed: panelPicked, run: onTogglePanel },
     { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing && !!propsPane, run: () => (propsOpen && !editing && propsPane ? closeSide() : openProps()) },
-    { id: "wt", label: "Worktrees of this folder's Git repository in the side panel", icon: <Ic.GitBranch />, pressed: wtOpen && !editing, run: toggleWorktrees },
   ];
   const paneCtl: Ctl[] = [
     { id: "splitH", label: "Split right", icon: <Columns2 />, run: () => onSplit("horizontal") },
