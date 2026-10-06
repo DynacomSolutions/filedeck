@@ -69,6 +69,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient
+          if ! command -v 7zz >/dev/null 2>&1; then
+            sudo ln -s "$(command -v 7z)" /usr/local/bin/7zz
+          fi
           command -v bsdtar
           command -v 7zz
           command -v qpdf
