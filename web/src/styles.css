@@ -175,8 +175,8 @@ input[type=checkbox]{accent-color:var(--accent)}
 .pv-dock{margin-left:auto;display:inline-flex;gap:.15rem;align-self:center}
 .pv-dockbtn{min-height:24px;min-width:26px;padding:0 .35rem;font-size:.8rem;border-color:transparent;color:var(--muted)}
 .pv-dockbtn.on{color:var(--fg);border-color:var(--border-strong);background:var(--surface-2)}
-.ed.inline{position:relative;inset:auto;z-index:auto;height:100%}
-.ed.inline .ed-head{padding-inline:.8rem}
+.ed.inline,.ed.in-pane{position:relative;inset:auto;z-index:auto;height:100%}
+.ed.inline .ed-head,.ed.in-pane .ed-head{padding-inline:.8rem}
 .fp .pv{border:0;border-radius:0}
 .fp [data-panel]{min-width:0;min-height:0}
 .fp .sep{background:var(--border)}.fp .sep:hover,.fp .sep[data-separator="active"]{background:var(--accent-line)}.fp .sep.horizontal{width:3px}.fp .sep.vertical{height:3px}

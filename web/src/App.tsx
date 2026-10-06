@@ -198,7 +198,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
       fromPop.current = true;
       setTree((t) => {
         if (!t) return t;
-        const go = (n: Tree): Tree => (n.kind === "leaf" ? (n.id === focused ? { ...n, node: target.node, path: target.path, sel: undefined, closed: undefined } : n) : { ...n, children: n.children.map(go) });
+        const go = (n: Tree): Tree => (n.kind === "leaf" ? (n.id === focused ? { ...n, node: target.node, path: target.path, sel: undefined, closed: undefined, gitDiff: undefined } : n) : { ...n, children: n.children.map(go) });
         return syncTree(go(t));
       });
       setStatus(`${back ? "Back" : "Forward"}: ${target.node}:${target.path}`);
@@ -546,8 +546,8 @@ export function App() {
       const go = (n: Tree): Tree => (n.kind === "leaf" ? n : n.id === sid ? { ...n, sizes } : { ...n, children: n.children.map(go) });
       return t ? go(t) : t;
     });
-  const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path, sr: undefined, wtPath: undefined } : l));
-  const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path, sr: undefined, wtPath: undefined } : l));
+  const navigate = (lid: string) => (node: string, path: string) => update((l) => (l.id === lid ? { ...l, node, path, sr: undefined, wtPath: undefined, gitDiff: undefined } : l));
+  const openInActive = (node: string, path: string) => update((l) => (l.id === activeId ? { ...l, node, path, sr: undefined, wtPath: undefined, gitDiff: undefined } : l));
   /** A new panel split beside the given one (default: the active one) at node:path, optionally with a file selected there. */
   const openPanel = (node: string, path: string, select?: string, beside = activeId) => {
     const fresh: Leaf = { kind: "leaf", id: id(), node, path, ...(select ? { sel: select } : {}) };
@@ -628,7 +628,7 @@ export function App() {
           onPatch={(p) => patchLeaf(t.id, p)}
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
           onDiff={onDiff}
-          onDiffHead={(n, p) => setDiff({ left: { node: n, path: p, rev: "HEAD" }, right: { node: n, path: p } })}
+          onDiffHead={(n, p) => patchLeaf(t.id, { gitDiff: { node: n, path: p, rev: "HEAD" }, edit: undefined, closed: undefined, pv: { dock: "right", size: t.pv?.size ?? 40 } })}
           diffMarked={diffMark !== null}
           onCompare={(peer) => startCompare(t.id, peer)}
           others={Object.entries(sels).filter(([k]) => k !== t.id).flatMap(([, v]) => v)}
