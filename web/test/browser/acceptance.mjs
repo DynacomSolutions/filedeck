@@ -197,14 +197,37 @@ async function verifyPresentation(browser) {
     await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--user-reading-size').trim() === '32px');
     assert.equal(await size.inputValue(), '32', 'presentation size control should accept 32px');
     assert.ok(await page.evaluate(() => localStorage.getItem('filedeck.presentation')?.includes('32')), 'presentation size should persist');
-    const clippedAtMaxSize = await dialog.locator('button:visible, input:visible, select:visible, [role="button"]:visible').evaluateAll((els) => els.flatMap((e) => {
-      const r = e.getBoundingClientRect();
-      for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
-        const s = getComputedStyle(p), pr = p.getBoundingClientRect();
-        if ((['hidden', 'clip'].includes(s.overflowX) && (r.left < pr.left - 1 || r.right > pr.right + 1)) || (['hidden', 'clip'].includes(s.overflowY) && (r.top < pr.top - 1 || r.bottom > pr.bottom + 1))) return [{ label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40), ancestor: p.className?.toString?.() || p.tagName }];
-      }
-      return [];
-    }));
+    const controls = dialog.locator('button:visible, input:visible, select:visible, [role="button"]:visible');
+    const clippedAtMaxSize = [];
+    for (let i = 0; i < await controls.count(); i++) {
+      const control = controls.nth(i);
+      await control.scrollIntoViewIfNeeded();
+      clippedAtMaxSize.push(...await control.evaluate((e) => {
+        const r = e.getBoundingClientRect();
+        const failures = [];
+        for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
+          const s = getComputedStyle(p);
+          const scrollX = ['auto', 'scroll'].includes(s.overflowX) && p.scrollWidth > p.clientWidth + 1;
+          const scrollY = ['auto', 'scroll'].includes(s.overflowY) && p.scrollHeight > p.clientHeight + 1;
+          const clipsX = ['hidden', 'clip'].includes(s.overflowX) || scrollX;
+          const clipsY = ['hidden', 'clip'].includes(s.overflowY) || scrollY;
+          if (!clipsX && !clipsY) continue;
+          const pr = p.getBoundingClientRect();
+          const left = pr.left + p.clientLeft, top = pr.top + p.clientTop;
+          const right = left + p.clientWidth, bottom = top + p.clientHeight;
+          const outsideX = clipsX && (r.left < left - 1 || r.right > right + 1);
+          const outsideY = clipsY && (r.top < top - 1 || r.bottom > bottom + 1);
+          if (outsideX || outsideY) failures.push({
+            label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40),
+            ancestor: p.className?.toString?.() || p.tagName,
+            scrollable: scrollX || scrollY,
+            bounds: { left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right), bottom: Math.round(r.bottom) },
+            visibleBounds: { left: Math.round(left), top: Math.round(top), right: Math.round(right), bottom: Math.round(bottom) },
+          });
+        }
+        return failures;
+      }));
+    }
     assert.deepEqual(clippedAtMaxSize, [], '32px reading presentation must not clip Settings controls');
     const close = dialog.getByRole('button', { name: 'Close', exact: true });
     await close.click();
