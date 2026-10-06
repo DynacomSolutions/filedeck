@@ -20,6 +20,7 @@ const originalMode = 0o644;
 const changedMode = 0o600;
 const permCalls = [];
 const opCalls = [];
+const worktreeRequests = [];
 const vaultEntryId = 'fixture-vault-entry';
 let vaultExpiry = Date.now() + 30_000;
 let vaultListCalls = 0;
@@ -29,7 +30,17 @@ const entry = (path, mode = originalMode) => ({
   name: path.split('/').at(-1), path, type: 'file', size: 128,
   mtime: 1791264000000, mode,
 });
-const gitInfo = (path) => path.startsWith('/work/') ? {
+const gitInfo = (path) => scope === 't75-worktrees' && path.startsWith('/parent-repo') ? {
+  repo: {
+    root: path.startsWith('/parent-repo/nested-repo/') ? '/parent-repo/nested-repo' : '/parent-repo',
+    kind: 'worktree', rel: path.slice('/parent-repo/'.length),
+    summary: { kind: 'worktree', branch: 'fixture', head: '0123456789abcdef', staged: 0, modified: 0, untracked: 0, conflicted: 0 },
+    lastCommit: null, stash: 0, remotes: [],
+    lists: { staged: [], modified: [], untracked: [], conflicted: [] },
+    counts: { staged: 0, modified: 0, untracked: 0, conflicted: 0 }, listCap: 100,
+    file: { tracked: true, letters: '', lastCommit: null },
+  },
+} : path.startsWith('/work/') ? {
   repo: {
     root: '/work', kind: 'worktree', rel: path.slice('/work/'.length),
     summary: { kind: 'worktree', branch: 'fixture', head: '0123456789abcdef', staged: 0, modified: 0, untracked: 0, conflicted: 0 },
@@ -73,7 +84,9 @@ async function installFixture(page) {
         const rows = path === '/' ? [{ name: 'destination', path: '/destination', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }] : [];
         return json({ path, entries: rows, truncated: false });
       }
-      const rows = path === '/work'
+      const rows = scope === 't75-worktrees' && path === '/parent-repo/nested-repo/sub'
+        ? [entry('/parent-repo/nested-repo/sub/current.txt')]
+        : path === '/work'
         ? [entry(tracked, fakeMode), entry('/work/readme.md'), entry('/work/package.zip'), { name: 'subdir', path: '/work/subdir', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }]
         : path === '/'
           ? [entry(plain, fakeMode), { name: 'work', path: '/work', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }]
@@ -96,7 +109,20 @@ async function installFixture(page) {
     }
     if (pathname.endsWith('/api/git/info')) return json(gitInfo(url.searchParams.get('path') || '/'));
     if (pathname.endsWith('/api/git/status')) return json({ repo: null, entries: {}, children: {}, pending: false });
-    if (pathname.endsWith('/api/git/worktrees')) return json({ worktrees: [] });
+    if (pathname.endsWith('/api/git/worktrees')) {
+      const queriedPath = url.searchParams.get('path') || '/';
+      worktreeRequests.push(queriedPath);
+      if (scope === 't75-worktrees') {
+        const nested = queriedPath.startsWith('/parent-repo/nested-repo');
+        const root = nested ? '/parent-repo/nested-repo' : queriedPath.startsWith('/parent-repo') ? '/parent-repo' : '/work';
+        const names = nested ? ['nested-main', 'nested-unrelated'] : root === '/parent-repo' ? ['parent-main', 'parent-feature', 'parent-release'] : ['main', 'feature-checkout', 'release-checkout'];
+        return json({ repo: root, bare: false, truncated: false, worktrees: names.map((name, i) => ({
+          path: i === 0 ? root : `${root}-${name}`, gitPath: `/host/${name}`, name, main: i === 0, bare: false,
+          branch: i === 0 ? 'main' : name, detached: false, head: '01234567', locked: false, prunable: false, dirty: false, current: i === 0,
+        })) });
+      }
+      return json({ worktrees: [] });
+    }
     if (pathname.endsWith('/api/fs/perms') && req.method() === 'POST') {
       const body = req.postDataJSON();
       permCalls.push(body);
@@ -424,6 +450,70 @@ async function verifyOutsideGit(browser) {
   await page.getByRole('tablist', { name: 'Properties sections' }).waitFor({ state: 'visible' });
   assert.equal(await page.getByRole('tab', { name: 'Git', exact: true }).count(), 0, 'Git tab must be hidden outside a repository');
   await context.close();
+}
+
+async function verifyGitWorktrees(browser) {
+  const { context, page } = await openPage(browser);
+  try {
+    const gitTab = page.getByRole('tab', { name: 'Git', exact: true });
+    await gitTab.waitFor({ state: 'visible' });
+    await gitTab.click();
+    const link = page.getByRole('button', { name: 'All worktrees', exact: true });
+    await link.waitFor({ state: 'visible' });
+    await link.click();
+    await page.locator('.wt-list').waitFor({ state: 'visible' });
+    for (const name of ['main', 'feature-checkout', 'release-checkout']) {
+      await page.locator('.wt-name', { hasText: name }).waitFor({ state: 'visible' });
+    }
+    assert.ok(worktreeRequests.includes('/work'), 'the existing worktrees API must receive the repository context');
+    assert.match(page.url(), /[?&]s=/, 'opening all worktrees must update URL state');
+    const worktreesURL = page.url();
+    await page.reload();
+    await page.locator('.wt-name', { hasText: 'feature-checkout' }).waitFor({ state: 'visible' });
+    assert.ok(worktreeRequests.length >= 2, 'reloading the worktrees route should reload the complete list');
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+    await page.goBack();
+    await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'detached' });
+    assert.equal(page.url(), worktreesURL, 'Back should restore the worktrees route URL');
+    await page.locator('.wt-name', { hasText: 'release-checkout' }).waitFor({ state: 'visible' });
+    await page.goForward();
+    await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+  } finally {
+    await context.close();
+  }
+
+  const nestedPath = '/parent-repo/nested-repo/sub';
+  const { context: nestedContext, page: nestedPage } = await openPage(browser, { state: appState({ path: nestedPath, selected: `${nestedPath}/current.txt` }) });
+  try {
+    await nestedPage.locator('nav[aria-label="Breadcrumb"] button').filter({ hasText: 'parent-repo' }).click({ button: 'right' });
+    await nestedPage.getByRole('menuitem', { name: 'Properties', exact: true }).click();
+    await nestedPage.getByRole('tab', { name: 'Git', exact: true }).click();
+    await nestedPage.getByRole('button', { name: 'All worktrees', exact: true }).click();
+    await nestedPage.locator('.wt-list').waitFor({ state: 'visible' });
+    for (const name of ['parent-main', 'parent-feature', 'parent-release']) {
+      await nestedPage.locator('.wt-name', { hasText: name }).waitFor({ state: 'visible' });
+    }
+    assert.ok(!await nestedPage.locator('.wt-name', { hasText: 'nested-unrelated' }).count(), 'breadcrumb Properties must list the parent repository, not the nested current-folder repository');
+    assert.ok(worktreeRequests.includes('/parent-repo'), 'the Git section repository root should be the worktrees API context');
+    const parentWorktreesURL = nestedPage.url();
+    const wire = JSON.parse(new URL(parentWorktreesURL).searchParams.get('s'));
+    assert.equal(wire.t.wp, '/parent-repo', 'the breadcrumb repository context should be encoded in the URL');
+    await nestedPage.reload();
+    for (const name of ['parent-main', 'parent-feature', 'parent-release']) {
+      await nestedPage.locator('.wt-name', { hasText: name }).waitFor({ state: 'visible' });
+    }
+    assert.equal(worktreeRequests.at(-1), '/parent-repo', 'reload should restore the parent repository context');
+    await nestedPage.getByRole('button', { name: 'Settings' }).click();
+    await nestedPage.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+    await nestedPage.goBack();
+    await nestedPage.locator('.wt-name', { hasText: 'parent-feature' }).waitFor({ state: 'visible' });
+    assert.equal(nestedPage.url(), parentWorktreesURL, 'Back should restore the worktrees route with parent context');
+    await nestedPage.goForward();
+    await nestedPage.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible' });
+  } finally {
+    await nestedContext.close();
+  }
 }
 
 async function verifyHistoryAndDirectLinks(browser) {
@@ -885,6 +975,8 @@ try {
   } else if (scope === 't75') {
     await verifyProperties(browser);
     await verifyOutsideGit(browser);
+  } else if (scope === 't75-worktrees') {
+    await verifyGitWorktrees(browser);
   } else if (scope === 'pr') {
     await verifyPrDirectLink(browser);
   } else if (scope === 'propskeys') {

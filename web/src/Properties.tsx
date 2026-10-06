@@ -52,7 +52,7 @@ function useJob(node: string) {
  * Details of one entry for the properties pane, with recursive size, chmod and chown. The pane remounts it (key) when the selection
  * changes, so every item starts from its own state; a folder-size job still running for the previous item is cancelled.
  */
-export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTick = 0, onReveal, onDiffHead, selectedTab = "details", onTabChange }: { node: string; path: string; entry?: Entry; onChanged: () => void; onStatus: (m: string) => void; gitTick?: number; onReveal?: (p: string) => void; onDiffHead?: (p: string) => void; selectedTab?: PropsTab; onTabChange: (tab: PropsTab) => void }) {
+export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTick = 0, onReveal, onDiffHead, onOpenWorktrees, selectedTab = "details", onTabChange }: { node: string; path: string; entry?: Entry; onChanged: () => void; onStatus: (m: string) => void; gitTick?: number; onReveal?: (p: string) => void; onDiffHead?: (p: string) => void; onOpenWorktrees?: (repoRoot: string) => void; selectedTab?: PropsTab; onTabChange: (tab: PropsTab) => void }) {
   const [p, setP] = useState<Props | null>(null);
   const [basic, setBasic] = useState<Entry | null>(entry ?? null);
   const [err, setErr] = useState("");
@@ -274,7 +274,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
       </section>
       {p && onReveal && onDiffHead && (
         <section id={`${tabBase}-git-panel`} className="props-tabpanel" role="tabpanel" aria-labelledby={`${tabBase}-git-tab`} tabIndex={0} hidden={activeTab !== "git"}>
-          <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onDiffHead={onDiffHead} onApplicability={setGitAvailable} />
+          <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onDiffHead={onDiffHead} onOpenWorktrees={onOpenWorktrees} onApplicability={setGitAvailable} />
         </section>
       )}
       {p && p.type !== "other" && (

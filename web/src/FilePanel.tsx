@@ -193,7 +193,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const wtOpen = leaf.pv?.tab === "wt";
   const pvTab = leaf.pv?.tab;
   const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize, ...(pvTab ? { tab: pvTab } : {}) } });
-  const setTab = (tab: "props" | "wt" | undefined) => onPatch({ pv: { dock: leaf.pv?.dock ?? "right", size: pvSize, ...(tab ? { tab } : {}) } });
+  const setTab = (tab: "props" | "wt" | undefined, wtPath?: string) => onPatch({ pv: { dock: leaf.pv?.dock ?? "right", size: pvSize, ...(tab ? { tab } : {}) }, wtPath: tab === "wt" ? wtPath : undefined });
   /** a folder named from a breadcrumb menu (not part of the selection); dropped as soon as the selection or folder changes */
   const [propsFor, setPropsFor] = useState<string | null>(null);
   const openProps = (forPath?: string) => {
@@ -684,7 +684,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           {paneExtra}
         </div>
         <div className="pv-body pp-body">
-          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} selectedTab={leaf.pt ?? "details"} onTabChange={(pt) => onPatch({ pt })} onReveal={(p) => goTo(node, parent(p), p)} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
+          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} selectedTab={leaf.pt ?? "details"} onTabChange={(pt) => onPatch({ pt })} onReveal={(p) => goTo(node, parent(p), p)} onOpenWorktrees={(repoRoot) => { setClosedFor(null); setPropsFor(null); setTab("wt", repoRoot); }} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
         </div>
       </div>
     ) : sel.size > 1 ? (
@@ -702,7 +702,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
     </Suspense>
   ) : wtOpen ? (
-    <WorktreesPane node={node} path={path} extra={paneExtra} onOpen={(p) => onNavigate(node, p)} onMenu={(e, p) => showMenu(e, folderItems(p, false))} />
+    <WorktreesPane node={node} path={leaf.wtPath ?? path} extra={paneExtra} onOpen={(p) => onNavigate(node, p)} onMenu={(e, p) => showMenu(e, folderItems(p, false))} />
   ) : propsOpen ? (
     propsPane
   ) : previewEntry ? (
