@@ -101,6 +101,7 @@ export function PrDiffView({ state, onState, onClose, onStatus }: { state: PrSta
       ref={root}
       className="ed over prd"
       role="dialog"
+      aria-modal="true"
       aria-label="Pull request diff"
       tabIndex={-1}
       onKeyDown={(e) => {

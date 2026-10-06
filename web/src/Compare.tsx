@@ -579,7 +579,11 @@ function Cell({ n, side, ctl }: { n: CNode; side: Side; ctl: CompareCtl }) {
     );
   const d = side === "left" ? r.l : r.r;
   const spelling = side === "right" && r.rp ? nameOf(r.rp) : n.name;
-  if (!d) return <span className="cmp-ph" role="gridcell" aria-label={`Not on the ${side} side`} />;
+  if (!d) return <>
+    <span className="cmp-ph" role="gridcell" aria-label={`Not on the ${side} side`} />
+    <span role="gridcell" />
+    <span role="gridcell" />
+  </>;
   return (
     <>
       <div role="gridcell"><Tip label={r.p} fill><span className="cmp-name" style={{ paddingLeft: ctl.depthOf(r.p) * 16 }}>
