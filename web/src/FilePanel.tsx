@@ -1238,15 +1238,15 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   useLayoutEffect(() => {
     const el = toolsRef.current;
     if (!el) return;
-    // an icon button is 28px plus a 4px gap, a group start adds a 6px gap; the more button takes one slot and exists only on overflow
+    // An icon button has a 44px hit area plus a 4px gap; group starts add 6px and the more button takes one slot on overflow.
     const measure = () => {
       const room = el.clientWidth - 16;
-      const width = (l: Ctl[]) => l.reduce((w, c, i) => w + 32 + (c.gap && i > 0 ? 6 : 0), 0);
+      const width = (l: Ctl[]) => l.reduce((w, c, i) => w + 48 + (c.gap && i > 0 ? 6 : 0), 0);
       let n = 0;
       while (n < dropOrder.length) {
         const gone = new Set(dropOrder.slice(0, n));
         const left = allTools.filter((c) => !gone.has(c.id));
-        if (width(left) + (n > 0 ? 32 : 0) <= room) break;
+        if (width(left) + (n > 0 ? 48 : 0) <= room) break;
         n++;
       }
       setHiddenN(n);
