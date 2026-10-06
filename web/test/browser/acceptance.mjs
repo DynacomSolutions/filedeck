@@ -208,23 +208,33 @@ async function verifyPresentation(browser) {
         const failures = [];
         for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
           const s = getComputedStyle(p);
-          const scrollX = ['auto', 'scroll'].includes(s.overflowX) && p.scrollWidth > p.clientWidth + 1;
-          const scrollY = ['auto', 'scroll'].includes(s.overflowY) && p.scrollHeight > p.clientHeight + 1;
-          const clipsX = ['hidden', 'clip'].includes(s.overflowX) || scrollX;
-          const clipsY = ['hidden', 'clip'].includes(s.overflowY) || scrollY;
+          const clipsX = ['hidden', 'clip'].includes(s.overflowX);
+          const clipsY = ['hidden', 'clip'].includes(s.overflowY);
           if (!clipsX && !clipsY) continue;
           const pr = p.getBoundingClientRect();
           const left = pr.left + p.clientLeft, top = pr.top + p.clientTop;
           const right = left + p.clientWidth, bottom = top + p.clientHeight;
           const outsideX = clipsX && (r.left < left - 1 || r.right > right + 1);
           const outsideY = clipsY && (r.top < top - 1 || r.bottom > bottom + 1);
-          if (outsideX || outsideY) failures.push({
-            label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40),
-            ancestor: p.className?.toString?.() || p.tagName,
-            scrollable: scrollX || scrollY,
-            bounds: { left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right), bottom: Math.round(r.bottom) },
-            visibleBounds: { left: Math.round(left), top: Math.round(top), right: Math.round(right), bottom: Math.round(bottom) },
-          });
+          if (outsideX || outsideY) {
+            const reachableScrollports = [];
+            for (let a = p.parentElement; a && a !== document.body; a = a.parentElement) {
+              const as = getComputedStyle(a);
+              const axes = [];
+              if (['auto', 'scroll'].includes(as.overflowX) && a.scrollWidth > a.clientWidth + 1) axes.push('x');
+              if (['auto', 'scroll'].includes(as.overflowY) && a.scrollHeight > a.clientHeight + 1) axes.push('y');
+              if (axes.length) reachableScrollports.push({ ancestor: a.className?.toString?.() || a.tagName, axes, scrollLeft: a.scrollLeft, scrollTop: a.scrollTop, maxScrollLeft: a.scrollWidth - a.clientWidth, maxScrollTop: a.scrollHeight - a.clientHeight });
+            }
+            failures.push({
+              label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40),
+              ancestor: p.className?.toString?.() || p.tagName,
+              overflow: { x: s.overflowX, y: s.overflowY },
+              outside: { x: outsideX, y: outsideY },
+              reachableScrollports,
+              bounds: { left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right), bottom: Math.round(r.bottom) },
+              visibleBounds: { left: Math.round(left), top: Math.round(top), right: Math.round(right), bottom: Math.round(bottom) },
+            });
+          }
         }
         return failures;
       }));
@@ -748,14 +758,19 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
   const clipped = await page.locator('button:visible, a[href]:visible, [role="button"]:visible, [role="tab"]:visible, [role="menuitem"]:visible').evaluateAll((els) => els.flatMap((e) => {
     const r = e.getBoundingClientRect();
     const bad = [];
+    const scrollports = [];
     for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
       const s = getComputedStyle(p);
       const clipsX = ['hidden', 'clip'].includes(s.overflowX);
       const clipsY = ['hidden', 'clip'].includes(s.overflowY);
+      const axes = [];
+      if (['auto', 'scroll'].includes(s.overflowX) && p.scrollWidth > p.clientWidth + 1) axes.push('x');
+      if (['auto', 'scroll'].includes(s.overflowY) && p.scrollHeight > p.clientHeight + 1) axes.push('y');
+      if (axes.length) scrollports.push({ ancestor: p.className?.toString?.() || p.tagName, axes, scrollLeft: p.scrollLeft, scrollTop: p.scrollTop, maxScrollLeft: p.scrollWidth - p.clientWidth, maxScrollTop: p.scrollHeight - p.clientHeight });
       if (!clipsX && !clipsY) continue;
       const pr = p.getBoundingClientRect();
       if (clipsX && (r.left < pr.left - 1 || r.right > pr.right + 1) || clipsY && (r.top < pr.top - 1 || r.bottom > pr.bottom + 1)) {
-        bad.push({ selector: e.id ? `#${CSS.escape(e.id)}` : `${e.tagName.toLowerCase()}${typeof e.className === 'string' && e.className.trim() ? `.${e.className.trim().split(/\s+/).join('.')}` : ''}`, label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40), bounds: { left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right), bottom: Math.round(r.bottom) }, ancestor: p.className?.toString?.() || p.tagName, ancestorBounds: { left: Math.round(pr.left), top: Math.round(pr.top), right: Math.round(pr.right), bottom: Math.round(pr.bottom) } });
+        bad.push({ selector: e.id ? `#${CSS.escape(e.id)}` : `${e.tagName.toLowerCase()}${typeof e.className === 'string' && e.className.trim() ? `.${e.className.trim().split(/\s+/).join('.')}` : ''}`, label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40), bounds: { left: Math.round(r.left), top: Math.round(r.top), right: Math.round(r.right), bottom: Math.round(r.bottom) }, ancestor: p.className?.toString?.() || p.tagName, overflow: { x: s.overflowX, y: s.overflowY }, ancestorBounds: { left: Math.round(pr.left), top: Math.round(pr.top), right: Math.round(pr.right), bottom: Math.round(pr.bottom) }, reachableScrollports: scrollports });
         break;
       }
     }
@@ -783,9 +798,16 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
   assert.ok(await page.locator('.fp-scroll:visible').count(), 'file content should remain available with WCAG text-spacing overrides');
   const spacingClips = await page.locator('button:visible, a[href]:visible, [role="button"]:visible, [role="tab"]:visible').evaluateAll((els) => els.flatMap((e) => {
     const r = e.getBoundingClientRect();
+    const scrollports = [];
     for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
       const s = getComputedStyle(p), pr = p.getBoundingClientRect();
-      if ((['hidden', 'clip'].includes(s.overflowX) && (r.left < pr.left - 1 || r.right > pr.right + 1)) || (['hidden', 'clip'].includes(s.overflowY) && (r.top < pr.top - 1 || r.bottom > pr.bottom + 1))) return [{ label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40), ancestor: p.className?.toString?.() || p.tagName }];
+      const axes = [];
+      if (['auto', 'scroll'].includes(s.overflowX) && p.scrollWidth > p.clientWidth + 1) axes.push('x');
+      if (['auto', 'scroll'].includes(s.overflowY) && p.scrollHeight > p.clientHeight + 1) axes.push('y');
+      if (axes.length) scrollports.push({ ancestor: p.className?.toString?.() || p.tagName, axes, scrollLeft: p.scrollLeft, scrollTop: p.scrollTop, maxScrollLeft: p.scrollWidth - p.clientWidth, maxScrollTop: p.scrollHeight - p.clientHeight });
+      const outsideX = ['hidden', 'clip'].includes(s.overflowX) && (r.left < pr.left - 1 || r.right > pr.right + 1);
+      const outsideY = ['hidden', 'clip'].includes(s.overflowY) && (r.top < pr.top - 1 || r.bottom > pr.bottom + 1);
+      if (outsideX || outsideY) return [{ label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40), ancestor: p.className?.toString?.() || p.tagName, overflow: { x: s.overflowX, y: s.overflowY }, outside: { x: outsideX, y: outsideY }, reachableScrollports: scrollports }];
     }
     return [];
   }));
