@@ -476,6 +476,8 @@ async function verifyKeyboardIsolation(browser) {
     assert.ok(await list.evaluate((e) => e === document.activeElement), 'file viewport should be the keyboard event target');
     // Ctrl+A on the Properties panel intentionally selects page text. Start a fresh
     // file-list interaction with no browser text selection to test file select-all.
+    const beforeClear = await page.evaluate(() => ({ selectedText: window.getSelection()?.toString() || '', activeTag: document.activeElement?.tagName, activeClass: document.activeElement?.className, selectedFiles: document.querySelectorAll('.fp.active .fp-scroll [data-path].sel').length }));
+    console.log(`Keyboard isolation before file Ctrl+A: ${JSON.stringify(beforeClear)}`);
     await page.evaluate(() => window.getSelection()?.removeAllRanges());
     const initialSelection = await page.locator('.fp.active .fp-scroll [data-path].sel').count();
     await page.keyboard.press('Control+a');
