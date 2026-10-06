@@ -37,6 +37,8 @@ const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.
 
 /** Rows put in the DOM at first and added per step while scrolling. */
 const RENDER_STEP = 400;
+const selectionEchoKey = (node: string, path: string, sel: string | null | undefined, ns: boolean | undefined, sels: readonly string[] | undefined) =>
+  JSON.stringify([node, path, sel ?? null, !!ns, sels ? [...sels].sort() : []]);
 const DOCKS: { dock: Dock; icon: LucideIcon; label: string }[] = [
   { dock: "left", icon: PanelLeft, label: "Dock side panel left" },
   { dock: "right", icon: PanelRight, label: "Dock side panel right" },
@@ -147,9 +149,20 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   cursorRef.current = cursor;
   const selRef = useRef(sel);
   selRef.current = sel;
+  /** Selection patches can arrive back through the URL after a newer keyboard event. */
+  const pendingSelectionEchoes = useRef<string[]>([]);
   // Browser history restores a new URL-backed leaf into the mounted panel.
   // Keep the panel's local interaction state in step with that restored state.
   useEffect(() => {
+    pendingSelectionEchoes.current = [];
+  }, [node, path]);
+  useEffect(() => {
+    const incoming = selectionEchoKey(node, path, leaf.sel, leaf.ns, leaf.sels);
+    const echo = pendingSelectionEchoes.current.indexOf(incoming);
+    if (echo >= 0) {
+      pendingSelectionEchoes.current.splice(0, echo + 1);
+      return;
+    }
     const next = new Set(leaf.sels ?? (leaf.sel && !leaf.ns ? [leaf.sel] : []));
     setSel((current) => current.size === next.size && [...next].every((path) => current.has(path)) ? current : next);
     setCursor((current) => current === (leaf.sel ?? null) ? current : leaf.sel ?? null);
@@ -163,6 +176,38 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const filterInput = useRef<HTMLInputElement>(null);
   const secRef = useRef<HTMLElement>(null);
   const barRef = useRef<HTMLElement>(null);
+  const focusAfterNavigation = useRef<{ node: string; path: string } | null>(null);
+  const locationRef = useRef({ node, path });
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
+  const navigate = (n: string, p: string) => {
+    if (active && (n !== node || p !== path)) focusAfterNavigation.current = { node: n, path: p };
+    onNavigate(n, p);
+  };
+  // Browser history and parent-driven restores do not pass through a local click handler.
+  // Treat a real location change as navigation, while refreshes (tick changes) leave focus alone.
+  useEffect(() => {
+    const previous = locationRef.current;
+    if (active && (previous.node !== node || previous.path !== path) && !focusAfterNavigation.current) {
+      focusAfterNavigation.current = { node, path };
+    }
+    locationRef.current = { node, path };
+  }, [active, node, path]);
+  useEffect(() => {
+    const request = focusAfterNavigation.current;
+    if (!request) return;
+    if (!active) {
+      focusAfterNavigation.current = null;
+      return;
+    }
+    if (request.node !== node || request.path !== path || loading) return;
+    const frame = requestAnimationFrame(() => {
+      if (!active || loadingRef.current || focusAfterNavigation.current !== request) return;
+      focusAfterNavigation.current = null;
+      secRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, node, path, loading]);
   const [over, setOver] = useState<string | null>(null); // "." = panel itself, else folder path
   const [renaming, setRenaming] = useState<string | null>(null);
   /** New file/folder typed straight into a row at the top of the listing (no dialog). */
@@ -367,7 +412,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     const many = sel.size > 1 && sel.size <= MAX_SELS ? [...sel].sort() : undefined;
     const ns = cursor && !sel.has(cursor) ? (true as const) : undefined;
     const old = leaf.sels ? [...leaf.sels].sort() : undefined;
-    if (v !== leaf.sel || ns !== leaf.ns || many?.join("\0") !== old?.join("\0")) onPatch({ sel: v, sels: many, ns });
+    if (v !== leaf.sel || ns !== leaf.ns || many?.join("\0") !== old?.join("\0")) {
+      pendingSelectionEchoes.current.push(selectionEchoKey(node, path, v, ns, many));
+      if (pendingSelectionEchoes.current.length > 32) pendingSelectionEchoes.current.splice(0, pendingSelectionEchoes.current.length - 32);
+      onPatch({ sel: v, sels: many, ns });
+    }
   }, [sel, cursor, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
   // Report the selection upward so the other panels and the selection bar see it.
   useEffect(() => {
@@ -437,7 +486,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const revealHit = (rel: string) => {
     const full = hitPath(rel);
     scrollTo.current = full;
-    onNavigate(node, parent(full));
+    navigate(node, parent(full));
     setSel(new Set([full]));
     setAnchor(full);
     setCursor(full);
@@ -451,11 +500,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       setAnchor(select);
       setCursor(select);
     }
-    onNavigate(n, p);
+    navigate(n, p);
   };
   const openHit = (rel: string, h: { t: Entry["type"] }) => {
     const full = hitPath(rel);
-    if (h.t === "dir") onNavigate(node, full);
+    if (h.t === "dir") navigate(node, full);
     else window.open(fileUrl(node, full), "_blank", "noopener");
   };
   const setSearch = (sr: SearchForm | undefined) => onPatch({ sr });
@@ -510,7 +559,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const pasteLabel = clip ? `Paste ${clip.items.length} item(s)${clip.items.some((i) => i.node !== node) ? ` from ${[...new Set(clip.items.map((i) => i.node))].join(", ")}` : ""}` : "Paste";
 
   const openFile = (en: Entry) => {
-    if (isDirEntry(en)) onNavigate(node, en.path);
+    if (isDirEntry(en)) navigate(node, en.path);
     else window.open(fileUrl(node, en.path), "_blank", "noopener");
   };
   const showMenu = (e: React.MouseEvent, items: MenuItem[]) => {
@@ -568,7 +617,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   /** Menu for a folder itself: empty space in the listing, or a breadcrumb. */
   const folderItems = (dir: string, here: boolean): MenuItem[] => [
-    ...(here ? [] : ([{ label: "Open", onSelect: () => onNavigate(node, dir) }, { label: "Open in new panel", onSelect: () => onOpenPanel(node, dir) }, { label: "Open in new tab", onSelect: () => newTab({ node, path: dir }) }] as MenuItem[])),
+    ...(here ? [] : ([{ label: "Open", onSelect: () => navigate(node, dir) }, { label: "Open in new panel", onSelect: () => onOpenPanel(node, dir) }, { label: "Open in new tab", onSelect: () => newTab({ node, path: dir }) }] as MenuItem[])),
     { label: isBookmarked(marks, { node, path: dir }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: dir }) },
     { label: "New file...", onSelect: () => startCreate(dir, "file") },
     { label: "New folder...", onSelect: () => startCreate(dir, "folder") },
@@ -688,7 +737,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           {paneExtra}
         </div>
         <div className="pv-body pp-body" data-testid="git-branch-diff-scroll">
-          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} selectedTab={leaf.pt ?? "details"} onTabChange={(pt) => onPatch({ pt })} onReveal={(p) => goTo(node, parent(p), p)} onOpenWorktree={(p) => { setClosedFor(null); setPropsFor(null); onNavigate(node, p); }} worktreeHref={(p) => encodeState({ tree: { kind: "leaf", id: leaf.id, node, path: p, pv: { dock: leaf.pv?.dock ?? "right", size: leaf.pv?.size ?? 40, tab: "props" }, pt: "git" }, active: leaf.id })} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
+          <PropertiesPanel key={`${node}\0${propsKey}`} node={node} path={propsKey} {...(!propsFor && only ? { entry: only } : {})} onChanged={refresh} onStatus={onStatus} gitTick={tick} selectedTab={leaf.pt ?? "details"} onTabChange={(pt) => onPatch({ pt })} onReveal={(p) => goTo(node, parent(p), p)} onOpenWorktree={(p) => { setClosedFor(null); setPropsFor(null); navigate(node, p); }} worktreeHref={(p) => encodeState({ tree: { kind: "leaf", id: leaf.id, node, path: p, pv: { dock: leaf.pv?.dock ?? "right", size: leaf.pv?.size ?? 40, tab: "props" }, pt: "git" }, active: leaf.id })} {...(onDiffHead ? { onDiffHead: (p: string) => onDiffHead(node, p) } : {})} />
         </div>
       </div>
     ) : sel.size > 1 ? (
@@ -866,7 +915,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   const goUp = () => {
     onFocus();
-    if (parentPath !== null) onNavigate(node, parentPath);
+    if (parentPath !== null) navigate(node, parentPath);
   };
   const rowsShown = visible.length > limit ? visible.slice(0, limit) : visible;
   const remaining = visible.length - rowsShown.length;
@@ -1113,7 +1162,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         return !!en && (open(en), true);
       }
       if (e.altKey && !mod && (key === "ArrowLeft" || key === "ArrowRight")) return histGo(key === "ArrowLeft" ? -1 : 1), true;
-      if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return path !== "/" && (onNavigate(node, parent(path)), true);
+      if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return path !== "/" && (navigate(node, parent(path)), true);
       if (key === "F2") return selEntries.length === 1 && (setRenaming(selEntries[0]!.path), true);
       if (key === "F4") return selEntries.length === 1 && canEdit(selEntries[0]!) && (setEditing({ node, path: selEntries[0]!.path }), true);
       if (key === "F5") return toOther("copy"), true;
@@ -1215,7 +1264,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     if (!t) return;
     h.i += d;
     h.skip = true;
-    onNavigate(t.node, t.path);
+    navigate(t.node, t.path);
     histTick((n) => n + 1);
   };
   const canBack = histRef.current.i > 0;
@@ -1374,7 +1423,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       <div className="fp-row">
         <Tip label="Back" shortcut="Alt+Left"><button type="button" className="fp-up" aria-label="Back" disabled={!canBack} onClick={() => histGo(-1)}><ArrowLeft /></button></Tip>
         <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
-        <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => onNavigate(node, parent(path))}><ArrowUp /></button></Tip>
+        <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         {git?.repo && !leaf.sr && <span className="git-chip"><GitPill s={git.repo.summary} /></span>}
         <div className="fp-actions">
