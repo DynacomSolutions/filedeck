@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import { File as FileIcon, Folder, History, Server, Star, TriangleAlert, type LucideIcon } from "lucide-react";
 import { api, parent, stat, type NodeInfo } from "./api";
-import { fmtAddr, fuzzy, itemUri, parseAddress, splitTyped, type Where } from "./address";
+import { addressBase, baseRemainder, fmtAddr, fuzzy, itemUri, parseAddress, resolveBasePath, splitTyped, type AddressBase, type Where } from "./address";
 import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
 import { Tip } from "./Tooltip";
@@ -29,6 +29,33 @@ const loadNodes = async (): Promise<NodeInfo[]> => {
   const list = await api.nodes().then((r) => r.nodes).catch(() => nodeCache?.list ?? []);
   nodeCache = { at: Date.now(), list };
   return list;
+};
+
+let baseCache: { at: number; list: AddressBase[]; mountNode: string } | null = null;
+let baseLoad: { node: string; promise: Promise<AddressBase[]> } | null = null;
+const baseKey = (base: Where) => `${base.node}\0${base.path}`;
+const rootBases = (fallbackNode: string, known: NodeInfo[]): AddressBase[] => {
+  const all = known.some((n) => n.name === fallbackNode) ? known : [{ name: fallbackNode, online: true, kind: "node" as const }, ...known];
+  return all.map((n) => ({ node: n.name, path: "/", label: n.kind === "source" ? `${n.name} (${n.type ?? "network"})` : n.name, kind: n.kind ?? "node" }));
+};
+const loadBases = async (fallbackNode: string): Promise<AddressBase[]> => {
+  if (baseCache && Date.now() - baseCache.at < 20000 && baseCache.mountNode === fallbackNode) return baseCache.list;
+  if (baseLoad?.node === fallbackNode) return baseLoad.promise;
+  let promise: Promise<AddressBase[]>;
+  promise = loadNodes()
+    .then(async (known) => {
+      const roots = rootBases(fallbackNode, known);
+      const mounted = await (known.find((n) => n.name === fallbackNode)?.kind === "source" ? Promise.resolve([]) : api.mounts(fallbackNode).then((r) => r.mounts.map((m) => ({ node: fallbackNode, path: m.mountpoint, label: `${fallbackNode}:${m.mountpoint}`, kind: "mount" as const }))).catch(() => []));
+      const seen = new Set<string>();
+      const list = [...roots, ...mounted].filter((b) => !seen.has(baseKey(b)) && (seen.add(baseKey(b)), true));
+      baseCache = { at: Date.now(), list, mountNode: fallbackNode };
+      return list;
+    })
+    .finally(() => {
+      if (baseLoad?.promise === promise) baseLoad = null;
+    });
+  baseLoad = { node: fallbackNode, promise };
+  return promise;
 };
 
 /** One row of a small popup list: `head` rows are captions (not selectable). */
@@ -151,6 +178,8 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [bases, setBases] = useState<AddressBase[]>([]);
+  const [editBase, setEditBase] = useState<AddressBase | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const editBtn = useRef<HTMLSpanElement>(null);
   const [pop, setPop] = useState<{ kind: "dir"; path: string; anchor: Anchor; items: PopItem[] } | { kind: "recent"; anchor: Anchor; items: PopItem[] } | null>(null);
@@ -167,26 +196,65 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const dirCache = useRef(new Map<string, { name: string; dir: boolean }[]>());
   const [box, setBox] = useState<{ left: number; top: number; width: number } | null>(null);
   const crumbs = path.split("/").filter(Boolean);
+  const currentBase = useMemo(() => addressBase(node, path, bases), [bases, node, path]);
+  const baseOptions = useMemo(() => {
+    const seen = new Set<string>();
+    return [currentBase, ...bases].filter((b) => !seen.has(baseKey(b)) && (seen.add(baseKey(b)), true));
+  }, [bases, currentBase]);
+  const selectedBase = editBase ?? currentBase;
+  const explicitAddress = (value: string) => /^(?:https?:\/\/|[^/\s:]+:)/i.test(value.trim());
+  const changeBase = (key: string) => {
+    const next = baseOptions.find((b) => baseKey(b) === key);
+    if (!next) return;
+    const previous = editBase ?? currentBase;
+    let remainder = editing ? text : baseRemainder(previous, path);
+    if (editing) {
+      const parsed = explicitAddress(text) ? parseAddress(text, previous, nodes.map((n) => n.name)) : { node: previous.node, path: resolveBasePath(previous, text) };
+      if (!("error" in parsed) && parsed.node === next.node && (next.path === "/" || parsed.path === next.path || parsed.path.startsWith(next.path.endsWith("/") ? next.path : next.path + "/"))) {
+        remainder = baseRemainder(next, parsed.path);
+      }
+    }
+    setEditBase(next);
+    setText(remainder);
+    setError("");
+    if (!editing) onGo(next.node, resolveBasePath(next, remainder));
+  };
 
   useEffect(() => {
     pushRecent({ node, path });
     visited.current = [{ node, path }, ...visited.current.filter((w) => w.node !== node || w.path !== path)].slice(0, 15);
+    setEditBase(null);
     setPop(null);
   }, [node, path]);
+  useEffect(() => {
+    let alive = true;
+    void loadNodes().then((list) => {
+      if (!alive) return;
+      setNodes(list);
+      setBases(rootBases(node, list));
+    });
+    void loadBases(node).then((list) => alive && setBases(list));
+    return () => {
+      alive = false;
+    };
+  }, [node]);
   useEffect(() => {
     if (!editing && navRef.current) navRef.current.scrollLeft = navRef.current.scrollWidth;
   }, [node, path, editing]);
 
   const begin = useCallback(() => {
     dirCache.current.clear();
-    setText(here);
+    const base = addressBase(node, path, bases);
+    setEditBase(base);
+    setText(baseRemainder(base, path));
     setError("");
     setCur(-1);
     setEditing(true);
     void loadNodes().then(setNodes);
-  }, [here]);
+  }, [bases, node, path]);
   const end = useCallback((refocus: boolean) => {
     setEditing(false);
+    setEditBase(null);
     setItems([]);
     setError("");
     setBusy(false);
@@ -200,8 +268,8 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     if (editing) input.current?.select();
   }, [editing]);
   useEffect(() => {
-    if (!editing) setText(here);
-  }, [here, editing]);
+    if (!editing) setText(baseRemainder(addressBase(node, path, bases), path));
+  }, [bases, editing, node, path]);
 
   // Ctrl+L in the active panel.
   useEffect(() => {
@@ -222,13 +290,15 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     if (!editing) return;
     const ac = new AbortController();
     const timer = window.setTimeout(async () => {
-      const where: Where = { node, path };
+      const base = editBase ?? currentBase;
+      const where: Where = { node: base.node, path: base.path };
       const names = nodes.map((n) => n.name);
       const out: Item[] = [];
       const seen = new Set<string>();
       const add = (i: Item) => !seen.has(i.uri) && (seen.add(i.uri), out.push(i));
       const q = text.trim();
-      const ty = splitTyped(text, where, names);
+      const typed = !explicitAddress(text) && base.path !== "/" ? `${base.node}:${resolveBasePath(base, text)}` : text;
+      const ty = splitTyped(typed, where, names);
       if (ty?.bare) {
         nodes
           .map((n) => [n, fuzzy(q, n.name)] as const)
@@ -277,7 +347,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       window.clearTimeout(timer);
       ac.abort();
     };
-  }, [editing, text, nodes, node, path, hidden, marks]);
+  }, [bases, currentBase, editBase, editing, text, nodes, node, path, hidden, marks]);
 
   // Dropdown position under the input.
   useLayoutEffect(() => {
@@ -292,9 +362,17 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     if (busy) return;
     setBusy(true);
     setError("");
-    const where: Where = { node, path };
+    const base = editBase ?? currentBase;
+    const where: Where = { node: base.node, path: base.path };
     const known = nodes.length ? nodes : await loadNodes();
-    const p = pick && !pick.select ? { node: pick.node, path: pick.path } : pick?.select ? { node: pick.node, path: pick.path, select: pick.select } : parseAddress(raw, where, known.map((n) => n.name));
+    const trimmed = raw.trim();
+    const p = pick && !pick.select
+      ? { node: pick.node, path: pick.path }
+      : pick?.select
+        ? { node: pick.node, path: pick.path, select: pick.select }
+        : explicitAddress(trimmed)
+          ? parseAddress(trimmed, where, known.map((n) => n.name))
+          : { node: base.node, path: resolveBasePath(base, trimmed) };
     if ("error" in p) {
       setError(p.error);
       setBusy(false);
@@ -405,10 +483,19 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     setPop({ kind: "recent", anchor: anchorOf(btn), items: items.length ? items : [{ key: "none", label: "No recent locations yet" }] });
   };
 
+  const basePicker = (
+    <select className="addr-base" aria-label="Location base" value={baseKey(selectedBase)} disabled={busy} onChange={(e) => changeBase(e.target.value)}>
+      {baseOptions.map((base) => (
+        <option key={baseKey(base)} value={baseKey(base)}>{base.label}</option>
+      ))}
+    </select>
+  );
+
   if (editing) {
     return (
       <div className="addr">
-          <input
+        {basePicker}
+        <input
             ref={input}
             type="text"
             role="combobox"
@@ -425,8 +512,11 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
             autoFocus
             onChange={(e) => (setText(e.target.value), setError(""))}
             onKeyDown={onKey}
-            onBlur={() => end(false)}
-          />
+            onBlur={(e) => {
+              if (e.relatedTarget && e.currentTarget.parentElement?.contains(e.relatedTarget)) return;
+              end(false);
+            }}
+        />
         {error && (
           <Tip label={error} forceOpen>
             <span className="addr-warn"><TriangleAlert aria-hidden="true" /></span>
@@ -443,20 +533,23 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       </div>
     );
   }
-  const segs = [{ label: node + ":", path: "/" }, ...crumbs.map((c, i) => ({ label: c, path: "/" + crumbs.slice(0, i + 1).join("/") }))];
+  const remainder = baseRemainder(currentBase, path);
+  const remainderCrumbs = remainder.split("/").filter(Boolean);
+  const segs = [{ label: "/", path: currentBase.path }, ...remainderCrumbs.map((c, i) => ({ label: c, path: resolveBasePath(currentBase, remainderCrumbs.slice(0, i + 1).join("/") ) }))];
   return (
     <div className="addr" onMouseDown={(e) => {
       // empty space inside the bar (not a segment, chevron or the recents button) starts text editing
-      if (e.button === 0 && e.currentTarget.contains(e.target as Node) && !(e.target as Element).closest("button")) {
+      if (e.button === 0 && e.currentTarget.contains(e.target as Node) && !(e.target as Element).closest("button,select")) {
         e.preventDefault();
         begin();
       }
     }}>
+      {basePicker}
       <nav className="crumbs" aria-label="Breadcrumb" ref={navRef} onWheel={wheelX}>
         {segs.map((sg, i) => (
           <span className="crumb" key={sg.path}>
-            <Tip label={i === 0 ? `Root of ${node}` : sg.path}>
-              <button type="button" className={i === segs.length - 1 ? "here" : ""} onClick={() => onGo(node, sg.path)} onContextMenu={(e) => onCrumbMenu(e, sg.path)}>
+            <Tip label={i === 0 ? `Root of ${currentBase.label}` : sg.path}>
+              <button type="button" className={i === segs.length - 1 ? "here" : ""} onClick={() => onGo(currentBase.node, sg.path)} onContextMenu={(e) => onCrumbMenu(e, sg.path)}>
                 {i === 0 ? <Ic.HardDrive aria-hidden="true" /> : null}
                 {sg.label}
               </button>
