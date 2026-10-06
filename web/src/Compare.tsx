@@ -7,6 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffCounts, type DiffJobView, type DiffMode, type DiffRow, type DiffStats, type Loc, type OpJob, type SyncStepSpec } from "./api";
 import { flattenFolders, joinRoot, relUnder, type CNode, type FolderData } from "./compareModel";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { Modal } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
 import { wheelX } from "./scrollx";
@@ -578,10 +579,10 @@ function Cell({ n, side, ctl }: { n: CNode; side: Side; ctl: CompareCtl }) {
     );
   const d = side === "left" ? r.l : r.r;
   const spelling = side === "right" && r.rp ? nameOf(r.rp) : n.name;
-  if (!d) return <span className="cmp-ph" aria-label={`Not on the ${side} side`} />;
+  if (!d) return <span className="cmp-ph" role="gridcell" aria-label={`Not on the ${side} side`} />;
   return (
     <>
-      <Tip label={r.p} fill><span className="cmp-name" style={{ paddingLeft: ctl.depthOf(r.p) * 16 }}>
+      <div role="gridcell"><Tip label={r.p} fill><span className="cmp-name" style={{ paddingLeft: ctl.depthOf(r.p) * 16 }}>
         {n.isDir ? (
           <button
             className="cmp-twisty"
@@ -596,9 +597,9 @@ function Cell({ n, side, ctl }: { n: CNode; side: Side; ctl: CompareCtl }) {
           <span className="cmp-twisty" aria-hidden="true" />
         )}
         <FileIcon className="ico" dir={n.isDir} type={d.t === "symlink" ? "symlink" : "file"} /> {spelling}
-      </span></Tip>
-      <span className="num">{n.isDir ? "" : fmtSize(d.s)}</span>
-      <span className={"cmp-mt" + (r.newer === side ? " fd-newer" : "")}>
+      </span></Tip></div>
+      <span role="gridcell" className="num">{n.isDir ? "" : fmtSize(d.s)}</span>
+      <span role="gridcell" className={"cmp-mt" + (r.newer === side ? " fd-newer" : "")}>
         {fmtDate(d.m)}
         {r.newer === side ? <span className="fd-newer-tag" title="Newer side"><ArrowUp /><span className="visually-hidden">newer</span></span> : null}
       </span>
@@ -650,6 +651,8 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
         className="cmp-scroll"
         ref={ref}
         role="grid"
+        tabIndex={0}
+        aria-activedescendant={ctl.cursor ? `${side}-compare-${encodeURIComponent(ctl.cursor)}` : undefined}
         aria-label={`Aligned rows, ${side} side`}
         onScroll={(e) => {
           setTop(e.currentTarget.scrollTop);
@@ -658,16 +661,16 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
         onClick={(e) => e.target === e.currentTarget && ctl.setSelected(new Set())}
       >
        <div className="cmp-inner">
-        <div className="cmp-head" aria-hidden>
-          <span>{side === "left" ? "Left" : "Right"}: name</span>
-          <span className="num">Size</span>
-          <span>Modified</span>
-          <span />
+        <div className="cmp-head" role="row">
+          <span role="columnheader">{side === "left" ? "Left" : "Right"}: name</span>
+          <span role="columnheader" className="num">Size</span>
+          <span role="columnheader">Modified</span>
+          <span role="columnheader" aria-label="Comparison status" />
         </div>
         {showUp && (
           <div className="cmp-row up" role="row" style={{ position: "relative", height: ROW_H }} onClick={ctl.up}>
-            <span className="cmp-name"><span className="fl"><Ic.CornerLeftUp className="ico" /><button type="button" className="up-btn" aria-label="Up one folder">{upRow === "up" ? "Up" : ".."}</button></span></span>
-            <span /><span /><span />
+            <span role="gridcell" className="cmp-name"><span className="fl"><Ic.CornerLeftUp className="ico" /><button type="button" className="up-btn" aria-label="Up one folder">{upRow === "up" ? "Up" : ".."}</button></span></span>
+            <span role="gridcell" /><span role="gridcell" /><span role="gridcell" />
           </div>
         )}
         {ctl.running && !ctl.rows.length && Array.from({ length: 10 }, (_, i) => (
@@ -684,6 +687,7 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
             return (
               <div
                 key={r.p}
+                id={`${side}-compare-${encodeURIComponent(r.p)}`}
                 role="row"
                 aria-selected={sel.has(r.p)}
                 data-rel={r.p}
@@ -697,12 +701,12 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
               >
                 <Cell n={n} side={side} ctl={ctl} />
                 {r.status === "pending" ? (
-                  <span className="cmp-status" title={n.skel ? "Listing this folder" : n.isDir ? "Comparing what is inside" : "Comparing"}>
+                  <span role="gridcell" className="cmp-status" title={n.skel ? "Listing this folder" : n.isDir ? "Comparing what is inside" : "Comparing"}>
                     <LoaderCircle className="cmp-spin" aria-hidden="true" />
                     <span className="visually-hidden">{n.skel ? "Loading" : "Comparing"}</span>
                   </span>
                 ) : (
-                  <span className="cmp-status" title={r.why ?? STATUS[r.status].label}>
+                  <span role="gridcell" className="cmp-status" title={r.why ?? STATUS[r.status].label}>
                     {(() => { const I = STATUS[r.status].Icon; return <I aria-hidden="true" />; })()}
                     <span className="visually-hidden">{STATUS[r.status].label}</span>
                   </span>
@@ -981,9 +985,7 @@ export function SyncDialog({ ctl }: { ctl: CompareCtl }) {
   const exec = ctl.exec;
   if (!exec) return null;
   return (
-    <div className="modal-back" role="dialog" aria-modal="true" aria-label={ACTION_LABEL[exec.action]}>
-      <div className="modal wide">
-        <h2>{ACTION_LABEL[exec.action]}</h2>
+    <Modal title={ACTION_LABEL[exec.action]} onClose={ctl.closeExec} wide>
         {exec.state === "plan" && (
           <>
             <p className="muted">
@@ -1020,8 +1022,7 @@ export function SyncDialog({ ctl }: { ctl: CompareCtl }) {
             <div className="modal-actions"><button className="primary" onClick={ctl.closeExec}><Ic.RefreshCw /> Close and compare again</button></div>
           </>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }
 

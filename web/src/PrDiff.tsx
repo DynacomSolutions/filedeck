@@ -7,6 +7,7 @@ import { OPTS, useTheme } from "./EditorViews";
 import { modelUri } from "./monacoSetup";
 import { Tip } from "./Tooltip";
 import type { PrState } from "./urlState";
+import { useDialogFocus } from "./dialogFocus";
 
 const STATUS: Record<GitFile["status"], { label: string; cls: string }> = {
   A: { label: "Added", cls: "pr-a" },
@@ -33,6 +34,7 @@ export function PrDiffView({ state, onState, onClose, onStatus }: { state: PrSta
   const [filter, setFilter] = useState("");
   const root = useRef<HTMLDivElement>(null);
 
+  useDialogFocus(root);
   useEffect(() => root.current?.focus(), []);
   useEffect(() => {
     let live = true;

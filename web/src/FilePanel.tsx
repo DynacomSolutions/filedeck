@@ -1,5 +1,5 @@
 import { PANEL_MIME } from "./dock";
-import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
 import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploads";
@@ -136,6 +136,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const [anchor, setAnchor] = useState<string | null>(null);
   /** the panel's ACTIVE item: drives its preview/properties and is never touched by actions in other panels (the action selection is `sel`) */
   const [cursor, setCursor] = useState<string | null>(leaf.sel ?? null);
+  const createErrorId = useId();
   const cursorRef = useRef(cursor);
   cursorRef.current = cursor;
   const selRef = useRef(sel);
@@ -603,9 +604,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
 
   const crumbs = path.split("/").filter(Boolean);
   const th = (key: SortKey, label: string) => (
-    <th onClick={() => setSort((s) => ({ key, asc: s.key === key ? !s.asc : true }))} className={"sortable " + key}>
-      {label}
-      {sort.key === key ? (sort.asc ? <ChevronUp role="img" aria-label="ascending" /> : <ChevronDown role="img" aria-label="descending" />) : null}
+    <th aria-sort={sort.key === key ? (sort.asc ? "ascending" : "descending") : "none"} className={"sortable " + key}>
+      <button type="button" onClick={() => setSort((s) => ({ key, asc: s.key === key ? !s.asc : true }))}>
+        {label}
+        {sort.key === key ? (sort.asc ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />) : null}
+      </button>
     </th>
   );
   const fileInput = useRef<HTMLInputElement>(null);
@@ -817,6 +820,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       className="cr-input"
       autoFocus
       aria-label={creating === "file" ? "Name of the new file" : "Name of the new folder"}
+      aria-invalid={!!err || undefined}
+      aria-describedby={err ? createErrorId : undefined}
       placeholder={creating === "file" ? "New file name, Enter to create" : "New folder name, Enter to create"}
       onClick={(e) => e.stopPropagation()}
       onBlur={() => setCreating(null)}
@@ -868,8 +873,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       <div
         className="fp-scroll"
         tabIndex={0}
-        role="group"
+        role={tabs.length > 1 && !cside ? "tabpanel" : "group"}
         aria-label={`Files in ${path} on ${node}. Arrow keys select, Enter opens.`}
+        id={tabs.length > 1 && !cside ? `${leaf.id}-tabpanel` : undefined}
+        aria-labelledby={tabs.length > 1 && !cside ? `${leaf.id}-tab-${ti}` : undefined}
         onFocus={(e) => {
           // Tabbing into the list selects the first entry so the arrow keys have somewhere to start. A mouse click
           // also focuses the list but must not: selecting (and scrolling to) the first row between mousedown and
@@ -889,7 +896,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }}
       >
         {view === "grid" ? (
-          <div className="fp-grid" role="listbox" aria-label="Files" aria-multiselectable="true" aria-busy={loading}>
+          <div className="fp-grid" role="group" aria-label="Files" aria-busy={loading}>
             {showUp && (
               <div className={"tile up" + (over === UP_DROP ? " drop" : "")} onClick={goUp} {...upDrop}>
                 <div className="tile-img"><span className="tile-ico"><CornerLeftUp /></span></div>
@@ -906,7 +913,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             {rowsShown.map((en) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
-                <div key={en.path} role="option" aria-selected={sel.has(en.path)} {...itemProps(en, isDir, "tile ")}>
+                <div key={en.path} role="group" aria-label={`${en.name}${sel.has(en.path) ? ", selected" : ""}`} {...itemProps(en, isDir, "tile ")}>
                   <Thumb node={node} entry={en} isDir={isDir} />
                   <Tip label={en.name} fill><div className="tile-name">{nameEditor(en)}</div></Tip>
                   {gitMark(en, isDir) && <div className="tile-git">{gitMark(en, isDir)}</div>}
@@ -1268,9 +1275,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           {tabs.map((t, i) => (
             <Tip key={i} label={`${t.node}:${t.path}`}>
             <div
-              role="tab"
-              aria-selected={i === ti}
-              tabIndex={-1}
               className={"fp-tab" + (i === ti ? " on" : "") + (tabDrag === i ? " dragging" : "")}
               draggable
               onClick={() => selectTab(i)}
@@ -1295,7 +1299,24 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 setTabDrag(null);
               }}
             >
-              <span className="fp-tab-name">{tabLabel(t)}</span>
+              <button
+                id={`${leaf.id}-tab-${i}`}
+                type="button"
+                role="tab"
+                aria-selected={i === ti}
+                aria-controls={`${leaf.id}-tabpanel`}
+                tabIndex={i === ti ? 0 : -1}
+                className="fp-tab-select"
+                onKeyDown={(e) => {
+                  const next = e.key === "ArrowRight" ? (i + 1) % tabs.length : e.key === "ArrowLeft" ? (i - 1 + tabs.length) % tabs.length : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : -1;
+                  if (next < 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  selectTab(next);
+                  requestAnimationFrame(() => document.getElementById(`${leaf.id}-tab-${next}`)?.focus());
+                }}
+                onClick={(e) => { e.stopPropagation(); selectTab(i); }}
+              ><span className="fp-tab-name">{tabLabel(t)}</span></button>
               <button type="button" className="fp-tab-x" aria-label={`Close tab ${tabLabel(t)}`} onClick={(e) => (e.stopPropagation(), closeTab(i))}><X /></button>
             </div>
             </Tip>
@@ -1387,7 +1408,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           />
         </div>
       )}
-      {err && <div className="fp-err">{err}</div>}
+      {err && <div id={createErrorId} className="fp-err" role="alert">{err}</div>}
       {pane ? (
         <Group key={dock} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
           onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>

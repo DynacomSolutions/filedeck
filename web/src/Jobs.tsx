@@ -293,7 +293,8 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   // Questions need attention, so the tray opens by itself.
   const asking = opRows.some((o) => o.state === "waiting");
   return (
-    <section className={"jobs" + (collapsed ? " collapsed" : "")} aria-label="Background jobs" role="status">
+    <section className={"jobs" + (collapsed ? " collapsed" : "")} aria-label="Background jobs">
+      <span className="sr-only" role="status">{asking ? `${total} background jobs. An operation needs an answer.` : `${running} of ${total} background jobs running.`}</span>
       <button type="button" className="jobs-toggle" aria-expanded={!collapsed} onClick={() => setCollapsedPersist(!collapsed)}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
         Jobs

@@ -791,3 +791,37 @@ button.wt-row:hover{background:var(--surface-2)}
 .side-cmp-ahead li{display:flex;align-items:center;gap:.5rem;min-width:0}
 .side-cmp-ahead-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .side-cmp-ahead-cancel{flex:none;padding:.1rem .4rem;font-size:.85em}.side-cmp-ahead-cancel svg{width:12px;height:12px;vertical-align:-1px}
+
+/* WCAG 2.2 AAA controls: preserve a 44px hit area and visible keyboard focus. */
+:where(button, a[href], input, select, textarea, [tabindex="0"], [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"]):focus-visible {
+  outline: 2px solid #000 !important;
+  outline-offset: 1px !important;
+  box-shadow: 0 0 0 5px #fff !important;
+}
+:where(button, a[href], input, select, textarea, [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"]) {
+  min-width: 44px !important;
+  min-height: 44px !important;
+}
+.fp-up, .fp-actions button, .fp-tools button, .pv-head .pv-acts > *, .pv-head .pv-acts button,
+.pv-head a.btn-a, .pv-head .pv-extra .pv-dockbtn, .ctx button, .crumbs button,
+.side-scroll button, .fp-tab-x, .fp-tab-new, .addr-recent, .addr-warn, .mark-rm,
+.selbar-actions button, .theme-seg button, .cmp-seg button {
+  min-width: 44px !important;
+  min-height: 44px !important;
+  height: auto !important;
+}
+.tip-bubble { pointer-events: auto; }
+.sortable button {
+  width: 100%; min-width: 44px; min-height: 44px; display: inline-flex; align-items: center;
+  gap: .35rem; padding: .4rem .55rem; border: 0; background: transparent; color: inherit; font: inherit; text-align: inherit;
+}
+.fp-tabs [role="tab"] { min-height: 44px; }
+.addr-pop li[role="none"] { padding: 0; }
+.addr-pop li > button[role="menuitem"] {
+  display: flex; align-items: center; gap: .5rem; width: 100%; min-width: 44px; min-height: 44px;
+  padding: .3rem .5rem; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left;
+}
+.addr-pop li.cur > button[role="menuitem"] { background: var(--surface-3); }
+.addr-pop li.dim > button[role="menuitem"] { color: var(--muted); cursor: default; }
+.shortcut-pref{display:flex;align-items:flex-start;gap:.65rem;line-height:1.5;margin:.75rem 0;padding:.75rem;border:1px solid var(--border);border-radius:var(--radius-btn)}
+.shortcut-pref-input{width:1.25rem!important;height:1.25rem!important;min-width:1.25rem!important;min-height:1.25rem!important;margin:.15rem .25rem 0 0!important;flex:none}
