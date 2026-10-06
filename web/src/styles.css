@@ -687,6 +687,15 @@ select option{background:var(--surface);color:var(--fg)}
 .perm-name button{min-height:32px}
 .pp-actions{display:flex;justify-content:flex-end}
 .pp .props>div{grid-template-columns:5.5rem 1fr}
+/* The Properties pane shares a short, resizable dock on narrow screens.
+   Let the outer pane scroll so its dock controls and tab panels remain reachable. */
+@media(max-width:700px){
+  .fp .pv{overflow-x:hidden;overflow-y:auto}
+  .fp .pv-head{flex:0 0 auto;min-width:0;align-items:flex-start}
+  .fp .pv-body.pp-body{flex:0 0 auto;min-height:max(14rem,35dvh);overflow:visible}
+  .fp .props-tabs{flex-wrap:wrap;overflow:visible}
+  .fp .pp .props>div{grid-template-columns:minmax(0,1fr);gap:.2rem}
+}
 .pv-imgsk{position:absolute;inset:.8rem;border-radius:var(--radius-btn);background:var(--surface-2);animation:sk-in .01s linear .12s backwards}
 /* compare: parent row and loading placeholders */
 .cmp-row.up{cursor:pointer;color:var(--muted)}
