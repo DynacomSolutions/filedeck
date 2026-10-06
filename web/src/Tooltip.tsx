@@ -26,6 +26,7 @@ export function Tip({ label, shortcut, fill, forceOpen, children }: Props) {
   const wrap = useRef<HTMLSpanElement>(null);
   const bubble = useRef<HTMLDivElement>(null);
   const timer = useRef<number | undefined>(undefined);
+  const hideTimer = useRef<number | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const shown = open || !!forceOpen;
@@ -33,14 +34,19 @@ export function Tip({ label, shortcut, fill, forceOpen, children }: Props) {
 
   const show = useCallback((delay: number) => {
     window.clearTimeout(timer.current);
+    window.clearTimeout(hideTimer.current);
     timer.current = window.setTimeout(() => setOpen(true), delay);
   }, []);
   const hide = useCallback(() => {
     window.clearTimeout(timer.current);
+    window.clearTimeout(hideTimer.current);
     setOpen(false);
     setPos(null);
   }, []);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
+  useEffect(() => () => {
+    window.clearTimeout(timer.current);
+    window.clearTimeout(hideTimer.current);
+  }, []);
 
   // Place under the control, flip above when there is no room, and keep inside the viewport.
   useLayoutEffect(() => {
@@ -67,11 +73,28 @@ export function Tip({ label, shortcut, fill, forceOpen, children }: Props) {
   if (!has) return children;
   const child = isValidElement(children) ? cloneElement(children, { "aria-describedby": shown ? id : undefined }) : children;
   return (
-    <span ref={wrap} className={"tip" + (fill ? " tip--fill" : "")} onMouseEnter={() => show(DELAY)} onMouseLeave={hide} onFocus={() => show(150)} onBlur={hide} onPointerDown={hide}>
+    <span ref={wrap} className={"tip" + (fill ? " tip--fill" : "")} onMouseEnter={() => show(DELAY)} onMouseLeave={(e) => {
+      // The tooltip is portalled to body, so moving the pointer to it leaves this wrapper.
+      // Keep it open while the pointer is over the tooltip, as required by 1.4.13.
+      if (bubble.current?.contains(e.relatedTarget as Node | null)) return;
+      window.clearTimeout(hideTimer.current);
+      hideTimer.current = window.setTimeout(() => {
+        if (!wrap.current?.contains(document.activeElement) && !bubble.current?.matches(":hover")) hide();
+      }, 180);
+    }} onFocus={() => show(150)} onBlur={(e) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      hide();
+    }} onPointerDown={hide}>
       {child}
       {shown &&
         createPortal(
-          <div ref={bubble} id={id} role="tooltip" className="tip-bubble" style={pos ? { left: pos.x, top: pos.y } : { left: 0, top: 0, visibility: "hidden" }}>
+          <div ref={bubble} id={id} role="tooltip" className="tip-bubble" onMouseEnter={() => { window.clearTimeout(timer.current); window.clearTimeout(hideTimer.current); setOpen(true); }} onMouseLeave={(e) => {
+            if (wrap.current?.contains(e.relatedTarget as Node | null)) return;
+            window.clearTimeout(hideTimer.current);
+            hideTimer.current = window.setTimeout(() => {
+              if (!wrap.current?.contains(document.activeElement)) hide();
+            }, 120);
+          }} style={pos ? { left: pos.x, top: pos.y } : { left: 0, top: 0, visibility: "hidden" }}>
             {label}
             {shortcut && <kbd>{shortcut}</kbd>}
           </div>,

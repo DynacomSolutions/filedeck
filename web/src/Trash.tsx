@@ -5,6 +5,7 @@ import { ConfirmDialog, NameDialog } from "./Dialogs";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
+import { useDialogFocus } from "./dialogFocus";
 
 type Dlg =
   | { k: "del"; ids: string[] }
@@ -34,6 +35,7 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
       .catch((e: Error) => setErr(e.message));
   }, [node]);
   useEffect(load, [load]);
+  useDialogFocus(root);
   useEffect(() => root.current?.focus(), []);
 
   const current = vols?.find((v) => v.volume === volume) ?? vols?.find((v) => v.items.length) ?? vols?.[0];

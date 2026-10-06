@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Modal } from "./ArchiveDialog";
 import * as Ic from "lucide-react";
 
@@ -7,6 +7,7 @@ export function NameDialog({ title, label, initial = "", action, allowSlash, onS
   const [name, setName] = useState(initial);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const errorId = useId();
   const go = async () => {
     const v = name.trim();
     if (allowSlash ? !v.startsWith("/") : !v || v.includes("/") || v === "." || v === "..") return setErr(allowSlash ? "Enter an absolute path starting with /" : "Enter a plain name without slashes");
@@ -23,9 +24,9 @@ export function NameDialog({ title, label, initial = "", action, allowSlash, onS
     <Modal title={title} onClose={onClose}>
       <label>
         {label}
-        <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onFocus={(e) => e.currentTarget.select()} />
+        <input autoFocus value={name} aria-invalid={!!err || undefined} aria-describedby={err ? errorId : undefined} onChange={(e) => (setName(e.target.value), setErr(""))} onFocus={(e) => e.currentTarget.select()} />
       </label>
-      {err && <div className="fp-err">{err}</div>}
+      {err && <div id={errorId} className="fp-err" role="alert">{err}</div>}
       <div className="modal-actions">
         <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
         <button type="submit" disabled={busy} onClick={() => void go()}><Ic.Check /> {action}</button>
@@ -40,15 +41,18 @@ export function LinkDialog({ existing, onSubmit, onClose }: { existing?: { name:
   const [target, setTarget] = useState(existing?.target ?? "");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const errorId = useId();
+  const [errorField, setErrorField] = useState<"name" | "target">("name");
   const go = async () => {
     const n = name.trim();
-    if (!n || n.includes("/") || n === "." || n === "..") return setErr("Enter a plain link name without slashes");
-    if (!target) return setErr("Enter where the link points");
+    if (!n || n.includes("/") || n === "." || n === "..") return (setErrorField("name"), setErr("Enter a plain link name without slashes"));
+    if (!target) return (setErrorField("target"), setErr("Enter where the link points"));
     setBusy(true);
     try {
       await onSubmit(n, target);
       onClose();
     } catch (e) {
+      setErrorField("target");
       setErr((e as Error).message);
       setBusy(false);
     }
@@ -57,13 +61,13 @@ export function LinkDialog({ existing, onSubmit, onClose }: { existing?: { name:
     <Modal title={existing ? "Edit link target" : "New symbolic link"} onClose={onClose}>
       <label>
         Link name
-        <input autoFocus={!existing} value={name} readOnly={!!existing} onChange={(e) => setName(e.target.value)} />
+        <input autoFocus={!existing} value={name} readOnly={!!existing} aria-invalid={!!err && errorField === "name" || undefined} aria-describedby={err && errorField === "name" ? errorId : undefined} onChange={(e) => (setName(e.target.value), setErr(""))} />
       </label>
       <label>
         Points to (relative to the link's folder, or an absolute path)
-        <input autoFocus={!!existing} value={target} onChange={(e) => setTarget(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void go()} />
+        <input autoFocus={!!existing} value={target} aria-invalid={!!err && errorField === "target" || undefined} aria-describedby={err && errorField === "target" ? errorId : undefined} onChange={(e) => (setTarget(e.target.value), setErr(""))} onKeyDown={(e) => e.key === "Enter" && void go()} />
       </label>
-      {err && <div className="fp-err" role="alert">{err}</div>}
+      {err && <div id={errorId} className="fp-err" role="alert">{err}</div>}
       <div className="modal-actions">
         <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
         <button type="submit" disabled={busy} onClick={() => void go()}>{existing ? <Ic.Save /> : <Ic.Plus />} {existing ? "Save" : "Create"}</button>

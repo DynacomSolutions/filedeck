@@ -554,6 +554,7 @@ export const api = {
       return { ...(await j<{ encrypted: boolean; locked: boolean }>(r)), usedSaved: saved };
     }),
   vaultList: () => fetch("/api/vault").then((r) => j<{ entries: VaultEntry[]; persistent: boolean; ttlSeconds: number; maxHours: number }>(r)),
+  vaultExtend: (id: string) => fetch(`/api/vault/${enc(id)}/extend`, { method: "POST" }).then((r) => j<VaultEntry>(r)),
   vaultForget: (id: string) => fetch(`/api/vault/${enc(id)}`, { method: "DELETE" }).then((r) => j<unknown>(r)),
   vaultForgetAll: () => fetch("/api/vault", { method: "DELETE" }).then((r) => j<{ removed: number }>(r)),
   vaultForgetPath: (node: string, path: string) =>
