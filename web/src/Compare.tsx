@@ -11,6 +11,7 @@ import { Modal } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
 import { wheelX } from "./scrollx";
+import { getPresentation, usePresentation } from "./presentation";
 import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DEFAULT_UI, DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
 import * as Ic from "lucide-react";
@@ -631,10 +632,13 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
   }, [side]); // eslint-disable-line react-hooks/exhaustive-deps
   // The parent row (setting: "..", "Up" or hidden) sits above the aligned rows on both sides, so row 0 still lines up. Only inside a sub-folder of the compare.
   const { upRow } = useSettings();
+  const presentation = usePresentation();
+  const rowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 5));
+  const headHeight = Math.max(HEAD_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 8));
   const showUp = upRow !== "hidden" && !!ctl.st.rel;
-  const upH = showUp ? ROW_H : 0;
-  const first = Math.max(0, Math.floor(Math.max(0, top - HEAD_H - upH) / ROW_H) - 6);
-  const last = Math.min(ctl.rows.length, Math.ceil((top + h - upH) / ROW_H) + 6);
+  const upH = showUp ? rowHeight : 0;
+  const first = Math.max(0, Math.floor(Math.max(0, top - headHeight - upH) / rowHeight) - 6);
+  const last = Math.min(ctl.rows.length, Math.ceil((top + h - upH) / rowHeight) + 6);
   const sel = ctl.selected;
   const rowMenu = (e: React.MouseEvent, n: CNode) => {
     e.preventDefault();
@@ -665,27 +669,27 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
         onClick={(e) => e.target === e.currentTarget && ctl.setSelected(new Set())}
       >
        <div className="cmp-inner">
-        <div className="cmp-head" role="row">
+        <div className="cmp-head" role="row" style={{ height: headHeight }}>
           <span role="columnheader">{side === "left" ? "Left" : "Right"}: name</span>
           <span role="columnheader" className="num">Size</span>
           <span role="columnheader">Modified</span>
           <span role="columnheader" aria-label="Comparison status" />
         </div>
         {showUp && (
-          <div className="cmp-row up" role="row" style={{ position: "relative", height: ROW_H }} onClick={ctl.up}>
+          <div className="cmp-row up" role="row" style={{ position: "relative", height: rowHeight }} onClick={ctl.up}>
             <span role="gridcell" className="cmp-name"><span className="fl"><Ic.CornerLeftUp className="ico" /><button type="button" className="up-btn" aria-label="Up one folder">{upRow === "up" ? "Up" : ".."}</button></span></span>
             <span role="gridcell" /><span role="gridcell" /><span role="gridcell" />
           </div>
         )}
         {ctl.running && !ctl.rows.length && Array.from({ length: 10 }, (_, i) => (
-          <div key={i} className="cmp-row skel" role="presentation" aria-hidden="true" style={{ position: "relative", height: ROW_H }}>
+          <div key={i} className="cmp-row skel" role="presentation" aria-hidden="true" style={{ position: "relative", height: rowHeight }}>
             <span><span className="sk sk-ico" /><span className="sk sk-nm" style={{ width: `${[7, 11, 9, 13, 8][i % 5]}rem` }} /></span>
             <span><span className="sk sk-num" style={{ "--w": "3rem" } as React.CSSProperties} /></span>
             <span><span className="sk sk-num" style={{ "--w": "7rem" } as React.CSSProperties} /></span>
             <span />
           </div>
         ))}
-        <div style={{ height: ctl.rows.length * ROW_H, position: "relative" }}>
+        <div style={{ height: ctl.rows.length * rowHeight, position: "relative" }}>
           {ctl.rows.slice(first, last).map((n, k) => {
             const r = n.row;
             return (
@@ -698,7 +702,7 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
                 data-status={r.status}
                 aria-busy={r.status === "pending" || undefined}
                 className={"cmp-row st-" + r.status + (n.skel ? " skel" : "") + (sel.has(r.p) ? " sel" : "") + (ctl.cursor === r.p ? " cur" : "") + (!n.skel && !(side === "left" ? r.l : r.r) ? " ph" : "")}
-                style={{ top: (first + k) * ROW_H, height: ROW_H }}
+                style={{ top: (first + k) * rowHeight, height: rowHeight }}
                 onClick={(e) => ctl.click(e, n)}
                 onDoubleClick={() => ctl.open(n)}
                 onContextMenu={(e) => rowMenu(e, n)}
@@ -731,6 +735,9 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
 export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent): boolean {
   const mod = e.ctrlKey || e.metaKey;
   const rows = ctl.rows;
+  const presentation = getPresentation();
+  const rowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 5));
+  const headHeight = Math.max(HEAD_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 8));
   const i = ctl.cursor ? rows.findIndex((x) => x.row.p === ctl.cursor) : -1;
   const move = (to: number) => {
     const n = rows[Math.max(0, Math.min(rows.length - 1, to))];
@@ -739,10 +746,10 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
     if (e.shiftKey) ctl.click({ shiftKey: true, ctrlKey: false, metaKey: false }, n);
     else ctl.setSelected(new Set(ctl.descend(n)));
     document.querySelectorAll<HTMLElement>(`.cmp-scroll`).forEach((sc) => {
-      const off = sc.querySelector(".cmp-row.up") ? ROW_H : 0;
-      const y = HEAD_H + off + rows.indexOf(n) * ROW_H;
-      if (y - HEAD_H < sc.scrollTop) sc.scrollTop = y - HEAD_H;
-      else if (y + ROW_H > sc.scrollTop + sc.clientHeight) sc.scrollTop = y + ROW_H - sc.clientHeight;
+      const off = sc.querySelector(".cmp-row.up") ? rowHeight : 0;
+      const y = headHeight + off + rows.indexOf(n) * rowHeight;
+      if (y - headHeight < sc.scrollTop) sc.scrollTop = y - headHeight;
+      else if (y + rowHeight > sc.scrollTop + sc.clientHeight) sc.scrollTop = y + rowHeight - sc.clientHeight;
     });
   };
   const k = e.key;

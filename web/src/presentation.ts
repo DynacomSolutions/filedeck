@@ -29,7 +29,7 @@ export function cssColourToHex(value: string, fallback = "#ffffff"): string {
   if (/^#[\da-f]{3}$/.test(input)) return `#${input[1]}${input[1]}${input[2]}${input[2]}${input[3]}${input[3]}`;
   const match = input.match(/^rgba?\(\s*([\d.]+%?)[, ]+\s*([\d.]+%?)[, ]+\s*([\d.]+%?)(?:\s*[,/]\s*[\d.]+%?)?\s*\)$/);
   if (!match) return fallback;
-  const channels = match.slice(1, 4).map((channel) => Math.max(0, Math.min(255, Math.round(parseFloat(channel) * (channel.endsWith("%") ? 255 / 100 : 1)))));
+  const channels = match.slice(1, 4).map((channel) => Math.max(0, Math.min(255, Math.round(channel.endsWith("%") ? (parseFloat(channel) / 100) * 255 : parseFloat(channel)))));
   return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
@@ -115,3 +115,5 @@ export const usePresentation = () => useSyncExternalStore((listener) => {
   listeners.add(listener);
   return () => void listeners.delete(listener);
 }, () => current);
+
+export const getPresentation = () => current;

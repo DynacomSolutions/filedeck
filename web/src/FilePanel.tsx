@@ -28,6 +28,7 @@ import { FileIcon } from "./FileIcon";
 import { useSettings } from "./settings";
 import { SkeletonRows, SkeletonTiles } from "./Skeleton";
 import { TransferDestination, type TransferKind } from "./TransferDestination";
+import { usePresentation } from "./presentation";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -107,6 +108,8 @@ const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
 export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onPrDiff, onStatus }: Props) {
   const { node, path } = leaf;
+  const presentation = usePresentation();
+  const estimatedFileRowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 17));
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
   /** the listing for node:path is still on its way (a refresh of a shown folder keeps its rows and is not "loading") */
@@ -973,7 +976,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               );
             })}
             {remaining > 0 && (
-              <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * ROW_H }}>
+              <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * estimatedFileRowHeight }}>
                 <td colSpan={gitCol ? 4 : 3} />
               </tr>
             )}
