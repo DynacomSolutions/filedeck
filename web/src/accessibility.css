@@ -26,6 +26,18 @@ textarea,
   border: 1px solid var(--a11y-control-boundary);
 }
 
+input,
+select,
+textarea {
+  color: var(--fg);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 button.primary {
   border-color: var(--a11y-action-fill);
   background: var(--a11y-action-fill);
