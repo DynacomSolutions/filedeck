@@ -790,6 +790,8 @@ select option{background:var(--surface);color:var(--fg)}
 .git-list li>button{min-height:26px;font-size:.76rem}
 .git-list li>button.git-item{flex:1 1 auto;min-width:0;justify-content:flex-start;text-align:left;overflow:hidden}
 .git-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.git-worktrees{border-top:1px solid var(--line);margin-top:.55rem;padding-top:.45rem}
+.git-worktrees h4{margin:0;font-size:.8rem}
 .tile-git .git-pill{flex-wrap:wrap;justify-content:center;white-space:normal;row-gap:0}
 .tile-git .git-br{max-width:100%}
 /* Worktrees side-panel tab */
@@ -797,6 +799,8 @@ select option{background:var(--surface);color:var(--fg)}
 .wt-list{list-style:none;margin:0;padding:.35rem;display:flex;flex-direction:column;gap:.25rem}
 .wt-row{display:flex;flex-direction:column;align-items:stretch;gap:.15rem;width:100%;min-height:44px;box-sizing:border-box;padding:.45rem .6rem;text-align:left;border:1px solid transparent;border-radius:var(--radius-sm);background:transparent;color:var(--fg);font-size:.8rem}
 button.wt-row:hover{background:var(--surface-2)}
+a.wt-row{color:var(--fg);text-decoration:none}
+a.wt-row:hover{background:var(--surface-2)}
 .wt-row.cur{background:var(--accent-tint);border-color:var(--accent-line)}
 .wt-row.off{opacity:.65}
 .wt-top{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .45rem}

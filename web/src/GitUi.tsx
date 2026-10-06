@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import * as Ic from "lucide-react";
-import { fmtDate } from "./api";
+import { api, fmtDate, type WorktreeList } from "./api";
 import { gitApi, shortHash, stateText, type GitCommit, type GitInfo, type GitSummary } from "./git";
 import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
@@ -90,8 +90,58 @@ const GROUPS = [
   ["untracked", "Untracked"],
 ] as const;
 
-/** Git details for the Properties panel: branch, upstream, last commit, stash, remotes, worktree link, change lists and the HEAD diff. */
-export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorktrees, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onDiffHead: (p: string) => void; onOpenWorktrees?: (repoRoot: string) => void; onApplicability?: (available: boolean | null) => void }) {
+function GitWorktrees({ node, root, onOpen, hrefFor }: { node: string; root: string; onOpen: (path: string) => void; hrefFor: (path: string) => string }) {
+  const [data, setData] = useState<WorktreeList | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let live = true;
+    setData(null);
+    setErr("");
+    void api.worktrees(node, root).then(
+      (result) => live && setData(result),
+      (error: Error) => live && setErr(error.message),
+    );
+    return () => { live = false; };
+  }, [node, root]);
+
+  return (
+    <section className="git-worktrees" aria-label="Repository worktrees">
+      <h4>Worktrees</h4>
+      {err ? <div className="muted perm-hint" role="status">Worktrees unavailable: {err}</div> : !data ? <div className="muted perm-hint" role="status">Loading worktrees...</div> : data.worktrees.length ? (
+        <>
+          <ul className="wt-list" aria-label="Repository worktrees">
+            {data.worktrees.map((w) => {
+              const branch = w.bare ? "bare repository" : w.detached ? "detached" : w.branch ?? "unknown branch";
+              const status = w.prunable ? "Missing worktree" : !w.path ? "Outside this node's folders" : null;
+              const body = <>
+                <span className="wt-top">
+                  <Ic.GitBranch aria-hidden="true" />
+                  <b className="wt-name">{w.name}</b>
+                  {w.current && <span className="wt-pill on">here</span>}
+                  {w.main && !w.bare && <span className="wt-pill">main</span>}
+                  {w.dirty === true && <span className="wt-pill warn">dirty</span>}
+                  {w.locked && <span className="wt-pill">locked</span>}
+                </span>
+                <span className="wt-sub muted">{branch}{w.head ? ` · ${w.head}` : ""}</span>
+                <span className="wt-path muted">{w.path ?? w.gitPath}</span>
+                {status && <span className="muted">{status}</span>}
+              </>;
+              return <li key={w.gitPath}>{w.path && !w.prunable ? (
+                <a href={hrefFor(w.path)} className={"wt-row" + (w.current ? " cur" : "")} aria-current={w.current ? "true" : undefined} aria-label={`Open worktree ${w.name}, ${branch}, ${w.path}`} onClick={(event) => { if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onOpen(w.path!); } }}>{body}</a>
+              ) : (
+                <div className="wt-row off" role="group" aria-label={`${w.name}: ${status ?? "Unavailable"}`}>{body}</div>
+              )}</li>;
+            })}
+          </ul>
+          {data.truncated && <div className="muted perm-hint" role="status">The worktree list is truncated. Some entries may not be shown.</div>}
+        </>
+      ) : <div className="muted perm-hint" role="status">No worktrees found.</div>}
+    </section>
+  );
+}
+
+/** Git details for the Properties panel: branch, upstream, last commit, stash, remotes, worktrees, change lists and the HEAD diff. */
+export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorktree, worktreeHref, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onDiffHead: (p: string) => void; onOpenWorktree?: (path: string) => void; worktreeHref?: (path: string) => string; onApplicability?: (available: boolean | null) => void }) {
   const [info, setInfo] = useState<GitInfo | null>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
@@ -136,11 +186,7 @@ export function GitSection({ node, path, tick, onReveal, onDiffHead, onOpenWorkt
           </div>
         ))}
       </dl>
-      {onOpenWorktrees && (
-        <div className="perm-row">
-          <button type="button" onClick={() => onOpenWorktrees(r.root)}><Ic.GitBranch /> All worktrees</button>
-        </div>
-      )}
+      {onOpenWorktree && worktreeHref && <GitWorktrees key={`${node}\0${r.root}`} node={node} root={r.root} onOpen={onOpenWorktree} hrefFor={worktreeHref} />}
       {f && (
         <div className="perm-row">
           <Tip label="Open the file next to its content at the last commit (HEAD) in the diff editor">
