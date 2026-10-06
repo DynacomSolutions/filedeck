@@ -247,6 +247,18 @@ async function verifyPresentation(browser) {
     const defaults = { foreground: '', background: '', font: 'system', fontSize: 16, lineHeight: 1.6, paragraphSpace: 2.4, lineMeasure: 80 };
     await page.waitForFunction(() => document.querySelector('[aria-label="Text size"]')?.value === '16' && !document.documentElement.hasAttribute('data-user-presentation'));
     assert.equal(await page.getByRole('slider', { name: 'Text size' }).inputValue(), '16', 'reset should restore the text size control');
+    const assertParagraphSpacingDefault = async (settings) => {
+      const spacing = settings.getByRole('slider', { name: 'Paragraph spacing' });
+      assert.equal(await spacing.getAttribute('min'), '2.4', 'paragraph spacing default minimum should be 2.4');
+      assert.equal(await spacing.inputValue(), '2.4', 'paragraph spacing should remain at its 2.4 default');
+      const association = await spacing.evaluate((input) => ({
+        id: input.id,
+        labels: [...input.labels].map((label) => ({ htmlFor: label.htmlFor, text: label.textContent.trim() })),
+      }));
+      assert.ok(association.id, 'paragraph spacing control should have an id');
+      assert.ok(association.labels.some((label) => label.htmlFor === association.id && label.text === 'Paragraph spacing'), 'paragraph spacing should have an explicit matching label association');
+    };
+    await assertParagraphSpacingDefault(dialog);
     assert.equal(await page.locator('html').getAttribute('data-user-presentation'), null, 'reset should remove the user presentation marker');
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('filedeck.presentation'))), defaults, 'reset should persist default presentation values');
     await page.reload();
@@ -267,6 +279,7 @@ async function verifyPresentation(browser) {
     await defaultSize.scrollIntoViewIfNeeded();
     await defaultSize.waitFor({ state: 'visible' });
     assert.equal(await defaultSize.inputValue(), '16', 'default text size should restore after reset and reload');
+    await assertParagraphSpacingDefault(defaultDialog);
     assert.equal(await page.locator('html').getAttribute('data-user-presentation'), null, 'default presentation should remain unmarked after reload');
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('filedeck.presentation'))), defaults, 'default presentation values should remain persisted after reload');
   } finally {
