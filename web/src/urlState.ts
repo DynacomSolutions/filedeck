@@ -153,6 +153,23 @@ export interface AppState {
   sync?: SyncState;
 }
 
+export type ViewRoute = Pick<AppState, "trash" | "diff" | "prDiff" | "folder" | "settings" | "help" | "sync">;
+/** Stable identity for an open view; its changing contents remain replaceable in place. */
+export function viewIdentity(route: ViewRoute): string {
+  return Object.keys(route).sort().join("+");
+}
+/** Decide whether crossing between two view identities adds a history entry. */
+export function viewHistoryAction(previous: string | null, next: string, replaceOnClose = false): "push" | "replace" | "none" {
+  if (previous === next) return "none";
+  return replaceOnClose ? "replace" : "push";
+}
+/** History index to reach when closing a view; null means replace a direct-entry URL in place. */
+export function viewCloseTarget(index: number, routeStart: number): number | null {
+  const root = Math.min(index, Math.max(0, routeStart));
+  if (root > 0) return root - 1;
+  return index > root ? root : null;
+}
+
 // Compact wire format (short keys keep shared links readable).
 type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
 type WTab = { s?: string; m?: string[]; x?: 1; c?: string };

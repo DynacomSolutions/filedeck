@@ -3,7 +3,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, tabOf, type FolderState, type Leaf, type PrState, type SyncState, type Tree, type TrashState } from "./urlState";
+import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, tabOf, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Leaf, type PrState, type SyncState, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
@@ -83,6 +83,8 @@ interface HState {
   /** this entry represents an app view opened through URL navigation */
   view?: boolean;
   route?: string;
+  /** first history index for the current view, so Close can leave in-view folder entries */
+  routeStart?: number;
 }
 const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { node: l.node, path: l.path, ti: l.ti ?? 0 }]));
 
@@ -92,7 +94,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, prDiff: PrState | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, help: boolean, sync: SyncState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void, restoreRoute: (state: NonNullable<ReturnType<typeof decodeState>>) => void) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, prDiff: PrState | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, help: boolean, sync: SyncState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void, restoreRoute: (state: NonNullable<ReturnType<typeof decodeState>>) => void, replaceOnClose: React.MutableRefObject<boolean>, closeAtRoot: React.MutableRefObject<{ root: number; fallback: () => void } | null>) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
   const prev = useRef<Record<string, { node: string; path: string; ti?: number }> | null>(null);
   const fromPop = useRef(false);
@@ -107,7 +109,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     // Keep the history identity separate from its serialised contents. Choosing
     // another PR file or trash volume updates this view in place, while moving
     // between Settings, Trash, a diff, and a sync plan creates a real entry.
-    const routeKey = Object.keys(route).sort().join("+");
+    const routeKey = viewIdentity(route);
     const url = encodeState({ tree, active, ...route, ...(panelSel.length ? { panelSel } : {}) });
     latest.current.url = url;
     latest.current.paths = paths;
@@ -119,17 +121,28 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
       prevRoute.current = routeKey;
       return;
     }
-    const routeChanged = prevRoute.current !== null && prevRoute.current !== routeKey;
+    const routeAction = viewHistoryAction(prevRoute.current, routeKey, replaceOnClose.current);
+    const routeChanged = prevRoute.current !== null && routeAction !== "none";
     prevRoute.current = routeKey;
     try {
-      if ((changed || routeChanged) && cur.current) {
-        const st: HState = { idx: cur.current.idx + 1, panel: changed ?? active, paths, view: !!routeKey, route: routeKey };
+      if (routeChanged && routeAction === "replace") {
+        replaceOnClose.current = false;
+        const old = cur.current;
+        const st: HState = { idx: old?.idx ?? 0, panel: old?.panel ?? active, paths, view: !!routeKey, route: routeKey };
+        history.replaceState(st, "", url);
+        cur.current = st;
+        return;
+      }
+      if ((changed || (routeChanged && routeAction === "push")) && cur.current) {
+        const idx = cur.current.idx + 1;
+        const st: HState = { idx, panel: changed ?? active, paths, view: !!routeKey, route: routeKey, ...(routeKey ? { routeStart: routeChanged ? idx : cur.current.routeStart ?? cur.current.idx } : {}) };
         history.pushState(st, "", url);
         cur.current = st;
       } else {
         const old = cur.current;
         const keep = old ? Object.fromEntries(Object.entries(old.paths).filter(([k]) => k in paths)) : {};
-        const st: HState = { idx: old?.idx ?? 0, panel: old?.panel ?? "init", paths: { ...paths, ...keep }, view: !!routeKey, route: routeKey };
+        const idx = old?.idx ?? 0;
+        const st: HState = { idx, panel: old?.panel ?? "init", paths: { ...paths, ...keep }, view: !!routeKey, route: routeKey, ...(routeKey ? { routeStart: old?.routeStart ?? old?.idx ?? 0 } : {}) };
         history.replaceState(st, "", url);
         cur.current = st;
       }
@@ -144,6 +157,15 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
       const departed = cur.current;
       if (!arrival || typeof arrival.idx !== "number" || !departed) return;
       cur.current = arrival;
+      const close = closeAtRoot.current;
+      if (close && arrival.idx === close.root) {
+        closeAtRoot.current = null;
+        replaceOnClose.current = true;
+        const rootState = decodeState(window.location.search);
+        if (rootState) restoreRoute(rootState);
+        close.fallback();
+        return;
+      }
       const restored = decodeState(window.location.search);
       const focused = latest.current.active;
       const back = arrival.idx < departed.idx;
@@ -173,7 +195,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [setTree, setStatus, restoreRoute]);
+  }, [setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot]);
 }
 
 type How = "here" | "panel" | "tab";
@@ -336,6 +358,8 @@ export function App() {
   // In-place folder compare between two panels; its state (roots, options, folder, filters) is mirrored into the URL.
   const [compare, setCompare] = useState<FolderState | null>(initial?.folder ?? null);
   const suppressSyncCapture = useRef(false);
+  const replaceOnClose = useRef(false);
+  const closeAtRoot = useRef<{ root: number; fallback: () => void } | null>(null);
 
   // Selection across panels: each panel reports its own, plain clicks clear the others, header clicks pick whole panels.
   const [sels, setSels] = useState<Record<string, SelRef[]>>({});
@@ -382,6 +406,14 @@ export function App() {
   const restoreRoute = useCallback((state: NonNullable<ReturnType<typeof decodeState>>) => {
     setTree(state.tree);
     setActiveId(state.active);
+    // Keep only refs represented by the restored URL. File panels report any
+    // newly restored refs after their listings settle, while these existing
+    // refs preserve their entry metadata when returning to the same selection.
+    setSels((current) => Object.fromEntries(leaves(state.tree).flatMap((panel) => {
+      const selected = new Set(panel.sels ?? (panel.sel && !panel.ns ? [panel.sel] : []));
+      const refs = (current[panel.id] ?? []).filter((ref) => ref.node === panel.node && selected.has(ref.path));
+      return refs.length ? [[panel.id, refs]] : [];
+    })));
     setPanelSel(state.panelSel ?? []);
     setDiff(state.diff ? { left: state.diff.left, right: state.diff.right } : null);
     setPrDiff(state.prDiff ?? null);
@@ -392,11 +424,26 @@ export function App() {
     suppressSyncCapture.current = !state.sync;
     setSyncRoute(state.sync ?? null);
   }, []);
-  useUrlHistory(tree, activeId, diff, prDiff, compare, trash, panelSel, settingsOpen, help, syncRoute, setTree, setStatus, restoreRoute);
+  useUrlHistory(tree, activeId, diff, prDiff, compare, trash, panelSel, settingsOpen, help, syncRoute, setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot);
   const closeView = (fallback: () => void) => {
     const entry = history.state as HState | null;
-    if (entry?.view && entry.idx > 0) history.back();
-    else fallback();
+    if (entry?.view) {
+      const root = entry.routeStart ?? entry.idx;
+      const target = viewCloseTarget(entry.idx, root);
+      if (target !== null && root === 0) {
+        closeAtRoot.current = { root, fallback };
+        history.go(target - entry.idx);
+        return;
+      }
+      if (target !== null) {
+        history.go(target - entry.idx);
+        return;
+      }
+      replaceOnClose.current = true;
+      fallback();
+      return;
+    }
+    fallback();
   };
 
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => { const m = t ? mapTree(t, fn) : t; return m ? syncTree(m) : m; });
@@ -406,18 +453,26 @@ export function App() {
   const restoredSync = useRef<string | null>(null);
   const syncKey = syncRoute ? JSON.stringify(syncRoute) : null;
   const compareRef = useRef(cmp);
-  compareRef.current = cmp;
+  if (cmp) compareRef.current = cmp;
   useEffect(() => {
+    if (!cmp) {
+      if (!syncRoute) {
+        compareRef.current?.closeExec();
+        compareRef.current = null;
+        restoredSync.current = null;
+      }
+      return;
+    }
     if (suppressSyncCapture.current && !syncRoute) {
       suppressSyncCapture.current = false;
-      if (cmp.exec) compareRef.current.closeExec();
+      if (cmp.exec) compareRef.current?.closeExec();
       restoredSync.current = null;
       return;
     }
     if (cmp.exec && syncRoute && (cmp.exec.action !== syncRoute.action || restoredSync.current !== syncKey)) {
       // A Back/Forward transition may arrive while the previous plan is still
       // open. Dispose it before restoring the plan encoded in the destination.
-      compareRef.current.closeExec();
+      compareRef.current?.closeExec();
       return;
     }
     if (cmp.exec) {
@@ -432,10 +487,11 @@ export function App() {
     }
     if (cmp.job && restoredSync.current !== syncKey) {
       restoredSync.current = syncKey;
-      compareRef.current.setSelected(new Set(syncRoute.paths));
-      compareRef.current.preview(syncRoute.action, syncRoute.paths);
+      compareRef.current?.setSelected(new Set(syncRoute.paths));
+      compareRef.current?.preview(syncRoute.action, syncRoute.paths);
     }
-  }, [cmp.exec, cmp.job, syncRoute, syncKey]);
+  }, [cmp?.exec, cmp?.job, cmp?.selected, syncRoute, syncKey]);
+  const routedCompare = cmp && compare ? { ...cmp, exit: () => closeView(() => cmp.exit()) } : cmp;
   const startCompare = (a: string, b: string) => {
     const la = leafOf(a);
     const lb = leafOf(b);
@@ -599,7 +655,7 @@ export function App() {
 
   return (
     <div className="app">
-      <CompareCtx.Provider value={cmp}>
+      <CompareCtx.Provider value={routedCompare}>
       <Sidebar nodes={nodes} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => settingsOpen ? closeView(() => setSettingsOpen(false)) : setSettingsOpen(true)}><Ic.Settings /></button></Tip></div></>} />
       <div className="app-col">
       <header className="site-header">
