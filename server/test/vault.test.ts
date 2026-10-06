@@ -57,7 +57,7 @@ test("settings extension refreshes idle expiry but cannot bypass the absolute ca
   c.t = 1_000_000 + 40 * MIN; // renew before the current idle expiry at +50
   const capped = v.extend(e.id)!;
   assert.equal(capped.expiresAt, 1_000_000 + HOUR);
-  c.t += 2;
+  c.t = 1_000_000 + HOUR + 1;
   assert.equal(v.extend(e.id), undefined, "the absolute cap cannot be extended");
 });
 
