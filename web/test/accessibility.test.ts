@@ -45,3 +45,9 @@ test("address edit target keeps its 44px minimum when breadcrumbs shrink", () =>
   assert.match(styles, /\.addr>\.tip:has\(\.addr-fill\)\{[^}]*min-width:44px/);
   assert.match(styles, /\.addr-fill\{[^}]*flex:1 1 44px;min-width:44px/);
 });
+
+test("narrow panel header reflows navigation before address and pane actions overlap", () => {
+  assert.match(styles, /@media\(max-width:360px\)\{\.fp-row>\.tip:has\(\.fp-up\[aria-label="Back"\]\),\.fp-row>\.tip:has\(\.fp-up\[aria-label="Forward"\]\)\{display:none\}\}/);
+  assert.match(styles, /\.fp-up, \.fp-actions button,[\s\S]*?min-width: 44px !important/);
+  assert.match(styles, /\.addr-recent,[\s\S]*?min-width: 44px !important/);
+});
