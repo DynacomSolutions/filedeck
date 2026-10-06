@@ -618,7 +618,7 @@ select option{background:var(--surface);color:var(--fg)}
 .ft tr.up:hover td,.tile.up:hover{background:var(--surface-2)}
 .ft tr.up td{color:var(--muted)}
 .ft .fl{display:flex;align-items:center;gap:.5rem;height:auto;min-height:44px}.ft .fl .ico{flex:none;margin:0}
-.ft tr.up .up-btn,.tile.up .up-btn{display:inline-flex;align-items:center;justify-content:flex-start;min-height:0;height:22px;flex:1;padding:0;box-shadow:none;background:transparent;font:inherit;font-weight:600;color:var(--muted);vertical-align:middle;border-radius:var(--radius-btn)}
+.ft tr.up .up-btn,.tile.up .up-btn{display:inline-flex;align-items:center;justify-content:flex-start;min-height:0;height:22px;flex:1;padding:0;border:0;box-shadow:none;background:transparent;font:inherit;font-weight:600;color:var(--muted);vertical-align:middle;border-radius:var(--radius-btn)}
 .ft tr.up .up-btn:hover:not(:disabled),.tile.up .up-btn:hover:not(:disabled){background:transparent;color:var(--fg)}
 .ft tr.up .up-btn:focus-visible,.tile.up .up-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent)}
 .tile.up .up-btn{width:auto;justify-content:center}
@@ -705,7 +705,7 @@ select option{background:var(--surface);color:var(--fg)}
 .cmp-row.up{cursor:pointer;color:var(--muted)}
 .cmp-row.up:hover{filter:none;background:var(--surface-2)}
 .cmp-row .fl{display:flex;align-items:center;gap:.5rem;height:22px}.cmp-row .fl .ico{flex:none;margin:0}
-.cmp-row.up .up-btn{display:inline-flex;align-items:center;justify-content:flex-start;flex:1;min-height:0;height:22px;padding:0;box-shadow:none;background:transparent;font:inherit;font-weight:600;color:var(--muted);border-radius:var(--radius-btn)}
+.cmp-row.up .up-btn{display:inline-flex;align-items:center;justify-content:flex-start;flex:1;min-height:0;height:22px;padding:0;border:0;box-shadow:none;background:transparent;font:inherit;font-weight:600;color:var(--muted);border-radius:var(--radius-btn)}
 .cmp-row.up .up-btn:hover:not(:disabled){background:transparent;color:var(--fg)}
 .cmp-row.up .up-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent)}
 .cmp-row.skel{animation:sk-in .01s linear .12s backwards}
