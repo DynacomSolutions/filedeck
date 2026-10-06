@@ -183,6 +183,16 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
         else history.replaceState({ ...arrival, paths: arrival.paths }, "", latest.current.url);
         return;
       }
+      if (restored) {
+        // A panel-navigation entry stores the complete app snapshot in the URL,
+        // including selection, cursor, tab state and the other panels. Restore it
+        // just like a view transition instead of reconstructing only node/path.
+        fromPop.current = true;
+        restoreRoute(restored);
+        const target = leaves(restored.tree).find((panel) => panel.id === focused);
+        setStatus(`${back ? "Back" : "Forward"}: ${target ? `${target.node}:${target.path}` : "view"}`);
+        return;
+      }
       const target = arrival.paths[focused];
       if (!target) return;
       fromPop.current = true;
