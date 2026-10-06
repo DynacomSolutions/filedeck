@@ -454,7 +454,7 @@ button.cmp-twisty:hover{color:var(--fg);background:var(--surface-3)}.cmp-twisty 
 svg.lucide{display:inline-block}
 .ln-target{white-space:nowrap}.ln-target svg.lucide{width:12px;height:12px;vertical-align:-2px}
 .side-node svg.lucide{vertical-align:-3px}
-.side-row{display:flex;align-items:center}.side-scroll .side-row button.side-twisty{flex:none;width:auto;padding:.3rem .2rem;color:var(--muted)}.side-scroll .side-row button.side-node{flex:1;min-width:0}.side-twisty svg.lucide{vertical-align:-3px}
+.side-row{display:flex;align-items:center}.side-scroll .side-row button.side-twisty{box-sizing:border-box;display:flex;flex:0 0 44px;width:44px;justify-content:center;padding:0;color:var(--muted)}.side-scroll .side-row button.side-node{flex:1;min-width:0}.side-twisty svg.lucide{flex:none}
 
 /* ---- compare status in the sidebar ---- */
 .side-cmp{flex:none;min-width:0;padding:.6rem .7rem;border-top:1px solid var(--border);font-size:.76rem;max-height:50vh;overflow:auto}
@@ -821,6 +821,11 @@ button.wt-row:hover{background:var(--surface-2)}
 :where(button, a[href], input, select, textarea, [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"]) {
   min-width: 44px !important;
   min-height: 44px !important;
+}
+.ft tr.up .up-btn:focus-visible,.tile.up .up-btn:focus-visible,.cmp-row.up .up-btn:focus-visible {
+  outline:2px solid var(--accent-text,var(--accent)) !important;
+  outline-offset:1px !important;
+  box-shadow:none !important;
 }
 .fp-up, .fp-actions button, .fp-tools button, .pv-head .pv-acts > *, .pv-head .pv-acts button,
 .pv-head a.btn-a, .pv-head .pv-extra .pv-dockbtn, .ctx button, .crumbs button,
