@@ -1,0 +1,143 @@
+# Generic defaults: a working single-agent install on any cluster. A deployment overrides them with its own values
+# file (nodes, image, hosts, branding); see "Install with Helm" in the Filedeck README.
+
+# Name of the hub Deployment/Service and prefix of the other objects. Empty means the chart name ("filedeck").
+fullnameOverride: ""
+
+image:
+  # Public container image; use a pinned tag or immutable digest for production deployments.
+  repository: ghcr.io/dynacomsolutions/filedeck
+  tag: "0.1.0"
+  # When set, the pods run repository@digest and `tag` is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+port: 8080
+
+# Optional shared secret between the hub and the agents, on top of the NetworkPolicy. When `secretName` is set, an
+# existing Secret in the release namespace (created out of band, never in Git) is mounted as FILEDECK_AGENT_TOKEN
+# into the hub and every agent; agents then answer 401 to anything without it (except /healthz). Create it with a long
+# random value under `key`. Empty (the default) means no token.
+agentToken:
+  secretName: ""
+  key: token
+
+# Saved-password vault (hub). Encrypted archive and PDF passwords that someone typed are kept server-side,
+# AES-256-GCM encrypted in a small sqlite file on `storage`; the key is derived from the Secret below, which is
+# generated in-cluster and never lives in Git: the pre-install/pre-upgrade hook Job (templates/vault-key-job.yaml) creates
+# it with a random 48-byte key only when it does not exist yet, and never overwrites or rotates it (that would make stored
+# passwords unreadable). Set `keyJob.enabled: false` to create the Secret yourself (kubectl create secret generic
+# <keySecret> --from-literal=key="$(openssl rand -base64 48)"). Without the Secret the vault is memory-only (lost on
+# restart); the Settings page says so.
+vault:
+  keySecret: filedeck-vault-key
+  key: key
+  keyJob:
+    enabled: true
+    # Any image with kubectl, sh and coreutils.
+    image: alpine/k8s@sha256:d50424976a0a888d2531f13035dce45c004ec2b6f877f233005ba35c0d61be5d
+  storage: 64Mi
+  storageClass: ""
+  # entries expire after this many idle seconds (each use renews it) and always after maxHours; "Remember" never expires
+  ttlSeconds: 1800
+  maxHours: 24
+
+hub:
+  # Pin the hub to a node (the vault volume is ReadWriteOnce); empty means any node.
+  nodeSelector: {}
+  resources:
+    requests: {cpu: 20m, memory: 64Mi}
+    # Compare rows spill to SQLite on the cache volume, so hub memory does not grow with the size of the trees.
+    limits: {cpu: "1", memory: 2Gi}
+  # emptyDir for compare spill files (one per open compare, deleted when it is dismissed) and the network-source index.
+  cacheVolume: 8Gi
+  # V8 heap ceiling; the default follows the memory limit (524 MB under 1Gi).
+  nodeOptions: "--max-old-space-size=1280"
+
+agent:
+  resources:
+    requests: {cpu: 15m, memory: 48Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  # V8 heap ceiling, below the 512Mi limit (measured agent RSS stays under ~150Mi; the limit is not raised).
+  nodeOptions: "--max-old-space-size=320"
+  # /healthz tolerance: hostPath agents live on busy shared hosts. 5s timeout, 6 consecutive failures (~1 min) to restart.
+  probes:
+    timeoutSeconds: 5
+    livenessFailureThreshold: 6
+  # Per-upload cap in bytes (default 1 TiB)
+  maxUpload: "1099511627776"
+  # Virtual paths (mount points or folders, "/" = the host root) that every agent refuses to change: no upload, edit,
+  # rename, move, delete, extract or permission change below them. A node can override with its own `readOnlyPaths`
+  # list. Empty means everything is writable. Kernel pseudo-filesystems are read-only by default.
+  readOnlyPaths: ["/proc", "/sys"]
+  # Thumbnail cache (emptyDir, lost on restart): the agent deletes the least recently used entries beyond
+  # thumbCacheBytes; the volume limit is a backstop.
+  thumbCacheBytes: "268435456"
+  thumbCacheVolume: 512Mi
+  # Compare index: inotify watches per agent on recently listed folders (LRU). A watched folder's listing is served
+  # from the index (hostPath /var/lib/filedeck on the node) until it changes; others are re-read on every compare.
+  indexWatches: 32768
+  # Beyond the watch budget (or after a restart) a stored listing is reused while the folder's mtime is unchanged,
+  # for at most this long; then it is read again in full. Hashes are always checked against a fresh stat.
+  indexRevalidateMs: "1800000"
+  # Roll the agents one at a time under Argo CD: agent N gets sync wave N+1 (in the order of `nodes`), so Argo waits for
+  # it to be Ready before it touches the next one. Plain Helm ignores the annotation. Set false to roll them together.
+  stagger: true
+  # Extra annotations on the agent Deployments (for example an Argo CD sync option). Empty by default.
+  annotations: {}
+
+# One agent per entry. `name` is what the UI shows (lowercase, [a-z0-9-], unique); `nodeName` is the Kubernetes node
+# (kubernetes.io/hostname) the agent runs on and whose filesystem it browses at "/". An empty `nodeName` lets the
+# scheduler pick any node, which is fine for a single-node cluster. Each agent gets a Service and the selector label
+# app.kubernetes.io/instance: <release>-agent-<name>. A node can add its own `readOnlyPaths`.
+nodes:
+  - name: local
+    nodeName: ""
+
+sources: []
+
+# Scratch servers for exercising the network sources (SFTP, WebDAV and SMB through rclone/Samba, S3 through MinIO),
+# each on its own emptyDir, no ingress, and a NetworkPolicy that lets only the hub reach them. Off by default. When
+# enabled, `sealed` must hold SealedSecret ciphertext (sealed-secrets controller, strict scope: name `secretName` in
+# the release namespace) for the keys username, password, accessKeyId and secretAccessKey, which the servers and the
+# `sources` entries (host "<fullname>-test-<sftp|webdav|s3|smb>") both read.
+testSources:
+  enabled: false
+  secretName: filedeck-test-sources
+  images:
+    # rclone 1.75.1 (multi-arch index digest)
+    rclone: rclone/rclone@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+    # MinIO. Used for S3 because rclone's S3 server keeps a trailing-slash folder marker as a plain file, so a folder
+    # made through the S3 backend could not be listed or written into.
+    minio: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # dockurr/samba 4.23.10 (multi-arch index digest)
+    samba: dockurr/samba@sha256:404f91bdf317d390241a41165579cd25199f34171b44677d877c75dc40184042
+  resources:
+    requests: {cpu: 5m, memory: 32Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+  volume: 1Gi
+  # SealedSecret ciphertext per key (see above). An extra `hostKey` (an OpenSSH private key) becomes the SFTP
+  # server's fixed host key, so a restart does not change it; pin its fingerprint as `options.hostKeySha256` on the source.
+  sealed: {}
+  # Extra annotations on the scratch-server Deployments. Empty by default.
+  annotations: {}
+
+# Page branding (see server/src/brand.ts). `cssContent` is chart-only and is omitted from FILEDECK_BRAND.
+brand:
+  name: ""
+  title: ""
+  icon: ""
+  css: ""
+  themeKey: ""
+  cssContent: ""
+
+service:
+  port: 80
+
+# Optional Emissary / Ambassador Mapping that routes `host` to the hub Service. Off by default; with any other
+# ingress, route to the hub Service (`<fullname>`, port `service.port`) yourself.
+mapping:
+  enabled: false
+  name: ""            # default "<fullname>-public"
+  host: ""            # required when enabled
+  ambassadorId: --apiVersion-v3alpha1-only--default
