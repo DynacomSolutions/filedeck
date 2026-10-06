@@ -1,5 +1,5 @@
 import { PANEL_MIME } from "./dock";
-import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
 import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploads";
@@ -27,6 +27,8 @@ import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
 import { useSettings } from "./settings";
 import { SkeletonRows, SkeletonTiles } from "./Skeleton";
+import { TransferDestination, type TransferKind } from "./TransferDestination";
+import { usePresentation } from "./presentation";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -97,6 +99,7 @@ interface Props {
 type Modal =
   | { k: "link"; dir: string; existing?: Entry }
   | { k: "new"; dir: string; type: "file" | "folder" }
+  | { k: "transfer"; kind: TransferKind; refs: SelRef[] }
   | { k: "del"; refs: SelRef[] }
 const natural = new Intl.Collator(undefined, { numeric: true }); // shared: localeCompare with options builds a collator per call
 const UP_DROP = "\0up";
@@ -105,6 +108,8 @@ const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
 export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onPrDiff, onStatus }: Props) {
   const { node, path } = leaf;
+  const presentation = usePresentation();
+  const estimatedFileRowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 17));
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
   /** the listing for node:path is still on its way (a refresh of a shown folder keeps its rows and is not "loading") */
@@ -134,6 +139,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const [anchor, setAnchor] = useState<string | null>(null);
   /** the panel's ACTIVE item: drives its preview/properties and is never touched by actions in other panels (the action selection is `sel`) */
   const [cursor, setCursor] = useState<string | null>(leaf.sel ?? null);
+  const createErrorId = useId();
   const cursorRef = useRef(cursor);
   cursorRef.current = cursor;
   const selRef = useRef(sel);
@@ -537,6 +543,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       "sep",
       { label: "Cut", hint: "Ctrl+X", onSelect: () => setClipboard("cut", picked, extra) },
       { label: "Copy", hint: "Ctrl+C", onSelect: () => setClipboard("copy", picked, extra) },
+      { label: "Copy to folder...", onSelect: () => setModal({ k: "transfer", kind: "copy", refs: combine(picked, extra) }) },
+      { label: "Move to folder...", onSelect: () => setModal({ k: "transfer", kind: "move", refs: combine(picked, extra) }) },
       { label: pasteLabel + (pasteDir !== path ? " into folder" : ""), hint: "Ctrl+V", disabled: !clip, onSelect: () => void paste(pasteDir) },
       "sep",
       ...(one && one.type === "symlink" ? ([{ label: "Edit link target...", onSelect: () => setModal({ k: "link", dir: path, existing: one }) }] as MenuItem[]) : []),
@@ -607,9 +615,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
 
   const crumbs = path.split("/").filter(Boolean);
   const th = (key: SortKey, label: string) => (
-    <th onClick={() => setSort((s) => ({ key, asc: s.key === key ? !s.asc : true }))} className={"sortable " + key}>
-      {label}
-      {sort.key === key ? (sort.asc ? <ChevronUp role="img" aria-label="ascending" /> : <ChevronDown role="img" aria-label="descending" />) : null}
+    <th aria-sort={sort.key === key ? (sort.asc ? "ascending" : "descending") : "none"} className={"sortable " + key}>
+      <button type="button" onClick={() => setSort((s) => ({ key, asc: s.key === key ? !s.asc : true }))}>
+        {label}
+        {sort.key === key ? (sort.asc ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />) : null}
+      </button>
     </th>
   );
   const fileInput = useRef<HTMLInputElement>(null);
@@ -821,6 +831,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       className="cr-input"
       autoFocus
       aria-label={creating === "file" ? "Name of the new file" : "Name of the new folder"}
+      aria-invalid={!!err || undefined}
+      aria-describedby={err ? createErrorId : undefined}
       placeholder={creating === "file" ? "New file name, Enter to create" : "New folder name, Enter to create"}
       onClick={(e) => e.stopPropagation()}
       onBlur={() => setCreating(null)}
@@ -872,8 +884,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       <div
         className="fp-scroll"
         tabIndex={0}
-        role="group"
+        role={tabs.length > 1 && !cside ? "tabpanel" : "group"}
         aria-label={`Files in ${path} on ${node}. Arrow keys select, Enter opens.`}
+        id={tabs.length > 1 && !cside ? `${leaf.id}-tabpanel` : undefined}
+        aria-labelledby={tabs.length > 1 && !cside ? `${leaf.id}-tab-${ti}` : undefined}
         onFocus={(e) => {
           // Tabbing into the list selects the first entry so the arrow keys have somewhere to start. A mouse click
           // also focuses the list but must not: selecting (and scrolling to) the first row between mousedown and
@@ -893,7 +907,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }}
       >
         {view === "grid" ? (
-          <div className="fp-grid" role="listbox" aria-label="Files" aria-multiselectable="true" aria-busy={loading}>
+          <div className="fp-grid" role="group" aria-label="Files" aria-busy={loading}>
             {showUp && (
               <div className={"tile up" + (over === UP_DROP ? " drop" : "")} onClick={goUp} {...upDrop}>
                 <div className="tile-img"><span className="tile-ico"><CornerLeftUp /></span></div>
@@ -910,7 +924,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             {rowsShown.map((en) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
-                <div key={en.path} role="option" aria-selected={sel.has(en.path)} {...itemProps(en, isDir, "tile ")}>
+                <div key={en.path} role="group" aria-label={`${en.name}${sel.has(en.path) ? ", selected" : ""}`} {...itemProps(en, isDir, "tile ")}>
                   <Thumb node={node} entry={en} isDir={isDir} />
                   <Tip label={en.name} fill><div className="tile-name">{nameEditor(en)}</div></Tip>
                   {gitMark(en, isDir) && <div className="tile-git">{gitMark(en, isDir)}</div>}
@@ -970,7 +984,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               );
             })}
             {remaining > 0 && (
-              <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * ROW_H }}>
+              <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * estimatedFileRowHeight }}>
                 <td colSpan={gitCol ? 4 : 3} />
               </tr>
             )}
@@ -1016,6 +1030,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (compareKey(cmpCtl, cside, e)) (e.preventDefault(), e.stopPropagation());
       return;
     }
+    // File-selection and row actions belong to the file viewport. Let tabs,
+    // toolbar buttons, and other focusable widgets keep their own Home/End,
+    // Delete, Ctrl+A, and arrow-key behaviour. Alt panel commands remain
+    // available from panel chrome for keyboard users.
+    const inFileArea = e.target === e.currentTarget || !!t.closest(".fp-scroll");
+    if (!inFileArea && !e.altKey) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key;
     const hasText = !!window.getSelection()?.toString();
@@ -1226,15 +1246,15 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   useLayoutEffect(() => {
     const el = toolsRef.current;
     if (!el) return;
-    // an icon button is 28px plus a 4px gap, a group start adds a 6px gap; the more button takes one slot and exists only on overflow
+    // An icon button has a 44px hit area plus a 4px gap; group starts add 6px and the more button takes one slot on overflow.
     const measure = () => {
       const room = el.clientWidth - 16;
-      const width = (l: Ctl[]) => l.reduce((w, c, i) => w + 32 + (c.gap && i > 0 ? 6 : 0), 0);
+      const width = (l: Ctl[]) => l.reduce((w, c, i) => w + 48 + (c.gap && i > 0 ? 6 : 0), 0);
       let n = 0;
       while (n < dropOrder.length) {
         const gone = new Set(dropOrder.slice(0, n));
         const left = allTools.filter((c) => !gone.has(c.id));
-        if (width(left) + (n > 0 ? 32 : 0) <= room) break;
+        if (width(left) + (n > 0 ? 48 : 0) <= room) break;
         n++;
       }
       setHiddenN(n);
@@ -1272,9 +1292,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           {tabs.map((t, i) => (
             <Tip key={i} label={`${t.node}:${t.path}`}>
             <div
-              role="tab"
-              aria-selected={i === ti}
-              tabIndex={-1}
               className={"fp-tab" + (i === ti ? " on" : "") + (tabDrag === i ? " dragging" : "")}
               draggable
               onClick={() => selectTab(i)}
@@ -1299,7 +1316,24 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 setTabDrag(null);
               }}
             >
-              <span className="fp-tab-name">{tabLabel(t)}</span>
+              <button
+                id={`${leaf.id}-tab-${i}`}
+                type="button"
+                role="tab"
+                aria-selected={i === ti}
+                aria-controls={`${leaf.id}-tabpanel`}
+                tabIndex={i === ti ? 0 : -1}
+                className="fp-tab-select"
+                onKeyDown={(e) => {
+                  const next = e.key === "ArrowRight" ? (i + 1) % tabs.length : e.key === "ArrowLeft" ? (i - 1 + tabs.length) % tabs.length : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : -1;
+                  if (next < 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  selectTab(next);
+                  requestAnimationFrame(() => document.getElementById(`${leaf.id}-tab-${next}`)?.focus());
+                }}
+                onClick={(e) => { e.stopPropagation(); selectTab(i); }}
+              ><span className="fp-tab-name">{tabLabel(t)}</span></button>
               <button type="button" className="fp-tab-x" aria-label={`Close tab ${tabLabel(t)}`} onClick={(e) => (e.stopPropagation(), closeTab(i))}><X /></button>
             </div>
             </Tip>
@@ -1391,7 +1425,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           />
         </div>
       )}
-      {err && <div className="fp-err">{err}</div>}
+      {err && <div id={createErrorId} className="fp-err" role="alert">{err}</div>}
       {pane ? (
         <Group key={dock} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
           onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
@@ -1430,6 +1464,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             onStatus(modal.existing ? `Retargeted ${at}` : `Created link ${at}`);
             refresh();
           }}
+        />
+      )}
+      {modal?.k === "transfer" && (
+        <TransferDestination
+          kind={modal.kind}
+          items={modal.refs}
+          initialNode={node}
+          initialPath={path}
+          onClose={() => setModal(null)}
+          onChoose={(targetNode, targetDir) => void transferOp(modal.kind, modal.refs.map(({ node: sourceNode, path: sourcePath }) => ({ node: sourceNode, path: sourcePath })), targetNode, targetDir)}
         />
       )}
       {modal?.k === "del" && (

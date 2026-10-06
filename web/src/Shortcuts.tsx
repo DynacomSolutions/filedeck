@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as Ic from "lucide-react";
+import { TechnicalGlossary } from "./TechnicalGlossary";
 
 const GROUPS: { title: string; rows: [string, string][] }[] = [
   {
@@ -14,6 +15,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["Ctrl+F", "Filter this folder by name"],
       ["Alt+T / Alt+W", "New tab with this folder / close the tab"],
       ["Alt+[ / Alt+]", "Previous / next tab"],
+      ["Tab menu: Move left / Move right", "Reorder tabs in this panel (or drag a tab)"],
       ["Alt+Shift+Arrows", "Dock this panel beside the previous / next panel (or drag the panel header: edge splits, centre merges as a tab)"],
       ["Ctrl+Shift+F", "Search under this folder (name, glob, regex, file content)"],
       ["Esc", "Clear filter, then selection"],
@@ -40,6 +42,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["Del", "Move to trash"],
       ["Shift+Del", "Delete permanently (asks first)"],
       ["Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste (across panels and nodes)"],
+      ["Context menu: Copy to folder / Move to folder", "Choose any online node and destination folder"],
       ["Shift+F10 / Menu key", "Context menu"],
       ["?", "This help"],
     ],
@@ -48,7 +51,32 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
 
 export function ShortcutHelp({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => ref.current?.focus(), []);
+  const opener = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
+  const [helpKeyEnabled, setHelpKeyEnabled] = useState(() => {
+    try { return localStorage.getItem("filedeck.help-key-disabled") !== "true"; }
+    catch { return true; }
+  });
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => ref.current?.focus());
+    return () => {
+      cancelAnimationFrame(frame);
+      opener.current?.focus({ preventScroll: true });
+    };
+  }, []);
+  const trap = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape" || (e.key === "?" && e.target === ref.current)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return onClose();
+    }
+    if (e.key !== "Tab" || !ref.current) return;
+    const f = Array.from(ref.current.querySelectorAll<HTMLElement>("button:not([disabled]),input:not([disabled]),summary,a[href],[tabindex]:not([tabindex='-1'])")).filter((el) => el.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0]!;
+    const last = f[f.length - 1]!;
+    if (e.shiftKey && document.activeElement === first) (e.preventDefault(), last.focus());
+    else if (!e.shiftKey && document.activeElement === last) (e.preventDefault(), first.focus());
+  };
   return (
     <div className="modal-back" onMouseDown={onClose}>
       <div
@@ -59,13 +87,7 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
         aria-label="Keyboard shortcuts"
         tabIndex={-1}
         onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape" || e.key === "?" || e.key === "Enter") {
-            e.preventDefault();
-            e.stopPropagation();
-            onClose();
-          }
-        }}
+        onKeyDown={trap}
       >
         <h2>Keyboard shortcuts</h2>
         {GROUPS.map((g) => (
@@ -81,8 +103,22 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
             </dl>
           </section>
         ))}
+        <label className="shortcut-pref">
+          <input
+            className="shortcut-pref-input"
+            type="checkbox"
+            checked={helpKeyEnabled}
+            onChange={(e) => {
+              const enabled = e.currentTarget.checked;
+              setHelpKeyEnabled(enabled);
+              try { localStorage.setItem("filedeck.help-key-disabled", String(!enabled)); } catch { /* page-session choice still applies to this dialog */ }
+            }}
+          />
+          Enable the single-character ? shortcut (you can always open this help with the keyboard button)
+        </label>
+        <TechnicalGlossary />
         <div className="modal-actions">
-          <button type="submit" onClick={onClose}><Ic.X /> Close</button>
+          <button type="button" onClick={onClose}><Ic.X /> Close</button>
         </div>
       </div>
     </div>
