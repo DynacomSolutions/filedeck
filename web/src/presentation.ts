@@ -29,7 +29,7 @@ export function cssColourToHex(value: string, fallback = "#ffffff"): string {
   if (/^#[\da-f]{3}$/.test(input)) return `#${input[1]}${input[1]}${input[2]}${input[2]}${input[3]}${input[3]}`;
   const match = input.match(/^rgba?\(\s*([\d.]+%?)[, ]+\s*([\d.]+%?)[, ]+\s*([\d.]+%?)(?:\s*[,/]\s*[\d.]+%?)?\s*\)$/);
   if (!match) return fallback;
-  const channels = match.slice(1, 4).map((channel) => Math.max(0, Math.min(255, Math.round(parseFloat(channel) * (channel.endsWith("%") ? 2.55 : 1)))));
+  const channels = match.slice(1, 4).map((channel) => Math.max(0, Math.min(255, Math.round(parseFloat(channel) * (channel.endsWith("%") ? 255 / 100 : 1)))));
   return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
@@ -38,7 +38,7 @@ const listeners = new Set<() => void>();
 const validColour = (value: unknown): value is string => typeof value === "string" && /^#[\da-f]{6}$/i.test(value);
 const bounded = (value: unknown, min: number, max: number, step: number, fallback: number) => {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return Math.round(Math.min(max, Math.max(min, value)) / step) * step;
+  return Number((Math.round(Math.min(max, Math.max(min, value)) / step) * step).toFixed(6));
 };
 
 export function normalizePresentation(value: unknown): PresentationSettings {
