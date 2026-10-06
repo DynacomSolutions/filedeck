@@ -144,6 +144,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   cursorRef.current = cursor;
   const selRef = useRef(sel);
   selRef.current = sel;
+  // Browser history restores a new URL-backed leaf into the mounted panel.
+  // Keep the panel's local interaction state in step with that restored state.
+  useEffect(() => {
+    const next = new Set(leaf.sels ?? (leaf.sel && !leaf.ns ? [leaf.sel] : []));
+    setSel((current) => current.size === next.size && [...next].every((path) => current.has(path)) ? current : next);
+    setCursor((current) => current === (leaf.sel ?? null) ? current : leaf.sel ?? null);
+    setAnchor(leaf.sel ?? null);
+  }, [leaf.sel, leaf.ns, leaf.sels]);
   /** the previous listing's paths in display order, to pick the next sibling when the active item disappears */
   const orderRef = useRef<string[]>([]);
   const view = leaf.w === "g" ? "grid" : "list";

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeState, encodeState, type Tree } from "../../web/src/urlState.ts";
+import { decodeState, encodeState, isSyncPreviewReady, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Tree } from "../../web/src/urlState.ts";
 
 const tree: Tree = { kind: "leaf", id: "p1", node: "n", path: "/a" };
 
@@ -9,6 +9,39 @@ test("the settings view round-trips through ?s= and is absent by default", () =>
   assert.equal(on?.settings, true);
   const off = decodeState(encodeState({ tree, active: "p1" }));
   assert.equal(off?.settings, undefined);
+});
+
+test("view history pushes between overlays and replaces a direct-entry close", () => {
+  const settings = viewIdentity({ settings: true });
+  const trash = viewIdentity({ trash: { node: "n", volume: "" } });
+  assert.equal(viewHistoryAction(null, settings), "push");
+  assert.equal(viewHistoryAction(settings, trash), "push");
+  assert.equal(viewHistoryAction(settings, settings), "none");
+  assert.equal(viewHistoryAction(settings, "", true), "replace");
+  assert.equal(viewCloseTarget(4, 2), 1, "close skips same-view panel entries to the entry before the view");
+  assert.equal(viewCloseTarget(1, 0), 0, "a direct-entry view first returns to its root entry");
+  assert.equal(viewCloseTarget(0, 0), null, "a direct-entry root closes by replacing its URL");
+});
+
+test("view overlays round-trip through copied URLs, including sync plans", () => {
+  const left: Tree = { kind: "leaf", id: "p1", node: "left", path: "/source", sel: "/source/readme.md", sels: ["/source/readme.md", "/source/data.bin"] };
+  const tree: Tree = { kind: "split", id: "p2", dir: "horizontal", children: [left, { kind: "leaf", id: "p3", node: "right", path: "/target" }] };
+  const folder: FolderState = { left: { node: "left", path: "/source" }, right: { node: "right", path: "/target" }, opts: { mode: "name", toleranceSec: 0, ignoreCase: false, ignoreHidden: false, include: "", exclude: "", depth: 256 }, preset: "", lp: "p1", rp: "p3", rel: "", hide: [] };
+  const state = decodeState(encodeState({ tree, active: "p1", panelSel: ["p1"], help: true, folder, sync: { action: "copy-lr", paths: ["docs/readme.md", "data.bin"] } }));
+  assert.equal(state?.help, true);
+  assert.deepEqual(state?.panelSel, ["p1"]);
+  assert.deepEqual(state?.tree.kind === "split" ? state.tree.children[0] : null, left);
+  assert.deepEqual(state?.sync, { action: "copy-lr", paths: ["docs/readme.md", "data.bin"] });
+  assert.deepEqual(state?.folder, folder);
+  const noCompare = decodeState(encodeState({ tree, active: "p1", sync: { action: "copy-lr", paths: ["readme.md"] } }));
+  assert.equal(noCompare?.sync, undefined);
+});
+
+test("URL-restored sync previews wait for completed comparison rows", () => {
+  assert.equal(isSyncPreviewReady("queued"), false);
+  assert.equal(isSyncPreviewReady("running"), false);
+  assert.equal(isSyncPreviewReady("done"), true);
+  assert.equal(isSyncPreviewReady("failed"), false);
 });
 
 test("the side panel tab round-trips and old three-part links keep working", () => {
