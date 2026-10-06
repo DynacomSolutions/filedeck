@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeState, encodeState, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Tree } from "../../web/src/urlState.ts";
+import { decodeState, encodeState, isSyncPreviewReady, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Tree } from "../../web/src/urlState.ts";
 
 const tree: Tree = { kind: "leaf", id: "p1", node: "n", path: "/a" };
 
@@ -35,6 +35,13 @@ test("view overlays round-trip through copied URLs, including sync plans", () =>
   assert.deepEqual(state?.folder, folder);
   const noCompare = decodeState(encodeState({ tree, active: "p1", sync: { action: "copy-lr", paths: ["readme.md"] } }));
   assert.equal(noCompare?.sync, undefined);
+});
+
+test("URL-restored sync previews wait for completed comparison rows", () => {
+  assert.equal(isSyncPreviewReady("queued"), false);
+  assert.equal(isSyncPreviewReady("running"), false);
+  assert.equal(isSyncPreviewReady("done"), true);
+  assert.equal(isSyncPreviewReady("failed"), false);
 });
 
 test("the side panel tab round-trips and old three-part links keep working", () => {

@@ -3,7 +3,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, leaves, maxId, syncTree, tabOf, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Leaf, type PrState, type SyncState, type Tree, type TrashState } from "./urlState";
+import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, isSyncPreviewReady, leaves, maxId, syncTree, tabOf, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Leaf, type PrState, type SyncState, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
@@ -495,7 +495,10 @@ export function App() {
       restoredSync.current = null;
       return;
     }
-    if (cmp.job && restoredSync.current !== syncKey) {
+    // A restored URL can arrive before the asynchronous compare has finished.
+    // Planning from its pending subtree rows would create an empty/incomplete
+    // plan and mark this route as restored without another attempt.
+    if (isSyncPreviewReady(cmp.job?.state) && restoredSync.current !== syncKey) {
       restoredSync.current = syncKey;
       compareRef.current?.setSelected(new Set(syncRoute.paths));
       compareRef.current?.preview(syncRoute.action, syncRoute.paths);

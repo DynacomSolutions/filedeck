@@ -134,6 +134,11 @@ export interface SyncState {
   paths: string[];
 }
 
+/** URL-restored sync plans must wait until the comparison has finalised its rows. */
+export function isSyncPreviewReady(jobState: string | undefined): boolean {
+  return jobState === "done";
+}
+
 export interface AppState {
   tree: Tree;
   active: string;
