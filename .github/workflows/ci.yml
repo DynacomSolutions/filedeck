@@ -81,7 +81,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          npm test -w server -- --test-reporter=tap | node scripts/check-test-skips.mjs
+          (cd server && node --import tsx --test --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
         timeout-minutes: 15
 
   web:

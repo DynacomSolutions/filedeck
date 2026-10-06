@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           npm run typecheck
           npm run build
-          npm test -w server -- --test-reporter=tap | node scripts/check-test-skips.mjs
+          (cd server && node --import tsx --test --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
           npm run check:neutral
         timeout-minutes: 20
 
