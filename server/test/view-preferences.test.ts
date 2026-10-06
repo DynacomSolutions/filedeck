@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_SETTINGS, resolvePanelPreferences, settingsFromStorage } from "../../web/src/settings.ts";
-import { decodeState, encodeState, type Tree } from "../../web/src/urlState.ts";
+import { decodeState, encodeState, type Leaf, type Tree } from "../../web/src/urlState.ts";
 
 test("stored view preferences keep valid values and replace invalid ones independently", () => {
   assert.deepEqual(settingsFromStorage(JSON.stringify({
@@ -29,7 +29,7 @@ test("explicit panel URL preferences override stored defaults, while omitted val
   const explicit: Tree = { kind: "leaf", id: "p1", node: "n", path: "/a", hidden: false, sort: { key: "name", asc: true }, w: "l" };
   const restored = decodeState(encodeState({ tree: explicit, active: "p1" }));
   assert.deepEqual(restored?.tree, explicit);
-  assert.deepEqual(resolvePanelPreferences(settings, restored!.tree as Extract<Tree, { kind: "leaf" }>), {
+  assert.deepEqual(resolvePanelPreferences(settings, restored!.tree as Leaf), {
     hidden: false,
     sort: { key: "name", asc: true },
     view: "list",
@@ -38,7 +38,7 @@ test("explicit panel URL preferences override stored defaults, while omitted val
   const omitted: Tree = { kind: "leaf", id: "p1", node: "n", path: "/a" };
   const inherited = decodeState(encodeState({ tree: omitted, active: "p1" }));
   assert.deepEqual(inherited?.tree, omitted);
-  assert.deepEqual(resolvePanelPreferences(settings, inherited!.tree as Extract<Tree, { kind: "leaf" }>), {
+  assert.deepEqual(resolvePanelPreferences(settings, inherited!.tree as Leaf), {
     hidden: true,
     sort: { key: "mtime", asc: false },
     view: "grid",

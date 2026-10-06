@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { Leaf, SortKey } from "./urlState";
+import type { Leaf, SortKey } from "./urlState.js";
 
 /** How the "go up one level" row at the top of a folder listing looks. */
 export type UpRow = "dots" | "up" | "hidden";
