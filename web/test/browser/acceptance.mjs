@@ -473,6 +473,10 @@ async function verifyKeyboardIsolation(browser) {
     assert.equal(await page.locator('.fp.active .fp-scroll [data-path].sel').count(), before.length, 'Properties keyboard commands must not change file selection');
     const list = page.locator('.fp.active .fp-scroll');
     await list.focus();
+    assert.ok(await list.evaluate((e) => e === document.activeElement), 'file viewport should be the keyboard event target');
+    // Ctrl+A on the Properties panel intentionally selects page text. Start a fresh
+    // file-list interaction with no browser text selection to test file select-all.
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
     const initialSelection = await page.locator('.fp.active .fp-scroll [data-path].sel').count();
     await page.keyboard.press('Control+a');
     const selectAllCount = await page.locator('.fp.active .fp-scroll [data-path].sel').count();
