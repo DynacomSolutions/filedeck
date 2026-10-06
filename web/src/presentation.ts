@@ -35,7 +35,7 @@ export function cssColourToHex(value: string, fallback = "#ffffff"): string {
 
 const KEY = "filedeck.presentation";
 const listeners = new Set<() => void>();
-const validColour = (value: unknown) => typeof value === "string" && /^#[\da-f]{6}$/i.test(value);
+const validColour = (value: unknown): value is string => typeof value === "string" && /^#[\da-f]{6}$/i.test(value);
 const bounded = (value: unknown, min: number, max: number, step: number, fallback: number) => {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.round(Math.min(max, Math.max(min, value)) / step) * step;
