@@ -178,7 +178,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const editing = leaf.edit ?? null;
   const setEditing = (f: FileRef | null) => onPatch({ edit: f ?? undefined });
   const gitDiff = leaf.gitDiff ?? null;
-  const setGitDiff = (f: FileRef | null) => onPatch({ gitDiff: f ?? undefined });
+  const setGitDiff = (f: Leaf["gitDiff"] | null) => onPatch({ gitDiff: f ?? undefined });
   const closedFor = leaf.closed ?? null;
   const setClosedFor = (p: string | null) => onPatch({ closed: p ?? undefined });
   const [narrow, setNarrow] = useState(false);
