@@ -35,12 +35,16 @@ function useTheme() {
 
 export function GitInlineDiffEditor({ node, path, head, working, modelId }: { node: string; path: string; head: TextFile; working: TextFile; modelId: string }) {
   const editorRef = useRef<MonacoEditor.IStandaloneDiffEditor | null>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const wheelCleanupRef = useRef<(() => void) | null>(null);
   const [contentHeight, setContentHeight] = useState(180);
   const theme = useTheme();
   const modelRoot = modelUri(node, path);
   const modelSuffix = encodeURIComponent(modelId);
   const language = languageForPath(path);
   useEffect(() => () => {
+    wheelCleanupRef.current?.();
+    wheelCleanupRef.current = null;
     const editor = editorRef.current;
     editorRef.current = null;
     const models = editor ? [editor.getOriginalEditor().getModel(), editor.getModifiedEditor().getModel()] : [];
@@ -62,7 +66,39 @@ export function GitInlineDiffEditor({ node, path, head, working, modelId }: { no
   };
   const resizeRef = useRef<(() => void) | null>(null);
   useEffect(() => () => resizeRef.current?.(), []);
+  const attachHorizontalWheel = (editor: MonacoEditor.IStandaloneDiffEditor) => {
+    const host = hostRef.current;
+    if (!host) return;
+    wheelCleanupRef.current?.();
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey) return; // Preserve browser zoom gestures.
+      const shiftedVertical = event.deltaX === 0 && event.shiftKey;
+      const horizontalDelta = event.deltaX || (shiftedVertical ? event.deltaY : 0);
+      if (!horizontalDelta) return;
+
+      const original = editor.getOriginalEditor();
+      const modified = editor.getModifiedEditor();
+      const target = event.target instanceof Node ? event.target : null;
+      const targetEditor = target && original.getContainerDomNode().contains(target) ? original
+        : target && modified.getContainerDomNode().contains(target) ? modified
+        : null;
+      if (!targetEditor) return;
+
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 40
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? targetEditor.getLayoutInfo().width
+        : 1;
+      const maxScroll = Math.max(0, targetEditor.getScrollWidth() - targetEditor.getLayoutInfo().width);
+      targetEditor.setScrollLeft(Math.max(0, Math.min(maxScroll, targetEditor.getScrollLeft() + horizontalDelta * unit)));
+
+      // For diagonal trackpad gestures, leave the event untouched so its vertical
+      // component continues to the Properties panel's scroll owner.
+      if (shiftedVertical || event.deltaY === 0) event.preventDefault();
+    };
+    host.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    wheelCleanupRef.current = () => host.removeEventListener("wheel", onWheel, true);
+  };
   return (
+    <div ref={hostRef}>
     <DiffEditor
       originalLanguage={language}
       modifiedLanguage={language}
@@ -75,8 +111,9 @@ export function GitInlineDiffEditor({ node, path, head, working, modelId }: { no
       height={contentHeight}
       keepCurrentOriginalModel
       keepCurrentModifiedModel
-      onMount={(editor) => { editorRef.current = editor; resizeRef.current?.(); resizeRef.current = updateContentHeight(editor); }}
+      onMount={(editor) => { editorRef.current = editor; attachHorizontalWheel(editor); resizeRef.current?.(); resizeRef.current = updateContentHeight(editor); }}
       loading={<div className="pad muted">Loading editor...</div>}
     />
+    </div>
   );
 }
