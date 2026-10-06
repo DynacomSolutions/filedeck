@@ -4,14 +4,13 @@
   --presentation-line-height: var(--user-line-height, 1.6);
 }
 body { font-family: var(--presentation-font); font-size: var(--presentation-size); line-height: var(--presentation-line-height); }
-[data-user-presentation] body { color: var(--user-foreground, var(--fg)); background-color: var(--user-background, var(--bg)); }
-[data-user-presentation] body :where(p, dd, .pv-md, .props dd) { max-width: var(--user-line-measure, 80ch); }
-[data-user-presentation] body :where(p, dd, .pv-md p) { margin-block-end: var(--user-paragraph-space, 1em); }
-[data-user-presentation] body :where(p, li, dd, dt, td, th, label, button, a, input, select, textarea, h1, h2, h3, h4, h5, h6, pre, code, span) { line-height: var(--user-line-height, 1.6); }
+[data-user-presentation] body :where(p, dd, .pv-md, .props dd, .ed-body, .modal p, textarea, input, select) { max-width: var(--user-line-measure, 80ch); }
+[data-user-presentation] body :where(p, dd, .pv-md p) { margin-block-end: var(--user-paragraph-space, 2.4em); }
+[data-user-presentation] body :not(svg):not(svg *) { font-family: var(--presentation-font) !important; font-size: var(--user-reading-size, 16px) !important; line-height: var(--user-line-height, 1.6) !important; }
 .presentation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: .8rem 1.2rem; }
-.presentation-grid label { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .35rem .65rem; min-width: 0; font-size: .9em; font-weight: 600; }
-.presentation-grid input[type=color] { grid-column: 1 / -1; width: 100%; min-height: 44px; padding: .25rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); }
-.presentation-grid input[type=range], .presentation-grid select { grid-column: 1 / -1; width: 100%; min-height: 44px; }
-.presentation-grid output { color: var(--fg); font-size: .88em; font-variant-numeric: tabular-nums; }
-.presentation-grid label button { grid-column: 1 / -1; justify-self: start; min-height: 44px; color: var(--accent-text); text-decoration: underline; }
+.presentation-field { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .35rem .65rem; min-width: 0; font-weight: 600; }
+.presentation-field input[type=color] { grid-column: 1 / -1; width: 100%; min-height: 44px; padding: .25rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); }
+.presentation-field input[type=range], .presentation-field select { grid-column: 1 / -1; width: 100%; min-height: 44px; }
+.presentation-field output { color: var(--fg); font-variant-numeric: tabular-nums; }
+.presentation-field button { grid-column: 1 / -1; justify-self: start; min-height: 44px; color: var(--accent-text); text-decoration: underline; }
 .presentation-reset { min-height: 44px; align-self: start; padding-inline: .8rem; border: 1px solid var(--border-strong); border-radius: var(--radius-btn); }
