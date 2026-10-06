@@ -210,8 +210,12 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     let remainder = editing ? text : baseRemainder(previous, path);
     if (editing) {
       const parsed = explicitAddress(text) ? parseAddress(text, previous, nodes.map((n) => n.name)) : { node: previous.node, path: resolveBasePath(previous, text) };
-      if (!("error" in parsed) && parsed.node === next.node && (next.path === "/" || parsed.path === next.path || parsed.path.startsWith(next.path.endsWith("/") ? next.path : next.path + "/"))) {
-        remainder = baseRemainder(next, parsed.path);
+      if (!("error" in parsed)) {
+        const parsedBase = addressBase(parsed.node, parsed.path, bases);
+        remainder = baseRemainder(parsedBase, parsed.path);
+        if (parsed.node === next.node && (next.path === "/" || parsed.path === next.path || parsed.path.startsWith(next.path.endsWith("/") ? next.path : next.path + "/"))) {
+          remainder = baseRemainder(next, parsed.path);
+        }
       }
     }
     setEditBase(next);

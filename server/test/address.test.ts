@@ -48,6 +48,8 @@ test("address bases resolve mount-relative paths without prefix collisions", () 
   assert.equal(baseRemainder(bases[1]!, "/mnt/photos/2026"), "photos/2026");
   assert.equal(resolveBasePath(bases[1]!, "photos/2026"), "/mnt/photos/2026");
   assert.equal(resolveBasePath(bases[0]!, "/etc"), "/etc");
+  const parsedBase = addressBase("node-a", "/mnt/photos/2026", bases);
+  assert.equal(baseRemainder(parsedBase, "/mnt/photos/2026"), "photos/2026", "an unrelated target base keeps the parsed URI remainder");
 });
 
 test("fuzzy ranks prefix over substring over subsequence", () => {

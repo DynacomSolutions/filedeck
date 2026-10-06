@@ -605,7 +605,7 @@ select option{background:var(--surface);color:var(--fg)}
 .addr-recent{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--muted)}
 .addr-recent:hover:not(:disabled),.addr-recent.open{background:var(--surface-3);color:var(--fg)}
 .addr-in{height:auto;min-height:44px;flex:1 1 auto;min-width:0;width:auto}
-.addr-base{height:36px;min-height:36px;flex:0 1 13rem;max-width:15rem;margin:4px 3px}
+.addr-base{height:44px;min-height:44px;flex:0 1 13rem;max-width:15rem;margin:0 3px}
 .addr>.tip:has(.addr-recent){flex:none;margin-left:auto}
 .addr>.tip:has(.addr-warn){position:absolute;right:30px;top:6px;flex:none;min-width:0;width:16px;height:16px}
 .addr-pop{z-index:120}
