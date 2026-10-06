@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
 
       - name: Validate stable release tag and chart versions
         shell: bash
@@ -29,12 +30,15 @@ jobs:
           app_version=$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2}' k8s/Chart.yaml)
           test "$chart_version" = "$version"
           test "$app_version" = "$version"
-          printf 'FILEDECK_RELEASE_TAG=%s\nFILEDECK_RELEASE_VERSION=%s\n' "$tag" "$version" >> "$GITHUB_ENV"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$version"
+          printf 'FILEDECK_RELEASE_TAG=%s\nFILEDECK_RELEASE_VERSION=%s\nFILEDECK_IMAGE=%s\n' "$tag" "$version" "$image" >> "$GITHUB_ENV"
+        timeout-minutes: 5
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+        timeout-minutes: 5
 
       - name: Install test tools
         run: |
@@ -46,6 +50,7 @@ jobs:
           command -v ffmpeg
           command -v git
           command -v smbclient
+        timeout-minutes: 5
       - run: npm ci --no-audit --no-fund
         timeout-minutes: 5
       - name: Verify the tagged release
@@ -61,6 +66,7 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.17.3
+        timeout-minutes: 5
       - name: Package chart
         run: |
           mkdir -p dist
@@ -70,23 +76,40 @@ jobs:
         timeout-minutes: 5
 
       - uses: docker/setup-buildx-action@v3
+        timeout-minutes: 5
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+        timeout-minutes: 5
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          load: true
+          push: false
           no-cache: true
-          tags: ghcr.io/dynacomsolutions/filedeck:${{ env.FILEDECK_RELEASE_VERSION }}
+          tags: ${{ env.FILEDECK_IMAGE }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.FILEDECK_RELEASE_VERSION }}
             org.opencontainers.image.title=Filedeck
             org.opencontainers.image.description=Web file manager with per-node agents and a hub
+        timeout-minutes: 15
+      - name: Scan release image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f
+        with:
+          image-ref: ${{ env.FILEDECK_IMAGE }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+        timeout-minutes: 10
+      - name: Push release image
+        run: docker push "$FILEDECK_IMAGE"
+        timeout-minutes: 5
       - name: Create GitHub release and upload chart
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release create "$FILEDECK_RELEASE_TAG" "dist/filedeck-${FILEDECK_RELEASE_VERSION}.tgz" --repo "$GITHUB_REPOSITORY" --title "Filedeck $FILEDECK_RELEASE_TAG" --generate-notes
+        timeout-minutes: 5
