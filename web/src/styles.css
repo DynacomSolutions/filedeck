@@ -166,6 +166,10 @@ input[type=checkbox]{accent-color:var(--accent)}
 .modal-actions button{min-height:38px;padding:0 1.15rem;font-size:.85rem}
 .modal-actions button[type=submit]{background:var(--accent-fill);border-color:transparent;color:#fff;font-weight:700}
 .modal-actions button[type=submit]:hover:not(:disabled){background:var(--accent-fill-hover);border-color:transparent}
+.transfer-destination-path{display:flex;align-items:center;justify-content:space-between;gap:.75rem;overflow-wrap:anywhere;font-size:.84rem}
+.transfer-destination-list{display:flex;flex-direction:column;gap:.25rem;max-height:min(42dvh,360px);overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.35rem}
+.transfer-destination-list button{display:flex;align-items:center;justify-content:flex-start;gap:.5rem;min-height:36px;text-align:left;overflow-wrap:anywhere}
+.transfer-destination-list button svg{width:16px;height:16px;flex:none;color:var(--muted)}
 
 /* per-panel preview dock controls */
 .pv-dock{margin-left:auto;display:inline-flex;gap:.15rem;align-self:center}
