@@ -90,9 +90,19 @@ export function GitInlineDiffEditor({ node, path, head, working, modelId }: { no
       const maxScroll = Math.max(0, targetEditor.getScrollWidth() - targetEditor.getLayoutInfo().width);
       targetEditor.setScrollLeft(Math.max(0, Math.min(maxScroll, targetEditor.getScrollLeft() + horizontalDelta * unit)));
 
-      // For diagonal trackpad gestures, leave the event untouched so its vertical
-      // component continues to the Properties panel's scroll owner.
-      if (shiftedVertical || event.deltaY === 0) event.preventDefault();
+      // A horizontal gesture must be consumed even when the editor is at an edge.
+      // Otherwise macOS can interpret the remaining delta as browser navigation.
+      // Route the vertical part of a diagonal gesture to the right-pane scroll
+      // owner before consuming the event so Monaco cannot become its scroll owner.
+      if (!shiftedVertical && event.deltaY) {
+        const scrollOwner = host.closest<HTMLElement>(".pv-body.pp-body");
+        const verticalUnit = event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? scrollOwner?.clientHeight ?? unit
+          : unit;
+        if (scrollOwner) scrollOwner.scrollTop += event.deltaY * verticalUnit;
+      }
+      event.preventDefault();
+      event.stopPropagation();
     };
     host.addEventListener("wheel", onWheel, { capture: true, passive: false });
     wheelCleanupRef.current = () => host.removeEventListener("wheel", onWheel, true);
