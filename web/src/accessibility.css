@@ -1,5 +1,5 @@
 /* WCAG AAA text contrast and clear control boundaries in both bundled themes. */
-:root {
+:root:not([data-theme="light"]) {
   --muted: #b8b8c2;
   --fg-soft: #d8d8dd;
   --accent-text: #a7c7ff;
