@@ -249,9 +249,18 @@ async function verifyPresentation(browser) {
     assert.equal(await page.locator('html').getAttribute('data-user-presentation'), null, 'reset should remove the user presentation marker');
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('filedeck.presentation'))), defaults, 'reset should persist default presentation values');
     await page.reload();
-    await opener.click();
+    await page.getByRole('group', { name: /Files in/ }).waitFor({ state: 'visible', timeout: 15000 });
     const defaultDialog = page.getByRole('dialog', { name: 'Settings' });
-    await defaultDialog.waitFor({ state: 'visible' });
+    if (await opener.getAttribute('aria-pressed') !== 'true') await opener.click();
+    try {
+      await defaultDialog.waitFor({ state: 'visible' });
+    } catch (error) {
+      const diagnostic = await page.evaluate(() => ({
+        url: location.href,
+        body: document.body.innerText.slice(0, 500),
+      }));
+      throw new Error(`Settings dialog did not open after reload: ${JSON.stringify(diagnostic)}`, { cause: error });
+    }
     await defaultDialog.getByRole('heading', { name: 'Reading presentation' }).waitFor({ state: 'visible' });
     const defaultSize = defaultDialog.getByRole('slider', { name: 'Text size' });
     await defaultSize.scrollIntoViewIfNeeded();
