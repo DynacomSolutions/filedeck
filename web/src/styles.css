@@ -675,8 +675,27 @@ select option{background:var(--surface);color:var(--fg)}
 .pv-body.pp-body{display:block;align-items:initial}
 .pp{padding:.8rem;display:flex;flex-direction:column;gap:.8rem;min-width:0;text-align:left}
 .pp .perm{padding:.7rem .8rem}
+.props-tabs{display:flex;gap:.25rem;overflow-x:auto;border-bottom:1px solid var(--border);scrollbar-width:thin}
+.props-tabs button{flex:0 0 auto;min-height:40px;padding:.4rem .7rem;border:0;border-bottom:2px solid transparent;border-radius:var(--radius-sm) var(--radius-sm) 0 0;background:transparent;color:var(--muted);box-shadow:none;font-size:.82rem;font-weight:650}
+.props-tabs button:hover{background:var(--surface-2);color:var(--fg)}
+.props-tabs button.on{border-bottom-color:var(--accent);background:var(--accent-tint);color:var(--fg)}
+.props-tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.props-tabpanel{min-width:0}
+.props-tabpanel[hidden]{display:none}
+.perm-name{display:flex;flex-direction:column;align-items:flex-start;gap:.25rem}
+.perm-name>label{font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.perm-name button{min-height:32px}
 .pp-actions{display:flex;justify-content:flex-end}
 .pp .props>div{grid-template-columns:5.5rem 1fr}
+/* The Properties pane shares a short, resizable dock on narrow screens.
+   Let the outer pane scroll so its dock controls and tab panels remain reachable. */
+@media(max-width:700px){
+  .fp .pv{overflow-x:hidden;overflow-y:auto}
+  .fp .pv-head{flex:0 0 auto;min-width:0;align-items:flex-start}
+  .fp .pv-body.pp-body{flex:0 0 auto;min-height:max(14rem,35dvh);overflow:visible}
+  .fp .props-tabs{flex-wrap:wrap;overflow:visible}
+  .fp .pp .props>div{grid-template-columns:minmax(0,1fr);gap:.2rem}
+}
 .pv-imgsk{position:absolute;inset:.8rem;border-radius:var(--radius-btn);background:var(--surface-2);animation:sk-in .01s linear .12s backwards}
 /* compare: parent row and loading placeholders */
 .cmp-row.up{cursor:pointer;color:var(--muted)}
