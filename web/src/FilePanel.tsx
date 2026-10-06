@@ -33,6 +33,7 @@ import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
+const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 
 /** Rows put in the DOM at first and added per step while scrolling. */
 const RENDER_STEP = 400;
@@ -176,6 +177,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // Per-panel preview: shown only while exactly one file is selected here (or being edited).
   const editing = leaf.edit ?? null;
   const setEditing = (f: FileRef | null) => onPatch({ edit: f ?? undefined });
+  const gitDiff = leaf.gitDiff ?? null;
+  const setGitDiff = (f: FileRef | null) => onPatch({ gitDiff: f ?? undefined });
   const closedFor = leaf.closed ?? null;
   const setClosedFor = (p: string | null) => onPatch({ closed: p ?? undefined });
   const [narrow, setNarrow] = useState(false);
@@ -628,6 +631,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const folderInput = useRef<HTMLInputElement>(null);
 
   const closeSide = () => {
+    if (gitDiff) return setGitDiff(null);
     if (editing) return setEditing(null);
     if (wtOpen) return setTab(undefined);
     if (propsOpen) {
@@ -640,7 +644,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   const paneExtra = (
     <span className="pv-extra">
-      {!editing && (
+      {!editing && !gitDiff && (
         <span className="pv-dock pv-switch" role="group" aria-label="Side panel content">
           <Tip label={previewEntry || (only && !isDirEntry(only) && !only.broken) ? "Preview the selected file" : "Select one file to preview it"}>
             <button type="button" className={"pv-dockbtn" + (!propsOpen && !wtOpen ? " on" : "")} aria-pressed={!propsOpen && !wtOpen} disabled={(propsOpen || wtOpen) && !(only && !isDirEntry(only) && !only.broken)} aria-label="Preview" onClick={showPreview}><Ic.Eye /></button>
@@ -661,16 +665,18 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             </button>
           </Tip>
         ))}
-        <Tip label={wtOpen && !editing ? "Close worktrees" : propsOpen && !editing ? "Close properties" : "Close preview"}>
-          <button
-            type="button"
-            className="pv-dockbtn"
-            aria-label={wtOpen && !editing ? "Close worktrees" : propsOpen && !editing ? "Close properties" : "Close preview"}
-            onClick={closeSide}
-          >
-            <X />
-          </button>
-        </Tip>
+        {!gitDiff && (
+          <Tip label={wtOpen && !editing ? "Close worktrees" : propsOpen && !editing ? "Close properties" : "Close preview"}>
+            <button
+              type="button"
+              className="pv-dockbtn"
+              aria-label={wtOpen && !editing ? "Close worktrees" : propsOpen && !editing ? "Close properties" : "Close preview"}
+              onClick={closeSide}
+            >
+              <X />
+            </button>
+          </Tip>
+        )}
       </span>
     </span>
   );
@@ -703,6 +709,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
       <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
     </Suspense>
+  ) : gitDiff ? (
+    <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
+      <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inline onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
+    </Suspense>
   ) : wtOpen ? (
     <WorktreesPane node={node} path={leaf.wtPath ?? path} extra={paneExtra} onOpen={(p) => onNavigate(node, p)} onMenu={(e, p) => showMenu(e, folderItems(p, false))} />
   ) : propsOpen ? (
@@ -734,6 +744,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       path: t.path,
       // the tab's own active item, selection and preview state come back with it
       ...(reset ? { sel: t.sel, sels: t.sels, ns: t.ns, closed: t.closed, sr: undefined, q: undefined } : {}),
+      ...(reset ? { gitDiff: undefined } : {}),
     });
     if (reset) {
       setSel(new Set(t.sels ?? (t.sel && !t.ns ? [t.sel] : [])));

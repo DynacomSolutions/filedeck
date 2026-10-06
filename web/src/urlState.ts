@@ -60,6 +60,8 @@ export interface Leaf {
   closed?: string;
   /** file open in the panel's editor */
   edit?: FileRef;
+  /** Git HEAD diff shown in this panel's side pane */
+  gitDiff?: FileRef;
   /** name filter (Ctrl+F) */
   q?: string;
   /** open search (under this panel's folder) */
@@ -178,7 +180,7 @@ export function viewCloseTarget(index: number, routeStart: number): number | nul
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 0 | 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; e?: [string, string]; q?: string; z?: WSearch; w?: "g" | "l"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
+type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 0 | 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; e?: [string, string]; gd?: [string, string]; q?: string; z?: WSearch; w?: "g" | "l"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
 type WTab = { s?: string; m?: string[]; x?: 1; c?: string };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
@@ -216,6 +218,7 @@ const toWire = (t: Tree): WTree => {
   if (t.pv?.tab === "wt" && t.wtPath) w.wp = t.wtPath;
   if (t.closed) w.c = t.closed;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
+  if (t.gitDiff) w.gd = [t.gitDiff.node, t.gitDiff.path];
   if (t.q) w.q = t.q;
   if (t.w) w.w = t.w;
   if (t.tabs && t.tabs.length > 1) {
@@ -303,6 +306,7 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (str(o.wp) && o.wp.startsWith("/")) leaf.wtPath = o.wp;
   if (str(o.c)) leaf.closed = o.c;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
+  if (Array.isArray(o.gd) && str(o.gd[0]) && str(o.gd[1]) && o.gd[1].startsWith("/")) leaf.gitDiff = { node: o.gd[0], path: o.gd[1], rev: "HEAD" };
   if (str(o.q) && o.q) leaf.q = o.q;
   if (o.w === "g" || o.w === "l") leaf.w = o.w;
   if (Array.isArray(o.tb) && o.tb.length > 1 && o.tb.length <= MAX_TABS && o.tb.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]) && x[1].startsWith("/"))) {

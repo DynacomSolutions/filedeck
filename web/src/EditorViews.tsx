@@ -1,6 +1,7 @@
 import { Tip } from "./Tooltip";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DiffEditor, Editor } from "@monaco-editor/react";
+import * as monaco from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { ConflictError, api, fmtSize, type TextFile } from "./api";
 import { gitApi } from "./git";
@@ -15,6 +16,16 @@ export interface FileRef {
   rev?: string;
 }
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+
+function languageForPath(path: string): string | undefined {
+  const name = base(path).toLowerCase();
+  const languages = monaco.languages.getLanguages();
+  const named = languages.find((language) => language.filenames?.some((filename) => filename.toLowerCase() === name));
+  if (named) return named.id;
+  return languages
+    .filter((language) => language.extensions?.some((extension) => name.endsWith(extension.toLowerCase())))
+    .sort((a, b) => Math.max(...(b.extensions ?? []).map((extension) => extension.length)) - Math.max(...(a.extensions ?? []).map((extension) => extension.length)))[0]?.id;
+}
 
 export const OPTS: MonacoEditor.IStandaloneEditorConstructionOptions = {
   automaticLayout: true,
@@ -161,7 +172,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
 
 /** Two-file diff: left is read-only, right is editable and saveable. */
 /** `overlay` places the diff over the panel area (inside <main>) instead of the whole page. */
-export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: FileRef; right: FileRef; onClose: () => void; onStatus: (m: string) => void; overlay?: boolean }) {
+export function DiffViewer({ left, right, onClose, onStatus, overlay, inline = false, extra }: { left: FileRef; right: FileRef; onClose: () => void; onStatus: (m: string) => void; overlay?: boolean; inline?: boolean; extra?: React.ReactNode }) {
   const [l, setL] = useState<TextFile | null>(null);
   const [r, setR] = useState<TextFile | null>(null);
   const [rText, setRText] = useState("");
@@ -237,7 +248,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: 
   const same = l && r && l.content === r.content;
 
   return (
-    <div className={"ed" + (overlay ? " over" : "")} role="region" aria-label="File diff">
+    <div className={"ed" + (overlay ? " over" : "") + (inline ? " inline" : "")} role="region" aria-label="File diff">
       <div className="ed-head" role="group" aria-label="Diff toolbar">
         <b>Diff</b>
         <Tip label={`${left.rev ? left.rev + " of " : ""}${left.node}:${left.path}`}><span className="muted ed-pair">{left.rev ? `${left.rev}:` : ""}{left.node}:{left.path}</span></Tip>
@@ -256,12 +267,15 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay }: { left: 
         </Tip>
         <Tip label="Save right side" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save right"}</button></Tip>
         <Tip label="Close"><button onClick={close}><Ic.X /> Close</button></Tip>
+        {extra}
       </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
       <div className="ed-body">
         {l && r && (
           <DiffEditor
+            originalLanguage={languageForPath(left.path)}
+            modifiedLanguage={languageForPath(right.path)}
             originalModelPath={modelUri(left.node, left.path) + "?side=left" + (left.rev ? `&rev=${encodeURIComponent(left.rev)}` : "")}
             modifiedModelPath={modelUri(right.node, right.path) + "?side=right"}
             keepCurrentOriginalModel
