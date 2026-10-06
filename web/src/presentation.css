@@ -11,10 +11,12 @@ body { font-family: var(--presentation-font); font-size: var(--presentation-size
 [data-user-presentation] .site-header__actions { flex-wrap: wrap; overflow: visible; }
 [data-user-presentation] .site-header .status { max-width: 100%; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 [data-user-presentation] .fp-bar { height: auto; min-height: 72px; justify-content: flex-start; gap: .5rem; padding-block: .55rem; overflow: visible; }
+[data-user-presentation] .fp-row { height: auto; min-height: max(44px, calc(var(--user-reading-size, 16px) * var(--user-line-height, 1.6) + .5rem)); flex-wrap: wrap; overflow: visible; padding-block: .25rem; }
+[data-user-presentation] .fp-tools { height: auto; min-height: 44px; flex-wrap: wrap; overflow: visible; padding-block: .25rem; }
 [data-user-presentation] .addr { height: auto; min-height: 22px; flex-wrap: wrap; overflow: visible; }
 [data-user-presentation] .addr-in, [data-user-presentation] .addr-edit { height: auto; min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
 [data-user-presentation] .crumbs { height: auto; min-height: 22px; flex-wrap: wrap; white-space: normal; overflow: visible; }
-[data-user-presentation] .fp-actions { height: auto; min-height: 32px; flex-wrap: wrap; overflow: visible; }
+[data-user-presentation] .fp-actions { height: auto; min-height: 44px; flex-wrap: wrap; overflow: visible; }
 [data-user-presentation] .cmp-barwrap { height: auto; min-height: 36px; overflow: visible; }
 [data-user-presentation] .cmp-bar { height: auto; min-height: 36px; flex-wrap: wrap; overflow: visible; padding-block: .35rem; }
 [data-user-presentation] .cmp-row { line-height: var(--user-line-height, 1.6); padding-block: 2px; }
