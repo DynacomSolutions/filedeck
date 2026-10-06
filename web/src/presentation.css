@@ -7,6 +7,24 @@ body { font-family: var(--presentation-font); font-size: var(--presentation-size
 [data-user-presentation] body :where(p, dd, .pv-md, .props dd, .ed-body, .modal p, textarea, input, select) { max-width: var(--user-line-measure, 80ch); }
 [data-user-presentation] body :where(p, dd, .pv-md p) { margin-block-end: var(--user-paragraph-space, 2.4em); }
 [data-user-presentation] body :not(svg):not(svg *) { font-family: var(--presentation-font) !important; font-size: var(--user-reading-size, 16px) !important; line-height: var(--user-line-height, 1.6) !important; }
+[data-user-presentation] .site-header__inner { height: auto; min-height: 52px; flex-wrap: wrap; overflow: visible; padding-block: .35rem; }
+[data-user-presentation] .site-header__actions { flex-wrap: wrap; overflow: visible; }
+[data-user-presentation] .site-header .status { max-width: 100%; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+[data-user-presentation] .fp-bar { height: auto; min-height: 72px; justify-content: flex-start; gap: .5rem; padding-block: .55rem; overflow: visible; }
+[data-user-presentation] .addr { height: auto; min-height: 22px; flex-wrap: wrap; overflow: visible; }
+[data-user-presentation] .addr-in, [data-user-presentation] .addr-edit { height: auto; min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
+[data-user-presentation] .crumbs { height: auto; min-height: 22px; flex-wrap: wrap; white-space: normal; overflow: visible; }
+[data-user-presentation] .fp-actions { height: auto; min-height: 32px; flex-wrap: wrap; overflow: visible; }
+[data-user-presentation] .cmp-barwrap { height: auto; min-height: 36px; overflow: visible; }
+[data-user-presentation] .cmp-bar { height: auto; min-height: 36px; flex-wrap: wrap; overflow: visible; padding-block: .35rem; }
+[data-user-presentation] .cmp-row { line-height: var(--user-line-height, 1.6); padding-block: 2px; }
+[data-user-presentation] .cmp-head { min-height: 28px; height: auto; padding-block: 2px; white-space: normal; }
+[data-user-presentation] .side-brand { height: auto; min-height: 52px; flex-wrap: wrap; padding-block: .5rem; }
+[data-user-presentation] .side-status { height: auto; min-height: 26px; overflow: visible; white-space: normal; overflow-wrap: anywhere; padding-block: .35rem; }
+[data-user-presentation] .side-status span { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+[data-user-presentation] .modal-back { align-items: flex-start; overflow-y: auto; padding: .5rem; }
+[data-user-presentation] .modal { width: min(420px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow: auto; margin: auto; }
+[data-user-presentation] .modal-actions { flex-wrap: wrap; }
 .presentation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: .8rem 1.2rem; }
 .presentation-field { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .35rem .65rem; min-width: 0; font-weight: 600; }
 .presentation-field input[type=color] { grid-column: 1 / -1; width: 100%; min-height: 44px; padding: .25rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); }

@@ -213,6 +213,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
           : e.key === "End" ? tabs.length - 1 : -1;
     if (next < 0) return;
     e.preventDefault();
+    e.stopPropagation();
     const tab = tabs[next]!.id;
     onTabChange(tab);
     tabRefs.current[tab]?.focus();
