@@ -44,7 +44,7 @@ const bounded = (value: unknown, min: number, max: number, step: number, fallbac
 export function normalizePresentation(value: unknown): PresentationSettings {
   const raw = value && typeof value === "object" ? value as Partial<PresentationSettings> : {};
   const lineHeight = bounded(raw.lineHeight, 1.5, 2, 0.1, 1.6);
-  const paragraphMin = Math.ceil(Math.max(2, lineHeight * 1.5) * 10) / 10;
+  const paragraphMin = Math.ceil(Math.max(20, Math.round(lineHeight * 10) * 1.5)) / 10;
   return {
     foreground: validColour(raw.foreground) ? raw.foreground : "",
     background: validColour(raw.background) ? raw.background : "",

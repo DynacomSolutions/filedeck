@@ -14,10 +14,16 @@ test("presentation preferences clamp stored values and reject invalid colours", 
   });
 });
 
+test("default presentation normalizes unchanged and paragraph spacing rounds cleanly", () => {
+  assert.deepEqual(normalizePresentation(DEFAULT_PRESENTATION), DEFAULT_PRESENTATION);
+  assert.equal(normalizePresentation({ lineHeight: 1.6, paragraphSpace: 0 }).paragraphSpace, 2.4);
+  assert.equal(normalizePresentation({ lineHeight: 1.7, paragraphSpace: 0 }).paragraphSpace, 2.6);
+});
+
 test("paragraph spacing remains at least 1.5 times the selected line height", () => {
   for (const lineHeight of [1.5, 1.6, 1.7, 1.8, 1.9, 2]) {
     const settings = normalizePresentation({ lineHeight, paragraphSpace: 0 });
-    assert.ok(settings.paragraphSpace >= lineHeight * 1.5);
+    assert.ok(settings.paragraphSpace >= Math.ceil(lineHeight * 15) / 10);
   }
 });
 
