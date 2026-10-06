@@ -166,6 +166,10 @@ input[type=checkbox]{accent-color:var(--accent)}
 .modal-actions button{min-height:38px;padding:0 1.15rem;font-size:.85rem}
 .modal-actions button[type=submit]{background:var(--accent-fill);border-color:transparent;color:#fff;font-weight:700}
 .modal-actions button[type=submit]:hover:not(:disabled){background:var(--accent-fill-hover);border-color:transparent}
+.transfer-destination-path{display:flex;align-items:center;justify-content:space-between;gap:.75rem;overflow-wrap:anywhere;font-size:.84rem}
+.transfer-destination-list{display:flex;flex-direction:column;gap:.25rem;max-height:min(42dvh,360px);overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.35rem}
+.transfer-destination-list button{display:flex;align-items:center;justify-content:flex-start;gap:.5rem;min-height:36px;text-align:left;overflow-wrap:anywhere}
+.transfer-destination-list button svg{width:16px;height:16px;flex:none;color:var(--muted)}
 
 /* per-panel preview dock controls */
 .pv-dock{margin-left:auto;display:inline-flex;gap:.15rem;align-self:center}
@@ -567,38 +571,38 @@ select option{background:var(--surface);color:var(--fg)}
 .fp.active,.fp.picked,.fp.active.picked{box-shadow:var(--shadow-2)}
 .fp.picked::after{box-shadow:inset 0 0 0 2px var(--accent-line)}
 .fp.active::after,.fp.active.picked::after{box-shadow:inset 0 0 0 2px var(--accent)}
-.fp-bar{height:72px;flex-direction:column;justify-content:flex-start;align-items:stretch;gap:0;padding:0}
-.fp-row{flex:none;height:40px;box-sizing:border-box;display:flex;flex-direction:row;align-items:center;gap:4px;padding:0 .5rem;min-width:0}
-.fp-tools{flex:none;height:32px;box-sizing:border-box;display:flex;flex-direction:row;align-items:center;gap:4px;padding:0 .5rem 4px;min-width:0;overflow:hidden}
-.fp-tools button{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;min-height:28px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--fg)}
+.fp-bar{height:88px;flex-direction:column;justify-content:flex-start;align-items:stretch;gap:0;padding:0}
+.fp-row{flex:none;height:44px;box-sizing:border-box;display:flex;flex-direction:row;align-items:center;gap:4px;padding:0 .5rem;min-width:0;overflow:visible}
+.fp-tools{flex:none;height:44px;box-sizing:border-box;display:flex;flex-direction:row;align-items:center;gap:4px;padding:0 .5rem;min-width:0;overflow:visible}
+.fp-tools button{display:inline-flex;align-items:center;justify-content:center;flex:none;width:44px;height:auto;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--fg)}
 .fp-tools button:hover:not(:disabled){background:var(--surface-3)}
 .fp-tools button:disabled{opacity:.4;cursor:default}
 .fp-tools button.marked{background:var(--accent-tint);color:var(--accent-text)}
 .fp-tools button.gap{margin-left:6px}
 .fp-tools button svg{width:16px;height:16px}
 .fp-tools>.tip{flex:none;display:inline-flex}
-.fp-up,.fp-actions button{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;min-height:28px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--fg)}
+.fp-up,.fp-actions button{display:inline-flex;align-items:center;justify-content:center;flex:none;width:44px;height:auto;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--fg)}
 .fp-up:hover:not(:disabled),.fp-actions button:hover:not(:disabled){background:var(--surface-3)}
 .fp-up:disabled,.fp-actions button:disabled{opacity:.4;cursor:default}
 .fp-up svg,.fp-actions button svg,.addr-recent svg{width:16px;height:16px}
-.fp-actions{height:28px;flex:none;gap:4px;overflow:visible}
+.fp-actions{height:44px;flex:none;gap:4px;overflow:visible}
 .fp-actions button.marked{background:var(--accent-tint);color:var(--accent-text)}
-.addr{flex:1 1 auto;min-width:190px;height:28px;padding:0 0 0 2px;border-radius:6px;background:var(--surface);cursor:text}
+.addr{flex:1 1 auto;min-width:190px;height:44px;padding:0 0 0 2px;border-radius:6px;background:var(--surface);cursor:text}
 .addr>.tip{flex:none;display:flex}
-.addr>.tip:has(.addr-fill){flex:1 1 24px;min-width:24px;height:100%}
-.crumbs{height:28px}
+.addr>.tip:has(.addr-fill){flex:1 1 44px;min-width:44px;height:100%}
+.crumbs{height:44px}
 .crumb{display:inline-flex;align-items:center;flex:none}.crumb>.tip{display:inline-flex}
-.crumbs button{height:24px;border-radius:6px;padding:0 .3rem;cursor:pointer}
+.crumbs button{height:auto;min-height:44px;border-radius:6px;padding:0 .3rem;cursor:pointer}
 .crumbs button:hover:not(:disabled){background:var(--surface-3);color:var(--fg)}
 .crumbs button.here{color:var(--fg)}
 .crumbs .crumb-sep{width:18px;padding:0;color:var(--muted)}
 .crumbs .crumb-sep svg.lucide{width:14px;height:14px;transition:transform var(--fast) var(--ease)}
 .crumbs .crumb-sep.open{background:var(--surface-3)}.crumbs .crumb-sep.open svg.lucide{transform:rotate(90deg)}
-.addr-fill{display:block;flex:1 1 24px;min-width:24px;height:100%;border-radius:6px;outline:none}
+.addr-fill{display:block;flex:1 1 44px;min-width:44px;height:100%;border-radius:6px;outline:none}
 .addr-fill:focus-visible{box-shadow:inset 0 0 0 2px var(--accent-line)}
-.addr-recent{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;min-height:0;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--muted)}
+.addr-recent{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--muted)}
 .addr-recent:hover:not(:disabled),.addr-recent.open{background:var(--surface-3);color:var(--fg)}
-.addr-in{height:28px;flex:1 1 auto;min-width:0;width:auto}
+.addr-in{height:auto;min-height:44px;flex:1 1 auto;min-width:0;width:auto}
 .addr>.tip:has(.addr-recent){flex:none;margin-left:auto}
 .addr>.tip:has(.addr-warn){position:absolute;right:30px;top:6px;flex:none;min-width:0;width:16px;height:16px}
 .addr-pop{z-index:120}
@@ -613,12 +617,12 @@ select option{background:var(--surface);color:var(--fg)}
 .ft tr.up,.tile.up{cursor:pointer}
 .ft tr.up:hover td,.tile.up:hover{background:var(--surface-2)}
 .ft tr.up td{color:var(--muted)}
-.ft .fl{display:flex;align-items:center;gap:.5rem;height:22px}.ft .fl .ico{flex:none;margin:0}
+.ft .fl{display:flex;align-items:center;gap:.5rem;height:auto;min-height:44px}.ft .fl .ico{flex:none;margin:0}
 .ft tr.up .up-btn,.tile.up .up-btn{display:inline-flex;align-items:center;justify-content:flex-start;min-height:0;height:22px;flex:1;padding:0;box-shadow:none;background:transparent;font:inherit;font-weight:600;color:var(--muted);vertical-align:middle;border-radius:var(--radius-btn)}
 .ft tr.up .up-btn:hover:not(:disabled),.tile.up .up-btn:hover:not(:disabled){background:transparent;color:var(--fg)}
 .ft tr.up .up-btn:focus-visible,.tile.up .up-btn:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent)}
 .tile.up .up-btn{width:auto;justify-content:center}
-.tile.up .tile-name{display:flex;justify-content:center}
+.tile.up .tile-name{display:flex;justify-content:center;min-height:44px;height:auto;overflow:visible}
 .ft tr.up.drop,.tile.up.drop{outline:2px solid var(--accent);outline-offset:-2px}
 /* inline new file / folder row: input spans the whole name cell, same height as a row */
 .ft tr.creating td.name{padding-top:.5rem;padding-bottom:.5rem;max-width:none;overflow:visible}
@@ -728,8 +732,9 @@ select option{background:var(--surface);color:var(--fg)}
 .fd-tog .fd-n{display:inline-block;min-width:7ch;text-align:left;font-variant-numeric:tabular-nums}
 /* row 1 = navigation + address bar + pane buttons only; the address bar shrinks, the row never overflows */
 .fp-row .addr{min-width:40px}
-.fp-row{overflow:hidden}
+.fp-row{overflow:visible}
 .fp-row>.tip{flex:none;display:inline-flex}
+@media(max-width:360px){.fp-bar{height:132px}.fp-row{height:88px;flex-wrap:wrap;align-content:flex-start}.fp-row .addr{min-width:88px}}
 
 /* pull request diff */
 .prd:focus{outline:none}
@@ -806,3 +811,37 @@ button.wt-row:hover{background:var(--surface-2)}
 .side-cmp-ahead li{display:flex;align-items:center;gap:.5rem;min-width:0}
 .side-cmp-ahead-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .side-cmp-ahead-cancel{flex:none;padding:.1rem .4rem;font-size:.85em}.side-cmp-ahead-cancel svg{width:12px;height:12px;vertical-align:-1px}
+
+/* WCAG 2.2 AAA controls: preserve a 44px hit area and visible keyboard focus. */
+:where(button, a[href], input, select, textarea, [tabindex="0"], [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"]):focus-visible {
+  outline: 2px solid #000 !important;
+  outline-offset: 1px !important;
+  box-shadow: 0 0 0 5px #fff !important;
+}
+:where(button, a[href], input, select, textarea, [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"]) {
+  min-width: 44px !important;
+  min-height: 44px !important;
+}
+.fp-up, .fp-actions button, .fp-tools button, .pv-head .pv-acts > *, .pv-head .pv-acts button,
+.pv-head a.btn-a, .pv-head .pv-extra .pv-dockbtn, .ctx button, .crumbs button,
+.side-scroll button, .fp-tab-x, .fp-tab-new, .addr-recent, .addr-warn, .mark-rm,
+.selbar-actions button, .theme-seg button, .cmp-seg button {
+  min-width: 44px !important;
+  min-height: 44px !important;
+  height: auto !important;
+}
+.tip-bubble { pointer-events: auto; }
+.sortable button {
+  width: 100%; min-width: 44px; min-height: 44px; display: inline-flex; align-items: center;
+  gap: .35rem; padding: .4rem .55rem; border: 0; background: transparent; color: inherit; font: inherit; text-align: inherit;
+}
+.fp-tabs [role="tab"] { min-height: 44px; }
+.addr-pop li[role="none"] { padding: 0; }
+.addr-pop li > button[role="menuitem"] {
+  display: flex; align-items: center; gap: .5rem; width: 100%; min-width: 44px; min-height: 44px;
+  padding: .3rem .5rem; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left;
+}
+.addr-pop li.cur > button[role="menuitem"] { background: var(--surface-3); }
+.addr-pop li.dim > button[role="menuitem"] { color: var(--muted); cursor: default; }
+.shortcut-pref{display:flex;align-items:flex-start;gap:.65rem;line-height:1.5;margin:.75rem 0;padding:.75rem;border:1px solid var(--border);border-radius:var(--radius-btn)}
+.shortcut-pref-input{width:1.25rem!important;height:1.25rem!important;min-width:1.25rem!important;min-height:1.25rem!important;margin:.15rem .25rem 0 0!important;flex:none}

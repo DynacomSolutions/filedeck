@@ -3,29 +3,22 @@ import { api, passwordState, type ArchiveFormat, type OverwritePolicy, type Pw }
 import { Tip } from "./Tooltip";
 import "./archive.css";
 import * as Ic from "lucide-react";
+import { useDialogFocus } from "./dialogFocus";
 
 export function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
   const form = useRef<HTMLFormElement>(null);
-  // Keyboard users: focus returns to where it was when the dialog closes, and Tab stays inside it.
-  const opener = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null); // read before autoFocus moves it
-  useEffect(() => () => opener.current?.focus?.(), []);
-  const trap = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") return onClose();
-    if (e.key !== "Tab" || !form.current) return;
-    const f = Array.from(form.current.querySelectorAll<HTMLElement>("button,input,select,textarea,a[href],[tabindex]:not([tabindex='-1'])")).filter((x) => !(x as HTMLButtonElement).disabled && x.offsetParent !== null);
-    if (!f.length) return;
-    const first = f[0]!;
-    const last = f[f.length - 1]!;
-    if (e.shiftKey && document.activeElement === first) (e.preventDefault(), last.focus());
-    else if (!e.shiftKey && document.activeElement === last) (e.preventDefault(), first.focus());
-  };
+  useDialogFocus(form);
   return (
-    <div className="modal-back" role="dialog" aria-modal="true" aria-label={title} onMouseDown={onClose}>
+    <div className="modal-back" role="presentation" onMouseDown={onClose}>
       <form
         ref={form}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
         className={"modal" + (wide ? " wide" : "")}
         onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={trap}
+        onKeyDown={(e) => e.key === "Escape" && onClose()}
         onSubmit={(e) => e.preventDefault()}
       >
         <h2>{title}</h2>

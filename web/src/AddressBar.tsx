@@ -52,10 +52,10 @@ const anchorOf = (el: Element): Anchor => {
 };
 
 /** Small popup list under an anchor (Explorer-style folder lists, recent locations): arrows, Enter, Esc, outside click. */
-function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem[]; label: string; onClose: () => void }) {
+function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem[]; label: string; onClose: (restore?: boolean) => void }) {
   const ref = useRef<HTMLUListElement>(null);
-  const rows = items.map((it, i) => [it, i] as const).filter(([it]) => !it.head).map(([, i]) => i);
-  const first = Math.max(0, items.findIndex((i) => i.on));
+  const rows = items.map((it, i) => [it, i] as const).filter(([it]) => !it.head && !!it.pick).map(([, i]) => i);
+  const first = rows.find((i) => items[i]?.on) ?? rows[0] ?? -1;
   const [cur, setCur] = useState(first);
   const [pos, setPos] = useState<{ left: number; top: number; maxH: number; width: number } | null>(null);
   useEffect(() => setCur(first), [first, items.length]);
@@ -70,7 +70,7 @@ function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem
     setPos({ left: Math.max(4, Math.min(anchor.left, vw - width - 4)), top: up ? Math.max(4, anchor.top - 4 - Math.min(maxH, 32 + items.length * 28)) : anchor.bottom + 4, maxH, width });
   }, [anchor, items.length]);
   useEffect(() => {
-    ref.current?.focus({ preventScroll: true });
+    (ref.current?.querySelector<HTMLElement>(`[data-i="${cur}"] button:not(:disabled)`) ?? ref.current)?.focus({ preventScroll: true });
     const down = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && onClose();
     const away = () => onClose();
     window.addEventListener("mousedown", down, true);
@@ -83,7 +83,9 @@ function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem
     };
   }, [onClose]);
   useEffect(() => {
-    ref.current?.querySelector(`[data-i="${cur}"]`)?.scrollIntoView({ block: "nearest" });
+    const active = ref.current?.querySelector<HTMLElement>(`[data-i="${cur}"] button:not(:disabled)`);
+    active?.scrollIntoView({ block: "nearest" });
+    if (active && document.activeElement !== active) active.focus({ preventScroll: true });
   }, [cur, pos]);
   const run = (it?: PopItem) => {
     if (!it?.pick) return;
@@ -104,7 +106,7 @@ function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem
     } else if (e.key === "Escape" || e.key === "ArrowLeft") {
       e.preventDefault();
       e.stopPropagation();
-      onClose();
+      onClose(true);
     }
   };
   return createPortal(
@@ -113,9 +115,11 @@ function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem
         it.head ? (
           <li key={it.key} role="presentation" className="addr-head">{it.label}</li>
         ) : (
-          <li key={it.key} data-i={i} role="menuitem" aria-current={it.on ? "true" : undefined} className={(i === cur ? "cur " : "") + (it.on ? "on" : "") + (it.pick ? "" : " dim")} onMouseMove={() => it.pick && cur !== i && setCur(i)} onClick={() => run(it)}>
-            {it.Icon && <it.Icon aria-hidden="true" />}
-            <span className="addr-uri">{it.label}</span>
+          <li key={it.key} data-i={i} role="none" className={(i === cur ? "cur " : "") + (it.on ? "on" : "") + (it.pick ? "" : " dim")} onMouseMove={() => it.pick && cur !== i && setCur(i)}>
+            <button type="button" role="menuitem" tabIndex={i === cur ? 0 : -1} aria-current={it.on ? "location" : undefined} disabled={!it.pick} onFocus={() => setCur(i)} onClick={() => run(it)}>
+              {it.Icon && <it.Icon aria-hidden="true" />}
+              <span className="addr-uri">{it.label}</span>
+            </button>
           </li>
         ),
       )}
@@ -150,8 +154,12 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const input = useRef<HTMLInputElement>(null);
   const editBtn = useRef<HTMLSpanElement>(null);
   const [pop, setPop] = useState<{ kind: "dir"; path: string; anchor: Anchor; items: PopItem[] } | { kind: "recent"; anchor: Anchor; items: PopItem[] } | null>(null);
+  const popOpener = useRef<HTMLElement | null>(null);
   const visited = useRef<Where[]>([]);
-  const closePop = useCallback(() => setPop(null), []);
+  const closePop = useCallback((restore = false) => {
+    setPop(null);
+    if (restore) requestAnimationFrame(() => popOpener.current?.focus({ preventScroll: true }));
+  }, []);
   const navRef = useRef<HTMLElement>(null);
   const skipFocus = useRef(false);
   const listId = useId();
@@ -361,6 +369,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   /** Explorer-style: the chevron after a segment lists that folder's sub-folders. */
   const openDirs = async (dirPath: string, btn: HTMLElement) => {
     if (pop?.kind === "dir" && pop.path === dirPath) return setPop(null);
+    popOpener.current = btn;
     const anchor = anchorOf(btn);
     const next = crumbs[crumbsOf(dirPath).length];
     setPop({ kind: "dir", path: dirPath, anchor, items: [{ key: "load", label: "Loading..." }] });
@@ -383,6 +392,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   };
   const openRecents = (btn: HTMLElement) => {
     if (pop?.kind === "recent") return setPop(null);
+    popOpener.current = btn;
     const here0 = (w: Where) => w.node === node && w.path === path;
     const go = (w: Where): PopItem => ({ key: fmtAddr(w.node, w.path), label: fmtAddr(w.node, w.path), Icon: Folder, pick: () => onGo(w.node, w.path) });
     const mine = visited.current.filter((w) => !here0(w));

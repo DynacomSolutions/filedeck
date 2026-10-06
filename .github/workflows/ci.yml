@@ -108,6 +108,8 @@ jobs:
         timeout-minutes: 5
       - run: npm run typecheck -w web
         timeout-minutes: 5
+      - run: npm test -w web
+        timeout-minutes: 10
       - run: npm run build -w web
         timeout-minutes: 10
 

@@ -337,7 +337,10 @@ export function App() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
-      if ((e.target as HTMLElement | null)?.closest("input,textarea,select,[contenteditable=true],.monaco-editor")) return;
+      try { if (localStorage.getItem("filedeck.help-key-disabled") === "true") return; } catch { /* keep the shortcut available when storage is blocked */ }
+      // The help key is a single-character shortcut. Do not intercept it from any
+      // interactive widget, menu, editor, or dialog, even when that widget is not editable.
+      if ((e.target as HTMLElement | null)?.closest("input,textarea,select,button,a[href],[role],[tabindex]:not([tabindex='-1']),[contenteditable=true],.monaco-editor")) return;
       e.preventDefault();
       setHelp(true);
     };

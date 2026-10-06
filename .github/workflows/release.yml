@@ -61,6 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run typecheck
+          npm test -w web
           npm run build
           (cd server && node --import tsx --test --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
           npm run check:neutral

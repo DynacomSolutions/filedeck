@@ -41,6 +41,10 @@ export function registerVaultRoutes(app: Hono, vault: Vault, nodeExists: (n: str
     if (!b || typeof b.node !== "string" || typeof b.path !== "string" || !b.path.startsWith("/") || !nodeExists(b.node)) return c.json({ error: "node and absolute path required" }, 400);
     return c.json({ removed: vault.forgetPath(b.node, b.path) });
   });
+  app.post("/api/vault/:id/extend", (c) => {
+    const entry = vault.extend(c.req.param("id"));
+    return entry ? c.json(entry) : c.json({ error: "saved password has expired" }, 404);
+  });
   app.delete("/api/vault/:id", (c) => (vault.forget(c.req.param("id")) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404)));
   app.delete("/api/vault", (c) => c.json({ removed: vault.forgetAll() }));
 }

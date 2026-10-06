@@ -224,6 +224,16 @@ export class Vault {
     this.db.prepare("UPDATE entries SET last_used = ? WHERE id = ?").run(this.now(), id);
   }
 
+  /** Extend an entry from the settings page, while preserving its absolute lifetime cap. */
+  extend(id: string): VaultEntryView | undefined {
+    this.purge();
+    const row = this.db.prepare("SELECT * FROM entries WHERE id = ?").get(id) as Row | undefined;
+    if (!row || !this.alive(row)) return undefined;
+    this.touch(id);
+    const updated = this.db.prepare("SELECT * FROM entries WHERE id = ?").get(id) as Row | undefined;
+    return updated ? this.view(updated) : undefined;
+  }
+
   /** True if any entry exists for the node (lets the hub skip an inode lookup when there is nothing to find). */
   hasNode(node: string): boolean {
     return this.db.prepare("SELECT 1 FROM entries WHERE node = ? LIMIT 1").get(node) !== undefined;

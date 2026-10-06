@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 import { SavedPasswords } from "./SavedPasswords";
+import { PresentationSettings } from "./PresentationSettings";
 import { Tip } from "./Tooltip";
 import { UP_ROWS, setSettings, useSettings, type UpRow } from "./settings";
 import * as Ic from "lucide-react";
+import { useDialogFocus } from "./dialogFocus";
 
 const ICON: Record<UpRow, Ic.LucideIcon> = { dots: Ic.CornerLeftUp, up: Ic.ArrowUp, hidden: Ic.EyeOff };
 
@@ -10,12 +12,14 @@ const ICON: Record<UpRow, Ic.LucideIcon> = { dots: Ic.CornerLeftUp, up: Ic.Arrow
 export function SettingsView({ onClose }: { onClose: () => void }) {
   const s = useSettings();
   const root = useRef<HTMLDivElement>(null);
+  useDialogFocus(root);
   useEffect(() => root.current?.focus(), []);
   return (
     <div
       ref={root}
       className="ed settings over"
       role="dialog"
+      aria-modal="true"
       aria-label="Settings"
       tabIndex={-1}
       onKeyDown={(e) => {
@@ -44,6 +48,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
             })}
           </div>
         </section>
+        <PresentationSettings />
         <SavedPasswords />
       </div>
     </div>

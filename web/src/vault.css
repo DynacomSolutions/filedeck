@@ -4,8 +4,13 @@
 .vault-wrap{overflow-x:auto;max-width:100%}
 .vault-table{table-layout:fixed;min-width:44rem;width:100%}
 .vault-table .vault-loc{width:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.vault-table .vault-scope{width:9.5rem}.vault-table .vault-kept{width:7.5rem}.vault-table .vault-date{width:8.8rem}.vault-table .vault-act{width:6.5rem;text-align:right}
+.vault-table .vault-scope{width:9.5rem}.vault-table .vault-kept{width:7.5rem}.vault-table .vault-date{width:8.8rem}.vault-table .vault-act{width:9rem;text-align:right}
 .vault-table td,.vault-table th{white-space:nowrap}
 .vault-empty{padding:1rem .6rem}
 .vault-sec{max-width:64rem}
+.vault-warning{display:flex;align-items:flex-start;gap:.45rem;margin:.65rem 0;padding:.55rem .7rem;border:1px solid var(--warn);border-radius:var(--radius-btn);color:var(--fg);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.vault-warning svg{width:1.1rem;flex:none;color:var(--warn)}
+.vault-expiry-warning{display:block;color:var(--warn);font-size:.75rem}
+.vault-maxed{white-space:normal;text-align:left;font-size:.75rem}
+.vault-act{display:flex;justify-content:flex-end;align-items:center;gap:.35rem;flex-wrap:wrap}
 .set-body>.set-sec+.set-sec{margin-top:1.8rem}

@@ -1,0 +1,57 @@
+:root {
+  --presentation-font: var(--user-reading-font, var(--font));
+  --presentation-size: var(--user-reading-size, 16px);
+  --presentation-line-height: var(--user-line-height, 1.6);
+}
+body { font-family: var(--presentation-font); font-size: var(--presentation-size); line-height: var(--presentation-line-height); }
+[data-user-presentation] body :where(p, dd, .pv-md, .props dd, .ed-body, .modal p, textarea, input, select) { max-width: var(--user-line-measure, 80ch); }
+[data-user-presentation] body :where(p, dd, .pv-md p) { margin-block-end: var(--user-paragraph-space, 2.4em); }
+[data-user-presentation] body :not(svg):not(svg *) { font-family: var(--presentation-font) !important; font-size: var(--user-reading-size, 16px) !important; line-height: var(--user-line-height, 1.6) !important; }
+[data-user-presentation] .site-header__inner { height: auto; min-height: 52px; flex-wrap: wrap; overflow: visible; padding-block: .35rem; }
+[data-user-presentation] .site-header__actions { flex-wrap: wrap; overflow: visible; }
+[data-user-presentation] .site-header .status { max-width: 100%; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+[data-user-presentation] .fp-bar { height: auto; min-height: 72px; justify-content: flex-start; gap: .5rem; padding-block: .55rem; overflow: visible; }
+[data-user-presentation] .fp-row { height: auto; min-height: max(44px, calc(var(--user-reading-size, 16px) * var(--user-line-height, 1.6) + .5rem)); flex-wrap: wrap; overflow: visible; padding-block: .25rem; }
+[data-user-presentation] .fp-tools { height: auto; min-height: 44px; flex-wrap: wrap; overflow: visible; padding-block: .25rem; }
+[data-user-presentation] .addr { height: auto; min-height: 22px; flex-wrap: wrap; overflow: visible; }
+[data-user-presentation] .addr-in, [data-user-presentation] .addr-edit { height: auto; min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
+[data-user-presentation] .crumbs { height: auto; min-height: 22px; flex-wrap: wrap; white-space: normal; overflow: visible; }
+[data-user-presentation] .fp-actions { height: auto; min-height: 44px; flex-wrap: wrap; overflow: visible; }
+[data-user-presentation] .cmp-barwrap { height: auto; min-height: 36px; overflow: visible; }
+[data-user-presentation] .cmp-bar { height: auto; min-height: 36px; flex-wrap: wrap; overflow: visible; padding-block: .35rem; }
+[data-user-presentation] .cmp-row { line-height: var(--user-line-height, 1.6); padding-block: 2px; }
+[data-user-presentation] .cmp-head { min-height: 28px; height: auto; padding-block: 2px; white-space: normal; }
+[data-user-presentation] .side-brand { height: auto; min-height: 52px; flex-wrap: wrap; padding-block: .5rem; }
+[data-user-presentation] .side-status { height: auto; min-height: 26px; overflow: visible; white-space: normal; overflow-wrap: anywhere; padding-block: .35rem; }
+[data-user-presentation] .side-status span { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+[data-user-presentation] .modal-back { align-items: flex-start; overflow-y: auto; padding: .5rem; }
+[data-user-presentation] .modal { width: min(420px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow: auto; margin: auto; }
+[data-user-presentation] .modal-actions { flex-wrap: wrap; }
+.presentation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: .8rem 1.2rem; }
+.presentation-field { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: .35rem .65rem; min-width: 0; font-weight: 600; }
+.presentation-field input[type=color] { grid-column: 1 / -1; width: 100%; min-height: 44px; padding: .25rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2); }
+.presentation-field input[type=range], .presentation-field select { grid-column: 1 / -1; width: 100%; min-height: 44px; }
+.presentation-field output { color: var(--fg); font-variant-numeric: tabular-nums; }
+.presentation-field button { grid-column: 1 / -1; justify-self: start; min-height: 44px; color: var(--accent-text); text-decoration: none; }
+.presentation-reset { min-height: 44px; align-self: start; padding-inline: .8rem; border: 1px solid var(--border-strong); border-radius: var(--radius-btn); }
+
+/* Reflow the compact Properties controls and sidebar at narrow viewports. The
+   breakpoint also catches desktop zoom when it reduces the CSS viewport. */
+@media (max-width: 700px) {
+  .side { max-height: 45dvh; overflow-y: auto; }
+  .side-scroll { flex: 1 1 auto; min-height: 3rem; }
+  .jobs { max-height: 30%; }
+  .pv { min-width: 0; overflow: auto; }
+  .pv-head { align-items: flex-start; min-width: 0; }
+  .pv-head > .pv-extra { flex: 1 1 100%; width: 100%; min-width: 0; margin-left: 0; flex-wrap: wrap; }
+  .pv-extra > .pv-switch,
+  .pv-extra > .pv-dock { flex: 1 1 auto; min-width: 0; margin-left: 0; flex-wrap: wrap; }
+  .pv-dockbtn { min-width: 44px; min-height: 44px; height: auto; }
+  .props-tabs { flex-wrap: wrap; overflow: visible; }
+  .props-tabs button { min-height: 44px; }
+  .props>div,
+  .pp .props>div { grid-template-columns: minmax(0, 1fr); gap: .2rem; }
+  [data-user-presentation] .cmp-inner { min-width: 0; }
+  [data-user-presentation] .cmp-head,
+  [data-user-presentation] .cmp-row { grid-template-columns: minmax(0, 1fr) 26px; }
+}

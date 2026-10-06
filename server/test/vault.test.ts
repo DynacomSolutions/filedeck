@@ -48,6 +48,26 @@ test("sliding TTL: each use refreshes the expiry", () => {
   assert.equal(v.list().length, 0, "expired entries are purged");
 });
 
+test("settings extension refreshes idle expiry but cannot bypass the absolute cap", () => {
+  const { v, c } = clocked({ ttlMs: 30 * MIN, maxMs: HOUR });
+  const e = v.put("n", "/f/a.zip", SECRET);
+  c.t += 20 * MIN;
+  const extended = v.extend(e.id)!;
+  assert.equal(extended.expiresAt, c.t + 30 * MIN);
+  c.t = 1_000_000 + 40 * MIN; // renew before the current idle expiry at +50
+  const capped = v.extend(e.id)!;
+  assert.equal(capped.expiresAt, 1_000_000 + HOUR);
+  c.t = 1_000_000 + HOUR + 1;
+  assert.equal(v.extend(e.id), undefined, "the absolute cap cannot be extended");
+});
+
+test("settings extension cannot revive an entry after idle expiry", () => {
+  const { v, c } = clocked({ ttlMs: 30 * MIN, maxMs: HOUR });
+  const e = v.put("n", "/f/a.zip", SECRET);
+  c.t += 31 * MIN;
+  assert.equal(v.extend(e.id), undefined, "an expired entry cannot be renewed");
+});
+
 test("absolute cap: constant use cannot keep an expiring entry past 24 hours", () => {
   const { v, c } = clocked();
   const start = c.t;
