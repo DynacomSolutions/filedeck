@@ -736,7 +736,39 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
     runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag2aaa', 'wcag21a', 'wcag21aa', 'wcag21aaa', 'wcag22aa', 'wcag22aaa', 'best-practice'] },
   }));
   const serious = axe.violations.filter((v) => ['critical', 'serious'].includes(v.impact));
-  const axeDiagnostics = serious.map((v) => ({ id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.map((n) => ({ target: n.target, summary: n.failureSummary })) }));
+  const targetSizeDiagnostics = await page.evaluate((selectors) => selectors.map((selector) => {
+    let elements = [];
+    try { elements = [...document.querySelectorAll(selector)].slice(0, 10); } catch { /* preserve diagnostic run for nonstandard selectors */ }
+    return { selector, matches: elements.map((element) => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const points = [
+        ['center', .5, .5], ['top-left', .08, .08], ['top', .5, .08], ['top-right', .92, .08],
+        ['right', .92, .5], ['bottom-right', .92, .92], ['bottom', .5, .92], ['bottom-left', .08, .92], ['left', .08, .5],
+      ];
+      const label = (node) => node ? {
+        tag: node.tagName.toLowerCase(),
+        class: typeof node.className === 'string' ? node.className : '',
+        label: node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent?.trim().slice(0, 60) || '',
+      } : null;
+      return {
+        element: label(element),
+        bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left },
+        style: { pointerEvents: style.pointerEvents, zIndex: style.zIndex, position: style.position, visibility: style.visibility, display: style.display },
+        hits: points.map(([point, fx, fy]) => {
+          const x = Math.min(innerWidth - 1, Math.max(0, rect.left + rect.width * fx));
+          const y = Math.min(innerHeight - 1, Math.max(0, rect.top + rect.height * fy));
+          return { point, x, y, topmost: label(document.elementFromPoint(x, y)) };
+        }),
+      };
+    }) };
+  }), serious.filter((v) => v.id === 'target-size').flatMap((v) => v.nodes.flatMap((n) => n.target)));
+  let targetSizeIndex = 0;
+  const axeDiagnostics = serious.map((v) => ({ id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.map((n) => ({
+    target: n.target,
+    summary: n.failureSummary,
+    ...(v.id === 'target-size' ? { targetSizeDiagnostics: n.target.map(() => targetSizeDiagnostics[targetSizeIndex++]) } : {}),
+  })) }));
   for (const violation of axeDiagnostics) failures.push({ kind: 'axe', ...violation });
   const targets = await page.locator('button:visible, a[href]:visible, input:visible, select:visible, [role="button"]:visible, [role="tab"]:visible, [role="menuitem"]:visible').evaluateAll((els) => els.map((e) => {
     const r = e.getBoundingClientRect();
