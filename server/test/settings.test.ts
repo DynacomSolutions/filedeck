@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeState, encodeState, type FolderState, type Tree } from "../../web/src/urlState.ts";
+import { decodeState, encodeState, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Tree } from "../../web/src/urlState.ts";
 
 const tree: Tree = { kind: "leaf", id: "p1", node: "n", path: "/a" };
 
@@ -9,6 +9,18 @@ test("the settings view round-trips through ?s= and is absent by default", () =>
   assert.equal(on?.settings, true);
   const off = decodeState(encodeState({ tree, active: "p1" }));
   assert.equal(off?.settings, undefined);
+});
+
+test("view history pushes between overlays and replaces a direct-entry close", () => {
+  const settings = viewIdentity({ settings: true });
+  const trash = viewIdentity({ trash: { node: "n", volume: "" } });
+  assert.equal(viewHistoryAction(null, settings), "push");
+  assert.equal(viewHistoryAction(settings, trash), "push");
+  assert.equal(viewHistoryAction(settings, settings), "none");
+  assert.equal(viewHistoryAction(settings, "", true), "replace");
+  assert.equal(viewCloseTarget(4, 2), 1, "close skips same-view panel entries to the entry before the view");
+  assert.equal(viewCloseTarget(1, 0), 0, "a direct-entry view first returns to its root entry");
+  assert.equal(viewCloseTarget(0, 0), null, "a direct-entry root closes by replacing its URL");
 });
 
 test("view overlays round-trip through copied URLs, including sync plans", () => {
