@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
+import { isEnhancedContrastFailure } from './contrast.mjs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -643,7 +644,7 @@ async function verifyMenusAndTooltips(browser) {
 }
 
 async function checkContrast(page) {
-  return page.evaluate(() => {
+  const candidates = await page.evaluate(() => {
     const parse = (s) => {
       const m = s.match(/rgba?\(([^)]+)\)/);
       if (!m) return null;
@@ -673,7 +674,7 @@ async function checkContrast(page) {
       }
       return bits.join(' > ');
     };
-    const fails = [];
+    const candidates = [];
     for (const el of document.querySelectorAll('body *')) {
       if (!el.getClientRects().length) continue;
       const text = [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
@@ -696,10 +697,11 @@ async function checkContrast(page) {
       const size = Number.parseFloat(cs.fontSize);
       const large = size >= 24 || (size >= 18.66 && Number.parseInt(cs.fontWeight) >= 700);
       const required = large ? 4.5 : 7;
-      if (ratio < required) fails.push({ selector: selector(el), text: el.textContent.trim().slice(0, 80), foreground: getComputedStyle(el).color, background: `rgba(${bg.map((v, i) => i < 3 ? Math.round(v) : Number(v.toFixed(3))).join(', ')})`, ratio: Number(ratio.toFixed(3)), required, fontSize: cs.fontSize, fontWeight: cs.fontWeight });
+      if (ratio < required) candidates.push({ selector: selector(el), text: el.textContent.trim().slice(0, 80), foreground: getComputedStyle(el).color, background: `rgba(${bg.map((v, i) => i < 3 ? Math.round(v) : Number(v.toFixed(3))).join(', ')})`, ratio: Number(ratio.toFixed(3)), required, disabled: Boolean(el.closest(':disabled, [aria-disabled="true"]')), fontSize: cs.fontSize, fontWeight: cs.fontWeight });
     }
-    return fails;
+    return candidates;
   });
+  return candidates.filter(isEnhancedContrastFailure).map(({ disabled, ...failure }) => failure);
 }
 
 async function verifyAccessibility(browser, viewport, colorScheme) {
