@@ -8,7 +8,35 @@ export interface Where {
 }
 export type Parsed = { node: string; path: string; select?: string } | { error: string };
 
+/** A selectable root in the address bar. Mounts are concrete roots below a node. */
+export interface AddressBase extends Where {
+  label: string;
+  kind: "node" | "source" | "mount";
+}
+
 export const fmtAddr = (node: string, path: string) => `${node}:${path}`;
+
+const within = (path: string, root: string) => root === "/" || path === root || path.startsWith(root.endsWith("/") ? root : root + "/");
+
+/** Pick the deepest known base that contains a location, falling back to the node root. */
+export function addressBase(node: string, path: string, bases: AddressBase[]): AddressBase {
+  const candidates = bases.filter((b) => b.node === node && within(path, b.path));
+  return candidates.sort((a, b) => b.path.length - a.path.length)[0] ?? { node, path: "/", label: node, kind: "node" };
+}
+
+/** Display the portion of a path after its selected base. Root paths retain their leading slash. */
+export function baseRemainder(base: Where, path: string): string {
+  if (base.path === "/") return path;
+  if (path === base.path) return "";
+  return path.slice(base.path.length).replace(/^\/+/, "");
+}
+
+/** Resolve the address bar's remaining path against its selected base. */
+export function resolveBasePath(base: Where, remainder: string): string {
+  const text = remainder.trim();
+  if (base.path === "/") return normPath(text || "/");
+  return normPath(`${base.path}/${text.replace(/^\/+/, "")}`);
+}
 
 /** Resolve `.`, `..` and repeated slashes; relative paths start from `base`. Always absolute, no trailing slash (except "/"). */
 export function normPath(p: string, base = "/"): string {

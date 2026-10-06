@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fuzzy, itemUri, normPath, parseAddress, splitTyped } from "../../web/src/address.ts";
+import { addressBase, baseRemainder, fuzzy, itemUri, normPath, parseAddress, resolveBasePath, splitTyped } from "../../web/src/address.ts";
 import { encodeState, type Tree } from "../../web/src/urlState.ts";
 
 const cur = { node: "node-a", path: "/home/user" };
@@ -36,6 +36,20 @@ test("splitTyped: parent folder and fragment", () => {
   assert.deepEqual(splitTyped("hq", cur, nodes), { bare: true, node: "node-a", dir: "/home/user", leaf: "hq" });
   assert.deepEqual(splitTyped("node-a:/a/..", cur, nodes), { bare: false, node: "node-a", dir: "/", leaf: "" });
   assert.equal(splitTyped("zz:/x", cur, nodes), null);
+});
+
+test("address bases resolve mount-relative paths without prefix collisions", () => {
+  const bases = [
+    { node: "node-a", path: "/", label: "node-a", kind: "node" as const },
+    { node: "node-a", path: "/mnt", label: "node-a:/mnt", kind: "mount" as const },
+  ];
+  assert.equal(addressBase("node-a", "/mnt/photos", bases).path, "/mnt");
+  assert.equal(addressBase("node-a", "/mnt2/photos", bases).path, "/");
+  assert.equal(baseRemainder(bases[1]!, "/mnt/photos/2026"), "photos/2026");
+  assert.equal(resolveBasePath(bases[1]!, "photos/2026"), "/mnt/photos/2026");
+  assert.equal(resolveBasePath(bases[0]!, "/etc"), "/etc");
+  const parsedBase = addressBase("node-a", "/mnt/photos/2026", bases);
+  assert.equal(baseRemainder(parsedBase, "/mnt/photos/2026"), "photos/2026", "an unrelated target base keeps the parsed URI remainder");
 });
 
 test("fuzzy ranks prefix over substring over subsequence", () => {

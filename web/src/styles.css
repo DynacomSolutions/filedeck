@@ -90,6 +90,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .addr-edit{flex:1;height:22px;min-height:0;padding:0;border:0;border-radius:6px;background:transparent}
 .addr-edit:hover:not(:disabled){background:var(--surface-2);border:0}
 .addr-in{flex:1;width:100%;height:22px;min-height:0;box-sizing:border-box;padding:0 1.6rem 0 .5rem;border:0!important;border-radius:6px;background:var(--surface-2)!important;color:var(--fg);font:inherit;font-size:.84rem;font-weight:600;box-shadow:0 0 0 2px var(--accent-line);outline:none}
+.addr-base{flex:0 1 12rem;min-width:5rem;max-width:15rem;height:32px;margin:0 3px;border:0;border-radius:5px;background:var(--surface-2);color:var(--fg);font:inherit;font-size:.78rem;font-weight:600;}
 .addr-in.bad{box-shadow:0 0 0 2px var(--accent)}
 .addr>.tip:has(.addr-warn){position:absolute;right:.4rem;top:3px;flex:none;min-width:0;width:16px;height:16px}
 .addr-warn{display:block;width:16px;height:16px;color:var(--accent-text)}.addr-warn svg{width:16px;height:16px}
@@ -604,6 +605,7 @@ select option{background:var(--surface);color:var(--fg)}
 .addr-recent{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;min-height:44px;padding:0;border:0;border-radius:6px;background:transparent;box-shadow:none;color:var(--muted)}
 .addr-recent:hover:not(:disabled),.addr-recent.open{background:var(--surface-3);color:var(--fg)}
 .addr-in{height:auto;min-height:44px;flex:1 1 auto;min-width:0;width:auto}
+.addr-base{height:44px;min-height:44px;flex:0 1 13rem;max-width:15rem;margin:0 3px}
 .addr>.tip:has(.addr-recent){flex:none;margin-left:auto}
 .addr>.tip:has(.addr-warn){position:absolute;right:30px;top:6px;flex:none;min-width:0;width:16px;height:16px}
 .addr-pop{z-index:120}
