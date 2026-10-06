@@ -235,8 +235,13 @@ async function verifyPresentation(browser) {
     assert.equal(await opener.evaluate((e) => e === document.activeElement), true, 'closing Settings restores focus to its opener');
     await page.reload();
     await opener.click();
-    await page.getByRole('dialog', { name: 'Settings' }).getByRole('slider', { name: 'Text size' }).waitFor({ state: 'visible' });
-    assert.equal(await page.getByRole('slider', { name: 'Text size' }).inputValue(), '32', 'presentation preference should restore after reload');
+    const restoredDialog = page.getByRole('dialog', { name: 'Settings' });
+    await restoredDialog.waitFor({ state: 'visible' });
+    await restoredDialog.getByRole('heading', { name: 'Reading presentation' }).waitFor({ state: 'visible' });
+    const restoredSize = restoredDialog.getByRole('slider', { name: 'Text size' });
+    await restoredSize.scrollIntoViewIfNeeded();
+    await restoredSize.waitFor({ state: 'visible' });
+    assert.equal(await restoredSize.inputValue(), '32', 'presentation preference should restore after reload');
     await page.getByRole('button', { name: 'Reset reading presentation' }).click();
     const defaults = { foreground: '', background: '', font: 'system', fontSize: 16, lineHeight: 1.6, paragraphSpace: 2.4, lineMeasure: 80 };
     await page.waitForFunction(() => document.querySelector('[aria-label="Text size"]')?.value === '16' && !document.documentElement.hasAttribute('data-user-presentation'));
@@ -245,9 +250,13 @@ async function verifyPresentation(browser) {
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('filedeck.presentation'))), defaults, 'reset should persist default presentation values');
     await page.reload();
     await opener.click();
-    const restoredDialog = page.getByRole('dialog', { name: 'Settings' });
-    await restoredDialog.getByRole('slider', { name: 'Text size' }).waitFor({ state: 'visible' });
-    assert.equal(await restoredDialog.getByRole('slider', { name: 'Text size' }).inputValue(), '16', 'default text size should restore after reset and reload');
+    const defaultDialog = page.getByRole('dialog', { name: 'Settings' });
+    await defaultDialog.waitFor({ state: 'visible' });
+    await defaultDialog.getByRole('heading', { name: 'Reading presentation' }).waitFor({ state: 'visible' });
+    const defaultSize = defaultDialog.getByRole('slider', { name: 'Text size' });
+    await defaultSize.scrollIntoViewIfNeeded();
+    await defaultSize.waitFor({ state: 'visible' });
+    assert.equal(await defaultSize.inputValue(), '16', 'default text size should restore after reset and reload');
     assert.equal(await page.locator('html').getAttribute('data-user-presentation'), null, 'default presentation should remain unmarked after reload');
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('filedeck.presentation'))), defaults, 'default presentation values should remain persisted after reload');
   } finally {
