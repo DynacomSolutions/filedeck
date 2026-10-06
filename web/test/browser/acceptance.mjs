@@ -755,7 +755,12 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
       return matching ? [{ target, foreground: matching.foreground, background: matching.background, ratio: matching.ratio, required: matching.required }] : [];
     });
   }
-  const clipped = await page.locator('button:visible, a[href]:visible, [role="button"]:visible, [role="tab"]:visible, [role="menuitem"]:visible').evaluateAll((els) => els.flatMap((e) => {
+  const clippingControls = page.locator('button:visible, a[href]:visible, [role="button"]:visible, [role="tab"]:visible, [role="menuitem"]:visible');
+  const clipped = [];
+  for (let i = 0; i < await clippingControls.count(); i++) {
+    const control = clippingControls.nth(i);
+    await control.scrollIntoViewIfNeeded();
+    clipped.push(...await control.evaluate((e) => {
     const r = e.getBoundingClientRect();
     const bad = [];
     const scrollports = [];
@@ -775,7 +780,8 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
       }
     }
     return bad;
-  }));
+    }));
+  }
   if (clipped.length) failures.push({ kind: 'clipped-interactive-targets', targets: clipped });
   if (contrast.length) failures.push({ kind: 'wcag-aaa-contrast', entries: contrast });
   await page.keyboard.press('Tab');
@@ -796,7 +802,12 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
   if (focus && !focus.disabled && Number(focus.opacity) < 0.5) failures.push({ kind: 'focus-opacity', focus });
   await page.addStyleTag({ content: '* { line-height: 1.5 !important; letter-spacing: .12em !important; word-spacing: .16em !important; } p { margin-bottom: 2em !important; }' });
   assert.ok(await page.locator('.fp-scroll:visible').count(), 'file content should remain available with WCAG text-spacing overrides');
-  const spacingClips = await page.locator('button:visible, a[href]:visible, [role="button"]:visible, [role="tab"]:visible').evaluateAll((els) => els.flatMap((e) => {
+  const spacingControls = page.locator('button:visible, a[href]:visible, [role="button"]:visible, [role="tab"]:visible');
+  const spacingClips = [];
+  for (let i = 0; i < await spacingControls.count(); i++) {
+    const control = spacingControls.nth(i);
+    await control.scrollIntoViewIfNeeded();
+    spacingClips.push(...await control.evaluate((e) => {
     const r = e.getBoundingClientRect();
     const scrollports = [];
     for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
@@ -810,7 +821,8 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
       if (outsideX || outsideY) return [{ label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40), ancestor: p.className?.toString?.() || p.tagName, overflow: { x: s.overflowX, y: s.overflowY }, outside: { x: outsideX, y: outsideY }, reachableScrollports: scrollports }];
     }
     return [];
-  }));
+    }));
+  }
   if (spacingClips.length) failures.push({ kind: 'text-spacing-clipping', targets: spacingClips });
   const width = viewport.width;
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
