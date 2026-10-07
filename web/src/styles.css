@@ -937,3 +937,4 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .fp-row .addr{order:5;flex:1 1 100%;min-width:0}
 }
 .job-line{gap:.1rem .3rem}.job-line button{padding:0 .45rem}
+.addr>.tip:has(.addr-fill){flex:1 1000 24px!important;min-width:0!important}.addr-fill{flex:1 1000 24px!important;min-width:0!important}

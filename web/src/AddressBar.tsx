@@ -186,6 +186,8 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const root = useRef<HTMLDivElement>(null);
   /** how many segments after the root are folded into the "..." menu (grown until the path fits) */
   const [folded, setFolded] = useState(0);
+  /** still overflowing with everything folded: only then may the last segment be truncated */
+  const [tight, setTight] = useState(false);
   const [, rerender] = useState(0);
   const rootW = useRef(0);
   const popOpener = useRef<HTMLElement | null>(null);
@@ -498,10 +500,17 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const maxFold = Math.max(0, segs.length - 2);
   const segKey = segs.map((x) => x.path).join("\0") + "\0" + currentBase.label;
   // Collapse by measurement: start from the full path, fold one more middle segment while the crumbs still overflow (settles before paint).
-  useLayoutEffect(() => setFolded(0), [segKey, editing]);
+  useLayoutEffect(() => (setFolded(0), setTight(false)), [segKey, editing]);
+  useEffect(() => {
+    let on = true;
+    void document.fonts?.ready.then(() => on && (setFolded(0), setTight(false), rerender((n) => n + 1)));
+    return () => void (on = false);
+  }, [segKey]);
   useLayoutEffect(() => {
     const nav = navRef.current;
-    if (!editing && nav && folded < maxFold && nav.scrollWidth > nav.clientWidth + 1) setFolded(folded + 1);
+    if (editing || !nav || nav.scrollWidth <= nav.clientWidth + 1) return;
+    if (folded < maxFold) setFolded(folded + 1);
+    else if (!tight) setTight(true);
   });
   useLayoutEffect(() => {
     const el = root.current;
@@ -511,6 +520,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       if (Math.abs(el.clientWidth - rootW.current) < 1) return;
       rootW.current = el.clientWidth;
       setFolded(0);
+      setTight(false);
       rerender((n) => n + 1);
     });
     ro.observe(el);
@@ -575,7 +585,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       }
     }}>
       {basePicker}
-      <nav className={"crumbs" + (folded >= maxFold ? " tight" : "")} aria-label="Breadcrumb" ref={navRef}>
+      <nav className={"crumbs" + (tight ? " tight" : "")} aria-label="Breadcrumb" ref={navRef}>
         {shownSegs.map(({ sg, i }) => (
           <span className={"crumb" + (i === segs.length - 1 ? " last" : "")} key={sg.path}>
             {i === folded + 1 && folded > 0 && (
