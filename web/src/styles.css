@@ -448,7 +448,7 @@ svg.lucide{display:inline-block}
 .brand-mark{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .side-brand{flex:none;display:flex;align-items:center;height:52px;box-sizing:border-box;padding:0 1.2rem;border-bottom:1px solid var(--border)}
 /* ---- flat surfaces: solid fills separated by soft shadows, not borders; one modest button radius ---- */
-:root{--btn-gap:.4rem}
+:root{--btn-gap:.4rem;--pane-head-h:45px}
 html,body{background:var(--bg)}
 .site-header{background:var(--surface);border:0;box-shadow:var(--shadow-1);position:relative;z-index:3}
 .side{background:var(--surface);border:0;box-shadow:var(--shadow-2);position:relative;z-index:4;height:100%}
@@ -941,3 +941,27 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 .pv-code{flex:1;min-height:0;width:100%;align-self:stretch;height:100%}
 .pv-code .monaco-editor,.pv-code .monaco-editor-background,.pv-code .monaco-editor .margin{background:var(--surface)}
 .pv-mdwrap .pv-code{height:auto}
+
+/* ---- one-row pane headers: the file list's column header and the side pane's header share --pane-head-h so their bottom edges line up in every dock position ---- */
+.pv-head,.ed.inline .ed-head,.ed.in-pane .ed-head{box-sizing:border-box;height:var(--pane-head-h);min-height:var(--pane-head-h);flex:0 0 auto;flex-wrap:nowrap;align-items:center;gap:.5rem;padding:0 .4rem 0 .8rem;overflow:hidden;border-bottom:1px solid transparent}
+.pv-head .pv-title{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;overflow-wrap:normal}
+.pv-head .pv-meta,.pv-head>.muted{flex:0 1000 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pv-head .pv-acts{margin-left:auto;flex:none;gap:.2rem}
+.pv-head .pv-extra{flex:none;gap:.2rem;margin-left:0}
+.pv-head .pv-acts+.pv-extra{margin-left:0}
+.pv-head .pv-extra .pv-dock{gap:.1rem}
+.pv-head .pv-lbl{margin-left:.1rem}
+.ed.inline .ed-head b,.ed.in-pane .ed-head b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed.inline .ed-head>.muted,.ed.in-pane .ed-head>.muted{min-width:0;flex:0 1000 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed.inline .ed-head .pv-extra,.ed.in-pane .ed-head .pv-extra{flex:none;margin-left:0}
+.pv{container:pvpane/inline-size}
+.pv-head .pv-title{min-width:3.5rem}
+@media(max-width:700px){.fp .pv-head{align-items:center;min-width:0}.pv-head .pv-meta{display:none}}
+/* narrow pane (docked side, or a phone): icon-only Edit and compact 34px icon targets (above the 24px WCAG 2.2 minimum) so the title keeps room */
+@container pvpane (max-width:440px){
+  .pv-head{padding-left:.6rem;gap:.3rem;padding-right:.2rem}
+  .pv-head .pv-lbl{display:none}
+  .pv-head .pv-meta{display:none}
+  .fp .pv-head button,.fp .pv-head .pv-dockbtn,.fp .pv-head .pv-acts>*,.fp .pv-head .pv-extra .pv-dockbtn,.fp .ed-head button{min-width:34px!important;min-height:34px!important;height:34px!important;padding:0 .4rem}
+  .pv-head .pv-acts,.pv-head .pv-extra,.pv-head .pv-extra .pv-dock{gap:0}
+}
