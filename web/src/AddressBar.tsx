@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Dropdown, shouldCloseOnOutside } from "./Dropdown";
 import { createPortal } from "react-dom";
 import { File as FileIcon, Folder, History, Server, Star, TriangleAlert, type LucideIcon } from "lucide-react";
 import { api, parent, stat, type NodeInfo } from "./api";
@@ -79,7 +80,7 @@ const anchorOf = (el: Element): Anchor => {
 };
 
 /** Small popup list under an anchor (Explorer-style folder lists, recent locations): arrows, Enter, Esc, outside click. */
-function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem[]; label: string; onClose: (restore?: boolean) => void }) {
+function Pop({ anchor, items, label, opener, onClose }: { anchor: Anchor; items: PopItem[]; label: string; opener?: HTMLElement | null; onClose: (restore?: boolean) => void }) {
   const ref = useRef<HTMLUListElement>(null);
   const rows = items.map((it, i) => [it, i] as const).filter(([it]) => !it.head && !!it.pick).map(([, i]) => i);
   const first = rows.find((i) => items[i]?.on) ?? rows[0] ?? -1;
@@ -98,7 +99,7 @@ function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem
   }, [anchor, items.length]);
   useEffect(() => {
     (ref.current?.querySelector<HTMLElement>(`[data-i="${cur}"] button:not(:disabled)`) ?? ref.current)?.focus({ preventScroll: true });
-    const down = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && onClose();
+    const down = (e: MouseEvent) => shouldCloseOnOutside(e.target as Node, ref.current, opener ?? null) && onClose();
     const away = () => onClose();
     window.addEventListener("mousedown", down, true);
     window.addEventListener("resize", away);
@@ -108,7 +109,7 @@ function Pop({ anchor, items, label, onClose }: { anchor: Anchor; items: PopItem
       window.removeEventListener("resize", away);
       window.removeEventListener("blur", away);
     };
-  }, [onClose]);
+  }, [onClose, opener]);
   useEffect(() => {
     const active = ref.current?.querySelector<HTMLElement>(`[data-i="${cur}"] button:not(:disabled)`);
     active?.scrollIntoView({ block: "nearest" });
@@ -488,11 +489,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   };
 
   const basePicker = (
-    <select className="addr-base" aria-label="Location base" value={baseKey(selectedBase)} disabled={busy} onChange={(e) => changeBase(e.target.value)}>
-      {baseOptions.map((base) => (
-        <option key={baseKey(base)} value={baseKey(base)}>{base.label}</option>
-      ))}
-    </select>
+    <Dropdown className="addr-base" label="Location base" value={baseKey(selectedBase)} disabled={busy} onChange={changeBase} options={baseOptions.map((base) => ({ value: baseKey(base), label: base.label }))} />
   );
 
   if (editing) {
@@ -533,7 +530,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
         </Tip>
         <span className="sr-only" role="status">{error || (items.length ? `${items.length} suggestion${items.length === 1 ? "" : "s"}` : "")}</span>
         {list}
-        {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} onClose={closePop} />}
+        {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} opener={popOpener.current} onClose={closePop} />}
       </div>
     );
   }
@@ -543,7 +540,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   return (
     <div className="addr" onMouseDown={(e) => {
       // empty space inside the bar (not a segment, chevron or the recents button) starts text editing
-      if (e.button === 0 && e.currentTarget.contains(e.target as Node) && !(e.target as Element).closest("button,select")) {
+      if (e.button === 0 && e.currentTarget.contains(e.target as Node) && !(e.target as Element).closest("button")) {
         e.preventDefault();
         begin();
       }
@@ -574,7 +571,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
           <Ic.History aria-hidden="true" />
         </button>
       </Tip>
-      {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} onClose={closePop} />}
+      {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} opener={popOpener.current} onClose={closePop} />}
     </div>
   );
 }
