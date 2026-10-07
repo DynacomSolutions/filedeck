@@ -232,7 +232,7 @@ function GitWorktrees({ node, root, onOpen, hrefFor }: { node: string; root: str
                 {status && <span className="muted">{status}</span>}
               </>;
               return <li key={w.gitPath}>{w.path && !w.prunable ? (
-                <a href={hrefFor(w.path)} data-nav className={"wt-row" + (w.current ? " cur" : "")} aria-current={w.current ? "true" : undefined} aria-label={`Open worktree ${w.name}, ${branch}, ${w.path}`} onClick={(event) => { if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onOpen(w.path!); } }}>{body}</a>
+                <a href={hrefFor(w.path)} data-nav className={"wt-row" + (w.current ? " cur" : "")} aria-current={w.current ? "true" : undefined} onClick={(event) => { if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onOpen(w.path!); } }}>{body}</a>
               ) : (
                 <div className="wt-row off" role="group" aria-label={`${w.name}: ${status ?? "Unavailable"}`}>{body}</div>
               )}</li>;

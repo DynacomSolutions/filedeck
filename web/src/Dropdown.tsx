@@ -121,7 +121,8 @@ export function Dropdown({ value, options, onChange, label, iconOnly, disabled, 
     }
   };
 
-  const name = iconOnly ? `${label}: ${selected?.label ?? ""}` : label;
+  // the visible text of a text trigger must be part of its accessible name (WCAG 2.5.3), so the current option is always appended
+  const name = `${label}: ${selected?.label ?? ""}`;
   const Sel = selected?.Icon;
   return (
     <>
