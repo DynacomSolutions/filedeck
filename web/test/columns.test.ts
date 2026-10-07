@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COLUMNS, clampWidth, isFlex, isShown, totalWidth, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn, visibleColumns, widthOf } from "../src/columns.ts";
+import { COLUMNS, clampWidth, isShown, totalWidth, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn, visibleColumns, widthOf } from "../src/columns.ts";
 
 test("widths are clamped to the column limits", () => {
   assert.equal(clampWidth("size", 1), 70);
@@ -50,21 +50,40 @@ test("reset restores defaults and resetWidth forgets one width", () => {
   assert.deepEqual(resetColumns(), { widths: {}, shown: {} });
 });
 
-test("Name fills the remaining width until the user resizes it", () => {
+test("every column, Name included, has an explicit width", () => {
   const s = resetColumns();
-  assert.equal(isFlex(s, "name"), true);
-  assert.equal(isFlex(s, "size"), false);
-  const sized = setWidth(s, "name", 500);
-  assert.equal(isFlex(sized, "name"), false);
-  assert.equal(widthOf(sized, "name"), 500);
-  assert.equal(isFlex(resetWidth(sized, "name"), "name"), true);
-  assert.equal(isFlex(parseColumns(serialiseColumns(sized)), "name"), false);
+  for (const c of COLUMNS) assert.equal(typeof widthOf(s, c.id), "number", c.id);
+  assert.equal(widthOf(s, "name"), 280);
+  assert.equal(widthOf(setWidth(s, "name", 500), "name"), 500);
+  assert.equal(widthOf(parseColumns(serialiseColumns(setWidth(s, "name", 500))), "name"), 500);
 });
 
-test("the minimum table width uses Name's default share and honours a stored width", () => {
-  assert.equal(totalWidth(resetColumns()), 240 + 100 + 160);
+test("resizing one column leaves every other width untouched", () => {
+  const s = resetColumns();
+  const r = setWidth(s, "size", 180);
+  assert.equal(widthOf(r, "size"), 180);
+  assert.equal(widthOf(r, "name"), widthOf(s, "name"));
+  assert.equal(widthOf(r, "mtime"), widthOf(s, "mtime"));
+  assert.deepEqual(r.widths, { size: 180 });
+});
+
+test("widths respect each column's minimum", () => {
+  for (const c of COLUMNS) assert.equal(clampWidth(c.id, 1), c.min, c.id);
+  assert.equal(widthOf(setWidth(resetColumns(), "name", 10), "name"), 160);
+});
+
+test("older saves (Name flexible, no stored width, or with legacy fields) load gracefully", () => {
+  const legacy = parseColumns(JSON.stringify({ widths: { size: 140 }, shown: { type: true }, extra: 1 }));
+  assert.equal(widthOf(legacy, "name"), 280);
+  assert.equal(widthOf(legacy, "size"), 140);
+  assert.deepEqual(visibleColumns(legacy).map((c) => c.id), ["name", "type", "size", "mtime"]);
+  assert.equal(totalWidth(legacy), 280 + 110 + 140 + 160);
+});
+
+test("the table width is the sum of the visible column widths, so widening one grows it by the same amount", () => {
+  assert.equal(totalWidth(resetColumns()), 280 + 100 + 160);
   assert.equal(totalWidth(setWidth(resetColumns(), "name", 600)), 600 + 100 + 160);
-  assert.equal(widthOf(resetColumns(), "name"), 240);
+  assert.equal(totalWidth(setWidth(resetColumns(), "name", 400)) - totalWidth(resetColumns()), 120);
 });
 
 test("header alignment: only Size is right aligned", () => {

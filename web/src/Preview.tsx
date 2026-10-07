@@ -11,6 +11,7 @@ import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
 import { isTextName } from "./highlight";
 import { PlainOrCode } from "./PlainOrCode";
 import { Tip } from "./Tooltip";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
 import * as Ic from "lucide-react";
 
 const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
@@ -51,24 +52,35 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
   const [hex, setHex] = useState(false);
   useEffect(() => setHex(false), [node, entry.path]);
   const isOffice = OFFICE_EXT.includes(e) && (e !== "csv" && e !== "tsv" || entry.size <= 8 * 1024 * 1024);
+  const [menu, setMenu] = useState<{ x: number; y: number; opener: HTMLElement } | null>(null);
   const known = isArchive(entry.name) || IMG.includes(e) || VID.includes(e) || AUD.includes(e) || e === "pdf" || isOffice || LEGACY_OFFICE.includes(e) || e === "md" || e === "markdown" || isTextName(entry.name) || entry.size === 0;
+  const items: MenuItem[] = [
+    ...(entry.size > 0 && known ? [{ label: hex ? "Back to preview" : "Hex dump", icon: hex ? Ic.Eye : Ic.Binary, onSelect: () => setHex(!hex) } satisfies MenuItem] : []),
+    { label: "Download", onSelect: () => {
+      const a = document.createElement("a");
+      a.href = fileUrl(node, entry.path, "download");
+      a.download = entry.name;
+      a.click();
+    } },
+  ];
   return (
     <div className="pv">
       <div className="pv-head">
-        <Tip label={entry.path}><b>{entry.name}</b></Tip>
-        <span className="muted">
-          {fmtSize(entry.size)} · {fmtDate(entry.mtime)}
-        </span>
+        <Tip label={entry.path}><b className="pv-title">{entry.name}</b></Tip>
+        <span className="muted pv-meta">{fmtSize(entry.size)} · {fmtDate(entry.mtime)}</span>
         <span className="pv-acts">
-        {canEdit(entry) && (
-          <Tip label="Open in the editor"><button type="button" onClick={() => onEdit(node, entry.path)}><Ic.FilePen /> Edit</button></Tip>
-        )}
-        {entry.size > 0 && known && (
-          <Tip label="Show the raw bytes as a hex dump"><button type="button" aria-pressed={hex} onClick={() => setHex(!hex)}>{hex ? <Ic.Eye /> : <Ic.Binary />} {hex ? "Preview" : "Hex"}</button></Tip>
-        )}
-        <Tip label="Download this file"><a className="btn-a" role="button" href={fileUrl(node, entry.path, "download")} download><Ic.Download /> Download</a></Tip>
+          {canEdit(entry) && (
+            <Tip label="Open in the editor"><button type="button" aria-label="Edit" onClick={() => onEdit(node, entry.path)}><Ic.FilePen /><span className="pv-lbl">Edit</span></button></Tip>
+          )}
+          <Tip label="More actions">
+            <button type="button" aria-label="More file actions" aria-haspopup="menu" aria-expanded={!!menu} onClick={(ev) => {
+              const r = ev.currentTarget.getBoundingClientRect();
+              setMenu({ x: r.right, y: r.bottom + 4, opener: ev.currentTarget });
+            }}><Ic.Ellipsis /></button>
+          </Tip>
         </span>
         {extra}
+        {menu && <ContextMenu x={menu.x} y={menu.y} opener={menu.opener} items={items} onClose={() => setMenu(null)} />}
       </div>
       <div className="pv-body">
         {hex || (!known && entry.size > 0) ? (

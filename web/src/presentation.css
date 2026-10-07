@@ -42,10 +42,7 @@ body { font-family: var(--presentation-font); font-size: var(--presentation-size
   .side-scroll { flex: 1 1 auto; min-height: 3rem; }
   .jobs { max-height: 30%; }
   .pv { min-width: 0; overflow: auto; }
-  .pv-head { align-items: flex-start; min-width: 0; }
-  .pv-head > .pv-extra { flex: 1 1 100%; width: 100%; min-width: 0; margin-left: 0; flex-wrap: wrap; }
-  .pv-extra > .pv-switch,
-  .pv-extra > .pv-dock { flex: 1 1 auto; min-width: 0; margin-left: 0; flex-wrap: wrap; }
+  .pv-head { min-width: 0; }
   .pv-dockbtn { min-width: 44px; min-height: 44px; height: auto; }
   .props-tabs { flex-wrap: wrap; overflow: visible; }
   .props-tabs button { min-height: 44px; }

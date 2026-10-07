@@ -12,12 +12,10 @@ export interface ColDef {
   /** shown by default */
   on: boolean;
   align?: "end";
-  /** takes the remaining table width until the user resizes it (def is then only its share of the minimum table width) */
-  fill?: boolean;
 }
 
 export const COLUMNS: readonly ColDef[] = [
-  { id: "name", label: "Name", min: 160, max: 1200, def: 240, sort: "name", on: true, fill: true },
+  { id: "name", label: "Name", min: 160, max: 2000, def: 280, sort: "name", on: true },
   { id: "type", label: "Type", min: 70, max: 400, def: 110, on: false },
   { id: "size", label: "Size", min: 70, max: 400, def: 100, sort: "size", on: true, align: "end" },
   { id: "mtime", label: "Modified", min: 110, max: 400, def: 160, sort: "mtime", on: true },
@@ -44,7 +42,7 @@ export function clampWidth(id: ColId, w: number): number {
   return Math.min(c.max, Math.max(c.min, Math.round(w)));
 }
 
-/** Tolerant parse: anything corrupt or unknown falls back to the defaults. */
+/** Tolerant parse: anything corrupt or unknown falls back to the defaults. Older saves (Name without a width) load as is: Name then takes its default width. */
 export function parseColumns(raw: string | null | undefined): ColumnState {
   if (!raw) return EMPTY_COLUMNS;
   let v: unknown;
@@ -88,14 +86,11 @@ export function resetWidth(s: ColumnState, id: ColId): ColumnState {
 
 export const widthOf = (s: ColumnState, id: ColId) => s.widths[id] ?? byId(id).def;
 
-/** A fill column (Name) with no stored width stretches to the space the other columns leave. */
-export const isFlex = (s: ColumnState, id: ColId) => !!byId(id).fill && s.widths[id] === undefined;
-
 export const visibleColumns = (s: ColumnState): ColDef[] => COLUMNS.filter((c) => isShown(s, c.id));
 
 export const resetColumns = (): ColumnState => EMPTY_COLUMNS;
 
 export const isDefault = (s: ColumnState) => Object.keys(s.widths).length === 0 && Object.keys(s.shown).length === 0;
 
-/** Sum of the visible column widths (the table's minimum width). */
+/** Sum of the visible column widths: the table is exactly this wide (or the panel width when that is larger, the rest staying empty). */
 export const totalWidth = (s: ColumnState) => visibleColumns(s).reduce((n, c) => n + widthOf(s, c.id), 0);
