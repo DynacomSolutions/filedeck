@@ -938,3 +938,6 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 }
 .job-line{gap:.1rem .3rem}.job-line button{padding:0 .45rem}
 .addr>.tip:has(.addr-fill){flex:1 1000 24px!important;min-width:0!important}.addr-fill{flex:1 1000 24px!important;min-width:0!important}
+.pv-code{flex:1;min-height:0;width:100%;align-self:stretch;height:100%}
+.pv-code .monaco-editor,.pv-code .monaco-editor-background,.pv-code .monaco-editor .margin{background:var(--surface)}
+.pv-mdwrap .pv-code{height:auto}

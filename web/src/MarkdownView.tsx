@@ -1,5 +1,8 @@
 import { SkeletonLines } from "./Skeleton";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { PlainOrCode } from "./PlainOrCode";
+
+const MAX_HIGHLIGHT = 256 * 1024;
 import DOMPurify from "dompurify";
 import { Marked } from "marked";
 import { fileUrl } from "./api";
@@ -81,6 +84,28 @@ export function MarkdownView({ node, path }: { node: string; path: string }) {
     return () => ctl.abort();
   }, [node, path]);
   const html = useMemo(() => (text === null ? "" : renderMarkdown(text, node, path.slice(0, path.lastIndexOf("/")) || "/")), [text, node, path]);
+  const article = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = article.current;
+    if (raw || !el) return;
+    const blocks = [...el.querySelectorAll<HTMLElement>("pre > code[class*='language-']")].slice(0, 100);
+    if (blocks.length === 0) return;
+    let live = true;
+    void (async () => {
+      const m = await import("./monacoSetup");
+      for (const code of blocks) {
+        const info = [...code.classList].find((c) => c.startsWith("language-"))?.slice(9) ?? "";
+        const lang = m.languageForFence(info);
+        const src = (code.textContent ?? "").replace(/\n$/, "");
+        if (!lang || lang === "plaintext" || !src || src.length > MAX_HIGHLIGHT / 4) continue;
+        const out = await m.colorizeSafe(src, lang);
+        if (live && code.isConnected) code.innerHTML = out;
+      }
+    })().catch((e) => console.warn("md-highlight", e));
+    return () => {
+      live = false;
+    };
+  }, [html, raw]);
   if (text === null) return <SkeletonLines lines={10} />;
   return (
     <div className="pv-mdwrap">
@@ -90,9 +115,10 @@ export function MarkdownView({ node, path }: { node: string; path: string }) {
         {trunc && <span className="muted">first 1 MiB shown</span>}
       </div>
       {raw ? (
-        <pre className="pv-text">{text}</pre>
+        <PlainOrCode id={fileUrl(node, path)} name="source.md" text={text} />
       ) : (
         <article
+          ref={article}
           className="pv-md"
           onClick={(e) => {
             const a = (e.target as HTMLElement).closest("a");
