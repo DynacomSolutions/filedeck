@@ -44,7 +44,7 @@ To run both modes locally: start an agent (`FILEDECK_MODE=agent FILEDECK_ROOT=/s
 Download the chart archive attached to the [latest GitHub release](https://github.com/DynacomSolutions/filedeck/releases), then install it without overrides to try the default configuration:
 
 ```sh
-helm install filedeck ./filedeck-0.3.2.tgz -n filedeck --create-namespace
+helm install filedeck ./filedeck-0.3.3.tgz -n filedeck --create-namespace
 kubectl -n filedeck port-forward svc/filedeck 8080:80   # then open http://127.0.0.1:8080
 ```
 
