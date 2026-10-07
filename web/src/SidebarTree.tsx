@@ -68,8 +68,9 @@ const loadStored = (): ExpandState => {
 /**
  * Tree navigation for the left sidebar: Nodes, Networks and Bookmarks as top-level groups.
  *
- * Interaction: each row is a single button. Clicking the label opens the folder in the active panel (and expands it if
- * closed, never collapses); clicking the small chevron only toggles. Ctrl/Cmd or middle click opens in a new panel.
+ * Interaction: each row is a single button. Clicking the label of a collapsed expandable row only expands it; clicking
+ * a row that is already expanded (or not expandable) opens the folder in the active panel. The small chevron only
+ * toggles. Ctrl/Cmd or middle click opens in a new panel immediately. Enter always opens, Space toggles.
  * The trailing "..." button (and Shift+F10 / the Menu key on the focused row) opens the action menu.
  */
 /** Tooltip only when the row's label is cut off. */
@@ -228,12 +229,12 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
     root.current?.querySelector<HTMLElement>(`[data-tid="${CSS.escape(tabId)}"]`)?.focus();
   });
 
-  const open = (t: TNode, how: How) => {
+  const open = (t: TNode, how: How, direct = false) => {
     if (t.kind === "section") return setExp(t.id, !isOpen(expanded, t.id, true));
     if (t.kind === "trash") return onTrash(t.node!);
     if (t.offline) return;
+    if (how === "here" && !direct && t.expandable && !isOpen(expanded, t.id, false)) return setExp(t.id, true);
     onOpen(t.node!, t.path ?? "/", how);
-    if (t.expandable && !isOpen(expanded, t.id, false)) setExp(t.id, true);
   };
 
   const bookmarkOf = (t: TNode): Bookmark | null => (t.node && t.path && t.kind !== "trash" ? { node: t.node, path: t.path } : null);
@@ -271,7 +272,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
     else if (a.type === "expand") setExp(a.id, true);
     else if (a.type === "collapse") setExp(a.id, false);
     else if (a.type === "toggle") setExp(a.id, !isOpen(expanded, a.id, t.defaultOpen));
-    else open(t, "here");
+    else open(t, "here", true);
   };
 
   const renderRow = (t: TNode, level: number): React.ReactNode => {
