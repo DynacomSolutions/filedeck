@@ -15,6 +15,8 @@ export type MenuItem =
       hint?: string;
       /** one nested level */
       sub?: MenuItem[];
+      /** icon for the row; by default one is chosen from the label */
+      icon?: LucideIcon;
     };
 
 type Item = Exclude<MenuItem, "sep">;
@@ -115,7 +117,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
               }}
               onClick={() => run(it)}
             >
-              <span className="ctx-l">{(() => { if (it.checked !== undefined) return <Check aria-hidden="true" style={{ visibility: it.checked ? "visible" : "hidden" }} />; const I = iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
+              <span className="ctx-l">{(() => { if (it.checked !== undefined) return <Check aria-hidden="true" style={{ visibility: it.checked ? "visible" : "hidden" }} />; const I = it.icon ?? iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
               {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
             </button>
             {it.sub && openSub === i && (

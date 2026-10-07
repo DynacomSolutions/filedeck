@@ -22,8 +22,9 @@ import { ColGroup, FillCell, HeaderRow, cellCount, dataCell, tableStyle, useColu
 import { gitApi, type GitListing } from "./git";
 import { GitBadge, GitPill } from "./GitUi";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
-import { EMPTY_SEARCH, MAX_SELS, MAX_TABS, encodeState, type Dock, type Leaf, type Loc, type SearchForm, type SortKey, type TabLoc } from "./urlState";
-import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowLeft, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitCompareArrows, GitPullRequest, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Plus, Rows2, Search, SquarePlus, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
+import { EMPTY_SEARCH, MAX_SELS, encodeState, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
+import type { ClickKind } from "./panelSelection";
+import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowLeft, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitBranch, GripVertical, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Rows2, Search, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
 import { resolvePanelPreferences, setSettings, useSettings } from "./settings";
@@ -63,7 +64,7 @@ interface Props {
   onOpenPanel: (node: string, path: string, select?: string) => void;
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
-  /** HTML5 drag props that make the panel header the drag handle for docking */
+  /** HTML5 drag props for the panel's drag handle (the drag image is the whole panel) */
   dragProps?: React.HTMLAttributes<HTMLElement>;
   /** Alt+Shift+Arrow: dock this panel beside its neighbour */
   onDock?: (key: string) => boolean;
@@ -80,7 +81,7 @@ interface Props {
   peers: { id: string; node: string; path: string; sel?: string; picked?: boolean }[];
   /** items selected in the other panels: Shift/Ctrl+click adds to them, a plain click drops them from the action selection (their active items stay), and actions here run on the lot */
   others: SelRef[];
-  /** this panel is picked as a whole (Shift/Ctrl+click on its header) */
+  /** this panel is one of the selected panels (Ctrl/Cmd+click on its items, Alt+P, or Shift/Ctrl+click on its toolbar) */
   panelPicked: boolean;
   /** a plain selection elsewhere asks every other panel to drop its items from the action selection (each keeps its own active item) */
   clearReq: { except: string; n: number } | null;
@@ -96,8 +97,8 @@ interface Props {
   onHelp: () => void;
   /** open this node's trash browser */
   onTrash: (node: string) => void;
-  /** open the pull request diff view for this repository folder */
-  onPrDiff: (node: string, path: string) => void;
+  /** Ctrl/Cmd+click (toggle) or Shift+click (range) on an item: the selected panels follow */
+  onClickSelect: (kind: ClickKind, stillSelectedHere: boolean) => void;
   onStatus: (msg: string) => void;
 }
 
@@ -111,7 +112,7 @@ const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, next, onSwitch, onHelp, onTrash, onPrDiff, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, onClickSelect, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const presentation = usePresentation();
   const estimatedFileRowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 17));
@@ -457,19 +458,22 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
 
   const click = (e: React.MouseEvent, en: Entry) => {
     onFocus();
+    const mod = e.ctrlKey || e.metaKey;
+    // Shift: a range inside this panel. Ctrl/Cmd: toggle, and this panel joins the selected panels. Plain: reset to this one item here.
+    const kind: ClickKind = e.shiftKey && anchor ? "range" : mod && !e.shiftKey ? "toggle" : "plain";
     // Ctrl/Cmd on a selected item deselects it: the active item then follows what is left (nothing: the open folder).
-    const off = (e.ctrlKey || e.metaKey) && !e.shiftKey && sel.has(en.path);
+    const off = kind === "toggle" && sel.has(en.path);
     if (off) {
       const rest = [...sel].filter((x) => x !== en.path);
       setCursor(rest.length === 1 ? rest[0]! : rest.length === 0 ? null : en.path);
     } else setCursor(en.path);
-    // Plain click selects here and nowhere else; Shift (range) and Ctrl/Cmd (toggle) keep the other panels' selections.
-    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) onClearOthers();
-    if (e.shiftKey && anchor) {
+    if (kind === "plain") onClearOthers();
+    else onClickSelect(kind, off ? sel.size > 1 : true);
+    if (kind === "range") {
       const a = visible.findIndex((x) => x.path === anchor);
       const b = visible.findIndex((x) => x.path === en.path);
       setSel(new Set(visible.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.path)));
-    } else if (e.ctrlKey || e.metaKey) {
+    } else if (kind === "toggle") {
       setSel((s) => {
         const n = new Set(s);
         n.has(en.path) ? n.delete(en.path) : n.add(en.path);
@@ -586,7 +590,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       ...(one && isDirEntry(one)
         ? ([
             { label: "Open in new panel", onSelect: () => onOpenPanel(node, one.path) },
-            { label: "Open in new tab", onSelect: () => newTab({ node, path: one.path }) },
             { label: isBookmarked(marks, { node, path: one.path }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: one.path }) },
           ] as MenuItem[])
         : one
@@ -619,7 +622,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   /** Menu for a folder itself: empty space in the listing, or a breadcrumb. */
   const folderItems = (dir: string, here: boolean): MenuItem[] => [
-    ...(here ? [] : ([{ label: "Open", onSelect: () => navigate(node, dir) }, { label: "Open in new panel", onSelect: () => onOpenPanel(node, dir) }, { label: "Open in new tab", onSelect: () => newTab({ node, path: dir }) }] as MenuItem[])),
+    ...(here ? [] : ([{ label: "Open", onSelect: () => navigate(node, dir) }, { label: "Open in new panel", onSelect: () => onOpenPanel(node, dir) }] as MenuItem[])),
     { label: isBookmarked(marks, { node, path: dir }) ? "Remove bookmark" : "Add to bookmarks", onSelect: () => toggleMark({ node, path: dir }) },
     { label: "New file...", onSelect: () => startCreate(dir, "file") },
     { label: "New folder...", onSelect: () => startCreate(dir, "folder") },
@@ -630,7 +633,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     ...compareItems(),
     { label: "Copy path", onSelect: () => void copyPaths([dir]) },
     { label: "Forget saved password", onSelect: () => forgetPasswords([dir]) },
-    { label: "Pull request diff...", onSelect: () => onPrDiff(node, dir) },
     { label: "Open trash", onSelect: () => onTrash(node) },
     "sep",
     { label: "Properties", hint: here ? "Alt+Enter" : undefined, onSelect: () => openProps(dir) },
@@ -761,73 +763,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   ) : previewEntry ? (
     <Preview node={node} entry={previewEntry} onEdit={(n, p) => setEditing({ node: n, path: p })} extra={paneExtra} />
   ) : null;
-  // ---- tabs: several folders per panel; `node`/`path` stay the active tab's, the list lives in the URL ----
+  // ---- bookmarks ----
   const marks = useBookmarks();
   const here = { node, path };
-  /** every tab with its own active item, selection and closed preview; the open tab's live state replaces its stored one */
-  const curTab: TabLoc = {
-    node,
-    path,
-    ...(cursor ? { sel: cursor } : {}),
-    ...(cursor && !sel.has(cursor) ? { ns: true as const } : {}),
-    ...(sel.size > 1 && sel.size <= MAX_SELS ? { sels: [...sel].sort() } : {}),
-    ...(closedFor ? { closed: closedFor } : {}),
-  };
-  const tabs: TabLoc[] = (leaf.tabs ?? [here]).map((t, k) => (k === Math.min(leaf.ti ?? 0, (leaf.tabs?.length ?? 1) - 1) ? curTab : t));
-  const ti = Math.min(leaf.ti ?? 0, tabs.length - 1);
-  const [tabDrag, setTabDrag] = useState<number | null>(null);
-  const applyTabs = (list: TabLoc[], idx: number, reset: boolean) => {
-    const t = list[idx]!;
-    onPatch({
-      tabs: list.length > 1 ? list : undefined,
-      ti: list.length > 1 && idx > 0 ? idx : undefined,
-      node: t.node,
-      path: t.path,
-      // the tab's own active item, selection and preview state come back with it
-      ...(reset ? { sel: t.sel, sels: t.sels, ns: t.ns, closed: t.closed, sr: undefined, q: undefined } : {}),
-      ...(reset ? { gitDiff: undefined } : {}),
-    });
-    if (reset) {
-      setSel(new Set(t.sels ?? (t.sel && !t.ns ? [t.sel] : [])));
-      setCursor(t.sel ?? null);
-      setAnchor(t.sel ?? null);
-      setFilterOpen(false);
-    }
-  };
-  const newTab = (at: TabLoc = here) => {
-    if (tabs.length >= MAX_TABS) return onStatus(`At most ${MAX_TABS} tabs per panel`);
-    const list = [...tabs.slice(0, ti + 1), at, ...tabs.slice(ti + 1)];
-    applyTabs(list, ti + 1, at.node !== node || at.path !== path);
-  };
-  const selectTab = (i: number) => i !== ti && applyTabs(tabs, i, true);
-  const closeTab = (i: number) => {
-    if (tabs.length < 2) return;
-    const list = tabs.filter((_, k) => k !== i);
-    const idx = i < ti ? ti - 1 : i === ti ? Math.min(i, list.length - 1) : ti;
-    applyTabs(list, idx, i === ti);
-  };
-  const moveTab = (from: number, to: number) => {
-    if (from === to || to < 0 || to >= tabs.length) return;
-    const list = tabs.slice();
-    const [m] = list.splice(from, 1);
-    list.splice(to, 0, m!);
-    const idx = ti === from ? to : from < ti && to >= ti ? ti - 1 : from > ti && to <= ti ? ti + 1 : ti;
-    applyTabs(list, idx, false);
-  };
-  const tabLabel = (t: Loc) => (t.path === "/" ? t.node + ":/" : t.path.slice(t.path.lastIndexOf("/") + 1));
-  const tabMenu = (e: React.MouseEvent, i: number) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const items: MenuItem[] = [
-      { label: "Duplicate tab", onSelect: () => { if (tabs.length >= MAX_TABS) return onStatus(`At most ${MAX_TABS} tabs per panel`); applyTabs([...tabs.slice(0, i + 1), tabs[i]!, ...tabs.slice(i + 1)], ti > i ? ti + 1 : ti, false); } },
-      { label: "Move left", disabled: i === 0, onSelect: () => moveTab(i, i - 1) },
-      { label: "Move right", disabled: i === tabs.length - 1, onSelect: () => moveTab(i, i + 1) },
-      "sep",
-      { label: "Close tab", hint: "Alt+W", disabled: tabs.length < 2, onSelect: () => closeTab(i) },
-      { label: "Close other tabs", disabled: tabs.length < 2, onSelect: () => applyTabs([tabs[i]!], 0, i !== ti) },
-    ];
-    setMenu({ x: e.clientX, y: e.clientY, items });
-  };
   const toggleMark = (l: Loc) => {
     onStatus(isBookmarked(marks, l) ? `Removed bookmark ${l.node}:${l.path}` : `Bookmarked ${l.node}:${l.path}`);
     toggleBookmark(l);
@@ -840,7 +778,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     draggable: true,
     onClick: (e: React.MouseEvent) => click(e, en),
     onDoubleClick: () => open(en),
-    onAuxClick: isDir ? (e: React.MouseEvent) => e.button === 1 && (e.preventDefault(), newTab({ node, path: en.path })) : undefined,
+    onAuxClick: isDir ? (e: React.MouseEvent) => e.button === 1 && (e.preventDefault(), onOpenPanel(node, en.path)) : undefined,
     onContextMenu: (e: React.MouseEvent) => {
       onFocus();
       const inSel = sel.has(en.path);
@@ -938,10 +876,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       <div
         className="fp-scroll"
         tabIndex={0}
-        role={tabs.length > 1 && !cside ? "tabpanel" : "group"}
+        role="group"
         aria-label={`Files in ${path} on ${node}. Arrow keys select, Enter opens.`}
-        id={tabs.length > 1 && !cside ? `${leaf.id}-tabpanel` : undefined}
-        aria-labelledby={tabs.length > 1 && !cside ? `${leaf.id}-tab-${ti}` : undefined}
         onFocus={(e) => {
           // Tabbing into the list selects the first entry so the arrow keys have somewhere to start. A mouse click
           // also focuses the list but must not: selecting (and scrolling to) the first row between mousedown and
@@ -1109,7 +1045,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     const handled = (() => {
       if (e.altKey && e.shiftKey && !mod && key.startsWith("Arrow") && onDock) return onDock(key);
       // While the search results are open the panel's own selection is hidden: no file operations by key.
-      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "twTW[]nurcNURC".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
+      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "nurcpNURCP".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
       if (!mod && !e.altKey && /^\p{L}$/u.test(key)) {
         const match = nextLetterMatch(visible, cursor, key);
         if (match) {
@@ -1118,14 +1054,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }
       }
       if (key === "?" && !mod) return onHelp(), true;
-      if (e.altKey && !mod && key.toLowerCase() === "t") return newTab(), true;
       // Folder actions that used to live only in the header "more" menu (also in the right-click menu of the list and the breadcrumb).
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "n") return startCreate(path, "file"), true;
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "u") return fileInput.current?.click(), true;
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "r") return refresh(), true;
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "c") return void copyPaths([path]), true;
-      if (e.altKey && !mod && key.toLowerCase() === "w") return tabs.length > 1 && (closeTab(ti), true);
-      if (e.altKey && !mod && (key === "]" || key === "[") && tabs.length > 1) return selectTab((ti + (key === "]" ? 1 : -1) + tabs.length) % tabs.length), true;
+      // Keyboard alternative to Ctrl/Cmd+click: add this panel to (or remove it from) the selected panels.
+      if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "p") return onTogglePanel(), true;
       // Tab hops between panels only from the list itself, and never wraps: otherwise it would be a keyboard trap.
       if (key === "Tab" && !mod && !e.altKey && (e.target === e.currentTarget || !!(e.target as HTMLElement).closest(".fp-scroll"))) return onSwitch(e.shiftKey ? -1 : 1);
       if (mod && e.shiftKey && key.toLowerCase() === "f") return setSearch(leaf.sr ?? EMPTY_SEARCH), true;
@@ -1195,56 +1130,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     }
   }
   const horizontal = dock === "left" || dock === "right";
-  // ---- panel controls, one row with the address bar: what does not fit moves into the "more" menu ----
-  type Ctl = { id: string; label: string; hint?: string; gap?: boolean; icon: React.ReactNode; pressed?: boolean; disabled?: boolean; run: () => void; ctx?: (e: React.MouseEvent) => void };
+  // ---- panel toolbar: frequent actions stay visible, the rest live in grouped menus (New, View, More) ----
   const marked = isBookmarked(marks, here);
-  const compareRun = () => {
-    if (cside && cmpCtl) return cmpCtl.exit();
-    if (!peers.length) return onStatus("Open a second panel first (split button)");
-    const pickedPeers = peers.filter((p) => p.picked);
-    if (panelPicked && pickedPeers.length === 1) return onCompare(pickedPeers[0]!.id);
-    onCompare(next?.id ?? peers[0]!.id);
-  };
-  const viewCtl: Ctl[] = [
-    { id: "view", label: view === "grid" ? "Switch to the list view" : "Switch to the thumbnail grid", icon: view === "grid" ? <List /> : <LayoutGrid />, pressed: view === "grid", run: () => {
-      const next = view === "grid" ? "list" : "grid";
-      setSettings({ view: next });
-      onPatch({ w: next === "grid" ? "g" : "l" });
-    } },
-    ...(view === "grid"
-      ? SORTS.map((s): Ctl => {
-          const on = sort.key === s.key;
-          const Icon = on && !sort.asc ? s.desc : s.asc;
-          return { id: "sort-" + s.key, label: `Sort by ${s.name}${on ? `, ${sort.asc ? s.ascText : s.descText} (click to reverse)` : ""}`, icon: <Icon />, pressed: on, run: () => setSort((c) => ({ key: s.key, asc: c.key === s.key ? !c.asc : s.key === "name" })) };
-        })
-      : []),
-    { id: "search", label: "Search under this folder (Ctrl+Shift+F)", icon: <Search />, pressed: !!leaf.sr, run: () => setSearch(leaf.sr ? undefined : EMPTY_SEARCH) },
-    { id: "hidden", label: hidden ? "Hide hidden files" : "Show hidden files", icon: hidden ? <Eye /> : <EyeOff />, pressed: hidden, run: () => setHidden(!hidden) },
-  ];
-  const rightCtl: Ctl[] = [
-    {
-      id: "compare",
-      gap: true,
-      label: cside ? "Exit compare mode" : "Compare with another panel (right-click to choose which)",
-      icon: <GitCompareArrows />,
-      pressed: !!cside,
-      run: compareRun,
-      ctx: (e) => {
-        if (cside || !peers.length) return;
-        showMenu(e, peers.map((pr): MenuItem => ({ label: `Compare with ${peerLabel(pr)}`, onSelect: () => onCompare(pr.id) })));
-      },
-    },
-    { id: "prdiff", label: "Pull request diff of this repository folder", icon: <GitPullRequest />, run: () => onPrDiff(node, path) },
-    { id: "mark", label: marked ? "Remove this folder from the bookmarks" : "Bookmark this folder", icon: <Star fill={marked ? "currentColor" : "none"} />, pressed: marked, run: () => toggleMark(here) },
-    { id: "tab", label: "New tab with this folder (Alt+T)", icon: <SquarePlus />, run: () => newTab() },
-    { id: "pick", label: "Pick this panel (also Shift/Ctrl+click its header), e.g. to compare two panels", icon: <SquareCheck />, pressed: panelPicked, run: onTogglePanel },
-    { id: "props", label: "Properties in the side panel (Alt+Enter)", icon: <Ic.Info />, pressed: propsOpen && !editing && !!propsPane, run: () => (propsOpen && !editing && propsPane ? closeSide() : openProps()) },
-  ];
-  const paneCtl: Ctl[] = [
-    { id: "splitH", label: "Split right", icon: <Columns2 />, run: () => onSplit("horizontal") },
-    { id: "splitV", label: "Split down", icon: <Rows2 />, run: () => onSplit("vertical") },
-    ...(onClose ? [{ id: "close", label: "Close panel", icon: <X />, run: () => onClose() } as Ctl] : []),
-  ];
   // per-pane back/forward history of the folders this panel showed
   const histRef = useRef<{ s: { node: string; path: string }[]; i: number; skip: boolean }>({ s: [], i: -1, skip: false });
   const [, histTick] = useState(0);
@@ -1268,71 +1155,71 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   const canBack = histRef.current.i > 0;
   const canFwd = histRef.current.i < histRef.current.s.length - 1;
-  // ---- second header row: file and folder actions (the same ones the context menus offer), flat icons; what does not fit moves into its own "more" menu ----
+  // ---- second header row: grouped menus on the left, the buttons that open the RIGHT side panel grouped on the right ----
   const sole = selEntries.length === 1 ? selEntries[0]! : undefined;
   const anySel = combine(selEntries).length > 0;
-  const tools: Ctl[] = [
-    { id: "newFile", label: "New file", hint: "Alt+N", gap: true, icon: <FilePlus />, run: () => startCreate(path, "file") },
-    { id: "newFolder", label: "New folder", hint: "F7", icon: <FolderPlus />, run: () => startCreate(path, "folder") },
-    { id: "newLink", label: "New symbolic link", icon: <Link2 />, run: () => setModal({ k: "link", dir: path }) },
-    { id: "upload", label: "Upload files", hint: "Alt+U", icon: <Upload />, run: () => fileInput.current?.click() },
-    { id: "uploadDir", label: "Upload a folder", icon: <FolderUp />, run: () => folderInput.current?.click() },
-    { id: "paste", label: pasteLabel, hint: "Ctrl+V", icon: <ClipboardPaste />, disabled: !clip, run: () => void paste(path) },
-    { id: "refresh", label: "Refresh", hint: "Alt+R", icon: <RefreshCw />, run: refresh },
-    { id: "copyPath", label: selEntries.length > 1 ? "Copy paths" : "Copy path", hint: "Alt+C", icon: <Copy />, run: () => void copyPaths(selEntries.length ? selEntries.map((x) => x.path) : [path]) },
-    { id: "selAll", label: "Select all", hint: "Ctrl+A", icon: <ListChecks />, disabled: !entries.length, run: () => setSel(new Set(entries.map((x) => x.path))) },
-    { id: "rename", label: "Rename", hint: "F2", gap: true, icon: <Pencil />, disabled: sel.size !== 1 || others.length > 0, run: () => setRenaming([...sel][0] ?? null) },
-    { id: "duplicate", label: "Duplicate", icon: <CopyPlus />, disabled: !selEntries.length || others.length > 0, run: () => void duplicate(selEntries) },
-    { id: "edit", label: "Edit in the editor", hint: "F4", icon: <FilePen />, disabled: !sole || !canEdit(sole), run: () => sole && setEditing({ node, path: sole.path }) },
-    {
-      id: "diff",
-      label: diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another",
-      icon: <Diff />,
-      pressed: !!diffMarked,
-      disabled: !combine(selEntries).length || combine(selEntries).length > 2 || !combine(selEntries).every((r) => r.editable),
-      run: () => onDiff(combine(selEntries).map((r) => ({ node: r.node, path: r.path }))),
-    },
-    { id: "download", label: "Download (several items or folders as a zip)", gap: true, icon: <Download />, disabled: !anySel, run: () => download(selEntries) },
-    { id: "compress", label: "Compress selection", icon: <Archive />, disabled: !anySel, run: () => setDialog("compress") },
-    { id: "extract", label: "Extract archive", icon: <PackageOpen />, disabled: !(sel.size === 1 && !!sole && sole.type === "file" && isArchive(sole.name)), run: () => setDialog("extract") },
-    { id: "trash", label: "Move to trash", hint: "Del", gap: true, icon: <Trash2 />, disabled: !anySel, run: () => void trashEntries(selEntries) },
-    { id: "delete", label: "Delete permanently", hint: "Shift+Del", icon: <CircleX />, disabled: !anySel, run: () => setModal({ k: "del", refs: combine(selEntries) }) },
+  const menuAt = (e: React.MouseEvent, items: MenuItem[]) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenu({ x: r.left, y: r.bottom + 4, items });
+  };
+  const newItems = (): MenuItem[] => [
+    { label: "New file", hint: "Alt+N", icon: FilePlus, onSelect: () => startCreate(path, "file") },
+    { label: "New folder", hint: "F7", icon: FolderPlus, onSelect: () => startCreate(path, "folder") },
+    { label: "New symbolic link", icon: Link2, onSelect: () => setModal({ k: "link", dir: path }) },
+    "sep",
+    { label: "Upload files", hint: "Alt+U", icon: Upload, onSelect: () => fileInput.current?.click() },
+    { label: "Upload a folder", icon: FolderUp, onSelect: () => folderInput.current?.click() },
   ];
-  const toolsRef = useRef<HTMLDivElement>(null);
-  // one toolbar: [view/sort/hidden/search] | [file actions] | [compare/bookmark/tab/pick/properties].
-  // On overflow the file actions move into "more" first (last first), then the right group, then the view group.
-  const allTools: Ctl[] = [...viewCtl, ...tools, ...rightCtl];
-  const [hiddenN, setHiddenN] = useState(0);
-  const dropOrder = useMemo(() => {
-    const ids = (l: Ctl[]) => l.map((c) => c.id);
-    return [...ids(tools).reverse(), ...ids(rightCtl), ...ids(viewCtl).reverse()];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allTools.length]);
-  useLayoutEffect(() => {
-    const el = toolsRef.current;
-    if (!el) return;
-    // An icon button has a 44px hit area plus a 4px gap; group starts add 6px and the more button takes one slot on overflow.
-    const measure = () => {
-      const room = el.clientWidth - 16;
-      const width = (l: Ctl[]) => l.reduce((w, c, i) => w + 48 + (c.gap && i > 0 ? 6 : 0), 0);
-      let n = 0;
-      while (n < dropOrder.length) {
-        const gone = new Set(dropOrder.slice(0, n));
-        const left = allTools.filter((c) => !gone.has(c.id));
-        if (width(left) + (n > 0 ? 48 : 0) <= room) break;
-        n++;
-      }
-      setHiddenN(n);
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dropOrder, allTools.length, view, sort.key]);
-  const goneIds = new Set(dropOrder.slice(0, hiddenN));
-  const toolsShown = allTools.filter((c) => !goneIds.has(c.id));
-  const toolsMore = allTools.filter((c) => goneIds.has(c.id));
+  const viewItems = (): MenuItem[] => [
+    { label: "List view", icon: List, checked: view !== "grid", onSelect: () => (setSettings({ view: "list" }), onPatch({ w: "l" })) },
+    { label: "Thumbnail grid", icon: LayoutGrid, checked: view === "grid", onSelect: () => (setSettings({ view: "grid" }), onPatch({ w: "g" })) },
+    "sep",
+    ...SORTS.map((x): MenuItem => {
+      const on = sort.key === x.key;
+      const Icon = on && !sort.asc ? x.desc : x.asc;
+      return { label: `Sort by ${x.name}${on ? ` (${sort.asc ? x.ascText : x.descText})` : ""}`, icon: Icon, checked: on, onSelect: () => setSort((c) => ({ key: x.key, asc: c.key === x.key ? !c.asc : x.key === "name" })) };
+    }),
+    "sep",
+    { label: hidden ? "Hide hidden files" : "Show hidden files", icon: hidden ? EyeOff : Eye, checked: hidden, onSelect: () => setHidden(!hidden) },
+  ];
+  const splitItems = (): MenuItem[] => [
+    { label: "Split right", icon: Columns2, onSelect: () => onSplit("horizontal") },
+    { label: "Split down", icon: Rows2, onSelect: () => onSplit("vertical") },
+  ];
+  const moreItems = (): MenuItem[] => [
+    { label: pasteLabel, hint: "Ctrl+V", icon: ClipboardPaste, disabled: !clip, onSelect: () => void paste(path) },
+    { label: "Select all", hint: "Ctrl+A", icon: ListChecks, disabled: !entries.length, onSelect: () => setSel(new Set(entries.map((x) => x.path))) },
+    { label: selEntries.length > 1 ? "Copy paths" : "Copy path", hint: "Alt+C", icon: Copy, onSelect: () => void copyPaths(selEntries.length ? selEntries.map((x) => x.path) : [path]) },
+    "sep",
+    { label: "Rename", hint: "F2", icon: Pencil, disabled: sel.size !== 1 || others.length > 0, onSelect: () => setRenaming([...sel][0] ?? null) },
+    { label: "Duplicate", icon: CopyPlus, disabled: !selEntries.length || others.length > 0, onSelect: () => void duplicate(selEntries) },
+    { label: "Edit in the editor", hint: "F4", icon: FilePen, disabled: !sole || !canEdit(sole), onSelect: () => sole && setEditing({ node, path: sole.path }) },
+    {
+      label: diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another",
+      icon: Diff,
+      checked: !!diffMarked,
+      disabled: !combine(selEntries).length || combine(selEntries).length > 2 || !combine(selEntries).every((r) => r.editable),
+      onSelect: () => onDiff(combine(selEntries).map((r) => ({ node: r.node, path: r.path }))),
+    },
+    "sep",
+    { label: "Download", icon: Download, disabled: !anySel, onSelect: () => download(selEntries) },
+    { label: "Compress selection", icon: Archive, disabled: !anySel, onSelect: () => setDialog("compress") },
+    { label: "Extract archive", icon: PackageOpen, disabled: !(sel.size === 1 && !!sole && sole.type === "file" && isArchive(sole.name)), onSelect: () => setDialog("extract") },
+    "sep",
+    { label: "Move to trash", hint: "Del", icon: Trash2, danger: true, disabled: !anySel, onSelect: () => void trashEntries(selEntries) },
+    { label: "Delete permanently", hint: "Shift+Del", icon: CircleX, danger: true, disabled: !anySel, onSelect: () => setModal({ k: "del", refs: combine(selEntries) }) },
+    { label: "Open trash", icon: Trash2, onSelect: () => onTrash(node) },
+    "sep",
+    ...(git?.repo ? ([{ label: "Git worktrees", icon: GitBranch, onSelect: () => showGit() }] as MenuItem[]) : []),
+    { label: panelPicked ? "Remove this panel from the selection" : "Add this panel to the selection", hint: "Alt+P", icon: SquareCheck, checked: panelPicked, onSelect: onTogglePanel },
+  ];
+  /** Properties in the side panel, on its Git tab. */
+  const showGit = () => {
+    onPatch({ pt: "git" });
+    openProps();
+  };
+  const sidePanelShown = !editing && !gitDiff && !!propsPane;
+  const canPreview = !!only && !isDirEntry(only) && !only.broken;
 
   const first = dock === "left" || dock === "top";
 
@@ -1352,67 +1239,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       onDragLeave={() => setOver(null)}
       onDrop={(e) => drop(e, path)}
     >
-      {tabs.length > 1 && !cside && (
-        <div className="fp-tabs" role="tablist" aria-label="Tabs">
-          {tabs.map((t, i) => (
-            <Tip key={i} label={`${t.node}:${t.path}`}>
-            <div
-              className={"fp-tab" + (i === ti ? " on" : "") + (tabDrag === i ? " dragging" : "")}
-              draggable
-              onClick={() => selectTab(i)}
-              onAuxClick={(e) => e.button === 1 && (e.preventDefault(), closeTab(i))}
-              onContextMenu={(e) => tabMenu(e, i)}
-              onDragStart={(e) => {
-                e.dataTransfer.setData("application/x-filedeck-tab", String(i));
-                e.dataTransfer.effectAllowed = "move";
-                setTabDrag(i);
-              }}
-              onDragEnd={() => setTabDrag(null)}
-              onDragOver={(e) => {
-                if (tabDrag === null) return;
-                e.preventDefault();
-                e.stopPropagation();
-              }}
-              onDrop={(e) => {
-                if (tabDrag === null) return;
-                e.preventDefault();
-                e.stopPropagation();
-                moveTab(tabDrag, i);
-                setTabDrag(null);
-              }}
-            >
-              <button
-                id={`${leaf.id}-tab-${i}`}
-                type="button"
-                role="tab"
-                aria-selected={i === ti}
-                aria-controls={`${leaf.id}-tabpanel`}
-                tabIndex={i === ti ? 0 : -1}
-                className="fp-tab-select"
-                onKeyDown={(e) => {
-                  const next = e.key === "ArrowRight" ? (i + 1) % tabs.length : e.key === "ArrowLeft" ? (i - 1 + tabs.length) % tabs.length : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : -1;
-                  if (next < 0) return;
-                  e.preventDefault();
-                  e.stopPropagation();
-                  selectTab(next);
-                  requestAnimationFrame(() => document.getElementById(`${leaf.id}-tab-${next}`)?.focus());
-                }}
-                onClick={(e) => { e.stopPropagation(); selectTab(i); }}
-              ><span className="fp-tab-name">{tabLabel(t)}</span></button>
-              <button type="button" className="fp-tab-x" aria-label={`Close tab ${tabLabel(t)}`} onClick={(e) => (e.stopPropagation(), closeTab(i))}><X /></button>
-            </div>
-            </Tip>
-          ))}
-          <Tip label="New tab" shortcut="Alt+T"><button type="button" className="fp-tab-new" aria-label="New tab" onClick={() => newTab()}><Plus /></button></Tip>
-        </div>
-      )}
       <header
         ref={barRef}
         className="fp-bar"
-        {...dragProps}
         onClick={(e) => {
-          // Shift/Ctrl/Cmd+click on the header picks the whole panel (e.g. two panels to compare).
-          if ((e.shiftKey || e.ctrlKey || e.metaKey) && !(e.target as Element).closest("button,input,select,label,a")) {
+          // Shift/Ctrl/Cmd+click on the toolbar background also selects the whole panel (e.g. two panels to compare).
+          if ((e.shiftKey || e.ctrlKey || e.metaKey) && !(e.target as Element).closest("button,input,select,label,a,[role=button]")) {
             e.preventDefault();
             onFocus();
             onTogglePanel();
@@ -1420,33 +1252,53 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }}
       >
       <div className="fp-row">
+        <Tip label="Drag to move this panel, or use Alt+Shift+Arrow keys" shortcut="Alt+Shift+Arrows">
+          <div
+            className="fp-grip"
+            role="button"
+            tabIndex={0}
+            aria-label="Move panel: drag, or press Alt+Shift with an arrow key"
+            aria-keyshortcuts="Alt+Shift+ArrowLeft Alt+Shift+ArrowRight Alt+Shift+ArrowUp Alt+Shift+ArrowDown"
+            {...dragProps}
+          ><GripVertical aria-hidden="true" /></div>
+        </Tip>
         <Tip label="Back" shortcut="Alt+Left"><button type="button" className="fp-up" aria-label="Back" disabled={!canBack} onClick={() => histGo(-1)}><ArrowLeft /></button></Tip>
         <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
         <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
+        <Tip label="Refresh" shortcut="Alt+R"><button type="button" className="fp-up fp-refresh" aria-label="Refresh" onClick={refresh}><RefreshCw /></button></Tip>
         {git?.repo && !leaf.sr && <span className="git-chip"><GitPill s={git.repo.summary} /></span>}
         <div className="fp-actions">
-          {paneCtl.map((c) => (
-            <Tip key={c.id} label={c.label} shortcut={c.hint}>
-              <button type="button" aria-label={c.label} onClick={c.run}>{c.icon}</button>
-            </Tip>
-          ))}
+          <Tip label="Split this panel"><button type="button" aria-label="Split this panel" aria-haspopup="menu" onClick={(e) => menuAt(e, splitItems())}><Columns2 /></button></Tip>
+          {onClose ? (
+            <Tip label="Close panel"><button type="button" aria-label="Close panel" onClick={() => onClose()}><X /></button></Tip>
+          ) : (
+            // The only panel cannot be closed: an invisible button of the same size keeps the other controls where they are.
+            <button type="button" className="fp-close-ph" aria-hidden="true" tabIndex={-1} disabled><X /></button>
+          )}
         </div>
       </div>
-      <div className="fp-tools" ref={toolsRef} role="toolbar" aria-label="File and folder actions">
-        {toolsShown.map((c, i) => (
-          <Tip key={c.id} label={c.label} shortcut={c.hint}>
-            <button type="button" aria-label={c.label} aria-pressed={c.pressed} className={(c.pressed ? "marked" : "") + (c.gap && i > 0 ? " gap" : "")} disabled={c.disabled} onClick={c.run} onContextMenu={c.ctx}>{c.icon}</button>
+      <div className="fp-tools" role="toolbar" aria-label="File and folder actions">
+        <div className="fp-tools-main" role="group" aria-label="Folder actions">
+          <Tip label="New: file, folder, link or upload"><button type="button" className="fp-menubtn" aria-label="New" aria-haspopup="menu" onClick={(e) => menuAt(e, newItems())}><FilePlus />{!narrow && <span className="fp-menubtn-l">New</span>}<ChevronDown className="fp-caret" /></button></Tip>
+          <Tip label="View: list or grid, sort order, hidden files"><button type="button" className="fp-menubtn" aria-label="View" aria-haspopup="menu" onClick={(e) => menuAt(e, viewItems())}>{view === "grid" ? <LayoutGrid /> : <List />}{!narrow && <span className="fp-menubtn-l">View</span>}<ChevronDown className="fp-caret" /></button></Tip>
+          <Tip label="Search under this folder" shortcut="Ctrl+Shift+F"><button type="button" aria-label="Search under this folder" aria-pressed={!!leaf.sr} className={leaf.sr ? "marked" : ""} onClick={() => setSearch(leaf.sr ? undefined : EMPTY_SEARCH)}><Search /></button></Tip>
+          <Tip label={marked ? "Remove this folder from the bookmarks" : "Bookmark this folder"}><button type="button" aria-label={marked ? "Remove this folder from the bookmarks" : "Bookmark this folder"} aria-pressed={marked} className={marked ? "marked" : ""} onClick={() => toggleMark(here)}><Star fill={marked ? "currentColor" : "none"} /></button></Tip>
+          <Tip label="More actions"><button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => menuAt(e, moreItems())}><Ellipsis /></button></Tip>
+        </div>
+        <div className="fp-tools-side" role="group" aria-label="Side panel">
+          <Tip label={canPreview ? "Preview the selected file" : "Select one file to preview it"}>
+            <button type="button" aria-label="Preview in the side panel" aria-pressed={sidePanelShown && !propsOpen} className={sidePanelShown && !propsOpen ? "marked" : ""} disabled={!canPreview && !(sidePanelShown && !propsOpen)} onClick={() => (sidePanelShown && !propsOpen ? closeSide() : showPreview())}><Eye /></button>
           </Tip>
-        ))}
-        {toolsMore.length > 0 && (
-          <Tip label="More actions">
-            <button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => {
-              const r = e.currentTarget.getBoundingClientRect();
-              setMenu({ x: r.right - 4, y: r.bottom + 4, items: toolsMore.map((c): MenuItem => ({ label: c.label, hint: c.hint, disabled: c.disabled, onSelect: c.run })) });
-            }}><Ellipsis /></button>
+          <Tip label="Properties in the side panel" shortcut="Alt+Enter">
+            <button type="button" aria-label="Properties in the side panel" aria-pressed={propsOpen && sidePanelShown} className={propsOpen && sidePanelShown ? "marked" : ""} onClick={() => (propsOpen && sidePanelShown ? closeSide() : openProps())}><Ic.Info /></button>
           </Tip>
-        )}
+          {git?.repo && (
+            <Tip label="Git details in the side panel: branch, changes, worktrees, pull request diff">
+              <button type="button" aria-label="Git details in the side panel" aria-pressed={propsOpen && sidePanelShown && leaf.pt === "git"} className={propsOpen && sidePanelShown && leaf.pt === "git" ? "marked" : ""} onClick={() => (propsOpen && sidePanelShown && leaf.pt === "git" ? closeSide() : showGit())}><GitBranch /></button>
+            </Tip>
+          )}
+        </div>
         <input ref={fileInput} type="file" multiple hidden onChange={(e) => {
             const files = Array.from(e.target.files ?? []);
             e.target.value = "";
