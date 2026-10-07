@@ -840,7 +840,7 @@ button,button:hover,button:active,.btn--secondary,.btn--danger,.btn--ghost,.user
 .dd-btn .dd-caret{width:14px;height:14px;color:var(--muted);transition:transform var(--fast) var(--ease)}
 .dd-btn.open{background:var(--surface-3)}.dd-btn.open .dd-caret{transform:rotate(180deg)}
 .modal .dd-btn,.fd-opts .dd-btn,.perm-row .dd-btn,.presentation-field .dd-btn{width:100%}
-.dd-btn.dd-icon{padding:0;background:transparent;box-shadow:none;color:var(--muted)}
+.dd-btn.dd-icon{justify-content:center;padding:0;background:transparent;box-shadow:none;color:var(--muted)}
 .dd-btn.dd-icon:hover:not(:disabled),.dd-btn.dd-icon.open{background:var(--surface-3);color:var(--fg)}
 .dd-menu{position:fixed;z-index:200;display:flex;flex-direction:column;gap:2px;padding:.3rem;overflow-y:auto;background:var(--surface);border-radius:var(--radius-sm);box-shadow:var(--shadow);font-size:.82rem}
 .dd-item{justify-content:flex-start;gap:.5rem;width:100%;padding:.3rem .6rem;border-radius:var(--radius-sm);background:transparent;box-shadow:none;text-align:left;white-space:nowrap;font-weight:500}
@@ -947,7 +947,8 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 .pv-head .pv-title{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;overflow-wrap:normal}
 .pv-head .pv-meta,.pv-head>.muted{flex:0 1000 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pv-head .pv-acts{margin-left:auto;flex:none;gap:.2rem}
-.pv-head .pv-extra{flex:none;gap:.2rem;margin-left:0}
+.pv-head .pv-extra{flex:none;gap:.2rem;margin-left:auto}
+.pv-head .pv-extra .dd-btn.dd-icon{padding:0 .35rem}
 .pv-head .pv-acts+.pv-extra{margin-left:0}
 .pv-head .pv-extra .pv-dock{gap:.1rem}
 .pv-head .pv-lbl{margin-left:.1rem}
