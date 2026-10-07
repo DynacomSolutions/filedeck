@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
+import { Tip } from "./Tooltip";
+import { Check, Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
   | "sep"
@@ -8,17 +9,23 @@ export type MenuItem =
       label: string;
       onSelect?: () => void;
       disabled?: boolean;
+      /** checkable item: true or false renders as a menuitemcheckbox with a tick */
+      checked?: boolean;
       danger?: boolean;
       /** shortcut text shown on the right */
       hint?: string;
       /** one nested level */
       sub?: MenuItem[];
+      /** icon for the row; by default one is chosen from the label */
+      icon?: LucideIcon;
+      /** tooltip with a short explanation (shown on hover and focus, also when disabled) */
+      tip?: string;
     };
 
 type Item = Exclude<MenuItem, "sep">;
 /** Icon for a menu row, chosen from its label so every item carries one (flat lucide line icon, 16px). */
 const ICONS: [RegExp, LucideIcon][] = [
-  [/^Open trash/i, Trash2], [/^Pull request diff/i, GitPullRequest], [/^Open in new panel|^Show in new panel/i, Columns2], [/^Open here/i, FolderOpen], [/^Open in new tab|^New tab|^Duplicate tab/i, SquarePlus], [/^Open/i, FolderOpen],
+  [/^Open trash/i, Trash2], [/^Pull request diff/i, GitPullRequest], [/^Open in new panel|^Show in new panel/i, Columns2], [/^Open here/i, FolderOpen], [/^Open/i, FolderOpen],
   [/^Remove bookmark/i, StarOff], [/bookmark/i, Star], [/^Preview/i, Eye], [/^Edit link|^Edit/i, FilePen], [/^Cut/i, Scissors], [/^Copy path/i, Copy],
   [/^Copy to|^Copy/i, Copy], [/^Paste/i, ClipboardPaste], [/^Rename/i, Pencil], [/^Duplicate/i, CopyPlus], [/^Compress/i, Archive], [/^Extract/i, PackageOpen], [/^Forget saved/i, KeyRound],
   [/^Download/i, Download], [/^Move to trash|^Delete left|^Delete right/i, Trash2], [/^Delete/i, CircleX], [/^Properties/i, Info], [/^New file/i, FilePlus],
@@ -93,9 +100,11 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
           <div key={i} className="ctx-sep" role="separator" />
         ) : (
           <div key={i} className="ctx-row">
+            <Tip label={it.tip}>
             <button
               type="button"
-              role="menuitem"
+              role={it.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+              aria-checked={it.checked}
               data-menu-index={i}
               tabIndex={cur === i ? 0 : -1}
               disabled={it.disabled}
@@ -112,9 +121,10 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
               }}
               onClick={() => run(it)}
             >
-              <span className="ctx-l">{(() => { const I = iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
+              <span className="ctx-l">{(() => { if (it.checked !== undefined) return <Check aria-hidden="true" style={{ visibility: it.checked ? "visible" : "hidden" }} />; const I = it.icon ?? iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
               {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
             </button>
+            </Tip>
             {it.sub && openSub === i && (
               <div className={"ctx-subwrap" + (flip() ? " flip" : "")}>
                 <Menu items={it.sub} x={0} y={0} onClose={onClose} depth={1} onEscape={onEscape} onLeft={() => {

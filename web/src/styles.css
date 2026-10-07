@@ -57,8 +57,6 @@ input[type=checkbox]{accent-color:var(--accent)}
 .side h2{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:.2rem .5rem .6rem}
 .side-scroll button{display:block;width:100%;text-align:left;border:0;border-radius:var(--radius-sm);background:transparent;padding:.3rem .5rem;font-size:.84rem;font-weight:600;min-height:0}
 .side-scroll button:hover:not(:disabled){background:var(--surface-2);border:0}
-.side .mounts{list-style:none;margin:0 0 .4rem .9rem;padding:0 0 0 .5rem;border-left:1px solid var(--border);font-size:.8rem}
-.side-scroll .mounts button{font-weight:500;color:var(--fg-soft)}
 .side .bar{display:block;height:3px;background:var(--surface-3);border-radius:2px;margin-top:.25rem}.side .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .net-badge{margin-left:.4rem;padding:0 .35rem;border:1px solid var(--border);border-radius:.6rem;font-size:.65rem;font-weight:600;letter-spacing:.03em;color:var(--muted);vertical-align:middle}.net-badge.bad{color:var(--fg);border-style:dashed}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%}.dot.on{background:var(--fg)}.dot.off{background:var(--muted)}
@@ -158,8 +156,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .modal-back{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:60}
 .modal{background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.25rem;width:min(420px,calc(100vw - 32px));display:flex;flex-direction:column;gap:.8rem}
 .modal h2,.modal h3{margin:0;font-size:1rem;font-weight:700;letter-spacing:-.01em}.modal label{display:flex;flex-direction:column;gap:.35rem;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.modal label.chk{flex-direction:row;gap:.5rem;align-items:center;text-transform:none;letter-spacing:0;font-size:.82rem}
-.modal input[type=text],.modal input:not([type]),.modal select{width:100%;background:transparent;color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:.4rem .6rem;font:inherit;font-size:.88rem;text-transform:none;letter-spacing:0}
-.modal select option{background:var(--surface)}
+.modal input[type=text],.modal input:not([type]){width:100%;background:transparent;color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:.4rem .6rem;font:inherit;font-size:.88rem;text-transform:none;letter-spacing:0}
 .modal-actions{display:flex;justify-content:flex-end;gap:.5rem}
 .av{width:100%;align-self:stretch;display:flex;flex-direction:column}
 .av-bar{display:flex;flex-wrap:wrap;gap:.35rem .7rem;align-items:center;padding:.5rem .8rem;border-bottom:1px solid var(--border)}
@@ -174,7 +171,6 @@ input[type=checkbox]{accent-color:var(--accent)}
 
 /* per-panel preview dock controls */
 .pv-dock{margin-left:auto;display:inline-flex;gap:.15rem;align-self:center}
-.pv-dock select{min-height:44px;max-width:9rem;padding:0 .45rem;font-size:.78rem;color:var(--fg);background:var(--surface-1);border:1px solid var(--border);border-radius:var(--radius-sm)}
 .pv-dockbtn{min-height:24px;min-width:26px;padding:0 .35rem;font-size:.8rem;border-color:transparent;color:var(--muted)}
 .pv-dockbtn.on{color:var(--fg);border-color:var(--border-strong);background:var(--surface-2)}
 .ed.inline,.ed.in-pane{position:relative;inset:auto;z-index:auto;height:100%}
@@ -185,11 +181,11 @@ input[type=checkbox]{accent-color:var(--accent)}
 /* folder diff: status colours stay distinguishable from the brand accent; each also has a symbol and a label */
 :root{--fd-diff:#ffc777;--fd-left:#8cc4ff;--fd-right:#7ee0c0;--fd-bad:#ff8f8f}
 :root[data-theme="light"]{--fd-diff:#885400;--fd-left:#165d9e;--fd-right:#08795f;--fd-bad:#a4262c}
-.fd-opts select,.fd-opts input[type=text],.fd-opts input[type=number]{background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font:inherit}
+.fd-opts input[type=text],.fd-opts input[type=number]{background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font:inherit}
 .fd-opts{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px 14px;align-items:end}
 .fd-opts label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted)}
 .fd-opts label.chk{flex-direction:row;align-items:center;gap:6px}
-.fd-opts input[type=text],.fd-opts select,.fd-opts input[type=number]{width:100%}
+.fd-opts input[type=text],.fd-opts input[type=number]{width:100%}
 .fd-presets{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
 .fd-presets label{min-width:180px}
 button.primary{border-color:var(--accent);color:var(--accent)}
@@ -217,7 +213,7 @@ button.primary{border-color:var(--accent);color:var(--accent)}
 .ctx-row{position:relative}
 .ctx button{display:flex;width:100%;justify-content:space-between;gap:1.5rem;align-items:center;text-align:left;border:0;border-radius:var(--radius-sm);background:transparent;padding:.35rem .6rem;min-height:0;font-size:.82rem;font-weight:500}
 .ctx button.cur:not(:disabled),.ctx button:hover:not(:disabled){background:var(--surface-3);border:0}
-.ctx button.danger{color:var(--accent-text)}
+.ctx button.danger{color:var(--danger-text)}.ctx button.danger.cur:not(:disabled),.ctx button.danger:hover:not(:disabled){background:var(--danger-tint)}
 .ctx .hint{color:var(--muted);font-size:.72rem;font-weight:500;white-space:nowrap}
 .ctx-sep{height:1px;background:var(--border);margin:.3rem .2rem}
 .ctx-subwrap{position:absolute;left:100%;top:-.3rem;padding-left:.15rem}
@@ -269,8 +265,6 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .perm-row label.chk{flex-direction:row;align-items:center;gap:.4rem;text-transform:none;letter-spacing:0;font-size:.82rem;font-weight:500;color:var(--fg)}
 .perm-row input:not([type=checkbox]){width:9rem;background:transparent;color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:.3rem .5rem;font:inherit;font-size:.86rem}
 .perm-row .perm-oct input{width:4.5rem;font-family:var(--mono)}
-.perm-row select{background:transparent;color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:.3rem .5rem;font:inherit;font-size:.84rem}
-.perm-row select option{background:var(--surface)}
 .perm-hint{font-size:.72rem}
 .perm-spin{display:inline-flex;width:15px;height:15px;flex:none;align-items:center;justify-content:center}
 .perm-field{display:flex;align-items:center;gap:.4rem;text-transform:none;letter-spacing:0}
@@ -289,8 +283,6 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .sr{height:100%;display:flex;flex-direction:column;min-height:0}
 .sr-form{display:flex;flex-wrap:wrap;gap:.35rem .5rem;align-items:center;padding:.5rem .65rem;border-bottom:1px solid var(--border)}
 .sr-form input[type=search]{flex:1 1 11rem;min-width:8rem}
-.sr-form select{background:transparent;color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:.3rem .5rem;font:inherit;font-size:.82rem}
-.sr-form select option{background:var(--surface)}
 .sr-form .chk{font-size:.72rem;font-weight:600;color:var(--muted);display:inline-flex;gap:.25rem;align-items:center}
 .sr-sum{padding:.3rem .8rem;font-size:.74rem;border-bottom:1px solid var(--border);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sr-list{flex:1}.sr-list:focus{outline:none}
@@ -314,22 +306,8 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .fp-sort option{background:var(--surface)}
 
 /* tabs per panel */
-.fp-tabs{display:flex;gap:.2rem;align-items:flex-end;padding:.35rem .5rem 0;border-bottom:1px solid var(--border);overflow-x:auto;flex:none}
-.fp-tab{display:flex;align-items:center;gap:.3rem;max-width:12rem;min-width:4rem;padding:.25rem .3rem .25rem .65rem;border:1px solid var(--border);border-bottom:0;border-radius:var(--radius-sm) var(--radius-sm) 0 0;font-size:.78rem;font-weight:600;color:var(--muted);cursor:default;user-select:none;background:transparent}
-.fp-tab:hover{background:var(--surface-2);color:var(--fg)}
-.fp-tab.on{background:var(--surface-3);color:var(--fg);border-color:var(--border-strong);box-shadow:inset 0 2px 0 var(--accent)}
-.fp-tab.dragging{opacity:.5}
-.fp-tab-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-.fp-tabs button.fp-tab-x{border:0;min-height:0;padding:0 .3rem;font-size:.9rem;color:var(--muted);border-radius:var(--radius-sm)}
-.fp-tabs button.fp-tab-x:hover:not(:disabled){background:var(--surface-3);color:var(--fg);border:0}
-.fp-tabs button.fp-tab-new{border:0;min-height:26px;padding:0 .5rem;margin-bottom:.1rem}
 
 /* bookmarks in the sidebar */
-.side .marks{list-style:none;margin:0 0 .8rem;padding:0}
-.side .marks li{display:flex;align-items:center}
-.side-scroll .marks button.mark-open{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.side-scroll .marks button.mark-rm{flex:none;width:auto;padding:.1rem .45rem;color:var(--muted);opacity:0}
-.side .marks li:hover button.mark-rm,.side .marks li:focus-within button.mark-rm{opacity:1}
 .mark-star{color:var(--accent-text)}.mark-node{font-size:.68rem;font-weight:500;margin-left:.2rem}
 .side-hint{font-size:.74rem;margin:0 .5rem .8rem}
 
@@ -399,13 +377,12 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 .tip-bubble kbd{border:0;background:transparent;padding:0;font:inherit;font-size:.68rem;opacity:.75;white-space:nowrap}
 .dirty-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent-text);margin-right:.4rem;vertical-align:baseline}
 /* flat controls: no heavy borders on toolbar buttons, border only on hover/pressed */
-.fp-actions button,.pv-dockbtn,.fp-tab-x,.fp-tab-new,.mark-rm{border-color:transparent;box-shadow:none;background-image:none}
+.fp-actions button,.pv-dockbtn{border-color:transparent;box-shadow:none;background-image:none}
 .fp-actions button:hover:not(:disabled){border-color:var(--border)}
 .fp-actions button.marked,.pv-dockbtn.on{border-color:transparent;background:var(--accent-tint)}
-.fp-actions button,.pv-dockbtn,.fp-tab-x,.fp-tab-new,.mark-rm,.btn--ghost{display:inline-flex;align-items:center;justify-content:center;gap:.35rem}
+.fp-actions button,.pv-dockbtn,.btn--ghost{display:inline-flex;align-items:center;justify-content:center;gap:.35rem}
 .fd-newer-tag{display:inline-flex;align-items:center;gap:.15rem;margin-left:.35rem}.fd-newer-tag svg.lucide{width:12px;height:12px}
-.side-scroll .tip{display:flex;width:100%}.side-scroll .marks li{display:flex}.side-scroll .marks .tip:first-child{flex:1;min-width:0}.side-scroll .marks .tip:last-child{flex:none;width:auto}
-.fp-tabs>.tip{flex:0 1 auto;min-width:0}.fp-tabs .tip>.fp-tab{flex:1}
+.side-scroll .tip{display:flex;width:100%}
 .fd-row>.tip{min-width:0}.crumbs>.tip{display:inline-flex}
 .fd-newer svg{vertical-align:-2px}
 
@@ -422,7 +399,7 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 .cmp-barwrap{position:relative;flex:none;height:36px;box-sizing:border-box;border-bottom:1px solid var(--border);background:var(--surface-2)}
 .cmp-bar{display:flex;flex-wrap:nowrap;gap:0 .5rem;align-items:center;height:100%;padding:0 .65rem;font-size:.78rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
 .cmp-bar>*{flex:none}
-.cmp-bar button,.cmp-bar select{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{display:inline-flex;gap:.3rem;flex-wrap:nowrap}.cmp-bar .fd-toggles{display:inline-flex;gap:.3rem;flex-wrap:nowrap}
+.cmp-bar button{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{display:inline-flex;gap:.3rem;flex-wrap:nowrap}.cmp-bar .fd-toggles{display:inline-flex;gap:.3rem;flex-wrap:nowrap}
 .cmp-badge{font-weight:700;color:var(--accent-text)}
 .cmp-with{display:block;max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmp-exit{margin-left:auto}
@@ -456,7 +433,7 @@ button.cmp-twisty:hover{color:var(--fg);background:var(--surface-3)}.cmp-twisty 
 svg.lucide{display:inline-block}
 .ln-target{white-space:nowrap}.ln-target svg.lucide{width:12px;height:12px;vertical-align:-2px}
 .side-node svg.lucide{vertical-align:-3px}
-.side-row{display:flex;align-items:center}.side-scroll .side-row button.side-twisty{box-sizing:border-box;display:flex;flex:0 0 44px;width:44px;justify-content:center;padding:0;color:var(--muted)}.side-scroll .side-row button.side-node{flex:1;min-width:0}.side-twisty svg.lucide{flex:none}
+.side-row{display:flex;align-items:center}.side-scroll .side-row button.side-node{flex:1;min-width:0}
 
 /* ---- compare status in the sidebar ---- */
 .side-cmp{flex:none;min-width:0;padding:.6rem .7rem;border-top:1px solid var(--border);font-size:.76rem;max-height:50vh;overflow:auto}
@@ -479,8 +456,6 @@ html,body{background:var(--bg)}
 .brand-name{white-space:nowrap}
 .side-scroll button{display:flex;align-items:center;gap:var(--btn-gap);background:transparent;box-shadow:none}
 .side-scroll button:hover:not(:disabled){background:var(--surface-2)}
-.side-scroll .mounts button{flex-wrap:wrap}.side-scroll .mounts .bar{flex:0 0 100%}
-.side .mounts{border-left:0}
 .fp,.pv{border:0;box-shadow:var(--shadow-2)}
 .fp.active{box-shadow:var(--shadow-2),0 0 0 1.5px var(--accent-line)}
 .fp.picked{border:0;box-shadow:var(--shadow-2),0 0 0 2px var(--accent)}
@@ -505,15 +480,12 @@ html,body{background:var(--bg)}
 .ed.over{border:0;box-shadow:var(--shadow-3)}
 .cmp-barwrap{border-bottom:0;background:var(--surface-2)}
 .cmp-head{border-bottom:0;background:var(--surface-2)}
-.fp-tabs{border-bottom:0;background:var(--surface-2)}
-.fp-tab{border:0;border-radius:var(--radius-btn) var(--radius-btn) 0 0;box-shadow:none}
-.fp-tab.on{border:0;background:var(--surface);box-shadow:inset 0 2px 0 var(--accent)}
 .tile{border:0}.tile.sel{border:0;box-shadow:inset 0 0 0 1.5px var(--accent-line)}
 .perm{border:0;background:var(--surface-2);box-shadow:var(--shadow-1)}
 .pv-slides section{border:0;box-shadow:var(--shadow-1)}
 .job-ask{border:0;box-shadow:var(--shadow-1)}
 .fd-plan,.fd-errs{border:0;background:var(--surface-2);box-shadow:var(--shadow-1)}
-.fd-opts select,.fd-opts input[type=text],.fd-opts input[type=number],.modal input[type=text],.modal input:not([type]),.modal select,.perm-row input:not([type=checkbox]),.perm-row select,.sr-form select,.fp-sort{border:0;border-radius:var(--radius-btn);background:var(--surface-2);box-shadow:var(--shadow-1)}
+.fd-opts input[type=text],.fd-opts input[type=number],.modal input[type=text],.modal input:not([type]),.perm-row input:not([type=checkbox]),.fp-sort{border:0;border-radius:var(--radius-btn);background:var(--surface-2);box-shadow:var(--shadow-1)}
 input[type=text]:focus,input:not([type]):focus,input[type=search]:focus{outline:2px solid var(--accent);outline-offset:0}
 .fd-sep{background:var(--surface-3);width:2px;border-radius:1px}
 kbd{border:0;box-shadow:var(--shadow-1);border-radius:var(--radius-btn)}
@@ -522,15 +494,14 @@ kbd{border:0;box-shadow:var(--shadow-1);border-radius:var(--radius-btn)}
 .ft th{border-bottom:1px solid var(--border)}
 .ft td{border-bottom:1px solid var(--border)}
 /* quiet buttons: no resting fill or shadow */
-.fp-actions button,.pv-dockbtn,.fp-tab-x,.fp-tab-new,.mark-rm,.crumbs button,.jobs-toggle,.cmp-twisty,.tr-tabs button:not(.on),.theme-seg button:not([aria-checked=true]){box-shadow:none;background:transparent;border:0}
+.fp-actions button,.pv-dockbtn,.crumbs button,.jobs-toggle,.cmp-twisty,.tr-tabs button:not(.on),.theme-seg button:not([aria-checked=true]){box-shadow:none;background:transparent;border:0}
 .fp-actions button:hover:not(:disabled){background:var(--surface-3)}
 .fp-actions button.marked,.pv-dockbtn.on,.tr-tabs button.on,.fd-tog[aria-pressed=true]{background:var(--accent-tint);box-shadow:none;border:0}
 button.primary{border:0;background:var(--accent-fill);color:#fff}
 button.primary:hover:not(:disabled){background:var(--accent-fill-hover)}
 .modal-actions button.danger{border:0}
 .modal-actions button[type=submit]{box-shadow:var(--shadow-1)}
-.selbar-actions button.danger{color:var(--accent-text)}
-button.danger{color:var(--accent-text)}
+button.danger{color:var(--danger-text)}
 .modal-actions button.danger[type=submit]{color:#fff}
 /* theme selector: segmented Light / Dark / Auto pinned to the sidebar bottom */
 .theme-seg{flex:none;display:flex;gap:2px;margin:.55rem .7rem .7rem;padding:2px;background:var(--surface-2);border-radius:var(--radius-btn);box-shadow:var(--shadow-1) inset}
@@ -542,7 +513,8 @@ button.danger{color:var(--accent-text)}
 /* header: count + actions + Compare; lower-priority labels collapse to icon-only (still the accessible name) before anything wraps */
 .site-header .site-header__actions{margin-left:0}
 .selbar{overflow:hidden}
-.selbar>.tip{flex:0 1 11rem;min-width:4.5rem}
+.selbar>.tip{flex:none;max-width:100%}.selbar b{overflow:visible;text-overflow:clip}.selbar b.selbar-none{font-weight:500;color:var(--muted)}
+.selbar-actions button.selbar-clear{padding:0;width:var(--btn-h,32px);color:var(--muted)}.selbar-actions button.selbar-clear:hover{color:var(--fg)}
 .selbar-actions button,.site-header__actions button{gap:var(--btn-gap)}
 .selbar-actions button{padding:0 .6rem}
 .site-header__actions{margin-left:auto}
@@ -554,8 +526,6 @@ button.danger{color:var(--accent-text)}
 
 .cmp-row .cmp-name{color:var(--fg);font-weight:600}.cmp-row .num,.cmp-row .cmp-mt{color:var(--muted)}.cmp-row .cmp-mt{font-variant-numeric:tabular-nums}
 .side-scroll button,.jobs-toggle{justify-content:flex-start}
-select{font:inherit;color:var(--fg);background:var(--surface-2);border:0;border-radius:var(--radius-btn);box-shadow:var(--shadow-1);padding:.2rem .45rem}
-select option{background:var(--surface);color:var(--fg)}
 .crumbs button{gap:.25rem}.crumbs svg.lucide{width:14px;height:14px}
 .addr-edit{justify-content:flex-end;padding:0 .4rem;color:var(--muted)}.addr-edit svg.lucide{width:12px;height:12px;opacity:.55}.addr-edit:hover svg.lucide{opacity:1}
 .addr-edit{box-shadow:none}.addr-edit:hover:not(:disabled){background:var(--surface-3)}
@@ -741,29 +711,8 @@ select option{background:var(--surface);color:var(--fg)}
 
 /* pull request diff */
 .prd:focus{outline:none}
-.prd-bar input[type=text]{min-width:0;flex:1 1 10rem;max-width:18rem}
-.prd-bar .tr-tabs{padding:0;margin-right:.4rem}
-.prd-info{padding:.3rem var(--gutter);font-size:.78rem;overflow-wrap:anywhere}
-.prd-body{flex:1;min-height:0;display:flex}
-.prd-files{flex:0 0 clamp(14rem,30%,24rem);min-width:0;overflow:auto;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:.3rem;padding:.4rem}
-.prd-files ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
-.prd-file{width:100%;display:flex;align-items:center;gap:.5rem;text-align:left;box-shadow:none;background:transparent;border:0;padding:.35rem .5rem;min-width:0}
-.prd-file:hover{background:var(--surface-2)}
-.prd-file.on{background:var(--accent-tint)}
-.prd-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;min-width:0}
-.prd-name>span{direction:ltr;unicode-bidi:plaintext}
-.prd-file>span:nth-child(2){flex:1;min-width:0;overflow:hidden}
-.prd-st{flex:none;width:1.4rem;height:1.4rem;display:inline-flex;align-items:center;justify-content:center;border-radius:var(--radius-sm);font:700 .72rem var(--mono);border:1px solid currentColor}
 .pr-a{color:var(--fd-right)}.pr-m{color:var(--fd-diff)}.pr-d{color:var(--fd-bad)}.pr-r{color:var(--fd-left)}
-.prd-n{flex:none;font:.74rem var(--mono);color:var(--muted)}
 .pr-add{color:var(--fd-right)}.pr-del{color:var(--fd-bad)}
-.prd-view{flex:1;min-width:0;display:flex;flex-direction:column}
-.prd-diff{flex:1;min-height:0;display:flex;flex-direction:column}
-.prd-fhead{position:static}
-@media (max-width:700px){
-  .prd-body{flex-direction:column}
-  .prd-files{flex:0 0 38%;border-right:0;border-bottom:1px solid var(--border)}
-}
 
 /* Git status (work-item) and details (work-item): everything from the theme tokens; state is told by letters and text, not colour alone. */
 .git-pill{display:inline-flex;align-items:center;gap:.3rem;max-width:100%;padding:.05rem .45rem;border:1px solid var(--border-strong);border-radius:var(--radius-btn);background:var(--surface-2);color:var(--fg);font-size:.7rem;font-weight:600;line-height:1.35;vertical-align:middle;white-space:nowrap}
@@ -854,10 +803,7 @@ a.wt-row:hover{background:var(--surface-2)}
   outline-offset:1px !important;
   box-shadow:none !important;
 }
-.fp-up, .fp-actions button, .fp-tools button, .pv-head .pv-acts > *, .pv-head .pv-acts button,
-.pv-head a.btn-a, .pv-head .pv-extra .pv-dockbtn, .ctx button, .crumbs button,
-.side-scroll button, .fp-tab-x, .fp-tab-new, .addr-recent, .addr-warn, .mark-rm,
-.selbar-actions button, .theme-seg button, .cmp-seg button {
+.fp-up,.fp-actions button,.fp-tools button,.pv-head .pv-acts > *,.pv-head .pv-acts button,.pv-head a.btn-a,.pv-head .pv-extra .pv-dockbtn,.ctx button,.side-scroll button,.addr-recent,.addr-warn,.selbar-actions button,.theme-seg button,.cmp-seg button{
   min-width: 44px !important;
   min-height: 44px !important;
   height: auto !important;
@@ -867,7 +813,6 @@ a.wt-row:hover{background:var(--surface-2)}
   width: 100%; min-width: 44px; min-height: 44px; display: inline-flex; align-items: center;
   gap: .35rem; padding: .4rem .55rem; border: 0; background: transparent; color: inherit; font: inherit; text-align: inherit;
 }
-.fp-tabs [role="tab"] { min-height: 44px; }
 .addr-pop li[role="none"] { padding: 0; }
 .addr-pop li > button[role="menuitem"] {
   display: flex; align-items: center; gap: .5rem; width: 100%; min-width: 44px; min-height: 44px;
@@ -877,3 +822,119 @@ a.wt-row:hover{background:var(--surface-2)}
 .addr-pop li.dim > button[role="menuitem"] { color: var(--muted); cursor: default; }
 .shortcut-pref{display:flex;align-items:flex-start;gap:.65rem;line-height:1.5;margin:.75rem 0;padding:.75rem;border:1px solid var(--border);border-radius:var(--radius-btn)}
 .shortcut-pref-input{width:1.25rem!important;height:1.25rem!important;min-width:1.25rem!important;min-height:1.25rem!important;margin:.15rem .25rem 0 0!important;flex:none}
+
+/* ==== a-chrome: one button system, borderless in every theme (light, dark, high contrast) ====
+   Buttons never draw a UA or token border: hover/active use a tinted fill, raised/primary buttons a soft shadow,
+   and the focus-visible ring (accessibility block above) stays. Native-looking light outlines are removed here. */
+button,button:hover,button:active,.btn--secondary,.btn--danger,.btn--ghost,.user-menu__trigger,.theme-option,.theme-option[aria-checked="true"],.pill--on,.pill--off,.pill--alert{border:0;border-color:transparent}
+.btn--secondary,.btn--danger,.user-menu__trigger{background:var(--surface-2);box-shadow:var(--shadow-1)}
+.btn--secondary:hover:not(:disabled),.user-menu__trigger:hover:not(:disabled){background:var(--surface-3)}
+.btn--danger{background:var(--accent-tint)}.btn--danger:hover:not(:disabled){background:var(--accent-line)}
+.theme-option[aria-checked="true"]{background:var(--surface-3);box-shadow:var(--shadow-1)}
+@media (forced-colors:active){button{border:1px solid ButtonText}}
+
+/* ==== a-chrome: custom dropdown (Dropdown.tsx) replaces every native select ==== */
+.dd-btn{justify-content:space-between;gap:.4rem;min-width:44px;max-width:100%;padding:0 .6rem;background:var(--surface-2);box-shadow:var(--shadow-1);font-size:.8rem;font-weight:600}
+.dd-btn .dd-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.dd-btn svg,.dd-item svg{flex:none;width:16px;height:16px}
+.dd-btn .dd-caret{width:14px;height:14px;color:var(--muted);transition:transform var(--fast) var(--ease)}
+.dd-btn.open{background:var(--surface-3)}.dd-btn.open .dd-caret{transform:rotate(180deg)}
+.modal .dd-btn,.fd-opts .dd-btn,.perm-row .dd-btn,.presentation-field .dd-btn{width:100%}
+.dd-btn.dd-icon{padding:0;background:transparent;box-shadow:none;color:var(--muted)}
+.dd-btn.dd-icon:hover:not(:disabled),.dd-btn.dd-icon.open{background:var(--surface-3);color:var(--fg)}
+.dd-menu{position:fixed;z-index:200;display:flex;flex-direction:column;gap:2px;padding:.3rem;overflow-y:auto;background:var(--surface);border-radius:var(--radius-sm);box-shadow:var(--shadow);font-size:.82rem}
+.dd-item{justify-content:flex-start;gap:.5rem;width:100%;padding:.3rem .6rem;border-radius:var(--radius-sm);background:transparent;box-shadow:none;text-align:left;white-space:nowrap;font-weight:500}
+.dd-item .dd-text{flex:1}
+.dd-item.cur,.dd-item:hover:not(:disabled){background:var(--surface-3)}
+.dd-item[aria-checked="true"]{font-weight:700;color:var(--accent-text)}
+.dd-item .dd-check{margin-left:auto;color:var(--accent-text)}
+
+/* ==== a-chrome: address bar reads as a text path; segments are compact links ==== */
+.crumbs{gap:0}
+.crumbs button{min-height:0;padding:0 .2rem;border-radius:4px;background:transparent;box-shadow:none;font-weight:500;color:var(--fg)}
+.crumbs button:hover:not(:disabled){background:var(--accent-tint);color:var(--fg)}
+.crumbs .crumb-sep{width:14px;padding:0;margin:0 -1px}
+.crumbs .crumb-sep svg.lucide{width:11px;height:11px;opacity:.7}
+.crumbs .crumb-sep.open{background:var(--accent-tint)}
+.crumbs button.here{font-weight:700}
+/* compact targets (24px, WCAG 2.5.8 AA) so the path reads as text; the empty bar area and recents button stay 44px */
+.crumbs button{min-height:44px!important;height:44px!important;min-width:0!important;padding:0 .2rem}
+.crumbs .crumb-sep{min-width:16px!important;width:16px}
+.addr-base.dd-btn{min-height:28px!important;height:28px;flex:0 0 auto;max-width:9rem;margin:0 4px 0 2px;padding:0 .4rem;background:transparent;box-shadow:none;color:var(--muted);font-weight:600}
+.addr-base.dd-btn:hover:not(:disabled),.addr-base.dd-btn.open{background:var(--accent-tint);color:var(--fg)}
+/* ---- panel toolbar: drag handle, grouped menus, right-aligned side-panel group ---- */
+.fp-grip{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:44px;margin-left:-.15rem;border-radius:var(--radius-sm,6px);color:var(--muted);cursor:grab;user-select:none;touch-action:none}
+.fp-grip:hover{background:var(--surface-3);color:var(--fg)}
+.fp-grip:active{cursor:grabbing}
+.fp-grip svg{width:16px;height:16px}
+.fp-close-ph{visibility:hidden;pointer-events:none}
+.fp-tools{justify-content:space-between}
+.fp-tools-main,.fp-tools-side{display:flex;align-items:center;gap:4px;min-width:0}
+.fp-tools-side{margin-left:auto;flex:none;padding-left:6px;border-left:0}
+.fp-tools-main>.tip,.fp-tools-side>.tip{flex:none;display:inline-flex}
+.fp-tools .fp-menubtn{width:auto;padding:0 .55rem;gap:.3rem}
+.fp-tools .fp-menubtn .fp-caret{width:12px;height:12px;opacity:.7}
+.fp-menubtn-l{font-size:.82rem;font-weight:600}
+/* dock slot: the panel being dragged dims, the drop zone shows where it lands */
+.dock-slot.dock-src{opacity:.45}
+.panel-ghost{pointer-events:none;border-radius:var(--radius-md,8px);overflow:hidden;opacity:.92;box-shadow:var(--shadow-2,0 6px 24px rgba(0,0,0,.35));background:var(--surface,#fff)}
+/* pull request diff inside the Git section */
+.git-pr-form{display:flex;flex-direction:column;gap:.35rem;margin:.3rem 0}
+.git-pr-mode{display:flex;gap:.25rem}
+.git-pr-mode button{box-shadow:none;border:0;background:transparent;color:var(--muted)}
+.git-pr-mode button.on{background:var(--accent-tint);color:var(--accent-text,var(--fg))}
+.git-pr-row{display:flex;gap:.25rem;align-items:center}
+.git-pr-row input{flex:1 1 auto;min-width:0}
+.git-pr-filter{width:100%;margin:.3rem 0}
+.git-pr .pr-add{color:var(--ok,#2a8a4a)}.git-pr .pr-del{color:var(--danger,#c0392b)}
+
+/* destructive actions: red text, never the blue accent */
+:root{--danger-text:#b3261e;--danger-tint:rgba(179,38,30,.1)}
+:root:not([data-theme="light"]){--danger-text:#ff8f86;--danger-tint:rgba(255,120,110,.14)}
+
+/* breadcrumbs: root and the current folder always show; middle folders fold into a "..." menu (AddressBar measures) */
+.crumbs{overflow:hidden}
+.crumbs .crumb{display:inline-flex;align-items:center;flex:none}
+.crumbs .crumb-more{width:24px;padding:0;color:var(--muted)}.crumbs .crumb-more svg.lucide{width:14px;height:14px}
+.crumbs .crumb-more.open{background:var(--accent-tint)}
+.crumbs.tight .crumb.last{flex:0 1 auto;min-width:3.5rem}
+.crumbs.tight .crumb.last>.tip:first-of-type{min-width:0;flex:0 1 auto}
+.crumbs.tight .crumb.last>.tip:first-of-type>button{max-width:100%}
+.crumbs .crumb-t{overflow:hidden;text-overflow:ellipsis}
+.crumbs>.crumb:not(.last) .crumb-t{overflow:visible}
+
+/* job rows: title on its own line, then status and actions; themed checkbox (native input stays underneath for keyboard and screen readers) */
+.job-line .job-title{flex:0 0 100%}
+.job-line .job-state{flex:1 1 auto;color:var(--muted);font-size:.72rem}
+.job.waiting .job-state{color:var(--accent-text);font-weight:600}
+label.ck{position:relative;display:flex;align-items:center;gap:.5rem;min-height:44px;margin:0 -.3rem -.3rem;padding:0 .3rem;border-radius:var(--radius-sm);font-size:.74rem;font-weight:600;color:var(--fg);text-transform:none;letter-spacing:0;cursor:pointer}
+label.ck:hover{background:var(--surface-3)}
+label.ck input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+label.ck .ck-box{flex:none;display:grid;place-items:center;width:16px;height:16px;border-radius:4px;background:var(--surface-3);box-shadow:var(--shadow-1),inset 0 0 0 1px var(--border-strong);color:transparent;transition:background var(--fast) var(--ease)}
+label.ck .ck-box svg{width:12px;height:12px;stroke-width:3}
+label.ck input:checked+.ck-box{background:var(--accent-fill);color:#fff;box-shadow:var(--shadow-1)}
+label.ck input:focus-visible+.ck-box{outline:2px solid var(--accent);outline-offset:2px}
+
+/* chips, badges and cards: tinted fills, no outlines */
+.git-pill,.git-st,.wt-pill,.wt-row.cur,.git-branch-files li,.git-inline-diff,.shortcut-pref,.fd-plan,.fd-errs,.pv-slides section,.transfer-destination-list,.perm,kbd{border:0}
+.git-pill{background:var(--surface-3)}
+.git-pill[data-dirty]{background:var(--accent-tint)}
+.git-st{background:var(--surface-3)}
+.git-st[data-st*="M"],.git-st[data-st*="S"],.git-st[data-st*="C"]{background:var(--accent-tint);color:var(--accent-text)}
+.wt-pill{background:var(--surface-3)}
+.wt-pill.on{background:var(--accent-tint);color:var(--accent-text,var(--accent))}
+.wt-pill.warn{background:var(--warn-tint,var(--accent-tint));color:var(--warn)}
+.wt-row.cur{background:var(--accent-tint)}
+.git-branch-files li,.git-inline-diff,.shortcut-pref,.perm,.transfer-destination-list{background:var(--surface-2);box-shadow:var(--shadow-1)}
+.fd-plan,.fd-errs,.pv-slides section{background:var(--surface-2)}
+kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
+
+/* narrow panels: the address bar gets a row of its own so the base and the current folder always have room */
+.fp{container-type:inline-size;container-name:fp}
+@container fp (max-width:560px){
+  .fp-bar{height:132px}
+  .fp-row{height:88px;flex-wrap:wrap;align-content:flex-start;row-gap:0}
+  .fp-row .addr{order:5;flex:1 1 100%;min-width:0}
+}
+.job-line{gap:.1rem .3rem}.job-line button{padding:0 .45rem}
+.addr>.tip:has(.addr-fill){flex:1 1000 24px!important;min-width:0!important}.addr-fill{flex:1 1000 24px!important;min-width:0!important}

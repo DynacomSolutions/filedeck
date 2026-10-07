@@ -1,10 +1,10 @@
 // No imports beyond urlState: pure layout helpers (the drag-to-dock model), also exercised by the server tests.
-import { MAX_TABS, syncTabs, type Leaf, type Tree } from "./urlState.ts";
+import type { Leaf, Tree } from "./urlState.ts";
 
 export type DropZone = "top" | "bottom" | "left" | "right" | "center";
 export const PANEL_MIME = "application/x-filedeck-panel";
 
-/** Cursor position inside a panel (0..1 on each axis) to a drop zone: the outer 25% of each edge, the middle merges. */
+/** Cursor position inside a panel (0..1 on each axis) to a drop zone: the outer 25% of each edge, the middle swaps places. */
 export function pickZone(xFrac: number, yFrac: number): DropZone {
   const d = { top: yFrac, bottom: 1 - yFrac, left: xFrac, right: 1 - xFrac };
   const near = Math.min(d.top, d.bottom, d.left, d.right);
@@ -39,25 +39,19 @@ const place = (t: Tree, targetId: string, src: Leaf, zone: Exclude<DropZone, "ce
   return { ...t, children: t.children.map((c) => place(c, targetId, src, zone, mkId)) };
 };
 
-/** Move panel `srcId` next to (or, for `center`, into the tab strip of) panel `targetId`. Returns null when it is not possible. */
+/** Swap two panels' places in the layout (panels never merge: file panels have no tabs). */
+const swap = (t: Tree, a: Leaf, b: Leaf): Tree => (t.kind === "leaf" ? (t.id === a.id ? b : t.id === b.id ? a : t) : { ...t, children: t.children.map((c) => swap(c, a, b)) });
+
+/** Move panel `srcId` next to panel `targetId` (edge zones), or, for `center`, swap their places. Returns null when it is not possible. */
 export function dockPanel(tree: Tree, srcId: string, targetId: string, zone: DropZone, mkId: () => string): Tree | null {
   if (srcId === targetId) return null;
   const find = (t: Tree, id: string): Leaf | null => (t.kind === "leaf" ? (t.id === id ? t : null) : t.children.reduce<Leaf | null>((a, c) => a ?? find(c, id), null));
   const src = find(tree, srcId);
   const dst = find(tree, targetId);
   if (!src || !dst) return null;
+  if (zone === "center") return swap(tree, src, dst);
   const rest = without(tree, srcId);
   if (!rest) return null;
-  if (zone === "center") {
-    const sTabs = syncTabs(src).tabs ?? [{ node: src.node, path: src.path }];
-    const dTabs = syncTabs(dst).tabs ?? [{ node: dst.node, path: dst.path }];
-    if (dTabs.length + sTabs.length > MAX_TABS) return null;
-    const tabs = [...dTabs, ...sTabs];
-    const ti = dTabs.length + Math.min(src.ti ?? 0, sTabs.length - 1);
-    const at = tabs[ti]!;
-    const merge = (t: Tree): Tree => (t.kind === "leaf" ? (t.id === targetId ? { ...t, tabs, ti, node: at.node, path: at.path, sel: undefined, closed: undefined, sr: undefined, q: undefined } : t) : { ...t, children: t.children.map(merge) });
-    return merge(rest);
-  }
   return place(rest, targetId, src, zone, mkId);
 }
 

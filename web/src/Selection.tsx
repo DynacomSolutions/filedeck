@@ -1,6 +1,6 @@
 // Selection that spans panels: every panel reports what it has selected, App merges the reports,
 // and the actions here run on the combined list (hub jobs take items from any node).
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useState } from "react";
 import { createPortal } from "react-dom";
 import { api, canEdit, fileUrl, zipUrl, type Entry, type OpSpec } from "./api";
 import { setClip } from "./clipboard";
@@ -114,97 +114,58 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
     }));
     return items.length ? items : [{ label: "No other panel", disabled: true }];
   };
-  const to = (op: "copy" | "move") => (e: React.MouseEvent) => {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setMenu({ x: r.left, y: r.bottom + 2, items: destItems(op) });
-  };
   const files = refs.filter(isEditable);
   const diffable = refs.length === 2 && files.length === 2;
-  const none = "Select one or more items in a panel first.";
-  const need = (label: string) => (refs.length ? label : none);
   const nPanels = new Set(refs.map((r) => r.panel)).size || panelCount;
-  const text = `${refs.length ? summary(refs, nPanels) : "0 selected"}${picked.length > 0 ? `${refs.length ? "; " : " - "}${picked.length} panel${picked.length === 1 ? "" : "s"} picked` : ""}`;
+  const nPick = picked.length;
+  const text = refs.length ? `${refs.length} selected` : nPick ? `${nPick} panel${nPick === 1 ? "" : "s"} picked` : "No selection";
+  const detail = `${refs.length ? summary(refs, nPanels) : text}${refs.length && nPick ? `; ${nPick} panel${nPick === 1 ? "" : "s"} picked` : ""}`;
   const clip = (mode: "copy" | "cut") => () => (setClip({ mode, items: refs.map((r) => ({ node: r.node, path: r.path })) }), onStatus(`${mode === "copy" ? "Copied" : "Cut"} ${refs.length} item(s) to the file clipboard`));
-  interface Act {
-    id: string;
-    label: string;
-    tip: string;
-    icon: ReactNode;
-    disabled?: boolean;
-    danger?: boolean;
-    run: (e: React.MouseEvent) => void;
-    /** menu entry in the "More" menu: label shown there and, for the destination pickers, the nested items */
-    menuLabel: string;
-    sub?: () => MenuItem[];
-    runMenu?: () => void;
-  }
-  const off = !refs.length;
-  const acts: Act[] = [
-    { id: "copy", label: "Copy", tip: need("Copy the selection to the file clipboard"), icon: <Ic.Copy />, disabled: off, run: clip("copy"), menuLabel: "Copy", runMenu: clip("copy") },
-    { id: "cut", label: "Cut", tip: need("Cut the selection to the file clipboard"), icon: <Ic.Scissors />, disabled: off, run: clip("cut"), menuLabel: "Cut", runMenu: clip("cut") },
-    { id: "copyto", label: "Copy to...", tip: need("Copy the selection into another open panel's folder"), icon: <Ic.CopyPlus />, disabled: off, run: to("copy"), menuLabel: "Copy to...", sub: () => destItems("copy") },
-    { id: "moveto", label: "Move to...", tip: need("Move the selection into another open panel's folder"), icon: <Ic.FolderInput />, disabled: off, run: to("move"), menuLabel: "Move to...", sub: () => destItems("move") },
-    { id: "download", label: "Download", tip: need("Download the selection (several items or folders as a zip)"), icon: <Ic.Download />, disabled: off, run: () => downloadRefs(refs), menuLabel: "Download", runMenu: () => downloadRefs(refs) },
-    { id: "compress", label: "Compress...", tip: need("Compress the selection into an archive"), icon: <Ic.Archive />, disabled: off, run: () => setCompress(true), menuLabel: "Compress...", runMenu: () => setCompress(true) },
-    { id: "trash", label: "Trash", tip: need("Move the selection to the trash"), icon: <Ic.Trash2 />, disabled: off, run: () => void queue("Trash", trashSpec(refs)), menuLabel: "Move to trash", runMenu: () => void queue("Trash", trashSpec(refs)) },
-    { id: "delete", label: "Delete...", tip: need("Delete the selection permanently"), icon: <Ic.CircleX />, disabled: off, danger: true, run: () => setConfirm(true), menuLabel: "Delete...", runMenu: () => setConfirm(true) },
-    { id: "diff", label: "Diff files", tip: diffable ? "Diff the two selected files" : "Select exactly two regular files (in one or two panels) to diff them.", icon: <Ic.Diff />, disabled: !diffable, run: () => diffable && onDiff(refs[0]!, refs[1]!), menuLabel: "Diff files", runMenu: () => diffable && onDiff(refs[0]!, refs[1]!) },
-    { id: "clear", label: "Clear", tip: refs.length || picked.length ? "Clear the selection and picked panels" : "Nothing is selected.", icon: <Ic.Eraser />, disabled: !refs.length && !picked.length, run: onClear, menuLabel: "Clear", runMenu: onClear },
+  const doTrash = () => void queue("Trash", trashSpec(refs));
+  const primary = [
+    { id: "copy", label: "Copy", tip: "Copy the selection to the file clipboard", icon: <Ic.Copy />, run: clip("copy") },
+    { id: "cut", label: "Cut", tip: "Cut the selection to the file clipboard", icon: <Ic.Scissors />, run: clip("cut") },
+    { id: "download", label: "Download", tip: "Download the selection (several items or folders as a zip)", icon: <Ic.Download />, run: () => downloadRefs(refs) },
+    { id: "trash", label: "Trash", tip: "Move the selection to the trash", icon: <Ic.Trash2 />, run: doTrash },
   ];
-
-  // Progressive collapse by measured width: level 0 icon + label, 1 icon only, then 1 + k: the last k actions move into "More".
-  const bar = useRef<HTMLDivElement>(null);
-  const [level, setLevel] = useState(0);
-  const maxLevel = 1 + acts.length;
-  const [, force] = useState(0);
-  const lastW = useRef(0);
-  useLayoutEffect(() => {
-    const el = bar.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    lastW.current = el.clientWidth;
-    const ro = new ResizeObserver(() => {
-      if (Math.abs(el.clientWidth - lastW.current) < 1) return;
-      lastW.current = el.clientWidth;
-      setLevel(0);
-      force((n) => n + 1); // render again even when the level was already 0
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  // The text (and the state of the actions) change widths: measure again from the widest layout.
-  useLayoutEffect(() => setLevel(0), [text]);
-  // After every render: still clipped, collapse one step further (settles before paint).
-  useLayoutEffect(() => {
-    const el = bar.current;
-    if (el && level < maxLevel && el.scrollWidth > el.clientWidth) setLevel(level + 1);
-  });
-  const hidden = Math.max(0, level - 1);
-  const shown = acts.slice(0, acts.length - hidden);
-  const more = acts.slice(acts.length - hidden);
   const openMore = (e: React.MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const diffItem: MenuItem = { label: "Diff files", icon: Ic.Diff, ...(diffable ? { onSelect: () => onDiff(refs[0]!, refs[1]!) } : { disabled: true }) };
     setMenu({
       x: r.left,
       y: r.bottom + 2,
-      items: more.map((a): MenuItem => ({ label: a.menuLabel, ...(a.disabled ? { disabled: true } : {}), ...(a.danger ? { danger: true } : {}), ...(a.sub ? { sub: a.sub() } : { onSelect: a.runMenu! }) })),
+      items: [
+        { label: "Copy to...", icon: Ic.CopyPlus, sub: destItems("copy") },
+        { label: "Move to...", icon: Ic.FolderInput, sub: destItems("move") },
+        { label: "Compress...", icon: Ic.Archive, onSelect: () => setCompress(true) },
+        "sep",
+        diffItem,
+        "sep",
+        { label: "Delete permanently...", icon: Ic.CircleX, danger: true, hint: "Shift+Del", onSelect: () => setConfirm(true) },
+      ],
     });
   };
   return (
     // Lives inside the page header (fixed height, always present): nothing moves when a selection starts or ends.
-    <div className="selbar" ref={bar} role="region" aria-label="Selection across panels">
-      <Tip label={text}><b role="status">{text}</b></Tip>
-      <span className="selbar-actions" data-icons={level > 0 ? "1" : undefined}>
-        {shown.map((a) => (
-          <Tip key={a.id} label={a.tip}>
-            <button aria-label={a.label} disabled={a.disabled} className={a.danger ? "danger" : undefined} onClick={a.run}>{a.icon} <span className="bl">{a.label}</span></button>
+    <div className="selbar" role="region" aria-label="Selection across panels">
+      <Tip label={detail}><b role="status" className={refs.length || nPick ? undefined : "selbar-none"}>{text}</b></Tip>
+      {(refs.length > 0 || nPick > 0) && (
+        <span className="selbar-actions">
+          {refs.length > 0 && primary.map((a) => (
+            <Tip key={a.id} label={a.tip}>
+              <button aria-label={a.label} onClick={a.run}>{a.icon} <span className="bl">{a.label}</span></button>
+            </Tip>
+          ))}
+          {refs.length > 0 && (
+            <Tip label="More selection actions">
+              <button aria-label="More selection actions" aria-haspopup="menu" onClick={openMore}><Ic.Ellipsis /></button>
+            </Tip>
+          )}
+          <Tip label="Clear the selection and picked panels">
+            <button aria-label="Clear" className="selbar-clear" onClick={onClear}><Ic.X /></button>
           </Tip>
-        ))}
-        {more.length > 0 && (
-          <Tip label="More selection actions">
-            <button aria-label="More selection actions" aria-haspopup="menu" onClick={openMore}><Ic.Ellipsis /></button>
-          </Tip>
-        )}
-      </span>
+        </span>
+      )}
       {createPortal(<>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {compress && <CompressDialog groups={groupRefs(refs)} onClose={() => setCompress(false)} onStatus={onStatus} />}

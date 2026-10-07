@@ -13,6 +13,10 @@ interface Props {
   fill?: boolean;
   /** Keep the tooltip open while true (an error that appears under a control that already has focus). */
   forceOpen?: boolean;
+  /** Only open when this returns true for the wrapper (e.g. the text is actually truncated). */
+  when?: (wrap: HTMLElement) => boolean;
+  /** Place beside the closest ancestor matching this selector (to its right) instead of under the control, so it never covers neighbouring rows. */
+  besideOf?: string;
   children: ReactElement<{ "aria-describedby"?: string }>;
 }
 
@@ -21,7 +25,7 @@ interface Props {
  * delay) and on keyboard focus, closes on leave, blur and Esc, stays inside the viewport and is linked to
  * its control with aria-describedby. Replaces the native `title` attribute.
  */
-export function Tip({ label, shortcut, fill, forceOpen, children }: Props) {
+export function Tip({ label, shortcut, fill, forceOpen, when, besideOf, children }: Props) {
   const id = useId();
   const wrap = useRef<HTMLSpanElement>(null);
   const bubble = useRef<HTMLDivElement>(null);
@@ -35,8 +39,10 @@ export function Tip({ label, shortcut, fill, forceOpen, children }: Props) {
   const show = useCallback((delay: number) => {
     window.clearTimeout(timer.current);
     window.clearTimeout(hideTimer.current);
-    timer.current = window.setTimeout(() => setOpen(true), delay);
-  }, []);
+    timer.current = window.setTimeout(() => {
+      if (!when || (wrap.current && when(wrap.current))) setOpen(true);
+    }, delay);
+  }, [when]);
   const hide = useCallback(() => {
     window.clearTimeout(timer.current);
     window.clearTimeout(hideTimer.current);
@@ -55,6 +61,13 @@ export function Tip({ label, shortcut, fill, forceOpen, children }: Props) {
     const b = bubble.current.getBoundingClientRect();
     const vw = document.documentElement.clientWidth;
     const vh = document.documentElement.clientHeight;
+    const side = besideOf ? wrap.current.closest(besideOf) : null;
+    if (side) {
+      const sr = side.getBoundingClientRect();
+      const sx = Math.min(sr.right + GAP, vw - b.width - 4);
+      setPos({ x: Math.max(4, sx), y: Math.max(4, Math.min(a.top + a.height / 2 - b.height / 2, vh - b.height - 4)) });
+      return;
+    }
     let y = a.bottom + GAP;
     if (y + b.height > vh - 4 && a.top - GAP - b.height >= 4) y = a.top - GAP - b.height;
     y = Math.max(4, Math.min(y, vh - b.height - 4));

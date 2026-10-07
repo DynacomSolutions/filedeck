@@ -33,7 +33,7 @@ body { font-family: var(--presentation-font); font-size: var(--presentation-size
 .presentation-field input[type=range], .presentation-field select { grid-column: 1 / -1; width: 100%; min-height: 44px; }
 .presentation-field output { color: var(--fg); font-variant-numeric: tabular-nums; }
 .presentation-field button { grid-column: 1 / -1; justify-self: start; min-height: 44px; color: var(--accent-text); text-decoration: none; }
-.presentation-reset { min-height: 44px; align-self: start; padding-inline: .8rem; border: 1px solid var(--border-strong); border-radius: var(--radius-btn); }
+.presentation-reset { min-height: 44px; align-self: start; padding-inline: .8rem; border: 0; background: var(--surface-2); box-shadow: var(--shadow-1); border-radius: var(--radius-btn); }
 
 /* Reflow the compact Properties controls and sidebar at narrow viewports. The
    breakpoint also catches desktop zoom when it reduces the CSS viewport. */

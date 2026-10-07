@@ -8,14 +8,6 @@ export type Loc = FileRef;
 export type DiffRef = FileRef & { rev?: string };
 export type DiffMode = "name" | "size" | "mtime" | "content" | "quick";
 
-/** A tab: its folder plus the tab's own active item, selection and closed preview (kept while another tab is shown). */
-export interface TabLoc extends Loc {
-  sel?: string;
-  sels?: string[];
-  ns?: true;
-  closed?: string;
-}
-
 export type Dock = "left" | "right" | "top" | "bottom";
 export type SortKey = "name" | "size" | "mtime";
 
@@ -68,10 +60,6 @@ export interface Leaf {
   sr?: SearchForm;
   /** view mode: absent = use the browser default, "g" = grid, "l" = list */
   w?: "g" | "l";
-  /** tabs (every tab's folder, in order); absent = a single location. `node`/`path` above are always the active tab's. */
-  tabs?: TabLoc[];
-  /** index of the active tab in `tabs` */
-  ti?: number;
 }
 export type Tree = Leaf | { kind: "split"; id: string; dir: "horizontal" | "vertical"; children: Tree[]; sizes?: number[] };
 
@@ -120,20 +108,6 @@ export interface TrashState {
   volume: string;
 }
 
-/** Open pull request diff: the repository folder, what is compared (a PR number, or two refs) and the file open in the diff. */
-export interface PrState {
-  node: string;
-  path: string;
-  /** pull request number; absent = compare two refs */
-  pr?: number;
-  base?: string;
-  head?: string;
-  /** file (new path) open in the diff */
-  file?: string;
-  /** inline instead of side-by-side */
-  inline?: boolean;
-}
-
 /** A sync preview view can be reconstructed from the selected relative paths. */
 export interface SyncState {
   action: "copy-lr" | "copy-rl" | "delete-left" | "delete-right";
@@ -150,9 +124,8 @@ export interface AppState {
   active: string;
   trash?: TrashState;
   diff?: { left: DiffRef; right: FileRef };
-  prDiff?: PrState;
   folder?: FolderState;
-  /** panels picked as a whole (Shift/Ctrl+click on the panel header) */
+  /** panels selected as a whole: Ctrl/Cmd+click on items in another panel adds that panel, or Alt+P / the panel menu */
   panelSel?: string[];
   /** the settings view is open */
   settings?: boolean;
@@ -162,7 +135,7 @@ export interface AppState {
   sync?: SyncState;
 }
 
-export type ViewRoute = Pick<AppState, "trash" | "diff" | "prDiff" | "folder" | "settings" | "help" | "sync">;
+export type ViewRoute = Pick<AppState, "trash" | "diff" | "folder" | "settings" | "help" | "sync">;
 /** Stable identity for an open view; its changing contents remain replaceable in place. */
 export function viewIdentity(route: ViewRoute): string {
   return Object.keys(route).sort().join("+");
@@ -180,8 +153,7 @@ export function viewCloseTarget(index: number, routeStart: number): number | nul
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 0 | 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; e?: [string, string]; gd?: [string, string]; q?: string; z?: WSearch; w?: "g" | "l"; tb?: ([string, string] | [string, string, WTab])[]; ti?: number; x?: 1 };
-type WTab = { s?: string; m?: string[]; x?: 1; c?: string };
+type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 0 | 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; e?: [string, string]; gd?: [string, string]; q?: string; z?: WSearch; w?: "g" | "l"; x?: 1 };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
@@ -199,8 +171,6 @@ interface Wire {
   sh?: 1;
   /** sync plan action and selected relative paths */
   sy?: [SyncState["action"], string[]];
-  /** pull request diff: node, repository path, then only what is set */
-  pd?: { n: string; p: string; r?: number; b?: string; h?: string; f?: string; i?: 1 };
   /** folder compare: l/r roots, a/b panel ids, u current relative folder, f hidden statuses, then only the options that differ from the defaults */
   g?: { l: [string, string]; r: [string, string]; a: string; b: string; u?: string; f?: string; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
 }
@@ -221,19 +191,6 @@ const toWire = (t: Tree): WTree => {
   if (t.gitDiff) w.gd = [t.gitDiff.node, t.gitDiff.path];
   if (t.q) w.q = t.q;
   if (t.w) w.w = t.w;
-  if (t.tabs && t.tabs.length > 1) {
-    w.tb = t.tabs.map((x, i) => {
-      // the active tab's own state lives on the panel itself
-      if (i === (t.ti ?? 0)) return [x.node, x.path];
-      const o: WTab = {};
-      if (x.sel) o.s = x.sel;
-      if (x.ns) o.x = 1;
-      if (x.sels && x.sels.length > 1) o.m = x.sels.slice(0, MAX_SELS);
-      if (x.closed) o.c = x.closed;
-      return Object.keys(o).length ? [x.node, x.path, o] : [x.node, x.path];
-    });
-    if (t.ti) w.ti = t.ti;
-  }
   if (t.sr) {
     const z: WSearch = {};
     if (t.sr.q) z.q = t.sr.q;
@@ -255,10 +212,6 @@ export function encodeState(s: AppState): string {
   if (s.settings) w.se = 1;
   if (s.help) w.sh = 1;
   if (s.folder && s.sync?.paths.length) w.sy = [s.sync.action, s.sync.paths];
-  if (s.prDiff) {
-    const d = s.prDiff;
-    w.pd = { n: d.node, p: d.path, ...(d.pr ? { r: d.pr } : {}), ...(d.base ? { b: d.base } : {}), ...(d.head ? { h: d.head } : {}), ...(d.file ? { f: d.file } : {}), ...(d.inline ? { i: 1 as const } : {}) };
-  }
   if (s.diff) w.f = [s.diff.left.rev ? [s.diff.left.node, s.diff.left.path, s.diff.left.rev] : [s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
   if (s.folder) {
     const { left, right, opts: o, preset, lp, rp, rel, hide } = s.folder;
@@ -311,20 +264,7 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (Array.isArray(o.gd) && str(o.gd[0]) && str(o.gd[1]) && o.gd[1].startsWith("/")) leaf.gitDiff = { node: o.gd[0], path: o.gd[1], rev: "HEAD" };
   if (str(o.q) && o.q) leaf.q = o.q;
   if (o.w === "g" || o.w === "l") leaf.w = o.w;
-  if (Array.isArray(o.tb) && o.tb.length > 1 && o.tb.length <= MAX_TABS && o.tb.every((x) => Array.isArray(x) && str(x[0]) && str(x[1]) && x[1].startsWith("/"))) {
-    leaf.tabs = (o.tb as [string, string, WTab?][]).map(([node, path, t]) => {
-      const tab: TabLoc = { node, path };
-      if (t && typeof t === "object") {
-        if (str(t.s)) tab.sel = t.s;
-        if (t.x === 1 && tab.sel) tab.ns = true;
-        if (Array.isArray(t.m) && t.m.length > 1 && t.m.length <= MAX_SELS && t.m.every(str)) tab.sels = t.m as string[];
-        if (str(t.c)) tab.closed = t.c;
-      }
-      return tab;
-    });
-    leaf.ti = typeof o.ti === "number" && Number.isInteger(o.ti) && o.ti >= 0 && o.ti < leaf.tabs.length ? o.ti : 0;
-    leaf.tabs[leaf.ti] = { node: leaf.node, path: leaf.path };
-  }
+  // Legacy tabbed panels (`tb`/`ti`) collapse to their active tab: `n`/`p` (and the item state) were always the active tab's, so they are simply not read any more.
   if (o.z && typeof o.z === "object") {
     const z = o.z as WSearch;
     leaf.sr = {
@@ -339,36 +279,6 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   }
   return leaf;
 };
-
-export const MAX_TABS = 16;
-
-/** The panel's own tab state (active item, selection, closed preview) as stored on a tab entry. */
-export const tabOf = (l: Leaf): TabLoc => ({
-  node: l.node,
-  path: l.path,
-  ...(l.sel ? { sel: l.sel } : {}),
-  ...(l.ns ? { ns: true as const } : {}),
-  ...(l.sels ? { sels: l.sels } : {}),
-  ...(l.closed ? { closed: l.closed } : {}),
-});
-/** Leaf fields that a tab entry restores when it becomes the panel's tab. */
-export const fromTab = (t: TabLoc): Pick<Leaf, "node" | "path" | "sel" | "sels" | "ns" | "closed"> => ({ node: t.node, path: t.path, sel: t.sel, sels: t.sels, ns: t.ns, closed: t.closed });
-
-/** Keeps `tabs[ti]` equal to the panel's own node/path (navigation edits the active tab in place). Same object when nothing changes. */
-export function syncTabs(l: Leaf): Leaf {
-  if (!l.tabs) return l;
-  const ti = Math.min(Math.max(l.ti ?? 0, 0), l.tabs.length - 1);
-  const cur = l.tabs[ti]!;
-  if (cur.node === l.node && cur.path === l.path && ti === (l.ti ?? 0)) return l;
-  const tabs = l.tabs.slice();
-  tabs[ti] = { node: l.node, path: l.path };
-  return { ...l, tabs, ti };
-}
-export function syncTree(t: Tree): Tree {
-  if (t.kind === "leaf") return syncTabs(t);
-  const kids = t.children.map(syncTree);
-  return kids.every((k, i) => k === t.children[i]) ? t : { ...t, children: kids };
-}
 
 export function leaves(t: Tree): Leaf[] {
   return t.kind === "leaf" ? [t] : t.children.flatMap(leaves);
@@ -419,17 +329,12 @@ export function decodeState(search: string): AppState | null {
     const r = w.r;
     const trash = Array.isArray(r) && str(r[0]) && typeof r[1] === "string" ? { node: r[0], volume: r[1] } : undefined;
     const folder = folderFromWire(w.g, ids);
-    const pd = w.pd;
-    const prDiff: PrState | undefined =
-      pd && typeof pd === "object" && str(pd.n) && str(pd.p) && pd.p.startsWith("/")
-        ? { node: pd.n, path: pd.p, ...(typeof pd.r === "number" && Number.isInteger(pd.r) && pd.r > 0 ? { pr: pd.r } : {}), ...(str(pd.b) ? { base: pd.b.slice(0, 256) } : {}), ...(str(pd.h) ? { head: pd.h.slice(0, 256) } : {}), ...(str(pd.f) ? { file: pd.f.slice(0, 4096) } : {}), ...(pd.i === 1 ? { inline: true } : {}) }
-        : undefined;
     const panelSel = Array.isArray(w.ps) ? w.ps.filter((x) => str(x) && ids.includes(x)) : [];
     const sy = w.sy;
     const sync = folder && Array.isArray(sy) && ["copy-lr", "copy-rl", "delete-left", "delete-right"].includes(sy[0]) && Array.isArray(sy[1]) && sy[1].length > 0 && sy[1].length <= 500 && sy[1].every((p) => str(p) && p.length <= 4096)
       ? { action: sy[0] as SyncState["action"], paths: sy[1] as string[] }
       : undefined;
-    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(prDiff ? { prDiff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}), ...(w.sh === 1 ? { help: true } : {}), ...(sync ? { sync } : {}) };
+    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}), ...(w.sh === 1 ? { help: true } : {}), ...(sync ? { sync } : {}) };
   } catch {
     return null;
   }

@@ -6,6 +6,7 @@ import { EMPTY_SEARCH, type SearchForm, type SearchMode, type SearchTypes } from
 import { FileIcon } from "./FileIcon";
 import { X } from "lucide-react";
 import * as Ic from "lucide-react";
+import { Dropdown } from "./Dropdown";
 
 interface Props {
   node: string;
@@ -137,20 +138,20 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
           value={form.q}
           onChange={(e) => set({ q: e.target.value })}
         />
-        <select aria-label="Name match" value={form.mode} onChange={(e) => set({ mode: e.target.value as SearchMode })}>
-          <option value="name">contains</option>
-          <option value="glob">glob</option>
-          <option value="regex">regex</option>
-        </select>
+        <Dropdown label="Name match" value={form.mode} onChange={(v) => set({ mode: v as SearchMode })} options={[
+          { value: "name", label: "contains" },
+          { value: "glob", label: "glob" },
+          { value: "regex", label: "regex" },
+        ]} />
         <Tip label="Match name case-sensitively"><label className="chk"><input type="checkbox" checked={!form.ic} onChange={(e) => set({ ic: !e.target.checked })} /> Aa</label></Tip>
         <input type="search" placeholder="Text inside files (optional)" aria-label="Content" value={form.content} onChange={(e) => set({ content: e.target.value })} />
         <Tip label="Treat the content text as a regular expression"><label className="chk"><input type="checkbox" checked={form.cre} onChange={(e) => set({ cre: e.target.checked })} /> regex</label></Tip>
         <Tip label="Match content case-sensitively"><label className="chk"><input type="checkbox" checked={!form.cic} onChange={(e) => set({ cic: !e.target.checked })} /> Aa</label></Tip>
-        <select aria-label="Type" value={form.types} onChange={(e) => set({ types: e.target.value as SearchTypes })}>
-          <option value="all">files and folders</option>
-          <option value="file">files</option>
-          <option value="dir">folders</option>
-        </select>
+        <Dropdown label="Type" value={form.types} onChange={(v) => set({ types: v as SearchTypes })} options={[
+          { value: "all", label: "files and folders" },
+          { value: "file", label: "files" },
+          { value: "dir", label: "folders" },
+        ]} />
         {running ? (
           <button type="button" onClick={cancel}><Ic.X /> Cancel</button>
         ) : (
@@ -186,7 +187,7 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
                 <td className="num">{fmtDate(h.m)}</td>
                 <td className="sr-act">
                   <Tip label="Show in its folder" shortcut="Enter"><button type="button" onClick={(e) => (e.stopPropagation(), onReveal(h.p))}><Ic.FolderSearch /> Reveal</button></Tip>
-                  <Tip label={h.t === "dir" ? "Open folder" : "Open file in a new tab (Shift+Enter)"}><button type="button" onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}><Ic.ExternalLink /> Open</button></Tip>
+                  <Tip label={h.t === "dir" ? "Open folder" : "Open file (Shift+Enter)"}><button type="button" onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}><Ic.ExternalLink /> Open</button></Tip>
                 </td>
               </tr>
             ))}

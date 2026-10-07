@@ -15,6 +15,7 @@ import { getPresentation, usePresentation } from "./presentation";
 import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DEFAULT_UI, DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
 import * as Ic from "lucide-react";
+import { Dropdown } from "./Dropdown";
 
 /* ------------------------------------------------------------------ options and presets */
 
@@ -899,10 +900,7 @@ function CompareOptions({ ctl }: { ctl: CompareCtl }) {
           <div className="fd-presets">
             <label>
               Preset
-              <select value={st.preset} onChange={(e) => ctl.setPreset(e.target.value)}>
-                <option value="">(none)</option>
-                {Object.keys(ctl.presets).sort().map((p) => <option key={p}>{p}</option>)}
-              </select>
+              <Dropdown label="Preset" value={st.preset} onChange={ctl.setPreset} options={[{ value: "", label: "(none)" }, ...Object.keys(ctl.presets).sort().map((p) => ({ value: p, label: p }))]} />
             </label>
             <label>
               Save current options as
