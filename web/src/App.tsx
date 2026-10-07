@@ -427,10 +427,12 @@ export function App() {
   // "Compare panels" lives in the global toolbar and appears once more than one panel is selected: two selected panels compare
   // directly, more offer a menu of pairs.
   const [cmpMenu, setCmpMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  const multiPanel = isMultiPanel(panelSel);
+  const leafIds = tree ? leaves(tree).map((l) => l.id) : [];
+  // also offered whenever exactly two panels exist: there is only one possible pair
+  const multiPanel = isMultiPanel(panelSel) || leafIds.length === 2;
   const compareClick = (e: React.MouseEvent) => {
     if (!tree) return;
-    const pairs = comparePairs(panelSel, leaves(tree).map((l) => l.id));
+    const pairs = comparePairs(isMultiPanel(panelSel) ? panelSel : leafIds, leafIds);
     if (pairs.length === 1) return startCompare(pairs[0]![0], pairs[0]![1]);
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const label = (pid: string) => { const l = leafOf(pid); return l ? `${l.node}:${l.path}` : pid; };
@@ -590,7 +592,7 @@ export function App() {
               </Tip>
             )}
             {multiPanel && (
-              <Tip label={`Compare two of the ${panelSel.length} selected panels in place`}>
+              <Tip label={isMultiPanel(panelSel) ? `Compare two of the ${panelSel.length} selected panels in place` : "Compare the two panels in place"}>
                 <button aria-label="Compare panels" aria-haspopup={panelSel.length > 2 ? "menu" : undefined} onClick={compareClick}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
               </Tip>
             )}

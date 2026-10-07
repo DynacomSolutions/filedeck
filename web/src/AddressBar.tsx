@@ -8,7 +8,6 @@ import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
-import { wheelX } from "./scrollx";
 
 interface Item {
   key: string;
@@ -183,7 +182,12 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
   const [editBase, setEditBase] = useState<AddressBase | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const editBtn = useRef<HTMLSpanElement>(null);
-  const [pop, setPop] = useState<{ kind: "dir"; path: string; anchor: Anchor; items: PopItem[] } | { kind: "recent"; anchor: Anchor; items: PopItem[] } | null>(null);
+  const [pop, setPop] = useState<{ kind: "dir"; path: string; anchor: Anchor; items: PopItem[] } | { kind: "recent" | "more"; anchor: Anchor; items: PopItem[] } | null>(null);
+  const root = useRef<HTMLDivElement>(null);
+  /** how many segments after the root are folded into the "..." menu (grown until the path fits) */
+  const [folded, setFolded] = useState(0);
+  const [, rerender] = useState(0);
+  const rootW = useRef(0);
   const popOpener = useRef<HTMLElement | null>(null);
   const visited = useRef<Where[]>([]);
   const closePop = useCallback((restore = false) => {
@@ -243,9 +247,6 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       alive = false;
     };
   }, [node]);
-  useEffect(() => {
-    if (!editing && navRef.current) navRef.current.scrollLeft = navRef.current.scrollWidth;
-  }, [node, path, editing]);
 
   const begin = useCallback(() => {
     dirCache.current.clear();
@@ -492,9 +493,40 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     <Dropdown className="addr-base" label="Location base" value={baseKey(selectedBase)} disabled={busy} onChange={changeBase} options={baseOptions.map((base) => ({ value: baseKey(base), label: base.label }))} />
   );
 
+  const remainderCrumbs = baseRemainder(currentBase, path).split("/").filter(Boolean);
+  const segs = [{ label: "/", path: currentBase.path }, ...remainderCrumbs.map((c, i) => ({ label: c, path: resolveBasePath(currentBase, remainderCrumbs.slice(0, i + 1).join("/")) }))];
+  const maxFold = Math.max(0, segs.length - 2);
+  const segKey = segs.map((x) => x.path).join("\0") + "\0" + currentBase.label;
+  // Collapse by measurement: start from the full path, fold one more middle segment while the crumbs still overflow (settles before paint).
+  useLayoutEffect(() => setFolded(0), [segKey, editing]);
+  useLayoutEffect(() => {
+    const nav = navRef.current;
+    if (!editing && nav && folded < maxFold && nav.scrollWidth > nav.clientWidth + 1) setFolded(folded + 1);
+  });
+  useLayoutEffect(() => {
+    const el = root.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    rootW.current = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (Math.abs(el.clientWidth - rootW.current) < 1) return;
+      rootW.current = el.clientWidth;
+      setFolded(0);
+      rerender((n) => n + 1);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [editing]);
+  const shownSegs = segs.map((sg, i) => ({ sg, i })).filter(({ i }) => i === 0 || i > folded);
+  const hiddenSegs = segs.slice(1, folded + 1);
+  const openMore = (btn: HTMLElement) => {
+    if (pop?.kind === "more") return setPop(null);
+    popOpener.current = btn;
+    setPop({ kind: "more", anchor: anchorOf(btn), items: [{ key: "h", label: "Parent folders", head: true }, ...hiddenSegs.map((sg): PopItem => ({ key: sg.path, label: sg.label, Icon: Folder, pick: () => onGo(currentBase.node, sg.path) }))] });
+  };
+
   if (editing) {
     return (
-      <div className="addr">
+      <div className="addr" ref={root}>
         {basePicker}
         <input
             ref={input}
@@ -530,15 +562,12 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
         </Tip>
         <span className="sr-only" role="status">{error || (items.length ? `${items.length} suggestion${items.length === 1 ? "" : "s"}` : "")}</span>
         {list}
-        {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} opener={popOpener.current} onClose={closePop} />}
+        {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : pop.kind === "more" ? "Parent folders" : "Recent locations"} opener={popOpener.current} onClose={closePop} />}
       </div>
     );
   }
-  const remainder = baseRemainder(currentBase, path);
-  const remainderCrumbs = remainder.split("/").filter(Boolean);
-  const segs = [{ label: "/", path: currentBase.path }, ...remainderCrumbs.map((c, i) => ({ label: c, path: resolveBasePath(currentBase, remainderCrumbs.slice(0, i + 1).join("/") ) }))];
   return (
-    <div className="addr" onMouseDown={(e) => {
+    <div className="addr" ref={root} onMouseDown={(e) => {
       // empty space inside the bar (not a segment, chevron or the recents button) starts text editing
       if (e.button === 0 && e.currentTarget.contains(e.target as Node) && !(e.target as Element).closest("button")) {
         e.preventDefault();
@@ -546,13 +575,20 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       }
     }}>
       {basePicker}
-      <nav className="crumbs" aria-label="Breadcrumb" ref={navRef} onWheel={wheelX}>
-        {segs.map((sg, i) => (
-          <span className="crumb" key={sg.path}>
+      <nav className={"crumbs" + (folded >= maxFold ? " tight" : "")} aria-label="Breadcrumb" ref={navRef}>
+        {shownSegs.map(({ sg, i }) => (
+          <span className={"crumb" + (i === segs.length - 1 ? " last" : "")} key={sg.path}>
+            {i === folded + 1 && folded > 0 && (
+              <Tip label="Show the hidden parent folders">
+                <button type="button" className={"crumb-more" + (pop?.kind === "more" ? " open" : "")} aria-label="Show hidden parent folders" aria-haspopup="menu" aria-expanded={pop?.kind === "more"} onClick={(e) => openMore(e.currentTarget)}>
+                  <Ic.Ellipsis aria-hidden="true" />
+                </button>
+              </Tip>
+            )}
             <Tip label={i === 0 ? `Root of ${currentBase.label}` : sg.path}>
               <button type="button" className={i === segs.length - 1 ? "here" : ""} onClick={() => onGo(currentBase.node, sg.path)} onContextMenu={(e) => onCrumbMenu(e, sg.path)}>
                 {i === 0 ? <Ic.HardDrive aria-hidden="true" /> : null}
-                {sg.label}
+                <span className="crumb-t">{sg.label}</span>
               </button>
             </Tip>
             <Tip label={`Folders in ${sg.path}`}>
@@ -571,7 +607,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
           <Ic.History aria-hidden="true" />
         </button>
       </Tip>
-      {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : "Recent locations"} opener={popOpener.current} onClose={closePop} />}
+      {pop && <Pop anchor={pop.anchor} items={pop.items} label={pop.kind === "dir" ? "Folders" : pop.kind === "more" ? "Parent folders" : "Recent locations"} opener={popOpener.current} onClose={closePop} />}
     </div>
   );
 }

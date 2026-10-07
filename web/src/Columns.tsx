@@ -4,7 +4,7 @@ import { fmtDate, fmtMode, fmtSize, type Entry } from "./api";
 import type { MenuItem } from "./ContextMenu";
 import type { SortKey } from "./urlState";
 import {
-  COLUMNS, COLUMN_KEY, KEY_STEP, isDefault, isShown, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn,
+  COLUMNS, COLUMN_KEY, KEY_STEP, isDefault, isFlex, isShown, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn,
   totalWidth, visibleColumns, widthOf, type ColDef, type ColId, type ColumnState,
 } from "./columns";
 import "./columns.css";
@@ -49,10 +49,10 @@ export function ColGroup({ state: s, cols, git }: { state: ColumnState; cols: Co
   return (
     <colgroup>
       {cols.flatMap((c, i) => [
-        <col key={c.id} className={"c-" + c.id} style={{ width: widthOf(s, c.id) }} />,
+        <col key={c.id} className={"c-" + c.id} style={isFlex(s, c.id) ? undefined : { width: widthOf(s, c.id) }} />,
         ...(i === 0 && git ? [<col key="git" className="c-git" style={{ width: GIT_COL_W }} />] : []),
       ])}
-      <col className="c-fill" />
+      <col className="c-fill" style={cols.some((c) => isFlex(s, c.id)) ? { width: 0 } : undefined} />
     </colgroup>
   );
 }
@@ -109,6 +109,8 @@ function autoFit(th: HTMLElement, id: ColId): number {
 function Handle({ col, s, label }: { col: ColDef; s: ColumnState; label: string }) {
   const drag = useRef<{ x: number; w: number } | null>(null);
   const w = widthOf(s, col.id);
+  /** the rendered width: a flexible column has no stored one yet */
+  const actual = (el: HTMLElement) => (isFlex(load(), col.id) ? el.parentElement!.offsetWidth : widthOf(load(), col.id));
   const set = (n: number, persist = true) => commit(setWidth(load(), col.id, n), persist);
   return (
     <div
@@ -125,7 +127,7 @@ function Handle({ col, s, label }: { col: ColDef; s: ColumnState; label: string 
         if (e.button !== 0) return;
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
-        drag.current = { x: e.clientX, w: widthOf(load(), col.id) };
+        drag.current = { x: e.clientX, w: actual(e.currentTarget) };
       }}
       onPointerMove={(e) => {
         if (drag.current) set(drag.current.w + e.clientX - drag.current.x, false);
@@ -146,7 +148,7 @@ function Handle({ col, s, label }: { col: ColDef; s: ColumnState; label: string 
       }}
       onKeyDown={(e) => {
         const step = KEY_STEP * (e.shiftKey ? 4 : 1);
-        const cur = widthOf(load(), col.id);
+        const cur = actual(e.currentTarget);
         if (e.key === "ArrowRight") set(cur + step);
         else if (e.key === "ArrowLeft") set(cur - step);
         else if (e.key === "Home") set(col.min);

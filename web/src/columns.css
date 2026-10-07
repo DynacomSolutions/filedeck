@@ -16,7 +16,8 @@
   color:inherit;font:inherit;letter-spacing:inherit;text-transform:inherit;text-align:inherit;cursor:pointer;
   transition:color var(--fast) var(--ease);
 }
-.ft th.colh.end button.colh-btn{justify-content:flex-end}
+.ft th.colh button.colh-btn{justify-content:flex-start;text-align:left}
+.ft th.colh.end button.colh-btn{justify-content:flex-end;text-align:right}
 .ft th.colh button.colh-btn:hover:not(:disabled){background:transparent;color:var(--accent-text)}
 .ft th.colh button.colh-btn:active{background:transparent}
 .ft th.colh[aria-sort="ascending"] button.colh-btn,.ft th.colh[aria-sort="descending"] button.colh-btn{color:var(--fg)}

@@ -68,7 +68,7 @@ const opPct = (j: OpJob): number | null => {
   if (p.totalEntries > 0) return Math.min(100, Math.round((p.entries / p.totalEntries) * 100));
   return null;
 };
-const STATE_LABEL: Record<string, string> = { queued: "queued", paused: "paused", waiting: "needs an answer", done: "done", failed: "failed", canceled: "canceled" };
+const STATE_LABEL: Record<string, string> = { queued: "queued", paused: "paused", waiting: "waiting for you", done: "done", failed: "failed", canceled: "canceled" };
 
 function detailLine(job: OpJob, eta: number | null, live: boolean): string {
   const p = job.progress;
@@ -100,7 +100,7 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
   return (
     <li className={"job op " + job.state} data-job-id={job.id}>
       <div className="job-line">
-        <b>{job.title}</b>
+        <b className="job-title">{job.title}</b>
         <span className="job-state">{job.state === "running" ? (p === null ? " running" : ` ${p}%`) : ` ${STATE_LABEL[job.state] ?? job.state}`}</span>
         {live && job.state !== "waiting" && (
           job.state === "paused" ? (
@@ -123,7 +123,7 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
             <button onClick={() => act(() => api.opResolve(job.id, "overwrite", all))}>{job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? <Ic.Merge /> : <Ic.Replace />} {job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? "Merge" : "Overwrite"}</button>
             <button className="primary" onClick={() => act(() => api.opResolve(job.id, "rename", all))}><Ic.CopyPlus /> Keep both</button>
           </div>
-          <label className="chk"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Apply to all remaining</label>
+          <label className="ck"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /><span className="ck-box" aria-hidden="true"><Ic.Check /></span><span>Apply to all remaining</span></label>
         </div>
       )}
       <div className="muted job-detail">{detailLine(job, eta, live)}</div>

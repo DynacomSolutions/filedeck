@@ -12,13 +12,15 @@ export interface ColDef {
   /** shown by default */
   on: boolean;
   align?: "end";
+  /** takes the remaining table width until the user resizes it (def is then only its share of the minimum table width) */
+  fill?: boolean;
 }
 
 export const COLUMNS: readonly ColDef[] = [
-  { id: "name", label: "Name", min: 140, max: 1200, def: 380, sort: "name", on: true },
+  { id: "name", label: "Name", min: 160, max: 1200, def: 240, sort: "name", on: true, fill: true },
   { id: "type", label: "Type", min: 70, max: 400, def: 110, on: false },
   { id: "size", label: "Size", min: 70, max: 400, def: 100, sort: "size", on: true, align: "end" },
-  { id: "mtime", label: "Modified", min: 110, max: 400, def: 160, sort: "mtime", on: true, align: "end" },
+  { id: "mtime", label: "Modified", min: 110, max: 400, def: 160, sort: "mtime", on: true },
   { id: "mode", label: "Permissions", min: 100, max: 400, def: 120, on: false },
 ];
 
@@ -85,6 +87,9 @@ export function resetWidth(s: ColumnState, id: ColId): ColumnState {
 }
 
 export const widthOf = (s: ColumnState, id: ColId) => s.widths[id] ?? byId(id).def;
+
+/** A fill column (Name) with no stored width stretches to the space the other columns leave. */
+export const isFlex = (s: ColumnState, id: ColId) => !!byId(id).fill && s.widths[id] === undefined;
 
 export const visibleColumns = (s: ColumnState): ColDef[] => COLUMNS.filter((c) => isShown(s, c.id));
 

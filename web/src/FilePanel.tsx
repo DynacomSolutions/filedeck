@@ -1195,9 +1195,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { label: "Duplicate", icon: CopyPlus, disabled: !selEntries.length || others.length > 0, onSelect: () => void duplicate(selEntries) },
     { label: "Edit in the editor", hint: "F4", icon: FilePen, disabled: !sole || !canEdit(sole), onSelect: () => sole && setEditing({ node, path: sole.path }) },
     {
-      label: diffMarked ? "Diff against the marked file" : "Diff: select two files, or mark one then pick another",
+      label: diffMarked ? "Diff against the marked file" : "Diff files",
+      tip: "Select two files, or mark one then pick another",
       icon: Diff,
-      checked: !!diffMarked,
       disabled: !combine(selEntries).length || combine(selEntries).length > 2 || !combine(selEntries).every((r) => r.editable),
       onSelect: () => onDiff(combine(selEntries).map((r) => ({ node: r.node, path: r.path }))),
     },
@@ -1211,7 +1211,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { label: "Open trash", icon: Trash2, onSelect: () => onTrash(node) },
     "sep",
     ...(git?.repo ? ([{ label: "Git worktrees", icon: GitBranch, onSelect: () => showGit() }] as MenuItem[]) : []),
-    { label: panelPicked ? "Remove this panel from the selection" : "Add this panel to the selection", hint: "Alt+P", icon: SquareCheck, checked: panelPicked, onSelect: onTogglePanel },
+    { label: panelPicked ? "Remove this panel from the selection" : "Add this panel to the selection", hint: "Alt+P", icon: panelPicked ? Ic.SquareMinus : SquareCheck, onSelect: onTogglePanel },
   ];
   /** Properties in the side panel, on its Git tab. */
   const showGit = () => {

@@ -49,3 +49,6 @@
 .jobs-hist-list .h-out.failed{color:var(--fd-bad)}
 .jobs-hist-list .h-detail{font-size:.7rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .jobs-idle{margin:.2rem .1rem .4rem;font-size:.76rem}
+
+/* empty states: plain muted indented text, no box */
+.st-note,.st-note.empty{border:0;background:transparent;box-shadow:none;border-radius:0;text-align:left;justify-content:flex-start;margin:0}

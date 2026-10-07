@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Tip } from "./Tooltip";
 import { Check, Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
@@ -17,6 +18,8 @@ export type MenuItem =
       sub?: MenuItem[];
       /** icon for the row; by default one is chosen from the label */
       icon?: LucideIcon;
+      /** tooltip with a short explanation (shown on hover and focus, also when disabled) */
+      tip?: string;
     };
 
 type Item = Exclude<MenuItem, "sep">;
@@ -97,6 +100,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
           <div key={i} className="ctx-sep" role="separator" />
         ) : (
           <div key={i} className="ctx-row">
+            <Tip label={it.tip}>
             <button
               type="button"
               role={it.checked === undefined ? "menuitem" : "menuitemcheckbox"}
@@ -120,6 +124,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
               <span className="ctx-l">{(() => { if (it.checked !== undefined) return <Check aria-hidden="true" style={{ visibility: it.checked ? "visible" : "hidden" }} />; const I = it.icon ?? iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
               {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
             </button>
+            </Tip>
             {it.sub && openSub === i && (
               <div className={"ctx-subwrap" + (flip() ? " flip" : "")}>
                 <Menu items={it.sub} x={0} y={0} onClose={onClose} depth={1} onEscape={onEscape} onLeft={() => {

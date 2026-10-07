@@ -48,6 +48,9 @@ const loadStored = (): ExpandState => {
  * closed, never collapses); clicking the small chevron only toggles. Ctrl/Cmd or middle click opens in a new panel.
  * The trailing "..." button (and Shift+F10 / the Menu key on the focused row) opens the action menu.
  */
+/** Tooltip only when the row's label is cut off. */
+const truncated = (wrap: HTMLElement) => [...wrap.querySelectorAll<HTMLElement>(".st-label,.st-sub")].some((el) => el.scrollWidth > el.clientWidth);
+
 export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void }) {
   const [expanded, setExpanded] = useState<ExpandState>(loadStored);
   const [listings, setListings] = useState<Record<string, Listing>>({});
@@ -303,7 +306,7 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
     return (
       <li key={t.id} role="none" className={"st-item" + (t.kind === "section" ? " sec" : "")}>
         <div className={"st-row" + (tabId === t.id ? " cur" : "") + (t.offline ? " off" : "")}>
-          {t.tip ? <Tip label={t.tip}>{main}</Tip> : main}
+          {t.tip ? <Tip label={t.tip} besideOf=".side" when={truncated}>{main}</Tip> : main}
           {hasMenu && (
             <Tip label="Actions">
               <button type="button" className="st-more" tabIndex={-1} aria-label={`Actions for ${t.label}`} aria-hidden="true" disabled={!mark && t.kind !== "trash"} onClick={(e) => showMenu(t, e.currentTarget)}><Ellipsis /></button>

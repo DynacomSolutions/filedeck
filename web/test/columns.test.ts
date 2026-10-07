@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COLUMNS, clampWidth, isShown, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn, visibleColumns, widthOf } from "../src/columns.ts";
+import { COLUMNS, clampWidth, isFlex, isShown, totalWidth, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn, visibleColumns, widthOf } from "../src/columns.ts";
 
 test("widths are clamped to the column limits", () => {
   assert.equal(clampWidth("size", 1), 70);
@@ -48,4 +48,25 @@ test("reset restores defaults and resetWidth forgets one width", () => {
   assert.equal(widthOf(resetWidth(s, "size"), "size"), 100);
   assert.equal(widthOf(resetWidth(s, "size"), "mtime"), 250);
   assert.deepEqual(resetColumns(), { widths: {}, shown: {} });
+});
+
+test("Name fills the remaining width until the user resizes it", () => {
+  const s = resetColumns();
+  assert.equal(isFlex(s, "name"), true);
+  assert.equal(isFlex(s, "size"), false);
+  const sized = setWidth(s, "name", 500);
+  assert.equal(isFlex(sized, "name"), false);
+  assert.equal(widthOf(sized, "name"), 500);
+  assert.equal(isFlex(resetWidth(sized, "name"), "name"), true);
+  assert.equal(isFlex(parseColumns(serialiseColumns(sized)), "name"), false);
+});
+
+test("the minimum table width uses Name's default share and honours a stored width", () => {
+  assert.equal(totalWidth(resetColumns()), 240 + 100 + 160);
+  assert.equal(totalWidth(setWidth(resetColumns(), "name", 600)), 600 + 100 + 160);
+  assert.equal(widthOf(resetColumns(), "name"), 240);
+});
+
+test("header alignment: only Size is right aligned", () => {
+  assert.deepEqual(COLUMNS.filter((c) => c.align === "end").map((c) => c.id), ["size"]);
 });
