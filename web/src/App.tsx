@@ -1,5 +1,5 @@
 import { brand } from "./brand";
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
@@ -11,7 +11,8 @@ import type { FileRef } from "./EditorViews";
 // Monaco (several MB) lives in its own chunks, fetched on first use.
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
-import { SideTree, type How } from "./SidebarTree";
+import { useNodes } from "./data";
+import { SideTree, type How, type NodesState } from "./SidebarTree";
 import { ThemeMenu } from "./ThemeMenu";
 import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
@@ -209,7 +210,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot]);
 }
 
-function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
+function Sidebar({ nodesState, onOpen, onTrash, footer }: { nodesState: NodesState; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
   return (
     <aside className="side">
       <div className="side-brand">
@@ -222,7 +223,7 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
         </span>
       </div>
       <div className="side-scroll">
-        <SideTree nodes={nodes} onOpen={onOpen} onTrash={onTrash} />
+        <SideTree nodesState={nodesState} onOpen={onOpen} onTrash={onTrash} />
       </div>
       {footer}
     </aside>
@@ -230,7 +231,8 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
 }
 
 export function App() {
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const nodesState = useNodes();
+  const nodes = useMemo(() => nodesState.nodes ?? [], [nodesState.nodes]);
   const [tree, setTree] = useState<Tree | null>(initial?.tree ?? null);
   const [activeId, setActiveId] = useState(initial?.active ?? "");
   const [status, setStatus] = useState("");
@@ -303,12 +305,6 @@ export function App() {
     setPanelSel((p) => panelsAfterClick(p, Object.keys(selsRef.current), pid, kind, stillSelectedHere));
   }, []);
 
-  useEffect(() => {
-    const load = () => api.nodes().then((r) => setNodes(r.nodes)).catch(() => setNodes([]));
-    void load();
-    const t = setInterval(load, 15000);
-    return () => clearInterval(t);
-  }, []);
   useEffect(() => {
     if (tree || !nodes.length) return;
     const cluster = nodes.filter((n) => n.kind !== "source");
@@ -567,7 +563,7 @@ export function App() {
   return (
     <div className="app">
       <CompareCtx.Provider value={routedCompare}>
-      <Sidebar nodes={nodes} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => settingsOpen ? closeView(() => setSettingsOpen(false)) : setSettingsOpen(true)}><Ic.Settings /></button></Tip></div></>} />
+      <Sidebar nodesState={nodesState} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => settingsOpen ? closeView(() => setSettingsOpen(false)) : setSettingsOpen(true)}><Ic.Settings /></button></Tip></div></>} />
       <div className="app-col">
       <header className="site-header">
         <div className="site-header__inner">

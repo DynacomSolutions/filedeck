@@ -3,6 +3,7 @@ import { Dropdown, shouldCloseOnOutside } from "./Dropdown";
 import { createPortal } from "react-dom";
 import { File as FileIcon, Folder, History, Server, Star, TriangleAlert, type LucideIcon } from "lucide-react";
 import { api, parent, stat, type NodeInfo } from "./api";
+import { fetchNodes, NODES_KEY, swrCache } from "./data";
 import { addressBase, baseRemainder, fmtAddr, fuzzy, itemUri, parseAddress, resolveBasePath, splitTyped, type AddressBase, type Where } from "./address";
 import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
@@ -24,9 +25,11 @@ const MAX_ITEMS = 40;
 const crumbsOf = (p: string) => p.split("/").filter(Boolean);
 
 let nodeCache: { at: number; list: NodeInfo[] } | null = null;
+/** Goes through the same in-flight request (and SWR cache) as the sidebar, so the node list is fetched once. */
 const loadNodes = async (): Promise<NodeInfo[]> => {
   if (nodeCache && Date.now() - nodeCache.at < 20000) return nodeCache.list;
-  const list = await api.nodes().then((r) => r.nodes).catch(() => nodeCache?.list ?? []);
+  const cached = (swrCache.get(NODES_KEY) as { data?: NodeInfo[] } | undefined)?.data;
+  const list = await fetchNodes().catch(() => nodeCache?.list ?? cached ?? []);
   nodeCache = { at: Date.now(), list };
   return list;
 };

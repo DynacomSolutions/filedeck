@@ -47,3 +47,17 @@ export function SkeletonLines({ lines = 8 }: { lines?: number }) {
     </div>
   );
 }
+
+/** Placeholder sidebar tree rows (indented like real rows at `level`) shown while the node list loads for the first time. */
+export function SkeletonTreeRows({ level = 2, rows = 3 }: { level?: number; rows?: number }) {
+  return (
+    <>
+      {Array.from({ length: rows }, (_, i) => (
+        <li key={i} role="none" className="st-skel" aria-hidden="true" style={{ ["--lvl" as string]: level - 1 }}>
+          <span className="sk sk-ico" />
+          <span className="sk" style={{ width: `${NAME_W[(i * 3 + 1) % NAME_W.length]}%` }} />
+        </li>
+      ))}
+    </>
+  );
+}

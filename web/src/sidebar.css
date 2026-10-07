@@ -52,3 +52,5 @@
 
 /* empty states: plain muted indented text, no box */
 .st-note,.st-note.empty{border:0;background:transparent;box-shadow:none;border-radius:0;text-align:left;justify-content:flex-start;margin:0}
+.st-skel{display:flex;align-items:center;gap:.4rem;padding:.3rem .4rem .3rem calc(.2rem + var(--lvl,1) * 14px + 18px + .35rem);animation:sk-in .01s linear .12s backwards}
+.st-skel .sk-ico{margin-right:0;flex:none}
