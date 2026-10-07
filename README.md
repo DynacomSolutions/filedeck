@@ -48,6 +48,8 @@ helm install filedeck ./filedeck-0.2.8.tgz -n filedeck --create-namespace
 kubectl -n filedeck port-forward svc/filedeck 8080:80   # then open http://127.0.0.1:8080
 ```
 
+Each published release also moves the `stable` git tag to the released commit, so Argo CD deployments can track `targetRevision: stable`.
+
 The defaults give one agent (`local`, any node) that browses the node's filesystem. Values you will most likely set (all documented in `k8s/values.yaml`):
 
 | Value | Meaning |

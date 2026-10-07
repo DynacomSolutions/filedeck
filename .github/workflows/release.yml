@@ -117,3 +117,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release create "$FILEDECK_RELEASE_TAG" "dist/filedeck-${FILEDECK_RELEASE_VERSION}.tgz" --repo "$GITHUB_REPOSITORY" --title "Filedeck $FILEDECK_RELEASE_TAG" --generate-notes
         timeout-minutes: 5
+      - name: Move stable tag to this release
+        run: |
+          set -euo pipefail
+          git tag -f stable "$GITHUB_SHA"
+          git push -f origin refs/tags/stable
+        timeout-minutes: 5
