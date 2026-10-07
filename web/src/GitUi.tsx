@@ -153,7 +153,7 @@ function GitBranchDiff({ node, root, branch, headSha, tick }: { node: string; ro
   );
 }
 
-function GitBranchFileDiff({ node, root, data, file }: { node: string; root: string; data: GitDiff; file: GitFile }) {
+export function GitBranchFileDiff({ node, root, data, file }: { node: string; root: string; data: GitDiff; file: GitFile }) {
   const [state, setState] = useState<{ kind: "loading" } | { kind: "error"; message: string } | { kind: "message"; text: string } | { kind: "ready"; base: TextFile; head: TextFile }>({ kind: "loading" });
   const modelId = useId().replace(/:/g, "");
   useEffect(() => {
@@ -246,7 +246,7 @@ function GitWorktrees({ node, root, onOpen, hrefFor }: { node: string; root: str
 }
 
 /** Git details for the Properties panel: branch, upstream, last commit, stash, remotes, worktrees, change lists and the HEAD diff. */
-export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktreeHref, onApplicability }: { node: string; path: string; tick: number; onReveal: (p: string) => void; onOpenWorktree?: (path: string) => void; worktreeHref?: (path: string) => string; onApplicability?: (available: boolean | null) => void }) {
+export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktreeHref, onApplicability, extra }: { /** rendered under the branch comparison for a repository folder (the pull request diff) */ extra?: (root: string) => React.ReactNode; node: string; path: string; tick: number; onReveal: (p: string) => void; onOpenWorktree?: (path: string) => void; worktreeHref?: (path: string) => string; onApplicability?: (available: boolean | null) => void }) {
   const [info, setInfo] = useState<GitInfo | null>(null);
   const [err, setErr] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -299,6 +299,7 @@ export function GitSection({ node, path, tick, onReveal, onOpenWorktree, worktre
       </dl>
       {onOpenWorktree && worktreeHref && <GitWorktrees key={`${node}\0${r.root}`} node={node} root={r.root} onOpen={onOpenWorktree} hrefFor={worktreeHref} />}
       {r.kind !== "bare" && <GitBranchDiff key={`${node}\0${r.root}`} node={node} root={r.root} branch={s.branch ?? null} headSha={s.head ?? null} tick={tick} />}
+      {extra?.(r.root)}
       {f && (
         <>
           <div className="perm-row git-file-diff-head">

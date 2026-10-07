@@ -877,3 +877,29 @@ a.wt-row:hover{background:var(--surface-2)}
 .addr-pop li.dim > button[role="menuitem"] { color: var(--muted); cursor: default; }
 .shortcut-pref{display:flex;align-items:flex-start;gap:.65rem;line-height:1.5;margin:.75rem 0;padding:.75rem;border:1px solid var(--border);border-radius:var(--radius-btn)}
 .shortcut-pref-input{width:1.25rem!important;height:1.25rem!important;min-width:1.25rem!important;min-height:1.25rem!important;margin:.15rem .25rem 0 0!important;flex:none}
+
+/* ---- panel toolbar: drag handle, grouped menus, right-aligned side-panel group ---- */
+.fp-grip{flex:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:44px;margin-left:-.15rem;border-radius:var(--radius-sm,6px);color:var(--muted);cursor:grab;user-select:none;touch-action:none}
+.fp-grip:hover{background:var(--surface-3);color:var(--fg)}
+.fp-grip:active{cursor:grabbing}
+.fp-grip svg{width:16px;height:16px}
+.fp-close-ph{visibility:hidden;pointer-events:none}
+.fp-tools{justify-content:space-between}
+.fp-tools-main,.fp-tools-side{display:flex;align-items:center;gap:4px;min-width:0}
+.fp-tools-side{margin-left:auto;flex:none;padding-left:6px;border-left:0}
+.fp-tools-main>.tip,.fp-tools-side>.tip{flex:none;display:inline-flex}
+.fp-tools .fp-menubtn{width:auto;padding:0 .55rem;gap:.3rem}
+.fp-tools .fp-menubtn .fp-caret{width:12px;height:12px;opacity:.7}
+.fp-menubtn-l{font-size:.82rem;font-weight:600}
+/* dock slot: the panel being dragged dims, the drop zone shows where it lands */
+.dock-slot.dock-src{opacity:.45}
+.panel-ghost{pointer-events:none;border-radius:var(--radius-md,8px);overflow:hidden;opacity:.92;box-shadow:var(--shadow-2,0 6px 24px rgba(0,0,0,.35));background:var(--surface,#fff)}
+/* pull request diff inside the Git section */
+.git-pr-form{display:flex;flex-direction:column;gap:.35rem;margin:.3rem 0}
+.git-pr-mode{display:flex;gap:.25rem}
+.git-pr-mode button{box-shadow:none;border:0;background:transparent;color:var(--muted)}
+.git-pr-mode button.on{background:var(--accent-tint);color:var(--accent-text,var(--fg))}
+.git-pr-row{display:flex;gap:.25rem;align-items:center}
+.git-pr-row input{flex:1 1 auto;min-width:0}
+.git-pr-filter{width:100%;margin:.3rem 0}
+.git-pr .pr-add{color:var(--ok,#2a8a4a)}.git-pr .pr-del{color:var(--danger,#c0392b)}

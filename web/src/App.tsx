@@ -3,11 +3,12 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
-import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, isSyncPreviewReady, leaves, maxId, syncTree, tabOf, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Leaf, type PrState, type SyncState, type Tree, type TrashState } from "./urlState";
+import { DEFAULT_UI, decodeState, encodeState, isSyncPreviewReady, leaves, maxId, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Leaf, type SyncState, type Tree, type TrashState } from "./urlState";
+import { comparePairs, isMultiPanel, panelsAfterClick, pruneMissing, togglePanelSelection, type ClickKind } from "./panelSelection";
+import { panelGhost } from "./panelGhost";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
-const PrDiffView = lazy(() => import("./PrDiff").then((m) => ({ default: m.PrDiffView })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
 import { useBookmarks, removeBookmark, bookmarkLabel } from "./bookmarks";
@@ -23,7 +24,7 @@ import { Tip } from "./Tooltip";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
 
-/** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = merge as a tab). */
+/** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = swap places). */
 function DockSlot({ id, dragging, onDock, children }: { id: string; dragging: string | null; onDock: (src: string, target: string, zone: DropZone) => void; children: React.ReactNode }) {
   const [zone, setZone] = useState<DropZone | null>(null);
   const foreign = dragging !== null && dragging !== id;
@@ -33,7 +34,7 @@ function DockSlot({ id, dragging, onDock, children }: { id: string; dragging: st
   };
   return (
     <div
-      className="dock-slot"
+      className={"dock-slot" + (dragging === id ? " dock-src" : "")}
       data-dock-slot={id}
       onDragOver={(e) => {
         if (!foreign || !e.dataTransfer.types.includes(PANEL_MIME)) return;
@@ -79,14 +80,14 @@ interface HState {
   /** panel whose navigation created this entry ("init" for the first) */
   panel: string;
   /** every panel's node/path right after that navigation */
-  paths: Record<string, { node: string; path: string; ti?: number }>;
+  paths: Record<string, { node: string; path: string }>;
   /** this entry represents an app view opened through URL navigation */
   view?: boolean;
   route?: string;
   /** first history index for the current view, so Close can leave in-view folder entries */
   routeStart?: number;
 }
-const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { node: l.node, path: l.path, ti: l.ti ?? 0 }]));
+const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { node: l.node, path: l.path }]));
 
 /**
  * The URL always reflects the full app state. A folder change in a panel pushes a
@@ -94,9 +95,9 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, prDiff: PrState | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, help: boolean, sync: SyncState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void, restoreRoute: (state: NonNullable<ReturnType<typeof decodeState>>) => void, replaceOnClose: React.MutableRefObject<boolean>, closeAtRoot: React.MutableRefObject<{ root: number; fallback: () => void } | null>) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, help: boolean, sync: SyncState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void, restoreRoute: (state: NonNullable<ReturnType<typeof decodeState>>) => void, replaceOnClose: React.MutableRefObject<boolean>, closeAtRoot: React.MutableRefObject<{ root: number; fallback: () => void } | null>) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
-  const prev = useRef<Record<string, { node: string; path: string; ti?: number }> | null>(null);
+  const prev = useRef<Record<string, { node: string; path: string }> | null>(null);
   const fromPop = useRef(false);
   const prevRoute = useRef<string | null>(null);
   const latest = useRef({ active, url: "", paths: {} as HState["paths"] });
@@ -105,7 +106,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   useEffect(() => {
     if (!tree) return;
     const paths = pathsOf(tree);
-    const route = { ...(diff ? { diff } : {}), ...(prDiff ? { prDiff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(settings ? { settings: true } : {}), ...(help ? { help: true } : {}), ...(sync ? { sync } : {}) };
+    const route = { ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(settings ? { settings: true } : {}), ...(help ? { help: true } : {}), ...(sync ? { sync } : {}) };
     // Keep the history identity separate from its serialised contents. Choosing
     // another PR file or trash volume updates this view in place, while moving
     // between Settings, Trash, a diff, and a sync plan creates a real entry.
@@ -114,7 +115,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     latest.current.url = url;
     latest.current.paths = paths;
     let changed: string | undefined;
-    if (prev.current && !fromPop.current) changed = Object.keys(paths).find((k) => prev.current![k] && prev.current![k]!.ti === paths[k]!.ti && (prev.current![k]!.node !== paths[k]!.node || prev.current![k]!.path !== paths[k]!.path));
+    if (prev.current && !fromPop.current) changed = Object.keys(paths).find((k) => prev.current![k] && (prev.current![k]!.node !== paths[k]!.node || prev.current![k]!.path !== paths[k]!.path));
     prev.current = paths;
     if (fromPop.current) {
       fromPop.current = false;
@@ -149,7 +150,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     } catch {
       /* history unavailable (sandboxed frame) */
     }
-  }, [tree, active, diff, prDiff, folder, trash, panelSel, settings, help, sync]);
+  }, [tree, active, diff, folder, trash, panelSel, settings, help, sync]);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
@@ -199,7 +200,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
       setTree((t) => {
         if (!t) return t;
         const go = (n: Tree): Tree => (n.kind === "leaf" ? (n.id === focused ? { ...n, node: target.node, path: target.path, sel: undefined, closed: undefined, gitDiff: undefined } : n) : { ...n, children: n.children.map(go) });
-        return syncTree(go(t));
+        return go(t);
       });
       setStatus(`${back ? "Back" : "Forward"}: ${target.node}:${target.path}`);
     };
@@ -208,7 +209,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot]);
 }
 
-type How = "here" | "panel" | "tab";
+type How = "here" | "panel";
 
 function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
   const [mounts, setMounts] = useState<Record<string, Mount[]>>({});
@@ -246,7 +247,6 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
         items: [
           { label: "Open here", onSelect: () => onOpen(node, path, "here") },
           { label: "Open in new panel", hint: "Middle-click", onSelect: () => onOpen(node, path, "panel") },
-          { label: "Open in new tab", onSelect: () => onOpen(node, path, "tab") },
         ],
       });
     },
@@ -348,7 +348,6 @@ export function App() {
     return () => window.removeEventListener("keydown", h);
   }, []);
   const [diff, setDiff] = useState<{ left: FileRef; right: FileRef } | null>(initial?.diff ?? null);
-  const [prDiff, setPrDiff] = useState<PrState | null>(initial?.prDiff ?? null);
   const [diffMark, setDiffMark] = useState<FileRef | null>(null);
   const onDiff = (files: FileRef[]) => {
     if (files.length === 2) {
@@ -392,7 +391,13 @@ export function App() {
     setClearReq((c) => ({ except: pid, n: (c?.n ?? 0) + 1 }));
     setPanelSel((p) => (p.length ? [] : p));
   }, []);
-  const togglePanel = useCallback((pid: string) => setPanelSel((p) => (p.includes(pid) ? p.filter((x) => x !== pid) : [...p, pid])), []);
+  const togglePanel = useCallback((pid: string) => setPanelSel((p) => togglePanelSelection(p, pid)), []);
+  // Ctrl/Cmd+click (toggle) or Shift+click (range) on an item: the selected panels follow the click (see panelSelection.ts).
+  const selsRef = useRef(sels);
+  selsRef.current = sels;
+  const clickSelect = useCallback((pid: string, kind: ClickKind, stillSelectedHere: boolean) => {
+    setPanelSel((p) => panelsAfterClick(p, Object.keys(selsRef.current), pid, kind, stillSelectedHere));
+  }, []);
 
   useEffect(() => {
     const load = () => api.nodes().then((r) => setNodes(r.nodes)).catch(() => setNodes([]));
@@ -413,7 +418,7 @@ export function App() {
     if (!tree) return;
     const ids = new Set(leaves(tree).map((l) => l.id));
     setSels((m) => (Object.keys(m).every((k) => ids.has(k)) ? m : Object.fromEntries(Object.entries(m).filter(([k]) => ids.has(k)))));
-    setPanelSel((p) => (p.every((k) => ids.has(k)) ? p : p.filter((k) => ids.has(k))));
+    setPanelSel((p) => (p.every((k) => ids.has(k)) ? p : pruneMissing(p, ids)));
   }, [tree]);
 
   const restoreRoute = useCallback((state: NonNullable<ReturnType<typeof decodeState>>) => {
@@ -429,7 +434,6 @@ export function App() {
     })));
     setPanelSel(state.panelSel ?? []);
     setDiff(state.diff ? { left: state.diff.left, right: state.diff.right } : null);
-    setPrDiff(state.prDiff ?? null);
     setCompare(state.folder ?? null);
     setTrash(state.trash ?? null);
     setSettingsOpen(!!state.settings);
@@ -437,7 +441,7 @@ export function App() {
     suppressSyncCapture.current = !state.sync;
     setSyncRoute(state.sync ?? null);
   }, []);
-  useUrlHistory(tree, activeId, diff, prDiff, compare, trash, panelSel, settingsOpen, help, syncRoute, setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot);
+  useUrlHistory(tree, activeId, diff, compare, trash, panelSel, settingsOpen, help, syncRoute, setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot);
   const closeView = (fallback: () => void) => {
     const entry = history.state as HState | null;
     if (entry?.view) {
@@ -459,7 +463,7 @@ export function App() {
     fallback();
   };
 
-  const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => { const m = t ? mapTree(t, fn) : t; return m ? syncTree(m) : m; });
+  const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => (t ? mapTree(t, fn) : t));
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
   const leafOf = (lid: string) => (tree ? leaves(tree).find((l) => l.id === lid) : undefined);
   const cmp = useCompare({ state: compare, setState: setCompare, leafOf, patchLeaf, activeId, onFileDiff: (l, r) => setDiff({ left: l, right: r }), onStatus: setStatus });
@@ -516,30 +520,17 @@ export function App() {
     setPanelSel([]);
     setStatus(`Comparing ${la.node}:${la.path} with ${lb.node}:${lb.path}`);
   };
-  // "Compare panels" from the header or the selection bar: two picked panels, else the only two panels,
-  // else the focused panel against one chosen from a small menu.
+  // "Compare panels" lives in the global toolbar and appears once more than one panel is selected: two selected panels compare
+  // directly, more offer a menu of pairs.
   const [cmpMenu, setCmpMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  const panelCount = tree ? leaves(tree).length : 0;
-  const compareWhyNot = panelCount < 2 ? "Compare needs two panels: open a second one with a Split button in a panel header." : null;
-  /** Left-click: the picked pair, else the only two panels, else the focused panel against the next one. Right-click offers every other panel. */
-  const compareAnchor = () => {
-    const all = leaves(tree!);
-    const picked = panelSel.filter((p) => all.some((l) => l.id === p));
-    const anchor = picked.length === 1 ? picked[0]! : all.some((l) => l.id === activeId) ? activeId : all[0]!.id;
-    return { all, picked, anchor };
-  };
-  const compareClick = () => {
-    if (!tree || compareWhyNot) return;
-    const { all, picked, anchor } = compareAnchor();
-    if (picked.length === 2) return startCompare(picked[0]!, picked[1]!);
-    startCompare(anchor, all[(all.findIndex((l) => l.id === anchor) + 1) % all.length]!.id);
-  };
-  const compareChoose = (e: React.MouseEvent) => {
-    e.preventDefault();
-    if (!tree || compareWhyNot) return;
-    const { all, anchor } = compareAnchor();
-    const al = all.find((l) => l.id === anchor)!;
-    setCmpMenu({ x: e.clientX, y: e.clientY, items: all.filter((l) => l.id !== anchor).map((l): MenuItem => ({ label: `Compare ${al.node}:${al.path} with ${l.node}:${l.path}`, onSelect: () => startCompare(anchor, l.id) })) });
+  const multiPanel = isMultiPanel(panelSel);
+  const compareClick = (e: React.MouseEvent) => {
+    if (!tree) return;
+    const pairs = comparePairs(panelSel, leaves(tree).map((l) => l.id));
+    if (pairs.length === 1) return startCompare(pairs[0]![0], pairs[0]![1]);
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const label = (pid: string) => { const l = leafOf(pid); return l ? `${l.node}:${l.path}` : pid; };
+    setCmpMenu({ x: r.left, y: r.bottom + 2, items: pairs.map(([a, b]): MenuItem => ({ label: `Compare ${label(a)} with ${label(b)}`, onSelect: () => startCompare(a, b) })) });
   };
   const patchSizes = (sid: string, sizes: number[]) =>
     setTree((t) => {
@@ -554,20 +545,7 @@ export function App() {
     update((l) => (l.id === beside ? { kind: "split", id: id(), dir: "horizontal", children: [l, fresh] } : l));
     setActiveId(fresh.id);
   };
-  /** A new tab in the active panel. */
-  const openTab = (node: string, path: string) =>
-    update((l) => {
-      if (l.id !== activeId) return l;
-      const ti0 = l.ti ?? 0;
-      const tabs = (l.tabs ?? [tabOf(l)]).map((t, k) => (k === ti0 ? tabOf(l) : t));
-      if (tabs.length >= MAX_TABS) {
-        setStatus(`At most ${MAX_TABS} tabs per panel`);
-        return l;
-      }
-      const ti = l.ti ?? 0;
-      return { ...l, tabs: [...tabs.slice(0, ti + 1), { node, path }, ...tabs.slice(ti + 1)], ti: ti + 1, node, path, sel: undefined, sels: undefined, ns: undefined, closed: undefined, sr: undefined, q: undefined };
-    });
-  const openFromSide = (node: string, path: string, how: How) => (how === "panel" ? openPanel(node, path) : how === "tab" ? openTab(node, path) : openInActive(node, path));
+  const openFromSide = (node: string, path: string, how: How) => (how === "panel" ? openPanel(node, path) : openInActive(node, path));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
 
@@ -575,24 +553,35 @@ export function App() {
   const dock = (src: string, target: string, zone: DropZone): boolean => {
     const next = tree ? dockPanel(tree, src, target, zone, id) : null;
     if (!next) {
-      setStatus(zone === "center" ? `Cannot merge: at most ${MAX_TABS} tabs per panel` : "Cannot move the panel there");
+      setStatus("Cannot move the panel there");
       return false;
     }
-    setTree(syncTree(next));
+    setTree(next);
     setActiveId(src);
-    setStatus(zone === "center" ? "Merged panel as tabs" : `Moved panel to the ${zone}`);
+    setStatus(zone === "center" ? "Swapped the two panels" : `Moved panel to the ${zone}`);
     return true;
   };
+  const ghostCleanup = useRef<(() => void) | null>(null);
+  /** The panel's drag handle: the drag image is the whole panel (a scaled clone), not the handle. */
   const dragProps = (lid: string): React.HTMLAttributes<HTMLElement> => ({
     draggable: true,
     onDragStart: (e) => {
-      // inputs and the tab strip keep their own text/drag behaviour
-      if ((e.target as Element).closest("input,textarea,select,.fp-tab")) return;
       e.dataTransfer.setData(PANEL_MIME, lid);
       e.dataTransfer.effectAllowed = "move";
+      const el = document.querySelector<HTMLElement>(`[data-fp="${lid}"]`);
+      if (el) {
+        ghostCleanup.current?.();
+        const cleanup = panelGhost(el, e);
+        ghostCleanup.current = cleanup;
+        setTimeout(cleanup, 100);
+      }
       setDragId(lid);
     },
-    onDragEnd: () => setDragId(null),
+    onDragEnd: () => {
+      ghostCleanup.current?.();
+      ghostCleanup.current = null;
+      setDragId(null);
+    },
   });
   const onKeyDock = (lid: string) => (key: string): boolean => {
     const r = tree && keyDock(leaves(tree).map((l) => l.id), lid, key);
@@ -637,11 +626,11 @@ export function App() {
           onSelection={(refs) => reportSel(t.id, refs)}
           onClearOthers={() => clearOthers(t.id)}
           onTogglePanel={() => togglePanel(t.id)}
+          onClickSelect={(kind, still) => clickSelect(t.id, kind, still)}
           next={nx ? { node: nx.node, path: nx.path, id: nx.id } : null}
           onSwitch={(d) => switchPanel(t.id, d)}
           onHelp={() => setHelp(true)}
           onTrash={(node) => setTrash({ node, volume: "" })}
-          onPrDiff={(node, path) => setPrDiff({ node, path })}
           peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel, picked: panelSel.includes(l.id) }))}
           onStatus={setStatus}
         />
@@ -696,9 +685,11 @@ export function App() {
                 </button>
               </Tip>
             )}
-            <Tip label={compareWhyNot ?? "Compare two panels in place (the two picked panels, else the focused panel with the next one). Right-click to choose the other panel."}>
-              <button aria-label="Compare panels" disabled={!!compareWhyNot} onClick={compareClick} onContextMenu={compareChoose}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
-            </Tip>
+            {multiPanel && (
+              <Tip label={`Compare two of the ${panelSel.length} selected panels in place`}>
+                <button aria-label="Compare panels" aria-haspopup={panelSel.length > 2 ? "menu" : undefined} onClick={compareClick}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
+              </Tip>
+            )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
           </div>
         </div>
@@ -714,11 +705,6 @@ export function App() {
             </Suspense>
           )}
           {settingsOpen && <SettingsView onClose={() => closeView(() => setSettingsOpen(false))} />}
-          {prDiff && (
-            <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
-              <PrDiffView state={prDiff} onState={setPrDiff} onClose={() => closeView(() => setPrDiff(null))} onStatus={setStatus} />
-            </Suspense>
-          )}
           {diff && (
             <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
               <DiffViewer overlay left={diff.left} right={diff.right} onClose={() => closeView(() => setDiff(null))} onStatus={setStatus} />

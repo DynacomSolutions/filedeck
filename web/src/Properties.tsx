@@ -4,6 +4,7 @@ import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 import { GitSection } from "./GitUi";
+import { PrDiffSection } from "./PrDiff";
 
 type PropsTab = "details" | "git" | "permissions";
 const PROP_TABS: { id: PropsTab; label: string }[] = [
@@ -274,7 +275,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
       </section>
       {p && onReveal && onDiffHead && (
         <section id={`${tabBase}-git-panel`} className="props-tabpanel" role="tabpanel" aria-labelledby={`${tabBase}-git-tab`} tabIndex={0} hidden={activeTab !== "git"}>
-          <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onOpenWorktree={onOpenWorktree} worktreeHref={worktreeHref} onApplicability={setGitAvailable} />
+          <GitSection node={node} path={path} tick={gitTick} onReveal={onReveal} onOpenWorktree={onOpenWorktree} worktreeHref={worktreeHref} onApplicability={setGitAvailable} extra={(root) => <PrDiffSection key={`${node}\0${root}`} node={node} root={root} />} />
         </section>
       )}
       {p && p.type !== "other" && (

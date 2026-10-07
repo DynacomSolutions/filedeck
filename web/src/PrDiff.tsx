@@ -1,281 +1,167 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
-import type { editor as MonacoEditor } from "monaco-editor";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as Ic from "lucide-react";
-import { api, fmtSize, type GitBlob, type GitDiff, type GitFile, type GitRefs } from "./api";
-import { OPTS, useTheme } from "./EditorViews";
-import { languageForPath, modelUri } from "./monacoSetup";
+import { api, type GitDiff, type GitRefs } from "./api";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { GitBranchFileDiff } from "./GitUi";
+import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
-import type { PrState } from "./urlState";
-import { useDialogFocus } from "./dialogFocus";
 
-const STATUS: Record<GitFile["status"], { label: string; cls: string }> = {
-  A: { label: "Added", cls: "pr-a" },
-  M: { label: "Modified", cls: "pr-m" },
-  D: { label: "Deleted", cls: "pr-d" },
-  R: { label: "Renamed", cls: "pr-r" },
-};
-const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
-const dir = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "");
+/** What the section compares: a pull request number, or two refs. */
+export interface PrChoice {
+  pr?: number;
+  base?: string;
+  head?: string;
+}
 
-type Side = { state: "loading" } | { state: "none" } | { state: "err"; msg: string } | { state: "ok"; blob: GitBlob };
+/** Parse "123" or "#123" into a pull request number; null when it is not one. */
+export function parsePrNumber(text: string): number | null {
+  const n = Number(text.trim().replace(/^#/, ""));
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
 
-/** Pull request diff: the changed files of a PR (or of two refs) in a repository folder, each opened in the Monaco diff, read-only. */
-export function PrDiffView({ state, onState, onClose, onStatus }: { state: PrState; onState: (s: PrState) => void; onClose: () => void; onStatus: (m: string) => void }) {
-  const { node, path } = state;
-  const [mode, setMode] = useState<"pr" | "refs">(state.pr || !(state.base && state.head) ? "pr" : "refs");
-  const [prText, setPrText] = useState(state.pr ? String(state.pr) : "");
-  const [baseText, setBaseText] = useState(state.base ?? "");
-  const [headText, setHeadText] = useState(state.head ?? "");
+/** Most refs offered in a menu; a repository can hold thousands, the box accepts any ref by typing. */
+const MAX_REF_MENU = 200;
+const STATUS: Record<string, string> = { A: "Added", M: "Modified", D: "Deleted", R: "Renamed" };
+
+/**
+ * Pull request diff for a repository folder, embedded in the Git section of the properties pane: pick a pull request (or two refs),
+ * see the changed files and open each file's diff inline (the same read-only diff the branch comparison uses).
+ */
+export function PrDiffSection({ node, root }: { node: string; root: string }) {
+  const [mode, setMode] = useState<"pr" | "refs">("pr");
+  const [prText, setPrText] = useState("");
+  const [baseText, setBaseText] = useState("");
+  const [headText, setHeadText] = useState("");
   const [refs, setRefs] = useState<GitRefs | null>(null);
+  const [choice, setChoice] = useState<PrChoice | null>(null);
   const [data, setData] = useState<GitDiff | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState("");
-  const root = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const loadId = useRef(0);
 
-  useDialogFocus(root);
-  useEffect(() => root.current?.focus(), []);
   useEffect(() => {
     let live = true;
-    setRefs(null);
-    api.gitRefs(node, path).then((r) => live && setRefs(r), (e: Error) => live && setErr(e.message));
+    api.gitRefs(node, root).then((r) => live && setRefs(r), () => live && setRefs({ bare: false, refs: [], prs: [] }));
     return () => {
       live = false;
     };
-  }, [node, path]);
+  }, [node, root]);
 
-  const key = `${node}|${path}|${state.pr ?? ""}|${state.base ?? ""}|${state.head ?? ""}`;
   useEffect(() => {
-    if (!state.pr && !(state.base && state.head)) {
-      setData(null);
-      return;
-    }
-    let live = true;
+    if (!choice) return;
+    const id = ++loadId.current;
     setBusy(true);
     setErr("");
-    api.gitDiff(node, path, state.pr ? { pr: state.pr } : { base: state.base!, head: state.head! }).then(
+    api.gitDiff(node, root, choice.pr ? { pr: choice.pr } : { base: choice.base!, head: choice.head! }).then(
       (d) => {
-        if (!live) return;
+        if (loadId.current !== id) return;
         setData(d);
+        setOpen(new Set());
         setBusy(false);
-        onStatus(`${d.files.length} changed file(s)`);
       },
       (e: Error) => {
-        if (!live) return;
+        if (loadId.current !== id) return;
         setData(null);
         setErr(e.message);
         setBusy(false);
       },
     );
-    return () => {
-      live = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [node, root, choice]);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (mode === "pr") {
-      const n = Number(prText.trim().replace(/^#/, ""));
-      if (!Number.isInteger(n) || n < 1) return setErr("Enter a pull request number, for example 123");
-      onState({ node, path, pr: n, ...(state.inline ? { inline: true } : {}) });
+      const n = parsePrNumber(prText);
+      if (n === null) return setErr("Enter a pull request number, for example 123");
+      setChoice({ pr: n });
     } else {
       if (!baseText.trim() || !headText.trim()) return setErr("Enter both a base and a head ref");
-      onState({ node, path, base: baseText.trim(), head: headText.trim(), ...(state.inline ? { inline: true } : {}) });
+      setChoice({ base: baseText.trim(), head: headText.trim() });
     }
   };
-
-  const files = useMemo(() => (data?.files ?? []).filter((f) => !filter || f.path.toLowerCase().includes(filter.toLowerCase()) || f.oldPath?.toLowerCase().includes(filter.toLowerCase())), [data, filter]);
-  const current = data?.files.find((f) => f.path === state.file) ?? null;
-  const totals = useMemo(() => (data?.files ?? []).reduce((t, f) => ({ add: t.add + (f.add ?? 0), del: t.del + (f.del ?? 0) }), { add: 0, del: 0 }), [data]);
-  const pick = (f: GitFile) => onState({ ...state, file: f.path });
-  const step = (d: number) => {
-    if (!files.length) return;
-    const i = files.findIndex((f) => f.path === state.file);
-    onState({ ...state, file: files[Math.min(files.length - 1, Math.max(0, i < 0 ? 0 : i + d))]!.path });
+  const pickFrom = (e: React.MouseEvent, items: MenuItem[]) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenu({ x: r.left, y: r.bottom + 4, items });
+  };
+  const refItems = (set: (v: string) => void): MenuItem[] => {
+    const all = refs?.refs ?? [];
+    if (!all.length) return [{ label: "No refs in this repository", disabled: true }];
+    return all.slice(0, MAX_REF_MENU).map((r): MenuItem => ({ label: r, icon: Ic.GitBranch, onSelect: () => set(r) }));
+  };
+  const prItems = (): MenuItem[] => {
+    const all = refs?.prs ?? [];
+    if (!all.length) return [{ label: "No pull request refs fetched", disabled: true }];
+    return all.slice(0, MAX_REF_MENU).map((p): MenuItem => ({ label: `#${p.n} ${p.subject}`.slice(0, 80), icon: Ic.GitPullRequest, onSelect: () => { setPrText(String(p.n)); setChoice({ pr: p.n }); } }));
   };
 
+  const files = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return (data?.files ?? []).filter((f) => !q || f.path.toLowerCase().includes(q) || f.oldPath?.toLowerCase().includes(q));
+  }, [data, filter]);
+  const totals = useMemo(() => (data?.files ?? []).reduce((t, f) => ({ add: t.add + (f.add ?? 0), del: t.del + (f.del ?? 0) }), { add: 0, del: 0 }), [data]);
+
   return (
-    <div
-      ref={root}
-      className="ed over prd"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Pull request diff"
-      tabIndex={-1}
-      onKeyDown={(e) => {
-        if ((e.target as HTMLElement).closest("input,select,textarea,.monaco-editor")) return;
-        if (e.key === "Escape") onClose();
-        else if (e.key === "ArrowDown" || e.key === "j") step(1);
-        else if (e.key === "ArrowUp" || e.key === "k") step(-1);
-        else return;
-        e.preventDefault();
-        e.stopPropagation();
-      }}
-    >
-      <div className="ed-head" role="group" aria-label="Toolbar">
-        <b>Pull request diff</b>
-        <Tip label={`${node}:${path}`}><span className="muted ed-pair">{node}:{path}</span></Tip>
-        <span className="ed-spacer" />
-        <Tip label="Close" shortcut="Esc"><button type="button" onClick={onClose}><Ic.X /> Close</button></Tip>
-      </div>
-      <form className="tr-bar prd-bar" onSubmit={submit} aria-label="What to compare">
-        <div className="tr-tabs prd-mode" role="tablist" aria-label="Compare by">
-          <button type="button" role="tab" aria-selected={mode === "pr"} className={mode === "pr" ? "on" : ""} onClick={() => setMode("pr")}><Ic.GitPullRequest /> Pull request</button>
-          <button type="button" role="tab" aria-selected={mode === "refs"} className={mode === "refs" ? "on" : ""} onClick={() => setMode("refs")}><Ic.GitBranch /> Two refs</button>
+    <section className="git-branch-diff git-pr" data-testid="git-pr-diff" aria-label="Pull request diff">
+      <h4>Pull request diff</h4>
+      <form className="git-pr-form" onSubmit={submit} aria-label="What to compare">
+        <div className="git-pr-mode" role="group" aria-label="Compare by">
+          <button type="button" aria-pressed={mode === "pr"} className={mode === "pr" ? "on" : ""} onClick={() => setMode("pr")}><Ic.GitPullRequest /> Pull request</button>
+          <button type="button" aria-pressed={mode === "refs"} className={mode === "refs" ? "on" : ""} onClick={() => setMode("refs")}><Ic.GitBranch /> Two refs</button>
         </div>
         {mode === "pr" ? (
-          <>
-            <input type="text" inputMode="numeric" list="prd-prs" aria-label="Pull request number" placeholder="PR number, e.g. 123" value={prText} onChange={(e) => setPrText(e.target.value)} />
-            <datalist id="prd-prs">{refs?.prs.map((p) => <option key={p.n} value={String(p.n)}>{p.subject}</option>)}</datalist>
-          </>
+          <div className="git-pr-row">
+            <input type="text" inputMode="numeric" aria-label="Pull request number" placeholder="PR number, e.g. 123" value={prText} onChange={(e) => setPrText(e.target.value)} />
+            <Tip label="Choose from the pull request refs in this repository"><button type="button" aria-haspopup="menu" aria-label="Choose a pull request" onClick={(e) => pickFrom(e, prItems())}><Ic.ChevronDown /></button></Tip>
+          </div>
         ) : (
           <>
-            <input type="text" list="prd-refs" aria-label="Base ref" placeholder="Base, e.g. main" value={baseText} onChange={(e) => setBaseText(e.target.value)} />
-            <Ic.ArrowRight className="muted" aria-hidden />
-            <input type="text" list="prd-refs" aria-label="Head ref" placeholder="Head, e.g. feature" value={headText} onChange={(e) => setHeadText(e.target.value)} />
-            <datalist id="prd-refs">{refs?.refs.map((r) => <option key={r} value={r} />)}</datalist>
+            <div className="git-pr-row">
+              <input type="text" aria-label="Base ref" placeholder="Base, e.g. main" value={baseText} onChange={(e) => setBaseText(e.target.value)} />
+              <Tip label="Choose the base ref"><button type="button" aria-haspopup="menu" aria-label="Choose the base ref" onClick={(e) => pickFrom(e, refItems(setBaseText))}><Ic.ChevronDown /></button></Tip>
+            </div>
+            <div className="git-pr-row">
+              <input type="text" aria-label="Head ref" placeholder="Head, e.g. feature" value={headText} onChange={(e) => setHeadText(e.target.value)} />
+              <Tip label="Choose the head ref"><button type="button" aria-haspopup="menu" aria-label="Choose the head ref" onClick={(e) => pickFrom(e, refItems(setHeadText))}><Ic.ChevronDown /></button></Tip>
+            </div>
           </>
         )}
         <button type="submit" disabled={busy}><Ic.GitCompareArrows /> Show changes</button>
-        {data && (
-          <span className="muted tr-count">
-            {data.files.length} file(s), <span className="pr-add">+{totals.add}</span> <span className="pr-del">-{totals.del}</span>
-            {data.truncated ? " (list truncated)" : ""}
-          </span>
-        )}
       </form>
-      {data && (
-        <div className="prd-info muted">
-          <Tip label={`base ${data.base.sha}`}><span>{data.pr ? `#${data.pr}: ` : ""}{data.head.ref} @ {data.head.sha.slice(0, 8)} against {data.base.ref} (merge-base {data.mergeBase.slice(0, 8)})</span></Tip>
-          {data.note && <span> - {data.note}</span>}
-        </div>
-      )}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
-      <div className="prd-body">
-        <div className="prd-files" role="region" aria-label="Changed files">
-          {data && data.files.length > 8 && <input type="search" aria-label="Filter changed files" placeholder="Filter files" value={filter} onChange={(e) => setFilter(e.target.value)} />}
-          {busy && <div className="pad muted">Loading...</div>}
-          {!busy && !data && !err && <div className="pad muted">Enter a pull request number or two refs, then show the changes.{refs && refs.prs.length === 0 && refs.refs.length === 0 ? " This repository has no refs." : ""}</div>}
-          {data && data.files.length === 0 && <div className="pad muted">{data.note ?? "No changes."}</div>}
-          <ul>
-            {files.map((f) => (
-              <li key={f.path}>
-                <button type="button" className={"prd-file" + (f.path === state.file ? " on" : "")} aria-current={f.path === state.file ? "true" : undefined} onClick={() => pick(f)}>
-                  <Tip label={STATUS[f.status].label}><span className={"prd-st " + STATUS[f.status].cls} role="img" aria-label={STATUS[f.status].label}>{f.status}</span></Tip>
-                  <Tip label={f.oldPath ? `${f.oldPath} -> ${f.path}` : f.path} fill>
-                    <span className="prd-name"><span className="muted">{dir(f.path)}</span>{base(f.path)}</span>
-                  </Tip>
-                  {f.binary ? <span className="pill">binary</span> : <span className="prd-n"><span className="pr-add">+{f.add}</span> <span className="pr-del">-{f.del}</span></span>}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div className="prd-view">
-          {data && current ? <FileDiff key={current.path} state={state} data={data} file={current} onInline={(inline) => onState({ ...state, ...(inline ? { inline: true } : { inline: undefined }) })} /> : data && data.files.length > 0 ? <div className="pad muted">Select a file to see its diff.</div> : null}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FileDiff({ state, data, file, onInline }: { state: PrState; data: GitDiff; file: GitFile; onInline: (inline: boolean) => void }) {
-  const { node, path } = state;
-  const [a, setA] = useState<Side>({ state: "loading" });
-  const [b, setB] = useState<Side>({ state: "loading" });
-  const ed = useRef<MonacoEditor.IStandaloneDiffEditor | null>(null);
-  const theme = useTheme();
-  const oldPath = file.oldPath ?? file.path;
-
-  const load = useCallback(() => {
-    let live = true;
-    const get = (sha: string, p: string, set: (s: Side) => void) =>
-      api.gitBlob(node, path, sha, p).then(
-        (blob) => live && set({ state: "ok", blob }),
-        (e: Error) => live && set({ state: "err", msg: e.message }),
-      );
-    setA({ state: "loading" });
-    setB({ state: "loading" });
-    if (file.status === "A") setA({ state: "none" });
-    else void get(data.base.sha, oldPath, setA);
-    if (file.status === "D") setB({ state: "none" });
-    else void get(data.head.sha, file.path, setB);
-    return () => {
-      live = false;
-    };
-  }, [node, path, data.base.sha, data.head.sha, file.path, file.status, oldPath]);
-  useEffect(load, [load]);
-
-  // Same disposal order as the file diff: detach the models from the widget before they are disposed.
-  useEffect(
-    () => () => {
-      const e = ed.current;
-      ed.current = null;
-      const models = e ? [e.getOriginalEditor().getModel(), e.getModifiedEditor().getModel()] : [];
-      try {
-        e?.setModel(null);
-      } catch {
-        /* widget already disposed */
-      }
-      setTimeout(() => models.forEach((m) => m?.dispose()), 0);
-    },
-    [],
-  );
-
-  const sides = [a, b];
-  const failed = sides.find((s): s is { state: "err"; msg: string } => s.state === "err");
-  const loading = sides.some((s) => s.state === "loading");
-  const blobs = sides.map((s) => (s.state === "ok" ? s.blob : null));
-  const isBinary = file.binary || blobs.some((x) => x?.binary);
-  const tooLarge = blobs.find((x) => x?.tooLarge);
-  const sizeOf = (s: Side) => (s.state === "ok" ? fmtSize(s.blob.size) : "none");
-
-  return (
-    <div className="prd-diff">
-      <div className="ed-head prd-fhead" role="group" aria-label="File toolbar">
-        <Tip label={file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}>
-          <b className="ed-pair">{file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}</b>
-        </Tip>
-        <span className="pill">{STATUS[file.status].label.toLowerCase()}</span>
-        <span className="ed-spacer" />
-        <Tip label="Toggle side-by-side / inline">
-          <button type="button" onClick={() => onInline(!state.inline)} aria-pressed={!!state.inline}>
-            {state.inline ? <Ic.Columns2 /> : <Ic.Rows2 />} {state.inline ? "Side by side" : "Inline"}
-          </button>
-        </Tip>
-      </div>
-      <div className="ed-body">
-        {failed ? (
-          <div className="pad muted" role="alert">{failed.msg}</div>
-        ) : loading ? (
-          <div className="pad muted">Loading...</div>
-        ) : isBinary ? (
-          <div className="pad muted">Binary file: {sizeOf(a)} before, {sizeOf(b)} after. No text diff.</div>
-        ) : tooLarge ? (
-          <div className="pad muted">This file is too large to diff here ({sizeOf(a)} before, {sizeOf(b)} after).</div>
-        ) : file.status !== "A" && file.status !== "D" && a.state === "ok" && b.state === "ok" && a.blob.content === b.blob.content ? (
-          <div className="pad muted">{file.status === "R" ? "Renamed without content changes." : "No text changes (mode or line endings only)."}</div>
-        ) : (
-          <DiffEditor
-            originalModelPath={modelUri(node, `${path}/@${data.base.sha.slice(0, 12)}/${oldPath}`)}
-            modifiedModelPath={modelUri(node, `${path}/@${data.head.sha.slice(0, 12)}/${file.path}`)}
-            keepCurrentOriginalModel
-            keepCurrentModifiedModel
-            original={a.state === "ok" ? a.blob.content : ""}
-            modified={b.state === "ok" ? b.blob.content : ""}
-            originalLanguage={languageForPath(file.path)}
-            modifiedLanguage={languageForPath(file.path)}
-            theme={theme}
-            options={{ ...OPTS, renderSideBySide: !state.inline, originalEditable: false, readOnly: true, useInlineViewWhenSpaceIsLimited: false }}
-            onMount={(e) => {
-              ed.current = e;
-            }}
-            loading={<div className="pad muted">Loading editor...</div>}
-          />
-        )}
-      </div>
-    </div>
+      {busy && <SkeletonLines lines={3} />}
+      {data && !busy && (
+        <>
+          <div className="muted perm-hint" role="status">
+            {data.pr ? `#${data.pr}: ` : ""}{data.head.ref} @ {data.head.sha.slice(0, 8)} against {data.base.ref} (merge base {data.mergeBase.slice(0, 8)}) · {data.files.length} file(s), <span className="pr-add">+{totals.add}</span> <span className="pr-del">-{totals.del}</span>
+            {data.truncated ? " (list truncated)" : ""}{data.note ? ` · ${data.note}` : ""}
+          </div>
+          {data.files.length > 8 && <input type="search" className="git-pr-filter" aria-label="Filter changed files" placeholder="Filter files" value={filter} onChange={(e) => setFilter(e.target.value)} />}
+          {data.files.length === 0 ? <div className="muted perm-hint">No changes.</div> : (
+            <ul className="git-branch-files" aria-label="Files changed in the pull request">
+              {files.map((f) => {
+                const isOpen = open.has(f.path);
+                return (
+                  <li key={f.path} className={isOpen ? "open" : ""} data-path={f.path}>
+                    <div className="git-branch-file-head">
+                      <button type="button" className="git-item" aria-expanded={isOpen} onClick={() => setOpen((cur) => { const n = new Set(cur); if (isOpen) n.delete(f.path); else n.add(f.path); return n; })}>
+                        {isOpen ? <Ic.ChevronDown aria-hidden="true" /> : <Ic.ChevronRight aria-hidden="true" />}
+                        <span>{f.oldPath ? `${f.oldPath} → ${f.path}` : f.path}</span>
+                        <span className="git-branch-file-status" role="img" aria-label={STATUS[f.status] ?? f.status}>{f.status}</span>
+                      </button>
+                      <span className="muted git-branch-file-count">{f.binary ? "binary" : `+${f.add ?? 0} −${f.del ?? 0}`}</span>
+                    </div>
+                    {isOpen && <GitBranchFileDiff node={node} root={root} data={data} file={f} />}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </>
+      )}
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+    </section>
   );
 }

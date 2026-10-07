@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
+import { Check, Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
   | "sep"
@@ -13,6 +13,10 @@ export type MenuItem =
       hint?: string;
       /** one nested level */
       sub?: MenuItem[];
+      /** icon for the row; by default one is chosen from the label */
+      icon?: LucideIcon;
+      /** a toggle that is currently on: shows a tick where the shortcut hint would be */
+      checked?: boolean;
     };
 
 type Item = Exclude<MenuItem, "sep">;
@@ -112,8 +116,8 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
               }}
               onClick={() => run(it)}
             >
-              <span className="ctx-l">{(() => { const I = iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
-              {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
+              <span className="ctx-l">{(() => { const I = it.icon ?? iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
+              {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : it.checked ? <span className="hint"><Check aria-label="On" /></span> : null}
             </button>
             {it.sub && openSub === i && (
               <div className={"ctx-subwrap" + (flip() ? " flip" : "")}>

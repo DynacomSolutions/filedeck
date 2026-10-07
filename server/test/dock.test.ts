@@ -27,24 +27,18 @@ test("dock to each edge", () => {
   assert.equal(shape(dockPanel(three, "p3", "p1", "bottom", mk)!), "h(v(p1,p3),p2)");
 });
 
-test("dock to centre merges into tabs and removes the source", () => {
+test("dock to centre swaps the two panels (no tabs)", () => {
   const t = split("p9", "horizontal", L("p1"), L("p2"));
   const m = dockPanel(t, "p1", "p2", "center", mk)!;
-  assert.equal(m.kind, "leaf");
-  const l = m as Leaf;
-  assert.equal(l.id, "p2");
-  assert.deepEqual(l.tabs, [{ node: "n", path: "/p2" }, { node: "n", path: "/p1" }]);
-  assert.equal(l.ti, 1);
-  assert.equal(l.path, "/p1");
-  assert.equal(leaves(m).length, 1);
+  assert.equal(shape(m), "h(p2,p1)");
+  assert.equal(leaves(m).length, 2);
+  assert.ok(leaves(m).every((l) => !("tabs" in l)));
 });
 
-test("refuses self-drop, and merges past the tab limit", () => {
+test("refuses self-drop", () => {
   const t = split("p9", "horizontal", L("p1"), L("p2"));
   assert.equal(dockPanel(t, "p1", "p1", "left", mk), null);
-  const many = (k: number) => Array.from({ length: k }, (_, i) => ({ node: "n", path: "/t" + i }));
-  const big = split("p9", "horizontal", { ...L("p1"), tabs: many(10) }, { ...L("p2"), tabs: many(10) });
-  assert.equal(dockPanel(big, "p1", "p2", "center", mk), null);
+  assert.equal(dockPanel(t, "p1", "p1", "center", mk), null);
 });
 
 test("stale split sizes are dropped when children change", () => {

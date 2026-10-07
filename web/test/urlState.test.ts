@@ -36,3 +36,32 @@ test("legacy worktrees side-panel URLs restore Properties on the Git tab", () =>
     assert.equal(restored.tree.pt, "git");
   }
 });
+
+test("legacy tabbed panels collapse to their active tab", () => {
+  const legacy = `?s=${encodeURIComponent(JSON.stringify({
+    t: { i: "p1", n: "node-b", p: "/second", s: "/second/a.txt", tb: [["node-a", "/first"], ["node-b", "/second", { s: "/x" }], ["node-a", "/third"]], ti: 1 },
+    a: "p1",
+  }))}`;
+  const restored = decodeState(legacy);
+  assert.equal(restored?.tree.kind, "leaf");
+  if (restored?.tree.kind === "leaf") {
+    assert.equal(restored.tree.node, "node-b");
+    assert.equal(restored.tree.path, "/second");
+    assert.equal(restored.tree.sel, "/second/a.txt");
+    assert.equal("tabs" in restored.tree, false);
+    assert.equal("ti" in restored.tree, false);
+  }
+  assert.doesNotMatch(encodeState(restored!), /tb|"ti"/);
+});
+
+test("legacy pull request diff routes are ignored", () => {
+  const legacy = `?s=${encodeURIComponent(JSON.stringify({ t: { i: "p1", n: "node-a", p: "/work" }, a: "p1", pd: { n: "node-a", p: "/work", r: 12 } }))}`;
+  const restored = decodeState(legacy);
+  assert.ok(restored);
+  assert.equal("prDiff" in restored, false);
+});
+
+test("panel selection round-trips", () => {
+  const state: AppState = { tree: { kind: "split", id: "p3", dir: "horizontal", children: [{ kind: "leaf", id: "p1", node: "a", path: "/" }, { kind: "leaf", id: "p2", node: "a", path: "/" }] }, active: "p1", panelSel: ["p1", "p2"] };
+  assert.deepEqual(decodeState(encodeState(state))?.panelSel, ["p1", "p2"]);
+});
