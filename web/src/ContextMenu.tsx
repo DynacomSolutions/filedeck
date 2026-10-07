@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Tip } from "./Tooltip";
+import { isOpenerPress, lastPress, resolveOpener, swallowNextClick, trackPresses } from "./menuOpener";
 import { Check, Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
@@ -142,11 +143,24 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
 }
 
 /** Context menu at viewport coordinates; closes on outside click, Escape, scroll or resize. */
-export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
-  const opener = useRef<HTMLElement | null>(document.activeElement as HTMLElement | null);
+export function ContextMenu({ x, y, items, onClose, opener: openerProp }: { x: number; y: number; items: MenuItem[]; onClose: () => void; /** the trigger element, when the caller knows it (otherwise inferred from the last press / focus) */ opener?: HTMLElement | null }) {
+  trackPresses();
+  const opener = useRef<Element | null>(null);
+  if (opener.current === null) opener.current = openerProp ?? resolveOpener(lastPress(), document.activeElement, Date.now());
+  useEffect(() => {
+    const el = opener.current;
+    if (!el || !el.hasAttribute("aria-expanded")) return;
+    const before = el.getAttribute("aria-expanded");
+    el.setAttribute("aria-expanded", "true");
+    return () => { el.setAttribute("aria-expanded", before ?? "false"); };
+  }, []);
   useEffect(() => {
     const down = (e: Event) => {
-      if (!(e.target as Element | null)?.closest?.(".ctx")) onClose();
+      const t = e.target as Element | null;
+      if (t?.closest?.(".ctx")) return;
+      const el = opener.current;
+      if (el && isOpenerPress(t, el) && (e as MouseEvent).button === 0) swallowNextClick(el);
+      onClose();
     };
     window.addEventListener("mousedown", down, true);
     window.addEventListener("blur", onClose);
@@ -159,5 +173,5 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
       window.removeEventListener("scroll", onClose, true);
     };
   }, [onClose]);
-  return <Menu items={items} x={x} y={y} onClose={onClose} onEscape={() => requestAnimationFrame(() => opener.current?.focus({ preventScroll: true }))} />;
+  return <Menu items={items} x={x} y={y} onClose={onClose} onEscape={() => requestAnimationFrame(() => (opener.current as HTMLElement | null)?.focus({ preventScroll: true }))} />;
 }
