@@ -4,6 +4,7 @@ import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 import { GitSection } from "./GitUi";
+import { Dropdown } from "./Dropdown";
 
 type PropsTab = "details" | "git" | "permissions";
 const PROP_TABS: { id: PropsTab; label: string }[] = [
@@ -371,11 +372,11 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
           <div className="muted perm-hint">Owner and group changes apply when you press Enter or choose Apply. Names come from the host; a number is taken as an id.</div>
           {isDir && (
             <div className="perm-row">
-              <select aria-label="Apply to" value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
-                <option value="all">Files and folders</option>
-                <option value="files">Files only</option>
-                <option value="dirs">Folders only</option>
-              </select>
+              <Dropdown label="Apply to" value={scope} onChange={(v) => setScope(v as typeof scope)} options={[
+                { value: "all", label: "Files and folders" },
+                { value: "files", label: "Files only" },
+                { value: "dirs", label: "Folders only" },
+              ]} />
               <Tip label="Set the mode, owner and group shown above on the selected files or folders inside this folder">
                 <button type="button" disabled={busy !== null} onClick={() => {
                   const target = scope === "files" ? "files only" : scope === "dirs" ? "folders only" : "files and folders";

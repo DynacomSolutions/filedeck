@@ -1,4 +1,5 @@
 import { PANEL_MIME } from "./dock";
+import { Dropdown } from "./Dropdown";
 import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
@@ -237,7 +238,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   // A narrow panel (phone, deep split) always stacks the preview underneath; the saved dock is kept for wide panels.
   const dock: Dock = narrow ? "bottom" : (leaf.pv?.dock ?? "right");
   const pvSize = leaf.pv?.size ?? 40;
-  const dockSelectRef = useRef<HTMLSelectElement>(null);
+  const dockSelectRef = useRef<HTMLButtonElement>(null);
   const restoreDockSelectFocus = useRef(false);
   useLayoutEffect(() => {
     if (!restoreDockSelectFocus.current) return;
@@ -702,14 +703,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         </span>
       )}
       <span className="pv-dock">
-        <label className="sr-only" htmlFor={`pv-dock-${leaf.id}`}>Side panel position</label>
-        <select ref={dockSelectRef} id={`pv-dock-${leaf.id}`} aria-label="Side panel position" value={dock} onChange={(e) => {
-          const next = e.target.value as Dock;
-          if (document.activeElement === e.currentTarget && next !== (leaf.pv?.dock ?? "right")) restoreDockSelectFocus.current = true;
-          setDock(next);
-        }}>
-          {DOCKS.map((d) => <option key={d.dock} value={d.dock}>{d.label.replace("Dock side panel ", "")}</option>)}
-        </select>
+        <Dropdown
+          id={`pv-dock-${leaf.id}`}
+          label="Side panel position"
+          iconOnly
+          className="pv-dockbtn"
+          triggerRef={dockSelectRef}
+          value={dock}
+          options={DOCKS.map((d) => ({ value: d.dock, label: d.label.replace("Dock side panel ", "").replace(/^./, (c) => c.toUpperCase()), Icon: d.icon }))}
+          onChange={(v) => { restoreDockSelectFocus.current = true; setDock(v as Dock); }}
+        />
         {!gitDiff && (
           <Tip label={propsOpen && !editing ? "Close properties" : "Close preview"}>
             <button

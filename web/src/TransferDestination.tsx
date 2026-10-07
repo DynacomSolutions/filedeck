@@ -4,6 +4,7 @@ import { Modal } from "./ArchiveDialog";
 import type { SelRef } from "./Selection";
 import { validTransferDestination } from "./transferPaths";
 import * as Ic from "lucide-react";
+import { Dropdown } from "./Dropdown";
 
 export type TransferKind = "copy" | "move";
 
@@ -55,9 +56,7 @@ export function TransferDestination({ kind, items, initialNode, initialPath, onC
     <Modal title={label} onClose={onClose} wide>
       <label>
         Destination node
-        <select autoFocus aria-label="Destination node" value={node} onChange={(e) => { setNode(e.target.value); setDir("/"); }}>
-          {nodes.map((n) => <option key={n.name} value={n.name} disabled={!n.online}>{n.name}{n.online ? "" : " (offline)"}</option>)}
-        </select>
+        <Dropdown autoFocus label="Destination node" value={node} onChange={(v) => { setNode(v); setDir("/"); }} options={nodes.map((n) => ({ value: n.name, label: n.name + (n.online ? "" : " (offline)"), disabled: !n.online }))} />
       </label>
       <div className="transfer-destination-path">
         <span>Destination folder: <strong>{node}:{dir}</strong></span>

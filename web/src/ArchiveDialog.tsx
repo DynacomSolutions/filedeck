@@ -4,6 +4,7 @@ import { Tip } from "./Tooltip";
 import "./archive.css";
 import * as Ic from "lucide-react";
 import { useDialogFocus } from "./dialogFocus";
+import { Dropdown } from "./Dropdown";
 
 export function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
   const form = useRef<HTMLFormElement>(null);
@@ -119,19 +120,11 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
         </label>
         <label>
           Format
-          <select value={format} onChange={(e) => setFormat(e.target.value as ArchiveFormat)}>
-            {FORMATS.map((f) => (
-              <option key={f.id} value={f.id}>{f.label}</option>
-            ))}
-          </select>
+          <Dropdown label="Format" value={format} onChange={(v) => setFormat(v as ArchiveFormat)} options={FORMATS.map((f) => ({ value: f.id, label: f.label }))} />
         </label>
         <label>
           Compression level
-          <select value={level} onChange={(e) => setLevel(Number(e.target.value))}>
-            {LEVELS.map((l) => (
-              <option key={l.v} value={l.v} disabled={l.v === 0 && !FORMATS.find((f) => f.id === format)!.encrypt}>{l.label}</option>
-            ))}
-          </select>
+          <Dropdown label="Compression level" value={String(level)} onChange={(v) => setLevel(Number(v))} options={LEVELS.map((l) => ({ value: String(l.v), label: l.label, disabled: l.v === 0 && !FORMATS.find((f) => f.id === format)!.encrypt }))} />
         </label>
         <label>
           Password
@@ -148,11 +141,7 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
           Split into volumes
           <span className="ad-row">
             <input type="number" min={0} step="any" inputMode="decimal" value={vol} disabled={!spec.split} placeholder={spec.split ? "No splitting" : "Zip and 7z only"} onChange={(e) => setVol(e.target.value)} />
-            <select value={unit} disabled={!spec.split} onChange={(e) => setUnit(Number(e.target.value))} aria-label="Volume size unit">
-              {UNITS.map((u) => (
-                <option key={u.u} value={u.n}>{u.u}</option>
-              ))}
-            </select>
+            <Dropdown label="Volume size unit" value={String(unit)} disabled={!spec.split} onChange={(v) => setUnit(Number(v))} options={UNITS.map((u) => ({ value: String(u.n), label: u.u }))} />
           </span>
         </label>
         <label className="ad-excl">
@@ -276,11 +265,11 @@ export function ExtractDialog({
       </label>
       <label>
         If a file already exists
-        <select value={policy} onChange={(e) => setPolicy(e.target.value as OverwritePolicy)}>
-          <option value="rename">Keep both (rename the new one)</option>
-          <option value="overwrite">Replace the existing file</option>
-          <option value="skip">Skip, keep the existing file</option>
-        </select>
+        <Dropdown label="If a file already exists" value={policy} onChange={(v) => setPolicy(v as OverwritePolicy)} options={[
+          { value: "rename", label: "Keep both (rename the new one)" },
+          { value: "overwrite", label: "Replace the existing file" },
+          { value: "skip", label: "Skip, keep the existing file" },
+        ]} />
       </label>
       <PasswordInput value={pw} onChange={setPw} state={lock} />
       <div className="ad-saved">
