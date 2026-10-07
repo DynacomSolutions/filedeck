@@ -5,7 +5,8 @@
   --accent-text: #a7c7ff;
   --a11y-action-fill: #143b80;
   --a11y-action-fill-hover: #0e2b60;
-  --a11y-control-boundary: #96969f;
+  /* themed dark boundary: never a light grey outline on dark surfaces */
+  --a11y-control-boundary: #4a4a54;
 }
 
 :root[data-theme="light"] {
@@ -17,12 +18,16 @@
   --a11y-control-boundary: #626262;
 }
 
+/* Buttons carry no outline: tinted fill, shadow and the focus ring identify them (single button system). */
 button,
 a.btn-a,
+[role="tab"] {
+  border: 0;
+}
+
 input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
 select,
-textarea,
-[role="tab"] {
+textarea {
   border: 1px solid var(--a11y-control-boundary);
 }
 
@@ -39,7 +44,6 @@ textarea::placeholder {
 }
 
 button.primary {
-  border-color: var(--a11y-action-fill);
   background: var(--a11y-action-fill);
   color: #fff;
 }
@@ -50,19 +54,18 @@ button.primary:hover:not(:disabled) {
 
 .modal-actions button[type="submit"],
 .modal-actions button.danger[type="submit"] {
-  border-color: var(--a11y-action-fill);
+  box-shadow: var(--shadow-1);
   background: var(--a11y-action-fill);
   color: #fff;
 }
 
 .modal-actions button[type="submit"]:hover:not(:disabled),
 .modal-actions button.danger[type="submit"]:hover:not(:disabled) {
-  border-color: var(--a11y-action-fill-hover);
   background: var(--a11y-action-fill-hover);
 }
 
 .addr-in {
-  border: 1px solid var(--a11y-control-boundary) !important;
+  border: 0 !important;
 }
 
 .skip-navigation {

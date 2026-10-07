@@ -855,7 +855,7 @@ a.wt-row:hover{background:var(--surface-2)}
   box-shadow:none !important;
 }
 .fp-up, .fp-actions button, .fp-tools button, .pv-head .pv-acts > *, .pv-head .pv-acts button,
-.pv-head a.btn-a, .pv-head .pv-extra .pv-dockbtn, .ctx button, .crumbs button,
+.pv-head a.btn-a, .pv-head .pv-extra .pv-dockbtn, .ctx button,
 .side-scroll button, .fp-tab-x, .fp-tab-new, .addr-recent, .addr-warn, .mark-rm,
 .selbar-actions button, .theme-seg button, .cmp-seg button {
   min-width: 44px !important;
@@ -877,3 +877,43 @@ a.wt-row:hover{background:var(--surface-2)}
 .addr-pop li.dim > button[role="menuitem"] { color: var(--muted); cursor: default; }
 .shortcut-pref{display:flex;align-items:flex-start;gap:.65rem;line-height:1.5;margin:.75rem 0;padding:.75rem;border:1px solid var(--border);border-radius:var(--radius-btn)}
 .shortcut-pref-input{width:1.25rem!important;height:1.25rem!important;min-width:1.25rem!important;min-height:1.25rem!important;margin:.15rem .25rem 0 0!important;flex:none}
+
+/* ==== a-chrome: one button system, borderless in every theme (light, dark, high contrast) ====
+   Buttons never draw a UA or token border: hover/active use a tinted fill, raised/primary buttons a soft shadow,
+   and the focus-visible ring (accessibility block above) stays. Native-looking light outlines are removed here. */
+button,button:hover,button:active,.btn--secondary,.btn--danger,.btn--ghost,.user-menu__trigger,.theme-option,.theme-option[aria-checked="true"],.pill--on,.pill--off,.pill--alert{border:0;border-color:transparent}
+.btn--secondary,.btn--danger,.user-menu__trigger{background:var(--surface-2);box-shadow:var(--shadow-1)}
+.btn--secondary:hover:not(:disabled),.user-menu__trigger:hover:not(:disabled){background:var(--surface-3)}
+.btn--danger{background:var(--accent-tint)}.btn--danger:hover:not(:disabled){background:var(--accent-line)}
+.theme-option[aria-checked="true"]{background:var(--surface-3);box-shadow:var(--shadow-1)}
+@media (forced-colors:active){button{border:1px solid ButtonText}}
+
+/* ==== a-chrome: custom dropdown (Dropdown.tsx) replaces every native select ==== */
+.dd-btn{justify-content:space-between;gap:.4rem;min-width:44px;max-width:100%;padding:0 .6rem;background:var(--surface-2);box-shadow:var(--shadow-1);font-size:.8rem;font-weight:600}
+.dd-btn .dd-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.dd-btn svg,.dd-item svg{flex:none;width:16px;height:16px}
+.dd-btn .dd-caret{width:14px;height:14px;color:var(--muted);transition:transform var(--fast) var(--ease)}
+.dd-btn.open{background:var(--surface-3)}.dd-btn.open .dd-caret{transform:rotate(180deg)}
+.modal .dd-btn,.fd-opts .dd-btn,.perm-row .dd-btn,.presentation-field .dd-btn{width:100%}
+.dd-btn.dd-icon{padding:0;background:transparent;box-shadow:none;color:var(--muted)}
+.dd-btn.dd-icon:hover:not(:disabled),.dd-btn.dd-icon.open{background:var(--surface-3);color:var(--fg)}
+.dd-menu{position:fixed;z-index:200;display:flex;flex-direction:column;gap:2px;padding:.3rem;overflow-y:auto;background:var(--surface);border-radius:var(--radius-sm);box-shadow:var(--shadow);font-size:.82rem}
+.dd-item{justify-content:flex-start;gap:.5rem;width:100%;padding:.3rem .6rem;border-radius:var(--radius-sm);background:transparent;box-shadow:none;text-align:left;white-space:nowrap;font-weight:500}
+.dd-item .dd-text{flex:1}
+.dd-item.cur,.dd-item:hover:not(:disabled){background:var(--surface-3)}
+.dd-item[aria-checked="true"]{font-weight:700;color:var(--accent-text)}
+.dd-item .dd-check{margin-left:auto;color:var(--accent-text)}
+
+/* ==== a-chrome: address bar reads as a text path; segments are compact links ==== */
+.crumbs{gap:0}
+.crumbs button{min-height:0;padding:0 .2rem;border-radius:4px;background:transparent;box-shadow:none;font-weight:500;color:var(--fg)}
+.crumbs button:hover:not(:disabled){background:var(--accent-tint);color:var(--fg)}
+.crumbs .crumb-sep{width:14px;padding:0;margin:0 -1px}
+.crumbs .crumb-sep svg.lucide{width:11px;height:11px;opacity:.7}
+.crumbs .crumb-sep.open{background:var(--accent-tint)}
+.crumbs button.here{font-weight:700}
+/* compact targets (24px, WCAG 2.5.8 AA) so the path reads as text; the empty bar area and recents button stay 44px */
+.crumbs button{min-height:24px!important;height:24px!important;min-width:0!important}
+.crumbs .crumb-sep{min-width:16px!important;width:16px}
+.addr-base.dd-btn{min-height:28px!important;height:28px;flex:0 1 auto;max-width:12rem;margin:0 4px 0 2px;padding:0 .4rem;background:transparent;box-shadow:none;color:var(--muted);font-weight:600}
+.addr-base.dd-btn:hover:not(:disabled),.addr-base.dd-btn.open{background:var(--accent-tint);color:var(--fg)}
