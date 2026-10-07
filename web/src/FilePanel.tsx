@@ -237,9 +237,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  // A narrow panel (phone, deep split) always stacks the preview underneath; the saved dock is kept for wide panels.
-  const dock: Dock = narrow ? "bottom" : (leaf.pv?.dock ?? "right");
-  const pvSize = leaf.pv?.size ?? 40;
+  // A narrow panel (phone, deep split) stacks the side pane: top and bottom are honoured, left falls back to top and right to bottom.
+  // The saved dock is kept for wide panels.
+  const savedDock: Dock = leaf.pv?.dock ?? "right";
+  const dock: Dock = narrow ? (savedDock === "left" ? "top" : savedDock === "right" ? "bottom" : savedDock) : savedDock;
+  // A stacked pane gets at least 58% of the panel height (the list keeps 30%), so its body is not a sliver.
+  const pvSize = narrow ? Math.max(leaf.pv?.size ?? 40, 58) : (leaf.pv?.size ?? 40);
   const dockSelectRef = useRef<HTMLButtonElement>(null);
   const restoreDockSelectFocus = useRef(false);
   useLayoutEffect(() => {
@@ -707,7 +710,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           className="pv-dockbtn"
           triggerRef={dockSelectRef}
           value={dock}
-          options={DOCKS.map((d) => ({ value: d.dock, label: d.label.replace("Dock side panel ", "").replace(/^./, (c) => c.toUpperCase()), Icon: d.icon }))}
+          options={DOCKS.map((d) => ({ value: d.dock, label: d.label.replace("Dock side panel ", "").replace(/^./, (c) => c.toUpperCase()) + (narrow && d.dock === "left" ? " (stacks on top)" : narrow && d.dock === "right" ? " (stacks below)" : ""), Icon: d.icon }))}
           onChange={(v) => { restoreDockSelectFocus.current = true; setDock(v as Dock); }}
         />
         {!gitDiff && (
@@ -732,7 +735,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     propsKey !== null ? (
       <div className="pv">
         <div className="pv-head">
-          <Tip label={propsKey}><b>{propsKey === "/" ? `${node}:/` : base(propsKey)}</b></Tip>
+          <Tip label={propsKey}><b className="pv-title">{propsKey === "/" ? `${node}:/` : base(propsKey)}</b></Tip>
           <span className="muted">{propsFor || folderProps ? "Folder" : "Active"}</span>
           {paneExtra}
         </div>
@@ -1344,13 +1347,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       )}
       {err && <div id={createErrorId} className="fp-err" role="alert">{err}</div>}
       {pane ? (
-        <Group key={dock} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
-          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
-          {first && <Panel id="pv" minSize="15%">{pane}</Panel>}
+        <Group key={dock + (narrow ? "-n" : "")} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
+          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock: savedDock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
+          {first && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
           {first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
-          <Panel id="list" minSize="20%">{listing}</Panel>
+          <Panel id="list" minSize={narrow ? "30%" : "20%"}>{listing}</Panel>
           {!first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
-          {!first && <Panel id="pv" minSize="15%">{pane}</Panel>}
+          {!first && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
         </Group>
       ) : (
         listing
