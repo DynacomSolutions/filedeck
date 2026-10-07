@@ -7,6 +7,7 @@ import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploa
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
 import { Preview } from "./Preview";
+import { isPreviewableEntry, sidePaneToggles, sidePaneView } from "./sidePane";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { ConfirmDialog, LinkDialog, NameDialog } from "./Dialogs";
 import { PropertiesMulti, PropertiesPanel } from "./Properties";
@@ -262,10 +263,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     setPropsFor(forPath ?? null);
     setTab("props");
   };
-  const showPreview = () => {
-    setClosedFor(null);
-    setTab(undefined);
-  };
+  /** Preview mode of the side pane. With nothing previewable selected it opens on the empty state (leaf.pe) instead of staying shut. */
+  const showPreview = () =>
+    onPatch({ closed: undefined, pe: isPreviewableEntry(only) ? undefined : true, pv: { dock: leaf.pv?.dock ?? "right", size: pvSize } });
 
   useEffect(() => {
     let live = true;
@@ -406,7 +406,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const activeEntry = cursor ? entries.find((e) => e.path === cursor) : undefined;
   /** the item the side panel shows: the active one, unless several items are selected here */
   const only = sel.size <= 1 ? activeEntry : undefined;
-  const previewEntry = only && only.type !== "dir" && !only.linkDir && !only.broken && closedFor !== only.path ? only : null; // a broken link has nothing to preview
+  const previewEntry = isPreviewableEntry(only) && closedFor !== only!.path ? only! : null; // a broken link has nothing to preview
+  const emptyOpen = !!leaf.pe;
   useEffect(() => {
     if (closedFor && closedFor !== cursor) setClosedFor(null);
   }, [cursor, closedFor]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -598,7 +599,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         : one
           ? ([{ label: "Show in new panel", onSelect: () => onOpenPanel(node, parent(one.path), one.path) }] as MenuItem[])
           : []),
-      { label: "Preview", disabled: !one || isDirEntry(one), onSelect: () => setClosedFor(null) },
+      { label: "Preview", disabled: !one || isDirEntry(one), onSelect: showPreview },
       { label: "Edit", disabled: !one || !canEdit(one), onSelect: () => one && setEditing({ node, path: one.path }) },
       ...diffItems(picked, extra),
       "sep",
@@ -682,20 +683,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const closeSide = () => {
     if (gitDiff) return setGitDiff(null);
     if (editing) return setEditing(null);
-    if (propsOpen) {
-      // Closing Properties must not reveal the preview of a selected file: mark that one closed too.
-      setClosedFor(only && !isDirEntry(only) ? only.path : null);
-      setPropsFor(null);
-      return setTab(undefined);
-    }
-    if (only) setClosedFor(only.path);
+    // Closing marks the selected file's preview closed (Properties must not reveal it either) and drops the empty-state flag.
+    const closed = only && !isDirEntry(only) ? only.path : undefined;
+    setPropsFor(null);
+    onPatch({ closed, pe: undefined, ...(propsOpen ? { pv: { dock: leaf.pv?.dock ?? "right", size: pvSize } } : {}) });
   };
   const paneExtra = (
     <span className="pv-extra">
       {!editing && !gitDiff && (
         <span className="pv-dock pv-switch" role="group" aria-label="Side panel content">
-          <Tip label={previewEntry || (only && !isDirEntry(only) && !only.broken) ? "Preview the selected file" : "Select one file to preview it"}>
-            <button type="button" className={"pv-dockbtn" + (!propsOpen ? " on" : "")} aria-pressed={!propsOpen} disabled={propsOpen && !(only && !isDirEntry(only) && !only.broken)} aria-label="Preview" onClick={showPreview}><Ic.Eye /></button>
+          <Tip label={isPreviewableEntry(only) ? "Preview the selected file" : "Select one file to preview it"}>
+            <button type="button" className={"pv-dockbtn" + (!propsOpen ? " on" : "")} aria-pressed={!propsOpen} aria-label="Preview" onClick={showPreview}><Ic.Eye /></button>
           </Tip>
           <Tip label="Properties of the active item" shortcut="Alt+Enter">
             <button type="button" className={"pv-dockbtn" + (propsOpen ? " on" : "")} aria-pressed={propsOpen} aria-label="Properties" onClick={() => openProps()}><Ic.Info /></button>
@@ -765,6 +763,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     propsPane
   ) : previewEntry ? (
     <Preview node={node} entry={previewEntry} onEdit={(n, p) => setEditing({ node: n, path: p })} extra={paneExtra} />
+  ) : emptyOpen ? (
+    <div className="pv">
+      <div className="pv-head">
+        <b className="pv-title">Preview</b>
+        {paneExtra}
+      </div>
+      <div className="pv-body pp-empty"><p className="muted pad">Select a file to preview</p></div>
+    </div>
   ) : null;
   // ---- bookmarks ----
   const marks = useBookmarks();
@@ -1093,7 +1099,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (key === "End") return moveTo(visible.length - 1), true;
       if (key === "PageDown") return moveTo(idx + 10), true;
       if (key === "PageUp") return moveTo(idx - 10), true;
-      if (key === "Enter" && e.altKey && !mod) return (propsOpen && !editing && propsPane ? closeSide() : openProps()), true;
+      if (key === "Enter" && e.altKey && !mod) return (sideView === "props" ? closeSide() : openProps()), true;
       if (key === "Enter" && !mod) {
         const en = visible[idx];
         return !!en && (open(en), true);
@@ -1221,8 +1227,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     onPatch({ pt: "git" });
     openProps();
   };
-  const sidePanelShown = !editing && !gitDiff && !!propsPane;
-  const canPreview = !!only && !isDirEntry(only) && !only.broken;
+  const sideView = sidePaneView({ editing: !!editing, gitDiff: !!gitDiff, propsOpen, previewable: !!previewEntry, emptyOpen });
+  const toggles = sidePaneToggles(sideView);
+  const canPreview = isPreviewableEntry(only);
 
   const first = dock === "left" || dock === "top";
 
@@ -1290,15 +1297,15 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           <Tip label="More actions"><button type="button" aria-label="More actions" aria-haspopup="menu" onClick={(e) => menuAt(e, moreItems())}><Ellipsis /></button></Tip>
         </div>
         <div className="fp-tools-side" role="group" aria-label="Side panel">
-          <Tip label={canPreview ? "Preview the selected file" : "Select one file to preview it"}>
-            <button type="button" aria-label="Preview in the side panel" aria-pressed={sidePanelShown && !propsOpen} className={sidePanelShown && !propsOpen ? "marked" : ""} disabled={!canPreview && !(sidePanelShown && !propsOpen)} onClick={() => (sidePanelShown && !propsOpen ? closeSide() : showPreview())}><Eye /></button>
+          <Tip label={canPreview ? "Preview the selected file" : "Preview panel (select a file to fill it)"}>
+            <button type="button" aria-label="Preview in the side panel" aria-pressed={toggles.preview} className={toggles.preview ? "marked" : ""} onClick={() => (toggles.preview ? closeSide() : showPreview())}><Eye /></button>
           </Tip>
           <Tip label="Properties in the side panel" shortcut="Alt+Enter">
-            <button type="button" aria-label="Properties in the side panel" aria-pressed={propsOpen && sidePanelShown} className={propsOpen && sidePanelShown ? "marked" : ""} onClick={() => (propsOpen && sidePanelShown ? closeSide() : openProps())}><Ic.Info /></button>
+            <button type="button" aria-label="Properties in the side panel" aria-pressed={toggles.props} className={toggles.props ? "marked" : ""} onClick={() => (toggles.props ? closeSide() : openProps())}><Ic.Info /></button>
           </Tip>
           {git?.repo && (
             <Tip label="Git details in the side panel: branch, changes, worktrees, pull request diff">
-              <button type="button" aria-label="Git details in the side panel" aria-pressed={propsOpen && sidePanelShown && leaf.pt === "git"} className={propsOpen && sidePanelShown && leaf.pt === "git" ? "marked" : ""} onClick={() => (propsOpen && sidePanelShown && leaf.pt === "git" ? closeSide() : showGit())}><GitBranch /></button>
+              <button type="button" aria-label="Git details in the side panel" aria-pressed={toggles.props && leaf.pt === "git"} className={toggles.props && leaf.pt === "git" ? "marked" : ""} onClick={() => (toggles.props && leaf.pt === "git" ? closeSide() : showGit())}><GitBranch /></button>
             </Tip>
           )}
         </div>
