@@ -5,7 +5,7 @@ import * as monaco from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { ConflictError, api, fmtSize, type TextFile } from "./api";
 import { gitApi } from "./git";
-import { modelUri, monacoTheme } from "./monacoSetup";
+import { languageForPath, modelUri, monacoTheme } from "./monacoSetup";
 import { ArrowLeftRight } from "lucide-react";
 import * as Ic from "lucide-react";
 
@@ -16,16 +16,6 @@ export interface FileRef {
   rev?: string;
 }
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
-
-function languageForPath(path: string): string | undefined {
-  const name = base(path).toLowerCase();
-  const languages = monaco.languages.getLanguages();
-  const named = languages.find((language) => language.filenames?.some((filename) => filename.toLowerCase() === name));
-  if (named) return named.id;
-  return languages
-    .filter((language) => language.extensions?.some((extension) => name.endsWith(extension.toLowerCase())))
-    .sort((a, b) => Math.max(...(b.extensions ?? []).map((extension) => extension.length)) - Math.max(...(a.extensions ?? []).map((extension) => extension.length)))[0]?.id;
-}
 
 export const OPTS: MonacoEditor.IStandaloneEditorConstructionOptions = {
   automaticLayout: true,
@@ -156,6 +146,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
         {loaded && (
           <Editor
             path={modelUri(node, path)}
+            language={languageForPath(path)}
             value={loaded.content}
             theme={theme}
             options={OPTS}

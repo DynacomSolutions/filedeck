@@ -8,6 +8,8 @@ import { LEGACY_OFFICE, OFFICE_EXT } from "./officeParse";
 import { HexView } from "./HexView";
 import { MarkdownView } from "./MarkdownView";
 import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
+import { isTextName } from "./highlight";
+import { PlainOrCode } from "./PlainOrCode";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 
@@ -15,9 +17,7 @@ const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
 const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
 const VID = VIDEO_EXT;
 const AUD = AUDIO_EXT;
-const TXT = ["txt", "log", "json", "yaml", "yml", "ts", "tsx", "js", "css", "html", "xml", "csv", "tsv", "sh", "py", "toml", "ini", "conf", "go", "rs"];
-
-function Text({ url }: { url: string }) {
+function Text({ url, path }: { url: string; path: string }) {
   const [t, setT] = useState<string | null>(null);
   useEffect(() => {
     setT(null);
@@ -29,7 +29,8 @@ function Text({ url }: { url: string }) {
     return () => ctl.abort();
   }, [url]);
   if (t === null) return <SkeletonLines lines={10} />;
-  return <pre className="pv-text">{t}</pre>;
+  if (t.length === 0) return <pre className="pv-text" />;
+  return <PlainOrCode id={url} name={path.slice(path.lastIndexOf("/") + 1)} text={t} />;
 }
 
 /** The image fades in once decoded; until then a placeholder block holds the space. */
@@ -50,7 +51,7 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
   const [hex, setHex] = useState(false);
   useEffect(() => setHex(false), [node, entry.path]);
   const isOffice = OFFICE_EXT.includes(e) && (e !== "csv" && e !== "tsv" || entry.size <= 8 * 1024 * 1024);
-  const known = isArchive(entry.name) || IMG.includes(e) || VID.includes(e) || AUD.includes(e) || e === "pdf" || isOffice || LEGACY_OFFICE.includes(e) || e === "md" || e === "markdown" || TXT.includes(e) || entry.size === 0;
+  const known = isArchive(entry.name) || IMG.includes(e) || VID.includes(e) || AUD.includes(e) || e === "pdf" || isOffice || LEGACY_OFFICE.includes(e) || e === "md" || e === "markdown" || isTextName(entry.name) || entry.size === 0;
   return (
     <div className="pv">
       <div className="pv-head">
@@ -88,8 +89,8 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
           <div className="pv-empty muted">Legacy .{e} files cannot be rendered here. Use Hex to inspect, or Download.</div>
         ) : e === "md" || e === "markdown" ? (
           <MarkdownView node={node} path={entry.path} />
-        ) : TXT.includes(e) || entry.size === 0 ? (
-          <Text url={url} />
+        ) : isTextName(entry.name) || entry.size === 0 ? (
+          <Text url={url} path={entry.path} />
         ) : (
           <div className="pv-empty muted">No preview for this type</div>
         )}
