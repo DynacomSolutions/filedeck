@@ -18,6 +18,7 @@ import { wheelX } from "./scrollx";
 import { AddressBar } from "./AddressBar";
 import { CompareBar, CompareBody, ROW_H, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
+import { ColGroup, FillCell, HeaderRow, cellCount, dataCell, tableStyle, useColumns } from "./Columns";
 import { gitApi, type GitListing } from "./git";
 import { GitBadge, GitPill } from "./GitUi";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
@@ -668,14 +669,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
 
   const crumbs = path.split("/").filter(Boolean);
-  const th = (key: SortKey, label: string) => (
-    <th aria-sort={sort.key === key ? (sort.asc ? "ascending" : "descending") : "none"} className={"sortable " + key}>
-      <button type="button" onClick={() => setSort((s) => ({ key, asc: s.key === key ? !s.asc : true }))}>
-        {label}
-        {sort.key === key ? (sort.asc ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />) : null}
-      </button>
-    </th>
-  );
+  const columns = useColumns();
+  const sortBy = (key: SortKey) => setSort((s) => ({ key, asc: s.key === key ? !s.asc : true }));
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
 
@@ -993,9 +988,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             {remaining > 0 && <div ref={(el) => void (moreEl.current = el)} className="more-tiles" aria-hidden="true" />}
           </div>
         ) : (
-        <table className="ft" aria-busy={loading}>
+        <table className="ft cols" aria-busy={loading} style={tableStyle(columns.state, gitCol)}>
+          <ColGroup state={columns.state} cols={columns.cols} git={gitCol} />
           <thead>
-            <tr>{th("name", "Name")}{gitCol && <th className="git-th">Git</th>}{th("size", "Size")}{th("mtime", "Modified")}</tr>
+            <HeaderRow s={columns.state} cols={columns.cols} git={gitCol} sort={sort} onSort={sortBy} onMenu={(x, y, items) => setMenu({ x, y, items })} />
           </thead>
           <tbody>
             {showUp && (
@@ -1007,14 +1003,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                   </div>
                 </td>
                 {gitCol && <td />}
-                <td className="num" />
-                <td className="num" />
+                {columns.cols.slice(1).map((c) => <td key={c.id} className={c.align ? "num" : "txt"} />)}
+                <FillCell />
               </tr>
             )}
             {loading && <SkeletonRows />}
             {createInput && (
               <tr className="creating">
-                <td className="name" colSpan={gitCol ? 4 : 3}>
+                <td className="name" colSpan={cellCount(columns.cols, gitCol)}>
                   <div className="cr">{creating === "file" ? <Ic.FilePlus className="ico" /> : <Ic.FolderPlus className="ico" />}{createInput}</div>
                 </td>
               </tr>
@@ -1037,14 +1033,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                     )}
                   </td>
                   {gitCol && <td className="git-td">{gitMark(en, isDir)}</td>}
-                  <td className="num">{isDir ? "" : fmtSize(en.size)}</td>
-                  <td className="num">{fmtDate(en.mtime)}</td>
+                  {columns.cols.slice(1).map((c) => dataCell(c, en, isDir))}
+                  <FillCell />
                 </tr>
               );
             })}
             {remaining > 0 && (
               <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * estimatedFileRowHeight }}>
-                <td colSpan={gitCol ? 4 : 3} />
+                <td colSpan={cellCount(columns.cols, gitCol)} />
               </tr>
             )}
           </tbody>
