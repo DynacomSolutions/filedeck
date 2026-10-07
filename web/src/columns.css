@@ -9,7 +9,7 @@
 .ft td.num{overflow:hidden;text-overflow:ellipsis}
 .ft td.mono{font-family:var(--mono);font-size:.78rem}
 
-/* the sort control: looks like header text; hover tints the text and underlines, never a raised button */
+/* the sort control: looks like header text; hover tints the text, never a raised button */
 .ft th.colh button.colh-btn{
   display:flex;align-items:center;gap:.35rem;width:100%;min-width:0;min-height:44px;
   padding:.65rem .9rem;margin:0;border:0;border-radius:0;background:transparent;box-shadow:none;
@@ -17,7 +17,7 @@
   transition:color var(--fast) var(--ease);
 }
 .ft th.colh.end button.colh-btn{justify-content:flex-end}
-.ft th.colh button.colh-btn:hover:not(:disabled){background:transparent;color:var(--fg);text-decoration:underline;text-underline-offset:.3em;text-decoration-thickness:1px}
+.ft th.colh button.colh-btn:hover:not(:disabled){background:transparent;color:var(--accent-text)}
 .ft th.colh button.colh-btn:active{background:transparent}
 .ft th.colh[aria-sort="ascending"] button.colh-btn,.ft th.colh[aria-sort="descending"] button.colh-btn{color:var(--fg)}
 .ft th.colh button.colh-btn:focus-visible{outline:2px solid var(--accent)!important;outline-offset:-3px!important;box-shadow:none!important}

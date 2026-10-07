@@ -25,15 +25,11 @@ a.btn-a,
   border: 0;
 }
 
-input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
-select,
-textarea {
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),textarea{
   border: 1px solid var(--a11y-control-boundary);
 }
 
-input,
-select,
-textarea {
+input,textarea{
   color: var(--fg);
 }
 

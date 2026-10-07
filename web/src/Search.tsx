@@ -187,7 +187,7 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
                 <td className="num">{fmtDate(h.m)}</td>
                 <td className="sr-act">
                   <Tip label="Show in its folder" shortcut="Enter"><button type="button" onClick={(e) => (e.stopPropagation(), onReveal(h.p))}><Ic.FolderSearch /> Reveal</button></Tip>
-                  <Tip label={h.t === "dir" ? "Open folder" : "Open file in a new tab (Shift+Enter)"}><button type="button" onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}><Ic.ExternalLink /> Open</button></Tip>
+                  <Tip label={h.t === "dir" ? "Open folder" : "Open file (Shift+Enter)"}><button type="button" onClick={(e) => (e.stopPropagation(), onOpen(h.p, h))}><Ic.ExternalLink /> Open</button></Tip>
                 </td>
               </tr>
             ))}

@@ -7,7 +7,7 @@ import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
 import { EXPANDED_KEY, flatten, isOpen, navigate, parseExpanded, rovingId, setOpen, type ExpandState, type TreeNodeBase } from "./sidebarTree";
 
-export type How = "here" | "panel" | "tab";
+export type How = "here" | "panel";
 
 type Listing = { status: "loading" } | { status: "ready"; dirs: Entry[]; truncated: boolean } | { status: "error"; error: string };
 type MountsState = { status: "loading" } | { status: "ready"; mounts: Mount[] } | { status: "error"; error: string };
@@ -227,7 +227,6 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
     const items: MenuItem[] = [
       { label: "Open here", disabled: t.offline, onSelect: () => onOpen(b.node, b.path, "here") },
       { label: "Open in new panel", hint: "Middle-click", disabled: t.offline, onSelect: () => onOpen(b.node, b.path, "panel") },
-      { label: "Open in new tab", disabled: t.offline, onSelect: () => onOpen(b.node, b.path, "tab") },
       "sep",
       isBookmarked(marks, b) ? { label: "Remove bookmark", onSelect: () => removeBookmark(b) } : { label: "Bookmark", onSelect: () => addBookmark(b) },
       { label: "Copy path", onSelect: () => void copyText(b.path).catch(() => undefined) },

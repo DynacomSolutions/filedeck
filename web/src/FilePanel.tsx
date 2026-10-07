@@ -2,7 +2,7 @@ import { PANEL_MIME } from "./dock";
 import { Dropdown } from "./Dropdown";
 import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, fmtDate, fmtSize, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
+import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
 import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploads";
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
