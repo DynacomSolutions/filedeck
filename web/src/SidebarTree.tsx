@@ -306,7 +306,7 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
           {t.tip ? <Tip label={t.tip}>{main}</Tip> : main}
           {hasMenu && (
             <Tip label="Actions">
-              <button type="button" className="st-more" tabIndex={-1} aria-label={`Actions for ${t.label}`} aria-haspopup="menu" disabled={!mark && t.kind !== "trash"} onClick={(e) => showMenu(t, e.currentTarget)}><Ellipsis /></button>
+              <button type="button" className="st-more" tabIndex={-1} aria-label={`Actions for ${t.label}`} aria-hidden="true" disabled={!mark && t.kind !== "trash"} onClick={(e) => showMenu(t, e.currentTarget)}><Ellipsis /></button>
             </Tip>
           )}
         </div>
@@ -314,8 +314,8 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
           <ul role="group" className="st-group">
             {t.children?.map((c) => renderRow(c, level + 1))}
             {t.note && (
-              <li role="none" className={"st-note " + t.note.kind} style={{ ["--lvl" as string]: level }}>
-                <span role={t.note.kind === "error" ? "alert" : "status"}>{t.note.text}</span>
+              <li role="treeitem" aria-level={level + 1} aria-disabled="true" className={"st-note " + t.note.kind} style={{ ["--lvl" as string]: level }}>
+                <span role={t.note.kind === "error" ? "alert" : undefined}>{t.note.text}</span>
                 {t.note.kind === "error" && <button type="button" className="st-retry" onClick={() => refresh(t)}>Retry</button>}
               </li>
             )}

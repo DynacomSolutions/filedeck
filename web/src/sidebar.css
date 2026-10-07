@@ -4,7 +4,8 @@
 .st-row{display:flex;align-items:center;position:relative;border-radius:var(--radius-sm)}
 .st-row:hover,.st-row:focus-within{background:var(--surface-2)}
 .st-row.cur:focus-within{background:var(--accent-tint)}
-.st-row>.tip{flex:1 1 auto;min-width:0}
+.side-scroll .st-row>.tip{flex:none;width:auto;min-width:0}
+.side-scroll .st-row>.tip:has(>.st-main){flex:1 1 auto}
 .side-scroll .st-row button.st-main{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:.35rem;width:100%;padding:.28rem .35rem .28rem .2rem;font-weight:500;font-size:.82rem;background:transparent;box-shadow:none;color:var(--fg-soft);overflow:hidden}
 .side-scroll .st-row button.st-main:hover:not(:disabled){background:transparent}
 .side-scroll .st-row button.st-main:focus-visible{outline:2px solid var(--accent-text);outline-offset:-2px}
