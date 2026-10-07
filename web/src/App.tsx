@@ -1,7 +1,7 @@
 import { brand } from "./brand";
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { api, type Entry, type Mount, type NodeInfo } from "./api";
+import { api, type Entry, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
 import { MAX_TABS, DEFAULT_UI, decodeState, encodeState, isSyncPreviewReady, leaves, maxId, syncTree, tabOf, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Leaf, type PrState, type SyncState, type Tree, type TrashState } from "./urlState";
 import type { FileRef } from "./EditorViews";
@@ -10,14 +10,14 @@ import type { FileRef } from "./EditorViews";
 const PrDiffView = lazy(() => import("./PrDiff").then((m) => ({ default: m.PrDiffView })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
-import { useBookmarks, removeBookmark, bookmarkLabel } from "./bookmarks";
+import { SideTree, type How } from "./SidebarTree";
 import { ThemeMenu } from "./ThemeMenu";
 import { ShortcutHelp } from "./Shortcuts";
 import { TrashBrowser } from "./Trash";
 import { SettingsView } from "./SettingsView";
 import { CompareCtx, CompareInfo, SyncDialog, useCompare } from "./Compare";
 import { SelectionBar, type SelRef } from "./Selection";
-import { ChevronDown, ChevronRight, GitCompareArrows, Keyboard, Star, X } from "lucide-react";
+import { GitCompareArrows, Keyboard, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
@@ -208,49 +208,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot]);
 }
 
-type How = "here" | "panel" | "tab";
-
 function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
-  const [mounts, setMounts] = useState<Record<string, Mount[]>>({});
-  const [open, setOpen] = useState<Record<string, boolean>>({});
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  const load = (n: string) => {
-    if (!mounts[n]) api.mounts(n).then((r) => setMounts((m) => ({ ...m, [n]: r.mounts }))).catch(() => setMounts((m) => ({ ...m, [n]: [] })));
-  };
-  const toggle = (n: string) => {
-    setOpen((o) => ({ ...o, [n]: !o[n] }));
-    load(n);
-  };
-  const cluster = nodes.filter((n) => n.kind !== "source");
-  const network = nodes.filter((n) => n.kind === "source");
-  const marks = useBookmarks();
-  /** Plain click: the active panel goes there. Middle or Ctrl/Cmd+click: a new panel beside it. Right-click: the context menu. Never a popup on a plain click. */
-  const link = (node: string, path: string, then?: () => void) => ({
-    onClick: (e: React.MouseEvent) => {
-      onOpen(node, path, e.ctrlKey || e.metaKey ? "panel" : "here");
-      then?.();
-    },
-    onMouseDown: (e: React.MouseEvent) => {
-      if (e.button === 1) e.preventDefault(); // no middle-click autoscroll
-    },
-    onAuxClick: (e: React.MouseEvent) => {
-      if (e.button !== 1) return;
-      e.preventDefault();
-      onOpen(node, path, "panel");
-    },
-    onContextMenu: (e: React.MouseEvent) => {
-      e.preventDefault();
-      setMenu({
-        x: e.clientX,
-        y: e.clientY,
-        items: [
-          { label: "Open here", onSelect: () => onOpen(node, path, "here") },
-          { label: "Open in new panel", hint: "Middle-click", onSelect: () => onOpen(node, path, "panel") },
-          { label: "Open in new tab", onSelect: () => onOpen(node, path, "tab") },
-        ],
-      });
-    },
-  });
   return (
     <aside className="side">
       <div className="side-brand">
@@ -263,64 +221,9 @@ function Sidebar({ nodes, onOpen, onTrash, footer }: { nodes: NodeInfo[]; onOpen
         </span>
       </div>
       <div className="side-scroll">
-      <h2>Bookmarks</h2>
-      {marks.length === 0 && <p className="muted side-hint">Star a folder to keep it here.</p>}
-      <ul className="marks">
-        {marks.map((b) => (
-          <li key={b.node + "\0" + b.path}>
-            <Tip label={`${b.node}:${b.path}`}>
-              <button className="mark-open" {...link(b.node, b.path)}>
-                <Star className="mark-star" fill="currentColor" /> {bookmarkLabel(b)} <span className="muted mark-node">{b.node}</span>
-              </button>
-            </Tip>
-            <Tip label="Remove bookmark">
-              <button className="mark-rm" onClick={() => removeBookmark(b)} aria-label={`Remove bookmark ${b.node}:${b.path}`}><X /></button>
-            </Tip>
-          </li>
-        ))}
-      </ul>
-      <h2>Nodes</h2>
-      {cluster.map((n) => (
-        <div key={n.name}>
-          <div className="side-row">
-            <button className="side-twisty" aria-expanded={!!open[n.name]} aria-label={`${open[n.name] ? "Collapse" : "Expand"} ${n.name}`} onClick={() => toggle(n.name)}>{open[n.name] ? <ChevronDown /> : <ChevronRight />}</button>
-            <button className="side-node" {...link(n.name, "/", () => { setOpen((o) => ({ ...o, [n.name]: true })); load(n.name); })}>
-              <span className={"dot " + (n.online ? "on" : "off")} /> {n.name}
-            </button>
-          </div>
-          {open[n.name] && (
-            <ul className="mounts">
-              <li><button {...link(n.name, "/")}><Ic.HardDrive /> / (root)</button></li>
-              <li><button onClick={() => onTrash(n.name)}><Ic.Trash2 /> Trash</button></li>
-              {(mounts[n.name] ?? []).map((m) => (
-                <li key={m.mountpoint}>
-                  <Tip label={`${m.device} (${m.fstype})${m.network ? " - network drive" : ""}${m.unreachable ? " - not responding" : ""}${m.readOnly ? " - read-only" : ""}`}>
-                  <button {...link(n.name, m.mountpoint)}>
-                    <Ic.HardDrive /> {m.mountpoint}
-                    {m.network && <span className={"net-badge" + (m.unreachable ? " bad" : "")}>{m.netKind ?? "network"}</span>}
-                    {m.readOnly && <span className="net-badge">read-only</span>}
-                    <span className="bar"><i style={{ width: `${m.total ? Math.round((m.used / m.total) * 100) : 0}%` }} /></span>
-                  </button>
-                  </Tip>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ))}
-      {!cluster.length && <p className="muted">No nodes</p>}
-      {network.length > 0 && <h2>Network</h2>}
-      {network.map((n) => (
-        <Tip key={n.name} label={`${n.type ?? "network"} ${n.host ?? ""}${n.online ? "" : n.offlineReason === "host-key-changed" ? " - host key changed, connection refused" : " - unreachable"}`}>
-          <button className="side-node" {...link(n.name, "/")}>
-            <span className={"dot " + (n.online ? "on" : "off")} /> <Ic.Network /> {n.name}
-            <span className="net-badge">{(n.type ?? "net").toUpperCase()}</span>
-          </button>
-        </Tip>
-      ))}
+        <SideTree nodes={nodes} onOpen={onOpen} onTrash={onTrash} />
       </div>
       {footer}
-      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </aside>
   );
 }
