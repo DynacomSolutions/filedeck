@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import useSWR, { useSWRConfig } from "swr";
 import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star, Trash2 } from "lucide-react";
-import { api, type Entry, type Mount, type NodeInfo } from "./api";
+import { type Entry, type Mount, type NodeInfo } from "./api";
+import { listFetcher, listKey as swrListKey, mountsFetcher, mountsKey } from "./data";
+import { listState } from "./sidebarState";
+import { SkeletonTreeRows } from "./Skeleton";
 import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks, type Bookmark } from "./bookmarks";
 import { copyText } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -26,13 +30,33 @@ interface TNode extends TreeNodeBase {
   /** what to fetch when the row is open and nothing is loaded yet */
   load?: "dir" | "mounts";
   /** inline note under the children */
-  note?: { kind: "loading" | "error" | "empty" | "more"; text: string };
+  note?: { kind: "loading" | "error" | "empty" | "more" | "skeleton"; text: string };
   offline?: boolean;
 }
 
 const listKey = (node: string, path: string) => node + "\0" + path;
-const dirsOf = (entries: Entry[]) => entries.filter((e) => e.type === "dir" || (e.type === "symlink" && e.linkDir)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+const sameListing = (a: Listing | undefined, b: Listing) => !!a && a.status === b.status && (a.status !== "ready" || b.status !== "ready" ? true : a.dirs === b.dirs && a.truncated === b.truncated) && (a.status !== "error" || b.status !== "error" || a.error === b.error);
+const sameMounts = (a: MountsState | undefined, b: MountsState) => !!a && a.status === b.status && (a.status !== "ready" || b.status !== "ready" ? true : a.mounts === b.mounts) && (a.status !== "error" || b.status !== "error" || a.error === b.error);
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+type Want = { k: string; kind: "dir" | "mounts"; node: string; path: string };
+
+/**
+ * Fetches one lazily scanned folder (or a node's mounts) through SWR and reports it to the tree. A re-expanded row
+ * therefore shows its cached listing at once while a background request refreshes it. Renders nothing.
+ */
+function Feed({ want, onDirs, onMounts }: { want: Want; onDirs: (k: string, l: Listing) => void; onMounts: (node: string, m: MountsState) => void }) {
+  const dirs = useSWR(want.kind === "dir" ? swrListKey(want.node, want.path) : null, listFetcher, { revalidateOnFocus: true });
+  const mts = useSWR(want.kind === "mounts" ? mountsKey(want.node) : null, mountsFetcher, { revalidateOnFocus: true });
+  useEffect(() => {
+    if (want.kind !== "dir") return;
+    onDirs(want.k, dirs.data ? { status: "ready", dirs: dirs.data.dirs, truncated: dirs.data.truncated } : dirs.isLoading || !dirs.error ? { status: "loading" } : { status: "error", error: msg(dirs.error) });
+  }, [want, dirs.data, dirs.error, dirs.isLoading, onDirs]);
+  useEffect(() => {
+    if (want.kind !== "mounts") return;
+    onMounts(want.node, mts.data ? { status: "ready", mounts: mts.data } : mts.isLoading || !mts.error ? { status: "loading" } : { status: "error", error: msg(mts.error) });
+  }, [want, mts.data, mts.error, mts.isLoading, onMounts]);
+  return null;
+}
 const loadStored = (): ExpandState => {
   try {
     return parseExpanded(localStorage.getItem(EXPANDED_KEY));
@@ -51,7 +75,14 @@ const loadStored = (): ExpandState => {
 /** Tooltip only when the row's label is cut off. */
 const truncated = (wrap: HTMLElement) => [...wrap.querySelectorAll<HTMLElement>(".st-label,.st-sub")].some((el) => el.scrollWidth > el.clientWidth);
 
-export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void }) {
+export interface NodesState {
+  nodes: NodeInfo[] | undefined;
+  error?: unknown;
+  isLoading: boolean;
+  reload: () => void;
+}
+
+export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesState; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void }) {
   const [expanded, setExpanded] = useState<ExpandState>(loadStored);
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [mounts, setMounts] = useState<Record<string, MountsState>>({});
@@ -59,7 +90,9 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const marks = useBookmarks();
   const root = useRef<HTMLUListElement>(null);
-  const asked = useRef(new Set<string>());
+  const { mutate } = useSWRConfig();
+  const nodes = nodesState.nodes ?? [];
+  const nodesView = listState({ data: nodesState.nodes, error: nodesState.error, isLoading: nodesState.isLoading });
   const wantFocus = useRef(false);
 
   const cluster = nodes.filter((n) => n.kind !== "source");
@@ -112,7 +145,10 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
       else if (m.status === "error") t.note = { kind: "error", text: m.error };
       return t;
     };
-    const section = (id: string, label: string, icon: React.ReactNode, kids: TNode[], empty: string): TNode => ({ id, kind: "section", label, icon, expandable: true, defaultOpen: true, children: kids, note: kids.length ? undefined : { kind: "empty", text: empty } });
+    // Nodes and networks arrive in one request, so they share one loading/error state; "empty" is shown only after a successful load.
+    const sectionNote = (kids: TNode[], empty: string, remote: boolean): TNode["note"] =>
+      remote && nodesView === "loading" ? { kind: "skeleton", text: "Loading" } : remote && nodesView === "error" ? { kind: "error", text: `Could not load: ${msg(nodesState.error)}` } : kids.length ? undefined : { kind: "empty", text: empty };
+    const section = (id: string, label: string, icon: React.ReactNode, kids: TNode[], empty: string, remote = true): TNode => ({ id, kind: "section", label, icon, expandable: true, defaultOpen: true, children: kids, note: sectionNote(kids, empty, remote) });
     const sourceRow = (n: NodeInfo): TNode => {
       const t = dirNode("", n.name, "/", undefined, "n:" + n.name);
       t.kind = "node";
@@ -136,10 +172,10 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
     return [
       section("sec:nodes", "Nodes", <Server />, cluster.map(nodeRow), "No nodes"),
       section("sec:networks", "Networks", <Network />, network.map(sourceRow), "No network sources"),
-      section("sec:bookmarks", "Bookmarks", <Star />, marks.map(bookmarkRow), "Star a folder to keep it here."),
+      section("sec:bookmarks", "Bookmarks", <Star />, marks.map(bookmarkRow), "Star a folder to keep it here.", false),
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, expanded, listings, mounts, marks]);
+  }, [nodes, nodesView, nodesState.error, expanded, listings, mounts, marks]);
 
   const byId = useMemo(() => {
     const m = new Map<string, TNode>();
@@ -150,46 +186,24 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
   const rows = useMemo(() => flatten(tree, (n) => isOpen(expanded, n.id, (n as TNode).defaultOpen)), [tree, expanded]);
   const tabId = rovingId(rows, focusId);
 
-  // Lazy scanning: whatever is open and visible but not loaded yet gets fetched once.
-  useEffect(() => {
+  // Lazy scanning: whatever is open and visible gets a SWR feed (cached listing first, then revalidated).
+  const wants = useMemo<Want[]>(() => {
+    const out: Want[] = [];
     for (const r of rows) {
       const t = byId.get(r.id);
       if (!t?.load || !r.expanded || !t.node) continue;
-      if (t.load === "mounts") {
-        const k = "m\0" + t.node;
-        if (asked.current.has(k)) continue;
-        asked.current.add(k);
-        const node = t.node;
-        setMounts((m) => ({ ...m, [node]: { status: "loading" } }));
-        api.mounts(node).then((x) => setMounts((m) => ({ ...m, [node]: { status: "ready", mounts: x.mounts } })), (e) => setMounts((m) => ({ ...m, [node]: { status: "error", error: msg(e) } })));
-      } else {
-        const k = listKey(t.node, t.path!);
-        if (asked.current.has(k)) continue;
-        asked.current.add(k);
-        const node = t.node;
-        const path = t.path!;
-        setListings((l) => ({ ...l, [k]: { status: "loading" } }));
-        api.list(node, path, false).then((x) => setListings((l) => ({ ...l, [k]: { status: "ready", dirs: dirsOf(x.entries), truncated: x.truncated } })), (e) => setListings((l) => ({ ...l, [k]: { status: "error", error: msg(e) } })));
-      }
+      out.push(t.load === "mounts" ? { k: "m\0" + t.node, kind: "mounts", node: t.node, path: "" } : { k: listKey(t.node, t.path!), kind: "dir", node: t.node, path: t.path! });
     }
+    return out;
   }, [rows, byId]);
+  const onDirs = useCallback((k: string, l: Listing) => setListings((x) => (sameListing(x[k], l) ? x : { ...x, [k]: l })), []);
+  const onMounts = useCallback((node: string, m: MountsState) => setMounts((x) => (sameMounts(x[node], m) ? x : { ...x, [node]: m })), []);
 
   const refresh = useCallback((t: TNode) => {
-    if (t.load === "mounts") {
-      asked.current.delete("m\0" + t.node);
-      setMounts((m) => {
-        const { [t.node!]: _drop, ...rest } = m;
-        return rest;
-      });
-    } else if (t.node && t.path) {
-      const k = listKey(t.node, t.path);
-      asked.current.delete(k);
-      setListings((l) => {
-        const { [k]: _drop, ...rest } = l;
-        return rest;
-      });
-    }
-  }, []);
+    if (t.kind === "section") nodesState.reload();
+    else if (t.load === "mounts") void mutate(mountsKey(t.node!));
+    else if (t.node && t.path) void mutate(swrListKey(t.node, t.path));
+  }, [mutate, nodesState.reload]);
 
   const setExp = useCallback((id: string, open: boolean) => {
     const def = byId.get(id)?.defaultOpen ?? false;
@@ -316,8 +330,9 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
         {isExp && (t.children?.length || t.note) ? (
           <ul role="group" className="st-group">
             {t.children?.map((c) => renderRow(c, level + 1))}
-            {t.note && (
-              <li role="treeitem" aria-level={level + 1} aria-disabled="true" className={"st-note " + t.note.kind} style={{ ["--lvl" as string]: level }}>
+            {t.note?.kind === "skeleton" && <SkeletonTreeRows level={level + 1} />}
+            {t.note && t.note.kind !== "skeleton" && (
+              <li role="treeitem" aria-level={level + 1} aria-disabled={t.note.kind === "error" ? undefined : "true"} className={"st-note " + t.note.kind} style={{ ["--lvl" as string]: level }}>
                 <span role={t.note.kind === "error" ? "alert" : undefined}>{t.note.text}</span>
                 {t.note.kind === "error" && <button type="button" className="st-retry" onClick={() => refresh(t)}>Retry</button>}
               </li>
@@ -330,9 +345,10 @@ export function SideTree({ nodes, onOpen, onTrash }: { nodes: NodeInfo[]; onOpen
 
   return (
     <>
-      <ul role="tree" aria-label="Navigation" className="st-tree" ref={root}>
+      <ul role="tree" aria-label="Navigation" className="st-tree" ref={root} aria-busy={nodesView === "loading" || undefined}>
         {tree.map((t) => renderRow(t, 1))}
       </ul>
+      {wants.map((w) => <Feed key={w.k} want={w} onDirs={onDirs} onMounts={onMounts} />)}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </>
   );

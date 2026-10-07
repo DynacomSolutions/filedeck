@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, parent, type Entry, type NodeInfo } from "./api";
+import { api, parent, type Entry } from "./api";
+import { useNodes } from "./data";
 import { Modal } from "./ArchiveDialog";
 import type { SelRef } from "./Selection";
 import { validTransferDestination } from "./transferPaths";
@@ -16,24 +17,21 @@ export function TransferDestination({ kind, items, initialNode, initialPath, onC
   onChoose: (node: string, dir: string) => void;
   onClose: () => void;
 }) {
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [node, setNode] = useState(initialNode);
   const [dir, setDir] = useState(initialPath);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const { nodes: found, error: nodesError } = useNodes();
+  const nodes = found ?? [];
   useEffect(() => {
-    let live = true;
-    api.nodes().then(({ nodes: found }) => {
-      if (!live) return;
-      setNodes(found);
-      if (!found.some((n) => n.name === initialNode && n.online)) {
-        const first = found.find((n) => n.online);
-        if (first) setNode(first.name);
-      }
-    }, (e: Error) => live && setError(e.message));
-    return () => { live = false; };
-  }, [initialNode]);
+    if (!found || found.some((n) => n.name === initialNode && n.online)) return;
+    const first = found.find((n) => n.online);
+    if (first) setNode(first.name);
+  }, [found, initialNode]);
+  useEffect(() => {
+    if (nodesError) setError(nodesError.message);
+  }, [nodesError]);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
