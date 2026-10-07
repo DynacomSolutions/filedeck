@@ -24,12 +24,18 @@
 .ft th.colh button.colh-btn:focus-visible{outline:2px solid var(--accent)!important;outline-offset:-3px!important;box-shadow:none!important}
 .ft th.colh button.colh-btn svg{width:14px;height:14px;flex:none}
 
-/* drag divider: hit area kept inside its own header cell (sticky cells stack in DOM order, so an overhang would be covered by the next cell's button), 1px visible line; the line only emphasises on hover, drag or focus */
-.colh-handle{position:absolute;top:0;right:0;bottom:0;width:9px;z-index:2;cursor:col-resize;touch-action:none;outline:none}
-.colh-handle::after{content:"";position:absolute;top:22%;bottom:22%;left:8px;width:1px;background:var(--border-strong);transition:background var(--fast) var(--ease)}
-.colh-handle:hover::after,.colh-handle:active::after{background:var(--accent);width:2px;left:7px}
-.colh-handle:focus-visible::after{background:var(--accent);width:2px;left:7px;top:8%;bottom:8%}
+/* drag divider: an 8px hit zone centred on the column's right edge (it overhangs into the next cell; header cells carry descending z-indexes so the overhang is not covered), a 1px line that shows while the header is hovered */
+.colh-handle{position:absolute;top:0;right:-4px;bottom:0;width:8px;z-index:2;cursor:col-resize;touch-action:none;outline:none}
+.colh-handle::after{content:"";position:absolute;top:25%;bottom:25%;left:3.5px;width:1px;background:var(--border-strong);opacity:0;transition:opacity var(--fast) var(--ease),background var(--fast) var(--ease)}
+.ft thead tr:hover .colh-handle::after,.colh-handle:focus-visible::after{opacity:1}
+.colh-handle:hover::after,.colh-handle:active::after{opacity:1;background:var(--accent);width:2px;left:3px;top:15%;bottom:15%}
+.colh-handle:focus-visible::after{background:var(--accent);width:2px;left:3px}
 .colh-handle:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:2px}
+body.col-resizing,body.col-resizing *{cursor:col-resize!important;user-select:none!important}
+/* every column has an explicit width; the table is as wide as their sum (or the panel, with the empty rest after the last column) */
+.ft.cols{width:100%}
+.ft th.colh{height:var(--pane-head-h);box-sizing:border-box}
+.ft th.colh-fill{z-index:0}
 
 /* narrow screens: back to the automatic layout, no dividers, optional columns folded away */
 @media(max-width:700px){
@@ -38,3 +44,7 @@
   .colh-handle,.ft .c-fill,.ft .c-type,.ft .c-mode,.ft .colh-fill{display:none}
   .ft th.colh .colh-txt,.ft th.colh button.colh-btn{padding-left:.6rem;padding-right:.6rem}
 }
+/* the last column's hit zone stays inside the table so it never adds scrollable overflow */
+.ft th.colh:nth-last-child(2) .colh-handle{right:0}
+.ft th.colh:nth-last-child(2) .colh-handle::after{left:7px}
+.ft th.colh:nth-last-child(2) .colh-handle:hover::after,.ft th.colh:nth-last-child(2) .colh-handle:active::after,.ft th.colh:nth-last-child(2) .colh-handle:focus-visible::after{left:6px}

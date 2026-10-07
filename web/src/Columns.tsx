@@ -4,7 +4,7 @@ import { fmtDate, fmtMode, fmtSize, type Entry } from "./api";
 import type { MenuItem } from "./ContextMenu";
 import type { SortKey } from "./urlState";
 import {
-  COLUMNS, COLUMN_KEY, KEY_STEP, isDefault, isFlex, isShown, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn,
+  COLUMNS, COLUMN_KEY, KEY_STEP, clampWidth, isDefault, isShown, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn,
   totalWidth, visibleColumns, widthOf, type ColDef, type ColId, type ColumnState,
 } from "./columns";
 import "./columns.css";
@@ -49,10 +49,10 @@ export function ColGroup({ state: s, cols, git }: { state: ColumnState; cols: Co
   return (
     <colgroup>
       {cols.flatMap((c, i) => [
-        <col key={c.id} className={"c-" + c.id} style={isFlex(s, c.id) ? undefined : { width: widthOf(s, c.id) }} />,
+        <col key={c.id} className={"c-" + c.id} style={{ width: widthOf(s, c.id) }} />,
         ...(i === 0 && git ? [<col key="git" className="c-git" style={{ width: GIT_COL_W }} />] : []),
       ])}
-      <col className="c-fill" style={cols.some((c) => isFlex(s, c.id)) ? { width: 0 } : undefined} />
+      <col className="c-fill" />
     </colgroup>
   );
 }
@@ -107,11 +107,30 @@ function autoFit(th: HTMLElement, id: ColId): number {
 }
 
 function Handle({ col, s, label }: { col: ColDef; s: ColumnState; label: string }) {
-  const drag = useRef<{ x: number; w: number } | null>(null);
+  const drag = useRef<{ x: number; w: number; cur: number; raf: number; colEl: HTMLElement | null; table: HTMLElement | null; min0: string; w0: string } | null>(null);
   const w = widthOf(s, col.id);
-  /** the rendered width: a flexible column has no stored one yet */
-  const actual = (el: HTMLElement) => (isFlex(load(), col.id) ? el.parentElement!.offsetWidth : widthOf(load(), col.id));
   const set = (n: number, persist = true) => commit(setWidth(load(), col.id, n), persist);
+  /** live drag: touch only this table's <col> and min-width in an animation frame (no React render per pointer move) */
+  const paint = () => {
+    const d = drag.current;
+    if (!d) return;
+    d.raf = 0;
+    if (d.colEl) d.colEl.style.width = d.cur + "px";
+    if (d.table) d.table.style.minWidth = parseFloat(d.min0) - d.w + d.cur + "px";
+  };
+  const end = (apply: boolean) => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    if (d.raf) cancelAnimationFrame(d.raf);
+    document.body.classList.remove("col-resizing");
+    if (apply && d.cur !== d.w) {
+      commit(setWidth(load(), col.id, d.cur));
+    } else {
+      if (d.colEl) d.colEl.style.width = d.w0;
+      if (d.table) d.table.style.minWidth = d.min0;
+    }
+  };
   return (
     <div
       className="colh-handle"
@@ -127,28 +146,32 @@ function Handle({ col, s, label }: { col: ColDef; s: ColumnState; label: string 
         if (e.button !== 0) return;
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
-        drag.current = { x: e.clientX, w: actual(e.currentTarget) };
+        const table = e.currentTarget.closest("table");
+        const colEl = table?.querySelector<HTMLElement>(`:scope > colgroup > col.c-${col.id}`) ?? null;
+        const w0 = widthOf(load(), col.id);
+        drag.current = { x: e.clientX, w: w0, cur: w0, raf: 0, colEl, table, min0: table?.style.minWidth || "0", w0: colEl?.style.width ?? "" };
+        document.body.classList.add("col-resizing");
       }}
       onPointerMove={(e) => {
-        if (drag.current) set(drag.current.w + e.clientX - drag.current.x, false);
+        const d = drag.current;
+        if (!d) return;
+        d.cur = clampWidth(col.id, d.w + e.clientX - d.x);
+        if (!d.raf) d.raf = requestAnimationFrame(paint);
       }}
       onPointerUp={(e) => {
         if (!drag.current) return;
-        drag.current = null;
         e.currentTarget.releasePointerCapture(e.pointerId);
-        commit(load());
+        end(true);
       }}
-      onPointerCancel={() => {
-        drag.current = null;
-        commit(load());
-      }}
+      onPointerCancel={() => end(false)}
+      onLostPointerCapture={() => end(true)}
       onDoubleClick={(e) => {
         e.stopPropagation();
         set(autoFit(e.currentTarget.parentElement!, col.id));
       }}
       onKeyDown={(e) => {
         const step = KEY_STEP * (e.shiftKey ? 4 : 1);
-        const cur = actual(e.currentTarget);
+        const cur = widthOf(load(), col.id);
         if (e.key === "ArrowRight") set(cur + step);
         else if (e.key === "ArrowLeft") set(cur - step);
         else if (e.key === "Home") set(col.min);
@@ -202,6 +225,7 @@ export function HeaderRow({ s, cols, git, sort, onSort, onMenu }: {
             scope="col"
             aria-sort={c.sort ? (on ? (sort.asc ? "ascending" : "descending") : "none") : undefined}
             className={"colh c-" + c.id + (c.sort ? " sortable" : "") + (c.align ? " end" : "")}
+            style={{ zIndex: cols.length + 2 - i }}
           >
             {c.sort ? (
               <button type="button" className="colh-btn" onClick={() => onSort(c.sort!)}>
