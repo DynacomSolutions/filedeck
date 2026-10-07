@@ -1,0 +1,39 @@
+/* Details-list column headers: plain header text (no button chrome), a thin drag divider on the right edge,
+   fixed table layout driven by the <col> widths so rows always line up with the headers. */
+.ft.cols{table-layout:fixed}
+.ft th.colh{padding:0;position:sticky;cursor:default;overflow:visible;text-overflow:clip}
+.ft th.colh .colh-txt{display:block;padding:.65rem .9rem}
+.ft th.colh.end{text-align:right}
+.ft td.colh-fill,.ft th.colh-fill{padding:0}
+.ft td.txt{overflow:hidden;text-overflow:ellipsis}
+.ft td.num{overflow:hidden;text-overflow:ellipsis}
+.ft td.mono{font-family:var(--mono);font-size:.78rem}
+
+/* the sort control: looks like header text; hover tints the text and underlines, never a raised button */
+.ft th.colh button.colh-btn{
+  display:flex;align-items:center;gap:.35rem;width:100%;min-width:0;min-height:44px;
+  padding:.65rem .9rem;margin:0;border:0;border-radius:0;background:transparent;box-shadow:none;
+  color:inherit;font:inherit;letter-spacing:inherit;text-transform:inherit;text-align:inherit;cursor:pointer;
+  transition:color var(--fast) var(--ease);
+}
+.ft th.colh.end button.colh-btn{justify-content:flex-end}
+.ft th.colh button.colh-btn:hover:not(:disabled){background:transparent;color:var(--fg);text-decoration:underline;text-underline-offset:.3em;text-decoration-thickness:1px}
+.ft th.colh button.colh-btn:active{background:transparent}
+.ft th.colh[aria-sort="ascending"] button.colh-btn,.ft th.colh[aria-sort="descending"] button.colh-btn{color:var(--fg)}
+.ft th.colh button.colh-btn:focus-visible{outline:2px solid var(--accent)!important;outline-offset:-3px!important;box-shadow:none!important}
+.ft th.colh button.colh-btn svg{width:14px;height:14px;flex:none}
+
+/* drag divider: wide hit area, 1px visible line; the line only emphasises on hover, drag or focus */
+.colh-handle{position:absolute;top:0;right:-5px;bottom:0;width:11px;z-index:2;cursor:col-resize;touch-action:none;outline:none}
+.colh-handle::after{content:"";position:absolute;top:22%;bottom:22%;left:5px;width:1px;background:var(--border-strong);transition:background var(--fast) var(--ease)}
+.colh-handle:hover::after,.colh-handle:active::after{background:var(--accent);width:2px;left:4px}
+.colh-handle:focus-visible::after{background:var(--accent);width:2px;left:4px;top:8%;bottom:8%}
+.colh-handle:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:2px}
+
+/* narrow screens: back to the automatic layout, no dividers, optional columns folded away */
+@media(max-width:700px){
+  .ft.cols{table-layout:auto;min-width:0!important}
+  .ft.cols col{width:auto!important}
+  .colh-handle,.ft .c-fill,.ft .c-type,.ft .c-mode,.ft .colh-fill{display:none}
+  .ft th.colh .colh-txt,.ft th.colh button.colh-btn{padding-left:.6rem;padding-right:.6rem}
+}

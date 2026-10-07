@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
+import { Check, Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, SquarePlus, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
   | "sep"
@@ -8,6 +8,8 @@ export type MenuItem =
       label: string;
       onSelect?: () => void;
       disabled?: boolean;
+      /** checkable item: true or false renders as a menuitemcheckbox with a tick */
+      checked?: boolean;
       danger?: boolean;
       /** shortcut text shown on the right */
       hint?: string;
@@ -95,7 +97,8 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
           <div key={i} className="ctx-row">
             <button
               type="button"
-              role="menuitem"
+              role={it.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+              aria-checked={it.checked}
               data-menu-index={i}
               tabIndex={cur === i ? 0 : -1}
               disabled={it.disabled}
@@ -112,7 +115,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
               }}
               onClick={() => run(it)}
             >
-              <span className="ctx-l">{(() => { const I = iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
+              <span className="ctx-l">{(() => { if (it.checked !== undefined) return <Check aria-hidden="true" style={{ visibility: it.checked ? "visible" : "hidden" }} />; const I = iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
               {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
             </button>
             {it.sub && openSub === i && (
