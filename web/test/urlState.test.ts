@@ -65,3 +65,15 @@ test("panel selection round-trips", () => {
   const state: AppState = { tree: { kind: "split", id: "p3", dir: "horizontal", children: [{ kind: "leaf", id: "p1", node: "a", path: "/" }, { kind: "leaf", id: "p2", node: "a", path: "/" }] }, active: "p1", panelSel: ["p1", "p2"] };
   assert.deepEqual(decodeState(encodeState(state))?.panelSel, ["p1", "p2"]);
 });
+
+test("closed preview and the empty-preview flag round-trip", () => {
+  const state: AppState = {
+    tree: { kind: "leaf", id: "p1", node: "n", path: "/w", closed: "/w/a.txt", pe: true, pv: { dock: "right", size: 40 } },
+    active: "p1",
+  };
+  const restored = decodeState(encodeState(state));
+  assert.equal(restored?.tree.kind === "leaf" && restored.tree.pe, true);
+  assert.equal(restored?.tree.kind === "leaf" && restored.tree.closed, "/w/a.txt");
+  const plain = decodeState(encodeState({ tree: { kind: "leaf", id: "p1", node: "n", path: "/w" }, active: "p1" }));
+  assert.equal(plain?.tree.kind === "leaf" && plain.tree.pe, undefined);
+});

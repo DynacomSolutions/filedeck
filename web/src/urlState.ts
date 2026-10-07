@@ -50,6 +50,8 @@ export interface Leaf {
   wtPath?: string;
   /** path whose preview the user closed */
   closed?: string;
+  /** the side pane was opened on its Preview with nothing previewable selected: it shows the empty state */
+  pe?: true;
   /** file open in the panel's editor */
   edit?: FileRef;
   /** Git HEAD diff shown in this panel's side pane */
@@ -153,7 +155,7 @@ export function viewCloseTarget(index: number, routeStart: number): number | nul
 }
 
 // Compact wire format (short keys keep shared links readable).
-type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 0 | 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; e?: [string, string]; gd?: [string, string]; q?: string; z?: WSearch; w?: "g" | "l"; x?: 1 };
+type WLeaf = { i: string; n: string; p: string; s?: string; m?: string[]; o?: string; h?: 0 | 1; v?: [string, number] | [string, number, "p" | "w"]; pt?: "details" | "git" | "permissions"; wp?: string; c?: string; pe?: 1; e?: [string, string]; gd?: [string, string]; q?: string; z?: WSearch; w?: "g" | "l"; x?: 1 };
 type WSearch = { q?: string; m?: string; s?: 1; c?: string; r?: 1; k?: 1; t?: string };
 type WSplit = { i: string; d: "h" | "v"; k: WTree[]; z?: number[] };
 type WTree = WLeaf | WSplit;
@@ -187,6 +189,7 @@ const toWire = (t: Tree): WTree => {
   if (t.pt && t.pt !== "details") w.pt = t.pt;
   if (t.wtPath) w.wp = t.wtPath;
   if (t.closed) w.c = t.closed;
+  if (t.pe) w.pe = 1;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
   if (t.gitDiff) w.gd = [t.gitDiff.node, t.gitDiff.path];
   if (t.q) w.q = t.q;
@@ -260,6 +263,7 @@ const fromWire = (w: unknown, depth = 0): Tree | null => {
   if (legacyWorktreesSidePane && o.pt === undefined) leaf.pt = "git";
   if (str(o.wp) && o.wp.startsWith("/")) leaf.wtPath = o.wp;
   if (str(o.c)) leaf.closed = o.c;
+  if (o.pe === 1) leaf.pe = true;
   if (Array.isArray(o.e) && str(o.e[0]) && str(o.e[1])) leaf.edit = { node: o.e[0], path: o.e[1] };
   if (Array.isArray(o.gd) && str(o.gd[0]) && str(o.gd[1]) && o.gd[1].startsWith("/")) leaf.gitDiff = { node: o.gd[0], path: o.gd[1], rev: "HEAD" };
   if (str(o.q) && o.q) leaf.q = o.q;
