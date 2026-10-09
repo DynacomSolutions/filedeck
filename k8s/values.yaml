@@ -7,7 +7,7 @@ fullnameOverride: ""
 image:
   # Public container image; use a pinned tag or immutable digest for production deployments.
   repository: ghcr.io/dynacomsolutions/filedeck
-  tag: "0.3.4"
+  tag: "0.3.5"
   # When set, the pods run repository@digest and `tag` is ignored.
   digest: ""
   pullPolicy: IfNotPresent
