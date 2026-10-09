@@ -32,7 +32,7 @@ import { resolvePanelPreferences, setSettings, useSettings } from "./settings";
 import { SkeletonRows, SkeletonTiles } from "./Skeleton";
 import { TransferDestination, type TransferKind } from "./TransferDestination";
 import { usePresentation } from "./presentation";
-import { nextLetterMatch } from "./letterNavigation";
+import { typeAheadMatch, type TypeAheadState } from "./letterNavigation";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -182,6 +182,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const barRef = useRef<HTMLElement>(null);
   const focusAfterNavigation = useRef<{ node: string; path: string } | null>(null);
   const locationRef = useRef({ node, path });
+  const typeAhead = useRef<TypeAheadState | null>(null);
+  useEffect(() => {
+    typeAhead.current = null;
+  }, [node, path]);
   const loadingRef = useRef(loading);
   loadingRef.current = loading;
   const navigate = (n: string, p: string) => {
@@ -1055,11 +1059,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (e.altKey && e.shiftKey && !mod && key.startsWith("Arrow") && onDock) return onDock(key);
       // While the search results are open the panel's own selection is hidden: no file operations by key.
       if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "nurcpNURCP".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
-      if (!mod && !e.altKey && /^\p{L}$/u.test(key)) {
-        const match = nextLetterMatch(visible, cursor, key);
-        if (match) {
-          selectOnly(match.path);
-          return true;
+      if (!mod && !e.altKey) {
+        const r = typeAheadMatch(visible, cursor, key, typeAhead.current, Date.now());
+        if (r) {
+          typeAhead.current = r.state;
+          if (r.match) selectOnly(r.match.path);
+          if (r.match || r.continued) return true;
         }
       }
       if (key === "?" && !mod) return onHelp(), true;
