@@ -719,7 +719,7 @@ button.danger{color:var(--danger-text)}
 .git-pill svg{width:12px;height:12px;flex:none;color:var(--muted)}
 .git-pill[data-dirty]{border-color:var(--accent-line);background:var(--accent-tint)}
 .git-pill.pending{color:var(--muted)}
-.git-br{overflow:hidden;text-overflow:ellipsis;max-width:9rem}
+.git-br{overflow:hidden;text-overflow:ellipsis;max-width:9rem;min-width:3ch}
 .git-n{display:inline-flex;align-items:center;font-variant-numeric:tabular-nums}
 .git-n svg{margin-right:1px}
 .git-u{color:var(--muted)}
@@ -728,7 +728,7 @@ button.danger{color:var(--danger-text)}
 .git-st[data-st*="M"],.git-st[data-st*="S"],.git-st[data-st*="C"]{border-color:var(--accent-line);background:var(--accent-tint)}
 .git-st[data-st="U"],.git-st[data-st="I"]{color:var(--muted)}
 .ft th.git-th{cursor:default}
-.ft td.git-td{width:1%;padding-top:.4rem;padding-bottom:.4rem}
+.ft td.git-td{width:1%;overflow:hidden;padding-top:.4rem;padding-bottom:.4rem}
 .tile-git{display:flex;justify-content:center;min-width:0;overflow:hidden}
 .git-chip{flex:none;display:flex;align-items:center;margin:0 .35rem;max-width:16rem}
 .git-inline{display:none}
