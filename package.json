@@ -1,6 +1,6 @@
 {
   "name": "filedeck",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "description": "Web file manager: per-node agents plus a hub SPA",
   "license": "MIT",

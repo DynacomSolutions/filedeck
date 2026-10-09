@@ -10,7 +10,7 @@ import {
 import "./columns.css";
 
 /** Width of the optional Git column, which is not user-configurable. */
-export const GIT_COL_W = 72;
+export const GIT_COL_W = 144;
 
 let state: ColumnState | null = null;
 const subs = new Set<() => void>();
