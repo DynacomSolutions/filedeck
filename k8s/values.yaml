@@ -109,9 +109,10 @@ testSources:
   images:
     # rclone 1.75.1 (multi-arch index digest)
     rclone: rclone/rclone@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
-    # MinIO. Used for S3 because rclone's S3 server keeps a trailing-slash folder marker as a plain file, so a folder
-    # made through the S3 backend could not be listed or written into.
-    minio: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # MinIO, pgsty/minio RELEASE.2026-08-04 (multi-arch index digest). Upstream quay.io/minio/minio is disabled. Used
+    # for S3 because rclone's S3 server keeps a trailing-slash folder marker as a plain file, so a folder made through
+    # the S3 backend could not be listed or written into.
+    minio: pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
     # dockurr/samba 4.23.10 (multi-arch index digest)
     samba: dockurr/samba@sha256:404f91bdf317d390241a41165579cd25199f34171b44677d877c75dc40184042
   resources:
