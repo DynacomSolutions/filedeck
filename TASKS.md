@@ -22,7 +22,7 @@
 | FD-18 | Agents in a container list the host's mounts, not the container's (large disks such as a separate /home were missing from sizes) | done | claude-20261018-host-mounts | host-mounts | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/60 (23f1944). Deploys with 2.FD-19. |
 | FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | done | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 |  | Released and rolled out with no downtime; see 2.FD-15. |
 
-ETA: 2026-10-18 17:00 ICT
+## 3. Cached folder sizes
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-9 | Size store: per-folder size totals in SQLite on each agent, filled by the size scan and reused while a folder's inode and mtime are unchanged; one-folder delta updates propagated to parents; agent and hub `GET /api/du` | done | claude-20261018-size-store | size-store |  | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/55 (f31230e). |
