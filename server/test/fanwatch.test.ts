@@ -18,7 +18,8 @@ test("mapPath: strips the root, refuses outside paths and trash stores", () => {
   assert.equal(mapPath("/host", "/elsewhere"), null);
   assert.equal(mapPath("/", "/data/a"), "/data/a");
   assert.equal(mapPath("/host", "/host/data/.filedeck-trash/x"), null);
-  assert.equal(unescapeLine("/a\\nb\\\\c"), "/a\nb\\c");
+  assert.equal(unescapeLine("/a\\x0ab\\\\c\\x0d"), "/a\nb\\c\r");
+  assert.equal(unescapeLine("/a\\\\x0d"), "/a\\x0d");
 });
 
 class Fake extends EventEmitter implements HelperProc {
@@ -31,7 +32,7 @@ class Fake extends EventEmitter implements HelperProc {
   }
 }
 
-function setup() {
+function setup(extra: Partial<ConstructorParameters<typeof FanWatch>[1]> = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
   fs.mkdirSync(path.join(root, "data"));
   const calls: string[] = [];
@@ -41,7 +42,7 @@ function setup() {
   const args: string[][] = [];
   const mounts = path.join(os.tmpdir(), `fanwatch-mounts-${process.pid}-${Math.random().toString(36).slice(2)}`);
   fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n/dev/b /data xfs rw 0 0\nsrv:/x /net nfs4 rw 0 0\n");
-  const w = new FanWatch(store, { helper: "fake", root, procMounts: mounts, settleMs: 40, modifyMs: 300, spawn: (_c, a) => (args.push(a), proc) });
+  const w = new FanWatch(store, { helper: "fake", root, procMounts: mounts, settleMs: 40, modifyMs: 300, ...extra, spawn: (_c, a) => (args.push(a), proc) });
   return { w, proc, calls, stale, args, root, done: () => (fs.rmSync(mounts), fs.rmSync(root, { recursive: true })) };
 }
 
@@ -134,6 +135,75 @@ test("SizeStore.markStale: next scan re-reads the folders", async () => {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("fanwatch: a path with CR/LF cannot inject a protocol line", async () => {
+  const s = setup();
+  await s.w.start();
+  s.proc.stdout.write(`x ${s.root}/data/a\\x0d!overflow\n`);
+  s.proc.stdout.write(`x ${s.root}/data/b\r!overflow\n`); // a raw CR (never sent by the helper) is still no line break
+  await sleep(150);
+  assert.deepEqual(s.stale, []);
+  assert.deepEqual([...s.calls].sort(), ["/data/a\r!overflow", "/data/b\r!overflow"]);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: 50k distinct folders drain quickly", async () => {
+  const calls: number[] = [];
+  const w = new FanWatch({ applyChanged: async () => void calls.push(1), markStale: () => {} }, { helper: "x", root: "/", procMounts: "/proc/mounts", settleMs: 1, modifyMs: 10 });
+  const t0 = Date.now();
+  for (let i = 0; i < 50_000; i++) w.line(`x /d/${i}`);
+  while (calls.length < 50_000 && Date.now() - t0 < 20_000) await sleep(50);
+  w.stop();
+  assert.equal(calls.length, 50_000);
+  assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`);
+});
+
+test("fanwatch: an unexpected helper exit marks stale and restarts with backoff; a refusal does not", async () => {
+  const errs: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.join(" "));
+  try {
+    const procs: Fake[] = [];
+    const stale: string[] = [];
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
+    const mounts = path.join(root, "m");
+    fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n");
+    const w = new FanWatch({ applyChanged: async () => {}, markStale: (v) => void stale.push(v) }, { helper: "fake", root, procMounts: mounts, restartMinMs: 20, restartMaxMs: 40, spawn: () => (procs.push(new Fake()), procs.at(-1)!) });
+    await w.start();
+    procs[0]!.emit("exit", 1, null);
+    assert.deepEqual(stale, ["/"]);
+    await sleep(80);
+    assert.equal(procs.length, 2);
+    procs[1]!.emit("exit", null, "SIGKILL");
+    await sleep(100);
+    assert.equal(procs.length, 3);
+    procs[2]!.emit("exit", 2, null); // not permitted: final
+    await sleep(100);
+    assert.equal(procs.length, 3);
+    assert.equal(errs.length, 2); // one rate-limited restart note, one refusal
+    w.stop();
+    fs.rmSync(root, { recursive: true });
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("fanwatch: a 'c' line is logged at startup", async () => {
+  const s = setup();
+  const errs: string[] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.join(" "));
+  try {
+    await s.w.start();
+    s.w.line("c /data/btrfs\\x0asub");
+  } finally {
+    console.error = orig;
+  }
+  assert.match(errs[0]!, /cannot watch \/data\/btrfs\nsub/);
+  s.w.stop();
+  s.done();
 });
 
 // Real helper, real kernel: needs a C compiler and CAP_SYS_ADMIN + CAP_DAC_READ_SEARCH (root). CI runs this file once

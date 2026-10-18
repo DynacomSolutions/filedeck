@@ -1,6 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { EventEmitter } from "node:events";
-import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import { listMounts } from "./mounts.ts";
 import { TRASH_DIR } from "./paths.ts";
@@ -29,6 +28,9 @@ export interface FanWatchOptions {
   settleMs?: number;
   modifyMs?: number;
   spawn?: SpawnHelper;
+  /** restart backoff after an unexpected helper exit */
+  restartMinMs?: number;
+  restartMaxMs?: number;
 }
 
 export interface ChangeSink {
@@ -47,7 +49,8 @@ export function mapPath(root: string, hostPath: string): string | null {
   return v.split("/").includes(TRASH_DIR) ? null : v;
 }
 
-export const unescapeLine = (s: string) => s.replace(/\\([\\n])/g, (_, c: string) => (c === "n" ? "\n" : "\\"));
+/** Inverse of the helper's escaping: `\\` and `\xHH`. Lines are split on "\n" only, which the helper never leaves unescaped inside a path. */
+export const unescapeLine = (s: string) => s.replace(/\\(?:(\\)|x([0-9a-f]{2}))/g, (_, b?: string, h?: string) => (b ? "\\" : String.fromCharCode(parseInt(h!, 16))));
 
 export class FanWatch {
   private proc: HelperProc | null = null;
@@ -75,6 +78,15 @@ export class FanWatch {
     console.error(`fanotify watcher off, folder sizes refresh by age and folder mtime only: ${msg}`);
   }
 
+  private lastLog = 0;
+  private backoff = 0;
+  private restartTimer: NodeJS.Timeout | null = null;
+  private note(msg: string) {
+    if (Date.now() - this.lastLog < 60_000) return;
+    this.lastLog = Date.now();
+    console.error(`fanotify watcher: ${msg}`);
+  }
+
   /** Spawn the helper for every local filesystem under the root. Never throws. */
   async start(): Promise<void> {
     if (!this.o.helper || this.proc || this.stopped) return;
@@ -90,10 +102,28 @@ export class FanWatch {
       p.stderr?.on("data", (d: Buffer) => (err = (err + d).slice(-500)));
       p.on("error", (e: Error) => this.warn(e.message));
       p.on("exit", (code: number | null, sig: string | null) => {
+        if (this.proc !== p) return;
         this.proc = null;
-        if (!this.stopped) this.warn(err.trim() || `helper exited (${code ?? sig})`);
+        if (this.stopped) return;
+        // 2 = not permitted, 3 = not supported: retrying cannot help. Anything else may have lost events.
+        if (code === 2 || code === 3 || !this.o.helper) return this.warn(err.trim() || `helper exited (${code})`);
+        for (const m of this.marks) this.store.markStale(m);
+        this.backoff = Math.min(this.o.restartMaxMs ?? 300_000, this.backoff ? this.backoff * 2 : (this.o.restartMinMs ?? 1000));
+        this.note(`helper exited (${code ?? sig}${err.trim() ? ": " + err.trim() : ""}), restarting in ${this.backoff} ms`);
+        this.restartTimer = setTimeout(() => void this.start(), this.backoff);
+        this.restartTimer.unref();
       });
-      if (p.stdout) createInterface({ input: p.stdout }).on("line", (l) => this.line(l));
+      let buf = "";
+      p.stdout?.setEncoding?.("utf8");
+      p.stdout?.on("data", (d: string | Buffer) => {
+        buf += d;
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          this.line(buf.slice(0, i));
+          buf = buf.slice(i + 1);
+        }
+        if (buf.length > 65_536) buf = ""; // no helper line is this long
+      });
     } catch (e) {
       this.warn((e as Error).message);
     }
@@ -101,6 +131,7 @@ export class FanWatch {
 
   stop() {
     this.stopped = true;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
     for (const d of this.due.values()) clearTimeout(d.timer);
     this.due.clear();
     this.queue.clear();
@@ -114,6 +145,8 @@ export class FanWatch {
       for (const m of this.marks) this.store.markStale(m);
       return;
     }
+    if (l.startsWith("#ready")) this.backoff = 0;
+    if (l.startsWith("c ")) return void this.note(`cannot watch ${unescapeLine(l.slice(2))}, changes there are seen only by age and folder mtime`);
     const kind = l[0];
     if ((kind !== "x" && kind !== "w" && kind !== "m") || l[1] !== " ") return;
     const v = mapPath(this.o.root, unescapeLine(l.slice(2)));
@@ -142,8 +175,13 @@ export class FanWatch {
     try {
       for (let v; !this.stopped && (v = this.queue.values().next().value as string | undefined) !== undefined; ) {
         this.queue.delete(v);
+        // insertion order = age order: drop the old ones from the front, stop at the first young one
+        this.lastRun.delete(v);
         this.lastRun.set(v, Date.now());
-        if (this.lastRun.size > 10_000) for (const [k, t] of this.lastRun) if (Date.now() - t > this.modifyMs) this.lastRun.delete(k);
+        for (const [k, t] of this.lastRun) {
+          if (Date.now() - t <= this.modifyMs) break;
+          this.lastRun.delete(k);
+        }
         try {
           await this.store.applyChanged(v);
         } catch {
