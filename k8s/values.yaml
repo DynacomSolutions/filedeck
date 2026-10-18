@@ -22,6 +22,13 @@ agentToken:
   secretName: ""
   key: token
 
+# Optional read-only token for the `filedeck du` CLI (hub). Name an existing Secret (created out of band, never in Git)
+# that holds a long random value under `key`; the hub then lets `Authorization: Bearer <token>` call only GET /api/du and
+# the du jobs it starts. Empty (the default) switches the feature off.
+apiToken:
+  secretName: ""
+  key: token
+
 # Saved-password vault (hub). Encrypted archive and PDF passwords that someone typed are kept server-side,
 # AES-256-GCM encrypted in a small sqlite file on `storage`; the key is derived from the Secret below, which is
 # generated in-cluster and never lives in Git: the pre-install/pre-upgrade hook Job (templates/vault-key-job.yaml) creates

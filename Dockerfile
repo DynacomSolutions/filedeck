@@ -38,6 +38,8 @@ COPY --from=build /src/server/dist server/dist
 COPY --from=build /src/web/dist web
 # Alpine ships npm/yarn, which this image never runs; drop them to shrink the scan surface.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /opt/yarn* /usr/local/bin/yarn*
+# `filedeck du ...` works inside the image (docker exec / kubectl-free: any shell in the container).
+RUN chmod +x server/dist/cli.js && ln -s /app/server/dist/cli.js /usr/local/bin/filedeck
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["wget", "-qO-", "http://127.0.0.1:8080/healthz"]
 CMD ["node", "server/dist/main.js"]

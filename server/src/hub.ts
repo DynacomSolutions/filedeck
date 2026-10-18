@@ -11,6 +11,7 @@ import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
+import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
@@ -35,6 +36,7 @@ function clean(h: Headers, keepLength: boolean): Headers {
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault };
   app.use("*", audit("hub", auditSink));
+  app.use("*", apiTokenAuth(cfg.apiToken));
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;
   app.close = async () => {

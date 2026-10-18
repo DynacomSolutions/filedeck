@@ -62,3 +62,6 @@ export const listKey = (node: string, path: string) => ["dirs", node, path] as c
 export const mountsKey = (node: string) => ["mounts", node] as const;
 export const listFetcher = ([, node, path]: readonly [string, string, string]) => api.list(node, path, false).then((x) => ({ dirs: dirsOf(x.entries), truncated: x.truncated }));
 export const mountsFetcher = ([, node]: readonly [string, string]) => api.mounts(node).then((x) => x.mounts as Mount[]);
+/** Stored folder sizes of one expanded folder's children: one request per expansion, not refetched on focus. */
+export const duKey = (node: string, path: string) => ["du", node, path] as const;
+export const duFetcher = ([, node, path]: readonly [string, string, string]) => api.duCached(node, path);
