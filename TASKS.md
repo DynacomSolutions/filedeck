@@ -12,7 +12,6 @@
 | FD-7 | Release v0.3.7 so the S3 test source image fix (#47) deploys | done | claude-20261015-filedeck-test-s3 | release-v037 | | | filedeck-test-s3 ImagePullBackOff because quay.io/minio/minio is disabled upstream; fixed in PR https://github.com/DynacomSolutions/filedeck/pull/47 (pgsty/minio), release prep in PR https://github.com/DynacomSolutions/filedeck/pull/48. Release run 38727321325 succeeded; the hub and all agents run ghcr.io/dynacomsolutions/filedeck:0.3.7, filedeck-test-s3 runs pgsty/minio, GitOps sync healthy. |
 
 ## 2. Sidebar tree polish
-ETA: 2026-10-18 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-8 | Sidebar tree: long labels truncate with an ellipsis and a hover popover (label, size, percentage, bar); size bar sits under the label aligned with the folder icon; top-level server rows get a size bar | done | claude-20261018-tree-label-ellipsis | tree-label-ellipsis | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/51 (1f550b7). CI green; web tests 81/81, typecheck clean. Checked in headless Chromium against mocked API responses, not a real hub. Folder rows have no size data yet (see 3.FD-13); network sources report no mounts, so they get no bar. |
@@ -21,7 +20,7 @@ ETA: 2026-10-18 16:00 ICT
 | FD-16 | Release v0.3.9 so zero-downtime rollouts (2.FD-15) deploy | done | claude-20261018-release-v039 | release-v039 | 2.FD-15 |  | v0.3.9 released (PR https://github.com/DynacomSolutions/filedeck/pull/58, a487094); the hub and all agents run filedeck:0.3.9, GitOps sync healthy. |
 | FD-17 | Test sources surge on rollout (RollingUpdate maxUnavailable 0) like hub and agents | done | claude-20261018-test-sources-rolling | test-sources-rolling | 2.FD-15 | 2026-10-18 14:00 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/59 (46cf5ec). |
 | FD-18 | Agents in a container list the host's mounts, not the container's (large disks such as a separate /home were missing from sizes) | done | claude-20261018-host-mounts | host-mounts | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/60 (23f1944). Deploys with 2.FD-19. |
-| FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | in_review | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 | 2026-10-18 16:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/61 |
+| FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | done | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 |  | Released and rolled out with no downtime; see 2.FD-15. |
 
 ## 3. Cached folder sizes
 ETA: 2026-10-18 17:00 ICT
