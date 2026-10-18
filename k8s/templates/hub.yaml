@@ -10,11 +10,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # Old pod keeps serving until the new one is Ready. Both pods briefly share the vault PVC (ReadWriteOnce allows several pods on one node); the vault is SQLite in WAL mode with a busy timeout, so that is safe.
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    {{- toYaml .Values.hub.strategy | nindent 4 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "filedeck.name" . }}
@@ -33,10 +29,16 @@ spec:
       automountServiceAccountToken: false
       nodeSelector:
         {{- toYaml .Values.hub.nodeSelector | nindent 8 }}
-      {{- with .Values.hub.affinity }}
+      # A surging hub must run on the old hub's node: the vault is SQLite on a ReadWriteOnce volume that only one node
+      # may mount, and its WAL locking only works between processes on the same host. A first pod matches itself.
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- $aff := deepCopy (.Values.hub.affinity | default dict) }}
+        {{- $pa := deepCopy ($aff.podAffinity | default dict) }}
+        {{- $req := $pa.requiredDuringSchedulingIgnoredDuringExecution | default list }}
+        {{- $req = append $req (dict "topologyKey" "kubernetes.io/hostname" "labelSelector" (dict "matchLabels" (dict "app.kubernetes.io/name" (include "filedeck.name" .) "app.kubernetes.io/component" "hub"))) }}
+        {{- $_ := set $pa "requiredDuringSchedulingIgnoredDuringExecution" $req }}
+        {{- $_ := set $aff "podAffinity" $pa }}
+        {{- toYaml $aff | nindent 8 }}
       {{- with .Values.hub.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
