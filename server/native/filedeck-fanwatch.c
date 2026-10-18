@@ -6,11 +6,12 @@
  * Needs CAP_SYS_ADMIN (fanotify filesystem marks) and CAP_DAC_READ_SEARCH (open_by_handle_at). Linux 5.9 or newer.
  * No dependencies; build: cc -O2 -static -o filedeck-fanwatch filedeck-fanwatch.c
  *
- * Output (stdout, one line each; "\" and newline in a path are written as "\\" and "\n"):
+ * Output (stdout, one line each; in a path "\" is written "\\" and every byte below 0x20 or 0x7f as \xHH):
  *   #ready N          N filesystems are watched
  *   x PATH            entry created, deleted, moved or its attributes changed in directory PATH
  *   w PATH            a file in PATH was closed after writing
  *   m PATH            a file in PATH was modified (an ongoing write; repeated at most once a second)
+ *   c PATH            PATH could not be watched (aliases of an already watched filesystem are not reported)
  *   !overflow         the kernel dropped events: everything watched must be rescanned
  * Messages go to stderr. Exit status: 0 stdout closed, 1 usage or runtime error, 2 not permitted
  * (missing capability), 3 not supported (old kernel, or no filesystem could be marked).
@@ -57,14 +58,14 @@ static void out(const char *s, size_t n) {
 }
 
 static void emit(char kind, const char *path) {
-	char buf[2 * PATH_MAX + 4];
+	char buf[4 * PATH_MAX + 4];
 	size_t n = 0;
 	buf[n++] = kind;
 	buf[n++] = ' ';
-	for (const char *p = path; *p && n < sizeof buf - 3; p++) {
+	for (const unsigned char *p = (const unsigned char *)path; *p && n < sizeof buf - 5; p++) {
 		if (*p == '\\') { buf[n++] = '\\'; buf[n++] = '\\'; }
-		else if (*p == '\n') { buf[n++] = '\\'; buf[n++] = 'n'; }
-		else buf[n++] = *p;
+		else if (*p < 0x20 || *p == 0x7f) n += (size_t)snprintf(buf + n, 5, "\\x%02x", *p);
+		else buf[n++] = (char)*p;
 	}
 	buf[n++] = '\n';
 	out(buf, n);
@@ -141,7 +142,7 @@ static int fail(int code, const char *msg, const char *arg) {
 int main(int argc, char **argv) {
 	if (argc < 2) return fail(1, "usage: filedeck-fanwatch PATH...", NULL);
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
-	int fan = (int)syscall(SYS_fanotify_init, FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_UNLIMITED_QUEUE | FAN_CLOEXEC, O_RDONLY | O_LARGEFILE);
+	int fan = (int)syscall(SYS_fanotify_init, FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_CLOEXEC, O_RDONLY | O_LARGEFILE);
 	if (fan < 0) {
 		if (errno == EPERM) return fail(2, "not permitted: fanotify needs CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH", strerror(errno));
 		return fail(3, "fanotify_init failed (kernel 5.9 or newer is needed)", strerror(errno));
@@ -152,6 +153,7 @@ int main(int argc, char **argv) {
 		int mfd = open(argv[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 		if (mfd < 0 || fstatfs(mfd, &sf) < 0) {
 			fprintf(stderr, "filedeck-fanwatch: skipping %s: %s\n", argv[i], strerror(errno));
+			emit('c', argv[i]);
 			if (mfd >= 0) close(mfd);
 			continue;
 		}
@@ -171,6 +173,7 @@ int main(int argc, char **argv) {
 		if (syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, (unsigned long long)MASK, AT_FDCWD, argv[i]) < 0) {
 			if (errno == EPERM) denied = 1;
 			fprintf(stderr, "filedeck-fanwatch: cannot watch %s: %s\n", argv[i], strerror(errno));
+			emit('c', argv[i]);
 			close(mfd);
 			continue;
 		}
