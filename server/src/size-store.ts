@@ -16,7 +16,7 @@ import type { SizeResult } from "./props.ts";
  * Freshness rules (the same as the compare index, see index-cache.ts):
  *  - a stored folder is reused while its inode and mtime match a fresh `stat` and it was scanned less
  *    than `ttlMs` ago: entries added, removed or renamed change the folder mtime, an in-place edit of a
- *    file does not. Without the watcher (3.FD-10) the own stats can therefore be stale up to `ttlMs`;
+ *    file does not. Without the change watcher (fanwatch.ts) the own stats can therefore be stale up to `ttlMs`;
  *  - everything else is re-read (readdir + lstat) and its row replaced;
  *  - a scan that hits the entry cap is returned but never stored, so stored totals are always complete.
  *
@@ -460,6 +460,12 @@ export class SizeStore {
     } finally {
       release();
     }
+  }
+
+  /** Forget how fresh the rows of `virtual` and below are (the watcher lost events): the next scan re-reads them. */
+  markStale(virtual: string): void {
+    const [lo, hi] = below(virtual);
+    this.safe(() => this.db!.prepare("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)").run(virtual, lo, hi), undefined);
   }
 
   private async changed(v: string, ctl: JobCtl): Promise<void> {

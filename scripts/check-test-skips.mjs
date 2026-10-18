@@ -4,7 +4,7 @@ const tap = fs.readFileSync(0, "utf8");
 process.stdout.write(tap);
 
 const skips = tap.split(/\r?\n/).filter((line) => /# SKIP\b/.test(line));
-const allowed = /smb live: skipped \(FILEDECK_TEST_SMB not set\)/;
+const allowed = /smb live: skipped \(FILEDECK_TEST_SMB not set\)|fanwatch live: skipped/;
 const unexpected = skips.filter((line) => !allowed.test(line));
 if (unexpected.length > 0) {
   console.error("Unexpected TAP skips:");

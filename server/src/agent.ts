@@ -13,6 +13,7 @@ import { registerGitDiffRoutes } from "./git-diff-routes.ts";
 import * as trash from "./trash.ts";
 import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
 import { registerPropsRoutes } from "./props.ts";
+import { FanWatch } from "./fanwatch.ts";
 import { registerGitRoutes } from "./git-routes.ts";
 import { registerSearchRoutes } from "./search.ts";
 import { registerGitWorktreeRoutes } from "./git-worktrees.ts";
@@ -261,7 +262,10 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   registerGitRoutes(app, cfg);
   const index = registerDiffRoutes(app, cfg);
   registerGitDiffRoutes(app, cfg);
+  const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts });
+  void fan.start();
   (app as unknown as { close: () => Promise<void> }).close = async () => {
+    fan.stop();
     index.close();
     sizes.close();
   };
