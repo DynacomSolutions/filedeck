@@ -12,12 +12,13 @@
 | FD-7 | Release v0.3.7 so the S3 test source image fix (#47) deploys | done | claude-20261015-filedeck-test-s3 | release-v037 | | | filedeck-test-s3 ImagePullBackOff because quay.io/minio/minio is disabled upstream; fixed in PR https://github.com/DynacomSolutions/filedeck/pull/47 (pgsty/minio), release prep in PR https://github.com/DynacomSolutions/filedeck/pull/48. Release run 38727321325 succeeded; the hub and all agents run ghcr.io/dynacomsolutions/filedeck:0.3.7, filedeck-test-s3 runs pgsty/minio, GitOps sync healthy. |
 
 ## 2. Sidebar tree polish
-ETA: 2026-10-18 16:00 ICT
+ETA: 2026-10-18 13:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-8 | Sidebar tree: long labels truncate with an ellipsis and a hover popover (label, size, percentage, bar); size bar sits under the label aligned with the folder icon; top-level server rows get a size bar | done | claude-20261018-tree-label-ellipsis | tree-label-ellipsis | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/51 (1f550b7). CI green; web tests 81/81, typecheck clean. Checked in headless Chromium against mocked API responses, not a real hub. Folder rows have no size data yet (see 3.FD-13); network sources report no mounts, so they get no bar. |
-| FD-14 | Release v0.3.8 so the sidebar tree polish (2.FD-8) deploys | blocked | claude-20261018-release-v038 | release-v038 | 2.FD-8 | | Release run 39094608784 succeeded and stable is at f15fe58. The rollout stalled: the old hub pod could not be removed by its node and strategy Recreate blocked the new pod. Deployment follow-up tracked outside this repo. Permanent fix: 2.FD-15. |
-| FD-15 | Zero-downtime rollouts: hub and agents keep one ready pod until the new one is ready (RollingUpdate maxUnavailable 0 where safe), and SIGTERM shutdown always exits within the grace period | in_review | claude-20261018-zero-downtime | zero-downtime-rollout | | 2026-10-18 13:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/57 |
+| FD-14 | Release v0.3.8 so the sidebar tree polish (2.FD-8) deploys | done | claude-20261018-release-v038 | release-v038 | 2.FD-8 | | Release run 39094608784 succeeded; the hub and all agents run ghcr.io/dynacomsolutions/filedeck:0.3.8, GitOps sync healthy. The rollout stalled for a while because the old hub pod could not be removed by its node and strategy Recreate blocked the new pod (fixed by 2.FD-15). |
+| FD-15 | Zero-downtime rollouts: hub and agents keep one ready pod until the new one is ready (RollingUpdate maxUnavailable 0 where safe), and SIGTERM shutdown always exits within the grace period | done | claude-20261018-zero-downtime | zero-downtime-rollout | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/57 (22b05d4): RollingUpdate maxSurge 1 maxUnavailable 0 for hub and agents, hub podAffinity keeps the surge pod on the vault's node, preStop sleep 5, shutdown drains in-flight requests then cleans up (5s drain, 15s hard exit), vault busy_timeout, index never deleted on SQLITE_BUSY. Deploys with 2.FD-16. |
+| FD-16 | Release v0.3.9 so zero-downtime rollouts (2.FD-15) deploy | in_review | claude-20261018-release-v039 | release-v039 | 2.FD-15 | 2026-10-18 13:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/58 |
 
 ## 3. Cached folder sizes
 ETA: 2026-10-19 18:00 ICT
