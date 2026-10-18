@@ -99,3 +99,27 @@ export function navigate(rows: FlatRow[], current: string | null, key: string): 
 
 /** The id that should hold tabindex 0: the remembered one if still visible, else the first row. */
 export const rovingId = (rows: FlatRow[], remembered: string | null): string | null => (remembered && rows.some((r) => r.id === remembered) ? remembered : (rows[0]?.id ?? null));
+
+export interface Usage {
+  used: number;
+  total: number;
+}
+
+/** Whole-number share of `total` that is used, clamped to 0..100. */
+export const usagePct = (u: Usage): number => (u.total > 0 ? Math.min(100, Math.max(0, Math.round((u.used / u.total) * 100))) : 0);
+
+/**
+ * A server's disk usage: the sum over its mounts, counting each device once (bind mounts repeat a device).
+ * The percentage is then used/total of that server, the same basis as a single mount row. Null when nothing is known.
+ */
+export function serverUsage(mounts: readonly { device: string; total: number; used: number }[]): Usage | null {
+  const seen = new Set<string>();
+  const sum: Usage = { used: 0, total: 0 };
+  for (const m of mounts) {
+    if (!(m.total > 0) || seen.has(m.device)) continue;
+    seen.add(m.device);
+    sum.used += m.used;
+    sum.total += m.total;
+  }
+  return sum.total > 0 ? sum : null;
+}

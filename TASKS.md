@@ -10,3 +10,9 @@
 | FD-5 | Git column wide enough to show the branch name in folder git pills (was cut to one letter) | done | claude-20261010-typeahead | git-pill-width | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/45; GIT_COL_W 72 to 144. Not checked in a browser. |
 | FD-6 | Release v0.3.6 so FD-5 deploys | done | claude-20261010-typeahead | git-pill-width | | | Release succeeded; filedeck-hub and agents eu3, eu4, hq0, hq1 run ghcr.io/dynacomsolutions/filedeck:0.3.6, Argo app Synced Healthy. |
 | FD-7 | Release v0.3.7 so the S3 test source image fix (#47) deploys | done | claude-20261015-filedeck-test-s3 | release-v037 | | | 77.CLUSTER-233: filedeck-test-s3 ImagePullBackOff because quay.io/minio/minio is disabled upstream; fixed in PR https://github.com/DynacomSolutions/filedeck/pull/47 (pgsty/minio), release prep in PR https://github.com/DynacomSolutions/filedeck/pull/48. Release run 38727321325 succeeded; filedeck-hub and agents eu3, eu4, hq0, hq1 run ghcr.io/dynacomsolutions/filedeck:0.3.7, filedeck-test-s3 runs pgsty/minio, Argo app Synced Healthy. |
+
+## 2. Sidebar tree polish
+ETA: 2026-10-18 18:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| FD-8 | Sidebar tree: long labels truncate with an ellipsis and a hover popover (label, size, percentage, bar); size bar sits under the label aligned with the folder icon; top-level server rows get a size bar | in_review | claude-20261018-tree-label-ellipsis | tree-label-ellipsis | | 2026-10-18 18:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/51 |

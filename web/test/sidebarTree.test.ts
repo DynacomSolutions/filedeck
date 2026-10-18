@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { flatten, isOpen, navigate, parseExpanded, rovingId, setOpen, type TreeNodeBase } from "../src/sidebarTree.ts";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { Popover, type TNode } from "../src/SidebarTree.tsx";
+import { flatten, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, usagePct, type TreeNodeBase } from "../src/sidebarTree.ts";
 
 const tree: TreeNodeBase[] = [
   { id: "a", expandable: true, children: [{ id: "a1", expandable: true, children: [{ id: "a1x", expandable: false }] }, { id: "a2", expandable: false }] },
@@ -72,4 +75,23 @@ test("rovingId falls back to the first visible row", () => {
   assert.equal(rovingId(r, "b"), "b");
   assert.equal(rovingId(r, "gone"), "a");
   assert.equal(rovingId([], "a"), null);
+});
+
+test("server usage sums mounts, counts a device once and skips empty ones", () => {
+  assert.equal(serverUsage([]), null);
+  assert.equal(serverUsage([{ device: "tmpfs", total: 0, used: 0 }]), null);
+  assert.deepEqual(serverUsage([{ device: "/dev/a", total: 100, used: 25 }, { device: "/dev/a", total: 100, used: 25 }, { device: "/dev/b", total: 300, used: 75 }]), { used: 100, total: 400 });
+  assert.equal(usagePct({ used: 100, total: 400 }), 25);
+  assert.equal(usagePct({ used: 5, total: 0 }), 0);
+  assert.equal(usagePct({ used: 9, total: 3 }), 100);
+});
+
+test("popover shows label, details, size, percentage and bar", () => {
+  const t = { id: "n:eu3", kind: "node", label: "a-very-long-server-name", icon: null, expandable: true, defaultOpen: false, tip: "eu3:/", usage: { used: 512, total: 2048 } } as TNode;
+  const html = renderToStaticMarkup(createElement(Popover, { t }));
+  assert.match(html, /a-very-long-server-name/);
+  assert.match(html, /eu3:\//);
+  assert.match(html, /512 B of 2\.0 KiB used \(25%\)/);
+  assert.match(html, /class="st-bar"[^>]*aria-label="25% used"/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(Popover, { t: { ...t, usage: undefined } })), /st-bar/);
 });
