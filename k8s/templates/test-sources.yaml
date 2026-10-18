@@ -62,7 +62,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate
+    {{- toYaml $ts.strategy | nindent 4 }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ $name }}

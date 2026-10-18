@@ -111,6 +111,10 @@ sources: []
 testSources:
   enabled: false
   secretName: filedeck-test-sources
+  # Every test source keeps its data in an emptyDir, so two pods can overlap during a rollout.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
   # Optional stable chart label for scratch pod templates during chart upgrades. Empty keeps the current chart version.
   podChartLabel: ""
   images:
