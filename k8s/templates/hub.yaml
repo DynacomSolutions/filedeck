@@ -68,6 +68,14 @@ spec:
                   name: {{ .Values.agentToken.secretName }}
                   key: {{ .Values.agentToken.key }}
             {{- end }}
+            {{- if .Values.apiToken.secretName }}
+            # Read-only token for the `filedeck du` CLI (Secret created out of band, never in Git).
+            - name: FILEDECK_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.apiToken.secretName }}
+                  key: {{ .Values.apiToken.key }}
+            {{- end }}
             # Saved-password vault: the AES key comes from a Secret created out of band (never in Git); the sqlite file
             # lives on its own small volume, not in user data. A missing Secret leaves the vault memory-only.
             - name: FILEDECK_VAULT_FILE
