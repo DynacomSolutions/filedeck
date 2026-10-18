@@ -90,8 +90,8 @@ export class SizeStore {
   private q!: Record<"get" | "put" | "kids" | "delTree", StatementSync>;
   private held: { path: string; done: Promise<void> }[] = [];
   private warned = false;
-  /** nodes of the latest walk, kept only while the database is unusable so the route can still answer */
-  private last = new Map<string, Row>();
+  /** nodes of the latest few walks, kept only while the database is unusable so `tree` can still answer */
+  private walks: Map<string, Row>[] = [];
 
   constructor(
     file: string,
@@ -167,11 +167,26 @@ export class SizeStore {
 
   /**
    * Scans and changes of overlapping subtrees run one after the other; unrelated subtrees do not wait.
-   * The returned function releases the lock (more than once is harmless).
+   * The returned function releases the lock (more than once is harmless). A wait ends with an error when `signal` aborts.
    */
-  async lock(virtual: string): Promise<() => void> {
+  async lock(virtual: string, signal?: AbortSignal): Promise<() => void> {
     const overlaps = (h: { path: string }) => h.path === virtual || h.path === "/" || virtual === "/" || h.path.startsWith(virtual + "/") || virtual.startsWith(h.path + "/");
-    for (let h; (h = this.held.find(overlaps)); ) await h.done;
+    const canceled = () => new FsError(400, "canceled");
+    for (let h; (h = this.held.find(overlaps)); ) {
+      if (signal?.aborted) throw canceled();
+      let off = () => {};
+      const aborted = new Promise<never>((_, rej) => {
+        const f = () => rej(canceled());
+        signal?.addEventListener("abort", f, { once: true });
+        off = () => signal?.removeEventListener("abort", f);
+      });
+      try {
+        await Promise.race([h.done, aborted]);
+      } finally {
+        off();
+      }
+    }
+    if (signal?.aborted) throw canceled();
     let release!: () => void;
     const h = { path: virtual, done: new Promise<void>((r) => (release = r)) };
     this.held.push(h);
@@ -305,8 +320,8 @@ export class SizeStore {
               const v = virtualJoin(t.virtual, g.n);
               node.kids.push(v);
               const prior = mode.trust && t.root ? byPath.get(v) : undefined;
-              // a folder deleted and recreated under the same name has another inode: its stored subtree is not its own
-              if (prior && prior.ino === Number(g.s.ino)) nodes.set(v, { ...prior, kids: [], fixed: true, reused: true });
+              // a folder deleted and recreated under the same name is not the stored one, even with the same inode number (freed inodes are reused at once); its mtime tells
+              if (prior && prior.ino === Number(g.s.ino) && prior.dev === Number(g.s.dev) && prior.mtime_ms === g.s.mtimeMs) nodes.set(v, { ...prior, kids: [], fixed: true, reused: true });
               else stack.push({ virtual: v, real: g.r, root: false, s: g.s });
             }
           } else if (g.s.isSymbolicLink()) {
@@ -342,7 +357,7 @@ export class SizeStore {
    * folder and the ancestors go in the last transaction, so totals above are only changed once everything below is stored.
    */
   private async commit({ root, order, nodes }: Walk, chunk = COMMIT_CHUNK) {
-    if (!this.db) return void (this.last = nodes);
+    if (!this.db) return void this.keep(nodes);
     const todo = order.filter((n) => !n.fixed).reverse();
     let ok = true;
     for (let i = 0; i < todo.length && ok; i += chunk) {
@@ -373,7 +388,17 @@ export class SizeStore {
       }, false);
       if (!lastChunk) await tick();
     }
-    if (!ok) this.last = nodes;
+    if (!ok) this.keep(nodes);
+  }
+
+  private keep(nodes: Map<string, Row>) {
+    this.walks.push(nodes);
+    if (this.walks.length > 4) this.walks.shift();
+  }
+
+  /** false once the database is unusable: nothing is cached any more */
+  get persistent(): boolean {
+    return this.db !== null;
   }
 
   private result(n: Node, truncated: boolean): SizeResult {
@@ -389,8 +414,9 @@ export class SizeStore {
   /**
    * Like `scan`, also telling how many folders were read from disk (0 = answered from the store, only validated).
    * `release` is a lock from `lock(virtual)` the caller already holds; it is released when the scan ends.
+   * `after` runs once the scan is stored, still under the lock, so it never sees a half-written scan.
    */
-  async scanRead(virtual: string, ctl: JobCtl = noCtl(), fresh = false, release?: () => void): Promise<{ res: SizeResult; read: number }> {
+  async scanRead<T = undefined>(virtual: string, ctl: JobCtl = noCtl(), fresh = false, release?: () => void, after?: () => Promise<T>): Promise<{ res: SizeResult; read: number; extra?: T }> {
     release ??= await this.lock(resolveRead(this.o.root, virtual).virtual);
     try {
       const r = resolveRead(this.o.root, virtual);
@@ -398,15 +424,16 @@ export class SizeStore {
       try {
         st = await fs.stat(r.real);
       } catch (e) {
-        // the start folder is gone: drop its rows (and take it off its parent) before reporting that
+        // The start folder is gone: its rows (and its share of the parent) are trimmed after this lock is released,
+        // never while holding it, because that takes another lock and a job slot must not wait on one.
         release();
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") await this.applyChanged(r.virtual);
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") void this.applyChanged(r.virtual).catch(() => undefined);
         throw e;
       }
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0 };
       const w = await this.walk(r.virtual, r.real, st, ctl, { fresh });
       if (!w.truncated) await this.commit(w, this.o.commitChunk);
-      return { res: this.result(w.root, w.truncated), read: w.read };
+      return { res: this.result(w.root, w.truncated), read: w.read, ...(after && !w.truncated ? { extra: await after() } : {}) };
     } finally {
       release();
     }
@@ -456,7 +483,8 @@ export class SizeStore {
     let budget = this.o.maxEntries;
     let truncated = false;
     const asEntry = (r: Row): DuEntry => ({ path: r.path, type: "dir", bytes: r.tot.bytes, diskBytes: r.tot.disk, files: r.tot.files, dirs: r.tot.dirs, scannedAt: r.scanned_at });
-    const top = this.db ? this.get(virtual) : this.last.get(virtual);
+    const walk = this.db ? undefined : [...this.walks].reverse().find((w) => w.has(virtual));
+    const top = this.db ? this.get(virtual) : walk?.get(virtual);
     if (!top) return { entries, truncated };
     let level = [top];
     for (let d = 0; level.length; d++) {
@@ -468,7 +496,7 @@ export class SizeStore {
         }
         entries.push(asEntry(r));
         if (d >= depth) continue;
-        for (const k of this.db ? this.kidsOf(r.path, r.dev) : this.last.values()) if (this.db || (k.parent === r.path && k.dev === r.dev)) next.push(k);
+        for (const k of walk ? walk.values() : this.kidsOf(r.path, r.dev)) if (!walk || (k.parent === r.path && k.dev === r.dev)) next.push(k);
         if (all) {
           const left = await this.filesOf(r.path, budget);
           budget -= left.entries.length;

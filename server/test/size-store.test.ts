@@ -408,6 +408,7 @@ test("scan of a folder that was removed trims its rows and its parent", async ()
   await s.scan("/gone/p/q", undefined, true);
   fs.rmSync(at("gone/p/q"), { recursive: true });
   await assert.rejects(() => s.scan("/gone/p/q"));
+  (await s.lock("/"))(); // the trim runs after the scan ended; wait for it
   assert.equal((await s.tree("/gone/p/q", 0, false)).entries.length, 0);
   assert.equal((await s.tree("/gone", 0, false)).entries[0]!.bytes, 0);
   assert.equal((await s.tree("/gone", 0, false)).entries[0]!.dirs, 1);
@@ -426,4 +427,122 @@ test("a scan stored in small chunks gives the same totals, and reports live prog
   await s.applyChanged("/a/sub");
   await agrees(s, "/a");
   s.close();
+});
+
+// ---- second review round ----
+
+test("applyChanged: a recreated folder is not trusted even when it gets the old inode number", async () => {
+  fs.mkdirSync(at("rc2/x/y"), { recursive: true });
+  fs.writeFileSync(at("rc2/x/y/f"), "1".repeat(1000));
+  const [l, st] = [fsp.lstat, fsp.stat];
+  const same = (fn: (...a: never[]) => Promise<fs.Stats>) => async (p: string, ...a: never[]) => {
+    const s = await fn(p as never, ...a);
+    if (String(p).startsWith(at("rc2/"))) Object.defineProperty(s, "ino", { value: 7 });
+    return s;
+  };
+  (fsp as { lstat: unknown }).lstat = same(l as never);
+  (fsp as { stat: unknown }).stat = same(st as never);
+  try {
+    const s = mk();
+    await s.scan("/rc2");
+    await sleep(30);
+    fs.rmSync(at("rc2/x"), { recursive: true });
+    fs.mkdirSync(at("rc2/x"));
+    fs.writeFileSync(at("rc2/x/g"), "2");
+    await s.applyChanged("/rc2");
+    assert.equal((await s.tree("/rc2", 0, false)).entries[0]!.bytes, 1);
+    s.close();
+  } finally {
+    (fsp as { lstat: unknown }).lstat = l;
+    (fsp as { stat: unknown }).stat = st;
+  }
+});
+
+test("uncached store keeps answering for earlier scans, not only the latest", async () => {
+  fs.mkdirSync(at("u/a/x"), { recursive: true });
+  fs.mkdirSync(at("u/b"), { recursive: true });
+  fs.writeFileSync(at("u/file"), "");
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    const s = new SizeStore(at("u/file/sizes.db"), { root: at("u"), ttlMs: 60_000, maxEntries: 100_000 });
+    assert.equal(s.persistent, false);
+    await s.scan("/a");
+    await s.scan("/b");
+    assert.equal((await s.tree("/a", 1, false)).entries.length, 2);
+    assert.equal((await s.tree("/b", 1, false)).entries.length, 1);
+    s.close();
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("the tree for an answer is built under the scan's lock", async () => {
+  const s = mk();
+  let got = false;
+  let late!: Promise<() => void>;
+  await s.scanRead("/a", undefined, true, undefined, async () => {
+    late = s.lock("/a").then((r) => ((got = true), r));
+    await sleep(30);
+    assert.equal(got, false);
+  });
+  (await late)();
+  assert.equal(got, true);
+  s.close();
+});
+
+test("scans: requests do not wait for overlapping scans, a vanished start folder cannot deadlock, cancel works while waiting", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "dl-"));
+  for (const d of ["big/sub", "q1", "q2", "p/x", "p/w", "p/z"]) fs.mkdirSync(path.join(root, d), { recursive: true });
+  const slow = new Set([path.join(root, "big"), path.join(root, "q1"), path.join(root, "q2")]);
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+    if (slow.has(String(p))) await sleep(500);
+    return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
+  };
+  try {
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "100" } as never));
+    const post = async (p: string) => (await app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: p }) })).json() as Promise<{ id: string; state: string }>;
+    const job = async (id: string) => (await (await app.request(`/api/jobs/${id}`)).json()) as { state: string };
+    const settle = async (id: string) => {
+      let j = await job(id);
+      for (let i = 0; i < 300 && (j.state === "queued" || j.state === "running"); i++) {
+        await sleep(20);
+        j = await job(id);
+      }
+      return j.state;
+    };
+
+    // the handlers answer at once while an overlapping scan holds the subtree
+    const big = await post("/big");
+    let t = Date.now();
+    const sub = await post("/big/sub");
+    assert.ok(Date.now() - t < 200, "POST waited for the lock");
+    t = Date.now();
+    const r = await app.request("/api/du?path=/big/sub&depth=0");
+    assert.equal(r.status, 202);
+    assert.ok(Date.now() - t < 400, "GET du waited for the lock");
+    // a waiting job can be canceled, and it does not block the one after it
+    const doomed = await post("/big/sub");
+    await app.request(`/api/jobs/${doomed.id}/cancel`, { method: "POST" });
+    assert.equal(await settle(doomed.id), "canceled");
+    assert.equal(await settle(big.id), "done");
+    assert.equal(await settle(sub.id), "done");
+
+    // two slow jobs fill the slots; the folders of the queued ones vanish before they start
+    const q1 = await post("/q1");
+    const q2 = await post("/q2");
+    const x = await post("/p/x");
+    const w = await post("/p/w");
+    const z = await post("/p/z");
+    fs.rmSync(path.join(root, "p/x"), { recursive: true });
+    fs.rmSync(path.join(root, "p/w"), { recursive: true });
+    assert.equal(await settle(q1.id), "done");
+    assert.equal(await settle(q2.id), "done");
+    assert.equal(await settle(x.id), "failed");
+    assert.equal(await settle(w.id), "failed");
+    assert.equal(await settle(z.id), "done");
+  } finally {
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
 });

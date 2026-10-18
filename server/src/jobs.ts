@@ -45,6 +45,8 @@ export interface JobCtl {
 interface Job extends JobView {
   run: (ctl: JobCtl) => Promise<unknown>;
   onDrop?: () => void;
+  /** set while the job waits for its gate: it is queued but takes no slot */
+  gated?: boolean;
   abort: AbortController;
   big?: boolean;
 }
@@ -61,8 +63,11 @@ export class Jobs {
   ) {}
   private timer?: ReturnType<typeof setInterval>;
 
-  /** `onDrop` runs when the job is canceled while still queued (its `run` then never starts). */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void): JobView {
+  /**
+   * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
+   * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
+   */
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal) => Promise<void>): JobView {
     const job: Job = {
       id: randomUUID(),
       kind,
@@ -75,13 +80,28 @@ export class Jobs {
       abort: new AbortController(),
     };
     this.jobs.set(job.id, job);
+    if (gate) {
+      job.gated = true;
+      gate(job.abort.signal)
+        .then(
+          () => void (job.gated = false),
+          (e) => {
+            job.gated = false;
+            if (job.state !== "queued") return;
+            job.state = job.abort.signal.aborted ? "canceled" : "failed";
+            if (job.state === "failed") job.error = this.mapErr(e);
+            job.finishedAt = Date.now();
+          },
+        )
+        .finally(() => this.pump());
+    }
     this.prune();
     this.pump();
     return this.view(job);
   }
 
   private view(j: Job): JobView {
-    const { run: _r, onDrop: _d, abort: _a, big: _b, ...v } = j;
+    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, ...v } = j;
     const out: JobView = { ...v, progress: { ...j.progress } };
     if (j.state === "queued") {
       const all = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -107,6 +127,7 @@ export class Jobs {
     if (j.state === "queued") {
       j.state = "canceled";
       j.finishedAt = Date.now();
+      j.abort.abort();
       j.onDrop?.();
     } else if (j.state === "running") {
       j.abort.abort();
@@ -155,7 +176,7 @@ export class Jobs {
   private pump() {
     for (const j of this.jobs.values()) {
       if (!this.canStart()) return;
-      if (j.state !== "queued") continue;
+      if (j.state !== "queued" || j.gated) continue;
       if (this.lanes && !this.timer) {
         this.timer = setInterval(() => this.recheck(), this.lanes.checkMs ?? 1000);
         this.timer.unref();

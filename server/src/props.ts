@@ -7,7 +7,7 @@ import { parseMounts, networkKind } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
 import type { JobCtl, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
-import { SizeStore } from "./size-store.ts";
+import { SizeStore, type DuEntry } from "./size-store.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -298,11 +298,20 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   };
   app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
 
-  // A scan lock is taken before the job exists, so a scan waiting for an overlapping one does not occupy a job slot.
-  const startScan = async (kind: "size" | "du", virtual: string, fresh: boolean) => {
-    const release = await sizes.lock(virtual);
-    const title = `Size of ${path.posix.basename(virtual) || "/"}`;
-    return jobs.create(kind, title, (ctl) => sizes.scanRead(virtual, ctl, fresh, release).then((x) => (kind === "size" ? x.res : x)), release);
+  // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
+  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
+    let release: (() => void) | undefined;
+    return jobs.create(
+      kind,
+      `Size of ${path.posix.basename(virtual) || "/"}`,
+      async (ctl) => {
+        const x = await sizes.scanRead(virtual, ctl, fresh, release, after);
+        done?.(x);
+        return kind === "size" ? x.res : { res: x.res, read: x.read };
+      },
+      () => release?.(),
+      async (signal) => void (release = await sizes.lock(virtual, signal)),
+    );
   };
 
   // "Calculate" in the properties dialog: exact, so every folder is re-read unless the caller says otherwise.
@@ -311,15 +320,21 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
-    return c.json(await startScan("size", r.virtual, b.fresh !== false), 202);
+    return c.json(startScan("size", r.virtual, b.fresh !== false), 202);
   });
 
   // GET /api/du?path=&depth=&all=&fresh=: unchanged folders are validated (one lstat each), changed ones re-read, then the
-  // answer comes from the store. A scan longer than cfg.duWaitMs answers 202 {jobId} and keeps running; poll GET /api/jobs/<id>
-  // until it is done, then repeat the request: it is then answered from the store with cached:true.
-  const duJobs = new Map<string, { id: string; detached: boolean }>();
+  // answer is read from the store under the scan's lock. A scan longer than cfg.duWaitMs answers 202 {jobId} and keeps
+  // running; poll GET /api/jobs/<id> until it is done, then repeat the request: for a minute it is answered from that scan.
+  interface DuRun {
+    id: string;
+    detached: boolean;
+    out?: { tree: { entries: DuEntry[]; truncated: boolean } | undefined; read: number };
+  }
+  const duRuns = new Map<string, DuRun>();
   const DETACHED_KEEP_MS = 60_000;
   app.get("/api/du", async (c) => {
+    const arrived = Date.now();
     const q = c.req.query.bind(c.req);
     const depth = q("depth") === undefined ? 1 : Number(q("depth"));
     if (!Number.isInteger(depth) || depth < 0 || depth > 64) throw bad("depth must be an integer between 0 and 64");
@@ -328,39 +343,49 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
-    const key = `${r.virtual}\0${fresh}`;
-    // a request for a folder that is already being scanned joins that scan
-    const known = duJobs.get(key);
-    let v = known ? jobs.get(known.id) : undefined;
-    // the repeat of a request that got 202 is answered from what that scan stored, for a minute
-    const finishedDetached = !!known?.detached && v?.state === "done" && Date.now() - (v.finishedAt ?? 0) < DETACHED_KEEP_MS;
-    if (finishedDetached) duJobs.delete(key);
-    else if (!v || (v.state !== "queued" && v.state !== "running")) {
-      v = await startScan("du", r.virtual, fresh);
-      duJobs.set(key, { id: v.id, detached: false });
+    const key = [r.virtual, depth, all, fresh].join("\0");
+    // an identical request joins the scan already running (or the one that got 202 within the last minute)
+    let run = duRuns.get(key);
+    let v = run && jobs.get(run.id);
+    const replay = !!run?.detached && v?.state === "done";
+    if (!run || !v || (v.state !== "queued" && v.state !== "running" && !replay)) {
+      const mine: DuRun = { id: "", detached: false };
+      run = mine;
+      v = startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }));
+      mine.id = v.id;
+      duRuns.set(key, mine);
     }
-    const id = v!.id;
-    const signal = c.req.raw.signal;
-    const until = Date.now() + cfg.duWaitMs;
-    while ((v!.state === "queued" || v!.state === "running") && Date.now() < until && !signal.aborted) {
-      await new Promise((res) => setTimeout(res, 20));
-      v = jobs.get(id) ?? { ...v!, state: "failed", error: "job lost" };
+    const id = run.id;
+    const forget = () => {
+      if (duRuns.get(key) === run) duRuns.delete(key);
+    };
+    try {
+      const signal = c.req.raw.signal;
+      while ((v!.state === "queued" || v!.state === "running") && Date.now() < arrived + cfg.duWaitMs && !signal.aborted) {
+        await new Promise((res) => setTimeout(res, 20));
+        v = jobs.get(id) ?? { ...v!, state: "failed", error: "job lost" };
+      }
+      if (v!.state === "queued" || v!.state === "running") {
+        // keep the entry for the repeat request; the job goes on whether or not this client is still there
+        if (!run.detached) setTimeout(forget, DETACHED_KEEP_MS).unref();
+        run.detached = true;
+        return c.json({ jobId: id, state: v!.state }, 202);
+      }
+      if (v!.state === "canceled") throw new ops.FsError(409, "canceled");
+      if (v!.state === "failed") throw new ops.FsError(500, v!.error ?? "failed");
+      const { res } = v!.result as { res: SizeResult };
+      if (res.truncated) {
+        // A capped scan is never stored: answer with the partial totals of the folder alone.
+        return c.json({ path: r.virtual, entries: [{ path: r.virtual, type: "dir", bytes: res.bytes, diskBytes: res.diskBytes, files: res.files, dirs: res.dirs }], cached: false, truncated: true, watched: false });
+      }
+      const t = run.out?.tree;
+      if (!t?.entries.length) throw new ops.FsError(404, "not found");
+      // cached: nothing was read from disk and the answer comes from the database (not from a degraded, uncached store)
+      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || run.out!.read === 0) && sizes.persistent, truncated: t.truncated, watched: false });
+    } finally {
+      if (!run.detached) forget();
+      else if (replay) forget();
     }
-    if (v!.state === "queued" || v!.state === "running") {
-      duJobs.set(key, { id, detached: true });
-      return c.json({ jobId: id, state: v!.state }, 202);
-    }
-    if (v!.state === "canceled") throw new ops.FsError(409, "canceled");
-    if (v!.state === "failed") throw new ops.FsError(500, v!.error ?? "failed");
-    const { res, read: scanned } = v!.result as { res: SizeResult; read: number };
-    const read = finishedDetached ? 0 : scanned;
-    if (res.truncated) {
-      // A capped scan is never stored: answer with the partial totals of the folder alone.
-      return c.json({ path: r.virtual, entries: [{ path: r.virtual, type: "dir", bytes: res.bytes, diskBytes: res.diskBytes, files: res.files, dirs: res.dirs }], cached: false, truncated: true, watched: false });
-    }
-    const t = await sizes.tree(r.virtual, depth, all);
-    if (!t.entries.length) throw new ops.FsError(404, "not found");
-    return c.json({ path: r.virtual, entries: t.entries, cached: read === 0, truncated: t.truncated, watched: false });
   });
 
   // Immediate for one entry; recursive changes run as a job (202 + job view).
