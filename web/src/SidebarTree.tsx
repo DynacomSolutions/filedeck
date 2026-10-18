@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star, Trash2 } from "lucide-react";
-import { type Entry, type Mount, type NodeInfo } from "./api";
+import { fmtSize, type Entry, type Mount, type NodeInfo } from "./api";
 import { listFetcher, listKey as swrListKey, mountsFetcher, mountsKey } from "./data";
 import { listState } from "./sidebarState";
 import { SkeletonTreeRows } from "./Skeleton";
@@ -9,14 +9,14 @@ import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks,
 import { copyText } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
-import { EXPANDED_KEY, flatten, isOpen, navigate, parseExpanded, rovingId, setOpen, type ExpandState, type TreeNodeBase } from "./sidebarTree";
+import { EXPANDED_KEY, flatten, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, usagePct, type ExpandState, type TreeNodeBase, type Usage } from "./sidebarTree";
 
 export type How = "here" | "panel";
 
 type Listing = { status: "loading" } | { status: "ready"; dirs: Entry[]; truncated: boolean } | { status: "error"; error: string };
 type MountsState = { status: "loading" } | { status: "ready"; mounts: Mount[] } | { status: "error"; error: string };
 
-interface TNode extends TreeNodeBase {
+export interface TNode extends TreeNodeBase {
   kind: "section" | "node" | "mount" | "dir" | "bookmark" | "trash";
   label: string;
   icon: React.ReactNode;
@@ -26,6 +26,8 @@ interface TNode extends TreeNodeBase {
   defaultOpen: boolean;
   tip?: string;
   extra?: React.ReactNode;
+  /** disk usage: draws the bar under the label and fills the popover */
+  usage?: Usage;
   children?: TNode[];
   /** what to fetch when the row is open and nothing is loaded yet */
   load?: "dir" | "mounts";
@@ -76,6 +78,27 @@ const loadStored = (): ExpandState => {
 /** Tooltip only when the row's label is cut off. */
 const truncated = (wrap: HTMLElement) => [...wrap.querySelectorAll<HTMLElement>(".st-label,.st-sub")].some((el) => el.scrollWidth > el.clientWidth);
 
+export function UsageBar({ usage }: { usage: Usage }) {
+  const p = usagePct(usage);
+  return <span className="st-bar" role="img" aria-label={`${p}% used`}><i style={{ width: `${p}%` }} /></span>;
+}
+
+/** Popover content: the full label, what the row points at, and the size details when known. */
+export function Popover({ t }: { t: TNode }) {
+  return (
+    <span className="st-pop">
+      <b>{t.label}</b>
+      {t.tip && <span className="st-pop-tip">{t.tip}</span>}
+      {t.usage && (
+        <>
+          <span>{fmtSize(t.usage.used)} of {fmtSize(t.usage.total)} used ({usagePct(t.usage)}%)</span>
+          <UsageBar usage={t.usage} />
+        </>
+      )}
+    </span>
+  );
+}
+
 export interface NodesState {
   nodes: NodeInfo[] | undefined;
   error?: unknown;
@@ -122,8 +145,9 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
     const nodeRow = (n: NodeInfo): TNode => {
       const id = "n:" + n.name;
       const t: TNode = { id, kind: "node", label: n.name, icon: <span className={"dot " + (n.online ? "on" : "off")} aria-hidden="true" />, node: n.name, path: "/", expandable: n.online, defaultOpen: false, offline: !n.online, tip: n.online ? undefined : "Offline" };
-      if (!n.online || !isOpen(expanded, id, false)) return t;
       const m = mounts[n.name];
+      if (n.online && m?.status === "ready") t.usage = serverUsage(m.mounts) ?? undefined;
+      if (!n.online || !isOpen(expanded, id, false)) return t;
       const kids: TNode[] = [dirNode(id, n.name, "/", { name: "/ (root)" } as Entry), { id: `${id}:trash`, kind: "trash", label: "Trash", icon: <Trash2 />, node: n.name, expandable: false, defaultOpen: false }];
       if (m?.status === "ready")
         for (const x of m.mounts) {
@@ -135,9 +159,9 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
             <>
               {x.network && <span className={"net-badge" + (x.unreachable ? " bad" : "")}>{x.netKind ?? "network"}</span>}
               {x.readOnly && <span className="net-badge">read-only</span>}
-              <span className="st-bar" aria-label={`${x.total ? Math.round((x.used / x.total) * 100) : 0}% used`}><i style={{ width: `${x.total ? Math.round((x.used / x.total) * 100) : 0}%` }} /></span>
             </>
           );
+          if (x.total > 0) mt.usage = { used: x.used, total: x.total };
           kids.push(mt);
         }
       t.children = kids;
@@ -195,8 +219,11 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       if (!t?.load || !r.expanded || !t.node) continue;
       out.push(t.load === "mounts" ? { k: "m\0" + t.node, kind: "mounts", node: t.node, path: "" } : { k: listKey(t.node, t.path!), kind: "dir", node: t.node, path: t.path! });
     }
+    // Server rows show a size bar, so every online node's mounts are read, not only the expanded ones.
+    for (const n of cluster) if (n.online && !out.some((w) => w.k === "m\0" + n.name)) out.push({ k: "m\0" + n.name, kind: "mounts", node: n.name, path: "" });
     return out;
-  }, [rows, byId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, byId, nodes]);
   const onDirs = useCallback((k: string, l: Listing) => setListings((x) => (sameListing(x[k], l) ? x : { ...x, [k]: l })), []);
   const onMounts = useCallback((node: string, m: MountsState) => setMounts((x) => (sameMounts(x[node], m) ? x : { ...x, [node]: m })), []);
 
@@ -290,6 +317,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
         aria-keyshortcuts={hasMenu ? "Shift+F10" : undefined}
         tabIndex={tabId === t.id ? 0 : -1}
         className={"st-main" + (t.kind === "section" ? " st-sec" : "")}
+        style={{ ["--lvl" as string]: level }}
         onFocus={() => setFocusId(t.id)}
         onKeyDown={(e) => onKeyDown(e, t)}
         onClick={(e) => {
@@ -311,17 +339,20 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
           if (items.length) setMenu({ x: e.clientX, y: e.clientY, items });
         }}
       >
-        {Array.from({ length: level - 1 }, (_, i) => <span key={i} className="st-guide" aria-hidden="true" />)}
-        <span className={"st-chev" + (t.expandable ? "" : " none") + (isExp ? " open" : "")} aria-hidden="true">{t.expandable && <ChevronRight />}</span>
-        <span className="st-icon" aria-hidden="true">{t.icon}</span>
-        <span className="st-label">{t.label}</span>
-        {t.extra}
+        <span className="st-line">
+          {Array.from({ length: level - 1 }, (_, i) => <span key={i} className="st-guide" aria-hidden="true" />)}
+          <span className={"st-chev" + (t.expandable ? "" : " none") + (isExp ? " open" : "")} aria-hidden="true">{t.expandable && <ChevronRight />}</span>
+          <span className="st-icon" aria-hidden="true">{t.icon}</span>
+          <span className="st-label">{t.label}</span>
+          {t.extra}
+        </span>
+        {t.usage && <UsageBar usage={t.usage} />}
       </button>
     );
     return (
       <li key={t.id} role="none" className={"st-item" + (t.kind === "section" ? " sec" : "")}>
         <div className={"st-row" + (tabId === t.id ? " cur" : "") + (t.offline ? " off" : "")}>
-          {t.tip ? <Tip label={t.tip} besideOf=".side" when={truncated}>{main}</Tip> : main}
+          {t.tip || t.usage ? <Tip label={<Popover t={t} />} besideOf=".side" when={(w) => !!t.usage || truncated(w)}>{main}</Tip> : main}
           {hasMenu && (
             <Tip label="Actions">
               <button type="button" className="st-more" tabIndex={-1} aria-label={`Actions for ${t.label}`} aria-hidden="true" disabled={!mark && t.kind !== "trash"} onClick={(e) => showMenu(t, e.currentTarget)}><Ellipsis /></button>

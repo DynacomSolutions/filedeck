@@ -22,8 +22,13 @@
 .st-icon svg{width:15px;height:15px}
 .st-label{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .st-sub{font-size:.68rem;margin-left:.1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.st-bar{flex:0 0 100%;height:3px;background:var(--surface-3);border-radius:2px}.st-bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
-.st-main:has(.st-bar){flex-wrap:wrap}
+.st-bar{display:block;height:3px;background:var(--surface-3);border-radius:2px}.st-bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
+.side-scroll .st-row button.st-main{flex-direction:column;align-items:stretch;justify-content:center;gap:.2rem}
+.st-line{display:flex;align-items:center;gap:.35rem;min-width:0}
+/* the bar's left edge lines up with the folder icon: guides + chevron, each followed by the line gap */
+.st-main>.st-bar{flex:none;margin-left:calc((var(--lvl,1) - 1) * (14px + .35rem) + 18px + .35rem)}
+.st-pop{display:flex;flex-direction:column;gap:.15rem;min-width:10rem}.st-pop-tip{opacity:.75;font-weight:400}
+.st-pop .st-bar{background:color-mix(in srgb,currentColor 25%,transparent)}.st-pop .st-bar i{background:currentColor}
 .st-sec .st-icon{display:none}
 .side-scroll .st-row button.st-more{flex:none;width:24px;height:24px;min-height:0;padding:0;margin-right:2px;justify-content:center;color:var(--muted);background:transparent;box-shadow:none;opacity:0;width:24px}
 .st-row:hover button.st-more,.st-row:focus-within button.st-more,.st-row button.st-more:focus-visible{opacity:1}
