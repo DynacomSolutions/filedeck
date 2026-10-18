@@ -15,4 +15,4 @@
 ETA: 2026-10-18 18:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| FD-8 | Sidebar tree: long labels truncate with an ellipsis and a hover popover (label, size, percentage, bar); size bar sits under the label aligned with the folder icon; top-level server rows get a size bar | in_progress | claude-20261018-tree-label-ellipsis | tree-label-ellipsis | | 2026-10-18 18:00 ICT | |
+| FD-8 | Sidebar tree: long labels truncate with an ellipsis and a hover popover (label, size, percentage, bar); size bar sits under the label aligned with the folder icon; top-level server rows get a size bar | in_review | claude-20261018-tree-label-ellipsis | tree-label-ellipsis | | 2026-10-18 18:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/51 |
