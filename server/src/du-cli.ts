@@ -8,10 +8,11 @@ export interface DuOptions {
   apparent: boolean;
   fresh: boolean;
   json: boolean;
+  timeout: number;
   targets: { node: string; path: string }[];
 }
 
-export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/path...
+export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] [--timeout SECONDS] node:/path...
   -s, --summarize     only a total for each argument (same as -d 0)
   -h, --human-readable  sizes like 1.5K, 23M
   -d, --max-depth=N   print entries only N or fewer levels below the argument (0 to 64)
@@ -19,12 +20,13 @@ export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size]
       --apparent-size print apparent sizes (bytes) instead of disk usage
       --fresh         re-read every folder instead of reusing stored sizes
       --json          print the hub's answer as JSON
+      --timeout SECONDS  give up after this long in total (default 3600)
 environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token)`;
 
 export class UsageError extends Error {}
 
 export function parseArgs(argv: string[]): DuOptions {
-  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, json: false, targets: [] };
+  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, json: false, timeout: 3600, targets: [] };
   const depth = (v: string | undefined) => {
     if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`invalid maximum depth '${v ?? ""}'`);
     return Number(v);
@@ -45,7 +47,11 @@ export function parseArgs(argv: string[]): DuOptions {
       else if (name === "--apparent-size") o.apparent = true;
       else if (name === "--fresh") o.fresh = true;
       else if (name === "--json") o.json = true;
-      else if (name === "--max-depth") o.depth = depth(val ?? argv[++i]);
+      else if (name === "--timeout") {
+        const v = val ?? argv[++i];
+        if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1) throw new UsageError(`invalid timeout '${v ?? ""}'`);
+        o.timeout = Number(v);
+      } else if (name === "--max-depth") o.depth = depth(val ?? argv[++i]);
       else throw new UsageError(`unrecognized option '${a}'`);
     } else {
       for (let j = 1; j < a.length; j++) {
@@ -164,11 +170,12 @@ export async function run(argv: string[], env: Record<string, string | undefined
     io.err("filedeck du: set FILEDECK_URL and FILEDECK_TOKEN\n");
     return 2;
   }
-  const headers = { authorization: `Bearer ${token}` };
+  const headers = { "x-filedeck-token": token };
+  const deadline = io.now() + o.timeout * 1000;
   const get = async (url: string) => {
     let r: Response;
     try {
-      r = await io.fetch(url, { headers, redirect: "manual" });
+      r = await io.fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(Math.max(1, deadline - io.now())) });
     } catch (e) {
       throw new Error(`cannot reach ${base}: ${(e as Error).message}`);
     }
@@ -193,6 +200,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
         polled = true;
         const { jobId } = (await r.json()) as { jobId: string };
         for (;;) {
+          if (io.now() > deadline) throw new Error(`timed out after ${o.timeout} s`);
           const jr = await get(`${api}/jobs/${encodeURIComponent(jobId)}`);
           if (!jr.ok) throw new Error(`job ${jobId}: HTTP ${jr.status}`);
           const j = (await jr.json()) as Job;

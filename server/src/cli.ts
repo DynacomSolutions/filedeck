@@ -3,7 +3,7 @@ import { run } from "./du-cli.ts";
 
 const [cmd, ...args] = process.argv.slice(2);
 if (cmd !== "du") {
-  process.stderr.write("usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/path...\n");
+  process.stderr.write("usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] [--timeout SECONDS] node:/path...\n");
   process.exit(2);
 }
 process.exitCode = await run(args, process.env, {

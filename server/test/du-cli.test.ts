@@ -37,7 +37,8 @@ function harness(responses: (url: string) => Response | Promise<Response>) {
   const io: RunIo = {
     fetch: (async (u: string, init?: RequestInit) => {
       calls.push(u);
-      assert.equal((init?.headers as Record<string, string>).authorization, "Bearer tok");
+      assert.equal((init?.headers as Record<string, string>)["x-filedeck-token"], "tok");
+      assert.equal((init?.headers as Record<string, string>).authorization, undefined);
       return responses(u);
     }) as never,
     out: (s) => out.push(s),
@@ -111,4 +112,14 @@ test("--json prints the answer with the node", async () => {
   const h = harness(() => j({ path: "/", entries: [E("/", 1)], cached: false, truncated: false, watched: false }));
   await run(["--json", "n:/"], env, h.io);
   assert.equal(JSON.parse(h.out.join("")).node, "n");
+});
+
+test("--timeout gives up while polling", async () => {
+  let t = 0;
+  const h = harness((u) => (u.includes("/jobs/") ? j({ state: "running" }) : j({ jobId: "J", state: "running" }, 202)));
+  h.io.now = () => (t += 40_000);
+  assert.equal(await run(["--timeout", "100", "n:/"], env, h.io), 1);
+  assert.match(h.err.join(""), /timed out after 100 s/);
+  assert.equal(parseArgs(["--timeout=5", "n:/"]).timeout, 5);
+  assert.throws(() => parseArgs(["--timeout", "0", "n:/"]), UsageError);
 });

@@ -84,7 +84,7 @@ Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_
 A `du` for the folders on your nodes, answered from the hub's stored folder sizes instead of walking the disk each time.
 
 ```sh
-filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/path...
+filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] [--timeout SECONDS] node:/path...
 ```
 
 | Flag | Meaning |
@@ -95,12 +95,15 @@ filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/pat
 | `--apparent-size` | Bytes of content instead of disk usage |
 | `--fresh` | Re-read every folder instead of reusing stored sizes |
 | `--json` | Print the hub's answer as JSON (one object per argument) |
+| `--timeout SECONDS` | Give up on an argument after this long in total (default 3600) and exit 1 |
 
 Without `-h` the unit is 1 KiB blocks, as in `du`. Children are printed before their parent. Paths are `node:/path`, where `node` is a node name from the sidebar. A long scan answers with a job; the CLI polls it and prints progress on stderr. When the answer comes from stored sizes it says so on stderr (with the age of the oldest folder), because changes since the last scan may be missing; `--fresh` avoids that. Exit status is 0 on success, 1 if any argument failed, 2 for a usage or configuration error.
 
 Environment: `FILEDECK_URL` (hub base URL, for example `https://filedeck.example.org`) and `FILEDECK_TOKEN` (the read-only token).
 
-Token setup: create a Secret with a long random value (`kubectl create secret generic filedeck-api-token --from-literal=token="$(openssl rand -base64 48)"`) and set `apiToken.secretName: filedeck-api-token` in the chart values; the hub reads it as `FILEDECK_API_TOKEN` (or the file named by `FILEDECK_API_TOKEN_FILE`). A request with `Authorization: Bearer <token>` may then call only `GET /api/nodes/<node>/api/du` and `GET /api/nodes/<node>/api/jobs/<id>` for du jobs; every other route answers 403 to it, a wrong token 401. Requests without that header are handled as before. Unset, the feature is off.
+Token setup: create a Secret with a long random value (`kubectl create secret generic filedeck-api-token --from-literal=token="$(openssl rand -base64 48)"`) and set `apiToken.secretName: filedeck-api-token` in the chart values; the hub reads it as `FILEDECK_API_TOKEN` (or the file named by `FILEDECK_API_TOKEN_FILE`). The CLI sends the token in the header `X-Filedeck-Token: <token>`; `Authorization` is never read or changed, so an ingress or OIDC login in front of the hub keeps working. A request with a matching `X-Filedeck-Token` may call only `GET /api/nodes/<node>/api/du` and `GET /api/nodes/<node>/api/jobs/<id>` for du jobs; every other route answers 403. If the header is present with any other value (wrong, empty, repeated), or present while the feature is off, the answer is 401. The hub removes the header before it talks to an agent. Requests without the header are handled as before. Unset, the feature is off.
+
+Ingress rule: skip login only when `X-Filedeck-Token` is present; the hub then enforces the token and the du-only scope itself, so a request carrying the header with anything else is refused.
 
 Run it from the image (`filedeck du ...` is on the `PATH`), from a checkout after `npm run build` (`npx filedeck du ...` or `node server/dist/cli.js du ...`), or anywhere with Node 22 and the built `server/dist`.
 
