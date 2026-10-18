@@ -1,8 +1,6 @@
 # Tasks
 
 ## 1. File panel keyboard navigation
-ETA: 2026-10-15 20:00 ICT
-
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-1 | Type-ahead search in the file panel: letters typed in quick succession jump to the first name with that prefix; the buffer resets after a short pause | done | claude-20261010-typeahead | typeahead-nav | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/41. CI green on 268c691; `web` tests 79/79 passing, typecheck clean. Not checked in a browser. |
@@ -11,4 +9,4 @@ ETA: 2026-10-15 20:00 ICT
 | FD-4 | Release v0.3.5 so the type-ahead fix (FD-1) deploys | done | claude-20261010-typeahead | release-v035 | | | Release run 37995971381 succeeded; filedeck-hub and agents eu3, eu4, hq0, hq1 run ghcr.io/dynacomsolutions/filedeck:0.3.5, Argo app Synced Healthy. |
 | FD-5 | Git column wide enough to show the branch name in folder git pills (was cut to one letter) | done | claude-20261010-typeahead | git-pill-width | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/45; GIT_COL_W 72 to 144. Not checked in a browser. |
 | FD-6 | Release v0.3.6 so FD-5 deploys | done | claude-20261010-typeahead | git-pill-width | | | Release succeeded; filedeck-hub and agents eu3, eu4, hq0, hq1 run ghcr.io/dynacomsolutions/filedeck:0.3.6, Argo app Synced Healthy. |
-| FD-7 | Release v0.3.7 so the S3 test source image fix (#47) deploys | in_review | claude-20261015-filedeck-test-s3 | release-v037 | | 2026-10-15 20:00 ICT | 77.CLUSTER-233: filedeck-test-s3 ImagePullBackOff because quay.io/minio/minio is disabled upstream; #47 switched to pgsty/minio. |
+| FD-7 | Release v0.3.7 so the S3 test source image fix (#47) deploys | done | claude-20261015-filedeck-test-s3 | release-v037 | | | 77.CLUSTER-233: filedeck-test-s3 ImagePullBackOff because quay.io/minio/minio is disabled upstream; fixed in PR https://github.com/DynacomSolutions/filedeck/pull/47 (pgsty/minio), release prep in PR https://github.com/DynacomSolutions/filedeck/pull/48. Release run 38727321325 succeeded; filedeck-hub and agents eu3, eu4, hq0, hq1 run ghcr.io/dynacomsolutions/filedeck:0.3.7, filedeck-test-s3 runs pgsty/minio, Argo app Synced Healthy. |
