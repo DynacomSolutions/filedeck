@@ -90,7 +90,7 @@ export class SizeStore {
   private q!: Record<"get" | "put" | "kids" | "delTree", StatementSync>;
   private held: { path: string; done: Promise<void> }[] = [];
   private warned = false;
-  /** nodes of the latest few walks, kept only while the database is unusable so `tree` can still answer */
+  /** nodes of the latest walks (up to maxEntries rows in total), kept only while the database is unusable so `tree` can still answer */
   private walks: Map<string, Row>[] = [];
 
   constructor(
@@ -393,7 +393,10 @@ export class SizeStore {
 
   private keep(nodes: Map<string, Row>) {
     this.walks.push(nodes);
-    if (this.walks.length > 4) this.walks.shift();
+    // bounded by rows in total, oldest first; the newest walk is always kept
+    let rows = 0;
+    for (const w of this.walks) rows += w.size;
+    while (this.walks.length > 1 && rows > this.o.maxEntries) rows -= this.walks.shift()!.size;
   }
 
   /** false once the database is unusable: nothing is cached any more */

@@ -344,6 +344,11 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
     const key = [r.virtual, depth, all, fresh].join("\0");
+    // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
+    for (const [k, d] of duRuns) {
+      const j = jobs.get(d.id);
+      if (!j || (j.state !== "queued" && j.state !== "running" && Date.now() - (j.finishedAt ?? 0) > DETACHED_KEEP_MS)) duRuns.delete(k);
+    }
     // an identical request joins the scan already running (or the one that got 202 within the last minute)
     let run = duRuns.get(key);
     let v = run && jobs.get(run.id);
@@ -367,7 +372,6 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       }
       if (v!.state === "queued" || v!.state === "running") {
         // keep the entry for the repeat request; the job goes on whether or not this client is still there
-        if (!run.detached) setTimeout(forget, DETACHED_KEEP_MS).unref();
         run.detached = true;
         return c.json({ jobId: id, state: v!.state }, 202);
       }

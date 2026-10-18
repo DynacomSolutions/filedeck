@@ -546,3 +546,59 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
     (fsp as { readdir: unknown }).readdir = orig;
   }
 });
+
+// ---- round 4 ----
+
+test("a detached du scan running past a minute is still joined by the repeat request, which then gets the result", async (t) => {
+  const root = fs.mkdtempSync(path.join(tmp, "det-"));
+  fs.mkdirSync(path.join(root, "big/sub"), { recursive: true });
+  let open!: () => void;
+  const gate = new Promise<void>((r) => (open = r));
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+    if (String(p) === path.join(root, "big")) await gate;
+    return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
+  };
+  t.mock.timers.enable({ apis: ["Date"] });
+  try {
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "0" } as never));
+    const du = async () => app.request("/api/du?path=/big&fresh=1");
+    const first = await du();
+    assert.equal(first.status, 202);
+    const { jobId } = (await first.json()) as { jobId: string };
+    t.mock.timers.tick(61_000);
+    const again = await du();
+    assert.equal(again.status, 202);
+    assert.equal(((await again.json()) as { jobId: string }).jobId, jobId);
+    open();
+    for (let i = 0; i < 200; i++) {
+      const j = (await (await app.request(`/api/jobs/${jobId}`)).json()) as { state: string };
+      if (j.state === "done") break;
+      await sleep(20);
+    }
+    const last = await du();
+    assert.equal(last.status, 200);
+    assert.equal(((await last.json()) as { entries: unknown[] }).entries.length, 2);
+  } finally {
+    t.mock.timers.reset();
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
+});
+
+test("uncached store keeps at most maxEntries rows across remembered walks", async () => {
+  fs.mkdirSync(at("cap/a/x"), { recursive: true });
+  fs.mkdirSync(at("cap/b/y"), { recursive: true });
+  fs.writeFileSync(at("cap/file"), "");
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    const s = new SizeStore(at("cap/file/sizes.db"), { root: at("cap"), ttlMs: 60_000, maxEntries: 3 });
+    await s.scan("/a");
+    await s.scan("/b");
+    assert.equal((await s.tree("/a", 1, false)).entries.length, 0); // evicted: 2 + 2 rows > 3
+    assert.equal((await s.tree("/b", 1, false)).entries.length, 2);
+    s.close();
+  } finally {
+    console.error = orig;
+  }
+});
