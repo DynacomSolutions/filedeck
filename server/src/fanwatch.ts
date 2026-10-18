@@ -61,6 +61,7 @@ export class FanWatch {
   private stopped = false;
   private warned = false;
   private marks: string[] = [];
+  private unwatched: string[] = [];
   private settleMs: number;
   private modifyMs: number;
 
@@ -91,7 +92,9 @@ export class FanWatch {
   async start(): Promise<void> {
     if (!this.o.helper || this.proc || this.stopped) return;
     try {
-      const mounts = (await listMounts(this.o.root, this.o.procMounts)).filter((m) => !m.network && !m.unreachable);
+      const all = await listMounts(this.o.root, this.o.procMounts);
+      const mounts = all.filter((m) => !m.network && !m.unreachable);
+      this.unwatched = all.filter((m) => m.network || m.unreachable).map((m) => m.mountpoint);
       const hostPaths = mounts.map((m) => (this.o.root === "/" ? m.mountpoint : this.o.root + (m.mountpoint === "/" ? "" : m.mountpoint)));
       this.marks = mounts.map((m) => m.mountpoint);
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
@@ -127,6 +130,18 @@ export class FanWatch {
     } catch (e) {
       this.warn((e as Error).message);
     }
+  }
+
+  /**
+   * True when the helper is running and `virtual` lies on a watched filesystem with no unwatched one below it, so stored sizes are kept current.
+   * Overflow and exit mark the rows stale, so the next read re-scans them and is current again.
+   */
+  covers(virtual: string): boolean {
+    if (!this.proc) return false;
+    const under = (dir: string, v: string) => dir === "/" || v === dir || v.startsWith(dir + "/");
+    const home = (v: string, dirs: string[]) => dirs.filter((d) => under(d, v)).reduce((a, d) => Math.max(a, d.length), -1);
+    if (home(virtual, this.marks) <= home(virtual, this.unwatched)) return false;
+    return !this.unwatched.some((d) => d !== virtual && under(virtual, d));
   }
 
   stop() {

@@ -263,6 +263,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const index = registerDiffRoutes(app, cfg);
   registerGitDiffRoutes(app, cfg);
   const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts });
+  sizes.covers = (v) => fan.covers(v);
   void fan.start();
   (app as unknown as { close: () => Promise<void> }).close = async () => {
     fan.stop();
