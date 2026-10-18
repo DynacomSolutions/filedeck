@@ -21,7 +21,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # Old pod keeps serving until the new one is Ready. Both pods briefly share the hostPath index; it is SQLite in WAL mode with a busy timeout and only a cache, so that is safe.
+    # Old pod keeps serving until the new one is Ready. Both pods briefly share the hostPath index; it is SQLite in WAL mode with a busy timeout (a busy file is never deleted) and only a cache, so that is safe.
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1

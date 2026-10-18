@@ -23,9 +23,11 @@ export function installShutdown(server: Server, cleanup: () => Promise<void> | v
     setTimeout(() => exit(1), hardMs).unref();
     const drain = setTimeout(() => server.closeAllConnections(), drainMs);
     drain.unref();
-    server.close(); // stops listening now; the close event fires once every socket is gone
+    // Registered before close(): the callback fires only when the last socket is gone, not when listening stops.
+    const drained = new Promise<void>((r) => server.close(() => r()));
     server.closeIdleConnections();
-    const closed = new Promise<void>((r) => (server.listening ? server.once("close", () => r()) : r()));
-    void Promise.allSettled([Promise.resolve().then(cleanup), closed]).then(() => exit(0));
+    void drained.then(() => clearTimeout(drain));
+    // Cleanup (database handles, source backends) runs only after in-flight requests are done or cut.
+    void drained.then(() => cleanup()).catch(() => undefined).then(() => exit(0));
   };
 }
