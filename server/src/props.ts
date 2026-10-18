@@ -7,6 +7,7 @@ import { parseMounts, networkKind } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
 import type { JobCtl, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
+import { SizeStore, type DuEntry } from "./size-store.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -121,86 +122,6 @@ export interface SizeResult {
 }
 
 const tick = () => new Promise<void>((r) => setImmediate(r));
-
-/**
- * Bounded, cancellable `du`: never follows symlinks, never crosses into another
- * device, skips the trash store, caps the number of entries, and yields to the
- * event loop between batches so it stays gentle on the disk.
- */
-export async function folderSize(root: string, p: string, maxEntries: number, ctl: JobCtl): Promise<SizeResult> {
-  const start = resolveRead(root, p);
-  const st = await fs.stat(start.real);
-  const res: SizeResult = { path: start.virtual, files: 0, dirs: 0, symlinks: 0, other: 0, bytes: 0, diskBytes: 0, truncated: false, mountsSkipped: 0, errors: 0 };
-  if (!st.isDirectory()) {
-    res.files = 1;
-    res.bytes = st.size;
-    res.diskBytes = Number(st.blocks) * 512;
-    return res;
-  }
-  const dev = st.dev;
-  const stack = [start.real];
-  let seen = 0;
-  while (stack.length) {
-    if (ctl.signal.aborted) throw bad("canceled");
-    const dir = stack.pop()!;
-    ctl.progress.current = dir.slice(root === "/" ? 0 : root.length) || "/";
-    let names: string[];
-    try {
-      names = await fs.readdir(dir);
-    } catch {
-      res.errors++;
-      continue;
-    }
-    for (let i = 0; i < names.length; i += 32) {
-      if (ctl.signal.aborted) throw bad("canceled");
-      const got = await Promise.all(
-        names.slice(i, i + 32).map(async (n) => {
-          if (n === TRASH_DIR) return null;
-          const real = path.join(dir, n);
-          try {
-            return { real, s: await fs.lstat(real) };
-          } catch {
-            res.errors++;
-            return null;
-          }
-        }),
-      );
-      for (const g of got) {
-        if (!g) continue;
-        if (seen >= maxEntries) {
-          res.truncated = true;
-          stack.length = 0;
-          return finish(res, ctl);
-        }
-        seen++;
-        const size = Number(g.s.size);
-        const disk = Number(g.s.blocks) * 512;
-        if (g.s.isDirectory()) {
-          res.dirs++;
-          res.diskBytes += disk;
-          if (g.s.dev !== dev) res.mountsSkipped++;
-          else stack.push(g.real);
-        } else if (g.s.isSymbolicLink()) {
-          res.symlinks++;
-          res.diskBytes += disk;
-        } else if (g.s.isFile()) {
-          res.files++;
-          res.bytes += size;
-          res.diskBytes += disk;
-        } else res.other++;
-      }
-      ctl.progress.entries = seen;
-      ctl.progress.bytes = res.bytes;
-      await tick();
-    }
-  }
-  return finish(res, ctl);
-}
-function finish(res: SizeResult, ctl: JobCtl) {
-  ctl.progress.bytes = res.bytes;
-  ctl.progress.entries = res.files + res.dirs + res.symlinks + res.other;
-  return res;
-}
 
 // ---- permissions ----
 
@@ -363,7 +284,11 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
   return res;
 }
 
-export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
+const flag = (v: string | undefined) => v === "1";
+
+/** The size store lives next to the compare index; its `du` is a bounded, cancellable walk that reuses unchanged folders. */
+export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStore {
+  const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : ":memory:", { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
   const json = async <T,>(c: Context): Promise<T> => {
     try {
       return (await c.req.json()) as T;
@@ -373,13 +298,98 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
   };
   app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
 
+  // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
+  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
+    let release: (() => void) | undefined;
+    return jobs.create(
+      kind,
+      `Size of ${path.posix.basename(virtual) || "/"}`,
+      async (ctl) => {
+        const x = await sizes.scanRead(virtual, ctl, fresh, release, after);
+        done?.(x);
+        return kind === "size" ? x.res : { res: x.res, read: x.read };
+      },
+      () => release?.(),
+      async (signal) => void (release = await sizes.lock(virtual, signal)),
+    );
+  };
+
+  // "Calculate" in the properties dialog: exact, so every folder is re-read unless the caller says otherwise.
   app.post("/api/jobs/size", async (c) => {
-    const b = await json<{ path?: string }>(c);
+    const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
-    const job = jobs.create("size", `Size of ${path.posix.basename(r.virtual) || "/"}`, (ctl) => folderSize(cfg.root, r.virtual, cfg.walkMaxEntries, ctl));
-    return c.json(job, 202);
+    return c.json(startScan("size", r.virtual, b.fresh !== false), 202);
+  });
+
+  // GET /api/du?path=&depth=&all=&fresh=: unchanged folders are validated (one lstat each), changed ones re-read, then the
+  // answer is read from the store under the scan's lock. A scan longer than cfg.duWaitMs answers 202 {jobId} and keeps
+  // running; poll GET /api/jobs/<id> until it is done, then repeat the request: for a minute it is answered from that scan.
+  interface DuRun {
+    id: string;
+    detached: boolean;
+    out?: { tree: { entries: DuEntry[]; truncated: boolean } | undefined; read: number };
+  }
+  const duRuns = new Map<string, DuRun>();
+  const DETACHED_KEEP_MS = 60_000;
+  app.get("/api/du", async (c) => {
+    const arrived = Date.now();
+    const q = c.req.query.bind(c.req);
+    const depth = q("depth") === undefined ? 1 : Number(q("depth"));
+    if (!Number.isInteger(depth) || depth < 0 || depth > 64) throw bad("depth must be an integer between 0 and 64");
+    for (const k of ["all", "fresh"]) if (q(k) !== undefined && q(k) !== "0" && q(k) !== "1") throw bad(`${k} must be 0 or 1`);
+    const r = resolveRead(cfg.root, q("path") ?? "/");
+    if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
+    const all = flag(q("all"));
+    const fresh = flag(q("fresh"));
+    const key = [r.virtual, depth, all, fresh].join("\0");
+    // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
+    for (const [k, d] of duRuns) {
+      const j = jobs.get(d.id);
+      if (!j || (j.state !== "queued" && j.state !== "running" && Date.now() - (j.finishedAt ?? 0) > DETACHED_KEEP_MS)) duRuns.delete(k);
+    }
+    // an identical request joins the scan already running (or the one that got 202 within the last minute)
+    let run = duRuns.get(key);
+    let v = run && jobs.get(run.id);
+    const replay = !!run?.detached && v?.state === "done";
+    if (!run || !v || (v.state !== "queued" && v.state !== "running" && !replay)) {
+      const mine: DuRun = { id: "", detached: false };
+      run = mine;
+      v = startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }));
+      mine.id = v.id;
+      duRuns.set(key, mine);
+    }
+    const id = run.id;
+    const forget = () => {
+      if (duRuns.get(key) === run) duRuns.delete(key);
+    };
+    try {
+      const signal = c.req.raw.signal;
+      while ((v!.state === "queued" || v!.state === "running") && Date.now() < arrived + cfg.duWaitMs && !signal.aborted) {
+        await new Promise((res) => setTimeout(res, 20));
+        v = jobs.get(id) ?? { ...v!, state: "failed", error: "job lost" };
+      }
+      if (v!.state === "queued" || v!.state === "running") {
+        // keep the entry for the repeat request; the job goes on whether or not this client is still there
+        run.detached = true;
+        return c.json({ jobId: id, state: v!.state }, 202);
+      }
+      if (v!.state === "canceled") throw new ops.FsError(409, "canceled");
+      if (v!.state === "failed") throw new ops.FsError(500, v!.error ?? "failed");
+      const { res } = v!.result as { res: SizeResult };
+      if (res.truncated) {
+        // A capped scan is never stored: answer with the partial totals of the folder alone.
+        return c.json({ path: r.virtual, entries: [{ path: r.virtual, type: "dir", bytes: res.bytes, diskBytes: res.diskBytes, files: res.files, dirs: res.dirs }], cached: false, truncated: true, watched: false });
+      }
+      const t = run.out?.tree;
+      if (!t?.entries.length) throw new ops.FsError(404, "not found");
+      // cached: nothing was read from disk and the answer comes from the database (not from a degraded, uncached store)
+      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || run.out!.read === 0) && sizes.persistent, truncated: t.truncated, watched: false });
+    } finally {
+      if (!run.detached) forget();
+      else if (replay) forget();
+    }
   });
 
   // Immediate for one entry; recursive changes run as a job (202 + job view).
@@ -392,4 +402,5 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
     }
     return c.json(await applyPerms(cfg, plan));
   });
+  return sizes;
 }

@@ -257,11 +257,14 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
 
   const jobs = registerArchiveRoutes(app, cfg);
   registerPdfRoutes(app, cfg);
-  registerPropsRoutes(app, cfg, jobs);
+  const sizes = registerPropsRoutes(app, cfg, jobs);
   registerGitRoutes(app, cfg);
   const index = registerDiffRoutes(app, cfg);
   registerGitDiffRoutes(app, cfg);
-  (app as unknown as { close: () => Promise<void> }).close = async () => index.close();
+  (app as unknown as { close: () => Promise<void> }).close = async () => {
+    index.close();
+    sizes.close();
+  };
   registerSearchRoutes(app, cfg);
   registerGitWorktreeRoutes(app, cfg);
   registerThumbRoutes(app, cfg);

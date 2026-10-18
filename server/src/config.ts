@@ -28,6 +28,8 @@ export interface Config {
   indexWatches: number;
   /** compare index: trust an unwatched listing with an unchanged directory mtime for this long */
   indexRevalidateMs: number;
+  /** `GET /api/du` answers 202 with a job id when its scan takes longer than this */
+  duWaitMs: number;
   listConcurrency: number;
   diffDir: string;
   /** search: concurrent searches per agent, per-file and total content bytes read */
@@ -105,6 +107,7 @@ export function loadConfig(env = process.env): Config {
     indexDir: env.FILEDECK_INDEX_DIR ?? "",
     indexWatches: Number(env.FILEDECK_INDEX_WATCHES ?? 32768),
     indexRevalidateMs: Number(env.FILEDECK_INDEX_REVALIDATE_MS ?? 30 * 60_000),
+    duWaitMs: Number(env.FILEDECK_DU_WAIT_MS ?? 10_000),
     listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
     diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),
     searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 2),

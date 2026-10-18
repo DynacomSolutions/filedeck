@@ -483,6 +483,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
   });
 
   // Archive jobs and live change events need local disk access; the SPA gets a clear answer.
+  app.get("/api/du", (c) => c.json({ error: "not supported on network sources" }, 501));
   app.all("/api/archive/*", (c) => c.json({ error: "not supported on network sources" }, 501));
   app.all("/api/jobs/*", (c) => c.json({ error: "not supported on network sources" }, 501));
   app.get("/api/events", (c) => c.json({ error: "not supported on network sources" }, 501));
