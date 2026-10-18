@@ -559,7 +559,7 @@ test("a detached du scan running past a minute is still joined by the repeat req
     if (String(p) === path.join(root, "big")) await gate;
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
-  t.mock.timers.enable({ apis: ["Date"] });
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   try {
     const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "0" } as never));
     const du = async () => app.request("/api/du?path=/big&fresh=1");
@@ -570,6 +570,7 @@ test("a detached du scan running past a minute is still joined by the repeat req
     const again = await du();
     assert.equal(again.status, 202);
     assert.equal(((await again.json()) as { jobId: string }).jobId, jobId);
+    t.mock.timers.reset();
     open();
     for (let i = 0; i < 200; i++) {
       const j = (await (await app.request(`/api/jobs/${jobId}`)).json()) as { state: string };
