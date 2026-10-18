@@ -5,8 +5,9 @@ description: Report folder and disk sizes on filedeck-managed nodes with `filede
 
 # filedeck du
 
-Filedeck keeps a cached size index of each managed node. Query it instead of
-scanning the disk: it answers in milliseconds and puts no I/O load on the node.
+Filedeck keeps a cached size index of each managed node. The first scan of a
+tree is a full walk; repeat queries reuse the cache and only re-read changed
+folders. Query it instead of running your own scans.
 
 ## When to use
 
@@ -16,29 +17,31 @@ scanning the disk: it answers in milliseconds and puts no I/O load on the node.
 
 ## Synopsis
 
-Matches 3.FD-11; the CLI is the source of truth if it differs.
-
 ```
 filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/path...
 ```
 
-- `-s` summary only, `-h` human-readable sizes, `-d N` depth limit.
-- `-a` include files, not only directories.
+- `-s`/`--summarize` total only, `-h`/`--human-readable` sizes like 1.5K,
+  `-d N`/`--max-depth=N` depth limit, `-a`/`--all` include files.
 - `--apparent-size` report file length instead of disk usage.
 - `--fresh` force a rescan (see below).
 - `--json` machine-readable output.
 - Paths are `node:/path`, for example `node1:/srv/data`.
+- Output is `SIZE<TAB>node:/path`, children before parent. Default unit is 1K
+  blocks of disk usage.
+- Exit code 0 ok, 1 an argument failed, 2 usage or config error.
 
 ## Environment
 
 - `FILEDECK_URL`: base URL of the filedeck server.
-- `FILEDECK_TOKEN`: read-only token. It can read sizes only, never file contents.
+- `FILEDECK_TOKEN`: read-only token. It can call only the du API (sizes), nothing else.
 
 ## Behaviour
 
 - The first scan of a large tree can be slow. The server then answers 202 with a
   job; the CLI waits and shows progress. Let it finish, do not kill and retry.
-- Results come from a cache and may be stale. Use `--fresh` only when you need
+- Results come from a cache and may be stale. Stale-cache and truncation notes
+  go to stderr with the age of the oldest folder. Use `--fresh` only when you need
   current numbers, for example right after deleting or writing a lot of data.
 - Hard links are counted once per link, unlike `du`. Totals can exceed `du`.
 
