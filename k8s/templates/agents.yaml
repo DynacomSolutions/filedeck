@@ -88,6 +88,11 @@ spec:
               value: {{ $.Values.agent.indexWatches | quote }}
             - name: FILEDECK_INDEX_REVALIDATE_MS
               value: {{ $.Values.agent.indexRevalidateMs | quote }}
+            {{- if $.Values.agent.fanotify.enabled }}
+            # Folder sizes follow kernel change notifications (needs CAP_SYS_ADMIN, see securityContext).
+            - name: FILEDECK_FANWATCH
+              value: /usr/local/bin/filedeck-fanwatch
+            {{- end }}
             # Keep the V8 heap well under the container memory limit so the GC works before the cgroup would OOM-kill.
             - name: NODE_OPTIONS
               value: {{ $.Values.agent.nodeOptions | quote }}
@@ -125,7 +130,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"]
+              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"{{ if $.Values.agent.fanotify.enabled }}, "SYS_ADMIN"{{ end }}]
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
