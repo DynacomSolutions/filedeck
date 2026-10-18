@@ -21,7 +21,7 @@ ETA: 2026-10-18 16:00 ICT
 | FD-16 | Release v0.3.9 so zero-downtime rollouts (2.FD-15) deploy | done | claude-20261018-release-v039 | release-v039 | 2.FD-15 |  | v0.3.9 released (PR https://github.com/DynacomSolutions/filedeck/pull/58, a487094); the hub and all agents run filedeck:0.3.9, GitOps sync healthy. |
 | FD-17 | Test sources surge on rollout (RollingUpdate maxUnavailable 0) like hub and agents | done | claude-20261018-test-sources-rolling | test-sources-rolling | 2.FD-15 | 2026-10-18 14:00 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/59 (46cf5ec). |
 | FD-18 | Agents in a container list the host's mounts, not the container's (large disks such as a separate /home were missing from sizes) | done | claude-20261018-host-mounts | host-mounts | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/60 (23f1944). Deploys with 2.FD-19. |
-| FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | in_progress | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 | 2026-10-18 16:00 ICT | |
+| FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | in_review | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 | 2026-10-18 16:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/61 |
 
 ## 3. Cached folder sizes
 ETA: 2026-10-19 18:00 ICT
