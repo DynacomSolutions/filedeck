@@ -214,6 +214,25 @@ test("GET /api/du: shape, depth, files with all=1, cached flag, validation", asy
   assert.equal(((await (await small.request("/api/du?path=/a")).json()) as Du).cached, false);
 });
 
+test("GET /api/du?cachedOnly=1 answers from the store and never scans", async () => {
+  fs.mkdirSync(at("co/sub"), { recursive: true });
+  fs.writeFileSync(at("co/sub/f"), "abc");
+  const idx = fs.mkdtempSync(path.join(tmp, "idx-"));
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: idx } as never));
+  const get = (q: string) => app.request("/api/du?cachedOnly=1&" + q);
+  assert.equal((await get("path=/co&depth=1")).status, 204); // unknown: nothing is scanned
+  assert.equal((await get("path=/co&depth=1")).status, 204); // still unknown, so the first call stored nothing
+  await app.request("/api/du?path=/co&depth=1");
+  const r = await get("path=/co&depth=1");
+  assert.equal(r.status, 200);
+  const j = (await r.json()) as { entries: { path: string; bytes: number }[]; cached: boolean };
+  assert.deepEqual(j.entries.map((e) => e.path), ["/co", "/co/sub"]);
+  assert.equal(j.entries[1]!.bytes, 3);
+  assert.equal(j.cached, true);
+  assert.equal((await app.request("/api/du?path=/co&cachedOnly=2")).status, 400);
+  await (app as unknown as { close(): Promise<void> }).close();
+});
+
 test("unusable database: scans still work uncached and the agent stays up", async () => {
   fs.writeFileSync(at("notadir"), "x");
   const errs: unknown[][] = [];

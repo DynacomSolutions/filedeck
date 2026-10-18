@@ -2,14 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import useSWR, { useSWRConfig } from "swr";
 import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star, Trash2 } from "lucide-react";
 import { fmtSize, type Entry, type Mount, type NodeInfo } from "./api";
-import { listFetcher, listKey as swrListKey, mountsFetcher, mountsKey } from "./data";
+import { duFetcher, duKey, listFetcher, listKey as swrListKey, mountsFetcher, mountsKey } from "./data";
 import { listState } from "./sidebarState";
 import { SkeletonTreeRows } from "./Skeleton";
 import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks, type Bookmark } from "./bookmarks";
 import { copyText } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
-import { EXPANDED_KEY, flatten, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, usagePct, type ExpandState, type TreeNodeBase, type Usage } from "./sidebarTree";
+import { EXPANDED_KEY, flatten, folderSizes, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, usagePct, type ExpandState, type FolderSize, type TreeNodeBase, type Usage } from "./sidebarTree";
 
 export type How = "here" | "panel";
 
@@ -28,6 +28,8 @@ export interface TNode extends TreeNodeBase {
   extra?: React.ReactNode;
   /** disk usage: draws the bar under the label and fills the popover */
   usage?: Usage;
+  /** folder size from the size store: bar and popover like usage; "unknown" = not stored yet (no bar) */
+  size?: FolderSize | "unknown";
   children?: TNode[];
   /** what to fetch when the row is open and nothing is loaded yet */
   load?: "dir" | "mounts";
@@ -37,16 +39,23 @@ export interface TNode extends TreeNodeBase {
 }
 
 const listKey = (node: string, path: string) => node + "\0" + path;
+const duWant = (node: string, path: string) => "d\0" + listKey(node, path);
 const sameListing = (a: Listing | undefined, b: Listing) => !!a && a.status === b.status && (a.status !== "ready" || b.status !== "ready" ? true : a.dirs === b.dirs && a.truncated === b.truncated) && (a.status !== "error" || b.status !== "error" || a.error === b.error);
 const sameMounts = (a: MountsState | undefined, b: MountsState) => !!a && a.status === b.status && (a.status !== "ready" || b.status !== "ready" ? true : a.mounts === b.mounts) && (a.status !== "error" || b.status !== "error" || a.error === b.error);
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-type Want = { k: string; kind: "dir" | "mounts"; node: string; path: string };
+type Want = { k: string; kind: "dir" | "mounts" | "du"; node: string; path: string };
+type Dus = Record<string, { path: string; diskBytes: number }[] | null>;
 
 /**
  * Fetches one lazily scanned folder (or a node's mounts) through SWR and reports it to the tree. A re-expanded row
  * therefore shows its cached listing at once while a background request refreshes it. Renders nothing.
  */
-function Feed({ want, onDirs, onMounts }: { want: Want; onDirs: (k: string, l: Listing) => void; onMounts: (node: string, m: MountsState) => void }) {
+function Feed({ want, onDirs, onMounts, onDu }: { want: Want; onDirs: (k: string, l: Listing) => void; onMounts: (node: string, m: MountsState) => void; onDu: (k: string, e: Dus[string]) => void }) {
+  // Stored sizes only (never a scan); once per expansion, so no revalidation on focus, reconnect or remount.
+  const du = useSWR(want.kind === "du" ? duKey(want.node, want.path) : null, duFetcher, { revalidateOnFocus: false, revalidateOnReconnect: false, revalidateIfStale: false, shouldRetryOnError: false });
+  useEffect(() => {
+    if (want.kind === "du" && !du.isLoading && (du.data !== undefined || du.error)) onDu(want.k, du.data ?? null);
+  }, [want, du.data, du.error, du.isLoading, onDu]);
   const dirs = useSWR(want.kind === "dir" ? swrListKey(want.node, want.path) : null, listFetcher, { revalidateOnFocus: true });
   const mts = useSWR(want.kind === "mounts" ? mountsKey(want.node) : null, mountsFetcher, { revalidateOnFocus: true });
   useEffect(() => {
@@ -78,6 +87,8 @@ const loadStored = (): ExpandState => {
 /** Tooltip only when the row's label is cut off. */
 const truncated = (wrap: HTMLElement) => [...wrap.querySelectorAll<HTMLElement>(".st-label,.st-sub")].some((el) => el.scrollWidth > el.clientWidth);
 
+const known = (s: TNode["size"]) => (s && s !== "unknown" ? s : undefined);
+
 export function UsageBar({ usage }: { usage: Usage }) {
   const p = usagePct(usage);
   return <span className="st-bar" role="img" aria-label={`${p}% used`}><i style={{ width: `${p}%` }} /></span>;
@@ -95,6 +106,13 @@ export function Popover({ t }: { t: TNode }) {
           <UsageBar usage={t.usage} />
         </>
       )}
+      {t.size === "unknown" && <span>size not calculated yet</span>}
+      {known(t.size) && (
+        <>
+          <span>{fmtSize(known(t.size)!.used)} ({usagePct(known(t.size)!)}% of {known(t.size)!.basis === "mount" ? "the used space on the mount" : "the parent folder"})</span>
+          <UsageBar usage={known(t.size)!} />
+        </>
+      )}
     </span>
   );
 }
@@ -110,6 +128,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
   const [expanded, setExpanded] = useState<ExpandState>(loadStored);
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [mounts, setMounts] = useState<Record<string, MountsState>>({});
+  const [dus, setDus] = useState<Dus>({});
   const [focusId, setFocusId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const marks = useBookmarks();
@@ -138,6 +157,12 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       else if (l.status === "error") t.note = { kind: "error", text: l.error };
       else {
         t.children = l.dirs.map((e) => dirNode(t.id, t.node!, e.path, e));
+        const du = dus[duWant(t.node!, t.path!)];
+        if (du !== undefined) {
+          const m = mounts[t.node!];
+          const sz = folderSizes(du ?? [], t.path!, m?.status === "ready" ? m.mounts.find((x) => x.mountpoint === t.path)?.used : undefined);
+          for (const c of t.children) c.size = sz[c.path!] ?? "unknown";
+        }
         if (!l.dirs.length) t.note = { kind: "empty", text: "No subfolders" };
         else if (l.truncated) t.note = { kind: "more", text: "More folders not shown" };
       }
@@ -200,7 +225,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       section("sec:bookmarks", "Bookmarks", <Star />, marks.map(bookmarkRow), "Star a folder to keep it here.", false),
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, nodesView, nodesState.error, expanded, listings, mounts, marks]);
+  }, [nodes, nodesView, nodesState.error, expanded, listings, mounts, dus, marks]);
 
   const byId = useMemo(() => {
     const m = new Map<string, TNode>();
@@ -218,6 +243,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       const t = byId.get(r.id);
       if (!t?.load || !r.expanded || !t.node) continue;
       out.push(t.load === "mounts" ? { k: "m\0" + t.node, kind: "mounts", node: t.node, path: "" } : { k: listKey(t.node, t.path!), kind: "dir", node: t.node, path: t.path! });
+      if (t.load === "dir") out.push({ k: duWant(t.node, t.path!), kind: "du", node: t.node, path: t.path! });
     }
     // Server rows show a size bar, so every online node's mounts are read, not only the expanded ones.
     for (const n of cluster) if (n.online && !out.some((w) => w.k === "m\0" + n.name)) out.push({ k: "m\0" + n.name, kind: "mounts", node: n.name, path: "" });
@@ -227,10 +253,12 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
   const onDirs = useCallback((k: string, l: Listing) => setListings((x) => (sameListing(x[k], l) ? x : { ...x, [k]: l })), []);
   const onMounts = useCallback((node: string, m: MountsState) => setMounts((x) => (sameMounts(x[node], m) ? x : { ...x, [node]: m })), []);
 
+  const onDu = useCallback((k: string, e: Dus[string]) => setDus((x) => (k in x && x[k] === e ? x : { ...x, [k]: e })), []);
+
   const refresh = useCallback((t: TNode) => {
     if (t.kind === "section") nodesState.reload();
     else if (t.load === "mounts") void mutate(mountsKey(t.node!));
-    else if (t.node && t.path) void mutate(swrListKey(t.node, t.path));
+    else if (t.node && t.path) (void mutate(swrListKey(t.node, t.path)), void mutate(duKey(t.node, t.path)));
   }, [mutate, nodesState.reload]);
 
   const setExp = useCallback((id: string, open: boolean) => {
@@ -345,14 +373,15 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
           <span className="st-icon" aria-hidden="true">{t.icon}</span>
           <span className="st-label">{t.label}</span>
           {t.extra}
+          {known(t.size) && <span className="muted st-sub">{fmtSize(known(t.size)!.used)}</span>}
         </span>
-        {t.usage && <UsageBar usage={t.usage} />}
+        {(t.usage ?? known(t.size)) && <UsageBar usage={(t.usage ?? known(t.size))!} />}
       </button>
     );
     return (
       <li key={t.id} role="none" className={"st-item" + (t.kind === "section" ? " sec" : "")}>
         <div className={"st-row" + (tabId === t.id ? " cur" : "") + (t.offline ? " off" : "")}>
-          {t.tip || t.usage ? <Tip label={<Popover t={t} />} besideOf=".side" when={(w) => !!t.usage || truncated(w)}>{main}</Tip> : main}
+          {t.tip || t.usage || t.size ? <Tip label={<Popover t={t} />} besideOf=".side" when={(w) => !!t.usage || !!t.size || truncated(w)}>{main}</Tip> : main}
           {hasMenu && (
             <Tip label="Actions">
               <button type="button" className="st-more" tabIndex={-1} aria-label={`Actions for ${t.label}`} aria-hidden="true" disabled={!mark && t.kind !== "trash"} onClick={(e) => showMenu(t, e.currentTarget)}><Ellipsis /></button>
@@ -380,7 +409,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       <ul role="tree" aria-label="Navigation" className="st-tree" ref={root} aria-busy={nodesView === "loading" || undefined}>
         {tree.map((t) => renderRow(t, 1))}
       </ul>
-      {wants.map((w) => <Feed key={w.k} want={w} onDirs={onDirs} onMounts={onMounts} />)}
+      {wants.map((w) => <Feed key={w.k} want={w} onDirs={onDirs} onMounts={onMounts} onDu={onDu} />)}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </>
   );

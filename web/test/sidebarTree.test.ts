@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Popover, type TNode } from "../src/SidebarTree.tsx";
-import { flatten, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, usagePct, type TreeNodeBase } from "../src/sidebarTree.ts";
+import { flatten, isOpen, navigate, parseExpanded, folderSizes, rovingId, serverUsage, setOpen, usagePct, type TreeNodeBase } from "../src/sidebarTree.ts";
 
 const tree: TreeNodeBase[] = [
   { id: "a", expandable: true, children: [{ id: "a1", expandable: true, children: [{ id: "a1x", expandable: false }] }, { id: "a2", expandable: false }] },
@@ -94,4 +94,27 @@ test("popover shows label, details, size, percentage and bar", () => {
   assert.match(html, /512 B of 2\.0 KiB used \(25%\)/);
   assert.match(html, /class="st-bar"[^>]*aria-label="25% used"/);
   assert.doesNotMatch(renderToStaticMarkup(createElement(Popover, { t: { ...t, usage: undefined } })), /st-bar/);
+});
+
+test("folderSizes: share of the parent, or of the mount's used bytes for top folders", () => {
+  const e = [{ path: "/a", diskBytes: 100 }, { path: "/a/x", diskBytes: 25 }, { path: "/a/y", diskBytes: 75 }];
+  const p = folderSizes(e, "/a");
+  assert.equal(usagePct(p["/a/x"]!), 25);
+  assert.equal(p["/a/x"]!.basis, "parent");
+  const m = folderSizes(e, "/a", 400);
+  assert.equal(usagePct(m["/a/y"]!), 19);
+  assert.equal(m["/a/y"]!.basis, "mount");
+  assert.deepEqual(folderSizes([{ path: "/a/x", diskBytes: 1 }], "/a"), {}); // parent not stored: nothing known
+});
+
+test("popover: size basis for known folders, a note and no bar for unknown ones", () => {
+  const base = { id: "i", kind: "dir", label: "x", icon: null, expandable: true, defaultOpen: false } as const;
+  const known = renderToStaticMarkup(createElement(Popover, { t: { ...base, size: { used: 1024, total: 4096, basis: "parent" } } as TNode }));
+  assert.match(known, /1.0 KiB \(25% of the parent folder\)/);
+  assert.match(known, /st-bar/);
+  const mount = renderToStaticMarkup(createElement(Popover, { t: { ...base, size: { used: 1024, total: 4096, basis: "mount" } } as TNode }));
+  assert.match(mount, /of the used space on the mount/);
+  const unknown = renderToStaticMarkup(createElement(Popover, { t: { ...base, size: "unknown" } as TNode }));
+  assert.match(unknown, /size not calculated yet/);
+  assert.doesNotMatch(unknown, /st-bar/);
 });

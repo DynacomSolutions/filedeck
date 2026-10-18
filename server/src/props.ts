@@ -323,7 +323,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     return c.json(startScan("size", r.virtual, b.fresh !== false), 202);
   });
 
-  // GET /api/du?path=&depth=&all=&fresh=: unchanged folders are validated (one lstat each), changed ones re-read, then the
+  // GET /api/du?path=&depth=&all=&fresh=&cachedOnly=: unchanged folders are validated (one lstat each), changed ones re-read, then the
   // answer is read from the store under the scan's lock. A scan longer than cfg.duWaitMs answers 202 {jobId} and keeps
   // running; poll GET /api/jobs/<id> until it is done, then repeat the request: for a minute it is answered from that scan.
   interface DuRun {
@@ -338,11 +338,17 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const q = c.req.query.bind(c.req);
     const depth = q("depth") === undefined ? 1 : Number(q("depth"));
     if (!Number.isInteger(depth) || depth < 0 || depth > 64) throw bad("depth must be an integer between 0 and 64");
-    for (const k of ["all", "fresh"]) if (q(k) !== undefined && q(k) !== "0" && q(k) !== "1") throw bad(`${k} must be 0 or 1`);
+    for (const k of ["all", "fresh", "cachedOnly"]) if (q(k) !== undefined && q(k) !== "0" && q(k) !== "1") throw bad(`${k} must be 0 or 1`);
     const r = resolveRead(cfg.root, q("path") ?? "/");
     if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
+    // cachedOnly=1: answer from stored rows only. Never scans, never waits for a lock; 204 when the folder is not stored.
+    if (flag(q("cachedOnly"))) {
+      const t = await sizes.tree(r.virtual, depth, all);
+      if (!t.entries.length) return c.body(null, 204);
+      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: false });
+    }
     const key = [r.virtual, depth, all, fresh].join("\0");
     // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
     for (const [k, d] of duRuns) {
