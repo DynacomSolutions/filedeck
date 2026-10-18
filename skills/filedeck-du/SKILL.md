@@ -18,7 +18,7 @@ folders. Query it instead of running your own scans.
 ## Synopsis
 
 ```
-filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/path...
+filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] [--timeout SECONDS] node:/path...
 ```
 
 - `-s`/`--summarize` total only, `-h`/`--human-readable` sizes like 1.5K,
@@ -26,6 +26,7 @@ filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/pat
 - `--apparent-size` report file length instead of disk usage.
 - `--fresh` force a rescan (see below).
 - `--json` machine-readable output.
+- `--timeout SECONDS` give up and exit 1 after this long (default 3600).
 - Paths are `node:/path`, for example `node1:/srv/data`.
 - Output is `SIZE<TAB>node:/path`, children before parent. Default unit is 1K
   blocks of disk usage.
