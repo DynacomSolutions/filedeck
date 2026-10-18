@@ -87,6 +87,14 @@ function readVaultKey(env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
+/**
+ * Mount table of the host. /proc/mounts is /proc/self/mounts, so under a host root mounted in a container it would be the
+ * container's own table; PID 1 of the host's mount namespace is what we want.
+ */
+export function defaultProcMounts(root: string): string {
+  return root === "/" ? "/proc/mounts" : `${root}/proc/1/mounts`;
+}
+
 export function loadConfig(env = process.env): Config {
   const mode = env.FILEDECK_MODE === "hub" ? "hub" : "agent";
   const root = (env.FILEDECK_ROOT ?? "/host").replace(/\/+$/, "") || "/";
@@ -95,7 +103,7 @@ export function loadConfig(env = process.env): Config {
     port: Number(env.PORT ?? 8080),
     root,
     node: env.FILEDECK_NODE ?? "local",
-    procMounts: env.FILEDECK_PROC_MOUNTS ?? `${root === "/" ? "" : root}/proc/mounts`,
+    procMounts: env.FILEDECK_PROC_MOUNTS ?? defaultProcMounts(root),
     maxUpload: Number(env.FILEDECK_MAX_UPLOAD ?? 1024 ** 4),
     maxEdit: Number(env.FILEDECK_MAX_EDIT ?? 5 * 1024 * 1024),
     staticDir: env.FILEDECK_STATIC ?? "/app/web",

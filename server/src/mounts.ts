@@ -70,13 +70,41 @@ export function parseMounts(text: string) {
   return out;
 }
 
-export async function listMounts(root: string, procMounts: string): Promise<Mount[]> {
-  let text = "";
-  try {
-    text = await fs.readFile(procMounts, "utf8");
-  } catch {
-    return [];
+/** Keep only the mounts under `root` and rewrite their mount points relative to it (a container-view table to host paths). */
+export function rebaseMountTable(text: string, root: string): string {
+  if (root === "/") return text;
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const f = line.split(" ");
+    if (f.length < 3) continue;
+    const mp = unescapeMount(f[1] as string);
+    if (mp !== root && !mp.startsWith(root + "/")) continue;
+    f[1] = (mp.slice(root.length) || "/").replace(/[\\ \t\n]/g, (c) => "\\" + c.charCodeAt(0).toString(8).padStart(3, "0"));
+    out.push(f.join(" "));
   }
+  return out.join("\n");
+}
+
+/**
+ * Host mount table text with mount points as seen from the host. Reads `procMounts`; when the default
+ * `<root>/proc/1/mounts` is unreadable (no permission), falls back to `<root>/proc/mounts` rebased to the host.
+ * Returns "" when nothing is readable.
+ */
+export async function readMountTable(root: string, procMounts: string): Promise<string> {
+  try {
+    return await fs.readFile(procMounts, "utf8");
+  } catch {
+    if (root === "/" || procMounts !== `${root}/proc/1/mounts`) return "";
+  }
+  try {
+    return rebaseMountTable(await fs.readFile(`${root}/proc/mounts`, "utf8"), root);
+  } catch {
+    return "";
+  }
+}
+
+export async function listMounts(root: string, procMounts: string): Promise<Mount[]> {
+  const text = await readMountTable(root, procMounts);
   const res: Mount[] = [];
   for (const m of parseMounts(text)) {
     const kind = networkKind(m.fstype);
