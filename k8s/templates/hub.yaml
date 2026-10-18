@@ -10,7 +10,11 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate
+    # Old pod keeps serving until the new one is Ready. Both pods briefly share the vault PVC (ReadWriteOnce allows several pods on one node); the vault is SQLite in WAL mode with a busy timeout, so that is safe.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "filedeck.name" . }}
@@ -25,6 +29,7 @@ spec:
         checksum/brand-css: {{ .Values.brand.cssContent | sha256sum | quote }}
       {{- end }}
     spec:
+      terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
       nodeSelector:
         {{- toYaml .Values.hub.nodeSelector | nindent 8 }}
@@ -85,6 +90,11 @@ spec:
             - name: FILEDECK_SOURCES
               value: {{ .Values.sources | toJson | quote }}
             {{- end }}
+          lifecycle:
+            # Let the endpoints controller drop this pod before the process stops listening (grace period is 30s;
+            # SIGTERM shutdown force-closes sockets after 5s and exits by 15s).
+            preStop:
+              exec: {command: ["sleep", "5"]}
           ports:
             - name: http
               containerPort: {{ .Values.port }}

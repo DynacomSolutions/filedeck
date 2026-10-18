@@ -11,7 +11,7 @@ metadata:
   {{- $ann := deepCopy ($.Values.agent.annotations | default dict) }}
   {{- if $.Values.agent.stagger }}
   {{- /* One Argo CD sync wave per agent: the next agent is only touched once the previous one is Ready, so at most
-         one node's agent is down while an image change rolls out (each Deployment is Recreate). */}}
+         one node's agent is surging while an image change rolls out (each Deployment is a RollingUpdate with maxUnavailable 0). */}}
   {{- $_ := set $ann "argocd.argoproj.io/sync-wave" (printf "%d" (add 1 $i)) }}
   {{- end }}
   {{- with $ann }}
@@ -21,7 +21,11 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate
+    # Old pod keeps serving until the new one is Ready. Both pods briefly share the hostPath index; it is SQLite in WAL mode with a busy timeout and only a cache, so that is safe.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "filedeck.name" $ }}
@@ -33,6 +37,7 @@ spec:
         {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (include "filedeck.agentInstance" (dict "root" $ "node" .))) | nindent 8 }}
         app.kubernetes.io/component: agent
     spec:
+      terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
       {{- with .nodeName }}
       nodeSelector:
@@ -86,6 +91,11 @@ spec:
             # Keep the V8 heap well under the container memory limit so the GC works before the cgroup would OOM-kill.
             - name: NODE_OPTIONS
               value: {{ $.Values.agent.nodeOptions | quote }}
+          lifecycle:
+            # Let the endpoints controller drop this pod before the process stops listening (grace period is 30s;
+            # SIGTERM shutdown force-closes sockets after 5s and exits by 15s).
+            preStop:
+              exec: {command: ["sleep", "5"]}
           ports:
             - name: http
               containerPort: {{ $.Values.port }}
