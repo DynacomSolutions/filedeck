@@ -49,6 +49,8 @@ export interface Config {
   readOnly: string[];
   /** shared hub-to-agent secret; empty = agents are unauthenticated (NetworkPolicy only) */
   agentToken: string | undefined;
+  /** hub: read-only token for the `filedeck du` CLI (FILEDECK_API_TOKEN or the file FILEDECK_API_TOKEN_FILE); unset = off */
+  apiToken: string | undefined;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
@@ -74,12 +76,13 @@ export function parseNodes(s: string | undefined) {
     });
 }
 
-/** The vault secret: `FILEDECK_VAULT_KEY`, or the contents of the file named by `FILEDECK_VAULT_KEY_FILE` (a mounted Secret). Never logged. */
-function readVaultKey(env: NodeJS.ProcessEnv): string | undefined {
-  if (env.FILEDECK_VAULT_KEY) return env.FILEDECK_VAULT_KEY;
-  if (env.FILEDECK_VAULT_KEY_FILE) {
+/** A secret from `<name>` or the contents of the file named by `<name>_FILE` (a mounted Secret). Never logged. */
+function readSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  if (env[name]) return env[name];
+  const file = env[`${name}_FILE`];
+  if (file) {
     try {
-      return readFileSync(env.FILEDECK_VAULT_KEY_FILE, "utf8").trim() || undefined;
+      return readFileSync(file, "utf8").trim() || undefined;
     } catch {
       return undefined;
     }
@@ -129,11 +132,12 @@ export function loadConfig(env = process.env): Config {
     brand: parseBrand(env.FILEDECK_BRAND),
     readOnly: parseReadOnly(env.FILEDECK_READONLY),
     agentToken: env.FILEDECK_AGENT_TOKEN || undefined,
+    apiToken: mode === "hub" ? readSecret(env, "FILEDECK_API_TOKEN") : undefined,
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",
     vaultFile: env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite",
-    vaultKey: readVaultKey(env),
+    vaultKey: readSecret(env, "FILEDECK_VAULT_KEY"),
     vaultTtlMs: Number(env.FILEDECK_VAULT_TTL_SECONDS ?? 30 * 60) * 1000,
     vaultMaxMs: Number(env.FILEDECK_VAULT_MAX_HOURS ?? 24) * 3600_000,
   };
