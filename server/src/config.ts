@@ -28,9 +28,9 @@ export interface Config {
   indexWatches: number;
   /** compare index: trust an unwatched listing with an unchanged directory mtime for this long */
   indexRevalidateMs: number;
-  /** `GET /api/du` answers 202 with a job id when its scan takes longer than this */
   /** fanotify helper binary that keeps folder sizes current; empty = off */
   fanwatch: string;
+  /** `GET /api/du` answers 202 with a job id when its scan takes longer than this */
   duWaitMs: number;
   listConcurrency: number;
   diffDir: string;
