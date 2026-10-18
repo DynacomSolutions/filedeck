@@ -19,6 +19,7 @@ ETA: 2026-10-18 13:00 ICT
 | FD-14 | Release v0.3.8 so the sidebar tree polish (2.FD-8) deploys | done | claude-20261018-release-v038 | release-v038 | 2.FD-8 | | Release run 39094608784 succeeded; the hub and all agents run ghcr.io/dynacomsolutions/filedeck:0.3.8, GitOps sync healthy. The rollout stalled for a while because the old hub pod could not be removed by its node and strategy Recreate blocked the new pod (fixed by 2.FD-15). |
 | FD-15 | Zero-downtime rollouts: hub and agents keep one ready pod until the new one is ready (RollingUpdate maxUnavailable 0 where safe), and SIGTERM shutdown always exits within the grace period | done | claude-20261018-zero-downtime | zero-downtime-rollout | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/57 (22b05d4): RollingUpdate maxSurge 1 maxUnavailable 0 for hub and agents, hub podAffinity keeps the surge pod on the vault's node, preStop sleep 5, shutdown drains in-flight requests then cleans up (5s drain, 15s hard exit), vault busy_timeout, index never deleted on SQLITE_BUSY. Deploys with 2.FD-16. |
 | FD-16 | Release v0.3.9 so zero-downtime rollouts (2.FD-15) deploy | in_review | claude-20261018-release-v039 | release-v039 | 2.FD-15 | 2026-10-18 13:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/58 |
+| FD-17 | Test sources surge on rollout (RollingUpdate maxUnavailable 0) like hub and agents | in_review | claude-20261018-test-sources-rolling | test-sources-rolling | 2.FD-15 | 2026-10-18 14:00 ICT | PR <url> |
 
 ## 3. Cached folder sizes
 ETA: 2026-10-19 18:00 ICT
