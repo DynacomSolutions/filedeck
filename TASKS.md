@@ -23,7 +23,6 @@
 | FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | done | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 |  | Released and rolled out with no downtime; see 2.FD-15. |
 
 ## 3. Cached folder sizes
-ETA: 2026-10-18 17:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-9 | Size store: per-folder size totals in SQLite on each agent, filled by the size scan and reused while a folder's inode and mtime are unchanged; one-folder delta updates propagated to parents; agent and hub `GET /api/du` | done | claude-20261018-size-store | size-store |  | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/55 (f31230e). |
@@ -31,4 +30,4 @@ ETA: 2026-10-18 17:00 ICT
 | FD-11 | `filedeck du` CLI: du-compatible flags (-s, -h, -d N, -a, --apparent-size, --fresh), `node:/path` addressing, queries the hub with one read-only cluster API token | done | claude-20261018-fd11 | du-cli |  |  | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/65 (a535663). Token travels in X-Filedeck-Token; off by default. |
 | FD-12 | Agent skill in this repo for every coding agent (Claude Code, Codex, Pi and others), not only Claude: one canonical SKILL.md in the open Agent Skills format at a tool-neutral path, referenced from AGENTS.md, and exposed to each tool's skill discovery path (for example .claude/skills, .agents/skills) without duplicating content; tells agents to use `filedeck du` instead of `du` | done | claude-20261018-fd12 | agent-skill |  |  | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/63 (dfb84fa). |
 | FD-13 | Sidebar tree folder rows show size, percentage and bar from the size store | done | claude-20261018-fd13 | tree-folder-sizes |  |  | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/64 (3c1970f). Adds GET /api/du?cachedOnly=1. |
-| FD-20 | Release v0.3.11 (size cache epic: du CLI and token, skill, tree folder sizes, fanotify watcher) | in_review | claude-20261018-release-v0311 | release-v0311 | 3.FD-10, 3.FD-11, 3.FD-12, 3.FD-13 | 2026-10-18 17:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/67 |
+| FD-20 | Release v0.3.11 (size cache epic: du CLI and token, skill, tree folder sizes, fanotify watcher) | done | claude-20261018-release-v0311 | release-v0311 | 3.FD-10, 3.FD-11, 3.FD-12, 3.FD-13 |  | Released and rolled out with no downtime; du API token verified end to end. |
