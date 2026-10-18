@@ -347,7 +347,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (flag(q("cachedOnly"))) {
       const t = await sizes.tree(r.virtual, depth, all);
       if (!t.entries.length) return c.body(null, 204);
-      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: false });
+      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
     }
     const key = [r.virtual, depth, all, fresh].join("\0");
     // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
@@ -391,7 +391,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       const t = run.out?.tree;
       if (!t?.entries.length) throw new ops.FsError(404, "not found");
       // cached: nothing was read from disk and the answer comes from the database (not from a degraded, uncached store)
-      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || run.out!.read === 0) && sizes.persistent, truncated: t.truncated, watched: false });
+      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || run.out!.read === 0) && sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
     } finally {
       if (!run.detached) forget();
       else if (replay) forget();

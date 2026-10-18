@@ -399,6 +399,9 @@ export class SizeStore {
     while (this.walks.length > 1 && rows > this.o.maxEntries) rows -= this.walks.shift()!.size;
   }
 
+  /** Set by the agent when a change watcher is running: true when it keeps the stored sizes of `virtual` current. */
+  covers: (virtual: string) => boolean = () => false;
+
   /** false once the database is unusable: nothing is cached any more */
   get persistent(): boolean {
     return this.db !== null;

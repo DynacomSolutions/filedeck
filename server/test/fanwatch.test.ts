@@ -236,3 +236,23 @@ test("fanwatch live: skipped (needs CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH)", { s
     fs.rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("fanwatch.covers: true on a watched filesystem while the helper runs; false when disabled, after exit, outside watched mounts", async () => {
+  const s = setup();
+  fs.mkdirSync(path.join(s.root, "net"));
+  await s.w.start();
+  assert.equal(s.w.covers("/data/a/b"), true);
+  assert.equal(s.w.covers("/other"), true);
+  assert.equal(s.w.covers("/net"), false);
+  assert.equal(s.w.covers("/net/x"), false);
+  assert.equal(s.w.covers("/"), false); // an unwatched filesystem sits below
+  s.w.line("!overflow");
+  assert.equal(s.w.covers("/data"), true); // rows are marked stale, the next read re-scans and is current again
+  s.proc.emit("exit", 1, null);
+  assert.equal(s.w.covers("/data"), false);
+  s.w.stop();
+  s.done();
+  const off = new FanWatch({ applyChanged: async () => {}, markStale: () => {} }, { helper: "", root: "/", procMounts: "/proc/mounts" });
+  await off.start();
+  assert.equal(off.covers("/"), false);
+});
