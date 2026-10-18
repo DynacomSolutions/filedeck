@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import type { Stats } from "node:fs";
+import { rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openDb } from "./index-cache.ts";
@@ -78,35 +78,85 @@ const below = (p: string) => {
 const COLS = ["path", "parent", "ino", "mtime_ms", "scanned_at", ...METRICS.map((m) => `own_${m}`), ...METRICS.map((m) => `tot_${m}`)];
 
 export class SizeStore {
-  private db: DatabaseSync;
-  private q: Record<"get" | "put" | "kids" | "delTree" | "minAge", StatementSync>;
+  /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
+  private db: DatabaseSync | null = null;
+  private q!: Record<"get" | "put" | "kids" | "delTree" | "minAge", StatementSync>;
   private chain: Promise<unknown> = Promise.resolve();
+  private warned = false;
+  /** nodes of the latest walk, kept only while the database is unusable so the route can still answer */
+  private last = new Map<string, Row>();
 
   constructor(
     file: string,
     private o: { root: string; ttlMs: number; maxEntries: number },
   ) {
+    // Like IndexCache: a file that cannot be opened is replaced once, then the store runs uncached.
+    for (let attempt = 0; attempt < 2 && !this.db; attempt++) {
+      try {
+        this.open(file);
+      } catch (e) {
+        this.db = null;
+        try {
+          if (attempt === 0 && file !== ":memory:") for (const f of [file, file + "-wal", file + "-shm"]) rmSync(f, { force: true });
+        } catch {
+          attempt = 1; // cannot clear it: no second try
+        }
+        if (attempt === 1) this.warn(e);
+      }
+    }
+    if (!this.db) this.warn(new Error("SQLite is unavailable"));
+  }
+
+  private open(file: string) {
     const db = openDb(file);
     if (!db) throw new Error("SQLite is unavailable");
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sizes (
+          path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino INTEGER, mtime_ms REAL, scanned_at INTEGER,
+          ${METRICS.map((m) => `own_${m} INTEGER NOT NULL`).join(", ")}, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
+      `);
+      this.q = {
+        get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
+        put: db.prepare(`INSERT OR REPLACE INTO sizes (${COLS.join(",")}) VALUES (${COLS.map(() => "?").join(",")})`),
+        kids: db.prepare("SELECT * FROM sizes WHERE parent = ? ORDER BY path"),
+        delTree: db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)"),
+        minAge: db.prepare("SELECT min(scanned_at) AS t FROM sizes WHERE path = ? OR (path > ? AND path < ?)"),
+      };
+    } catch (e) {
+      db.close();
+      throw e;
+    }
     this.db = db;
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sizes (
-        path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino INTEGER, mtime_ms REAL, scanned_at INTEGER,
-        ${METRICS.map((m) => `own_${m} INTEGER NOT NULL`).join(", ")}, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}
-      ) WITHOUT ROWID;
-      CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
-    `);
-    this.q = {
-      get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
-      put: db.prepare(`INSERT OR REPLACE INTO sizes (${COLS.join(",")}) VALUES (${COLS.map(() => "?").join(",")})`),
-      kids: db.prepare("SELECT * FROM sizes WHERE parent = ? ORDER BY path"),
-      delTree: db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)"),
-      minAge: db.prepare("SELECT min(scanned_at) AS t FROM sizes WHERE path = ? OR (path > ? AND path < ?)"),
-    };
+  }
+
+  private warn(e: unknown) {
+    if (this.warned) return;
+    this.warned = true;
+    console.error("size store unavailable, folder sizes are not cached:", (e as Error)?.message ?? e);
+  }
+
+  /** Run a database operation; on failure give the database up (logged once) and answer `dflt`. */
+  private safe<T>(fn: () => T, dflt: T): T {
+    if (!this.db) return dflt;
+    try {
+      return fn();
+    } catch (e) {
+      this.warn(e);
+      try {
+        this.db.close();
+      } catch {
+        /* already broken */
+      }
+      this.db = null;
+      return dflt;
+    }
   }
 
   close() {
-    this.db.close();
+    this.db?.close();
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -125,11 +175,13 @@ export class SizeStore {
     return { path: r.path as string, parent: r.parent as string, ino: Number(r.ino), mtime_ms: Number(r.mtime_ms), scanned_at: Number(r.scanned_at), own, tot };
   }
   private get(p: string): Row | undefined {
-    const r = this.q.get.get(p);
-    return r && this.toRow(r);
+    return this.safe(() => {
+      const r = this.q.get.get(p);
+      return r && this.toRow(r);
+    }, undefined);
   }
   private kidsOf(p: string): Row[] {
-    return this.q.kids.all(p).map((r) => this.toRow(r));
+    return this.safe(() => this.q.kids.all(p).map((r) => this.toRow(r)), []);
   }
   private put(n: Row) {
     this.q.put.run(n.path, n.parent, n.ino, n.mtime_ms, n.scanned_at, ...METRICS.map((m) => n.own[m]), ...METRICS.map((m) => n.tot[m]));
@@ -142,7 +194,7 @@ export class SizeStore {
     const anc: string[] = [];
     for (let a = parentOf(p); a; a = parentOf(a)) anc.push(a);
     if (!anc.length) return;
-    this.db
+    this.db!
       .prepare(`UPDATE sizes SET ${METRICS.map((m) => `tot_${m} = tot_${m} + ${Math.trunc(d[m])}`).join(", ")} WHERE path IN (${anc.map(() => "?").join(",")})`)
       .run(...anc);
   }
@@ -158,7 +210,7 @@ export class SizeStore {
       return false;
     }
     if (!st.isDirectory() || Number(st.ino) !== row.ino || st.mtimeMs !== row.mtime_ms) return false;
-    const t = (this.q.minAge.get(virtual, ...below(virtual)) as { t: number | null }).t;
+    const t = this.safe(() => (this.q.minAge.get(virtual, ...below(virtual)) as { t: number | null }).t, null);
     return t !== null && Date.now() - t < this.o.ttlMs;
   }
 
@@ -277,27 +329,33 @@ export class SizeStore {
 
   /** Store a complete walk in one transaction: replace rescanned rows, drop vanished child folders, fix the ancestors. */
   private commit({ root, nodes }: Walk) {
+    if (!this.db) return void (this.last = nodes);
     const old = this.get(root.path);
-    this.db.exec("BEGIN");
-    try {
-      for (const n of nodes.values()) {
-        if (n.fixed) continue;
-        if (!n.reused) {
-          const keep = new Set(n.kids);
-          for (const k of this.kidsOf(n.path)) if (!keep.has(k.path)) this.delTree(k.path);
+    const ok = this.safe(() => {
+      const db = this.db!;
+      db.exec("BEGIN");
+      try {
+        for (const n of nodes.values()) {
+          if (n.fixed) continue;
+          if (!n.reused) {
+            const keep = new Set(n.kids);
+            for (const k of this.kidsOf(n.path)) if (!keep.has(k.path)) this.delTree(k.path);
+          }
+          this.put(n);
         }
-        this.put(n);
+        if (old) {
+          const d = { ...root.tot };
+          addTo(d, old.tot, -1);
+          this.addToAncestors(root.path, d);
+        }
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
       }
-      if (old) {
-        const d = { ...root.tot };
-        addTo(d, old.tot, -1);
-        this.addToAncestors(root.path, d);
-      }
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+      return true;
+    }, false);
+    if (!ok) this.last = nodes;
   }
 
   private result(n: Node, truncated: boolean): SizeResult {
@@ -345,7 +403,7 @@ export class SizeStore {
       // The folder itself is gone: its parent's own counts change too, so re-read the parent when it is stored.
       const p = parentOf(v);
       if (p && this.get(p)) return this.changed(p, ctl);
-      this.delTree(v);
+      this.safe(() => this.delTree(v), undefined);
       return;
     }
     const w = await this.walk(v, real, st, ctl, { fresh: false, force: true, trust: true });
@@ -358,7 +416,7 @@ export class SizeStore {
     let budget = this.o.maxEntries;
     let truncated = false;
     const asEntry = (r: Row): DuEntry => ({ path: r.path, type: "dir", bytes: r.tot.bytes, diskBytes: r.tot.disk, files: r.tot.files, dirs: r.tot.dirs, scannedAt: r.scanned_at });
-    const top = this.get(virtual);
+    const top = this.db ? this.get(virtual) : this.last.get(virtual);
     if (!top) return { entries, truncated };
     let level = [top];
     for (let d = 0; level.length; d++) {
@@ -370,7 +428,7 @@ export class SizeStore {
         }
         entries.push(asEntry(r));
         if (d >= depth) continue;
-        next.push(...this.kidsOf(r.path));
+        next.push(...(this.db ? this.kidsOf(r.path) : [...this.last.values()].filter((k) => k.parent === r.path)));
         if (all) {
           const left = await this.filesOf(r.path, budget);
           budget -= left.entries.length;

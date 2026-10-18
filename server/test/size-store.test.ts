@@ -215,3 +215,35 @@ test("GET /api/du: shape, depth, files with all=1, cached flag, validation", asy
   assert.equal(t.cached, false);
   assert.equal(((await (await small.request("/api/du?path=/a")).json()) as Du).cached, false);
 });
+
+test("unusable database: scans still work uncached and the agent stays up", async () => {
+  fs.writeFileSync(at("notadir"), "x");
+  const errs: unknown[][] = [];
+  const orig = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a);
+  try {
+    // the database cannot be created below a regular file
+    const s = new SizeStore(at("notadir/sizes.db"), { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
+    const r = await s.scan("/a");
+    assert.equal(r.bytes, 18);
+    assert.equal(await s.isFresh("/a"), false);
+    assert.equal(await countReaddir(() => s.scan("/a")), 3); // nothing is reused
+    assert.equal((await s.tree("/a", 1, false)).entries.length, 2);
+    await s.applyChanged("/a");
+    s.close();
+
+    // a directory where the database file should be: SQLite cannot open it and it cannot be cleared
+    const idx = fs.mkdtempSync(path.join(tmp, "idx-"));
+    fs.mkdirSync(path.join(idx, "sizes-t.db"));
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: idx } as never));
+    for (let i = 0; i < 2; i++) {
+      const j = (await (await app.request("/api/du?path=/a&depth=1")).json()) as { cached: boolean; entries: unknown[] };
+      assert.equal(j.cached, false);
+      assert.equal(j.entries.length, 2);
+    }
+    await (app as unknown as { close(): Promise<void> }).close();
+    assert.equal(errs.filter((e) => String(e[0]).startsWith("size store unavailable")).length, 2); // once per store
+  } finally {
+    console.error = orig;
+  }
+});
