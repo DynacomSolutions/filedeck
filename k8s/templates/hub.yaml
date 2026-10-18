@@ -33,6 +33,14 @@ spec:
       automountServiceAccountToken: false
       nodeSelector:
         {{- toYaml .Values.hub.nodeSelector | nindent 8 }}
+      {{- with .Values.hub.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         seccompProfile:
           type: RuntimeDefault

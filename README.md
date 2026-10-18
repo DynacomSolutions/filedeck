@@ -61,6 +61,7 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `agentToken.secretName` | Existing Secret holding a shared hub-to-agent token (empty = none) |
 | `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key before the hub starts; check vault health after installation |
 | `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
+| `hub.affinity`, `hub.tolerations` | Hub scheduling; with a local-path vault volume the pod follows the volume's node, so set `vault.storageClass` to a network class to move it |
 | `sources[]` | Network sources (SFTP, WebDAV, S3, SMB) and the Secrets holding their credentials |
 | `brand` | `name`, `title`, `icon`, `css` and `themeKey`; `cssContent` is chart-only (neutral "Filedeck" when empty) |
 | `mapping.enabled`, `mapping.host` | Optional Emissary / Ambassador Mapping to the hub; with another ingress route to the `filedeck` Service yourself |

@@ -45,6 +45,8 @@ vault:
 hub:
   # Pin the hub to a node (the vault volume is ReadWriteOnce); empty means any node.
   nodeSelector: {}
+  affinity: {}
+  tolerations: []
   resources:
     requests: {cpu: 20m, memory: 64Mi}
     # Compare rows spill to SQLite on the cache volume, so hub memory does not grow with the size of the trees.
