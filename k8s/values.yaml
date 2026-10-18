@@ -45,6 +45,13 @@ vault:
 hub:
   # Pin the hub to a node (the vault volume is ReadWriteOnce); empty means any node.
   nodeSelector: {}
+  # Rollout: the new hub starts beside the old one on the same node (see the pod affinity in templates/hub.yaml).
+  # Use {type: Recreate} if the vault volume cannot be shared by two pods.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  affinity: {}
+  tolerations: []
   resources:
     requests: {cpu: 20m, memory: 64Mi}
     # Compare rows spill to SQLite on the cache volume, so hub memory does not grow with the size of the trees.

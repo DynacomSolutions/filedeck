@@ -81,7 +81,7 @@ export function openDb(file: string, cacheKiB = 8192, scratch = false): Database
   const db = new s.DatabaseSync(file);
   // A scratch file (compare spill) is thrown away on restart: no journal, no syncs. A cache keeps WAL (a process crash cannot
   // corrupt it) without syncs (an OS crash might; IndexCache then starts a fresh file).
-  db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=2000;`);
+  db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;`);
   db.exec(`PRAGMA temp_store=FILE; PRAGMA cache_size=-${cacheKiB};`);
   return db;
 }
@@ -140,9 +140,12 @@ export class IndexCache {
         db.prepare("SELECT count(*) FROM dirs WHERE path = ''").get();
         this.db = db;
       } catch (e) {
-        // A damaged cache is only a cache: start over with an empty one.
-        console.error("index cache reset:", (e as Error).message);
-        if (file !== ":memory:") for (const f of [file, file + "-wal", file + "-shm"]) fs.rmSync(f, { force: true });
+        // A damaged cache is only a cache: start over with an empty one. A busy or locked file belongs to another
+        // process (a surging pod), so it is never deleted.
+        const code = (e as { errcode?: number }).errcode;
+        const contended = code === 5 || code === 6;
+        console.error(contended ? "index cache busy:" : "index cache reset:", (e as Error).message);
+        if (file !== ":memory:" && !contended) for (const f of [file, file + "-wal", file + "-shm"]) fs.rmSync(f, { force: true });
       }
     }
     if (!this.db) return;
