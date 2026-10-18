@@ -3,7 +3,7 @@ import { constants as C } from "node:fs";
 import path from "node:path";
 import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
-import { parseMounts, networkKind } from "./mounts.ts";
+import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
 import type { JobCtl, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
@@ -86,7 +86,7 @@ export async function props(cfg: Config, p: string): Promise<Props> {
   }
   // The mount the item lives on: longest mount point that is a prefix of its virtual path.
   try {
-    const mounts = parseMounts(await fs.readFile(cfg.procMounts, "utf8")).filter((m) => r.virtual === m.mountpoint || r.virtual.startsWith(m.mountpoint === "/" ? "/" : m.mountpoint + "/"));
+    const mounts = parseMounts(await readMountTable(cfg.root, cfg.procMounts)).filter((m) => r.virtual === m.mountpoint || r.virtual.startsWith(m.mountpoint === "/" ? "/" : m.mountpoint + "/"));
     mounts.sort((a, b) => b.mountpoint.length - a.mountpoint.length);
     const m = mounts[0];
     if (m) {

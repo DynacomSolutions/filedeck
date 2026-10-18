@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as ops from "./fsops.ts";
-import { networkKind, parseMounts } from "./mounts.ts";
+import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveWrite, virtualJoin } from "./paths.ts";
 
 export interface TrashItem extends ops.TrashMeta {
@@ -66,12 +66,7 @@ async function readItems(dir: string): Promise<{ items: TrashItem[]; truncated: 
 
 /** Every volume of this node that has a trash store: the root plus each real mount point. */
 export async function listTrash(root: string, procMounts: string): Promise<TrashVolume[]> {
-  let text = "";
-  try {
-    text = await fs.readFile(procMounts, "utf8");
-  } catch {
-    /* no mount table: root only */
-  }
+  const text = await readMountTable(root, procMounts); // "" when unreadable: root only
   const cands = new Set<string>(["/"]);
   for (const m of parseMounts(text)) cands.add(m.mountpoint);
   const out: TrashVolume[] = [];
