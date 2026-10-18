@@ -123,3 +123,21 @@ export function serverUsage(mounts: readonly { device: string; total: number; us
   }
   return sum.total > 0 ? sum : null;
 }
+
+/** A folder's size next to what it is measured against: its parent folder, or for a top folder under a mount the mount's used bytes. */
+export interface FolderSize extends Usage {
+  basis: "parent" | "mount";
+}
+
+/**
+ * Sizes of the children in a depth-1 `du` answer for `parent`. `mountUsed` > 0 makes the mount's used bytes the whole
+ * (top folders under a mount); otherwise the parent's own total is. Folders the store does not know are absent.
+ */
+export function folderSizes(entries: readonly { path: string; diskBytes: number }[], parent: string, mountUsed?: number): Record<string, FolderSize> {
+  const own = entries.find((e) => e.path === parent)?.diskBytes;
+  const whole = mountUsed && mountUsed > 0 ? mountUsed : own;
+  const out: Record<string, FolderSize> = {};
+  if (whole === undefined) return out;
+  for (const e of entries) if (e.path !== parent) out[e.path] = { used: e.diskBytes, total: Math.max(whole, e.diskBytes), basis: mountUsed && mountUsed > 0 ? "mount" : "parent" };
+  return out;
+}
