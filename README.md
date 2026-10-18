@@ -61,6 +61,8 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `agentToken.secretName` | Existing Secret holding a shared hub-to-agent token (empty = none) |
 | `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key before the hub starts; check vault health after installation |
 | `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
+| `hub.affinity`, `hub.tolerations` | Hub scheduling; the chart adds a required pod affinity so a rolling update keeps both hubs on one node |
+| `hub.strategy` | Hub rollout, default `RollingUpdate` (surge 1, unavailable 0); `Recreate` stops the old hub first |
 | `sources[]` | Network sources (SFTP, WebDAV, S3, SMB) and the Secrets holding their credentials |
 | `brand` | `name`, `title`, `icon`, `css` and `themeKey`; `cssContent` is chart-only (neutral "Filedeck" when empty) |
 | `mapping.enabled`, `mapping.host` | Optional Emissary / Ambassador Mapping to the hub; with another ingress route to the `filedeck` Service yourself |
@@ -106,3 +108,5 @@ Filedeck has no user accounts: whoever can reach the page is the user. To spare 
 ## Licence
 
 MIT, see `LICENSE`. The bundled Montserrat fonts are under the SIL Open Font License 1.1 (`web/public/assets/fonts/OFL.txt`).
+
+> **Warning:** the vault volume holds a SQLite file shared briefly by two hub pods during a rollout. It must be block or local storage (ReadWriteOnce); never back it with NFS or SMB.

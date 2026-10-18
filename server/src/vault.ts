@@ -103,6 +103,7 @@ export class Vault {
       }
     }
     this.db.exec(`
+      PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS entries (
         id TEXT PRIMARY KEY,
