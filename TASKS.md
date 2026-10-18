@@ -23,7 +23,6 @@
 | FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | done | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 |  | Released and rolled out with no downtime; see 2.FD-15. |
 
 ## 3. Cached folder sizes
-ETA: 2026-10-18 20:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-9 | Size store: per-folder size totals in SQLite on each agent, filled by the size scan and reused while a folder's inode and mtime are unchanged; one-folder delta updates propagated to parents; agent and hub `GET /api/du` | done | claude-20261018-size-store | size-store |  | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/55 (f31230e). |
@@ -33,4 +32,4 @@ ETA: 2026-10-18 20:00 ICT
 | FD-13 | Sidebar tree folder rows show size, percentage and bar from the size store | done | claude-20261018-fd13 | tree-folder-sizes |  |  | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/64 (3c1970f). Adds GET /api/du?cachedOnly=1. |
 | FD-20 | Release v0.3.11 (size cache epic: du CLI and token, skill, tree folder sizes, fanotify watcher) | done | claude-20261018-release-v0311 | release-v0311 | 3.FD-10, 3.FD-11, 3.FD-12, 3.FD-13 |  | Released and rolled out with no downtime; du API token verified end to end. |
 | FD-21 | /api/du reports watched true when the fanotify watcher covers the path and is not stale, so the CLI stops warning about missed changes | done | claude-20261018-du-watched | du-watched-flag | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/70 (28f52d0). Deploys with 3.FD-22. |
-| FD-22 | Release v0.3.12 so the du watched flag (3.FD-21) deploys | in_review | claude-20261018-release-v0312 | release-v0312 | 3.FD-21 | 2026-10-18 20:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/71 |
+| FD-22 | Release v0.3.12 so the du watched flag (3.FD-21) deploys | done | claude-20261018-release-v0312 | release-v0312 | 3.FD-21 | | Released v0.3.12 and rolled out with no downtime; cached du answers now report watched true where the change watcher covers the path. |
