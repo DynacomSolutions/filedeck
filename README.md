@@ -59,6 +59,7 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `agent.stagger` | Under Argo CD, roll agents one at a time (agent N in sync wave N+1, in `nodes` order); default on, ignored by plain Helm |
 | `agent.readOnlyPaths` | Virtual paths no agent may change (default `/proc`, `/sys`) |
 | `agentToken.secretName` | Existing Secret holding a shared hub-to-agent token (empty = none) |
+| `apiToken.secretName` | Existing Secret holding the read-only token for `filedeck du` (empty = feature off) |
 | `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key before the hub starts; check vault health after installation |
 | `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
 | `hub.affinity`, `hub.tolerations` | Hub scheduling; the chart adds a required pod affinity so a rolling update keeps both hubs on one node |
@@ -74,9 +75,34 @@ Agents run as root with the node's `/` mounted read-write, and there are no user
 
 Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDECK_MAX_EDIT`, `FILEDECK_READONLY` (comma separated virtual prefixes), `FILEDECK_AGENT_TOKEN`, `FILEDECK_TRANSCODE_CONCURRENCY`, `FILEDECK_THUMB_DIR`, archive, search and hash limits (see `server/src/config.ts`).
 
-Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
+Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_API_TOKEN` or `FILEDECK_API_TOKEN_FILE` (read-only `filedeck du` token, see below), `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
 `FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help).
+
+## `filedeck du`
+
+A `du` for the folders on your nodes, answered from the hub's stored folder sizes instead of walking the disk each time.
+
+```sh
+filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] node:/path...
+```
+
+| Flag | Meaning |
+|---|---|
+| `-s`, `-d N` | Summary only, or entries up to N levels below the argument (like `du`) |
+| `-h` | Sizes as `1.5K`, `23M` (powers of 1024, rounded up, like `du -h`) |
+| `-a` | Also list files |
+| `--apparent-size` | Bytes of content instead of disk usage |
+| `--fresh` | Re-read every folder instead of reusing stored sizes |
+| `--json` | Print the hub's answer as JSON (one object per argument) |
+
+Without `-h` the unit is 1 KiB blocks, as in `du`. Children are printed before their parent. Paths are `node:/path`, where `node` is a node name from the sidebar. A long scan answers with a job; the CLI polls it and prints progress on stderr. When the answer comes from stored sizes it says so on stderr (with the age of the oldest folder), because changes since the last scan may be missing; `--fresh` avoids that. Exit status is 0 on success, 1 if any argument failed, 2 for a usage or configuration error.
+
+Environment: `FILEDECK_URL` (hub base URL, for example `https://filedeck.example.org`) and `FILEDECK_TOKEN` (the read-only token).
+
+Token setup: create a Secret with a long random value (`kubectl create secret generic filedeck-api-token --from-literal=token="$(openssl rand -base64 48)"`) and set `apiToken.secretName: filedeck-api-token` in the chart values; the hub reads it as `FILEDECK_API_TOKEN` (or the file named by `FILEDECK_API_TOKEN_FILE`). A request with `Authorization: Bearer <token>` may then call only `GET /api/nodes/<node>/api/du` and `GET /api/nodes/<node>/api/jobs/<id>` for du jobs; every other route answers 403 to it, a wrong token 401. Requests without that header are handled as before. Unset, the feature is off.
+
+Run it from the image (`filedeck du ...` is on the `PATH`), from a checkout after `npm run build` (`npx filedeck du ...` or `node server/dist/cli.js du ...`), or anywhere with Node 22 and the built `server/dist`.
 
 ## Archives and passwords
 
