@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { createAgent } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { createHub } from "./hub.ts";
+import { installShutdown } from "./shutdown.ts";
 
 const cfg = loadConfig();
 const app = cfg.mode === "hub" ? createHub(cfg) : createAgent(cfg);
@@ -11,6 +12,5 @@ const server = serve({ fetch: app.fetch, port: cfg.port }, (i) => {
 });
 (server as Server).requestTimeout = 0; // long uploads/downloads; the ingress sets its own limits
 (server as Server).headersTimeout = 30_000;
-for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => {
-  void ((app as { close?: () => Promise<void> }).close?.() ?? Promise.resolve()).finally(() => server.close(() => process.exit(0)));
-});
+const stop = installShutdown(server as Server, () => (app as { close?: () => Promise<void> }).close?.());
+for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, stop);
