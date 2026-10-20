@@ -62,12 +62,12 @@ ETA: 2026-10-21 01:00 ICT
 | FD-33 | Stores that run without an index directory use a temporary SQLite file, never `:memory:`, so their rows stay off the heap | done | | | | 2026-10-20 19:00 ICT | |
 | FD-36 | The size store never drops to its in-memory fallback on a busy database: a locked read is a cache miss, a real failure reopens the store with backoff, and the fallback holds at most 20 000 rows | done | claude-20261020-scale-walk | scale-walk | | 2026-10-20 19:00 ICT | Root cause of the agent heap OOMs on 20 Oct: "database is locked", then up to 500 000 fallback rows per walk on the heap. |
 | FD-34 | Release v0.3.16 so epic 5 deploys | done |  |  | 5.FD-30, 5.FD-31, 5.FD-32, 5.FD-33 | 2026-10-20 19:30 ICT | |
-| FD-37 | An agent starts serving /healthz within seconds whatever the size of its stores: nothing proportional to store size runs before listen, and a startup probe covers a long WAL replay | in_progress | claude-20261021-watcher-after-listen | watcher-after-listen | | 2026-10-21 01:00 ICT | v0.3.16 never came up with a 2 GB store. v0.3.17 added the startup probe and dropped the full-table read on open; still open: the change watcher handles its backlog before the server listens. |
+| FD-37 | An agent starts serving /healthz within seconds whatever the size of its stores: nothing proportional to store size runs before listen, and a startup probe covers a long WAL replay | done |  |  | | 2026-10-21 01:00 ICT | v0.3.16 never came up with a 2 GB store. v0.3.17 added the startup probe and dropped the full-table read on open; still open: the change watcher handles its backlog before the server listens. |
 | FD-38 | Release v0.3.17 so FD-37 deploys | done |  |  | 5.FD-37 | 2026-10-21 01:00 ICT | |
 | FD-39 | The size walk keeps the disk busy (bounded parallel stats, no wait on each commit), so a tree of small folders on a busy disk scans at least 5x faster than v0.3.16 | done |  |  |  | 2026-10-21 00:30 ICT | v0.3.16 walked about 100 entries/s at 6% CPU on a busy disk. |
 | FD-40 | Release v0.3.18 so FD-39 deploys | done |  |  | 5.FD-39 | 2026-10-21 00:45 ICT | |
 | FD-43 | Release v0.3.19 so FD-41 and FD-42 deploy | done |  |  | 3.FD-41, 2.FD-42 | 2026-10-21 00:45 ICT | |
-| FD-45 | Release v0.3.20 so FD-37 deploys | in_progress | claude-20261021-watcher-after-listen | watcher-after-listen | 5.FD-37 | 2026-10-21 01:15 ICT | |
+| FD-45 | Release v0.3.20 so FD-37 deploys | in_progress | claude-20261021-watcher-after-listen | watcher-after-listen | 5.FD-37 | 2026-10-21 01:15 ICT | Tagged; deploy waits for the GitOps sync, which is stuck on a repository error outside this repo. |
 
 ## 6. Housekeeping
 ETA: 2026-10-21 00:19 ICT
