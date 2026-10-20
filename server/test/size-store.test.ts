@@ -949,3 +949,112 @@ test("after a real failure the store is opened again once the backoff has passed
   }
   s.close();
 });
+
+// ---- review fixes: busy reads never give wrong totals ----
+
+const failOnce = (obj: { all?: (...a: unknown[]) => unknown; get?: (...a: unknown[]) => unknown }, fn: "all" | "get", nth: number) => {
+  const orig = obj[fn]!;
+  let n = 0;
+  obj[fn] = (...a: unknown[]) => {
+    if (n++ === nth) throw Object.assign(new Error("database is locked"), { errcode: 5 });
+    return orig.call(obj, ...a);
+  };
+  return () => (obj[fn] = orig);
+};
+
+test("a busy read of the stored children never gives a folder without its children", async () => {
+  for (const [n, nth] of [[3, 0], [1300, 6]] as const) {
+    const dir = at(`bk${n}`);
+    for (let i = 0; i < n; i++) {
+      fs.mkdirSync(path.join(dir, `k${String(i).padStart(4, "0")}`), { recursive: true });
+      fs.writeFileSync(path.join(dir, `k${String(i).padStart(4, "0")}`, "f"), "x".repeat(10));
+    }
+    const s = mk();
+    const quiet = console.error;
+    console.error = () => undefined;
+    try {
+      const first = await s.scan(`/bk${n}`);
+      const restore = failOnce((s as unknown as { q: { kidPage: never } }).q.kidPage, "all", nth);
+      const second = await s.scan(`/bk${n}`);
+      restore();
+      if (nth === 0) assert.equal(second.bytes, first.bytes); // the reuse check failed: the folder was read again
+      else assert.ok(second.errors >= 1); // the walk ran short of children and says so
+      // either way the next scan re-reads the stale subtree and is exact
+      assert.deepEqual(await s.scan(`/bk${n}`), first);
+    } finally {
+      console.error = quiet;
+    }
+    s.close();
+  }
+});
+
+test("a scan of a child alone does not leave a ghost: the parent scan purges rows it has no stored row for", async () => {
+  fs.mkdirSync(at("gh/a/b"), { recursive: true });
+  fs.mkdirSync(at("gh/a/c"));
+  const s = mk();
+  await s.scan("/gh/a/b");
+  await s.scan("/gh/a/c");
+  fs.rmSync(at("gh/a/c"), { recursive: true });
+  await s.scan("/gh/a");
+  assert.deepEqual((await rows(s, "/gh/a")).map((e) => e.path), ["/gh/a", "/gh/a/b"]);
+  s.close();
+});
+
+test("a folder that reports size 0 is streamed with opendir, not trusted to be small", async () => {
+  fs.mkdirSync(at("z0/a"), { recursive: true });
+  const olst = fsp.lstat;
+  const oopen = fsp.opendir;
+  let opened = 0;
+  (fsp as { lstat: unknown }).lstat = async (p: string, ...a: unknown[]) => {
+    const st = (await (olst as (...x: unknown[]) => Promise<object>)(p, ...a)) as { isDirectory(): boolean };
+    return String(p) === at("z0/a") ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { size: 0 }) : st;
+  };
+  (fsp as { opendir: unknown }).opendir = (...a: unknown[]) => (opened++, (oopen as (...x: unknown[]) => unknown)(...a));
+  const s = mk();
+  try {
+    assert.equal((await s.scan("/z0")).dirs, 1);
+  } finally {
+    (fsp as { lstat: unknown }).lstat = olst;
+    (fsp as { opendir: unknown }).opendir = oopen;
+  }
+  assert.equal(opened, 1);
+  s.close();
+});
+
+test("a busy read in applyChanged marks the folder stale instead of dropping the event", async () => {
+  fs.mkdirSync(at("ac/a"), { recursive: true });
+  const s = mk();
+  await s.scan("/ac");
+  const restore = failOnce((s as unknown as { q: { get: never } }).q.get, "get", 0);
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    await s.applyChanged("/ac/a");
+  } finally {
+    restore();
+    console.error = quiet;
+  }
+  await (s as unknown as { tail: Promise<void> }).tail;
+  assert.equal((await s.scanRead("/ac")).read, 2); // stale: read again
+  s.close();
+});
+
+test("reopening the store never lowers the walk stamp", async () => {
+  fs.mkdirSync(at("st/a"), { recursive: true });
+  const s = fileStore();
+  const p = s as unknown as Priv & { stamp: number };
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    await s.scan("/st");
+    p.stamp += 1_000_000; // as if an uncached walk handed out later stamps
+    const before = p.stamp;
+    p.giveUp(new Error("disk I/O error"));
+    p.retryAt = Date.now() - 1;
+    await s.scan("/st");
+    assert.ok(p.stamp >= before);
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
+});
