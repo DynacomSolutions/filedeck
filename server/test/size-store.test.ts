@@ -4,6 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { SizeStore } from "../src/size-store.ts";
@@ -351,7 +352,7 @@ test("a folder with 150k stored children can be listed", async () => {
   const s = mk(60_000, 1_000_000);
   const db = s as unknown as { put(r: unknown): void; db: { exec(q: string): void } };
   const own = { bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0 };
-  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, own, tot: own });
+  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, seen_at: 1, own, tot: own });
   db.db.exec("BEGIN");
   db.put(row("/big", "/"));
   for (let i = 0; i < 150_000; i++) db.put(row(`/big/${i}`, "/big"));
@@ -442,7 +443,11 @@ test("scan of a folder that was removed trims its rows and its parent", async ()
   await s.scan("/gone/p/q", undefined, true);
   fs.rmSync(at("gone/p/q"), { recursive: true });
   await assert.rejects(() => s.scan("/gone/p/q"));
-  (await s.lock("/"))(); // the trim runs after the scan ended; wait for it
+  // the trim runs after the scan ended, climbing one locked level at a time; wait for it
+  for (let i = 0; i < 100 && (await s.tree("/gone", 0, false)).entries[0]!.dirs !== 1; i++) {
+    (await s.lock("/"))();
+    await sleep(10);
+  }
   assert.equal((await s.tree("/gone/p/q", 0, false)).entries.length, 0);
   assert.equal((await s.tree("/gone", 0, false)).entries[0]!.bytes, 0);
   assert.equal((await s.tree("/gone", 0, false)).entries[0]!.dirs, 1);
@@ -691,4 +696,365 @@ test("/healthz answers within 1s while a large scan runs", async () => {
   assert.equal(j.result!.files, want.files);
   assert.equal(j.result!.truncated, false);
   await (app as unknown as { close(): Promise<void> }).close();
+});
+
+// ---- memory follows depth ----
+
+const fileStore = () => new SizeStore(path.join(fs.mkdtempSync(path.join(tmp, "db-")), "sizes.db"), { root: tmp, ttlMs: 60_000, maxEntries: 1_000_000 });
+
+for (const kind of ["memory", "file"] as const) {
+  test(`wide folder (${kind} store): 20k files and 2k subfolders, totals, removed subfolders dropped, unchanged rescan reads nothing`, async () => {
+    const dir = at(`wide-${kind}`);
+    fs.mkdirSync(dir);
+    for (let i = 0; i < 20_000; i++) fs.writeFileSync(path.join(dir, `f${i}`), "x");
+    for (let i = 0; i < 2_000; i++) {
+      fs.mkdirSync(path.join(dir, `d${i}`));
+      if (i % 4 === 0) fs.writeFileSync(path.join(dir, `d${i}`, "g"), "yy");
+    }
+    const s = kind === "memory" ? mk() : fileStore();
+    const v = `/wide-${kind}`;
+    const r = await s.scan(v);
+    assert.deepEqual({ files: r.files, dirs: r.dirs, bytes: r.bytes }, { files: 20_500, dirs: 2_000, bytes: 21_000 });
+    assert.ok(s.lastWalkFrames <= 2);
+    // unchanged: all 2k stored children are validated in pages and nothing is read
+    assert.equal((await s.scanRead(v)).read, 0);
+    // remove subfolders (with files in some), then re-read the folder
+    for (let i = 0; i < 2_000; i += 3) fs.rmSync(path.join(dir, `d${i}`), { recursive: true });
+    const gone = Math.ceil(2_000 / 3);
+    const r2 = await s.scan(v, undefined, false);
+    assert.equal(r2.dirs, 2_000 - gone);
+    assert.equal(r2.files, 20_500 - 167); // 167 removed folders held a file (multiples of 12 below 2000)
+    const rows2 = await rows(s, v);
+    assert.equal(rows2.length, 1 + 2_000 - gone);
+    await agrees(s, v);
+    s.close();
+  });
+}
+
+test("abort mid-walk closes every directory and leaves the subtree stale", async () => {
+  const dir = at("abort");
+  for (let i = 0; i < 300; i++) fs.mkdirSync(path.join(dir, `a${i}`, "b"), { recursive: true });
+  const fds = () => (process.platform === "linux" ? fs.readdirSync("/proc/self/fd").length : 0);
+  const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000, commitChunk: 5, streamAbove: 0 });
+  const before = fds();
+  const ac = new AbortController();
+  const ctl = { signal: ac.signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } };
+  const timer = setInterval(() => ctl.progress.entries > 100 && ac.abort(), 1);
+  await assert.rejects(s.scan("/abort", ctl), /canceled/);
+  clearInterval(timer);
+  assert.equal(fds(), before);
+  // rows written before the abort are marked stale, so the next scan re-reads them
+  const left = (s as unknown as { db: { prepare(q: string): { get(): { n: number; m: number } } } }).db.prepare("SELECT COUNT(*) AS n, MAX(scanned_at) AS m FROM sizes").get();
+  assert.ok(left.n > 0 && left.m === 0);
+  s.close();
+});
+
+test("walk keeps one frame per level: 20k empty subfolders in one folder", async () => {
+  const dir = at("many");
+  fs.mkdirSync(dir);
+  for (let i = 0; i < 20_000; i++) fs.mkdirSync(path.join(dir, `d${i}`));
+  const s = mk(60_000, 1_000_000);
+  const r = await s.scan("/many");
+  assert.equal(r.dirs, 20_000);
+  assert.equal(s.lastWalkFrames, 2); // the folder and one child at a time
+  s.close();
+});
+
+test("depth limit: folders past it are an error in the totals, and the count is stable across rescans", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "deep-"));
+  let p = root;
+  for (let i = 0; i < 260; i++) p = path.join(p, "d");
+  fs.mkdirSync(p, { recursive: true });
+  const s = new SizeStore(":memory:", { root, ttlMs: 60_000, maxEntries: 100_000 });
+  const r = await s.scan("/");
+  assert.equal(r.dirs, 256);
+  assert.ok(r.errors >= 1);
+  // a deeper scan first stores rows below the limit of a scan from the top: those folders are reused, not re-read
+  const s2 = new SizeStore(":memory:", { root, ttlMs: 60_000, maxEntries: 100_000 });
+  await s2.scan("/d/d/d/d/d/d/d/d/d/d");
+  const errs = [];
+  for (let k = 0; k < 3; k++) errs.push((await s2.scan("/")).errors);
+  assert.ok(errs[0]! >= 1);
+  assert.deepEqual(new Set(errs).size, 1);
+  const own = (s2 as unknown as { db: { prepare(q: string): { get(): { n: number } } } }).db.prepare("SELECT MAX(own_errors) AS n FROM sizes").get().n;
+  assert.ok(own <= 1);
+  s.close();
+  s2.close();
+});
+
+test("a clock stepped back does not keep removed folders: the purge uses a strictly increasing stamp", async () => {
+  fs.mkdirSync(at("ck/a"), { recursive: true });
+  fs.mkdirSync(at("ck/b"));
+  const s = mk();
+  await s.scan("/ck");
+  fs.rmdirSync(at("ck/b"));
+  const orig = Date.now;
+  Date.now = () => orig() - 3_600_000;
+  try {
+    const r = await s.scan("/ck", undefined, true);
+    assert.equal(r.dirs, 1);
+  } finally {
+    Date.now = orig;
+  }
+  assert.deepEqual((await rows(s, "/ck")).map((e) => e.path), ["/ck", "/ck/a"]);
+  s.close();
+});
+
+test("applyChanged climbs through gone folders taking each level's lock", async () => {
+  fs.mkdirSync(at("ap/g/p/x"), { recursive: true });
+  fs.mkdirSync(at("ap/z"));
+  const s = mk();
+  await s.scan("/ap");
+  fs.rmSync(at("ap/g/p"), { recursive: true });
+  const other = await s.lock("/ap/z");
+  let done = false;
+  const run = s.applyChanged("/ap/g/p/x").then(() => (done = true));
+  await sleep(100);
+  assert.equal(done, false); // the climb to /ap/g needs the lock of /ap
+  other();
+  await run;
+  assert.deepEqual((await rows(s, "/ap")).map((e) => e.path), ["/ap", "/ap/g", "/ap/z"]);
+  assert.equal((await s.tree("/ap", 0, false)).entries[0]!.dirs, 2);
+  s.close();
+});
+
+test("a stored child that vanishes between the reuse check and the walk is an error", async () => {
+  // 1300 children: the vanishing one is past the 1024 rows the reuse check keeps (later pages are lstat-ed again as they are handed out)
+  for (let i = 0; i < 1300; i++) fs.mkdirSync(at(`rc/k${String(i).padStart(4, "0")}`), { recursive: true });
+  const s = mk();
+  await s.scan("/rc");
+  const orig = fsp.lstat;
+  let n = 0;
+  (fsp as { lstat: unknown }).lstat = async (p: string, ...a: unknown[]) => {
+    if (String(p) === at("rc/k1299") && ++n === 2) throw Object.assign(new Error("gone"), { code: "ENOENT" });
+    return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
+  };
+  try {
+    assert.equal((await s.scan("/rc")).errors, 1);
+  } finally {
+    (fsp as { lstat: unknown }).lstat = orig;
+  }
+  s.close();
+});
+
+test("a store from before seen_at opens, and the first rescan drops removed folders", async () => {
+  fs.mkdirSync(at("mg/a"), { recursive: true });
+  fs.mkdirSync(at("mg/b"));
+  const f = path.join(fs.mkdtempSync(path.join(tmp, "mig-")), "sizes.db");
+  const s1 = new SizeStore(f, { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
+  await s1.scan("/mg");
+  s1.close();
+  const raw = new DatabaseSync(f);
+  raw.exec("ALTER TABLE sizes DROP COLUMN seen_at");
+  raw.close();
+  fs.rmdirSync(at("mg/b"));
+  const s2 = new SizeStore(f, { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
+  assert.ok(s2.persistent);
+  assert.equal((await s2.scan("/mg")).dirs, 1);
+  assert.deepEqual((await rows(s2, "/mg")).map((e) => e.path), ["/mg", "/mg/a"]);
+  s2.close();
+});
+
+for (const [kind, streamAbove] of [["opendir (streamed)", 0], ["readdir (small folders)", 1e12]] as const) {
+  test(`folder read through ${kind} gives the same totals`, async () => {
+    const dir = at(`rd-${streamAbove}`);
+    for (let i = 0; i < 40; i++) fs.mkdirSync(path.join(dir, `d${i}`, "e"), { recursive: true });
+    for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(dir, `f${i}`), "x");
+    const calls = { opendir: 0, readdir: 0 };
+    const o1 = fsp.opendir;
+    const o2 = fsp.readdir;
+    (fsp as { opendir: unknown }).opendir = (...a: unknown[]) => (calls.opendir++, (o1 as (...x: unknown[]) => unknown)(...a));
+    (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (calls.readdir++, (o2 as (...x: unknown[]) => unknown)(...a));
+    const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000, streamAbove });
+    try {
+      const r = await s.scan(`/rd-${streamAbove}`);
+      assert.deepEqual({ files: r.files, dirs: r.dirs, bytes: r.bytes }, { files: 100, dirs: 80, bytes: 100 });
+    } finally {
+      (fsp as { opendir: unknown }).opendir = o1;
+      (fsp as { readdir: unknown }).readdir = o2;
+    }
+    if (streamAbove === 0) assert.ok(calls.opendir === 81 && calls.readdir === 0);
+    else assert.ok(calls.readdir === 81 && calls.opendir === 0);
+    await agrees(s, `/rd-${streamAbove}`);
+    s.close();
+  });
+}
+
+// ---- a busy database is a cache miss ----
+
+type Priv = { q: { get: { get(p: string): unknown } }; send(m: unknown): Promise<void>; walks: Map<string, unknown>[]; db: { close(): void } | null; giveUp(e: unknown): void; retryAt: number; persistent: boolean };
+
+test("a locked database is a cache miss on read and on write: the store is not given up and the next call works", async () => {
+  fs.mkdirSync(at("bz/a"), { recursive: true });
+  const s = fileStore();
+  const p = s as unknown as Priv;
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    const real = p.q.get;
+    p.q.get = { get: () => { throw Object.assign(new Error("database is locked"), { errcode: 5 }); } };
+    assert.equal((await s.scan("/bz")).dirs, 1); // every lookup misses: the walk reads from disk
+    p.q.get = real;
+    const send = p.send;
+    p.send = () => Promise.reject(Object.assign(new Error("database is locked"), { busy: true }));
+    assert.equal((await s.scan("/bz", undefined, true)).dirs, 1); // the commit is lost, not the store
+    p.send = send;
+    assert.equal(s.persistent, true);
+    assert.equal((await s.scan("/bz", undefined, true)).dirs, 1);
+    assert.equal((await s.scanRead("/bz")).read, 0); // stored by the last scan
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
+});
+
+test("with the database unusable the in-memory fallback holds at most 20 000 rows", async () => {
+  const dir = at("fb");
+  for (let i = 0; i < 30_000; i++) fs.mkdirSync(path.join(dir, `d${i}`), { recursive: true });
+  const s = new SizeStore(path.join(tmp, "no-such-dir", "x", "sizes.db"), { root: tmp, ttlMs: 60_000, maxEntries: 1_000_000 });
+  const p = s as unknown as Priv;
+  // force the store unusable
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    if (s.persistent) p.giveUp(new Error("forced"));
+    const r = await s.scan("/fb");
+    assert.equal(r.dirs, 30_000);
+    assert.equal(s.persistent, false);
+    assert.ok(p.walks.reduce((n, w) => n + w.size, 0) <= 20_001);
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
+});
+
+test("after a real failure the store is opened again once the backoff has passed", async () => {
+  fs.mkdirSync(at("ro/a"), { recursive: true });
+  const s = fileStore();
+  const p = s as unknown as Priv;
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    await s.scan("/ro");
+    p.giveUp(new Error("disk I/O error"));
+    assert.equal(s.persistent, false);
+    assert.equal((await s.scan("/ro")).dirs, 1); // uncached, before the backoff has passed
+    assert.equal(s.persistent, false);
+    p.retryAt = Date.now() - 1;
+    assert.equal((await s.scan("/ro")).dirs, 1);
+    assert.equal(s.persistent, true);
+    assert.equal((await s.scanRead("/ro")).read, 0);
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
+});
+
+// ---- review fixes: busy reads never give wrong totals ----
+
+const failOnce = (obj: { all?: (...a: unknown[]) => unknown; get?: (...a: unknown[]) => unknown }, fn: "all" | "get", nth: number) => {
+  const orig = obj[fn]!;
+  let n = 0;
+  obj[fn] = (...a: unknown[]) => {
+    if (n++ === nth) throw Object.assign(new Error("database is locked"), { errcode: 5 });
+    return orig.call(obj, ...a);
+  };
+  return () => (obj[fn] = orig);
+};
+
+test("a busy read of the stored children never gives a folder without its children", async () => {
+  for (const [n, nth] of [[3, 0], [1300, 6]] as const) {
+    const dir = at(`bk${n}`);
+    for (let i = 0; i < n; i++) {
+      fs.mkdirSync(path.join(dir, `k${String(i).padStart(4, "0")}`), { recursive: true });
+      fs.writeFileSync(path.join(dir, `k${String(i).padStart(4, "0")}`, "f"), "x".repeat(10));
+    }
+    const s = mk();
+    const quiet = console.error;
+    console.error = () => undefined;
+    try {
+      const first = await s.scan(`/bk${n}`);
+      const restore = failOnce((s as unknown as { q: { kidPage: never } }).q.kidPage, "all", nth);
+      const second = await s.scan(`/bk${n}`);
+      restore();
+      if (nth === 0) assert.equal(second.bytes, first.bytes); // the reuse check failed: the folder was read again
+      else assert.ok(second.errors >= 1); // the walk ran short of children and says so
+      // either way the next scan re-reads the stale subtree and is exact
+      assert.deepEqual(await s.scan(`/bk${n}`), first);
+    } finally {
+      console.error = quiet;
+    }
+    s.close();
+  }
+});
+
+test("a scan of a child alone does not leave a ghost: the parent scan purges rows it has no stored row for", async () => {
+  fs.mkdirSync(at("gh/a/b"), { recursive: true });
+  fs.mkdirSync(at("gh/a/c"));
+  const s = mk();
+  await s.scan("/gh/a/b");
+  await s.scan("/gh/a/c");
+  fs.rmSync(at("gh/a/c"), { recursive: true });
+  await s.scan("/gh/a");
+  assert.deepEqual((await rows(s, "/gh/a")).map((e) => e.path), ["/gh/a", "/gh/a/b"]);
+  s.close();
+});
+
+test("a folder that reports size 0 is streamed with opendir, not trusted to be small", async () => {
+  fs.mkdirSync(at("z0/a"), { recursive: true });
+  const olst = fsp.lstat;
+  const oopen = fsp.opendir;
+  let opened = 0;
+  (fsp as { lstat: unknown }).lstat = async (p: string, ...a: unknown[]) => {
+    const st = (await (olst as (...x: unknown[]) => Promise<object>)(p, ...a)) as { isDirectory(): boolean };
+    return String(p) === at("z0/a") ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { size: 0 }) : st;
+  };
+  (fsp as { opendir: unknown }).opendir = (...a: unknown[]) => (opened++, (oopen as (...x: unknown[]) => unknown)(...a));
+  const s = mk();
+  try {
+    assert.equal((await s.scan("/z0")).dirs, 1);
+  } finally {
+    (fsp as { lstat: unknown }).lstat = olst;
+    (fsp as { opendir: unknown }).opendir = oopen;
+  }
+  assert.equal(opened, 1);
+  s.close();
+});
+
+test("a busy read in applyChanged marks the folder stale instead of dropping the event", async () => {
+  fs.mkdirSync(at("ac/a"), { recursive: true });
+  const s = mk();
+  await s.scan("/ac");
+  const restore = failOnce((s as unknown as { q: { get: never } }).q.get, "get", 0);
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    await s.applyChanged("/ac/a");
+  } finally {
+    restore();
+    console.error = quiet;
+  }
+  await (s as unknown as { tail: Promise<void> }).tail;
+  assert.equal((await s.scanRead("/ac")).read, 2); // stale: read again
+  s.close();
+});
+
+test("reopening the store never lowers the walk stamp", async () => {
+  fs.mkdirSync(at("st/a"), { recursive: true });
+  const s = fileStore();
+  const p = s as unknown as Priv & { stamp: number };
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    await s.scan("/st");
+    p.stamp += 1_000_000; // as if an uncached walk handed out later stamps
+    const before = p.stamp;
+    p.giveUp(new Error("disk I/O error"));
+    p.retryAt = Date.now() - 1;
+    await s.scan("/st");
+    assert.ok(p.stamp >= before);
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
 });
