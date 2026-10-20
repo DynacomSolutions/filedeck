@@ -4,6 +4,7 @@ import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type Jo
 import { Check, Circle, Loader, Minus, X } from "lucide-react";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
+import { gaveUp } from "./jobPoll";
 import { HISTORY_KEY, IDLE_COLLAPSE_MS, addToHistory, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
 
 const COLLAPSE_KEY = "filedeck-jobs-collapsed";
@@ -16,7 +17,7 @@ function pct(j: JobView): number | null {
   return null;
 }
 
-function JobRow({ node, job, onChange }: { node: string; job: JobView; onChange: () => void }) {
+function JobRow({ node, job, stale, onChange }: { node: string; job: JobView; stale: boolean; onChange: () => void }) {
   const p = pct(job);
   const act = (fn: () => Promise<unknown>) => void fn().catch(() => undefined).finally(onChange);
   const skipped = job.result?.skipped;
@@ -27,8 +28,9 @@ function JobRow({ node, job, onChange }: { node: string; job: JobView; onChange:
         <b>{job.title}</b>
         <span className="muted"> on {node}</span>
         <span className="job-state">
-          {job.state === "running" && (p === null ? " running" : ` ${p}%`)}
-          {job.state === "queued" && " queued"}
+          {stale && live(job) && " waiting for the agent"}
+          {!stale && job.state === "running" && (p === null ? " running" : ` ${p}%`)}
+          {!stale && job.state === "queued" && " queued"}
           {job.state === "done" && " done"}
           {job.state === "canceled" && " canceled"}
           {job.state === "failed" && " failed"}
@@ -89,7 +91,7 @@ function detailLine(job: OpJob, eta: number | null, live: boolean): string {
 }
 
 /** A hub-side bulk job: per-item progress, throughput, pause/cancel and the conflict question. */
-function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; detail?: OpJob; expanded: boolean; onToggle: () => void; onChange: () => void }) {
+function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJob; stale: boolean; detail?: OpJob; expanded: boolean; onToggle: () => void; onChange: () => void }) {
   const [all, setAll] = useState(false);
   const p = opPct(job);
   const act = (fn: () => Promise<unknown>) => void fn().catch(() => undefined).finally(onChange);
@@ -101,7 +103,7 @@ function OpRow({ job, detail, expanded, onToggle, onChange }: { job: OpJob; deta
     <li className={"job op " + job.state} data-job-id={job.id}>
       <div className="job-line">
         <b className="job-title">{job.title}</b>
-        <span className="job-state">{job.state === "running" ? (p === null ? " running" : ` ${p}%`) : ` ${STATE_LABEL[job.state] ?? job.state}`}</span>
+        <span className="job-state">{stale && live ? " waiting for the hub" : job.state === "running" ? (p === null ? " running" : ` ${p}%`) : ` ${STATE_LABEL[job.state] ?? job.state}`}</span>
         {live && job.state !== "waiting" && (
           job.state === "paused" ? (
             <button onClick={() => act(() => api.opAction(job.id, "resume"))}><Ic.Play /> Resume</button>
@@ -215,6 +217,10 @@ interface Finished {
 export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   const [jobs, setJobs] = useState<Record<string, JobView[]>>({});
   const [ops, setOps] = useState<OpJob[]>([]);
+  // Nodes (and the hub) whose last poll failed: their previous list stays, marked stale, until the outage is five minutes old.
+  const [stale, setStale] = useState<Set<string>>(new Set());
+  const downSince = useRef(new Map<string, number>());
+  const prev = useRef<{ jobs: Record<string, JobView[]>; ops: OpJob[] }>({ jobs: {}, ops: [] });
   const uploads = useUploads();
   const [open, setOpen] = useState<string | null>(null);
   const [detail, setDetail] = useState<OpJob | undefined>();
@@ -258,21 +264,34 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     }
     busy.current = true;
     const next: Record<string, JobView[]> = {};
-    const opsP = api.opJobs().then((r) => r.jobs, () => [] as OpJob[]);
+    const down = new Set<string>();
+    const opsP = api.opJobs().then((r) => r.jobs, () => (down.add("hub"), prev.current.ops));
     const detailP = openRef.current ? api.opJob(openRef.current).catch(() => undefined) : Promise.resolve(undefined);
     await Promise.all(
       nodesRef.current
-        .filter((n) => n.online)
+        .filter((n) => n.online || prev.current.jobs[n.name]?.some(live)) // an offline node with live jobs may just be restarting
         .map(async (n) => {
           try {
             next[n.name] = (await api.jobs(n.name)).jobs;
           } catch {
-            next[n.name] = [];
+            down.add(n.name);
+            next[n.name] = prev.current.jobs[n.name] ?? [];
           }
         }),
     );
-    const [opList, det] = await Promise.all([opsP, detailP]);
+    let [opList, det] = await Promise.all([opsP, detailP]);
     busy.current = false;
+    const t = Date.now();
+    for (const k of [...downSince.current.keys()]) if (!down.has(k)) downSince.current.delete(k);
+    for (const k of down) {
+      if (!downSince.current.has(k)) downSince.current.set(k, t);
+      if (!gaveUp(downSince.current.get(k) as number, t)) continue;
+      down.delete(k);
+      if (k === "hub") opList = [];
+      else next[k] = [];
+    }
+    prev.current = { jobs: next, ops: opList };
+    setStale(down);
     for (const [node, l] of Object.entries(next))
       for (const j of l) {
         const sk = j.result?.skipped;
@@ -293,7 +312,7 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     }
     const active = opList.some(opLive) || Object.values(next).some((l) => l.some(live));
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => void poll(), active ? 700 : 10000);
+    timer.current = setTimeout(() => void poll(), down.size ? 2000 : active ? 700 : 10000);
     if (again.current) {
       again.current = false;
       void poll();
@@ -408,10 +427,10 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
                 <UploadRow key={b.id} b={b} expanded={open === b.id} onToggle={() => setOpen(open === b.id ? null : b.id)} />
               ))}
               {opRows.map((job) => (
-                <OpRow key={job.id} job={job} detail={open === job.id ? detail : undefined} expanded={open === job.id} onToggle={() => setOpen(open === job.id ? null : job.id)} onChange={() => void poll()} />
+                <OpRow key={job.id} job={job} stale={stale.has("hub")} detail={open === job.id ? detail : undefined} expanded={open === job.id} onToggle={() => setOpen(open === job.id ? null : job.id)} onChange={() => void poll()} />
               ))}
               {rows.map(({ node, job }) => (
-                <JobRow key={node + job.id} node={node} job={job} onChange={() => void poll()} />
+                <JobRow key={node + job.id} node={node} job={job} stale={stale.has(node)} onChange={() => void poll()} />
               ))}
             </ul>
           ) : (

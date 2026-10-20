@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { api, fmtDate, fmtMode, fmtSize, stat, type Entry, type JobView, type PermsResult, type Props, type SizeResult } from "./api";
+import { backoff, classify, gaveUp, GONE_TEXT, UNREACHABLE_TEXT } from "./jobPoll";
 import { SkeletonLines } from "./Skeleton";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
@@ -37,6 +38,7 @@ const live = (j: JobView) => j.state === "queued" || j.state === "running";
 /** Poll a job on a node until it finishes. */
 function useJob(node: string) {
   const [job, setJob] = useState<JobView | null>(null);
+  const [waiting, setWaiting] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const dead = useRef(false);
   useEffect(() => () => {
@@ -45,15 +47,31 @@ function useJob(node: string) {
   }, []);
   const watch = (first: JobView): Promise<JobView> =>
     new Promise((resolve) => {
-      const step = (j: JobView) => {
+      const step = (j: JobView, fails = 0, since = 0) => {
         if (dead.current) return resolve(j);
         setJob(j);
+        setWaiting(fails > 0);
         if (!live(j)) return resolve(j);
-        timer.current = setTimeout(() => void api.job(node, j.id).then(step, () => resolve({ ...j, state: "failed", error: "lost track of the job" })), 400);
+        const fail = (error: string) => resolve({ ...j, state: "failed", error });
+        timer.current = setTimeout(
+          () =>
+            void api.job(node, j.id).then(
+              (n) => step(n),
+              (e) => {
+                const k = classify(e);
+                if (k === "gone") return fail(GONE_TEXT);
+                const t = Date.now();
+                if (k === "other") return fail("lost track of the job");
+                if (fails > 0 && gaveUp(since, t)) return fail(UNREACHABLE_TEXT);
+                step(j, fails + 1, fails > 0 ? since : t);
+              },
+            ),
+          fails > 0 ? backoff(fails) : 400,
+        );
       };
       step(first);
     });
-  return { job, watch, cancel: () => job && live(job) && void api.cancelJob(node, job.id) };
+  return { job, waiting, watch, cancel: () => job && live(job) && void api.cancelJob(node, job.id) };
 }
 
 /**
@@ -285,7 +303,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
                 </span>
               ) : sj && live(sj) ? (
                 <span>
-                  Calculating... {sj.progress.entries.toLocaleString()} entries, {fmtSize(sj.progress.bytes)} <button type="button" onClick={sizeJob.cancel}><Ic.X /> Cancel</button>
+                  {sizeJob.waiting ? "Waiting for the agent (restarting?) " : `Calculating... ${sj.progress.entries.toLocaleString()} entries, ${fmtSize(sj.progress.bytes)} `}<button type="button" onClick={sizeJob.cancel}><Ic.X /> Cancel</button>
                 </span>
               ) : (
                 <button type="button" onClick={() => void calc()}><Ic.Calculator /> {sj?.state === "canceled" ? "Calculate again" : "Calculate size"}</button>
