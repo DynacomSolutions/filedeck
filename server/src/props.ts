@@ -6,6 +6,7 @@ import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
+import { hitsReadOnly } from "./readonly.ts";
 import type { JobCtl, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { SizeStore, type DuEntry } from "./size-store.ts";
@@ -298,20 +299,26 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
 
   // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
-  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
+  const scanParts = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
     let release: (() => void) | undefined;
-    return jobs.create(
-      kind,
-      `Size of ${path.posix.basename(virtual) || "/"}`,
-      async (ctl) => {
+    return {
+      run: async (ctl: JobCtl) => {
         const x = await sizes.scanRead(virtual, ctl, fresh, release, after);
         done?.(x);
         return kind === "size" ? x.res : { res: x.res, read: x.read };
       },
-      () => release?.(),
-      async (signal) => void (release = await sizes.lock(virtual, signal)),
-    );
+      onDrop: () => release?.(),
+      gate: async (signal: AbortSignal) => void (release = await sizes.lock(virtual, signal)),
+    };
   };
+  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
+    const p = scanParts(kind, virtual, fresh, after, done);
+    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh } });
+  };
+  // An adopted scan runs again under its id, confined again and without `after` (a du client repeats its request once the job is done).
+  for (const kind of ["size", "du"] as const) {
+    jobs.register(kind, async (p) => scanParts(kind, resolveRead(cfg.root, (p as { path: string }).path).virtual, (p as { fresh: boolean }).fresh));
+  }
 
   // "Calculate" in the properties dialog: exact, so every folder is re-read unless the caller says otherwise.
   app.post("/api/jobs/size", async (c) => {
@@ -399,13 +406,25 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
 
   // Immediate for one entry; recursive changes run as a job (202 + job view).
   app.post("/api/fs/perms", async (c) => {
-    const plan = await planPerms(cfg, await json<PermsRequest>(c));
+    const req = await json<PermsRequest>(c);
+    const plan = await planPerms(cfg, req);
     if (plan.recursive) {
       const what = [plan.mode !== undefined ? `mode ${plan.mode.toString(8)}` : "", plan.uid !== undefined || plan.gid !== undefined ? "owner" : ""].filter(Boolean).join(" and ");
-      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => applyPerms(cfg, plan, ctl));
+      const { path: p, mode, owner, group, recursive, scope } = req; // allowlist, never the raw body
+      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => applyPerms(cfg, plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope } });
       return c.json(job, 202);
     }
     return c.json(await applyPerms(cfg, plan));
+  });
+  // Planned again, so confinement and read-only checks apply to the moment of the restart; a refusal fails the job with its message.
+  jobs.register("perms", async (p) => {
+    try {
+      if (hitsReadOnly(cfg.root, cfg.readOnly, (p as PermsRequest).path)) throw new ops.FsError(403, "read-only volume");
+      const plan = await planPerms(cfg, p as PermsRequest);
+      return { run: (ctl) => applyPerms(cfg, plan, ctl) };
+    } catch (e) {
+      return { run: async () => Promise.reject(e) };
+    }
   });
   return sizes;
 }
