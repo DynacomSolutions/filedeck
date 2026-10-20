@@ -43,9 +43,9 @@ ETA: 2026-10-18 18:00 ICT
 ETA: 2026-10-21 01:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| FD-23 | `filedeck du` scans are never cut short by FILEDECK_WALK_MAX_ENTRIES: the size walk stores and forgets each folder as soon as its children are done, so memory follows tree depth, not tree size; the cap stays for listing, search and archive paths | in_progress | claude-20261020-du-scan-fixes | du-scan-fixes | | 2026-10-21 00:30 ICT | `filedeck du -h -d 2` on a large data tree reported "scan hit the entry limit, sizes are partial" (89G shown). |
-| FD-24 | Agent /healthz answers during big scans: scan rows are written on a worker thread (the main thread only reads), so a contended disk no longer stalls the event loop and kubelet stops killing an agent | in_progress | claude-20261020-du-scan-fixes | du-scan-fixes | | 2026-10-21 00:30 ICT | an agent restarted 8+ times on 20 Oct 2026 (liveness timeouts, then `HTTP 502: agent unreachable`). |
-| FD-25 | Release v0.3.13 so FD-23 and FD-24 deploy | in_progress | claude-20261020-du-scan-fixes | du-scan-fixes | 4.FD-23, 4.FD-24 | 2026-10-21 00:30 ICT | |
+| FD-23 | `filedeck du` scans are never cut short by FILEDECK_WALK_MAX_ENTRIES: the size walk stores and forgets each folder as soon as its children are done, so memory follows tree depth, not tree size; the cap stays for listing, search and archive paths | done |  |  | | 2026-10-21 00:30 ICT | `filedeck du -h -d 2` on a large data tree reported "scan hit the entry limit, sizes are partial" (89G shown). |
+| FD-24 | Agent /healthz answers during big scans: scan rows are written on a worker thread (the main thread only reads), so a contended disk no longer stalls the event loop and kubelet stops killing an agent | done |  |  | | 2026-10-21 00:30 ICT | an agent restarted 8+ times on 20 Oct 2026 (liveness timeouts, then `HTTP 502: agent unreachable`). |
+| FD-25 | Release v0.3.13 so FD-23 and FD-24 deploy | done |  |  | 4.FD-23, 4.FD-24 | 2026-10-21 00:30 ICT | |
 | FD-26 | Size locks are granted in arrival order, so a du scan of a tree with constant writes is no longer starved by watcher updates and never stays queued | done | claude-20261020-du-lock-fifo | du-lock-fifo | | 2026-10-20 16:00 ICT | du stayed "queued, 0 entries" for 300 s and longer on a busy tree. |
 | FD-27 | Release v0.3.14 so FD-26 deploys | done | claude-20261020-du-lock-fifo | du-lock-fifo | 4.FD-26 | 2026-10-20 16:30 ICT | |
 | FD-28 | The change watcher bounds its pending folders: past 50 000 it treats the burst like a kernel overflow (marks the watched trees stale) instead of growing until the agent runs out of heap | done | claude-20261020-fanwatch-bound | fanwatch-bound | | 2026-10-20 17:00 ICT | An agent ran out of heap (320 MB) while a bulk copy wrote a large tree into a watched filesystem. |
@@ -66,4 +66,4 @@ ETA: 2026-10-21 01:00 ICT
 | FD-38 | Release v0.3.17 so FD-37 deploys | done |  |  | 5.FD-37 | 2026-10-21 01:00 ICT | |
 | FD-39 | The size walk keeps the disk busy (bounded parallel stats, no wait on each commit), so a tree of small folders on a busy disk scans at least 5x faster than v0.3.16 | done |  |  |  | 2026-10-21 00:30 ICT | v0.3.16 walked about 100 entries/s at 6% CPU on a busy disk. |
 | FD-40 | Release v0.3.18 so FD-39 deploys | done |  |  | 5.FD-39 | 2026-10-21 00:45 ICT | |
-| FD-43 | Release v0.3.19 so FD-41 and FD-42 deploy | in_progress | claude-20261020-release-0319 | release-0319 | 3.FD-41, 2.FD-42 | 2026-10-21 00:45 ICT | |
+| FD-43 | Release v0.3.19 so FD-41 and FD-42 deploy | done |  |  | 3.FD-41, 2.FD-42 | 2026-10-21 00:45 ICT | |
