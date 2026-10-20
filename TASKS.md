@@ -48,6 +48,7 @@ ETA: 2026-10-21 18:00 ICT
 | FD-27 | Release v0.3.14 so FD-26 deploys | in_progress | claude-20261020-du-lock-fifo | du-lock-fifo | 4.FD-26 | 2026-10-20 16:30 ICT | |
 | FD-28 | The change watcher bounds its pending folders: past 50 000 it treats the burst like a kernel overflow (marks the watched trees stale) instead of growing until the agent runs out of heap | in_progress | claude-20261020-fanwatch-bound | fanwatch-bound | | 2026-10-20 17:00 ICT | An agent ran out of heap (320 MB) while a bulk copy wrote a large tree into a watched filesystem. |
 | FD-29 | Release v0.3.15 so FD-28 deploys | in_progress | claude-20261020-fanwatch-bound | fanwatch-bound | 4.FD-28 | 2026-10-20 17:30 ICT | |
+| FD-35 | `filedeck du` keeps waiting through transient hub errors (502, 503, 504, network) and re-joins a lost job, instead of exiting while the scan runs on | in_progress | claude-20261020-du-cli-retry | du-cli-retry | | 2026-10-20 19:00 ICT | A transient 503 during a long poll ended the CLI and the next scan started in parallel. |
 
 ## 5. Agent memory scales with data
 ETA: 2026-10-21 18:00 ICT

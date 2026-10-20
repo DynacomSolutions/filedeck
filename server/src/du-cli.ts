@@ -152,6 +152,8 @@ interface Job {
   progress?: { entries: number; totalEntries: number; bytes: number; current: string };
 }
 
+class Transient extends Error {}
+
 export async function run(argv: string[], env: Record<string, string | undefined>, io: RunIo): Promise<number> {
   let o: DuOptions;
   if (argv.includes("--help")) {
@@ -177,15 +179,44 @@ export async function run(argv: string[], env: Record<string, string | undefined
     try {
       r = await io.fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(Math.max(1, deadline - io.now())) });
     } catch (e) {
-      throw new Error(`cannot reach ${base}: ${(e as Error).message}`);
+      throw new Transient(`cannot reach ${base}: ${(e as Error).message}`);
     }
     if (r.status === 401) throw new Error("the hub rejected FILEDECK_TOKEN (401)");
     if (r.status === 403) throw new Error("the hub refused the request (403)");
     return r;
   };
+  // Waits through 502/503/504 and network errors (backoff 1 s to 15 s) until the deadline; one notice per streak.
+  // With lostOk, a 404 is returned to the caller instead (the job is gone).
+  let answered = false; // per target: the hub has given a non-transient answer
+  const patient = async (url: string, label: string, lostOk = false): Promise<Response> => {
+    let wait = 1000;
+    let last = "";
+    let plain = "";
+    for (let said = false, n = 1; ; said = true, n++) {
+      try {
+        const r = await get(url);
+        if (![502, 503, 504].includes(r.status)) {
+          answered = true;
+          return r;
+        }
+        last = `hub answered HTTP ${r.status}`;
+        plain = `HTTP ${r.status}: ${r.statusText}`;
+      } catch (e) {
+        if (!(e instanceof Transient)) throw e;
+        last = plain = e.message;
+      }
+      // A wrong URL or a dead hub must not hang for the whole timeout: patience starts with the first real answer.
+      if (!answered && n >= 3) throw new Error(plain);
+      if (io.now() >= deadline) throw new Error(`timed out after ${o.timeout} s (${last})`);
+      if (!said) io.err(`filedeck du: ${label}: ${last}, retrying\n`);
+      await io.sleep(wait);
+      wait = Math.min(wait * 2, 15000);
+    }
+  };
   let status = 0;
   for (const t of o.targets) {
     const label = `${t.node}:${t.path}`;
+    answered = false;
     const api = `${base}/api/nodes/${encodeURIComponent(t.node)}/api`;
     const q = new URLSearchParams({ path: t.path });
     if (o.depth !== undefined) q.set("depth", String(o.depth));
@@ -195,13 +226,24 @@ export async function run(argv: string[], env: Record<string, string | undefined
     const url = `${api}/du?${q}`;
     try {
       let polled = false;
-      let r = await get(url);
+      let r = await patient(url, label);
+      let rejoined = false;
       while (r.status === 202) {
         polled = true;
         const { jobId } = (await r.json()) as { jobId: string };
+        let lost = false;
         for (;;) {
           if (io.now() > deadline) throw new Error(`timed out after ${o.timeout} s`);
-          const jr = await get(`${api}/jobs/${encodeURIComponent(jobId)}`);
+          const jr = await patient(`${api}/jobs/${encodeURIComponent(jobId)}`, label);
+          if (jr.status === 404 && !rejoined) {
+            // Job lost (agent restart): the same request starts or joins a scan.
+            rejoined = true;
+            io.err(`filedeck du: ${label}: job lost, asking for the scan again\n`);
+            r = await patient(url, label);
+            lost = true;
+            break;
+          }
+          rejoined = false;
           if (!jr.ok) throw new Error(`job ${jobId}: HTTP ${jr.status}`);
           const j = (await jr.json()) as Job;
           if (j.state === "done") break;
@@ -210,7 +252,8 @@ export async function run(argv: string[], env: Record<string, string | undefined
           io.err(`filedeck du: ${label}: ${j.state}${p ? `, ${p.entries} entries, ${humanSize(p.bytes)}` : ""}\n`);
           await io.sleep(1000);
         }
-        r = await get(url); // for a minute the repeat is answered from the scan that just finished
+        if (lost) continue;
+        r = await patient(url, label); // for a minute the repeat is answered from the scan that just finished
       }
       if (!r.ok) {
         const msg = ((await r.json().catch(() => null)) as { error?: string } | null)?.error ?? r.statusText;
