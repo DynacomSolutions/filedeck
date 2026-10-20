@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { direntsOf } from "./dirnames.ts";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
@@ -81,8 +82,34 @@ const rmDb = (f: string) => {
 };
 process.once("exit", () => spills.forEach(rmDb)); // best effort: a killed process leaves its file in the temp folder
 
+let swept = false;
+const SPILL_NAME = /^filedeck-[a-z]+-(\d+)-[0-9a-f-]{36}\.db(?:-wal|-shm)?$/;
+
+/** Remove spill files (and -wal/-shm) left by processes that no longer exist. Best effort: never throws, other names are never touched. */
+export async function sweepStaleSpills(dir = os.tmpdir()): Promise<void> {
+  try {
+    for await (const e of direntsOf(dir)) {
+      const pid = Number(SPILL_NAME.exec(e.name)?.[1]);
+      if (!pid || pid === process.pid) continue;
+      try {
+        process.kill(pid, 0);
+        continue; // alive
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ESRCH") continue;
+      }
+      fs.rmSync(path.join(dir, e.name), { force: true });
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
 /** A fresh database file under the temp folder, for stores that have no configured folder; heap stays small, the file goes with its owner. */
 export function spillPath(label: string): string {
+  if (!swept) {
+    swept = true;
+    void sweepStaleSpills();
+  }
   const f = path.join(os.tmpdir(), `filedeck-${label}-${process.pid}-${randomUUID()}.db`);
   spills.add(f);
   return f;
