@@ -67,7 +67,7 @@ ETA: 2026-10-21 01:00 ICT
 | FD-39 | The size walk keeps the disk busy (bounded parallel stats, no wait on each commit), so a tree of small folders on a busy disk scans at least 5x faster than v0.3.16 | done |  |  |  | 2026-10-21 00:30 ICT | v0.3.16 walked about 100 entries/s at 6% CPU on a busy disk. |
 | FD-40 | Release v0.3.18 so FD-39 deploys | done |  |  | 5.FD-39 | 2026-10-21 00:45 ICT | |
 | FD-43 | Release v0.3.19 so FD-41 and FD-42 deploy | done |  |  | 3.FD-41, 2.FD-42 | 2026-10-21 00:45 ICT | |
-| FD-45 | Release v0.3.20 so FD-37 deploys | in_progress | claude-20261021-watcher-after-listen | watcher-after-listen | 5.FD-37 | 2026-10-21 01:15 ICT | Tagged; deploy waits for the GitOps sync, which is stuck on a repository error outside this repo. |
+| FD-45 | Release v0.3.20 so FD-37 deploys | done |  |  | 5.FD-37 | 2026-10-21 01:15 ICT | |
 
 ## 6. Housekeeping
 ETA: 2026-10-21 00:19 ICT
