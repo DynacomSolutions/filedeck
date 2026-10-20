@@ -87,9 +87,9 @@ ETA: 2026-10-21 04:30 ICT
 ETA: 2026-10-21 09:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| FD-49 | Job polling in the UI survives an agent or hub restart: same job id, backoff, a waiting-for-the-agent state instead of lost track of the job | todo | | durable-ui | | 2026-10-21 05:30 ICT | |
-| FD-50 | Agent jobs are stored in SQLite with write-through, read-through and a lease, so the new pod serves the old pod's jobs during a rollout and orphans fail with a clear interrupted-by-restart error | todo | | durable-store | | 2026-10-21 06:00 ICT | Plan: rollouts overlap two pods, so a restart-only rebuild is not enough. |
-| FD-51 | On SIGTERM running jobs are interrupted cleanly (archive staging removed) and handed over for adoption | todo | | durable-store | 8.FD-50 | 2026-10-21 06:30 ICT | |
-| FD-52 | Interrupted size, du, perms and password-free compress jobs re-run under the same id after a restart; extract and passworded compress fail clearly; secrets never stored | todo | | | 8.FD-51 | 2026-10-21 07:30 ICT | |
-| FD-53 | Hub bulk operations persist and resume after a hub restart; the in-flight copy or move item is marked failed, never retried blindly | todo | | | 8.FD-50 | 2026-10-21 08:30 ICT | |
-| FD-54 | Release so epic 8 deploys | todo | | | 8.FD-49, 8.FD-52, 8.FD-53 | 2026-10-21 09:00 ICT | |
+| FD-49 | Job polling in the UI survives an agent or hub restart: same job id, backoff, a waiting-for-the-agent state instead of lost track of the job | done | | durable-ui | | 2026-10-21 05:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/99 |
+| FD-50 | Agent jobs are stored in SQLite with write-through, read-through and a lease, so the new pod serves the old pod's jobs during a rollout and orphans fail with a clear interrupted-by-restart error | done | | durable-store | | 2026-10-21 06:00 ICT | Plan: rollouts overlap two pods, so a restart-only rebuild is not enough. https://github.com/DynacomSolutions/filedeck/pull/100 |
+| FD-51 | On SIGTERM running jobs are interrupted cleanly (archive staging removed) and handed over for adoption | done | | durable-store | 8.FD-50 | 2026-10-21 06:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/100 |
+| FD-52 | Interrupted size, du, perms and password-free compress jobs re-run under the same id after a restart; extract and passworded compress fail clearly; secrets never stored | done | | | 8.FD-51 | 2026-10-21 07:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/101 |
+| FD-53 | Hub bulk operations persist and resume after a hub restart; the in-flight copy or move item is marked failed, never retried blindly | done | | | 8.FD-50 | 2026-10-21 08:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/102 |
+| FD-54 | Release so epic 8 deploys | in_progress | | | 8.FD-49, 8.FD-52, 8.FD-53 | 2026-10-21 09:00 ICT | Tagging v0.3.22. |
