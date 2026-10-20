@@ -267,6 +267,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
   (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
   (app as unknown as { close: () => Promise<void> }).close = async () => {
+    await jobs.interrupt(); // first: aborted jobs clean their staging and the rows are handed to the next process
     fan.stop();
     index.close();
     sizes.close();

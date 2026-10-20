@@ -26,6 +26,8 @@ export interface Config {
   /** compare index: SQLite directory (empty = in memory), inotify watch budget, concurrent directory listings; hub: session spill dir */
   indexDir: string;
   indexWatches: number;
+  /** agent: SQLite file that keeps background jobs visible across a restart or rollout (empty = in memory) */
+  jobsFile: string;
   /** compare index: trust an unwatched listing with an unchanged directory mtime for this long */
   indexRevalidateMs: number;
   /** fanotify helper binary that keeps folder sizes current; empty = off */
@@ -118,6 +120,7 @@ export function loadConfig(env = process.env): Config {
     hashConcurrency: Number(env.FILEDECK_HASH_CONCURRENCY ?? 4),
     walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
     indexDir: env.FILEDECK_INDEX_DIR ?? "",
+    jobsFile: env.FILEDECK_JOBS_FILE ?? (env.FILEDECK_INDEX_DIR ? path.join(env.FILEDECK_INDEX_DIR, `jobs-${env.FILEDECK_NODE ?? "local"}.db`) : ""),
     indexWatches: Number(env.FILEDECK_INDEX_WATCHES ?? 32768),
     indexRevalidateMs: Number(env.FILEDECK_INDEX_REVALIDATE_MS ?? 30 * 60_000),
     fanwatch: env.FILEDECK_FANWATCH ?? "",

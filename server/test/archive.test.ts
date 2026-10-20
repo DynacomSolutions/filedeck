@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { Readable } from "node:stream";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
@@ -335,6 +336,20 @@ test("job can be cancelled; no partial output remains", needTool, async () => {
   assert.equal((await fetch(`${base}/api/jobs/nope`)).status, 404);
   const dis = await fetch(`${base}/api/jobs/${job.id}`, { method: "DELETE" });
   assert.equal(dis.status, 200);
+});
+
+test("shutdown aborts a running compress and leaves no staging folder", needTool, async () => {
+  const d = path.join(tmp, "bulk");
+  fs.mkdirSync(d);
+  for (let i = 0; i < 30; i++) fs.writeFileSync(path.join(d, `f${i}`), randomBytes(1 << 20));
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+  await app.request("/api/jobs/compress", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir: "/", names: ["bulk"], format: "tar.gz", name: "bulk" }) });
+  const staged = () => fs.readdirSync(tmp).filter((n) => n.startsWith(".filedeck-archive-"));
+  for (let i = 0; i < 400 && !staged().length; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(staged().length, 1, "the job should be mid-flight");
+  await (app as unknown as { close(): Promise<void> }).close();
+  assert.deepEqual(staged(), []);
+  assert.equal(fs.existsSync(path.join(tmp, "bulk.tar.gz")), false);
 });
 
 test("multi-file/folder download streams a valid zip", needTool, async () => {

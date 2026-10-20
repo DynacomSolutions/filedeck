@@ -6,6 +6,7 @@ import { resolveRead } from "./paths.ts";
 import * as ops from "./fsops.ts";
 import * as ar from "./archive.ts";
 import { Jobs } from "./jobs.ts";
+import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 
@@ -35,7 +36,8 @@ function dispo(name: string) {
 export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   const root = cfg.root;
   const limits: ar.ArchiveLimits = { maxEntries: cfg.archiveMaxEntries, maxBytes: cfg.archiveMaxBytes };
-  const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message);
+  const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
+  const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
 
   // The password (if any) arrives base64-encoded in `x-filedeck-password`, never in a URL or a body, so it is not audit-logged.
   const pw = (c: Context) => passwordFromHeader(c.req.header("x-filedeck-password"));
