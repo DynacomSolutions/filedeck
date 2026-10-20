@@ -15,6 +15,7 @@ import { getPresentation, usePresentation } from "./presentation";
 import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DEFAULT_UI, DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
 import * as Ic from "lucide-react";
+import { backoff, classify, gaveUp } from "./jobPoll";
 import { Dropdown } from "./Dropdown";
 
 /* ------------------------------------------------------------------ options and presets */
@@ -264,10 +265,13 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     let rev = -1;
     let last: { t: number; dirs: number } | null = null;
     let delay = 500;
+    let fails = 0;
+    let since = 0;
     const tick = async () => {
       try {
         const j = await api.diffJob(jobId);
         if (!live) return;
+        fails = 0;
         setJob(j);
         const stt = j.stats;
         if (stt) {
@@ -295,8 +299,18 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
           void start();
           return;
         }
-        if (live) setErr((e as Error).message);
-        return;
+        // the hub is restarting: retry with backoff, give up after five minutes
+        if (live && classify(e) === "unreachable") {
+          if (!fails++) since = Date.now();
+          if (!gaveUp(since, Date.now())) delay = backoff(fails);
+          else {
+            setErr("hub unreachable");
+            return;
+          }
+        } else {
+          if (live) setErr((e as Error).message);
+          return;
+        }
       }
       if (live) timer = setTimeout(() => void tick(), delay);
     };
@@ -495,20 +509,22 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   useEffect(() => {
     if (!execJobId) return;
     let stop = false;
+    let fails = 0;
     const tick = async () => {
       try {
         const j = await api.opJob(execJobId);
         if (stop) return;
+        fails = 0;
         if (opLive(j)) setExec((x) => (x && x.jobId === execJobId ? { ...x, job: j } : x));
         else {
           const errors = (j.items ?? []).filter((i) => i.error).slice(0, 50).map((i) => `${i.label}: ${i.error}`);
           setExec((x) => (x && x.jobId === execJobId ? { ...x, job: j, state: "done", done: j.counts.done, errors, canceled: j.state === "canceled" } : x));
           return;
         }
-      } catch {
-        /* keep polling */
+      } catch (e) {
+        if (classify(e) === "unreachable") fails++; // keep polling, slower while the hub restarts
       }
-      if (!stop) setTimeout(() => void tick(), 600);
+      if (!stop) setTimeout(() => void tick(), fails ? backoff(fails) : 600);
     };
     void tick();
     return () => {
