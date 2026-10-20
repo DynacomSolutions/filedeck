@@ -9,7 +9,7 @@ import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks,
 import { copyText } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
-import { EXPANDED_KEY, ancestorPaths, flatten, folderSizes, heldIds, hold, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, shownOpen, usagePct, type ExpandState, type Held, type FolderSize, type TreeNodeBase, type Usage } from "./sidebarTree";
+import { EXPANDED_KEY, ancestorPaths, elide, flatten, folderSizes, heldIds, hold, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, shownOpen, usagePct, type ExpandState, type Held, type FolderSize, type TreeNodeBase, type Usage } from "./sidebarTree";
 
 export type How = "here" | "panel";
 
@@ -17,13 +17,15 @@ type Listing = { status: "loading" } | { status: "ready"; dirs: Entry[]; truncat
 type MountsState = { status: "loading" } | { status: "ready"; mounts: Mount[] } | { status: "error"; error: string };
 
 export interface TNode extends TreeNodeBase {
-  kind: "section" | "node" | "mount" | "dir" | "bookmark" | "trash";
+  kind: "section" | "node" | "mount" | "dir" | "bookmark" | "trash" | "elided";
   label: string;
   icon: React.ReactNode;
   /** where the row points; sections have none */
   node?: string;
   path?: string;
   defaultOpen: boolean;
+  /** elided rows: id of the chain head they stand in for */
+  of?: string;
   /** on the path to the current folder: open unless collapsed by hand */
   auto?: boolean;
   tip?: string;
@@ -134,6 +136,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const [focusId, setFocusId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [held, setHeld] = useState<Held>({ loc: "", ids: [] });
+  const [revealed, setRevealed] = useState<ReadonlySet<string>>(new Set()); // session only
   const marks = useBookmarks();
   const root = useRef<HTMLUListElement>(null);
   const { mutate } = useSWRConfig();
@@ -146,7 +149,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const heldNow = useMemo(() => new Set(heldIds(held, loc)), [held, loc]);
   const autoDirs = useMemo(() => new Set(current ? ancestorPaths(current.path) : []), [current]);
   const isAuto = (node: string, path: string) => !!current && node === current.node && autoDirs.has(path);
-  const openNow = (t: TNode) => shownOpen(isOpen(expanded, t.id, t.defaultOpen), !!t.auto, heldNow.has(t.id));
+  const openNow = (t: TNode) => t.kind === "elided" || shownOpen(isOpen(expanded, t.id, t.defaultOpen), !!t.auto, heldNow.has(t.id));
 
   const cluster = nodes.filter((n) => n.kind !== "source");
   const network = nodes.filter((n) => n.kind === "source");
@@ -237,13 +240,20 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, nodesView, nodesState.error, expanded, listings, mounts, dus, marks, current?.node, current?.path, heldNow]);
 
+  const shown = useMemo(
+    () => elide(tree, openNow, revealed, (head, hidden, tail): TNode => ({ id: head.id + "…", kind: "elided", of: head.id, label: "...", icon: <Ellipsis />, expandable: true, defaultOpen: true, tip: hidden.map((h) => h.label).join(" / "), children: [tail] })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tree, expanded, heldNow, revealed],
+  );
+  const reveal = (t: TNode) => setRevealed((s) => new Set(s).add(t.of!));
+
   const byId = useMemo(() => {
     const m = new Map<string, TNode>();
     const walk = (l: TNode[]) => l.forEach((n) => (m.set(n.id, n), n.children && walk(n.children)));
-    walk(tree);
+    walk(shown);
     return m;
-  }, [tree]);
-  const rows = useMemo(() => flatten(tree, (n) => openNow(n as TNode)), [tree, expanded, heldNow]);
+  }, [shown]);
+  const rows = useMemo(() => flatten(shown, (n) => openNow(n as TNode)), [shown, expanded, heldNow]);
   const tabId = rovingId(rows, focusId);
   // The first visible row for the current folder (a bookmark of it is not "the" current row).
   const currentId = current ? rows.find((r) => { const t = byId.get(r.id); return t && t.kind !== "bookmark" && t.node === current.node && t.path === current.path; })?.id : undefined;
@@ -277,7 +287,9 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   }, [mutate, nodesState.reload]);
 
   const setExp = useCallback((id: string, open: boolean) => {
-    const def = byId.get(id)?.defaultOpen ?? false;
+    const el = byId.get(id);
+    if (el?.kind === "elided") return reveal(el);
+    const def = el?.defaultOpen ?? false;
     if (!open && byId.get(id)?.auto) setHeld((h) => hold(h, loc, id));
     setExpanded((s) => {
       const next = setOpen(s, id, open, def);
@@ -288,6 +300,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
       }
       return next;
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [byId, loc]);
 
   const focusRow = (id: string) => {
@@ -302,6 +315,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
 
   const open = (t: TNode, how: How, direct = false) => {
     if (t.kind === "section") return setExp(t.id, !openNow(t));
+    if (t.kind === "elided") return reveal(t);
     if (t.kind === "trash") return onTrash(t.node!);
     if (t.offline) return;
     if (how === "here" && !direct && t.expandable && !openNow(t)) return setExp(t.id, true);
@@ -341,7 +355,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
     e.preventDefault();
     if (a.type === "focus") focusRow(a.id);
     else if (a.type === "expand") setExp(a.id, true);
-    else if (a.type === "collapse") setExp(a.id, false);
+    else if (a.type === "collapse") t.kind === "elided" ? focusRow(rows.find((r) => r.id === t.id)!.parent!) : setExp(a.id, false);
     else if (a.type === "toggle") setExp(a.id, !openNow(t));
     else open(t, "here", true);
   };
@@ -349,7 +363,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const renderRow = (t: TNode, level: number): React.ReactNode => {
     const isExp = t.expandable && openNow(t);
     const mark = bookmarkOf(t);
-    const hasMenu = t.kind !== "section";
+    const hasMenu = t.kind !== "section" && t.kind !== "elided";
     const main = (
       <button
         type="button"
@@ -361,7 +375,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
         aria-current={t.id === currentId ? "page" : undefined}
         aria-keyshortcuts={hasMenu ? "Shift+F10" : undefined}
         tabIndex={tabId === t.id ? 0 : -1}
-        className={"st-main" + (t.kind === "section" ? " st-sec" : "")}
+        className={"st-main" + (t.kind === "section" ? " st-sec" : "") + (t.kind === "elided" ? " st-ell" : "")}
         style={{ ["--lvl" as string]: level }}
         onFocus={() => setFocusId(t.id)}
         onKeyDown={(e) => onKeyDown(e, t)}
@@ -373,7 +387,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
           if (e.button === 1) e.preventDefault(); // no middle-click autoscroll
         }}
         onAuxClick={(e) => {
-          if (e.button !== 1 || t.kind === "section") return;
+          if (e.button !== 1 || t.kind === "section" || t.kind === "elided") return;
           e.preventDefault();
           if (t.kind !== "trash" && !t.offline) onOpen(t.node!, t.path ?? "/", "panel");
         }}
@@ -398,7 +412,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
     return (
       <li key={t.id} role="none" className={"st-item" + (t.kind === "section" ? " sec" : "")}>
         <div className={"st-row" + (tabId === t.id ? " cur" : "") + (t.id === currentId ? " here" : "") + (t.offline ? " off" : "")}>
-          {t.tip || t.usage || t.size ? <Tip label={<Popover t={t} />} besideOf=".side" when={(w) => !!t.usage || !!t.size || truncated(w)}>{main}</Tip> : main}
+          {t.tip || t.usage || t.size ? <Tip label={<Popover t={t} />} besideOf=".side" when={(w) => t.kind === "elided" || !!t.usage || !!t.size || truncated(w)}>{main}</Tip> : main}
           {hasMenu && (
             <Tip label="Actions">
               <button type="button" className="st-more" tabIndex={-1} aria-label={`Actions for ${t.label}`} aria-hidden="true" disabled={!mark && t.kind !== "trash"} onClick={(e) => showMenu(t, e.currentTarget)}><Ellipsis /></button>
@@ -424,7 +438,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   return (
     <>
       <ul role="tree" aria-label="Navigation" className="st-tree" ref={root} aria-busy={nodesView === "loading" || undefined}>
-        {tree.map((t) => renderRow(t, 1))}
+        {shown.map((t) => renderRow(t, 1))}
       </ul>
       {wants.map((w) => <Feed key={w.k} want={w} onDirs={onDirs} onMounts={onMounts} onDu={onDu} />)}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
