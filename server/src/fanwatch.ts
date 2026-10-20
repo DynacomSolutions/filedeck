@@ -31,6 +31,8 @@ export interface FanWatchOptions {
   /** restart backoff after an unexpected helper exit */
   restartMinMs?: number;
   restartMaxMs?: number;
+  /** pending changed folders (timers plus queue) before the burst is treated like a kernel overflow */
+  maxPending?: number;
 }
 
 export interface ChangeSink {
@@ -156,10 +158,7 @@ export class FanWatch {
 
   /** One helper output line. */
   line(l: string) {
-    if (l === "!overflow") {
-      for (const m of this.marks) this.store.markStale(m);
-      return;
-    }
+    if (l === "!overflow") return this.dropPending();
     if (l.startsWith("#ready")) this.backoff = 0;
     if (l.startsWith("c ")) return void this.note(`cannot watch ${unescapeLine(l.slice(2))}, changes there are seen only by age and folder mtime`);
     const kind = l[0];
@@ -168,12 +167,25 @@ export class FanWatch {
     if (v) this.schedule(v, kind === "m");
   }
 
+  /** Events were lost or are too many to track: forget the pending folders and let the next read re-scan the watched trees. */
+  private dropPending() {
+    for (const d of this.due.values()) clearTimeout(d.timer);
+    this.due.clear();
+    this.queue.clear();
+    for (const m of this.marks) this.store.markStale(m);
+  }
+
   private schedule(v: string, modify: boolean) {
     const now = Date.now();
     let at = now + this.settleMs;
     if (modify) at = Math.max(at, (this.lastRun.get(v) ?? 0) + this.modifyMs);
     const cur = this.due.get(v);
     if (cur && cur.at <= at) return;
+    // a bulk write adds one entry per folder while drain waits on size scans: bound memory by acting as on a kernel overflow
+    if (!cur && this.due.size + this.queue.size >= (this.o.maxPending ?? 50_000)) {
+      this.note("too many changed folders pending, treating it as an overflow");
+      return this.dropPending();
+    }
     if (cur) clearTimeout(cur.timer);
     const timer = setTimeout(() => {
       this.due.delete(v);
