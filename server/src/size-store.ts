@@ -232,7 +232,9 @@ export class SizeStore {
       `);
       // stores of older versions have no seen_at
       if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec("ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
-      this.stamp = Math.max(this.stamp, Number(db.prepare("SELECT MAX(seen_at) AS m FROM sizes").get()?.m ?? 0));
+      // Never MAX(seen_at): that scans the whole table before the server listens. A stamp only has to differ from earlier walks' stamps;
+      // a clock stepped back can only make a stale child look current until its next re-read, never purge a live one.
+      this.stamp = Math.max(this.stamp, Date.now());
       this.q = {
         get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
         put: db.prepare(`INSERT OR REPLACE INTO sizes (${COLS.join(",")}) VALUES (${COLS.map(() => "?").join(",")})`),

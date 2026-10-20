@@ -1068,3 +1068,27 @@ test("reopening the store never lowers the walk stamp", async () => {
   }
   s.close();
 });
+
+test("opening a store with many rows runs no statement that scans the sizes table", () => {
+  const file = at("big.db");
+  new SizeStore(file, { root: tmp, ttlMs: 60_000, maxEntries: 100_000 }).close(); // creates the schema
+  const db = new DatabaseSync(file);
+  const names = (db.prepare("PRAGMA table_info(sizes)").all() as { name: string }[]).map((c) => c.name);
+  const ins = db.prepare(`INSERT INTO sizes (${names.join(",")}) VALUES (?${",0".repeat(names.length - 1)})`);
+  db.exec("BEGIN");
+  for (let i = 0; i < 200_000; i++) ins.run("/p" + i);
+  db.exec("COMMIT");
+  db.close();
+  const seen: string[] = [];
+  const orig = DatabaseSync.prototype.prepare;
+  DatabaseSync.prototype.prepare = function (this: DatabaseSync, sql: string) {
+    seen.push(sql);
+    return orig.call(this, sql);
+  } as typeof orig;
+  try {
+    new SizeStore(file, { root: tmp, ttlMs: 60_000, maxEntries: 100_000 }).close();
+  } finally {
+    DatabaseSync.prototype.prepare = orig;
+  }
+  assert.deepEqual(seen.filter((q) => /FROM sizes\b/i.test(q) && !/WHERE/i.test(q)), []);
+});

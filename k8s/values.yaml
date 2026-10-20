@@ -7,7 +7,7 @@ fullnameOverride: ""
 image:
   # Public container image; use a pinned tag or immutable digest for production deployments.
   repository: ghcr.io/dynacomsolutions/filedeck
-  tag: "0.3.16"
+  tag: "0.3.17"
   # When set, the pods run repository@digest and `tag` is ignored.
   digest: ""
   pullPolicy: IfNotPresent
@@ -78,6 +78,8 @@ agent:
   probes:
     timeoutSeconds: 5
     livenessFailureThreshold: 6
+    # Startup probe: 10 s apart, so 60 allows up to 10 minutes to open a big size store and replay its WAL before liveness applies
+    startupFailureThreshold: 60
   # Per-upload cap in bytes (default 1 TiB)
   maxUpload: "1099511627776"
   # Virtual paths (mount points or folders, "/" = the host root) that every agent refuses to change: no upload, edit,
