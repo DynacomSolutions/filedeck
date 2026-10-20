@@ -9,6 +9,7 @@ const cfg = loadConfig();
 const app = cfg.mode === "hub" ? createHub(cfg) : createAgent(cfg);
 const server = serve({ fetch: app.fetch, port: cfg.port }, (i) => {
   console.log(`filedeck ${cfg.mode} listening on :${i.port}` + (cfg.mode === "agent" ? ` root=${cfg.root} node=${cfg.node}` : ` nodes=${cfg.nodes.map((n) => n.name).join(",")}`));
+  (app as { startWatcher?: () => void }).startWatcher?.();
 });
 (server as Server).requestTimeout = 0; // long uploads/downloads; the ingress sets its own limits
 (server as Server).headersTimeout = 30_000;

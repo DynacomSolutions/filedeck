@@ -198,6 +198,7 @@ parentPort.on("message", (m) => {
 
 /** `pending.due_at` of a folder that is not waiting but remembers its `last_run` */
 const PENDING_IDLE = Number.MAX_SAFE_INTEGER;
+const PENDING_BATCH = 10_000;
 
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
@@ -258,6 +259,7 @@ export class SizeStore {
         CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
         CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS pending_due ON pending(due_at);
+        CREATE INDEX IF NOT EXISTS pending_idle_run ON pending(due_at, last_run);
       `);
       // stores of older versions have no seen_at
       if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec("ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
@@ -1001,10 +1003,10 @@ export class SizeStore {
       return null;
     }
     if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [now, PENDING_IDLE, p]));
-    // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future)
-    if (now - this.lastPrune > Math.max(t.modifyMs, 1000)) {
+    // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future), one bounded batch per call
+    if (now - this.lastPrune > 1000) {
       this.lastPrune = now;
-      await this.write1("DELETE FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?)", [PENDING_IDLE, now - t.modifyMs, now + t.modifyMs]);
+      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?) LIMIT ?)", [PENDING_IDLE, now - t.modifyMs, now + t.modifyMs, PENDING_BATCH]);
     }
     return got;
   }
@@ -1015,8 +1017,12 @@ export class SizeStore {
   }
 
   /** The watcher lost events: nothing pending is worth keeping, the stale marks cover it. */
-  clearPending(): Promise<void> {
-    return this.write1("DELETE FROM pending", []); // not `write`: size walks wait on its tail
+  async clearPending(): Promise<void> {
+    // bounded batches (the writer never holds one huge transaction), a pause between them; not `write`: size walks wait on its tail
+    while (this.db && this.safe(() => !!this.db!.prepare("SELECT 1 FROM pending LIMIT 1").get(), false)) {
+      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending LIMIT ?)", [PENDING_BATCH]);
+      await new Promise((r) => setTimeout(r, 5));
+    }
   }
 
   /** Re-read `v`; when it is gone, the stored parent to re-read instead (undefined when done). */

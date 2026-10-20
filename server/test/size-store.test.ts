@@ -1094,6 +1094,78 @@ test("opening a store with many rows runs no statement that scans the sizes tabl
   assert.deepEqual(seen.filter((q) => /FROM sizes\b/i.test(q) && !/WHERE/i.test(q)), []);
 });
 
+function seedPending(file: string, n: number, due = 1, lastRun: number | null = null) {
+  new SizeStore(file, { root: tmp, ttlMs: 60_000, maxEntries: 100_000 }).close(); // creates the schema
+  const db = new DatabaseSync(file);
+  const ins = db.prepare("INSERT INTO pending (path, due_at, last_run) VALUES (?, ?, ?)");
+  db.exec("BEGIN");
+  for (let i = 0; i < n; i++) ins.run("/p" + i, due, lastRun);
+  db.exec("COMMIT");
+  db.close();
+}
+const spyPrepare = (seen: string[]) => {
+  const orig = DatabaseSync.prototype.prepare;
+  DatabaseSync.prototype.prepare = function (this: DatabaseSync, sql: string) {
+    seen.push(sql);
+    return orig.call(this, sql);
+  } as typeof orig;
+  return () => void (DatabaseSync.prototype.prepare = orig);
+};
+
+test("starting an agent and its watcher runs no statement over a large pending table except bounded reads", () => {
+  const idx = fs.mkdtempSync(path.join(tmp, "idx-"));
+  seedPending(path.join(idx, "sizes-t.db"), 200_000);
+  const seen: string[] = [];
+  const restore = spyPrepare(seen);
+  try {
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: idx, FILEDECK_FANWATCH: "/nonexistent-helper" } as never));
+    (app as unknown as { startWatcher: () => void }).startWatcher();
+  } finally {
+    restore();
+  }
+  assert.deepEqual(seen.filter((q) => /\bpending\b/i.test(q) && !/LIMIT/i.test(q)), []);
+});
+
+test("200k idle pending rows: start and first drain read them only by index, the prune is an indexed batch", async () => {
+  const idx = fs.mkdtempSync(path.join(tmp, "idx-"));
+  const file = path.join(idx, "sizes-t.db");
+  seedPending(file, 200_000, Number.MAX_SAFE_INTEGER, Date.now());
+  const seen: string[] = [];
+  const restore = spyPrepare(seen);
+  try {
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: idx, FILEDECK_FANWATCH: "/nonexistent-helper" } as never));
+    (app as unknown as { startWatcher: () => void }).startWatcher();
+    await sleep(800); // past the first drain tick
+  } finally {
+    restore();
+  }
+  assert.deepEqual(seen.filter((q) => /\bpending\b/i.test(q) && !/LIMIT|MIN\(due_at\)/i.test(q)), []);
+  // the writer's statements cannot be spied on: check their plans instead
+  const db = new DatabaseSync(file);
+  const plan = (q: string, ...a: number[]) => (db.prepare("EXPLAIN QUERY PLAN " + q).all(...a) as { detail: string }[]).map((r) => r.detail).join(" | ");
+  const prune = plan("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?) LIMIT ?)", 1, 2, 3, 4);
+  const recent = plan("SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?", 1, 2, 3);
+  db.close();
+  assert.doesNotMatch(prune, /SCAN pending(?! USING)/);
+  assert.match(recent, /USING (COVERING )?INDEX pending_idle_run/);
+});
+
+test("clearPending deletes in bounded batches", async () => {
+  const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
+  await s.notePending(Array.from({ length: 25_000 }, (_, i) => ({ path: "/p" + i, dueAt: 1, modify: false })), 1000);
+  const seen: string[] = [];
+  const restore = spyPrepare(seen);
+  try {
+    await s.clearPending();
+  } finally {
+    restore();
+  }
+  assert.deepEqual(seen.filter((q) => /DELETE/i.test(q) && !/LIMIT/i.test(q)), []);
+  assert.equal(seen.filter((q) => /DELETE/i.test(q)).length, 3);
+  assert.equal(((s as unknown as { db: DatabaseSync }).db.prepare("SELECT COUNT(*) n FROM pending").get() as { n: number }).n, 0);
+  s.close();
+});
+
 test("limiter runs at most n tasks at once and runs them all", async () => {
   const lim = limiter(3);
   let now = 0;
