@@ -305,6 +305,7 @@ function fileStore() {
     markStale: (v: string) => void stale.push(v),
     notePending: st.notePending.bind(st),
     takeDue: st.takeDue.bind(st),
+    recentRuns: st.recentRuns.bind(st),
     clearPending: st.clearPending.bind(st),
   };
   const count = () => (st as unknown as { db: { prepare(s: string): { get(): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending").get().n;
@@ -374,5 +375,49 @@ test("fanwatch + SizeStore file: overflow clears pending rows and marks stale", 
   assert.equal(f.count(), 0);
   assert.equal(f.calls.length, 0);
   w.stop();
+  f.done();
+});
+
+test("fanwatch + SizeStore file: a backlog older than 10 x modifyMs becomes an overflow", async () => {
+  const f = fileStore();
+  const slow = { ...f.sink, applyChanged: async (v: string) => (f.calls.push(v), void (await sleep(5))) };
+  const w = new FanWatch(slow, { ...opts, settleMs: 1, modifyMs: 20 });
+  (w as unknown as { marks: string[] }).marks = ["/"];
+  for (let i = 0; i < 600; i++) w.line(`x /d/${i}`);
+  await until(() => f.stale.length > 0, 10_000);
+  assert.deepEqual(f.stale, ["/"]);
+  await sleep(100);
+  assert.equal(f.count(), 0, "pending rows dropped");
+  assert.ok(f.calls.length < 600);
+  w.stop();
+  f.done();
+});
+
+test("fanwatch + SizeStore file: folders run just before a restart are marked stale at start; a stepped-back clock still drains", async () => {
+  const f = fileStore();
+  const old = Date.now() - 1000;
+  await f.st.notePending([{ path: "/r", dueAt: old, modify: false }], 300);
+  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
+  await f.st.notePending([{ path: "/future", dueAt: Date.now() + 3_600_000, modify: false }], 300);
+  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/future"]);
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
+  const mounts = path.join(root, "m");
+  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n");
+  const w = new FanWatch(f.sink, { ...opts, helper: "fake", root, procMounts: mounts, spawn: () => new Fake() });
+  await w.start();
+  assert.deepEqual(f.stale.sort(), ["/future", "/r"]);
+  w.stop();
+  fs.rmSync(root, { recursive: true });
+  f.done();
+});
+
+test("SizeStore pending writes do not extend the walk tail", async () => {
+  const f = fileStore();
+  const st = f.st as unknown as { tail: Promise<void> };
+  const before = st.tail;
+  await f.st.notePending([{ path: "/a", dueAt: 0, modify: false }], 300);
+  await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 });
+  await f.st.clearPending();
+  assert.equal(st.tail, before);
   f.done();
 });

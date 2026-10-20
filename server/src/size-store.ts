@@ -664,22 +664,43 @@ export class SizeStore {
   }
 
   private lastPrune = 0;
-  /** Up to `limit` folders whose due time has come, oldest first; they are marked run at `now` and not returned again until noted again. */
-  async takeDue(now: number, limit: number, keepMs: number): Promise<string[]> {
+  /**
+   * Up to `limit` folders whose due time has come, oldest first; they are marked run at `now` and not returned again until noted again.
+   * Null when the oldest due time is more than 10 x modifyMs ago (the backlog would take too long to apply): the pending rows are then
+   * dropped and the caller marks the watched trees stale instead. Due times far in the future (the clock stepped back) count as due.
+   */
+  async takeDue(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null> {
     if (!this.db) return [];
-    const paths = this.safe(() => (this.db!.prepare("SELECT path FROM pending WHERE due_at <= ? ORDER BY due_at LIMIT ?").all(now, limit) as { path: string }[]).map((r) => r.path), []);
-    if (paths.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ? AND due_at <= ?", paths.map((p) => [now, PENDING_IDLE, p, now]));
-    // idle rows only remember the last run: drop them once it is older than the modify interval
-    if (now - this.lastPrune > Math.max(keepMs, 1000)) {
-      this.lastPrune = now;
-      await this.write("DELETE FROM pending WHERE due_at = ? AND last_run < ?", [PENDING_IDLE, now - keepMs]);
+    const far = now + t.modifyMs + t.settleMs;
+    const got = this.safe(() => {
+      const db = this.db!;
+      const oldest = (db.prepare("SELECT MIN(due_at) d FROM pending").get() as { d: number | null }).d;
+      if (oldest !== null && oldest < PENDING_IDLE && oldest < now - 10 * t.modifyMs) return null;
+      const col = (sql: string, ...a: number[]) => (db.prepare(sql).all(...a) as { path: string }[]).map((r) => r.path);
+      const due = col("SELECT path FROM pending WHERE due_at <= ? ORDER BY due_at LIMIT ?", now, limit);
+      return due.length < limit ? [...due, ...col("SELECT path FROM pending WHERE due_at > ? AND due_at < ? LIMIT ?", far, PENDING_IDLE, limit - due.length)] : due;
+    }, []);
+    if (got === null) {
+      await this.clearPending();
+      return null;
     }
-    return paths;
+    if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [now, PENDING_IDLE, p]));
+    // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future)
+    if (now - this.lastPrune > Math.max(t.modifyMs, 1000)) {
+      this.lastPrune = now;
+      await this.write1("DELETE FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?)", [PENDING_IDLE, now - t.modifyMs, now + t.modifyMs]);
+    }
+    return got;
+  }
+
+  /** Folders that ran within the last `withinMs` (their run may not have finished when the process stopped), at most `limit`. */
+  recentRuns(now: number, withinMs: number, limit: number): string[] {
+    return this.safe(() => (this.db!.prepare("SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?").all(PENDING_IDLE, now - withinMs, limit) as { path: string }[]).map((r) => r.path), []);
   }
 
   /** The watcher lost events: nothing pending is worth keeping, the stale marks cover it. */
   clearPending(): Promise<void> {
-    return this.write("DELETE FROM pending", []);
+    return this.write1("DELETE FROM pending", []); // not `write`: size walks wait on its tail
   }
 
   private async changed(v: string, ctl: JobCtl): Promise<void> {

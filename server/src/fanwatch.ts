@@ -40,8 +40,10 @@ export interface ChangeSink {
   markStale(virtual: string): void;
   /** keep changed folders on disk: false when that is not possible (the watcher then keeps them in memory) */
   notePending?(items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number): Promise<boolean>;
-  /** folders due at `now` (oldest first, at most `limit`), marked as run */
-  takeDue?(now: number, limit: number, keepMs: number): Promise<string[]>;
+  /** folders due at `now` (oldest first, at most `limit`), marked as run; null = the backlog is too old to drain, the pending rows are dropped */
+  takeDue?(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null>;
+  /** folders that ran within `withinMs` (a crash may have cut the run short) */
+  recentRuns?(now: number, withinMs: number, limit: number): string[];
   clearPending?(): Promise<void>;
 }
 
@@ -68,6 +70,10 @@ export class FanWatch {
   /** events not yet handed to the store: the only per-folder state in memory, at most FLUSH_MAX entries */
   private buf = new Map<string, { at: number; modify: boolean }>();
   private inflight = 0;
+  /** the store is read for due folders only until this time (events were noted lately) or after a take that found some; the first drain always reads */
+  private activeUntil = 0;
+  private firstTake = true;
+  private recovered = false;
   private resume: (() => void) | null = null;
   private timer: NodeJS.Timeout | null = null;
   /** fallback while the store is unusable: due time per folder (capped by maxPending), and last runs for the modify interval */
@@ -115,6 +121,12 @@ export class FanWatch {
       const hostPaths = mounts.map((m) => (this.o.root === "/" ? m.mountpoint : this.o.root + (m.mountpoint === "/" ? "" : m.mountpoint)));
       this.marks = mounts.map((m) => m.mountpoint);
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
+      if (!this.recovered && this.store.recentRuns) {
+        // folders taken just before a stop or crash may not have been applied: re-read them on the next read
+        this.recovered = true;
+        const recent = this.store.recentRuns(Date.now(), 60_000, 1001);
+        for (const m of recent.length > 1000 ? this.marks : recent) this.store.markStale(m);
+      }
       if (this.stopped) return;
       const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["ignore", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
       this.proc = p;
@@ -221,7 +233,7 @@ export class FanWatch {
     this.buf = new Map();
     this.inflight++;
     try {
-      if (this.store.notePending && (await this.store.notePending(items, this.modifyMs))) return;
+      if (this.store.notePending && (await this.store.notePending(items, this.modifyMs))) return void (this.activeUntil = Date.now() + this.modifyMs + this.settleMs);
       this.keepInMemory(items);
     } finally {
       this.inflight--;
@@ -256,7 +268,16 @@ export class FanWatch {
     try {
       while (!this.stopped) {
         const now = Date.now();
-        let batch = this.store.takeDue ? await this.store.takeDue(now, DRAIN_BATCH, this.modifyMs) : [];
+        let batch: string[] | null = [];
+        if (this.store.takeDue && (this.firstTake || now <= this.activeUntil)) {
+          this.firstTake = false;
+          batch = await this.store.takeDue(now, DRAIN_BATCH, { modifyMs: this.modifyMs, settleMs: this.settleMs });
+          if (batch === null) {
+            this.note("changed folders are too far behind, treating it as an overflow");
+            for (const m of this.marks) this.store.markStale(m);
+            break;
+          }
+        }
         if (!batch.length && this.mem.size) {
           batch = [...this.mem].filter(([, at]) => at <= now).slice(0, DRAIN_BATCH).map(([p]) => p);
           for (const p of batch) {
@@ -279,6 +300,7 @@ export class FanWatch {
             /* a folder that vanished or cannot be read: the next scan deals with it */
           }
         }
+        if (this.store.takeDue) this.activeUntil = Math.max(this.activeUntil, Date.now() + this.modifyMs + this.settleMs); // rows may remain after a slow batch
       }
     } finally {
       this.draining = false;
