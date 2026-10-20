@@ -3,6 +3,7 @@ import { constants as C } from "node:fs";
 import path from "node:path";
 import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
+import { namesOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
 import type { JobCtl, Jobs } from "./jobs.ts";
@@ -245,13 +246,12 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
     if (ctl?.signal.aborted) throw bad("canceled");
     const dir = stack.pop()!;
     if (ctl) ctl.progress.current = dir.slice(cfg.root === "/" ? 0 : cfg.root.length) || "/";
-    let names: string[];
-    try {
-      names = await fs.readdir(dir);
-    } catch {
-      res.errors++;
-      continue;
-    }
+    for await (const batch of namesOf(dir, 256, undefined, () => res.errors++)) await visit(dir, batch);
+  }
+  if (ctl) ctl.progress.entries = seen;
+  return res;
+
+  async function visit(dir: string, names: string[]) {
     for (const n of names) {
       if (n === TRASH_DIR) continue;
       if (ctl?.signal.aborted) throw bad("canceled");
@@ -280,8 +280,6 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
       }
     }
   }
-  if (ctl) ctl.progress.entries = seen;
-  return res;
 }
 
 const flag = (v: string | undefined) => v === "1";

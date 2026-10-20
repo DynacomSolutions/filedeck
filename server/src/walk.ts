@@ -5,6 +5,10 @@ import path from "node:path";
 import { FsError } from "./fsops.ts";
 import { TRASH_DIR, resolveRead } from "./paths.ts";
 import { compileGlobs } from "./glob.ts";
+import { namesOf } from "./dirnames.ts";
+
+/** Names are read and sorted in batches of this size: folders up to it list in name order, larger ones in batch order (shortcut: no global sort, which would need every name on the heap). */
+const SORT_BATCH = 1000;
 
 export interface WalkEntry {
   /** path relative to the walked folder, "/" separated */
@@ -59,17 +63,21 @@ export async function* walkTree(
   while (stack.length) {
     if (signal?.aborted) throw new FsError(400, "canceled");
     const dir = stack.pop() as (typeof stack)[number];
-    let names: string[];
-    try {
-      names = await fs.readdir(dir.real);
-    } catch {
-      summary.errors++;
-      continue;
-    }
-    names.sort();
-    const wanted = names.filter((n) => n !== TRASH_DIR && (o.hidden || !n.startsWith(".")));
     const out: WalkEntry[] = [];
     const subdirs: typeof stack = [];
+    // unreadable folder: counted, what was found so far is kept
+    for await (const batch of namesOf(dir.real, SORT_BATCH, (n) => n !== TRASH_DIR && (o.hidden || !n.startsWith(".")), () => summary.errors++)) {
+      batch.sort();
+      await scan(dir, batch, out, subdirs);
+      if (summary.truncated) break; // the generator's finally closes the Dir
+    }
+    for (let i = 0; i < out.length; i += 500) yield out.slice(i, i + 500);
+    if (summary.truncated) break;
+    for (const d of subdirs.reverse()) stack.push(d);
+  }
+  return summary;
+
+  async function scan(dir: (typeof stack)[number], wanted: string[], out: WalkEntry[], subdirs: typeof stack) {
     for (let i = 0; i < wanted.length; i += 32) {
       if (signal?.aborted) throw new FsError(400, "canceled");
       const got = await Promise.all(
@@ -109,11 +117,7 @@ export async function* walkTree(
       }
       if (summary.truncated) break;
     }
-    for (let i = 0; i < out.length; i += 500) yield out.slice(i, i + 500);
-    if (summary.truncated) break;
-    for (const d of subdirs.reverse()) stack.push(d);
   }
-  return summary;
 }
 
 export class Semaphore {

@@ -3,6 +3,7 @@ import { FsError } from "./fsops.ts";
 import { Jobs, type JobView } from "./jobs.ts";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { spillPath } from "./index-cache.ts";
 import path from "node:path";
 import { normalizeOptions, DIFF_STATUSES, type DiffOptions, type Status } from "./folderdiff.ts";
 import { CompareSession, type DirSource, type LsEntry } from "./cmp-engine.ts";
@@ -168,7 +169,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
       const ls = agentSource(agents.get(left.node) as Target, left.path, "left");
       const rs = agentSource(agents.get(right.node) as Target, right.path, "right");
       const t0 = Date.now();
-      const sess = new CompareSession(ls, rs, options, diffDir ? path.join(diffDir, `${randomUUID()}.db`) : ":memory:");
+      const sess = new CompareSession(ls, rs, options, diffDir ? path.join(diffDir, `${randomUUID()}.db`) : spillPath("diff"));
       const job = jobs.create("folderdiff", `Compare ${left.node}:${left.path} with ${right.node}:${right.path}`, async (ctl) => {
         const s = sess;
         await s.run(ctl.signal, ctl.progress);

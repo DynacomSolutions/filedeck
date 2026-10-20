@@ -8,7 +8,7 @@ import { cleanVirtual, virtualJoin } from "../paths.ts";
 import { compileGlobs } from "../glob.ts";
 import { Semaphore, type WalkEntry, type WalkOpts, type WalkSummary } from "../walk.ts";
 import { walkResponse } from "../diff-routes.ts";
-import { IndexCache, type IdxEntry } from "../index-cache.ts";
+import { IndexCache, spillPath, type IdxEntry } from "../index-cache.ts";
 import { THUMB_MAX_IMAGE_BYTES, thumbKind, thumbResponse, type Thumbnailer } from "../thumbs.ts";
 import { SearchGate, parseSearch, searchTree } from "../search.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "./types.ts";
@@ -67,7 +67,7 @@ const DIR_STAT: SourceStat = { type: "dir", size: 0, mtime: null, mode: 0o755 };
 export function createSourceApp(name: string, backend: SourceBackend, o: SourceAppOptions) {
   const app = new Hono();
   const hashes = new Semaphore(Math.max(1, o.hashConcurrency));
-  const index = new IndexCache(o.indexFile || ":memory:", {
+  const index = new IndexCache(o.indexFile || spillPath("source"), {
     async statDir(p) {
       const s = p === "/" ? DIR_STAT : await backend.stat(p);
       if (!s) throw new FsError(404, "not found");
