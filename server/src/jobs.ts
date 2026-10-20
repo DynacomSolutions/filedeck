@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { JobRow, JobStore } from "./job-store.ts";
 
 export type JobState = "queued" | "running" | "done" | "failed" | "canceled";
 
@@ -42,7 +43,21 @@ export interface JobCtl {
   progress: Progress;
 }
 
+/** What an adopted job needs to run again; built from the stored allowlisted params. */
+export type Rebuild = (params: unknown) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal) => Promise<void> }>;
+
+/** Shared store: `scope` names this process's jobs, `rebuild` restarts adopted kinds (others fail), the lease is how long a silent owner keeps its jobs. */
+export interface JobsStore {
+  store: JobStore;
+  scope: string;
+  rebuild?: Record<string, Rebuild>;
+  leaseMs?: number;
+  tickMs?: number;
+}
+
 interface Job extends JobView {
+  /** JSON of the allowlisted params, null = not rebuildable */
+  params?: string | null;
   run: (ctl: JobCtl) => Promise<unknown>;
   onDrop?: () => void;
   /** set while the job waits for its gate: it is queued but takes no slot */
@@ -51,7 +66,10 @@ interface Job extends JobView {
   big?: boolean;
 }
 
-/** In-memory background job queue: bounded concurrency, progress, cancel. */
+const live = (s: string) => s === "queued" || s === "running";
+const rowView = (r: JobRow) => JSON.parse(r.view) as JobView;
+
+/** Background job queue: bounded concurrency, progress, cancel. In memory, or shared through a JobStore: bounded concurrency, progress, cancel. */
 export class Jobs {
   private jobs = new Map<string, Job>();
   private running = 0;
@@ -60,26 +78,33 @@ export class Jobs {
     private keep = 100,
     private mapErr: (e: unknown) => string = (e) => (e as Error)?.message ?? "failed",
     private lanes?: JobLanes,
-  ) {}
+    private shared?: JobsStore,
+  ) {
+    // one unref'd timer: heartbeat, foreign cancels, adoption of jobs whose owner went silent
+    if (shared) setInterval(() => this.tick(), shared.tickMs ?? 1000).unref();
+  }
   private timer?: ReturnType<typeof setInterval>;
+  private readonly me = randomUUID();
 
   /**
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal) => Promise<void>): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number }): JobView {
     const job: Job = {
-      id: randomUUID(),
+      id: meta?.id ?? randomUUID(),
+      params: meta?.params === undefined ? null : JSON.stringify(meta.params),
       kind,
       title,
       state: "queued",
       progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" },
-      createdAt: Date.now(),
+      createdAt: meta?.createdAt ?? Date.now(),
       run,
       onDrop,
       abort: new AbortController(),
     };
     this.jobs.set(job.id, job);
+    this.save(job);
     if (gate) {
       job.gated = true;
       gate(job.abort.signal)
@@ -91,6 +116,7 @@ export class Jobs {
             job.state = job.abort.signal.aborted ? "canceled" : "failed";
             if (job.state === "failed") job.error = this.mapErr(e);
             job.finishedAt = Date.now();
+            this.save(job);
           },
         )
         .finally(() => this.pump());
@@ -101,7 +127,7 @@ export class Jobs {
   }
 
   private view(j: Job): JobView {
-    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, ...v } = j;
+    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, ...v } = j;
     const out: JobView = { ...v, progress: { ...j.progress } };
     if (j.state === "queued") {
       const all = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -112,23 +138,33 @@ export class Jobs {
     return out;
   }
 
+  /** Other processes' jobs are read from the store (during a rollout the old pod still runs what the new one is polled for). */
   list(): JobView[] {
-    return [...this.jobs.values()].sort((a, b) => b.createdAt - a.createdAt).map((j) => this.view(j));
+    const own = [...this.jobs.values()].map((j) => this.view(j));
+    const other = (this.shared?.store.list(this.shared.scope) ?? []).filter((r) => !this.jobs.has(r.id)).map(rowView);
+    return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
   }
 
   get(id: string): JobView | undefined {
     const j = this.jobs.get(id);
-    return j && this.view(j);
+    if (j) return this.view(j);
+    const r = this.shared?.store.get(id);
+    return r && rowView(r);
   }
 
   cancel(id: string): JobView | undefined {
     const j = this.jobs.get(id);
-    if (!j) return undefined;
+    if (!j) {
+      const r = this.shared?.store.get(id);
+      if (r && live(r.state)) this.shared!.store.setCancel(id); // its owner aborts it at the next tick
+      return r && rowView(r);
+    }
     if (j.state === "queued") {
       j.state = "canceled";
       j.finishedAt = Date.now();
       j.abort.abort();
       j.onDrop?.();
+      this.save(j);
     } else if (j.state === "running") {
       j.abort.abort();
     }
@@ -138,7 +174,14 @@ export class Jobs {
   /** Forget a finished job. */
   dismiss(id: string): boolean {
     const j = this.jobs.get(id);
-    if (!j || j.state === "queued" || j.state === "running") return false;
+    if (!j) {
+      const r = this.shared?.store.get(id);
+      if (!r || live(r.state)) return false;
+      this.shared!.store.delete(id);
+      return true;
+    }
+    if (j.state === "queued" || j.state === "running") return false;
+    this.shared?.store.delete(id);
     return this.jobs.delete(id);
   }
 
@@ -149,6 +192,59 @@ export class Jobs {
   private prune() {
     const finished = [...this.jobs.values()].filter((j) => j.finishedAt).sort((a, b) => a.finishedAt! - b.finishedAt!);
     for (const j of finished.slice(0, Math.max(0, finished.length - this.keep))) this.jobs.delete(j.id);
+    this.shared?.store.prune(this.shared.scope, this.keep, Date.now());
+  }
+
+  private save(j: Job) {
+    if (!this.shared) return;
+    this.shared.store.put({
+      id: j.id, scope: this.shared.scope, kind: j.kind, title: j.title, params: j.params ?? null, view: JSON.stringify({ ...this.view(j), queue: undefined }),
+      state: j.state, owner: this.me, beat: Date.now(), created_at: j.createdAt, finished_at: j.finishedAt ?? null,
+    });
+  }
+
+  /** One heartbeat round. A busy database only skips it; nothing here waits. */
+  tick() {
+    const sh = this.shared;
+    if (!sh) return;
+    try {
+      const now = Date.now();
+      for (const j of [...this.jobs.values()]) {
+        if (!live(j.state)) continue;
+        if (sh.store.beat(j.id, this.me, JSON.stringify({ ...this.view(j), queue: undefined }), now) !== false) continue;
+        const r = sh.store.get(j.id);
+        if (!r) this.save(j); // the first write was skipped
+        else if (r.owner !== this.me) {
+          // adopted elsewhere: stop here and persist nothing
+          this.jobs.delete(j.id);
+          j.abort.abort();
+        }
+      }
+      for (const id of sh.store.canceled(this.me)) this.cancel(id);
+      for (const r of sh.store.orphans(sh.scope, this.me, now - (sh.leaseMs ?? 30_000))) {
+        if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) void this.adopt(r);
+      }
+    } catch {
+      /* try again next tick */
+    }
+  }
+
+  private async adopt(r: JobRow) {
+    const sh = this.shared!;
+    const rb = r.params ? sh.rebuild?.[r.kind] : undefined;
+    if (rb) {
+      try {
+        const params = JSON.parse(r.params!);
+        const b = await rb(params);
+        this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at });
+        return;
+      } catch {
+        /* fall through: failed */
+      }
+    }
+    const now = Date.now();
+    const view = { ...rowView(r), state: "failed", error: "Interrupted by an agent restart. Start it again.", finishedAt: now };
+    sh.store.put({ ...r, view: JSON.stringify(view), state: "failed", owner: this.me, beat: now, finished_at: now });
   }
 
   private canStart(): boolean {
@@ -184,6 +280,7 @@ export class Jobs {
       this.running++;
       j.state = "running";
       j.startedAt = Date.now();
+      this.save(j);
       void j
         .run({ signal: j.abort.signal, progress: j.progress })
         .then((r) => {
@@ -203,6 +300,7 @@ export class Jobs {
         })
         .finally(() => {
           j.finishedAt = Date.now();
+          this.save(j);
           this.running--;
           this.prune();
           this.pump();
