@@ -210,7 +210,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot]);
 }
 
-function Sidebar({ nodesState, onOpen, onTrash, footer }: { nodesState: NodesState; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
+function Sidebar({ nodesState, current, onOpen, onTrash, footer }: { nodesState: NodesState; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
   return (
     <aside className="side">
       <div className="side-brand">
@@ -223,7 +223,7 @@ function Sidebar({ nodesState, onOpen, onTrash, footer }: { nodesState: NodesSta
         </span>
       </div>
       <div className="side-scroll">
-        <SideTree nodesState={nodesState} onOpen={onOpen} onTrash={onTrash} />
+        <SideTree nodesState={nodesState} current={current} onOpen={onOpen} onTrash={onTrash} />
       </div>
       {footer}
     </aside>
@@ -366,6 +366,7 @@ export function App() {
   const update = (fn: (l: Leaf) => Tree | null) => setTree((t) => (t ? mapTree(t, fn) : t));
   const patchLeaf = (lid: string, p: Partial<Leaf>) => update((l) => (l.id === lid ? { ...l, ...p } : l));
   const leafOf = (lid: string) => (tree ? leaves(tree).find((l) => l.id === lid) : undefined);
+  const activeLeaf = leafOf(activeId);
   const cmp = useCompare({ state: compare, setState: setCompare, leafOf, patchLeaf, activeId, onFileDiff: (l, r) => setDiff({ left: l, right: r }), onStatus: setStatus });
   const restoredSync = useRef<string | null>(null);
   const syncKey = syncRoute ? JSON.stringify(syncRoute) : null;
@@ -563,7 +564,7 @@ export function App() {
   return (
     <div className="app">
       <CompareCtx.Provider value={routedCompare}>
-      <Sidebar nodesState={nodesState} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => settingsOpen ? closeView(() => setSettingsOpen(false)) : setSettingsOpen(true)}><Ic.Settings /></button></Tip></div></>} />
+      <Sidebar nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => settingsOpen ? closeView(() => setSettingsOpen(false)) : setSettingsOpen(true)}><Ic.Settings /></button></Tip></div></>} />
       <div className="app-col">
       <header className="site-header">
         <div className="site-header__inner">

@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Popover, type TNode } from "../src/SidebarTree.tsx";
-import { flatten, isOpen, navigate, parseExpanded, folderSizes, rovingId, serverUsage, setOpen, usagePct, type TreeNodeBase } from "../src/sidebarTree.ts";
+import { ancestorPaths, flatten, heldIds, hold, isOpen, shownOpen, type Held, navigate, parseExpanded, folderSizes, rovingId, serverUsage, setOpen, usagePct, type TreeNodeBase } from "../src/sidebarTree.ts";
 
 const tree: TreeNodeBase[] = [
   { id: "a", expandable: true, children: [{ id: "a1", expandable: true, children: [{ id: "a1x", expandable: false }] }, { id: "a2", expandable: false }] },
@@ -117,4 +117,41 @@ test("popover: size basis for known folders, a note and no bar for unknown ones"
   const unknown = renderToStaticMarkup(createElement(Popover, { t: { ...base, size: "unknown" } as TNode }));
   assert.match(unknown, /size not calculated yet/);
   assert.doesNotMatch(unknown, /st-bar/);
+});
+
+// Model of the tree's open state: manual choice (stored), auto = ancestor of the current folder, held = collapsed by hand at this location.
+const open = (manual: Set<string>, loc: string, h: Held, id: string, at: string) => shownOpen(manual.has(id), ancestorPaths(loc).includes(at), heldIds(h, loc).includes(id));
+const none: Held = { loc: "", ids: [] };
+
+test("ancestorPaths: root first, never the folder itself", () => {
+  assert.deepEqual(ancestorPaths("/a/b/c"), ["/", "/a", "/a/b"]);
+  assert.deepEqual(ancestorPaths("/a"), ["/"]);
+  assert.deepEqual(ancestorPaths("/"), []);
+});
+
+test("navigating to a deep path opens its ancestors", () => {
+  for (const p of ["/", "/a", "/a/b"]) assert.equal(open(new Set(), "/a/b/c", none, "id" + p, p), true);
+  assert.equal(open(new Set(), "/a/b/c", none, "id/a/b/c", "/a/b/c"), false);
+});
+
+test("navigating away closes what was opened automatically", () => {
+  assert.equal(open(new Set(), "/x/y", none, "id/a", "/a"), false);
+  assert.equal(open(new Set(), "/x/y", none, "id/x", "/x"), true);
+});
+
+test("a manual expansion survives navigation", () => {
+  assert.equal(open(new Set(["id/a"]), "/x/y", none, "id/a", "/a"), true);
+});
+
+test("a manual collapse of an ancestor holds until the next navigation", () => {
+  const h = hold(none, "/a/b/c", "id/a");
+  assert.equal(open(new Set(), "/a/b/c", h, "id/a", "/a"), false);
+  // new location: the hold no longer applies
+  const h2: Held = { loc: "/a/b/c", ids: ["id/a"] };
+  assert.deepEqual(heldIds(h2, "/a/z"), []);
+  assert.equal(shownOpen(false, true, heldIds(h2, "/a/z").includes("id/a")), true);
+});
+
+test("expanding an auto-opened folder by hand makes it stay open", () => {
+  assert.equal(open(new Set(["id/a"]), "/x/y", none, "id/a", "/a"), true);
 });

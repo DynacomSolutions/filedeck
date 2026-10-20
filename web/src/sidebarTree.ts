@@ -18,6 +18,27 @@ export function setOpen(state: ExpandState, id: string, open: boolean, defaultOp
   return next;
 }
 
+/** Proper ancestors of an absolute path, root first: "/a/b/c" gives "/", "/a", "/a/b". */
+export function ancestorPaths(path: string): string[] {
+  const parts = path.split("/").filter(Boolean);
+  if (!parts.length) return [];
+  return ["/", ...parts.slice(0, -1).map((_, i) => "/" + parts.slice(0, i + 1).join("/"))];
+}
+
+/**
+ * A row is open when the user opened it, or when it lies on the path to the current folder and the user has not
+ * collapsed it since arriving there. The auto part is derived from the location, so it vanishes on navigation.
+ */
+export const shownOpen = (manual: boolean, auto: boolean, heldClosed: boolean): boolean => manual || (auto && !heldClosed);
+
+/** Rows the user collapsed by hand while at `loc`; ignored (empty) once the location differs. */
+export interface Held {
+  loc: string;
+  ids: string[];
+}
+export const heldIds = (h: Held, loc: string): string[] => (h.loc === loc ? h.ids : []);
+export const hold = (h: Held, loc: string, id: string): Held => ({ loc, ids: [...heldIds(h, loc).filter((x) => x !== id), id] });
+
 export function parseExpanded(raw: string | null): ExpandState {
   try {
     const v = JSON.parse(raw ?? "{}") as unknown;
