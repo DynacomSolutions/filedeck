@@ -23,7 +23,7 @@ ETA: 2026-10-18 14:00 ICT
 | FD-17 | Test sources surge on rollout (RollingUpdate maxUnavailable 0) like hub and agents | done | claude-20261018-test-sources-rolling | test-sources-rolling | 2.FD-15 | 2026-10-18 14:00 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/59 (46cf5ec). |
 | FD-18 | Agents in a container list the host's mounts, not the container's (large disks such as a separate /home were missing from sizes) | done | claude-20261018-host-mounts | host-mounts | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/60 (23f1944). Deploys with 2.FD-19. |
 | FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | done | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 | | Released and rolled out with no downtime; see 2.FD-15. |
-| FD-42 | The sidebar tree opens the path to the current folder and closes what it opened when you move away; folders you opened yourself stay open | in_progress | claude-20261020-tree-autoexpand | tree-autoexpand | | 2026-10-21 01:30 ICT | |
+| FD-42 | The sidebar tree opens the path to the current folder and closes what it opened when you move away; folders you opened yourself stay open | done |  |  |  | 2026-10-21 01:30 ICT | |
 
 ## 3. Cached folder sizes
 ETA: 2026-10-18 18:00 ICT
@@ -37,7 +37,7 @@ ETA: 2026-10-18 18:00 ICT
 | FD-20 | Release v0.3.11 (size cache epic: du CLI and token, skill, tree folder sizes, fanotify watcher) | done | claude-20261018-release-v0311 | release-v0311 | 3.FD-10, 3.FD-11, 3.FD-12, 3.FD-13 | | Released and rolled out with no downtime; du API token verified end to end. |
 | FD-21 | /api/du reports watched true when the fanotify watcher covers the path and is not stale, so the CLI stops warning about missed changes | done | claude-20261018-du-watched | du-watched-flag | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/70 (28f52d0). Deploys with 3.FD-22. |
 | FD-22 | Release v0.3.12 so the du watched flag (3.FD-21) deploys | done | claude-20261018-release-v0312 | release-v0312 | 3.FD-21 | | Released v0.3.12 and rolled out with no downtime; cached du answers now report watched true where the change watcher covers the path. |
-| FD-41 | The details panel shows a folder's stored size (and when it was measured) without starting a scan | in_progress | claude-20261020-details-size | details-size | | 2026-10-21 01:30 ICT | |
+| FD-41 | The details panel shows a folder's stored size (and when it was measured) without starting a scan | done |  |  |  | 2026-10-21 01:30 ICT | |
 
 ## 4. du scan robustness
 ETA: 2026-10-21 01:00 ICT
@@ -64,5 +64,6 @@ ETA: 2026-10-21 01:00 ICT
 | FD-34 | Release v0.3.16 so epic 5 deploys | done |  |  | 5.FD-30, 5.FD-31, 5.FD-32, 5.FD-33 | 2026-10-20 19:30 ICT | |
 | FD-37 | An agent starts serving /healthz within seconds whatever the size of its stores: nothing proportional to store size runs before listen, and a startup probe covers a long WAL replay | in_progress | claude-20261020-startup-fast | startup-fast | | 2026-10-21 01:00 ICT | v0.3.16 scanned the whole size store on open and an agent with a 2 GB store never came up (liveness restart loop). |
 | FD-38 | Release v0.3.17 so FD-37 deploys | done |  |  | 5.FD-37 | 2026-10-21 01:00 ICT | |
-| FD-39 | The size walk keeps the disk busy (bounded parallel stats, no wait on each commit), so a tree of small folders on a busy disk scans at least 5x faster than v0.3.16 | in_progress | claude-20261020-walk-speed | walk-speed | | 2026-10-21 00:30 ICT | v0.3.16 walked about 100 entries/s at 6% CPU on a busy disk. |
-| FD-40 | Release v0.3.18 so FD-39 deploys | in_progress | claude-20261020-walk-speed | walk-speed | 5.FD-39 | 2026-10-21 00:45 ICT | |
+| FD-39 | The size walk keeps the disk busy (bounded parallel stats, no wait on each commit), so a tree of small folders on a busy disk scans at least 5x faster than v0.3.16 | done |  |  |  | 2026-10-21 00:30 ICT | v0.3.16 walked about 100 entries/s at 6% CPU on a busy disk. |
+| FD-40 | Release v0.3.18 so FD-39 deploys | done |  |  | 5.FD-39 | 2026-10-21 00:45 ICT | |
+| FD-43 | Release v0.3.19 so FD-41 and FD-42 deploy | in_progress | claude-20261020-release-0319 | release-0319 | 3.FD-41, 2.FD-42 | 2026-10-21 00:45 ICT | |
