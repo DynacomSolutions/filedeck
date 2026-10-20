@@ -253,14 +253,24 @@ export class SizeStore {
   }
 
   /**
-   * Scans and changes of overlapping subtrees run one after the other; unrelated subtrees do not wait.
+   * Scans and changes of overlapping subtrees run one after the other, in the order they asked; unrelated subtrees do not wait.
+   * Arrival order keeps a long scan from starving while small changes keep re-taking an overlapping lock.
    * The returned function releases the lock (more than once is harmless). A wait ends with an error when `signal` aborts.
    */
   async lock(virtual: string, signal?: AbortSignal): Promise<() => void> {
     const overlaps = (h: { path: string }) => h.path === virtual || h.path === "/" || virtual === "/" || h.path.startsWith(virtual + "/") || virtual.startsWith(h.path + "/");
     const canceled = () => new FsError(400, "canceled");
-    for (let h; (h = this.held.find(overlaps)); ) {
-      if (signal?.aborted) throw canceled();
+    if (signal?.aborted) throw canceled();
+    let release!: () => void;
+    const h = { path: virtual, done: new Promise<void>((r) => (release = r)) };
+    const ahead = this.held.filter(overlaps);
+    this.held.push(h);
+    const free = () => {
+      const i = this.held.indexOf(h);
+      if (i >= 0) this.held.splice(i, 1);
+      release();
+    };
+    if (ahead.length) {
       let off = () => {};
       const aborted = new Promise<never>((_, rej) => {
         const f = () => rej(canceled());
@@ -268,20 +278,15 @@ export class SizeStore {
         off = () => signal?.removeEventListener("abort", f);
       });
       try {
-        await Promise.race([h.done, aborted]);
+        await Promise.race([Promise.all(ahead.map((a) => a.done)), aborted]);
+      } catch (e) {
+        free();
+        throw e;
       } finally {
         off();
       }
     }
-    if (signal?.aborted) throw canceled();
-    let release!: () => void;
-    const h = { path: virtual, done: new Promise<void>((r) => (release = r)) };
-    this.held.push(h);
-    return () => {
-      const i = this.held.indexOf(h);
-      if (i >= 0) this.held.splice(i, 1);
-      release();
-    };
+    return free;
   }
 
   private toRow(r: Record<string, unknown>): Row {

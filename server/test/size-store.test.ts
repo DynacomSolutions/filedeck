@@ -376,6 +376,36 @@ test("scans of unrelated folders do not wait for each other, overlapping ones do
   s.close();
 });
 
+test("overlapping locks are granted in arrival order, so repeated child locks cannot starve a parent", async () => {
+  const s = mk();
+  let rel = await s.lock("/x/a");
+  let got = false;
+  const parent = s.lock("/x").then((r) => ((got = true), r()));
+  rel();
+  let n = 0;
+  for (; n < 20 && !got; n++) {
+    rel = await s.lock("/x/a"); // the watcher takes the child lock again right away
+    rel();
+  }
+  assert.ok(got && n <= 1, `parent granted only after ${n} child locks`);
+  await parent;
+  s.close();
+});
+
+test("aborting a waiting lock lets later waiters proceed", async () => {
+  const s = mk();
+  const rel = await s.lock("/x/a");
+  const ac = new AbortController();
+  const mid = s.lock("/x", ac.signal);
+  const last = s.lock("/x/a/b");
+  ac.abort();
+  await assert.rejects(mid, /canceled/);
+  rel();
+  (await last)();
+  assert.equal((s as any).held.length, 0);
+  s.close();
+});
+
 test("a job canceled while queued runs its onDrop", async () => {
   const { Jobs } = await import("../src/jobs.ts");
   const jobs = new Jobs(1);
