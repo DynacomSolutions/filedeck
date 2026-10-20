@@ -20,13 +20,13 @@ after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 /** readdir calls made while `fn` runs */
 async function countReaddir(fn: () => Promise<unknown>): Promise<number> {
-  const orig = fsp.readdir;
+  const orig = fsp.opendir;
   let n = 0;
-  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (n++, (orig as (...x: unknown[]) => unknown)(...a));
+  (fsp as { opendir: unknown }).opendir = (...a: unknown[]) => (n++, (orig as (...x: unknown[]) => unknown)(...a));
   try {
     await fn();
   } finally {
-    (fsp as { readdir: unknown }).readdir = orig;
+    (fsp as { opendir: unknown }).opendir = orig;
   }
   return n;
 }
@@ -351,7 +351,7 @@ test("a folder with 150k stored children can be listed", async () => {
   const s = mk(60_000, 1_000_000);
   const db = s as unknown as { put(r: unknown): void; db: { exec(q: string): void } };
   const own = { bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0 };
-  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, own, tot: own });
+  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, seen_at: 1, own, tot: own });
   db.db.exec("BEGIN");
   db.put(row("/big", "/"));
   for (let i = 0; i < 150_000; i++) db.put(row(`/big/${i}`, "/big"));
@@ -529,8 +529,8 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
   const root = fs.mkdtempSync(path.join(tmp, "dl-"));
   for (const d of ["big/sub", "q1", "q2", "p/x", "p/w", "p/z"]) fs.mkdirSync(path.join(root, d), { recursive: true });
   const slow = new Set([path.join(root, "big"), path.join(root, "q1"), path.join(root, "q2")]);
-  const orig = fsp.readdir;
-  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+  const orig = fsp.opendir;
+  (fsp as { opendir: unknown }).opendir = async (p: string, ...a: unknown[]) => {
     if (slow.has(String(p))) await sleep(500);
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
@@ -577,7 +577,7 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
     assert.equal(await settle(w.id), "failed");
     assert.equal(await settle(z.id), "done");
   } finally {
-    (fsp as { readdir: unknown }).readdir = orig;
+    (fsp as { opendir: unknown }).opendir = orig;
   }
 });
 
@@ -588,8 +588,8 @@ test("a detached du scan running past a minute is still joined by the repeat req
   fs.mkdirSync(path.join(root, "big/sub"), { recursive: true });
   let open!: () => void;
   const gate = new Promise<void>((r) => (open = r));
-  const orig = fsp.readdir;
-  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+  const orig = fsp.opendir;
+  (fsp as { opendir: unknown }).opendir = async (p: string, ...a: unknown[]) => {
     if (String(p) === path.join(root, "big")) await gate;
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
@@ -616,7 +616,7 @@ test("a detached du scan running past a minute is still joined by the repeat req
     assert.equal(((await last.json()) as { entries: unknown[] }).entries.length, 2);
   } finally {
     t.mock.timers.reset();
-    (fsp as { readdir: unknown }).readdir = orig;
+    (fsp as { opendir: unknown }).opendir = orig;
   }
 });
 
@@ -691,4 +691,66 @@ test("/healthz answers within 1s while a large scan runs", async () => {
   assert.equal(j.result!.files, want.files);
   assert.equal(j.result!.truncated, false);
   await (app as unknown as { close(): Promise<void> }).close();
+});
+
+// ---- memory follows depth ----
+
+const fileStore = () => new SizeStore(path.join(fs.mkdtempSync(path.join(tmp, "db-")), "sizes.db"), { root: tmp, ttlMs: 60_000, maxEntries: 1_000_000 });
+
+for (const kind of ["memory", "file"] as const) {
+  test(`wide folder (${kind} store): 20k files and 2k subfolders, totals, removed subfolders dropped, unchanged rescan reads nothing`, async () => {
+    const dir = at(`wide-${kind}`);
+    fs.mkdirSync(dir);
+    for (let i = 0; i < 20_000; i++) fs.writeFileSync(path.join(dir, `f${i}`), "x");
+    for (let i = 0; i < 2_000; i++) {
+      fs.mkdirSync(path.join(dir, `d${i}`));
+      if (i % 4 === 0) fs.writeFileSync(path.join(dir, `d${i}`, "g"), "yy");
+    }
+    const s = kind === "memory" ? mk() : fileStore();
+    const v = `/wide-${kind}`;
+    const r = await s.scan(v);
+    assert.deepEqual({ files: r.files, dirs: r.dirs, bytes: r.bytes }, { files: 20_500, dirs: 2_000, bytes: 21_000 });
+    assert.ok(s.lastWalkFrames <= 2);
+    // unchanged: all 2k stored children are validated in pages and nothing is read
+    assert.equal((await s.scanRead(v)).read, 0);
+    // remove subfolders (with files in some), then re-read the folder
+    for (let i = 0; i < 2_000; i += 3) fs.rmSync(path.join(dir, `d${i}`), { recursive: true });
+    const gone = Math.ceil(2_000 / 3);
+    const r2 = await s.scan(v, undefined, false);
+    assert.equal(r2.dirs, 2_000 - gone);
+    assert.equal(r2.files, 20_500 - 167); // 167 removed folders held a file (multiples of 12 below 2000)
+    const rows2 = await rows(s, v);
+    assert.equal(rows2.length, 1 + 2_000 - gone);
+    await agrees(s, v);
+    s.close();
+  });
+}
+
+test("abort mid-walk closes every directory and leaves the subtree stale", async () => {
+  const dir = at("abort");
+  for (let i = 0; i < 300; i++) fs.mkdirSync(path.join(dir, `a${i}`, "b"), { recursive: true });
+  const fds = () => (process.platform === "linux" ? fs.readdirSync("/proc/self/fd").length : 0);
+  const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000, commitChunk: 5 });
+  const before = fds();
+  const ac = new AbortController();
+  const ctl = { signal: ac.signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } };
+  const timer = setInterval(() => ctl.progress.entries > 100 && ac.abort(), 1);
+  await assert.rejects(s.scan("/abort", ctl), /canceled/);
+  clearInterval(timer);
+  assert.equal(fds(), before);
+  // rows written before the abort are marked stale, so the next scan re-reads them
+  const left = (s as unknown as { db: { prepare(q: string): { get(): { n: number; m: number } } } }).db.prepare("SELECT COUNT(*) AS n, MAX(scanned_at) AS m FROM sizes").get();
+  assert.ok(left.n > 0 && left.m === 0);
+  s.close();
+});
+
+test("walk keeps one frame per level: 200k empty subfolders in one folder", async () => {
+  const dir = at("many");
+  fs.mkdirSync(dir);
+  for (let i = 0; i < 200_000; i++) fs.mkdirSync(path.join(dir, `d${i}`));
+  const s = mk(60_000, 1_000_000);
+  const r = await s.scan("/many");
+  assert.equal(r.dirs, 200_000);
+  assert.equal(s.lastWalkFrames, 2); // the folder and one child at a time
+  s.close();
 });
