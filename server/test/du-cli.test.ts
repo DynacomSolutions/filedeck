@@ -102,6 +102,7 @@ test("errors: failed job, HTTP error, 401, network, missing env; other targets s
   assert.match(f.err.join(""), /scan failed: boom/);
   const n = harness(() => Promise.reject(new Error("ECONNREFUSED")));
   assert.equal(await run(["n:/"], env, n.io), 1);
+  assert.equal(n.calls.length, 3);
   assert.match(n.err.join(""), /cannot reach https:\/\/hub\.example: ECONNREFUSED/);
   const m = harness(() => j({}));
   assert.equal(await run(["n:/"], {}, m.io), 2);
@@ -122,4 +123,57 @@ test("--timeout gives up while polling", async () => {
   assert.match(h.err.join(""), /timed out after 100 s/);
   assert.equal(parseArgs(["--timeout=5", "n:/"]).timeout, 5);
   assert.throws(() => parseArgs(["--timeout", "0", "n:/"]), UsageError);
+});
+
+const ok = () => j({ path: "/", entries: [E("/", 1)], cached: false, truncated: false, watched: false });
+
+test("transient 503 on the first request and on a poll is waited out, one notice per streak", async () => {
+  const seq = [503, "202", "job503", "job503", "jobdone", "ok"];
+  const sleeps: number[] = [];
+  const h = harness(() => {
+    const s = seq.shift();
+    if (s === 503 || s === "job503") return j({}, 503);
+    if (s === "202") return j({ jobId: "J", state: "queued" }, 202);
+    return s === "jobdone" ? j({ state: "done" }) : ok();
+  });
+  h.io.sleep = async (ms) => void sleeps.push(ms);
+  assert.equal(await run(["n:/"], env, h.io), 0);
+  assert.equal(h.out.join(""), "1\tn:/\n");
+  assert.deepEqual(sleeps, [1000, 1000, 2000]);
+  assert.equal(h.err.join("").match(/HTTP 503, retrying/g)?.length, 2);
+});
+
+test("network error mid-poll is retried", async () => {
+  let polls = 0;
+  const h = harness((u) => {
+    if (!u.includes("/jobs/")) return polls < 2 ? j({ jobId: "J", state: "queued" }, 202) : ok();
+    if (polls++ === 0) return Promise.reject(new Error("ECONNRESET"));
+    return j({ state: "done" });
+  });
+  assert.equal(await run(["n:/"], env, h.io), 0);
+  assert.match(h.err.join(""), /cannot reach .*ECONNRESET, retrying/);
+});
+
+test("404 on a poll re-requests du once; a second 404 fails", async () => {
+  let dus = 0;
+  const h = harness((u) => {
+    if (!u.includes("/jobs/")) return ++dus < 3 ? j({ jobId: `J${dus}`, state: "queued" }, 202) : ok();
+    return u.endsWith("/J1") ? j({}, 404) : j({ state: "done" });
+  });
+  assert.equal(await run(["n:/"], env, h.io), 0);
+  assert.equal(dus, 3);
+  const g = harness((u) => (u.includes("/jobs/") ? j({}, 404) : j({ jobId: "J", state: "queued" }, 202)));
+  assert.equal(await run(["n:/"], env, g.io), 1);
+  assert.match(g.err.join(""), /job J: HTTP 404/);
+});
+
+test("500 still fails at once; 503 past the deadline times out", async () => {
+  const a = harness(() => j({ error: "boom" }, 500));
+  assert.equal(await run(["n:/"], env, a.io), 1);
+  assert.match(a.err.join(""), /HTTP 500: boom/);
+  const b = harness((u) => (u.includes("/jobs/") ? j({}, 503) : j({ jobId: "J", state: "queued" }, 202)));
+  let t = 0;
+  b.io.now = () => (t += 40_000);
+  assert.equal(await run(["--timeout", "100", "n:/"], env, b.io), 1);
+  assert.match(b.err.join(""), /timed out after 100 s/);
 });
