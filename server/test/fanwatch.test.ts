@@ -32,12 +32,34 @@ class Fake extends EventEmitter implements HelperProc {
   }
 }
 
-function setup(extra: Partial<ConstructorParameters<typeof FanWatch>[1]> = {}) {
+/** in-memory equivalent of the SizeStore pending table (same rules as SizeStore.notePending/takeDue) */
+function pendingFake() {
+  const rows = new Map<string, { due: number; last: number }>();
+  return {
+    rows,
+    notePending: async (items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number) => {
+      for (const i of items) {
+        const r = rows.get(i.path);
+        const at = i.modify ? Math.max(i.dueAt, (r?.last ?? 0) + modifyMs) : i.dueAt;
+        rows.set(i.path, { due: !r || r.due === Infinity ? at : Math.min(r.due, at), last: r?.last ?? 0 });
+      }
+      return true;
+    },
+    takeDue: async (now: number, limit: number) => {
+      const out = [...rows].filter(([, r]) => r.due <= now).sort((a, b) => a[1].due - b[1].due).slice(0, limit).map(([p]) => p);
+      for (const p of out) rows.set(p, { due: Infinity, last: now });
+      return out;
+    },
+    clearPending: async () => void rows.clear(),
+  };
+}
+
+function setup(extra: Partial<ConstructorParameters<typeof FanWatch>[1]> & { plain?: boolean } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
   fs.mkdirSync(path.join(root, "data"));
   const calls: string[] = [];
   const stale: string[] = [];
-  const store = { applyChanged: async (v: string) => void calls.push(v), markStale: (v: string) => void stale.push(v) };
+  const store = { ...(extra.plain ? {} : pendingFake()), applyChanged: async (v: string) => void calls.push(v), markStale: (v: string) => void stale.push(v) };
   const proc = new Fake();
   const args: string[][] = [];
   const mounts = path.join(os.tmpdir(), `fanwatch-mounts-${process.pid}-${Math.random().toString(36).slice(2)}`);
@@ -257,10 +279,11 @@ test("fanwatch.covers: true on a watched filesystem while the helper runs; false
   assert.equal(off.covers("/"), false);
 });
 
-test("fanwatch: past maxPending the burst acts like an overflow and later events schedule normally", async () => {
-  const s = setup({ maxPending: 5 });
+test("fanwatch: without a usable store, past maxPending the burst acts like an overflow and later events schedule normally", async () => {
+  const s = setup({ maxPending: 5, plain: true });
   await s.w.start();
   for (let i = 0; i < 12; i++) s.w.line(`x ${s.root}/data/d${i}`);
+  await sleep(60);
   assert.ok(s.stale.length > 0, "watched trees marked stale");
   await sleep(150);
   assert.ok(s.calls.length <= 5, `pending stayed bounded, got ${s.calls.length}`);
@@ -270,4 +293,131 @@ test("fanwatch: past maxPending the burst acts like an overflow and later events
   assert.deepEqual(s.calls, ["/data/late"]);
   s.w.stop();
   s.done();
+});
+
+function fileStore() {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-store-")));
+  const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 1000 });
+  const calls: string[] = [];
+  const stale: string[] = [];
+  const sink = {
+    applyChanged: async (v: string) => void calls.push(v),
+    markStale: (v: string) => void stale.push(v),
+    notePending: st.notePending.bind(st),
+    takeDue: st.takeDue.bind(st),
+    recentRuns: st.recentRuns.bind(st),
+    clearPending: st.clearPending.bind(st),
+  };
+  const count = () => (st as unknown as { db: { prepare(s: string): { get(): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending").get().n;
+  return { st, sink, calls, stale, count, done: () => (st.close(), fs.rmSync(dir, { recursive: true, force: true })) };
+}
+const opts = { helper: "x", root: "/", procMounts: "/proc/mounts", settleMs: 5, modifyMs: 300 };
+const until = async (f: () => boolean, ms = 20_000) => {
+  for (const t0 = Date.now(); !f() && Date.now() - t0 < ms; ) await sleep(20);
+};
+
+test("fanwatch + SizeStore file: many events of one folder become one row, applied once", async () => {
+  const f = fileStore();
+  const w = new FanWatch(f.sink, opts);
+  for (let i = 0; i < 5000; i++) w.line(i % 2 ? "x /d/a" : "w /d/a");
+  await until(() => f.calls.length > 0);
+  await sleep(100);
+  assert.deepEqual(f.calls, ["/d/a"]);
+  assert.equal(f.count(), 1, "the applied folder stays as one idle row");
+  w.stop();
+  f.done();
+});
+
+test("fanwatch + SizeStore file: 100k distinct folders keep the heap structures bounded and all get applied", async () => {
+  const f = fileStore();
+  const w = new FanWatch(f.sink, opts);
+  const priv = w as unknown as { buf: Map<string, unknown>; mem: Map<string, unknown>; timer: unknown };
+  let maxBuf = 0;
+  for (let i = 0; i < 100_000; i++) {
+    w.line(`x /d/${i}`);
+    maxBuf = Math.max(maxBuf, priv.buf.size);
+  }
+  assert.ok(maxBuf <= 2000, `buffer reached ${maxBuf}`);
+  assert.ok(priv.timer, "one shared timer");
+  await until(() => f.calls.length >= 100_000);
+  assert.equal(f.calls.length, 100_000);
+  assert.equal(new Set(f.calls).size, 100_000);
+  assert.equal(priv.mem.size, 0);
+  assert.deepEqual(f.stale, [], "a burst never forces staleness");
+  w.stop();
+  f.done();
+});
+
+test("fanwatch + SizeStore file: modify events wait modifyMs after the last run, settle events do not", async () => {
+  const f = fileStore();
+  const w = new FanWatch(f.sink, opts);
+  w.line("m /d/a");
+  await until(() => f.calls.length === 1);
+  const t0 = Date.now();
+  w.line("m /d/a");
+  await until(() => f.calls.length === 2);
+  assert.ok(Date.now() - t0 >= 250, `second run after ${Date.now() - t0} ms`);
+  w.line("w /d/a");
+  await until(() => f.calls.length === 3, 200);
+  assert.equal(f.calls.length, 3, "settle event not held back");
+  w.stop();
+  f.done();
+});
+
+test("fanwatch + SizeStore file: overflow clears pending rows and marks stale", async () => {
+  const f = fileStore();
+  const w = new FanWatch(f.sink, { ...opts, settleMs: 60_000 });
+  for (let i = 0; i < 3000; i++) w.line(`x /d/${i}`);
+  await until(() => f.count() >= 1000);
+  assert.ok(f.count() > 0);
+  w.line("!overflow");
+  await sleep(100);
+  assert.equal(f.count(), 0);
+  assert.equal(f.calls.length, 0);
+  w.stop();
+  f.done();
+});
+
+test("fanwatch + SizeStore file: a backlog older than 10 x modifyMs becomes an overflow", async () => {
+  const f = fileStore();
+  const slow = { ...f.sink, applyChanged: async (v: string) => (f.calls.push(v), void (await sleep(5))) };
+  const w = new FanWatch(slow, { ...opts, settleMs: 1, modifyMs: 20 });
+  (w as unknown as { marks: string[] }).marks = ["/"];
+  for (let i = 0; i < 600; i++) w.line(`x /d/${i}`);
+  await until(() => f.stale.length > 0, 10_000);
+  assert.deepEqual(f.stale, ["/"]);
+  await sleep(100);
+  assert.equal(f.count(), 0, "pending rows dropped");
+  assert.ok(f.calls.length < 600);
+  w.stop();
+  f.done();
+});
+
+test("fanwatch + SizeStore file: folders run just before a restart are marked stale at start; a stepped-back clock still drains", async () => {
+  const f = fileStore();
+  const old = Date.now() - 1000;
+  await f.st.notePending([{ path: "/r", dueAt: old, modify: false }], 300);
+  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
+  await f.st.notePending([{ path: "/future", dueAt: Date.now() + 3_600_000, modify: false }], 300);
+  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/future"]);
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
+  const mounts = path.join(root, "m");
+  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n");
+  const w = new FanWatch(f.sink, { ...opts, helper: "fake", root, procMounts: mounts, spawn: () => new Fake() });
+  await w.start();
+  assert.deepEqual(f.stale.sort(), ["/future", "/r"]);
+  w.stop();
+  fs.rmSync(root, { recursive: true });
+  f.done();
+});
+
+test("SizeStore pending writes do not extend the walk tail", async () => {
+  const f = fileStore();
+  const st = f.st as unknown as { tail: Promise<void> };
+  const before = st.tail;
+  await f.st.notePending([{ path: "/a", dueAt: 0, modify: false }], 300);
+  await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 });
+  await f.st.clearPending();
+  assert.equal(st.tail, before);
+  f.done();
 });

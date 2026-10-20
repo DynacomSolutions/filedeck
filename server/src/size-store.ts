@@ -125,11 +125,16 @@ const commit = ({ items, last }) => {
 };
 parentPort.on("message", (m) => {
   try {
-    if (m.op === "commit") commit(m); else db.prepare(m.sql).run(...m.params);
+    if (m.op === "commit") commit(m);
+    else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
+    else db.prepare(m.sql).run(...m.params);
     parentPort.postMessage({ id: m.id });
   } catch (e) { parentPort.postMessage({ id: m.id, err: String(e && e.message || e) }); }
 });
 `;
+
+/** `pending.due_at` of a folder that is not waiting but remembers its `last_run` */
+const PENDING_IDLE = Number.MAX_SAFE_INTEGER;
 
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
@@ -178,6 +183,8 @@ export class SizeStore {
           ${METRICS.map((m) => `own_${m} INTEGER NOT NULL`).join(", ")}, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
+        CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS pending_due ON pending(due_at);
       `);
       this.q = {
         get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
@@ -607,6 +614,93 @@ export class SizeStore {
   markStale(virtual: string): void {
     const [lo, hi] = below(virtual);
     void this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, lo, hi]);
+  }
+
+  /** Many rows of one statement in one transaction: on the writer worker for a file-backed store, else inline. False when the store is unusable. */
+  private async writeMany(sql: string, rows: (string | number)[][]): Promise<boolean> {
+    if (!this.db) return false;
+    if (this.file === ":memory:") {
+      return this.safe(() => {
+        const st = this.db!.prepare(sql);
+        this.db!.exec("BEGIN");
+        try {
+          for (const r of rows) st.run(...r);
+          this.db!.exec("COMMIT");
+        } catch (e) {
+          this.db!.exec("ROLLBACK");
+          throw e;
+        }
+        return true;
+      }, false);
+    }
+    try {
+      await this.send({ op: "many", sql, rows });
+      return true;
+    } catch (e) {
+      this.giveUp(e);
+      return false;
+    }
+  }
+
+  /**
+   * Remember changed folders for the watcher (fanwatch.ts) on disk instead of in memory. A folder already waiting keeps its earlier
+   * due time; a `modify` event is held back until `modifyMs` after the folder's last run. False when the store is unusable.
+   */
+  async notePending(items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number): Promise<boolean> {
+    const keep = (idle: string) => `ON CONFLICT(path) DO UPDATE SET due_at = CASE WHEN due_at = ${idle} THEN excluded.due_at ELSE MIN(due_at, excluded.due_at) END`;
+    const ok = await this.writeMany(
+      `INSERT INTO pending (path, due_at) VALUES (?1, ?2) ${keep("?3")}`,
+      items.filter((i) => !i.modify).map((i) => [i.path, i.dueAt, PENDING_IDLE]),
+    );
+    // a modify event on a folder that ran lately waits for last_run + modifyMs (the SELECT is the new row's due time)
+    const mod = items.filter((i) => i.modify);
+    if (!mod.length) return ok;
+    return (
+      (await this.writeMany(
+        `INSERT INTO pending (path, due_at) SELECT ?1, MAX(?2, COALESCE((SELECT last_run FROM pending WHERE path = ?1), 0) + ?3) WHERE true ${keep("?4")}`,
+        mod.map((i) => [i.path, i.dueAt, modifyMs, PENDING_IDLE]),
+      )) && ok
+    );
+  }
+
+  private lastPrune = 0;
+  /**
+   * Up to `limit` folders whose due time has come, oldest first; they are marked run at `now` and not returned again until noted again.
+   * Null when the oldest due time is more than 10 x modifyMs ago (the backlog would take too long to apply): the pending rows are then
+   * dropped and the caller marks the watched trees stale instead. Due times far in the future (the clock stepped back) count as due.
+   */
+  async takeDue(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null> {
+    if (!this.db) return [];
+    const far = now + t.modifyMs + t.settleMs;
+    const got = this.safe(() => {
+      const db = this.db!;
+      const oldest = (db.prepare("SELECT MIN(due_at) d FROM pending").get() as { d: number | null }).d;
+      if (oldest !== null && oldest < PENDING_IDLE && oldest < now - 10 * t.modifyMs) return null;
+      const col = (sql: string, ...a: number[]) => (db.prepare(sql).all(...a) as { path: string }[]).map((r) => r.path);
+      const due = col("SELECT path FROM pending WHERE due_at <= ? ORDER BY due_at LIMIT ?", now, limit);
+      return due.length < limit ? [...due, ...col("SELECT path FROM pending WHERE due_at > ? AND due_at < ? LIMIT ?", far, PENDING_IDLE, limit - due.length)] : due;
+    }, []);
+    if (got === null) {
+      await this.clearPending();
+      return null;
+    }
+    if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [now, PENDING_IDLE, p]));
+    // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future)
+    if (now - this.lastPrune > Math.max(t.modifyMs, 1000)) {
+      this.lastPrune = now;
+      await this.write1("DELETE FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?)", [PENDING_IDLE, now - t.modifyMs, now + t.modifyMs]);
+    }
+    return got;
+  }
+
+  /** Folders that ran within the last `withinMs` (their run may not have finished when the process stopped), at most `limit`. */
+  recentRuns(now: number, withinMs: number, limit: number): string[] {
+    return this.safe(() => (this.db!.prepare("SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?").all(PENDING_IDLE, now - withinMs, limit) as { path: string }[]).map((r) => r.path), []);
+  }
+
+  /** The watcher lost events: nothing pending is worth keeping, the stale marks cover it. */
+  clearPending(): Promise<void> {
+    return this.write1("DELETE FROM pending", []); // not `write`: size walks wait on its tail
   }
 
   private async changed(v: string, ctl: JobCtl): Promise<void> {
