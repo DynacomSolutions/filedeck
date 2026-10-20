@@ -48,3 +48,13 @@ ETA: 2026-10-21 18:00 ICT
 | FD-27 | Release v0.3.14 so FD-26 deploys | in_progress | claude-20261020-du-lock-fifo | du-lock-fifo | 4.FD-26 | 2026-10-20 16:30 ICT | |
 | FD-28 | The change watcher bounds its pending folders: past 50 000 it treats the burst like a kernel overflow (marks the watched trees stale) instead of growing until the agent runs out of heap | in_progress | claude-20261020-fanwatch-bound | fanwatch-bound | | 2026-10-20 17:00 ICT | An agent ran out of heap (320 MB) while a bulk copy wrote a large tree into a watched filesystem. |
 | FD-29 | Release v0.3.15 so FD-28 deploys | in_progress | claude-20261020-fanwatch-bound | fanwatch-bound | 4.FD-28 | 2026-10-20 17:30 ICT | |
+
+## 5. Agent memory scales with data
+ETA: 2026-10-21 18:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| FD-30 | Change watcher keeps its pending folders in the size store's SQLite file (one row per folder with its due time, drained in batches by one timer) instead of one in-memory timer per folder, so a bulk copy of any size costs disk rows, not heap, and no longer falls back to marking whole trees stale | in_progress | claude-20261020-scale-fanwatch | scale-fanwatch | 4.FD-28 | 2026-10-21 12:00 ICT | Replaces the 50 000 cap from 4.FD-28. |
+| FD-31 | Size walk memory is constant per tree depth: folders are read as a stream (`fs.opendir`), the walk holds one frame per depth level instead of every pending sibling, removed child folders are found in SQL instead of an in-memory child list, and stored children are validated in batches | in_progress | claude-20261020-scale-walk | scale-walk | | 2026-10-21 12:00 ICT | One folder with millions of entries must not grow the heap. |
+| FD-32 | Listing, search, archive, trash and properties walkers read folders as a stream and stop at their existing caps, so one huge folder cannot load all its names at once | in_progress | claude-20261020-scale-readdir | scale-readdir | | 2026-10-21 12:00 ICT | |
+| FD-33 | Stores that run without an index directory use a temporary SQLite file, never `:memory:`, so their rows stay off the heap | todo | | | | 2026-10-21 15:00 ICT | |
+| FD-34 | Release v0.3.16 so epic 5 deploys | todo | | | 5.FD-30, 5.FD-31, 5.FD-32, 5.FD-33 | 2026-10-21 18:00 ICT | |
