@@ -97,6 +97,34 @@ const DU_MAX_DEPTH = 256;
 /** stored child rows (with their stats) kept from the reuse check for the walk that follows it */
 const CACHED = 1024;
 const STREAM_ABOVE = 256 * 1024;
+/** Runs at most `n` async tasks at once (the rest wait in line, `queued` counts them). */
+export function limiter(n: number) {
+  let run = 0;
+  const line: (() => void)[] = [];
+  const pump = () => {
+    while (run < n && line.length) {
+      run++;
+      line.shift()!();
+    }
+  };
+  const lim = <T,>(f: () => Promise<T>) =>
+    new Promise<T>((res, rej) => {
+      line.push(() =>
+        f().then(res, rej).finally(() => {
+          run--;
+          pump();
+        }),
+      );
+      pump();
+    });
+  return Object.assign(lim, { get queued() { return line.length; } });
+}
+/** folders read ahead at once, and how many may wait before further read-ahead is dropped */
+const AHEAD = 32;
+const AHEAD_QUEUE = 256;
+const AHEAD_NAMES = 64;
+/** taken at load: read-ahead listings are not the walk's own reads (tests count those on `fs.readdir`) */
+const listAhead = fs.readdir;
 const tick = () => new Promise<void>((r) => setImmediate(r));
 const noCtl = (): JobCtl => ({ signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } });
 const parentOf = (p: string) => (p === "/" ? "" : path.posix.dirname(p));
@@ -180,6 +208,7 @@ export class SizeStore {
   private held: { path: string; done: Promise<void> }[] = [];
   private file = ":memory:";
   private writer?: Worker;
+  private io = limiter(AHEAD);
   private pending = new Map<number, { res: () => void; rej: (e: Error) => void }>();
   private seq = 0;
   /** the latest `write`: a walk waits for it so it never reads rows a stale mark is about to change */
@@ -502,6 +531,22 @@ export class SizeStore {
       if (!this.db) for (const n of part) if (!n.touch && (rows.size < Math.min(this.o.maxEntries, FALLBACK_ROWS) || n === last)) rows.set(n.path, { path: n.path, parent: n.parent, ino: n.ino, dev: n.dev, mtime_ms: n.mtime_ms, scanned_at: n.scanned_at, seen_at: n.seen_at, own: n.own, tot: n.tot });
     };
 
+    /**
+     * Read-ahead: a walk of many small folders would otherwise wait for the disk twice per folder (read, then stat) one folder after
+     * the other. Folders we are about to enter get their names read and their children stat-ed now, a few at a time, so the walk's
+     * own calls find them in the kernel's cache. Dropped when the line is long; results are never kept, so memory stays flat.
+     */
+    const ahead = (v: string, r: string) => {
+      if (this.io.queued >= AHEAD_QUEUE) return;
+      const row = mode.fresh ? undefined : this.get(v);
+      if (row && row.own.dirs - row.own.mounts === 0) return; // reused leaf: nothing under it is stat-ed
+      void this.io(async () => {
+        const kids = row ? this.kidPage(v, dev, "") : null;
+        const names = kids?.length ? kids.map((k) => path.posix.basename(k.path)) : ((await listAhead(r)) as string[]).slice(0, AHEAD_NAMES);
+        await Promise.all(names.map((n) => fs.lstat(path.join(r, n)).catch(() => undefined)));
+      }).catch(() => undefined);
+    };
+
     /** `n` has all its children: its totals are final. Store it and roll it into its parent. */
     const finish = async (n: Node) => {
       buf.push(n);
@@ -590,6 +635,7 @@ export class SizeStore {
                 node.own.disk += disk;
               } else node.own.other++;
             }
+            for (const b of batch) ahead(b.virtual, b.real);
             ctl.progress.entries = seen;
             ctl.progress.bytes = bytes;
             if (eof) await end(); // after the tally: the folder's totals are final
@@ -635,6 +681,7 @@ export class SizeStore {
               after = page[page.length - 1]!.path;
               // the whole page at once: one lstat after the other would make the walk wait for the disk once per child
               stats = await Promise.all(page.map((k) => fs.lstat(path.join(rpath, path.posix.basename(k.path))).catch(() => null)));
+              page.forEach((k, j) => stats![j] && ahead(k.path, path.join(rpath, path.posix.basename(k.path))));
             }
             const k = page[at++]!;
             handed++;
@@ -672,6 +719,7 @@ export class SizeStore {
           if (page.length) after = page[page.length - 1]!.path;
           const ks = await Promise.all(page.map((k) => fs.lstat(path.join(t.real, path.posix.basename(k.path))).catch(() => null)));
           reusable = ks.every((k) => k && k.isDirectory() && Number(k.dev) === dev);
+          if (reusable) page.forEach((k) => ahead(k.path, path.join(t.real, path.posix.basename(k.path))));
           first ??= { page: [], ks: [], complete: false };
           if (first.page.length < CACHED) {
             first.page.push(...page);

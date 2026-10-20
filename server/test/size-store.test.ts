@@ -5,6 +5,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { limiter } from "../src/size-store.ts";
 import { createAgent as makeAgent } from "../src/agent.ts";
 // a file-backed size store starts a writer thread: close every agent so the test process can exit
 const agents: { close(): Promise<void> }[] = [];
@@ -1091,4 +1092,23 @@ test("opening a store with many rows runs no statement that scans the sizes tabl
     DatabaseSync.prototype.prepare = orig;
   }
   assert.deepEqual(seen.filter((q) => /FROM sizes\b/i.test(q) && !/WHERE/i.test(q)), []);
+});
+
+test("limiter runs at most n tasks at once and runs them all", async () => {
+  const lim = limiter(3);
+  let now = 0;
+  let peak = 0;
+  const out = await Promise.all(
+    Array.from({ length: 10 }, (_, i) =>
+      lim(async () => {
+        peak = Math.max(peak, ++now);
+        await new Promise((r) => setTimeout(r, 5));
+        now--;
+        return i;
+      }),
+    ),
+  );
+  assert.equal(peak, 3);
+  assert.deepEqual(out, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.equal(lim.queued, 0);
 });

@@ -19,7 +19,8 @@ RUN npm run typecheck \
  && npm test && npm prune --omit=dev --workspace=server
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
-ENV NODE_ENV=production FILEDECK_STATIC=/app/web PORT=8080
+# libuv's file pool (4 threads by default) is the limit on parallel stat calls; the size walk keeps up to 32 in flight
+ENV NODE_ENV=production FILEDECK_STATIC=/app/web PORT=8080 UV_THREADPOOL_SIZE=64
 WORKDIR /app
 # libarchive's bsdtar does zip/tar.*/7z encode and decode for the archive jobs, 7zip (7zz) the password-protected
 # (AES-256 zip, 7z with header encryption) and split-volume archives;
