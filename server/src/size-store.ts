@@ -85,6 +85,8 @@ export interface DuEntry {
 }
 
 /** folders written per transaction when a scan is stored */
+/** rows kept in memory in total (all remembered walks) while the database is unusable, whatever `maxEntries` says: a big scan must not fill the heap */
+const FALLBACK_ROWS = 20_000;
 const COMMIT_CHUNK = 5000;
 /** child entries lstat-ed at once, and stored child rows fetched at once */
 const BATCH = 32;
@@ -146,13 +148,23 @@ const commit = ({ items, last }) => {
     db.exec("COMMIT");
   } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
 };
+const isBusy = (e) => !!e && (e.errcode === 5 || e.errcode === 6 || /database (table )?is locked/i.test(String(e.message)));
+const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 parentPort.on("message", (m) => {
-  try {
-    if (m.op === "commit") commit(m);
-    else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
-    else db.prepare(m.sql).run(...m.params);
-    parentPort.postMessage({ id: m.id });
-  } catch (e) { parentPort.postMessage({ id: m.id, err: String(e && e.message || e) }); }
+  // a busy database (another connection holds a lock past busy_timeout) is retried a few times with backoff; every op rolls back on failure, so a retry is safe
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (m.op === "commit") commit(m);
+      else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
+      else db.prepare(m.sql).run(...m.params);
+      parentPort.postMessage({ id: m.id });
+      return;
+    } catch (e) {
+      if (isBusy(e) && attempt < 3) { nap(250 << attempt); continue; }
+      parentPort.postMessage({ id: m.id, err: String(e && e.message || e), busy: isBusy(e) });
+      return;
+    }
+  }
 });
 `;
 
@@ -197,13 +209,18 @@ export class SizeStore {
         if (attempt === 1) this.warn(e);
       }
     }
-    if (!this.db) this.warn(new Error("SQLite is unavailable"));
+    if (!this.db) {
+      this.warn(new Error("SQLite is unavailable"));
+      this.retryAt = Date.now() + this.retryDelay;
+    }
   }
 
   private open(file: string) {
     const db = openDb(file);
     if (!db) throw new Error("SQLite is unavailable");
     try {
+      // a long wait here blocks the event loop (and /healthz); a miss only means a re-read from disk
+      db.exec("PRAGMA busy_timeout=100");
       db.exec(`
         CREATE TABLE IF NOT EXISTS sizes (
           path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino REAL, dev REAL, mtime_ms REAL, scanned_at INTEGER, seen_at INTEGER NOT NULL DEFAULT 0,
@@ -238,18 +255,54 @@ export class SizeStore {
     console.error("size store unavailable, folder sizes are not cached:", (e as Error)?.message ?? e);
   }
 
-  /** Run a database operation; on failure give the database up (logged once) and answer `dflt`. */
+  /** A locked database ("database is locked", SQLITE_BUSY / SQLITE_LOCKED): another connection holds it for a moment, nothing is broken. */
+  private isBusy(e: unknown): boolean {
+    const x = e as { busy?: boolean; errcode?: number; message?: string } | null;
+    return !!x && (x.busy === true || x.errcode === 5 || x.errcode === 6 || /database (table )?is locked/i.test(String(x.message)));
+  }
+
+  private lastBusyNote = 0;
+  private busyNote(e: unknown) {
+    if (Date.now() - this.lastBusyNote < 60_000) return;
+    this.lastBusyNote = Date.now();
+    console.error("size store busy, answering without the cache:", (e as Error)?.message ?? e);
+  }
+
+  /** A failed database call: a busy database is a cache miss (noted at most once a minute), anything else gives the store up. */
+  private failed(e: unknown) {
+    if (this.isBusy(e)) this.busyNote(e);
+    else this.giveUp(e);
+  }
+
+  /** Run a database operation; a busy database answers `dflt` for this call, any other failure gives the database up (logged once) and answers `dflt`. */
   private safe<T>(fn: () => T, dflt: T): T {
     if (!this.db) return dflt;
     try {
       return fn();
     } catch (e) {
-      this.giveUp(e);
+      this.failed(e);
       return dflt;
     }
   }
 
+  private retryAt = 0;
+  private retryDelay = 30_000;
+  /** After a real failure, open the store again (30 s, then doubling to 10 min between tries) so one bad moment does not last until restart. */
+  private reopen() {
+    if (this.db || this.file === ":memory:" || !this.retryAt || Date.now() < this.retryAt) return;
+    try {
+      this.open(this.file);
+      this.warned = false;
+      this.retryDelay = 30_000;
+      console.error("size store back");
+    } catch {
+      this.retryDelay = Math.min(this.retryDelay * 2, 600_000);
+      this.retryAt = Date.now() + this.retryDelay;
+    }
+  }
+
   private giveUp(e: unknown) {
+    this.retryAt = Date.now() + this.retryDelay;
     this.warn(e);
     try {
       this.db?.close();
@@ -269,10 +322,10 @@ export class SizeStore {
         for (const p of this.pending.values()) p.rej(e);
         this.pending.clear();
       };
-      w.on("message", (r: { id: number; err?: string }) => {
+      w.on("message", (r: { id: number; err?: string; busy?: boolean }) => {
         const p = this.pending.get(r.id);
         this.pending.delete(r.id);
-        if (r.err) p?.rej(new Error(r.err));
+        if (r.err) p?.rej(Object.assign(new Error(r.err), { busy: r.busy }));
         else p?.res();
       });
       w.once("error", fail);
@@ -398,6 +451,7 @@ export class SizeStore {
    * otherwise keep totals from before).
    */
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; force?: boolean; trust?: boolean }): Promise<Walk> {
+    this.reopen();
     const dev = Number(st.dev);
     const now = Date.now();
     const stamp = (this.stamp = Math.max(now, this.stamp + 1));
@@ -408,6 +462,7 @@ export class SizeStore {
     let root: Node | undefined;
     let buf: Node[] = [];
     let written = false;
+    let dirty = false;
     const frames: Frame[] = [];
     this.lastWalkFrames = 0;
     /** rows kept for `tree` while the database is unusable (bounded) */
@@ -431,12 +486,13 @@ export class SizeStore {
           try {
             await this.send({ op: "commit", items, last: last ? { path: last.path, dev: last.dev, tot: last.tot } : null });
           } catch (e) {
-            this.giveUp(e);
+            if (this.isBusy(e)) dirty = true; // not stored: the subtree is marked stale at the end
+            this.failed(e);
           }
         }
         written = true;
       }
-      if (!this.db) for (const n of part) if (!n.touch && (rows.size < this.o.maxEntries || n === last)) rows.set(n.path, { path: n.path, parent: n.parent, ino: n.ino, dev: n.dev, mtime_ms: n.mtime_ms, scanned_at: n.scanned_at, seen_at: n.seen_at, own: n.own, tot: n.tot });
+      if (!this.db) for (const n of part) if (!n.touch && (rows.size < Math.min(this.o.maxEntries, FALLBACK_ROWS) || n === last)) rows.set(n.path, { path: n.path, parent: n.parent, ino: n.ino, dev: n.dev, mtime_ms: n.mtime_ms, scanned_at: n.scanned_at, seen_at: n.seen_at, own: n.own, tot: n.tot });
     };
 
     /** `n` has all its children: its totals are final. Store it and roll it into its parent. */
@@ -663,6 +719,7 @@ export class SizeStore {
     } finally {
       for (const f of frames) await f.close();
     }
+    if (dirty && this.db) await this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]);
     if (!this.db) this.keep(rows);
     return { root: root!, read };
   }
@@ -705,7 +762,7 @@ export class SizeStore {
     // bounded by rows in total, oldest first; the newest walk is always kept
     let rows = 0;
     for (const w of this.walks) rows += w.size;
-    while (this.walks.length > 1 && rows > this.o.maxEntries) rows -= this.walks.shift()!.size;
+    while (this.walks.length > 1 && rows > Math.min(this.o.maxEntries, FALLBACK_ROWS)) rows -= this.walks.shift()!.size;
   }
 
   /** Set by the agent when a change watcher is running: true when it keeps the stored sizes of `virtual` current. */
@@ -789,7 +846,7 @@ export class SizeStore {
     try {
       await this.send({ op: "exec", sql, params });
     } catch (e) {
-      this.giveUp(e);
+      this.failed(e);
     }
   }
 
@@ -820,7 +877,7 @@ export class SizeStore {
       await this.send({ op: "many", sql, rows });
       return true;
     } catch (e) {
-      this.giveUp(e);
+      this.failed(e);
       return false;
     }
   }
@@ -908,6 +965,7 @@ export class SizeStore {
 
   /** The folder and its folder descendants down to `depth`; with `all`, also the files of the folders above that depth. */
   async tree(virtual: string, depth: number, all: boolean): Promise<{ entries: DuEntry[]; truncated: boolean }> {
+    this.reopen();
     const entries: DuEntry[] = [];
     let budget = this.o.maxEntries;
     let truncated = false;

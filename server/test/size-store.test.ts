@@ -879,3 +879,73 @@ for (const [kind, streamAbove] of [["opendir (streamed)", 0], ["readdir (small f
     s.close();
   });
 }
+
+// ---- a busy database is a cache miss ----
+
+type Priv = { q: { get: { get(p: string): unknown } }; send(m: unknown): Promise<void>; walks: Map<string, unknown>[]; db: { close(): void } | null; giveUp(e: unknown): void; retryAt: number; persistent: boolean };
+
+test("a locked database is a cache miss on read and on write: the store is not given up and the next call works", async () => {
+  fs.mkdirSync(at("bz/a"), { recursive: true });
+  const s = fileStore();
+  const p = s as unknown as Priv;
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    const real = p.q.get;
+    p.q.get = { get: () => { throw Object.assign(new Error("database is locked"), { errcode: 5 }); } };
+    assert.equal((await s.scan("/bz")).dirs, 1); // every lookup misses: the walk reads from disk
+    p.q.get = real;
+    const send = p.send;
+    p.send = () => Promise.reject(Object.assign(new Error("database is locked"), { busy: true }));
+    assert.equal((await s.scan("/bz", undefined, true)).dirs, 1); // the commit is lost, not the store
+    p.send = send;
+    assert.equal(s.persistent, true);
+    assert.equal((await s.scan("/bz", undefined, true)).dirs, 1);
+    assert.equal((await s.scanRead("/bz")).read, 0); // stored by the last scan
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
+});
+
+test("with the database unusable the in-memory fallback holds at most 20 000 rows", async () => {
+  const dir = at("fb");
+  for (let i = 0; i < 30_000; i++) fs.mkdirSync(path.join(dir, `d${i}`), { recursive: true });
+  const s = new SizeStore(path.join(tmp, "no-such-dir", "x", "sizes.db"), { root: tmp, ttlMs: 60_000, maxEntries: 1_000_000 });
+  const p = s as unknown as Priv;
+  // force the store unusable
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    if (s.persistent) p.giveUp(new Error("forced"));
+    const r = await s.scan("/fb");
+    assert.equal(r.dirs, 30_000);
+    assert.equal(s.persistent, false);
+    assert.ok(p.walks.reduce((n, w) => n + w.size, 0) <= 20_001);
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
+});
+
+test("after a real failure the store is opened again once the backoff has passed", async () => {
+  fs.mkdirSync(at("ro/a"), { recursive: true });
+  const s = fileStore();
+  const p = s as unknown as Priv;
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    await s.scan("/ro");
+    p.giveUp(new Error("disk I/O error"));
+    assert.equal(s.persistent, false);
+    assert.equal((await s.scan("/ro")).dirs, 1); // uncached, before the backoff has passed
+    assert.equal(s.persistent, false);
+    p.retryAt = Date.now() - 1;
+    assert.equal((await s.scan("/ro")).dirs, 1);
+    assert.equal(s.persistent, true);
+    assert.equal((await s.scanRead("/ro")).read, 0);
+  } finally {
+    console.error = quiet;
+  }
+  s.close();
+});
