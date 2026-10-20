@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Jobs, type Rebuild } from "../src/jobs.ts";
+import { DatabaseSync } from "node:sqlite";
 import { JobStore } from "../src/job-store.ts";
 
 let tmp: string;
@@ -62,7 +63,7 @@ test("claim is a compare and swap: one winner", () => {
   const a = mk(f);
   const s = new JobStore(f);
   const v = a.create("x", "slow", hang);
-  const row = s.get(v.id)!;
+  const row = s.get(v.id, "n")!;
   assert.equal(s.claim(v.id, row.owner, row.beat, "p1", 1), true);
   assert.equal(s.claim(v.id, row.owner, row.beat, "p2", 2), false);
 });
@@ -108,10 +109,85 @@ test("interrupt hands live jobs over: beat 0, not canceled, adopted at once", as
   const b = mk(f, 10_000);
   const v = a.create("x", "slow", hang);
   await a.interrupt(500);
-  const row = new JobStore(f).get(v.id)!;
+  const row = new JobStore(f).get(v.id, "n")!;
   assert.equal(row.beat, 0);
   assert.equal(row.state, "running");
   b.tick();
   assert.equal(b.get(v.id)?.state, "failed"); // no rebuilder: failed, by the adopter and not as canceled
-  assert.equal(new JobStore(f).get(v.id)!.owner === row.owner, false);
+  assert.equal(new JobStore(f).get(v.id, "n")!.owner === row.owner, false);
+});
+
+// a second connection holding the write lock makes every write of the store busy
+const lock = (f: string) => {
+  const db = new DatabaseSync(f);
+  db.exec("BEGIN IMMEDIATE");
+  return () => (db.exec("COMMIT"), db.close());
+};
+
+test("a finish written while the database is busy is retried by the next tick", async () => {
+  const f = file();
+  const a = mk(f, 10_000);
+  let done!: () => void;
+  const v = a.create("x", "t", () => new Promise<void>((r) => (done = r)));
+  const unlock = lock(f);
+  done();
+  await sleep(250);
+  unlock();
+  assert.equal(new JobStore(f).get(v.id, "n")!.state, "running");
+  a.tick();
+  assert.equal(new JobStore(f).get(v.id, "n")!.state, "done");
+});
+
+test("a claim never leaves a running row nobody runs", async () => {
+  const f = file();
+  const a = mk(f);
+  const v = a.create("x", "t", hang);
+  const b = mk(f);
+  await sleep(70);
+  const unlock = lock(f);
+  b.tick(); // busy: nothing claimed
+  unlock();
+  assert.equal(new JobStore(f).get(v.id, "n")!.state, "running");
+  b.tick();
+  assert.equal(new JobStore(f).get(v.id, "n")!.state, "failed");
+});
+
+test("an own live row missing from memory is failed, not left running", async () => {
+  const f = file();
+  const a = mk(f, 10_000);
+  const v = a.create("x", "t", hang);
+  (a as unknown as { jobs: Map<string, unknown> }).jobs.delete(v.id);
+  a.tick();
+  assert.equal(new JobStore(f).get(v.id, "n")!.state, "failed");
+});
+
+test("a damaged jobs file is started afresh", () => {
+  const f = file();
+  fs.writeFileSync(f, "this is not a database, it is long enough to be read as a bad header ".repeat(80));
+  const a = mk(f, 10_000);
+  const v = a.create("x", "t", async () => 1);
+  assert.equal(new JobStore(f).get(v.id, "n")?.title, "t");
+});
+
+test("heartbeats of many jobs are one transaction: a busy database costs one wait", async () => {
+  const f = file();
+  const a = new Jobs(0, 100, undefined, undefined, { store: new JobStore(f), scope: "n", tickMs: 3_600_000 });
+  for (let i = 0; i < 30; i++) a.create("x", `j${i}`, hang);
+  const unlock = lock(f);
+  const t = Date.now();
+  a.tick();
+  const took = Date.now() - t;
+  unlock();
+  assert.ok(took < 500, `tick took ${took} ms`);
+});
+
+test("rows of another scope are not visible", () => {
+  const f = file();
+  const a = mk(f, 10_000);
+  const v = a.create("x", "t", hang);
+  const other = new Jobs(1, 100, undefined, undefined, { store: new JobStore(f), scope: "m" });
+  assert.equal(other.get(v.id), undefined);
+  assert.equal(other.cancel(v.id), undefined);
+  assert.equal(other.dismiss(v.id), false);
+  assert.equal(new JobStore(f).get(v.id, "n")?.cancel, 0);
 });

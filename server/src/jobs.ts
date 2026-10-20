@@ -58,6 +58,8 @@ export interface JobsStore {
 interface Job extends JobView {
   /** JSON of the allowlisted params, null = not rebuildable */
   params?: string | null;
+  /** the last write to the store was skipped */
+  dirty?: boolean;
   run: (ctl: JobCtl) => Promise<unknown>;
   onDrop?: () => void;
   /** set while the job waits for its gate: it is queued but takes no slot */
@@ -86,6 +88,7 @@ export class Jobs {
   private timer?: ReturnType<typeof setInterval>;
   private readonly me = randomUUID();
   private stopping = false;
+  private adopting = new Set<string>();
 
   /**
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
@@ -128,7 +131,7 @@ export class Jobs {
   }
 
   private view(j: Job): JobView {
-    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, ...v } = j;
+    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, dirty: _y, ...v } = j;
     const out: JobView = { ...v, progress: { ...j.progress } };
     if (j.state === "queued") {
       const all = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -149,15 +152,15 @@ export class Jobs {
   get(id: string): JobView | undefined {
     const j = this.jobs.get(id);
     if (j) return this.view(j);
-    const r = this.shared?.store.get(id);
+    const r = this.shared?.store.get(id, this.shared.scope);
     return r && rowView(r);
   }
 
   cancel(id: string): JobView | undefined {
     const j = this.jobs.get(id);
     if (!j) {
-      const r = this.shared?.store.get(id);
-      if (r && live(r.state)) this.shared!.store.setCancel(id); // its owner aborts it at the next tick
+      const r = this.shared?.store.get(id, this.shared.scope);
+      if (r && live(r.state)) this.shared!.store.setCancel(id, this.shared!.scope); // its owner aborts it at the next tick
       return r && rowView(r);
     }
     if (j.state === "queued") {
@@ -176,13 +179,13 @@ export class Jobs {
   dismiss(id: string): boolean {
     const j = this.jobs.get(id);
     if (!j) {
-      const r = this.shared?.store.get(id);
+      const r = this.shared?.store.get(id, this.shared.scope);
       if (!r || live(r.state)) return false;
-      this.shared!.store.delete(id);
+      this.shared!.store.delete(id, this.shared!.scope);
       return true;
     }
     if (j.state === "queued" || j.state === "running") return false;
-    this.shared?.store.delete(id);
+    this.shared?.store.delete(id, this.shared.scope);
     return this.jobs.delete(id);
   }
 
@@ -198,7 +201,8 @@ export class Jobs {
 
   private save(j: Job) {
     if (!this.shared || this.stopping) return;
-    this.shared.store.put({
+    // a skipped write (busy database) is retried by tick
+    j.dirty = !this.shared.store.put({
       id: j.id, scope: this.shared.scope, kind: j.kind, title: j.title, params: j.params ?? null, view: JSON.stringify({ ...this.view(j), queue: undefined }),
       state: j.state, owner: this.me, beat: Date.now(), created_at: j.createdAt, finished_at: j.finishedAt ?? null,
     });
@@ -210,42 +214,51 @@ export class Jobs {
     if (!sh || this.stopping) return;
     try {
       const now = Date.now();
-      for (const j of [...this.jobs.values()]) {
-        if (!live(j.state)) continue;
-        if (sh.store.beat(j.id, this.me, JSON.stringify({ ...this.view(j), queue: undefined }), now) !== false) continue;
-        const r = sh.store.get(j.id);
+      const all = [...this.jobs.values()];
+      for (const j of all) if (j.dirty && !live(j.state)) this.save(j);
+      const mine = all.filter((j) => live(j.state));
+      const lost = sh.store.beatAll(this.me, mine.map((j) => ({ id: j.id, view: JSON.stringify({ ...this.view(j), queue: undefined }) })), now);
+      if (!lost) return; // busy: skip the whole round
+      for (const id of lost) {
+        const j = this.jobs.get(id)!;
+        const r = sh.store.get(id, sh.scope);
         if (!r) this.save(j); // the first write was skipped
         else if (r.owner !== this.me) {
           // adopted elsewhere: stop here and persist nothing
-          this.jobs.delete(j.id);
+          this.jobs.delete(id);
           j.abort.abort();
         }
       }
       for (const id of sh.store.canceled(this.me)) this.cancel(id);
       for (const r of sh.store.orphans(sh.scope, this.me, now - (sh.leaseMs ?? 30_000))) {
-        if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) void this.adopt(r);
+        if (this.jobs.has(r.id) || this.adopting.has(r.id)) continue;
+        if (r.params && sh.rebuild?.[r.kind]) {
+          if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) void this.adopt(r);
+        } else sh.store.failClaim(r, this.me, JSON.stringify(this.interrupted(r, now)), now);
       }
     } catch {
       /* try again next tick */
     }
   }
 
+  private interrupted(r: JobRow, now: number) {
+    return { ...rowView(r), state: "failed", error: "Interrupted by an agent restart. Start it again.", finishedAt: now };
+  }
+
+  /** Rebuild a claimed job; if that fails it is marked failed (a busy write is found again by the next tick as our own orphan). */
   private async adopt(r: JobRow) {
     const sh = this.shared!;
-    const rb = r.params ? sh.rebuild?.[r.kind] : undefined;
-    if (rb) {
-      try {
-        const params = JSON.parse(r.params!);
-        const b = await rb(params);
-        this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at });
-        return;
-      } catch {
-        /* fall through: failed */
-      }
+    this.adopting.add(r.id);
+    try {
+      const params = JSON.parse(r.params!);
+      const b = await sh.rebuild![r.kind]!(params);
+      this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at });
+    } catch {
+      const now = Date.now();
+      sh.store.put({ ...r, view: JSON.stringify(this.interrupted(r, now)), state: "failed", owner: this.me, beat: now, finished_at: now });
+    } finally {
+      this.adopting.delete(r.id);
     }
-    const now = Date.now();
-    const view = { ...rowView(r), state: "failed", error: "Interrupted by an agent restart. Start it again.", finishedAt: now };
-    sh.store.put({ ...r, view: JSON.stringify(view), state: "failed", owner: this.me, beat: now, finished_at: now });
   }
 
   /**
