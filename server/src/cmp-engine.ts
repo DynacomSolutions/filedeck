@@ -2,7 +2,7 @@ import fs from "node:fs";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { FsError } from "./fsops.ts";
 import { compileGlobs } from "./glob.ts";
-import { openDb } from "./index-cache.ts";
+import { dropSpill, openDb } from "./index-cache.ts";
 import { TRASH_DIR } from "./paths.ts";
 import type { Progress } from "./jobs.ts";
 import { classify, type DiffOptions, type Row, type Side, type Status, type Counts } from "./folderdiff.ts";
@@ -667,5 +667,6 @@ export class CompareSession {
       /* closed */
     }
     if (this.file !== ":memory:") for (const f of [this.file, this.file + "-wal", this.file + "-shm"]) fs.rmSync(f, { force: true });
+    dropSpill(this.file);
   }
 }

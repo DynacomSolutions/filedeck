@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import { FsError } from "./fsops.ts";
+import { direntsOf } from "./dirnames.ts";
 import type { JobCtl } from "./jobs.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
@@ -457,7 +458,7 @@ async function sanitizeTree(base: string, limits: ArchiveLimits, filter: ((n: st
   let entries = 0;
   const walk = async (dir: string, rel: string): Promise<boolean> => {
     let kept = false;
-    for (const n of await fs.readdir(dir)) {
+    for await (const { name: n } of direntsOf(dir)) {
       if (ctl.signal.aborted) throw new Error("canceled");
       if (++entries > limits.maxEntries) throw new ArchiveError(413, `archive has more than ${limits.maxEntries} entries`);
       const p = path.join(dir, n);

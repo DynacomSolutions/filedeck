@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as ops from "./fsops.ts";
+import { namesOf } from "./dirnames.ts";
 import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveWrite, virtualJoin } from "./paths.ts";
 
@@ -42,10 +43,17 @@ const checkIds = (ids: unknown): string[] => {
 };
 
 async function readItems(dir: string): Promise<{ items: TrashItem[]; truncated: boolean }> {
-  const names = (await fs.readdir(dir)).filter((n) => ID.test(n));
-  const truncated = names.length > MAX_TRASH_ITEMS;
+  const slice: string[] = [];
+  let truncated = false;
+  for await (const b of namesOf(dir, 256, (n) => ID.test(n))) {
+    slice.push(...b);
+    if (slice.length > MAX_TRASH_ITEMS) {
+      truncated = true;
+      slice.length = MAX_TRASH_ITEMS;
+      break;
+    }
+  }
   const items: TrashItem[] = [];
-  const slice = names.slice(0, MAX_TRASH_ITEMS);
   for (let i = 0; i < slice.length; i += 32) {
     const got = await Promise.all(
       slice.slice(i, i + 32).map(async (id): Promise<TrashItem> => {
@@ -160,16 +168,16 @@ export async function emptyTrash(root: string, volume: string, olderThanDays?: n
   let removed = 0;
   let failed = 0;
   const { items } = await readItems(dir);
-  const all = (await fs.readdir(dir)).filter((n) => ID.test(n)).length;
   const keep = new Set(items.filter((i) => i.deletedAt > cutoff).map((i) => i.id));
-  const names = items.length === all ? items.map((i) => i.id) : (await fs.readdir(dir)).filter((n) => ID.test(n));
-  for (const id of names) {
-    if (keep.has(id)) continue;
-    try {
-      await fs.rm(path.join(dir, id), { recursive: true, force: true });
-      removed++;
-    } catch {
-      failed++;
+  for await (const names of namesOf(dir, 256, (n) => ID.test(n))) {
+    for (const id of names) {
+      if (keep.has(id)) continue;
+      try {
+        await fs.rm(path.join(dir, id), { recursive: true, force: true });
+        removed++;
+      } catch {
+        failed++;
+      }
     }
   }
   return { removed, failed };

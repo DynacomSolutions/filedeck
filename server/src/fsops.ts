@@ -1,7 +1,8 @@
-import { constants } from "node:fs";
+import { constants, type Dirent } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { direntsOf } from "./dirnames.ts";
 import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
 import {
@@ -104,13 +105,19 @@ export async function list(root: string, p: string, hidden: boolean) {
   const r = resolveRead(root, p);
   const st = await fs.stat(r.real);
   if (!st.isDirectory()) throw new FsError(400, "not a directory");
-  const names = await fs.readdir(r.real);
-  const visible = names.filter((n) => n !== TRASH_DIR && (hidden || !n.startsWith(".")));
-  const truncated = visible.length > MAX_LIST;
+  let truncated = false;
+  const slice: string[] = [];
+  for await (const n of direntsOf(r.real)) {
+    if (n.name === TRASH_DIR || (!hidden && n.name.startsWith("."))) continue;
+    if (slice.length >= MAX_LIST) {
+      truncated = true;
+      break;
+    }
+    slice.push(n.name);
+  }
   const out: Entry[] = [];
   // bounded concurrency
   const batch = 64;
-  const slice = visible.slice(0, MAX_LIST);
   for (let i = 0; i < slice.length; i += batch) {
     const got = await Promise.all(slice.slice(i, i + batch).map((n) => toEntry(root, r.virtual, r.real, n)));
     for (const g of got) if (g) out.push(g);
@@ -170,20 +177,35 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
   const r = resolveRead(root, p);
   const st = await fs.stat(r.real);
   if (!st.isDirectory()) throw new FsError(400, "not a directory");
-  const dirents = (await fs.readdir(r.real, { withFileTypes: true })).filter((d) => d.name !== TRASH_DIR && (hidden || !d.name.startsWith(".")));
-  const truncated = dirents.length > MAX_LIST;
-  // A link only needs one stat to be ordered (is its target a folder?); its full entry is built with the rest of its batch.
-  const linkDir = new Set<string>();
-  const linkNames = dirents.filter((d) => d.isSymbolicLink()).map((d) => d.name);
-  const isDir = async (n: string) => {
-    try {
-      if ((await fs.stat(resolveRead(root, virtualJoin(r.virtual, n)).real)).isDirectory()) linkDir.add(n); // confined, never the container fs
-    } catch {
-      /* broken or looping link: sorts with the files */
-    }
+  // Streamed in chunks of 4096 names; only the best MAX_LIST rows are kept, so memory stays at the cap however large the folder is.
+  let all: { name: string; dir: boolean }[] = [];
+  let count = 0;
+  const flush = async (chunk: Dirent[]) => {
+    count += chunk.length;
+    // A link only needs one stat to be ordered (is its target a folder?); its full entry is built with the rest of its batch.
+    const linkDir = new Set<string>();
+    const isDir = async (n: string) => {
+      try {
+        if ((await fs.stat(resolveRead(root, virtualJoin(r.virtual, n)).real)).isDirectory()) linkDir.add(n); // confined, never the container fs
+      } catch {
+        /* broken or looping link: sorts with the files */
+      }
+    };
+    const linkNames = chunk.filter((d) => d.isSymbolicLink()).map((d) => d.name);
+    for (let i = 0; i < linkNames.length; i += 256) await Promise.all(linkNames.slice(i, i + 256).map(isDir));
+    all = smallest([...all, ...chunk.map((d) => ({ name: d.name, dir: d.isDirectory() || linkDir.has(d.name) }))], MAX_LIST);
   };
-  for (let i = 0; i < linkNames.length; i += 256) await Promise.all(linkNames.slice(i, i + 256).map(isDir));
-  const all = dirents.map((d) => ({ name: d.name, dir: d.isDirectory() || linkDir.has(d.name) }));
+  let chunk: Dirent[] = [];
+  for await (const d of direntsOf(r.real)) {
+    if (d.name === TRASH_DIR || (!hidden && d.name.startsWith("."))) continue;
+    chunk.push(d);
+    if (chunk.length >= 4096) {
+      await flush(chunk);
+      chunk = [];
+    }
+  }
+  await flush(chunk);
+  const truncated = count > MAX_LIST;
   const details = async (slice: { name: string }[]) => {
     const out: Entry[] = [];
     for (let k = 0; k < slice.length; k += 64) {
@@ -195,8 +217,7 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
   const head = smallest(all, Math.min(FIRST_BATCH, batchSize, MAX_LIST));
   const first = await details(head);
   if (first.length) yield { entries: first };
-  const seen = new Set(head.map((h) => h.name));
-  const rest = all.filter((x) => !seen.has(x.name)).sort(listOrder).slice(0, Math.max(0, MAX_LIST - head.length));
+  const rest = all.slice(head.length); // `all` is already in listOrder
   let ahead = details(rest.slice(0, batchSize));
   for (let i = 0; i < rest.length; i += batchSize) {
     const out = await ahead;

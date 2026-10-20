@@ -443,7 +443,11 @@ test("scan of a folder that was removed trims its rows and its parent", async ()
   await s.scan("/gone/p/q", undefined, true);
   fs.rmSync(at("gone/p/q"), { recursive: true });
   await assert.rejects(() => s.scan("/gone/p/q"));
-  (await s.lock("/"))(); // the trim runs after the scan ended; wait for it
+  // the trim runs after the scan ended, climbing one locked level at a time; wait for it
+  for (let i = 0; i < 100 && (await s.tree("/gone", 0, false)).entries[0]!.dirs !== 1; i++) {
+    (await s.lock("/"))();
+    await sleep(10);
+  }
   assert.equal((await s.tree("/gone/p/q", 0, false)).entries.length, 0);
   assert.equal((await s.tree("/gone", 0, false)).entries[0]!.bytes, 0);
   assert.equal((await s.tree("/gone", 0, false)).entries[0]!.dirs, 1);
