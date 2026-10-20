@@ -198,6 +198,7 @@ parentPort.on("message", (m) => {
 
 /** `pending.due_at` of a folder that is not waiting but remembers its `last_run` */
 const PENDING_IDLE = Number.MAX_SAFE_INTEGER;
+const PENDING_BATCH = 10_000;
 
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
@@ -1015,8 +1016,12 @@ export class SizeStore {
   }
 
   /** The watcher lost events: nothing pending is worth keeping, the stale marks cover it. */
-  clearPending(): Promise<void> {
-    return this.write1("DELETE FROM pending", []); // not `write`: size walks wait on its tail
+  async clearPending(): Promise<void> {
+    // bounded batches (the writer never holds one huge transaction), a pause between them; not `write`: size walks wait on its tail
+    while (this.db && this.safe(() => !!this.db!.prepare("SELECT 1 FROM pending LIMIT 1").get(), false)) {
+      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending LIMIT ?)", [PENDING_BATCH]);
+      await new Promise((r) => setTimeout(r, 5));
+    }
   }
 
   /** Re-read `v`; when it is gone, the stored parent to re-read instead (undefined when done). */
