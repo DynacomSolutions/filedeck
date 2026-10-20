@@ -1,5 +1,7 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
@@ -71,6 +73,24 @@ function loadSqlite(): typeof import("node:sqlite") | null {
     sqlite = null;
   }
   return sqlite;
+}
+
+const spills = new Set<string>();
+const rmDb = (f: string) => {
+  for (const x of [f, f + "-wal", f + "-shm"]) fs.rmSync(x, { force: true });
+};
+process.once("exit", () => spills.forEach(rmDb)); // best effort: a killed process leaves its file in the temp folder
+
+/** A fresh database file under the temp folder, for stores that have no configured folder; heap stays small, the file goes with its owner. */
+export function spillPath(label: string): string {
+  const f = path.join(os.tmpdir(), `filedeck-${label}-${process.pid}-${randomUUID()}.db`);
+  spills.add(f);
+  return f;
+}
+
+/** Remove a file made by `spillPath` (no-op for any other path). */
+export function dropSpill(f: string) {
+  if (spills.delete(f)) rmDb(f);
 }
 
 /** Open a SQLite database tuned for a cache (WAL, relaxed sync, small page cache). Null when SQLite is unavailable. */
@@ -443,6 +463,7 @@ export class IndexCache {
       /* closed */
     }
     this.db = null;
+    dropSpill(this.file);
   }
 }
 

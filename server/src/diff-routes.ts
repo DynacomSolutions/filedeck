@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { watch } from "node:fs";
 import path from "node:path";
 import { Semaphore, hashFile, walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
-import { IndexCache, type DirReader, type IdxEntry } from "./index-cache.ts";
+import { IndexCache, spillPath, type DirReader, type IdxEntry } from "./index-cache.ts";
 import { TRASH_DIR, resolveRead } from "./paths.ts";
 import { FsError } from "./fsops.ts";
 import type { Config } from "./config.ts";
@@ -62,7 +62,7 @@ export function registerDiffRoutes(app: Hono, cfg: Config): IndexCache {
   const root = cfg.root;
   const hashes = new Semaphore(Math.max(1, cfg.hashConcurrency));
   const lists = new Semaphore(Math.max(1, cfg.listConcurrency));
-  const index = new IndexCache(cfg.indexDir ? path.join(cfg.indexDir, `index-${cfg.node}.db`) : ":memory:", localReader(), { maxWatches: cfg.indexWatches, ttlMs: cfg.indexRevalidateMs });
+  const index = new IndexCache(cfg.indexDir ? path.join(cfg.indexDir, `index-${cfg.node}.db`) : spillPath("index"), localReader(), { maxWatches: cfg.indexWatches, ttlMs: cfg.indexRevalidateMs });
 
   app.get("/api/fs/hash", async (c) => {
     const signal = c.req.raw.signal;
