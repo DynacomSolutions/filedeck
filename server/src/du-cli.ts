@@ -187,18 +187,26 @@ export async function run(argv: string[], env: Record<string, string | undefined
   };
   // Waits through 502/503/504 and network errors (backoff 1 s to 15 s) until the deadline; one notice per streak.
   // With lostOk, a 404 is returned to the caller instead (the job is gone).
+  let answered = false; // per target: the hub has given a non-transient answer
   const patient = async (url: string, label: string, lostOk = false): Promise<Response> => {
     let wait = 1000;
     let last = "";
-    for (let said = false; ; said = true) {
+    let plain = "";
+    for (let said = false, n = 1; ; said = true, n++) {
       try {
         const r = await get(url);
-        if (![502, 503, 504].includes(r.status)) return r;
+        if (![502, 503, 504].includes(r.status)) {
+          answered = true;
+          return r;
+        }
         last = `hub answered HTTP ${r.status}`;
+        plain = `HTTP ${r.status}: ${r.statusText}`;
       } catch (e) {
         if (!(e instanceof Transient)) throw e;
-        last = e.message;
+        last = plain = e.message;
       }
+      // A wrong URL or a dead hub must not hang for the whole timeout: patience starts with the first real answer.
+      if (!answered && n >= 3) throw new Error(plain);
       if (io.now() >= deadline) throw new Error(`timed out after ${o.timeout} s (${last})`);
       if (!said) io.err(`filedeck du: ${label}: ${last}, retrying\n`);
       await io.sleep(wait);
@@ -208,6 +216,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
   let status = 0;
   for (const t of o.targets) {
     const label = `${t.node}:${t.path}`;
+    answered = false;
     const api = `${base}/api/nodes/${encodeURIComponent(t.node)}/api`;
     const q = new URLSearchParams({ path: t.path });
     if (o.depth !== undefined) q.set("depth", String(o.depth));

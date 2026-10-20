@@ -101,10 +101,9 @@ test("errors: failed job, HTTP error, 401, network, missing env; other targets s
   assert.equal(await run(["n:/"], env, f.io), 1);
   assert.match(f.err.join(""), /scan failed: boom/);
   const n = harness(() => Promise.reject(new Error("ECONNREFUSED")));
-  let nt = 0;
-  n.io.now = () => (nt += 40_000);
-  assert.equal(await run(["--timeout", "100", "n:/"], env, n.io), 1);
-  assert.match(n.err.join(""), /timed out after 100 s \(cannot reach https:\/\/hub\.example: ECONNREFUSED\)/);
+  assert.equal(await run(["n:/"], env, n.io), 1);
+  assert.equal(n.calls.length, 3);
+  assert.match(n.err.join(""), /cannot reach https:\/\/hub\.example: ECONNREFUSED/);
   const m = harness(() => j({}));
   assert.equal(await run(["n:/"], {}, m.io), 2);
   assert.equal(await run(["--bogus", "n:/"], env, m.io), 2);
@@ -129,7 +128,7 @@ test("--timeout gives up while polling", async () => {
 const ok = () => j({ path: "/", entries: [E("/", 1)], cached: false, truncated: false, watched: false });
 
 test("transient 503 on the first request and on a poll is waited out, one notice per streak", async () => {
-  const seq = [503, 503, "202", "job503", "job503", "jobdone", "ok"];
+  const seq = [503, "202", "job503", "job503", "jobdone", "ok"];
   const sleeps: number[] = [];
   const h = harness(() => {
     const s = seq.shift();
@@ -140,7 +139,7 @@ test("transient 503 on the first request and on a poll is waited out, one notice
   h.io.sleep = async (ms) => void sleeps.push(ms);
   assert.equal(await run(["n:/"], env, h.io), 0);
   assert.equal(h.out.join(""), "1\tn:/\n");
-  assert.deepEqual(sleeps, [1000, 2000, 1000, 2000]);
+  assert.deepEqual(sleeps, [1000, 1000, 2000]);
   assert.equal(h.err.join("").match(/HTTP 503, retrying/g)?.length, 2);
 });
 
