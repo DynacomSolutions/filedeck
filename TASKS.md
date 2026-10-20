@@ -68,3 +68,9 @@ ETA: 2026-10-21 01:00 ICT
 | FD-40 | Release v0.3.18 so FD-39 deploys | done |  |  | 5.FD-39 | 2026-10-21 00:45 ICT | |
 | FD-43 | Release v0.3.19 so FD-41 and FD-42 deploy | done |  |  | 3.FD-41, 2.FD-42 | 2026-10-21 00:45 ICT | |
 | FD-44 | Release v0.3.20 so FD-37 deploys | in_progress | claude-20261021-watcher-after-listen | watcher-after-listen | 5.FD-37 | 2026-10-21 01:15 ICT | |
+
+## 6. Housekeeping
+ETA: 2026-10-21 00:19 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| FD-44 | CLUSTER-287 hq0 disk cleanup: remove rebuildable and temporary material from this repo's .data folder and finished task worktrees | done | claude-20261021-cleanup | cleanup-20261021 | | 2026-10-21 00:19 ICT | Freed about 0.9 GiB: generated lag test tree, node_modules, dist copies, release tarballs; finished merged task worktree board-format-20261020. Kept scripts, notes and evidence. |
