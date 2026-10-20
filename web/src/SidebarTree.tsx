@@ -9,7 +9,7 @@ import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks,
 import { copyText } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
-import { EXPANDED_KEY, flatten, folderSizes, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, usagePct, type ExpandState, type FolderSize, type TreeNodeBase, type Usage } from "./sidebarTree";
+import { EXPANDED_KEY, ancestorPaths, flatten, folderSizes, heldIds, hold, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, shownOpen, usagePct, type ExpandState, type Held, type FolderSize, type TreeNodeBase, type Usage } from "./sidebarTree";
 
 export type How = "here" | "panel";
 
@@ -24,6 +24,8 @@ export interface TNode extends TreeNodeBase {
   node?: string;
   path?: string;
   defaultOpen: boolean;
+  /** on the path to the current folder: open unless collapsed by hand */
+  auto?: boolean;
   tip?: string;
   extra?: React.ReactNode;
   /** disk usage: draws the bar under the label and fills the popover */
@@ -124,19 +126,27 @@ export interface NodesState {
   reload: () => void;
 }
 
-export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesState; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void }) {
+export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState: NodesState; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void }) {
   const [expanded, setExpanded] = useState<ExpandState>(loadStored);
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [mounts, setMounts] = useState<Record<string, MountsState>>({});
   const [dus, setDus] = useState<Dus>({});
   const [focusId, setFocusId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [held, setHeld] = useState<Held>({ loc: "", ids: [] });
   const marks = useBookmarks();
   const root = useRef<HTMLUListElement>(null);
   const { mutate } = useSWRConfig();
   const nodes = nodesState.nodes ?? [];
   const nodesView = listState({ data: nodesState.nodes, error: nodesState.error, isLoading: nodesState.isLoading });
   const wantFocus = useRef(false);
+
+  // Derived from the current folder on every render, so it needs no cleanup when the user navigates away.
+  const loc = current ? current.node + "\0" + current.path : "";
+  const heldNow = useMemo(() => new Set(heldIds(held, loc)), [held, loc]);
+  const autoDirs = useMemo(() => new Set(current ? ancestorPaths(current.path) : []), [current]);
+  const isAuto = (node: string, path: string) => !!current && node === current.node && autoDirs.has(path);
+  const openNow = (t: TNode) => shownOpen(isOpen(expanded, t.id, t.defaultOpen), !!t.auto, heldNow.has(t.id));
 
   const cluster = nodes.filter((n) => n.kind !== "source");
   const network = nodes.filter((n) => n.kind === "source");
@@ -145,9 +155,8 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
     const dirNode = (parent: string, node: string, path: string, e?: Entry, fixedId?: string): TNode => {
       const id = fixedId ?? `${parent}›${path}`;
       const name = e?.name ?? path;
-      const open = isOpen(expanded, id, false);
-      const t: TNode = { id, kind: "dir", label: name, icon: <FolderClosed />, node, path, expandable: true, defaultOpen: false, tip: `${node}:${path}`, load: "dir" };
-      if (open) fill(t);
+      const t: TNode = { id, kind: "dir", label: name, icon: <FolderClosed />, node, path, expandable: true, defaultOpen: false, auto: isAuto(node, path), tip: `${node}:${path}`, load: "dir" };
+      if (openNow(t)) fill(t);
       return t;
     };
     /** Children and status note of a folder row, from whatever is cached. */
@@ -172,7 +181,8 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       const t: TNode = { id, kind: "node", label: n.name, icon: <span className={"dot " + (n.online ? "on" : "off")} aria-hidden="true" />, node: n.name, path: "/", expandable: n.online, defaultOpen: false, offline: !n.online, tip: n.online ? undefined : "Offline" };
       const m = mounts[n.name];
       if (n.online && m?.status === "ready") t.usage = serverUsage(m.mounts) ?? undefined;
-      if (!n.online || !isOpen(expanded, id, false)) return t;
+      t.auto = current?.node === n.name;
+      if (!n.online || !openNow(t)) return t;
       const kids: TNode[] = [dirNode(id, n.name, "/", { name: "/ (root)" } as Entry), { id: `${id}:trash`, kind: "trash", label: "Trash", icon: <Trash2 />, node: n.name, expandable: false, defaultOpen: false }];
       if (m?.status === "ready")
         for (const x of m.mounts) {
@@ -225,7 +235,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       section("sec:bookmarks", "Bookmarks", <Star />, marks.map(bookmarkRow), "Star a folder to keep it here.", false),
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, nodesView, nodesState.error, expanded, listings, mounts, dus, marks]);
+  }, [nodes, nodesView, nodesState.error, expanded, listings, mounts, dus, marks, current?.node, current?.path, heldNow]);
 
   const byId = useMemo(() => {
     const m = new Map<string, TNode>();
@@ -233,8 +243,13 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
     walk(tree);
     return m;
   }, [tree]);
-  const rows = useMemo(() => flatten(tree, (n) => isOpen(expanded, n.id, (n as TNode).defaultOpen)), [tree, expanded]);
+  const rows = useMemo(() => flatten(tree, (n) => openNow(n as TNode)), [tree, expanded, heldNow]);
   const tabId = rovingId(rows, focusId);
+  // The first visible row for the current folder (a bookmark of it is not "the" current row).
+  const currentId = current ? rows.find((r) => { const t = byId.get(r.id); return t && t.kind !== "bookmark" && t.node === current.node && t.path === current.path; })?.id : undefined;
+  useEffect(() => {
+    if (currentId) root.current?.querySelector<HTMLElement>(`[data-tid="${CSS.escape(currentId)}"]`)?.scrollIntoView?.({ block: "nearest" });
+  }, [currentId]);
 
   // Lazy scanning: whatever is open and visible gets a SWR feed (cached listing first, then revalidated).
   const wants = useMemo<Want[]>(() => {
@@ -263,6 +278,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
 
   const setExp = useCallback((id: string, open: boolean) => {
     const def = byId.get(id)?.defaultOpen ?? false;
+    if (!open && byId.get(id)?.auto) setHeld((h) => hold(h, loc, id));
     setExpanded((s) => {
       const next = setOpen(s, id, open, def);
       try {
@@ -272,7 +288,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
       }
       return next;
     });
-  }, [byId]);
+  }, [byId, loc]);
 
   const focusRow = (id: string) => {
     setFocusId(id);
@@ -285,10 +301,10 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
   });
 
   const open = (t: TNode, how: How, direct = false) => {
-    if (t.kind === "section") return setExp(t.id, !isOpen(expanded, t.id, true));
+    if (t.kind === "section") return setExp(t.id, !openNow(t));
     if (t.kind === "trash") return onTrash(t.node!);
     if (t.offline) return;
-    if (how === "here" && !direct && t.expandable && !isOpen(expanded, t.id, false)) return setExp(t.id, true);
+    if (how === "here" && !direct && t.expandable && !openNow(t)) return setExp(t.id, true);
     onOpen(t.node!, t.path ?? "/", how);
   };
 
@@ -326,12 +342,12 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
     if (a.type === "focus") focusRow(a.id);
     else if (a.type === "expand") setExp(a.id, true);
     else if (a.type === "collapse") setExp(a.id, false);
-    else if (a.type === "toggle") setExp(a.id, !isOpen(expanded, a.id, t.defaultOpen));
+    else if (a.type === "toggle") setExp(a.id, !openNow(t));
     else open(t, "here", true);
   };
 
   const renderRow = (t: TNode, level: number): React.ReactNode => {
-    const isExp = t.expandable && isOpen(expanded, t.id, t.defaultOpen);
+    const isExp = t.expandable && openNow(t);
     const mark = bookmarkOf(t);
     const hasMenu = t.kind !== "section";
     const main = (
@@ -342,6 +358,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
         aria-level={level}
         aria-expanded={t.expandable ? isExp : undefined}
         aria-disabled={t.offline || undefined}
+        aria-current={t.id === currentId ? "page" : undefined}
         aria-keyshortcuts={hasMenu ? "Shift+F10" : undefined}
         tabIndex={tabId === t.id ? 0 : -1}
         className={"st-main" + (t.kind === "section" ? " st-sec" : "")}
@@ -380,7 +397,7 @@ export function SideTree({ nodesState, onOpen, onTrash }: { nodesState: NodesSta
     );
     return (
       <li key={t.id} role="none" className={"st-item" + (t.kind === "section" ? " sec" : "")}>
-        <div className={"st-row" + (tabId === t.id ? " cur" : "") + (t.offline ? " off" : "")}>
+        <div className={"st-row" + (tabId === t.id ? " cur" : "") + (t.id === currentId ? " here" : "") + (t.offline ? " off" : "")}>
           {t.tip || t.usage || t.size ? <Tip label={<Popover t={t} />} besideOf=".side" when={(w) => !!t.usage || !!t.size || truncated(w)}>{main}</Tip> : main}
           {hasMenu && (
             <Tip label="Actions">

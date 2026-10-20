@@ -23,6 +23,7 @@ ETA: 2026-10-18 14:00 ICT
 | FD-17 | Test sources surge on rollout (RollingUpdate maxUnavailable 0) like hub and agents | done | claude-20261018-test-sources-rolling | test-sources-rolling | 2.FD-15 | 2026-10-18 14:00 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/59 (46cf5ec). |
 | FD-18 | Agents in a container list the host's mounts, not the container's (large disks such as a separate /home were missing from sizes) | done | claude-20261018-host-mounts | host-mounts | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/60 (23f1944). Deploys with 2.FD-19. |
 | FD-19 | Release v0.3.10 (size store 3.FD-9, test-source surge 2.FD-17, host mounts 2.FD-18) and confirm no service drops to zero ready pods during the rollout | done | claude-20261018-release-v0310 | release-v0310 | 2.FD-18 | | Released and rolled out with no downtime; see 2.FD-15. |
+| FD-42 | The sidebar tree opens the path to the current folder and closes what it opened when you move away; folders you opened yourself stay open | in_progress | claude-20261020-tree-autoexpand | tree-autoexpand | | 2026-10-21 01:30 ICT | |
 
 ## 3. Cached folder sizes
 ETA: 2026-10-18 18:00 ICT
