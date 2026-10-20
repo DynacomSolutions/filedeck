@@ -5,7 +5,14 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { createAgent } from "../src/agent.ts";
+import { createAgent as makeAgent } from "../src/agent.ts";
+// a file-backed size store starts a writer thread: close every agent so the test process can exit
+const agents: { close(): Promise<void> }[] = [];
+const createAgent = (cfg: Parameters<typeof makeAgent>[0]) => {
+  const a = makeAgent(cfg);
+  agents.push(a as unknown as { close(): Promise<void> });
+  return a;
+};
 import { loadConfig } from "../src/config.ts";
 import { SizeStore } from "../src/size-store.ts";
 
@@ -17,7 +24,10 @@ const mk = (ttlMs = 60_000, maxEntries = 100_000, commitChunk?: number) => new S
 before(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-sizes-")));
 });
-after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+after(async () => {
+  for (const a of agents) await a.close().catch(() => {}); // some tests close their agent already
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
 
 /** readdir calls made while `fn` runs */
 async function countReaddir(fn: () => Promise<unknown>): Promise<number> {
