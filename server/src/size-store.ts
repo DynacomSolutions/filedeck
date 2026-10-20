@@ -19,7 +19,7 @@ import type { SizeResult } from "./props.ts";
  *    than `ttlMs` ago: entries added, removed or renamed change the folder mtime, an in-place edit of a
  *    file does not. Without the change watcher (fanwatch.ts) the own stats can therefore be stale up to `ttlMs`;
  *  - everything else is re-read (opendir + lstat) and its row replaced; the stored child folders it no longer has are dropped
- *    (every row a walk writes or confirms is stamped `seen_at` = the start of that walk, so stale children are the older ones;
+ *    (every row a walk writes or confirms is stamped `seen_at` = the walk's stamp (strictly increasing per store), so stale children are the ones with another stamp;
  *    `scanned_at` is left alone on a reused row, it is what the TTL counts from);
  *  - a scan is never cut short and never partial; its memory use follows the depth of the tree, not its size (see `walk`).
  *
@@ -114,7 +114,7 @@ const { file, COLS, METRICS } = workerData;
 const db = new DatabaseSync(file);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192");
 const put = db.prepare("INSERT OR REPLACE INTO sizes (" + COLS.join(",") + ") VALUES (" + COLS.map(() => "?").join(",") + ")");
-const stale = db.prepare("SELECT path FROM sizes WHERE parent = ? AND dev = ? AND seen_at < ? LIMIT 256");
+const stale = db.prepare("SELECT path FROM sizes WHERE parent = ? AND dev = ? AND seen_at <> ? AND path > ? ORDER BY path LIMIT 256");
 const touch = db.prepare("UPDATE sizes SET seen_at = ? WHERE path = ?");
 const get = db.prepare("SELECT * FROM sizes WHERE path = ?");
 const delTree = db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)");
@@ -126,7 +126,7 @@ const commit = ({ items, last }) => {
     const old = last ? get.get(last.path) : undefined;
     for (const it of items) {
       if (it.touch != null) { touch.run(it.touch, it.path); continue; }
-      if (it.purge != null) for (;;) { const r = stale.all(it.path, it.dev, it.purge); if (!r.length) break; for (const k of r) delTree.run(k.path, ...below(k.path)); }
+      if (it.purge != null) for (let after = "";;) { const r = stale.all(it.path, it.dev, it.purge, after); if (!r.length) break; for (const k of r) delTree.run(k.path, ...below(k.path)); after = r[r.length - 1].path; }
       put.run(...it.row);
     }
     if (old) {
@@ -151,7 +151,7 @@ parentPort.on("message", (m) => {
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
   private db: DatabaseSync | null = null;
-  private q!: Record<"get" | "put" | "kids" | "kidPage" | "kidCount" | "touch" | "delTree", StatementSync>;
+  private q!: Record<"get" | "put" | "kids" | "kidPage" | "getKids" | "touch" | "delTree", StatementSync>;
   /** deepest frame stack of the latest walk (tests: memory follows depth, not width) */
   lastWalkFrames = 0;
   private held: { path: string; done: Promise<void> }[] = [];
@@ -162,6 +162,8 @@ export class SizeStore {
   /** the latest `write`: a walk waits for it so it never reads rows a stale mark is about to change */
   private tail: Promise<void> = Promise.resolve();
   private warned = false;
+  /** last `seen_at` stamp handed to a walk: strictly increasing, so a clock step back or two walks in one millisecond never share one */
+  private stamp = 0;
   /** nodes of the latest walks (up to maxEntries rows in total), kept only while the database is unusable so `tree` can still answer */
   private walks: Map<string, Row>[] = [];
 
@@ -200,12 +202,13 @@ export class SizeStore {
       `);
       // stores of older versions have no seen_at
       if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec("ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
+      this.stamp = Number(db.prepare("SELECT MAX(seen_at) AS m FROM sizes").get()?.m ?? 0);
       this.q = {
         get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
         put: db.prepare(`INSERT OR REPLACE INTO sizes (${COLS.join(",")}) VALUES (${COLS.map(() => "?").join(",")})`),
         kids: db.prepare("SELECT * FROM sizes WHERE parent = ? ORDER BY path"),
         kidPage: db.prepare("SELECT * FROM sizes WHERE parent = ? AND dev = ? AND path > ? ORDER BY path LIMIT ?"),
-        kidCount: db.prepare("SELECT COUNT(*) AS n FROM sizes WHERE parent = ? AND dev = ?"),
+        getKids: db.prepare("SELECT s.*, (SELECT COUNT(*) FROM sizes k WHERE k.parent = s.path AND k.dev = s.dev) AS kids FROM sizes s WHERE s.path = ?"),
         touch: db.prepare("UPDATE sizes SET seen_at = ? WHERE path = ?"),
         delTree: db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)"),
       };
@@ -336,11 +339,16 @@ export class SizeStore {
   private kidPage(p: string, dev: number, after: string): Row[] {
     return this.safe(() => this.q.kidPage.all(p, dev, after, PAGE).map((r) => this.toRow(r)), []);
   }
-  private kidCount(p: string, dev: number): number {
-    return this.safe(() => Number(this.q.kidCount.get(p, dev)!.n), -1);
+  /** A stored folder with the number of its stored child folders on its own device (one statement: this runs once per folder of every walk). */
+  private getWithKids(p: string): [Row | undefined, number] {
+    return this.safe(() => {
+      const r = this.q.getKids.get(p);
+      return [r && this.toRow(r), r ? Number(r.kids) : 0] as [Row | undefined, number];
+    }, [undefined, 0]);
   }
-  private kidStale(p: string, dev: number, seen: number): string[] {
-    return this.db!.prepare("SELECT path FROM sizes WHERE parent = ? AND dev = ? AND seen_at < ? LIMIT 256").all(p, dev, seen).map((r) => r.path as string);
+  /** Up to 256 stored child folders (by path, after `after`) whose `seen_at` is not `stamp`; keyset paging keeps a purge linear. */
+  private kidStale(p: string, dev: number, stamp: number, after: string): string[] {
+    return this.db!.prepare("SELECT path FROM sizes WHERE parent = ? AND dev = ? AND seen_at <> ? AND path > ? ORDER BY path LIMIT 256").all(p, dev, stamp, after).map((r) => r.path as string);
   }
   private put(n: Row) {
     this.q.put.run(n.path, n.parent, n.ino, n.dev, n.mtime_ms, n.scanned_at, n.seen_at, ...METRICS.map((m) => n.own[m]), ...METRICS.map((m) => n.tot[m]));
@@ -379,6 +387,7 @@ export class SizeStore {
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; force?: boolean; trust?: boolean }): Promise<Walk> {
     const dev = Number(st.dev);
     const now = Date.now();
+    const stamp = (this.stamp = Math.max(now, this.stamp + 1));
     const chunk = this.o.commitChunk ?? COMMIT_CHUNK;
     let seen = 0;
     let bytes = 0;
@@ -453,27 +462,29 @@ export class SizeStore {
           while (i >= batch.length) {
             if (ended) return null;
             canceled();
-            const names: string[] = [];
+            // each entry is lstat-ed as soon as it is read, so the read that finds the end and the close overlap with the lstats
+            const pend: Promise<{ n: string; r: string; s: Stats } | null>[] = [];
+            const stat1 = async (n: string) => {
+              if (n === TRASH_DIR) return null;
+              const r = path.join(rpath, n);
+              try {
+                return { n, r, s: await fs.lstat(r) };
+              } catch {
+                node.own.errors++;
+                return null;
+              }
+            };
             let eof = false;
             try {
-              for (let e; names.length < BATCH && (e = await dir.read()); ) names.push(e.name);
-              eof = names.length < BATCH;
+              for (let e; pend.length < BATCH && (e = await dir.read()); ) pend.push(stat1(e.name));
+              eof = pend.length < BATCH;
             } catch {
               node.own.errors++;
               eof = true;
             }
-            const got = await Promise.all(
-              names.map(async (n) => {
-                if (n === TRASH_DIR) return null;
-                const r = path.join(rpath, n);
-                try {
-                  return { n, r, s: await fs.lstat(r) };
-                } catch {
-                  node.own.errors++;
-                  return null;
-                }
-              }),
-            );
+            const closing = eof ? close() : undefined;
+            const got = await Promise.all(pend);
+            await closing;
             batch = [];
             i = 0;
             for (const g of got) {
@@ -490,7 +501,7 @@ export class SizeStore {
                   // a folder deleted and recreated under the same name is not the stored one, even with the same inode number (freed inodes are reused at once); its mtime tells
                   if (prior && prior.parent === vpath && prior.ino === Number(g.s.ino) && prior.dev === Number(g.s.dev) && prior.mtime_ms === g.s.mtimeMs) {
                     addTo(node.tot, prior.tot);
-                    buf.push({ ...prior, seen_at: now, reused: true, touch: true });
+                    buf.push({ ...prior, seen_at: stamp, reused: true, touch: true });
                   } else batch.push({ virtual: v, real: g.r, s: g.s });
                 }
               } else if (g.s.isSymbolicLink()) {
@@ -515,11 +526,13 @@ export class SizeStore {
     };
 
     /** Cursor over the stored child rows of an unchanged folder, a page at a time; each child is lstat-ed again as it is handed out. */
-    const storedFrame = (node: Node, rpath: string): Frame => {
-      let page: Row[] = [];
+    const storedFrame = (node: Node, rpath: string, first?: { page: Row[]; ks: (Stats | null)[] }): Frame => {
+      // the first page was lstat-ed by the reuse check a moment ago: its stats are taken as they are, later pages are lstat-ed when handed out
+      let page: Row[] = first?.page ?? [];
+      let stats = first?.ks;
       let at = 0;
-      let after = "";
-      let done = false;
+      let after = page.length ? page[page.length - 1]!.path : "";
+      let done = node.own.dirs - node.own.mounts === 0 || (!!first && page.length < PAGE); // no stored children, or the first page was all of them
       const fetch = (a: string) => this.kidPage(node.path, dev, a);
       return {
         node,
@@ -530,6 +543,7 @@ export class SizeStore {
               if (done) return null;
               canceled();
               page = fetch(after);
+              stats = undefined;
               at = 0;
               if (page.length < PAGE) done = true;
               if (!page.length) return null;
@@ -537,8 +551,11 @@ export class SizeStore {
             }
             const k = page[at++]!;
             const real = path.join(rpath, path.posix.basename(k.path));
-            const s = await fs.lstat(real).catch(() => null);
+            const s = stats ? stats[at - 1] : await fs.lstat(real).catch(() => null);
             if (s?.isDirectory() && Number(s.dev) === dev) return { virtual: k.path, real, s };
+            // gone since the check: counted as an unreadable folder, and the next scan re-reads this one
+            node.own.errors++;
+            node.tot.errors++;
           }
         },
       };
@@ -550,28 +567,30 @@ export class SizeStore {
       ctl.progress.current = t.virtual;
       const s = t.s;
       const ino = Number(s.ino);
-      const stored = this.get(t.virtual);
-      let reusable = !mode.fresh && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && now - stored.scanned_at < this.o.ttlMs && this.kidCount(t.virtual, dev) === stored.own.dirs - stored.own.mounts;
+      const [stored, storedKids] = this.getWithKids(t.virtual);
+      let reusable = !mode.fresh && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && now - stored.scanned_at < this.o.ttlMs && storedKids === stored.own.dirs - stored.own.mounts;
+      let first: { page: Row[]; ks: (Stats | null)[] } | undefined;
       if (reusable) {
         // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
-        for (let after = "", more = true; reusable && more; ) {
+        for (let after = "", more = stored!.own.dirs - stored!.own.mounts > 0; reusable && more; ) {
           canceled();
           const page = this.kidPage(t.virtual, dev, after);
           more = page.length === PAGE;
           if (page.length) after = page[page.length - 1]!.path;
           const ks = await Promise.all(page.map((k) => fs.lstat(path.join(t.real, path.posix.basename(k.path))).catch(() => null)));
           reusable = ks.every((k) => k && k.isDirectory() && Number(k.dev) === dev);
+          first ??= { page, ks };
         }
       }
       if (reusable) {
-        const node: Node = { ...stored!, tot: { ...stored!.own }, seen_at: now, reused: true, up: t.up };
+        const node: Node = { ...stored!, tot: { ...stored!.own }, seen_at: stamp, reused: true, up: t.up };
         seen += node.own.files + node.own.symlinks + node.own.other + node.own.dirs;
         bytes += node.own.bytes;
         ctl.progress.entries = seen;
         ctl.progress.bytes = bytes;
-        return storedFrame(node, t.real);
+        return storedFrame(node, t.real, first);
       }
-      const node: Node = { path: t.virtual, parent: parentOf(t.virtual), ino, dev, mtime_ms: s.mtimeMs, scanned_at: now, seen_at: now, own: zero(), tot: zero(), reused: false, up: t.up };
+      const node: Node = { path: t.virtual, parent: parentOf(t.virtual), ino, dev, mtime_ms: s.mtimeMs, scanned_at: now, seen_at: stamp, own: zero(), tot: zero(), reused: false, up: t.up };
       read++;
       let dir: Dir;
       try {
@@ -594,7 +613,9 @@ export class SizeStore {
         const c = await f.next();
         if (c) {
           if (frames.length >= DU_MAX_DEPTH) {
-            f.node.own.errors++; // too deep to enter: counted, not walked
+            // too deep to enter: counted, not walked. A reused node's stored `own` must not carry it (it would pile up on every scan; the folder is read again anyway as the child has no row)
+            if (!f.node.reused) f.node.own.errors++;
+            f.node.tot.errors++;
             continue;
           }
           const nf = await open({ virtual: c.virtual, real: c.real, root: false, s: c.s, up: f.node });
@@ -629,7 +650,10 @@ export class SizeStore {
         }
         if (!n.reused) {
           // drop the stored child folders this walk did not see (same as the worker's `purge`)
-          for (let r = this.kidStale(n.path, n.dev, n.seen_at); r.length; r = this.kidStale(n.path, n.dev, n.seen_at)) for (const k of r) this.delTree(k);
+          for (let after = "", r = this.kidStale(n.path, n.dev, n.seen_at, after); r.length; r = this.kidStale(n.path, n.dev, n.seen_at, after)) {
+            for (const k of r) this.delTree(k);
+            after = r[r.length - 1]!;
+          }
         }
         this.put(n);
       }
@@ -706,15 +730,20 @@ export class SizeStore {
    * every ancestor. Other stored child folders are trusted. An unknown folder re-reads its parent when that is stored.
    */
   async applyChanged(virtual: string, ctl: JobCtl = noCtl()): Promise<void> {
-    const v = resolveRead(this.o.root, virtual).virtual;
-    const release = await this.lock(parentOf(v) || v);
+    let v = resolveRead(this.o.root, virtual).virtual;
+    let release = await this.lock(parentOf(v) || v);
     try {
       if (!this.get(v)) {
         const p = parentOf(v);
-        if (p && this.get(p)) await this.changed(p, ctl);
-        return;
+        if (!p || !this.get(p)) return;
+        v = p;
       }
-      await this.changed(v, ctl);
+      // a folder that is gone re-reads its parent: climb one level at a time, taking the lock of the level we climb to
+      for (let up = await this.changed(v, ctl); up; up = await this.changed(v, ctl)) {
+        release();
+        v = up;
+        release = await this.lock(parentOf(v) || v);
+      }
     } finally {
       release();
     }
@@ -740,7 +769,8 @@ export class SizeStore {
     void this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, lo, hi]);
   }
 
-  private async changed(v: string, ctl: JobCtl): Promise<void> {
+  /** Re-read `v`; when it is gone, the stored parent to re-read instead (undefined when done). */
+  private async changed(v: string, ctl: JobCtl): Promise<string | undefined> {
     let real: string;
     let st: Stats;
     try {
@@ -750,12 +780,13 @@ export class SizeStore {
     } catch {
       // The folder itself is gone: its parent's own counts change too, so re-read the parent when it is stored.
       const p = parentOf(v);
-      if (p && this.get(p)) return this.changed(p, ctl);
+      if (p && this.get(p)) return p;
       await this.write("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)", [v, ...below(v)]);
-      return;
+      return undefined;
     }
     await this.tail;
     await this.walk(v, real, st, ctl, { fresh: false, force: true, trust: true });
+    return undefined;
   }
 
   /** The folder and its folder descendants down to `depth`; with `all`, also the files of the folders above that depth. */
