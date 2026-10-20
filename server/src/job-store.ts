@@ -67,7 +67,7 @@ export class JobStore {
   put(r: Omit<JobRow, "cancel">): boolean {
     return this.run(
       `INSERT INTO jobs (id,scope,kind,title,params,view,state,owner,beat,created_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-       ON CONFLICT(id) DO UPDATE SET params=excluded.params, view=excluded.view, state=excluded.state, beat=excluded.beat, finished_at=excluded.finished_at WHERE owner=excluded.owner`,
+       ON CONFLICT(id) DO UPDATE SET params=CASE excluded.params WHEN '' THEN NULL ELSE COALESCE(excluded.params, params) END, view=excluded.view, state=excluded.state, beat=excluded.beat, finished_at=excluded.finished_at WHERE owner=excluded.owner`,
       (s) => s.run(r.id, r.scope, r.kind, r.title, r.params, r.view, r.state, r.owner, r.beat, r.created_at, r.finished_at).changes > 0,
       false,
     );
@@ -124,8 +124,14 @@ export class JobStore {
     return this.run(`SELECT id, cancel FROM jobs WHERE owner=? AND cancel IN (2,3) AND ${LIVE}`, (s) => s.all(owner) as { id: string; cancel: number }[], []);
   }
 
-  clearFlag(id: string) {
-    this.run("UPDATE jobs SET cancel=0 WHERE id=? AND cancel IN (2,3)", (s) => s.run(id), undefined);
+  /** Clear the request that was read, so one that arrived since (a resume after a pause) is kept. */
+  clearFlag(id: string, flag: number) {
+    this.run("UPDATE jobs SET cancel=0 WHERE id=? AND cancel=?", (s) => s.run(id, flag), undefined);
+  }
+
+  /** Bytes of params held by live jobs of the scope. */
+  paramsBytes(scope: string): number {
+    return this.run(`SELECT COALESCE(SUM(length(params)),0) AS n FROM jobs WHERE scope=? AND ${LIVE}`, (s) => (s.get(scope) as { n: number }).n, 0);
   }
 
   /** Ids of this owner's live jobs that others asked to cancel. */

@@ -93,6 +93,9 @@ function detailLine(job: OpJob, eta: number | null, live: boolean): string {
 /** A hub-side bulk job: per-item progress, throughput, pause/cancel and the conflict question. */
 function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJob; stale: boolean; detail?: OpJob; expanded: boolean; onToggle: () => void; onChange: () => void }) {
   const [all, setAll] = useState(false);
+  const [askErr, setAskErr] = useState("");
+  // an answer can be refused while the job moves to a new server: show why
+  const answer = (a: "skip" | "overwrite" | "rename") => void api.opResolve(job.id, a, all).then(() => setAskErr(""), (e) => setAskErr((e as Error).message)).finally(onChange);
   const p = opPct(job);
   const act = (fn: () => Promise<unknown>) => void fn().catch(() => undefined).finally(onChange);
   const live = opLive(job);
@@ -121,10 +124,11 @@ function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJo
             {job.conflict.srcType === "file" && job.conflict.dstType === "file" && <span className="muted"> ({fmtSize(job.conflict.srcSize)} replaces {fmtSize(job.conflict.dstSize)})</span>}
           </div>
           <div className="job-ask-btns">
-            <button onClick={() => act(() => api.opResolve(job.id, "skip", all))}><Ic.SkipForward /> Skip</button>
-            <button onClick={() => act(() => api.opResolve(job.id, "overwrite", all))}>{job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? <Ic.Merge /> : <Ic.Replace />} {job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? "Merge" : "Overwrite"}</button>
-            <button className="primary" onClick={() => act(() => api.opResolve(job.id, "rename", all))}><Ic.CopyPlus /> Keep both</button>
+            <button onClick={() => answer("skip")}><Ic.SkipForward /> Skip</button>
+            <button onClick={() => answer("overwrite")}>{job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? <Ic.Merge /> : <Ic.Replace />} {job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? "Merge" : "Overwrite"}</button>
+            <button className="primary" onClick={() => answer("rename")}><Ic.CopyPlus /> Keep both</button>
           </div>
+          {askErr && <div className="fp-err">{askErr}</div>}
           <label className="ck"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /><span className="ck-box" aria-hidden="true"><Ic.Check /></span><span>Apply to all remaining</span></label>
         </div>
       )}

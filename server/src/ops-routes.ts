@@ -95,6 +95,7 @@ export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (n
     if (!b || !["skip", "overwrite", "rename"].includes(b.action ?? "")) return c.json({ error: "action must be skip, overwrite or rename" }, 400);
     const r = queue.resolve(c.req.param("id"), b.action as Choice, b.all === true);
     if (r === undefined) return c.json({ error: "not found" }, 404);
+    if (r === "moving") return c.json({ error: "The job is moving to a new server; answer again in a few seconds." }, 409);
     if (r === "none") return c.json({ error: "job is not waiting for an answer" }, 409);
     return c.json(r);
   });

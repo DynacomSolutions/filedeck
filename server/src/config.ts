@@ -125,8 +125,8 @@ export function loadConfig(env = process.env): Config {
     jobsFile:
       env.FILEDECK_JOBS_FILE ??
       (mode === "hub"
-        ? vaultFile
-          ? path.join(path.dirname(vaultFile), "jobs.sqlite")
+        ? env.FILEDECK_VAULT_FILE // only where the vault volume is configured (production), so tests never touch /var/lib
+          ? path.join(path.dirname(env.FILEDECK_VAULT_FILE), "jobs.sqlite")
           : ""
         : env.FILEDECK_INDEX_DIR
           ? path.join(env.FILEDECK_INDEX_DIR, `jobs-${env.FILEDECK_NODE ?? "local"}.db`)

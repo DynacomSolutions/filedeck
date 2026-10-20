@@ -122,12 +122,21 @@ interface Job {
   retried: Set<number>;
   /** was asking about a conflict when it was interrupted */
   wasWaiting?: boolean;
+  /** the spec is in the store */
+  specStored?: boolean;
 }
 
-/** What a hub needs to carry on a job: node names and paths only, never credentials. */
+/**
+ * What a hub needs to carry on a job. The spec (node names and paths only, never credentials) is written once, to the row's
+ * params. Everything that changes lives in the view column as `_p`, kept small: a state letter per item, bytes of done items,
+ * and the rare note or error.
+ */
 interface Persisted {
-  spec: OpSpec;
-  items: Pick<ItemView, "state" | "bytes" | "size" | "note" | "error">[];
+  /** one letter per item: p pending, r running, d done, s skipped, f failed */
+  c: string;
+  /** bytes per item, up to the last non-zero one */
+  b: number[];
+  x: Record<number, { n?: string; e?: string }>;
   policy: ConflictPolicy;
   paused: boolean;
   scanned: boolean;
@@ -138,6 +147,12 @@ interface Persisted {
 const SCOPE = "ops";
 const FINISHED_ITEMS = 200; // finished jobs keep only this many items, so 50 of them fit a small volume
 const clip = (s: string | undefined) => (s && s.length > 300 ? s.slice(0, 300) : s);
+/** Drop credentials from a URL (user:pass@host) in text that is stored. */
+const scrub = (s: string) => s.replace(/(\/\/)[^/@\s"\\]+@/g, "$1");
+const CODE = { pending: "p", running: "r", done: "d", skipped: "s", failed: "f" } as const;
+const STATE = { p: "pending", r: "running", d: "done", s: "skipped", f: "failed" } as const;
+/** Live jobs together keep at most this much spec in the store, which a small volume shares with the vault. */
+const MAX_PARAMS_BYTES = 8 * 1024 * 1024;
 const live = (s: string) => s === "queued" || s === "running";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const INTERRUPTED = "Interrupted by a restart; the destination may be incomplete";
@@ -246,7 +261,7 @@ export class OpQueue {
 
   list(): OpView[] {
     const own = [...this.jobs.values()].map((j) => this.view(j, false));
-    const other = (this.d.shared?.store.list(SCOPE) ?? []).filter((r) => !this.jobs.has(r.id)).map((r) => JSON.parse(r.view) as OpView);
+    const other = (this.d.shared?.store.list(SCOPE) ?? []).filter((r) => !this.jobs.has(r.id)).map((r) => this.rowView(r));
     return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
   }
   get(id: string): OpView | undefined {
@@ -254,17 +269,27 @@ export class OpQueue {
     if (j) return this.view(j, true);
     const r = this.d.shared?.store.get(id, SCOPE);
     if (!r) return undefined;
-    const v = JSON.parse(r.view) as OpView;
-    if (r.params) {
+    const v = this.rowView(r);
+    const p = (JSON.parse(r.view) as { _p?: Persisted })._p;
+    if (r.params && p) {
       try {
-        const p = JSON.parse(r.params) as Persisted;
-        v.items = itemsOf(p.spec).slice(0, MAX_ITEMS_VIEW).map((it, i) => ({ ...it, ...p.items[i] }));
-        if (p.items.length > MAX_ITEMS_VIEW) v.itemsTruncated = true;
+        const spec = (JSON.parse(r.params) as { spec: OpSpec }).spec;
+        v.items = itemsOf(spec).slice(0, MAX_ITEMS_VIEW).map((it, i) => ({ ...it, ...this.itemOf(p, i) }));
+        if (p.c.length > MAX_ITEMS_VIEW) v.itemsTruncated = true;
       } catch {
         /* the summary is enough */
       }
     }
     return v;
+  }
+
+  private rowView(r: JobRow): OpView {
+    const { _p, ...v } = JSON.parse(r.view) as OpView & { _p?: Persisted };
+    return v;
+  }
+
+  private itemOf(p: Persisted, i: number): Pick<ItemView, "state" | "bytes" | "note" | "error"> {
+    return { state: STATE[p.c[i] as keyof typeof STATE] ?? "pending", bytes: p.b[i] ?? 0, note: p.x[i]?.n, error: p.x[i]?.e };
   }
 
   /** A job another hub runs: ask its owner (flag read at its next tick) and show the row as it is. */
@@ -321,9 +346,9 @@ export class OpQueue {
   }
 
   /** Answer a pending conflict question. `all` applies the answer to the rest of the job. */
-  resolve(id: string, action: Choice, all: boolean): OpView | undefined | "none" {
+  resolve(id: string, action: Choice, all: boolean): OpView | undefined | "none" | "moving" {
     const j = this.jobs.get(id);
-    if (!j) return undefined;
+    if (!j) return this.d.shared?.store.get(id, SCOPE) ? "moving" : undefined; // the other hub asked; it is being handed over
     if (!j.waiting) return "none";
     j.waiting.resolve({ action, all });
     return this.view(j, false);
@@ -361,6 +386,22 @@ export class OpQueue {
     return v;
   }
 
+  /** The view column: the snapshot, plus for a live job the compact state a new owner needs. Credentials in URLs are scrubbed. */
+  private stored(j: Job): string {
+    const v: OpView & { _p?: Persisted } = this.snapshot(j);
+    if (!j.finishedAt) {
+      const x: Persisted["x"] = {};
+      let last = -1;
+      const b = j.items.map((i, n) => {
+        if (i.note || i.error) x[n] = { n: clip(i.note), e: clip(i.error) };
+        if (i.bytes) last = n;
+        return i.bytes;
+      });
+      v._p = { c: j.items.map((i) => CODE[i.state]).join(""), b: b.slice(0, last + 1), x, policy: j.policy, paused: j.paused, scanned: !!j.scanned, waiting: !!j.waiting || !!j.wasWaiting, progress: j.progress };
+    }
+    return scrub(JSON.stringify(v));
+  }
+
   /** Write the job through. Per-item updates (force=false) of a big job are coalesced to one write per 250 ms; the tick flushes the rest. */
   private save(j: Job, force = true) {
     const sh = this.d.shared;
@@ -372,19 +413,18 @@ export class OpQueue {
     }
     j.savedAt = now;
     const fin = j.finishedAt !== undefined;
-    const p: Persisted = {
-      spec: j.spec,
-      items: j.items.map((i) => ({ state: i.state, bytes: i.bytes, size: i.size, note: clip(i.note), error: clip(i.error) })),
-      policy: j.policy,
-      paused: j.paused,
-      scanned: !!j.scanned,
-      waiting: !!j.waiting || !!j.wasWaiting,
-      progress: j.progress,
-    };
+    let params: string | null = null; // null: keep what the row has
+    if (fin) params = "";
+    else if (!j.specStored) {
+      const spec = JSON.stringify({ spec: j.spec });
+      // over the cap the job is stored without its spec: it shows up, but a restart fails it instead of resuming it
+      params = sh.store.paramsBytes(SCOPE) + spec.length > MAX_PARAMS_BYTES ? null : spec;
+    }
     const ok = sh.store.put({
-      id: j.id, scope: SCOPE, kind: "ops", title: j.title, params: fin ? null : JSON.stringify(p), view: JSON.stringify(this.snapshot(j)),
+      id: j.id, scope: SCOPE, kind: "ops", title: j.title, params, view: this.stored(j),
       state: j.state, owner: this.me, beat: now, created_at: j.createdAt, finished_at: j.finishedAt ?? null,
     });
+    if (ok && !fin && params !== null) j.specStored = true;
     j.dirty = !ok;
     const row = ok ? undefined : sh.store.get(j.id, SCOPE);
     if (row && row.owner !== this.me) this.drop(j);
@@ -405,7 +445,7 @@ export class OpQueue {
       const all = [...this.jobs.values()];
       for (const j of all) if (j.dirty) this.save(j);
       const mine = all.filter((j) => live(j.state) && !j.lost);
-      const lost = sh.store.beatAll(this.me, mine.map((j) => ({ id: j.id, view: JSON.stringify(this.snapshot(j)) })), now);
+      const lost = sh.store.beatAll(this.me, mine.map((j) => ({ id: j.id, view: this.stored(j) })), now);
       if (!lost) return; // busy: skip the whole round
       for (const id of lost) {
         const j = this.jobs.get(id)!;
@@ -417,7 +457,7 @@ export class OpQueue {
       for (const f of sh.store.flagged(this.me)) {
         if (f.cancel === 2) this.pause(f.id);
         else this.resume(f.id);
-        sh.store.clearFlag(f.id);
+        sh.store.clearFlag(f.id, f.cancel);
       }
       for (const r of sh.store.orphans(SCOPE, this.me, now - (sh.leaseMs ?? 30_000))) {
         if (this.jobs.has(r.id)) continue;
@@ -435,16 +475,20 @@ export class OpQueue {
   private adopt(r: JobRow) {
     const sh = this.d.shared!;
     try {
-      const p = JSON.parse(r.params!) as Persisted;
-      const v = JSON.parse(r.view) as OpView;
-      const j = this.build(p.spec, r.id, r.created_at);
-      const transfer = p.spec.op === "copy" || p.spec.op === "move";
+      if (!r.params) throw new Error("not resumable");
+      const spec = (JSON.parse(r.params) as { spec: OpSpec }).spec;
+      const v = JSON.parse(r.view) as OpView & { _p: Persisted };
+      const p = v._p;
+      const j = this.build(spec, r.id, r.created_at);
+      const transfer = spec.op === "copy" || spec.op === "move";
       j.policy = p.policy;
       j.scanned = p.scanned;
+      j.specStored = true;
       j.progress = { ...p.progress, current: "" };
       j.startedAt = v.startedAt;
       j.items.forEach((iv, i) => {
-        Object.assign(iv, p.items[i]);
+        Object.assign(iv, this.itemOf(p, i));
+        if (iv.state === "pending" && !transfer) j.retried.add(i); // the last updates may not have been written: it may be done
         if (iv.state !== "running") return;
         if (transfer && !p.waiting) {
           iv.state = "failed";
@@ -463,8 +507,8 @@ export class OpQueue {
       this.pump();
     } catch {
       const now = Date.now();
-      const v = JSON.parse(r.view) as OpView;
-      sh.store.put({ ...r, view: JSON.stringify({ ...v, state: "failed", error: "Interrupted by a restart. Start it again.", finishedAt: now }), params: null, state: "failed", owner: this.me, beat: now, finished_at: now });
+      const { _p, ...v } = JSON.parse(r.view) as OpView & { _p?: Persisted };
+      sh.store.put({ ...r, view: JSON.stringify({ ...v, state: "failed", error: "Interrupted by a restart. Start it again.", finishedAt: now }), params: "", state: "failed", owner: this.me, beat: now, finished_at: now });
     }
   }
 
@@ -530,6 +574,7 @@ export class OpQueue {
       last = j.progress.bytes;
       j.speed = j.paused || j.waiting ? 0 : j.speed * 0.5 + delta * 0.5;
     }, 1000);
+    ticker.unref();
     try {
       const ctx = this.ctx(j);
       await ctx.boundary();

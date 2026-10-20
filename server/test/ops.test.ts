@@ -307,7 +307,7 @@ const jobsDb = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-o
 const mkq = (f: string, agents: Map<string, Target>, leaseMs = 40) => new OpQueue({ agents, isSource: () => false, shared: { store: new JobStore(f), leaseMs, tickMs: 3_600_000 } });
 
 /** A fake node that counts calls. `hook` may return a promise to hold a call. */
-function fake(hook?: (op: string, p: string, n: number) => Promise<void> | void) {
+function fake(hook?: (op: string, p: string, n: number) => Promise<void> | void, opts: { gone?: boolean; fail?: string } = {}) {
   const calls: string[] = [];
   const seen = new Map<string, number>();
   const t: Target = {
@@ -322,6 +322,8 @@ function fake(hook?: (op: string, p: string, n: number) => Promise<void> | void)
       const n = (seen.get(key) ?? 0) + 1;
       seen.set(key, n);
       await hook?.(u.pathname.split("/").pop()!, target, n);
+      if (opts.fail) return Response.json({ error: opts.fail }, { status: 500 });
+      if (opts.gone && n > 1) return Response.json({ error: "not found" }, { status: 404 });
       return Response.json({ ok: true });
     },
   };
@@ -427,10 +429,78 @@ test("the other hub reads, pauses and cancels a job it does not own; the databas
   b.pause(id);
   a.tick();
   assert.equal(a.get(id)!.state, "paused");
+  assert.equal(b.resolve(id, "skip", false), "moving");
   b.cancel(id);
   a.tick();
   release();
   assert.equal((await done(a, id)).state, "canceled");
   assert.equal(b.get(id)!.state, "canceled");
   for (const x of fs.readdirSync(path.dirname(f))) assert.ok(!fs.readFileSync(path.join(path.dirname(f), x)).includes(SECRET), x);
+});
+
+test("a restart without a graceful stop: 300 removes re-sent after a lost write count as done, not failed", async () => {
+  const f = jobsDb();
+  let release!: () => void;
+  const hold = new Promise<void>((r) => (release = r));
+  const n = fake((_o, p, c) => (p === "/f200" && c === 1 ? hold : undefined), { gone: true });
+  const a = mkq(f, new Map([["N", n.t]]));
+  const id = a.create(rm(300)).id;
+  for (const t0 = Date.now(); !n.calls.includes("delete /f200"); ) if (Date.now() - t0 > 3000) assert.fail("stuck"); else await nap(5);
+  await nap(60);
+  const b = mkq(f, new Map([["N", n.t]]));
+  b.tick();
+  const v = await done(b, id);
+  assert.equal(v.counts.failed, 0);
+  assert.equal(v.counts.done, 300);
+  release();
+});
+
+test("saving a 10k item copy writes a small compact state, fast; the spec is stored once", async () => {
+  const f = jobsDb();
+  const q = mkq(f, new Map([["N", fake().t]]), 10_000);
+  const id = q.create({ op: "copy", items: Array.from({ length: 10_000 }, (_, i) => ({ node: "N", path: `/s${i}` })), dst: { node: "N", dir: "/dst" }, conflict: "overwrite" }).id;
+  q.pause(id);
+  const store = new JobStore(f);
+  const job = (q as unknown as { jobs: Map<string, unknown> }).jobs.get(id);
+  const save = (q as unknown as { save(j: unknown): void }).save.bind(q);
+  const t0 = performance.now();
+  for (let i = 0; i < 50; i++) save(job);
+  const per = (performance.now() - t0) / 50;
+  const row = store.get(id, "ops")!;
+  assert.ok(row.view.length < 40_000, `view is ${row.view.length} bytes`);
+  assert.ok(row.params!.length > 100_000);
+  assert.ok(per < 5, `${per} ms per save`);
+});
+
+test("live jobs keep their spec in the store only up to a cap; the rest are not resumable and fail clearly", async () => {
+  const f = jobsDb();
+  const q = mkq(f, new Map([["N", fake().t]]), 40);
+  const big = (k: number): OpSpec => ({ op: "delete", items: Array.from({ length: 2_000 }, (_, i) => ({ node: "N", path: `/${k}/${"x".repeat(400)}${i}` })) });
+  const ids: string[] = [];
+  for (let k = 0; k < 14; k++) {
+    const id = q.create(big(k)).id;
+    q.pause(id);
+    ids.push(id);
+  }
+  const store = new JobStore(f);
+  const stored = ids.map((id) => store.get(id, "ops")!.params !== null);
+  assert.equal(stored[0], true);
+  assert.equal(stored[13], false);
+  assert.ok(store.paramsBytes("ops") <= 8 * 1024 * 1024);
+  await nap(60);
+  const b = mkq(f, new Map([["N", fake().t]]));
+  b.tick();
+  assert.equal(b.get(ids[13]!)!.state, "failed");
+  assert.match(b.get(ids[13]!)!.error!, /Start it again/);
+});
+
+test("credentials in a URL inside an item error are not stored", async () => {
+  const f = jobsDb();
+  const n = fake(undefined, { fail: "cannot reach https://bob:hunter2@files.example/x" });
+  const q = mkq(f, new Map([["N", n.t]]), 10_000);
+  const id = q.create(rm(2)).id;
+  const v = await done(q, id);
+  assert.equal(v.state, "failed");
+  for (const x of fs.readdirSync(path.dirname(f))) assert.ok(!fs.readFileSync(path.join(path.dirname(f), x)).includes("hunter2"), x);
+  assert.match(new JobStore(f).get(id, "ops")!.view, /files\.example/);
 });
