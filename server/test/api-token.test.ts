@@ -5,7 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
-import { createAgent } from "../src/agent.ts";
+import { createAgent as makeAgent } from "../src/agent.ts";
+// a file-backed size store starts a writer thread: close every agent so the test process can exit
+const agents: { close(): Promise<void> }[] = [];
+const createAgent = (cfg: Parameters<typeof makeAgent>[0]) => {
+  const a = makeAgent(cfg);
+  agents.push(a as unknown as { close(): Promise<void> });
+  return a;
+};
 import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 
@@ -18,7 +25,8 @@ const open = (app: { fetch: never }) =>
     const s: ReturnType<typeof serve> = serve({ fetch: app.fetch, port: 0 }, () => res(s));
     servers.push(s);
   });
-after(() => {
+after(async () => {
+  for (const a of agents) await a.close().catch(() => {});
   for (const s of servers) s.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });

@@ -9,6 +9,7 @@ import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts
 import type { JobCtl, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { SizeStore, type DuEntry } from "./size-store.ts";
+import { spillPath } from "./index-cache.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -286,7 +287,7 @@ const flag = (v: string | undefined) => v === "1";
 
 /** The size store lives next to the compare index; its `du` is a bounded, cancellable walk that reuses unchanged folders. */
 export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStore {
-  const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : ":memory:", { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
+  const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : spillPath("sizes"), { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
   const json = async <T,>(c: Context): Promise<T> => {
     try {
       return (await c.req.json()) as T;

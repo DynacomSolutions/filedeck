@@ -27,7 +27,8 @@ before(() => {
   fs.writeFileSync(path.join(tmp, "tree/.filedeck-trash/x/data"), "T".repeat(1000));
   app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_WALK_MAX_ENTRIES: "500000" } as never));
 });
-after(() => {
+after(async () => {
+  await (app as unknown as { close(): Promise<void> }).close();
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
 });
@@ -84,6 +85,7 @@ test("folder size job is not cut short by the entry cap", async () => {
   }
   assert.equal(j.result!.truncated, false);
   assert.equal(j.result!.bytes, 5 + 10 + 1);
+  await (small as unknown as { close(): Promise<void> }).close();
 });
 
 test("chmod on one entry, with guards", async () => {
