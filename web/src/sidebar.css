@@ -1,4 +1,5 @@
 /* ===== Sidebar tree (SidebarTree.tsx) and jobs history (Jobs.tsx). Kept apart from styles.css to ease merging. ===== */
+.st-tree{min-width:100%;width:max-content}
 .st-tree,.st-tree ul{list-style:none;margin:0;padding:0}
 .st-item{margin:0}
 .st-row{display:flex;align-items:center;position:relative;border-radius:var(--radius-sm)}

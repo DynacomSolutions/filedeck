@@ -163,9 +163,9 @@ const allOpen = () => true;
 
 test("elide: short chain untouched, long chain gets one ellipsis row", () => {
   const short = [chainOf(["a", "b"], [{ id: "x", expandable: true }])];
-  assert.deepEqual(elide(short, allOpen, new Set(), mk), short);
+  assert.deepEqual(elide(short, allOpen, new Set(), mk, 2), short);
   const long = chainOf(["a", "b", "c", "d", "e", "f"], [{ id: "x", expandable: true }, { id: "y", expandable: true }]);
-  const [out] = elide([long], allOpen, new Set(), mk) as N[];
+  const [out] = elide([long], allOpen, new Set(), mk, 2) as N[];
   assert.equal(out!.id, "a");
   const dots = out!.children![0] as N;
   assert.equal(dots.id, "a...");
@@ -179,9 +179,18 @@ test("elide: short chain untouched, long chain gets one ellipsis row", () => {
 test("elide: revealed head and branching stop the chain; input is not mutated", () => {
   const long = chainOf(["a", "b", "c", "d", "e", "f"]);
   const copy = JSON.stringify(long);
-  assert.deepEqual(elide([long], allOpen, new Set(["a"]), mk), [long]);
-  elide([long], allOpen, new Set(), mk);
+  assert.deepEqual(elide([long], allOpen, new Set(["a"]), mk, 2), [long]);
+  elide([long], allOpen, new Set(), mk, 2);
   assert.equal(JSON.stringify(long), copy);
   const fork: N = { id: "a", expandable: true, children: [chainOf(["b", "c"]), chainOf(["d", "e"])] };
-  assert.deepEqual(elide([fork], allOpen, new Set(), mk), [fork]);
+  assert.deepEqual(elide([fork], allOpen, new Set(), mk, 2), [fork]);
+});
+
+test("elide: keep 0 folds nothing; keep 3 shows three tail rows", () => {
+  const long = chainOf(["a", "b", "c", "d", "e", "f"]);
+  assert.equal(elide([long], allOpen, new Set(), mk, 0)[0], long);
+  const [out] = elide([long], allOpen, new Set(), mk, 3) as N[];
+  const dots = out!.children![0] as N;
+  assert.deepEqual(dots.dots, ["b", "c"]);
+  assert.equal(dots.children![0]!.id, "d");
 });

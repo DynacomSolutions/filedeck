@@ -3,6 +3,7 @@ import type { Leaf, SortKey } from "./urlState.js";
 
 /** How the "go up one level" row at the top of a folder listing looks. */
 export type UpRow = "dots" | "up" | "hidden";
+export type TreeFold = 0 | 2 | 3 | 4 | 5;
 export type ViewMode = "list" | "grid";
 export interface SortPreference {
   key: SortKey;
@@ -13,12 +14,21 @@ export interface Settings {
   showHidden: boolean;
   sort: SortPreference;
   view: ViewMode;
+  /** Rows kept at the end of a long chain of open sidebar folders; 0 shows every folder. */
+  treeFold: TreeFold;
 }
-export const DEFAULT_SETTINGS: Settings = { upRow: "dots", showHidden: false, sort: { key: "name", asc: true }, view: "list" };
+export const DEFAULT_SETTINGS: Settings = { upRow: "dots", showHidden: false, sort: { key: "name", asc: true }, view: "list", treeFold: 2 };
 export const UP_ROWS: { value: UpRow; label: string; help: string }[] = [
   { value: "dots", label: "Dots", help: "A row named .. at the top of every folder that has a parent" },
   { value: "up", label: "Up", help: "The same row, labelled Up" },
   { value: "hidden", label: "Hidden", help: "No parent row (Backspace and the Up button still go up)" },
+];
+export const TREE_FOLDS: { value: TreeFold; label: string; help: string }[] = [
+  { value: 0, label: "Off", help: "Show every parent folder in the sidebar" },
+  { value: 2, label: "Keep last 2", help: "A long path of open folders folds its middle into a ... row; the last 2 folders stay visible" },
+  { value: 3, label: "Keep last 3", help: "The same, with the last 3 folders visible" },
+  { value: 4, label: "Keep last 4", help: "The same, with the last 4 folders visible" },
+  { value: 5, label: "Keep last 5", help: "The same, with the last 5 folders visible" },
 ];
 
 const KEY = "filedeck.settings";
@@ -33,6 +43,7 @@ export function normalizeSettings(value: unknown): Settings {
       ? { key: sort.key, asc: sort.asc }
       : DEFAULT_SETTINGS.sort,
     view: v.view === "grid" || v.view === "list" ? v.view : DEFAULT_SETTINGS.view,
+    treeFold: v.treeFold === 0 || v.treeFold === 2 || v.treeFold === 3 || v.treeFold === 4 || v.treeFold === 5 ? v.treeFold : DEFAULT_SETTINGS.treeFold,
   };
 }
 

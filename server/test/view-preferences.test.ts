@@ -9,17 +9,20 @@ test("stored view preferences keep valid values and replace invalid ones indepen
     showHidden: true,
     sort: { key: "mtime", asc: false },
     view: "grid",
+    treeFold: 4,
   })), {
     upRow: "up",
     showHidden: true,
     sort: { key: "mtime", asc: false },
     view: "grid",
+    treeFold: 4,
   });
   assert.deepEqual(settingsFromStorage(JSON.stringify({
     upRow: "unexpected",
     showHidden: "yes",
     sort: { key: "path", asc: 1 },
     view: "table",
+    treeFold: 1,
   })), DEFAULT_SETTINGS);
   assert.deepEqual(settingsFromStorage("not JSON"), DEFAULT_SETTINGS);
 });

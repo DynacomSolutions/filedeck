@@ -9,6 +9,7 @@ import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks,
 import { copyText } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
+import { useSettings } from "./settings";
 import { EXPANDED_KEY, ancestorPaths, elide, flatten, folderSizes, heldIds, hold, isOpen, navigate, parseExpanded, rovingId, serverUsage, setOpen, shownOpen, usagePct, type ExpandState, type Held, type FolderSize, type TreeNodeBase, type Usage } from "./sidebarTree";
 
 export type How = "here" | "panel";
@@ -129,6 +130,7 @@ export interface NodesState {
 }
 
 export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState: NodesState; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void }) {
+  const { treeFold } = useSettings();
   const [expanded, setExpanded] = useState<ExpandState>(loadStored);
   const [listings, setListings] = useState<Record<string, Listing>>({});
   const [mounts, setMounts] = useState<Record<string, MountsState>>({});
@@ -241,9 +243,9 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   }, [nodes, nodesView, nodesState.error, expanded, listings, mounts, dus, marks, current?.node, current?.path, heldNow]);
 
   const shown = useMemo(
-    () => elide(tree, openNow, revealed, (head, hidden, tail): TNode => ({ id: head.id + "…", kind: "elided", of: head.id, label: "...", icon: <Ellipsis />, expandable: true, defaultOpen: true, tip: hidden.map((h) => h.label).join(" / "), children: [tail] })),
+    () => elide(tree, openNow, revealed, (head, hidden, tail): TNode => ({ id: head.id + "…", kind: "elided", of: head.id, label: "...", icon: <Ellipsis />, expandable: true, defaultOpen: true, tip: hidden.map((h) => h.label).join(" / "), children: [tail] }), treeFold),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tree, expanded, heldNow, revealed],
+    [tree, expanded, heldNow, revealed, treeFold],
   );
   const reveal = (t: TNode) => setRevealed((s) => new Set(s).add(t.of!));
 
