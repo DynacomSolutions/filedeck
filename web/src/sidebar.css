@@ -11,6 +11,7 @@
 .side-scroll .st-row button.st-main:hover:not(:disabled){background:transparent}
 .side-scroll .st-row button.st-main:focus-visible{outline:2px solid var(--accent-text);outline-offset:-2px}
 .side-scroll .st-row button.st-sec{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+.st-ell .st-label{color:var(--muted)}
 .st-row:hover .st-main,.st-row:focus-within .st-main{color:var(--fg)}
 .st-row.off .st-main{opacity:.6}
 .st-guide{flex:none;align-self:stretch;width:14px;margin-left:2px;margin-right:-2px;background:linear-gradient(var(--surface-3),var(--surface-3)) 6px 0/1px 100% no-repeat}

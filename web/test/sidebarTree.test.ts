@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Popover, type TNode } from "../src/SidebarTree.tsx";
-import { ancestorPaths, flatten, heldIds, hold, isOpen, shownOpen, type Held, navigate, parseExpanded, folderSizes, rovingId, serverUsage, setOpen, usagePct, type TreeNodeBase } from "../src/sidebarTree.ts";
+import { ancestorPaths, elide, flatten, heldIds, hold, isOpen, shownOpen, type Held, navigate, parseExpanded, folderSizes, rovingId, serverUsage, setOpen, usagePct, type TreeNodeBase } from "../src/sidebarTree.ts";
 
 const tree: TreeNodeBase[] = [
   { id: "a", expandable: true, children: [{ id: "a1", expandable: true, children: [{ id: "a1x", expandable: false }] }, { id: "a2", expandable: false }] },
@@ -154,4 +154,34 @@ test("a manual collapse of an ancestor holds until the next navigation", () => {
 
 test("expanding an auto-opened folder by hand makes it stay open", () => {
   assert.equal(open(new Set(["id/a"]), "/x/y", none, "id/a", "/a"), true);
+});
+
+type N = TreeNodeBase & { dots?: string[] };
+const chainOf = (ids: string[], leaf: N[] = []): N => ids.reduceRight<N>((kid, id) => ({ id, expandable: true, children: [kid] }), { id: "end", expandable: true, children: leaf });
+const mk = (head: N, hidden: N[], tail: N): N => ({ id: head.id + "...", expandable: true, children: [tail], dots: hidden.map((h) => h.id) });
+const allOpen = () => true;
+
+test("elide: short chain untouched, long chain gets one ellipsis row", () => {
+  const short = [chainOf(["a", "b"], [{ id: "x", expandable: true }])];
+  assert.deepEqual(elide(short, allOpen, new Set(), mk), short);
+  const long = chainOf(["a", "b", "c", "d", "e", "f"], [{ id: "x", expandable: true }, { id: "y", expandable: true }]);
+  const [out] = elide([long], allOpen, new Set(), mk) as N[];
+  assert.equal(out!.id, "a");
+  const dots = out!.children![0] as N;
+  assert.equal(dots.id, "a...");
+  assert.deepEqual(dots.dots, ["b", "c", "d", "e"]);
+  const tail = dots.children![0]!;
+  assert.equal(tail.id, "f");
+  assert.equal(tail.children![0]!.id, "end");
+  assert.deepEqual(tail.children![0]!.children!.map((c) => c.id), ["x", "y"]);
+});
+
+test("elide: revealed head and branching stop the chain; input is not mutated", () => {
+  const long = chainOf(["a", "b", "c", "d", "e", "f"]);
+  const copy = JSON.stringify(long);
+  assert.deepEqual(elide([long], allOpen, new Set(["a"]), mk), [long]);
+  elide([long], allOpen, new Set(), mk);
+  assert.equal(JSON.stringify(long), copy);
+  const fork: N = { id: "a", expandable: true, children: [chainOf(["b", "c"]), chainOf(["d", "e"])] };
+  assert.deepEqual(elide([fork], allOpen, new Set(), mk), [fork]);
 });
