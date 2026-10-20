@@ -74,3 +74,11 @@ ETA: 2026-10-21 00:19 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-44 | CLUSTER-287 hq0 disk cleanup: remove rebuildable and temporary material from this repo's .data folder and finished task worktrees | done | claude-20261021-cleanup | cleanup-20261021 | | 2026-10-21 00:19 ICT | Freed about 0.9 GiB: generated lag test tree, node_modules, dist copies, release tarballs; finished merged task worktree board-format-20261020. Kept scripts, notes and evidence. |
+
+## 7. Sidebar tree
+ETA: 2026-10-21 04:30 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| FD-46 | Folding of long open folder paths in the sidebar tree is a user setting (off, or keep the last 2 to 5 rows) | done | | tree-settings | | 2026-10-21 04:30 ICT | |
+| FD-47 | The sidebar scrolls sideways when the tree is wider than it | done | | tree-settings | | 2026-10-21 04:30 ICT | |
+| FD-48 | Release v0.3.21 so FD-46 and FD-47 deploy | todo | | | 7.FD-46, 7.FD-47 | 2026-10-21 04:30 ICT | |

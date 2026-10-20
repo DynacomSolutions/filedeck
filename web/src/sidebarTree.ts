@@ -57,23 +57,23 @@ export interface TreeNodeBase {
   children?: TreeNodeBase[];
 }
 
-/** A run of single-open-child rows keeps its first HEAD rows and last TAIL rows; the middle becomes one row if it hides at least MIN_HIDDEN. */
+/** A run of single-open-child rows keeps its first HEAD rows and last `tail` rows; the middle becomes one row if it hides at least MIN_HIDDEN. */
 export const ELIDE_HEAD = 1;
-export const ELIDE_TAIL = 2;
 export const ELIDE_MIN_HIDDEN = 2;
 
 /**
  * Collapses long chains of open rows that each have exactly one open child (the path down to a deep current folder)
- * into head, one `make(head, hidden, tail)` row, then the tail. Heads in `revealed` stay whole. Returns copies; the input is untouched.
+ * into head, one `make(head, hidden, tail)` row, then the last `keep` rows. `keep` 0 folds nothing. Heads in `revealed` stay whole. Returns copies; the input is untouched.
  */
-export function elide<T extends TreeNodeBase>(roots: T[], open: (n: T) => boolean, revealed: ReadonlySet<string>, make: (head: T, hidden: T[], tail: T) => T): T[] {
+export function elide<T extends TreeNodeBase>(roots: T[], open: (n: T) => boolean, revealed: ReadonlySet<string>, make: (head: T, hidden: T[], tail: T) => T, keep: number): T[] {
+  if (keep <= 0) return roots;
   const openKids = (n: T): T[] => (n.expandable && open(n) ? ((n.children ?? []) as T[]).filter((c) => c.expandable && !!c.children?.length && open(c)) : []);
   const go = (n: T, whole: boolean): T => {
     const chain = [n];
     for (let k = openKids(n); k.length === 1; k = openKids(chain[chain.length - 1]!)) chain.push(k[0]!);
-    const hidden = chain.slice(ELIDE_HEAD, chain.length - ELIDE_TAIL);
+    const hidden = chain.slice(ELIDE_HEAD, chain.length - keep);
     if (!whole && !revealed.has(n.id) && hidden.length >= ELIDE_MIN_HIDDEN) {
-      const tail = go(chain[chain.length - ELIDE_TAIL]!, true);
+      const tail = go(chain[chain.length - keep]!, true);
       return { ...n, children: [make(n, hidden, tail)] };
     }
     return n.children ? { ...n, children: (n.children as T[]).map((c) => go(c, c === chain[1] && (whole || revealed.has(n.id) || hidden.length < ELIDE_MIN_HIDDEN))) } : n;
