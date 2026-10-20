@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { OpQueue, OpError, type Choice, type ConflictPolicy, type Loc, type OpSpec, type SyncStep } from "./ops-queue.ts";
+import { OpQueue, OpError, type OpQueueDeps, type Choice, type ConflictPolicy, type Loc, type OpSpec, type SyncStep } from "./ops-queue.ts";
 import type { Target } from "./hub.ts";
 
 const MAX_ITEMS = 10_000;
@@ -14,8 +14,8 @@ const POLICIES = new Set(["ask", "skip", "overwrite", "rename"]);
  *   POST   /api/ops/jobs/:id/resolve    {action: skip|overwrite|rename, all?}
  *   DELETE /api/ops/jobs/:id            forget a finished job
  */
-export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (node: string) => boolean): OpQueue {
-  const queue = new OpQueue({ agents, isSource });
+export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (node: string) => boolean, shared?: OpQueueDeps["shared"]): OpQueue {
+  const queue = new OpQueue({ agents, isSource, shared });
 
   const abs = (p: unknown, what: string): string => {
     if (typeof p !== "string" || !p.startsWith("/") || p.includes("\0")) throw new OpError(400, `${what} must be an absolute path`);

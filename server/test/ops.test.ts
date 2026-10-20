@@ -294,3 +294,143 @@ test("job list and dismiss", async () => {
   assert.equal((await fetch(`${hub}/api/ops/jobs/${done.id}`, { method: "DELETE" })).status, 200);
   assert.equal((await fetch(`${hub}/api/ops/jobs/${done.id}`)).status, 404);
 });
+
+// ---------------------------------------------------------------- durable jobs (two hubs on one store)
+
+import { OpQueue, type OpSpec } from "../src/ops-queue.ts";
+import type { Target } from "../src/hub.ts";
+import { JobStore } from "../src/job-store.ts";
+
+const SECRET = "s3cret-agent-token";
+const nap = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const jobsDb = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-ops-jobs-")), "jobs.sqlite");
+const mkq = (f: string, agents: Map<string, Target>, leaseMs = 40) => new OpQueue({ agents, isSource: () => false, shared: { store: new JobStore(f), leaseMs, tickMs: 3_600_000 } });
+
+/** A fake node that counts calls. `hook` may return a promise to hold a call. */
+function fake(hook?: (op: string, p: string, n: number) => Promise<void> | void) {
+  const calls: string[] = [];
+  const seen = new Map<string, number>();
+  const t: Target = {
+    async fetch(rest, init) {
+      const u = new URL("http://x" + rest);
+      const p = u.pathname === "/api/fs/stat" ? u.searchParams.get("path")! : "";
+      if (u.pathname === "/api/fs/stat") return p.startsWith("/dst/") ? new Response("{}", { status: 404 }) : Response.json({ type: "file", size: 10 });
+      const body = JSON.parse((init?.body as string) ?? "{}") as { paths?: string[]; from?: string[]; path?: string };
+      const target = body.paths?.[0] ?? body.from?.[0] ?? body.path ?? "";
+      const key = u.pathname.split("/").pop() + " " + target;
+      calls.push(key);
+      const n = (seen.get(key) ?? 0) + 1;
+      seen.set(key, n);
+      await hook?.(u.pathname.split("/").pop()!, target, n);
+      return Response.json({ ok: true });
+    },
+  };
+  return { t, calls };
+}
+const rm = (n: number): OpSpec => ({ op: "delete", items: Array.from({ length: n }, (_, i) => ({ node: "N", path: `/f${i + 1}` })) });
+const done = async (q: OpQueue, id: string, ms = 3000) => {
+  for (const t0 = Date.now(); !finished(q.get(id)!); ) {
+    if (Date.now() - t0 > ms) assert.fail(`timeout: ${JSON.stringify(q.get(id))}`);
+    await nap(10);
+  }
+  return q.get(id)!;
+};
+
+test("delete interrupted after item 2 of 4 resumes at item 3 without re-sending earlier items", async () => {
+  const f = jobsDb();
+  let q1!: OpQueue;
+  const n = fake((_o, p) => void (p === "/f2" && void q1.interrupt()));
+  q1 = mkq(f, new Map([["N", n.t]]));
+  const id = q1.create(rm(4)).id;
+  await nap(150);
+  assert.deepEqual(n.calls, ["delete /f1", "delete /f2"]);
+  assert.equal(q1.get(id)!.state, "running"); // never recorded as canceled
+  const q2 = mkq(f, new Map([["N", n.t]]));
+  q2.tick(); // beat is 0: adopted at once
+  const v = await done(q2, id);
+  assert.equal(v.state, "done");
+  assert.deepEqual(n.calls, ["delete /f1", "delete /f2", "delete /f3", "delete /f4"]);
+  assert.deepEqual(v.counts, { total: 4, done: 4, skipped: 0, failed: 0 });
+  assert.equal(v.items![0]!.label, "N:/f1");
+});
+
+test("an in-flight copy is failed, never retried, and the next items still copy; a stale owner stops at its next checkpoint", async () => {
+  const f = jobsDb();
+  let release!: () => void;
+  const hold = new Promise<void>((r) => (release = r));
+  const n = fake((o, p, c) => (o === "copy" && p === "/s2" && c === 1 ? hold : undefined));
+  const a = mkq(f, new Map([["N", n.t]]));
+  const id = a.create({ op: "copy", items: ["/s1", "/s2", "/s3", "/s4"].map((p) => ({ node: "N", path: p })), dst: { node: "N", dir: "/dst" }, conflict: "overwrite" }).id;
+  for (const t0 = Date.now(); !n.calls.includes("copy /s2"); ) if (Date.now() - t0 > 3000) assert.fail("no copy"); else await nap(10);
+  await nap(60); // a's lease (40 ms) runs out without a tick
+  const b = mkq(f, new Map([["N", n.t]]));
+  b.tick();
+  const v = await done(b, id);
+  assert.deepEqual(v.items!.map((i) => i.state), ["done", "failed", "done", "done"]);
+  assert.match(v.items![1]!.error!, /Interrupted by a restart; the destination may be incomplete/);
+  assert.equal(n.calls.filter((c) => c === "copy /s2").length, 1);
+  assert.equal(v.state, "done");
+  // the old owner wakes up: it learns it lost the job and sends nothing more
+  a.tick();
+  release();
+  await nap(60);
+  assert.equal(n.calls.filter((c) => c === "copy /s3").length, 1);
+  assert.equal(a.get(id)!.state, "done"); // read through to the adopter's row
+});
+
+test("a sync step in flight at a restart is retried; a trash step that is already gone counts as done", async () => {
+  const f = jobsDb();
+  let release!: () => void;
+  const hold = new Promise<void>((r) => (release = r));
+  const n = fake((o, p, c) => (o === "mkdir" && p === "/m" && c === 1 ? hold : o === "trash" && c === 2 ? Promise.reject(new Error("never")) : undefined));
+  const spec: OpSpec = { op: "sync", steps: [{ kind: "trash", node: "N", path: "/t" }, { kind: "mkdir", node: "N", path: "/m" }, { kind: "mkdir", node: "N", path: "/m2" }] };
+  const a = mkq(f, new Map([["N", n.t]]));
+  const id = a.create(spec).id;
+  for (const t0 = Date.now(); !n.calls.includes("mkdir /m"); ) if (Date.now() - t0 > 3000) assert.fail("no mkdir"); else await nap(10);
+  await nap(60);
+  const b = mkq(f, new Map([["N", n.t]]));
+  b.tick();
+  const v = await done(b, id);
+  assert.equal(v.state, "done");
+  assert.deepEqual(n.calls, ["trash /t", "mkdir /m", "mkdir /m", "mkdir /m2"]);
+  release();
+});
+
+test("paused stays paused after adoption; the other hub can resume it", async () => {
+  const f = jobsDb();
+  const n = fake();
+  const a = mkq(f, new Map([["N", n.t]]));
+  const id = a.create(rm(2)).id;
+  a.pause(id);
+  await a.interrupt();
+  const b = mkq(f, new Map([["N", n.t]]));
+  b.tick();
+  await nap(60);
+  assert.equal(b.get(id)!.state, "paused");
+  assert.equal(n.calls.length, 0);
+  b.resume(id);
+  assert.equal((await done(b, id)).state, "done");
+  assert.equal(n.calls.length, 2);
+});
+
+test("the other hub reads, pauses and cancels a job it does not own; the database holds no tokens", async () => {
+  const f = jobsDb();
+  let release!: () => void;
+  const hold = new Promise<void>((r) => (release = r));
+  const n = fake((_o, p) => (p === "/f1" ? hold : undefined));
+  const a = new OpQueue({ agents: new Map([["N", { fetch: (r, i) => n.t.fetch(r, { ...i, headers: { authorization: `Bearer ${SECRET}` } }) }]]), isSource: () => false, shared: { store: new JobStore(f), leaseMs: 10_000, tickMs: 3_600_000 } });
+  const b = mkq(f, new Map([["N", n.t]]), 10_000);
+  const id = a.create(rm(3)).id;
+  await nap(30);
+  assert.equal(b.get(id)!.items!.length, 3);
+  assert.deepEqual(b.list().map((j) => j.id), [id]);
+  b.pause(id);
+  a.tick();
+  assert.equal(a.get(id)!.state, "paused");
+  b.cancel(id);
+  a.tick();
+  release();
+  assert.equal((await done(a, id)).state, "canceled");
+  assert.equal(b.get(id)!.state, "canceled");
+  for (const x of fs.readdirSync(path.dirname(f))) assert.ok(!fs.readFileSync(path.join(path.dirname(f), x)).includes(SECRET), x);
+});

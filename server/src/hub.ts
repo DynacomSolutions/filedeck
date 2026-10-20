@@ -2,9 +2,12 @@ import type { FsError } from "./fsops.ts";
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { readFile } from "node:fs/promises";
+import fs from "node:fs";
 import path from "node:path";
 import { registerHubDiff } from "./diff-hub.ts";
 import { registerOps } from "./ops-routes.ts";
+import type { OpQueue } from "./ops-queue.ts";
+import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
 import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
@@ -39,7 +42,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.use("*", apiTokenAuth(cfg.apiToken));
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;
+  let opq: OpQueue | undefined;
   app.close = async () => {
+    await opq?.interrupt(); // stop at an item boundary and hand the running jobs over
     vault.close();
     await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined)));
   };
@@ -107,7 +112,14 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // Folder diff jobs run here: the hub reads both agents' listings and asks each agent to hash its own files.
   registerHubDiff(app, agents, cfg.mode === "hub" ? cfg.diffDir : "");
   // Bulk copy/move/trash/delete/sync run as hub jobs (survive the browser closing, pausable, conflict policy).
-  registerOps(app, agents, (n) => sources.has(n));
+  opq = registerOps(app, agents, (n) => sources.has(n), cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), leaseMs: 30_000 } : undefined);
+  for (const f of cfg.jobsFile ? [cfg.jobsFile, cfg.jobsFile + "-wal", cfg.jobsFile + "-shm"] : []) {
+    try {
+      fs.chmodSync(f, 0o600);
+    } catch {
+      /* not created */
+    }
+  }
 
   // Cross-node / cross-source transfer: the hub streams src -> dst. Files and folders; both ends are
   // agents or network sources. Moving removes the source afterwards (node trash, permanent on sources).
