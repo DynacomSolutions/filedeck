@@ -25,6 +25,12 @@ const SPECIAL: [string, number, string][] = [
   ["setgid", 0o2000, "Run the file with its group's rights; on a folder, new files inherit the folder's group (it does not change the group)"],
   ["sticky", 0o1000, "On a shared folder, only a file's owner can delete or rename it"],
 ];
+/** The stored total of `path` from a cached `du` answer (null = nothing stored), as one line for the details list. */
+export function storedSizeText(entries: Awaited<ReturnType<typeof api.duCached>>, path: string): string | null {
+  const e = entries?.find((x) => x.path === path);
+  if (!e) return null;
+  return `${fmtSize(e.diskBytes)} on disk · ${e.files.toLocaleString()} file(s), ${e.dirs.toLocaleString()} folder(s)` + (fmtDate(e.scannedAt) ? ` · measured ${fmtDate(e.scannedAt)}` : "");
+}
 const octal = (m: number) => (m & 0o7777).toString(8).padStart(4, "0");
 const live = (j: JobView) => j.state === "queued" || j.state === "running";
 
@@ -104,6 +110,17 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
     void load();
   }, [node, path]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const isDir = p?.type === "dir";
+  const [stored, setStored] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isDir) return;
+    let live = true;
+    api.duCached(node, path).then((v) => live && setStored(storedSizeText(v, path)), () => undefined);
+    return () => {
+      live = false;
+    };
+  }, [node, path, isDir]);
+
   const calc = async () => {
     setSize(null);
     try {
@@ -117,7 +134,6 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
   const origOwner = p ? (p.owner ?? String(p.uid)) : "";
   const origGroup = p ? (p.group ?? String(p.gid)) : "";
   const modeChanged = p ? mode !== p.mode : false;
-  const isDir = p?.type === "dir";
   const octOk = (v: string) => /^[0-7]{3,4}$/.test(v);
   /** Send one permission change (or, for a folder, the whole set to its contents) and reload what the node now reports. */
   const apply = async (field: NonNullable<typeof busy>, body: { mode?: number; owner?: string; group?: string }, tree = false) => {
@@ -249,6 +265,12 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
             <dd>{v}</dd>
           </div>
         ))}
+        {isDir && stored && !size && (
+          <div>
+            <dt>Stored size</dt>
+            <dd data-testid="stored-size">{stored}</dd>
+          </div>
+        )}
         {isDir && (
           <div>
             <dt>Size</dt>
