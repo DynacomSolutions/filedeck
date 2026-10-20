@@ -85,6 +85,7 @@ export class Jobs {
   }
   private timer?: ReturnType<typeof setInterval>;
   private readonly me = randomUUID();
+  private stopping = false;
 
   /**
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
@@ -196,7 +197,7 @@ export class Jobs {
   }
 
   private save(j: Job) {
-    if (!this.shared) return;
+    if (!this.shared || this.stopping) return;
     this.shared.store.put({
       id: j.id, scope: this.shared.scope, kind: j.kind, title: j.title, params: j.params ?? null, view: JSON.stringify({ ...this.view(j), queue: undefined }),
       state: j.state, owner: this.me, beat: Date.now(), created_at: j.createdAt, finished_at: j.finishedAt ?? null,
@@ -206,7 +207,7 @@ export class Jobs {
   /** One heartbeat round. A busy database only skips it; nothing here waits. */
   tick() {
     const sh = this.shared;
-    if (!sh) return;
+    if (!sh || this.stopping) return;
     try {
       const now = Date.now();
       for (const j of [...this.jobs.values()]) {
@@ -247,6 +248,17 @@ export class Jobs {
     sh.store.put({ ...r, view: JSON.stringify(view), state: "failed", owner: this.me, beat: now, finished_at: now });
   }
 
+  /**
+   * Shutdown: abort what runs (their catch blocks clean staging), wait up to `ms`, then hand the live rows over at once (beat 0).
+   * Nothing is persisted as canceled: the next process rebuilds or fails them.
+   */
+  async interrupt(ms = 3000) {
+    this.stopping = true;
+    for (const j of this.jobs.values()) if (live(j.state)) j.abort.abort();
+    for (const end = Date.now() + ms; this.running > 0 && Date.now() < end; ) await new Promise((r) => setTimeout(r, 20));
+    this.shared?.store.release(this.me);
+  }
+
   private canStart(): boolean {
     if (!this.lanes) return this.running < this.concurrency;
     let big = 0;
@@ -270,6 +282,7 @@ export class Jobs {
   }
 
   private pump() {
+    if (this.stopping) return;
     for (const j of this.jobs.values()) {
       if (!this.canStart()) return;
       if (j.state !== "queued" || j.gated) continue;

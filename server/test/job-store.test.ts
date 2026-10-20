@@ -101,3 +101,17 @@ test("no jobsFile: in memory, nothing persisted", async () => {
   assert.equal(a.dismiss(v.id), true);
   assert.equal(a.get(v.id), undefined);
 });
+
+test("interrupt hands live jobs over: beat 0, not canceled, adopted at once", async () => {
+  const f = file();
+  const a = mk(f, 10_000);
+  const b = mk(f, 10_000);
+  const v = a.create("x", "slow", hang);
+  await a.interrupt(500);
+  const row = new JobStore(f).get(v.id)!;
+  assert.equal(row.beat, 0);
+  assert.equal(row.state, "running");
+  b.tick();
+  assert.equal(b.get(v.id)?.state, "failed"); // no rebuilder: failed, by the adopter and not as canceled
+  assert.equal(new JobStore(f).get(v.id)!.owner === row.owner, false);
+});
