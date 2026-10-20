@@ -103,6 +103,7 @@ export function defaultProcMounts(root: string): string {
 }
 
 export function loadConfig(env = process.env): Config {
+  const vaultFile = env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite";
   const mode = env.FILEDECK_MODE === "hub" ? "hub" : "agent";
   const root = (env.FILEDECK_ROOT ?? "/host").replace(/\/+$/, "") || "/";
   return {
@@ -120,7 +121,16 @@ export function loadConfig(env = process.env): Config {
     hashConcurrency: Number(env.FILEDECK_HASH_CONCURRENCY ?? 4),
     walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
     indexDir: env.FILEDECK_INDEX_DIR ?? "",
-    jobsFile: env.FILEDECK_JOBS_FILE ?? (env.FILEDECK_INDEX_DIR ? path.join(env.FILEDECK_INDEX_DIR, `jobs-${env.FILEDECK_NODE ?? "local"}.db`) : ""),
+    // the hub keeps its jobs next to the vault (a volume that survives a restart); an agent next to its index
+    jobsFile:
+      env.FILEDECK_JOBS_FILE ??
+      (mode === "hub"
+        ? env.FILEDECK_VAULT_FILE // only where the vault volume is configured (production), so tests never touch /var/lib
+          ? path.join(path.dirname(env.FILEDECK_VAULT_FILE), "jobs.sqlite")
+          : ""
+        : env.FILEDECK_INDEX_DIR
+          ? path.join(env.FILEDECK_INDEX_DIR, `jobs-${env.FILEDECK_NODE ?? "local"}.db`)
+          : ""),
     indexWatches: Number(env.FILEDECK_INDEX_WATCHES ?? 32768),
     indexRevalidateMs: Number(env.FILEDECK_INDEX_REVALIDATE_MS ?? 30 * 60_000),
     fanwatch: env.FILEDECK_FANWATCH ?? "",
@@ -142,7 +152,7 @@ export function loadConfig(env = process.env): Config {
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",
-    vaultFile: env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite",
+    vaultFile,
     vaultKey: readSecret(env, "FILEDECK_VAULT_KEY"),
     vaultTtlMs: Number(env.FILEDECK_VAULT_TTL_SECONDS ?? 30 * 60) * 1000,
     vaultMaxMs: Number(env.FILEDECK_VAULT_MAX_HOURS ?? 24) * 3600_000,

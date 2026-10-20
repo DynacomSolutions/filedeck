@@ -1,6 +1,7 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Target } from "./hub.ts";
+import type { JobRow, JobStore } from "./job-store.ts";
 
 /**
  * Hub-side queue for bulk file operations (copy, move, trash, delete, folder-diff sync).
@@ -110,6 +111,61 @@ interface Job {
   gate?: { promise: Promise<void>; open: () => void };
   /** a pause happened during the current file, so one failure is retried */
   pausedDuring: boolean;
+  /** another hub took the job over: stop at the next checkpoint and write nothing */
+  lost?: boolean;
+  /** the last write was skipped or coalesced; the tick writes it */
+  dirty?: boolean;
+  savedAt: number;
+  /** copy/move totals are known (a resumed job must not count them twice) */
+  scanned?: boolean;
+  /** items taken over mid-flight and retried: a 404 then means the earlier attempt succeeded */
+  retried: Set<number>;
+  /** was asking about a conflict when it was interrupted */
+  wasWaiting?: boolean;
+  /** the spec is in the store */
+  specStored?: boolean;
+}
+
+/**
+ * What a hub needs to carry on a job. The spec (node names and paths only, never credentials) is written once, to the row's
+ * params. Everything that changes lives in the view column as `_p`, kept small: a state letter per item, bytes of done items,
+ * and the rare note or error.
+ */
+interface Persisted {
+  /** one letter per item: p pending, r running, d done, s skipped, f failed */
+  c: string;
+  /** bytes per item, up to the last non-zero one */
+  b: number[];
+  x: Record<number, { n?: string; e?: string }>;
+  policy: ConflictPolicy;
+  paused: boolean;
+  scanned: boolean;
+  waiting: boolean;
+  progress: OpView["progress"];
+}
+
+const SCOPE = "ops";
+const FINISHED_ITEMS = 200; // finished jobs keep only this many items, so 50 of them fit a small volume
+const clip = (s: string | undefined) => (s && s.length > 300 ? s.slice(0, 300) : s);
+/** Drop credentials from a URL (user:pass@host) in text that is stored. */
+const scrub = (s: string) => s.replace(/(\/\/)[^/@\s"\\]+@/g, "$1");
+const CODE = { pending: "p", running: "r", done: "d", skipped: "s", failed: "f" } as const;
+const STATE = { p: "pending", r: "running", d: "done", s: "skipped", f: "failed" } as const;
+/** Live jobs together keep at most this much spec in the store, which a small volume shares with the vault. */
+const MAX_PARAMS_BYTES = 8 * 1024 * 1024;
+const live = (s: string) => s === "queued" || s === "running";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const INTERRUPTED = "Interrupted by a restart; the destination may be incomplete";
+
+function itemsOf(spec: OpSpec): ItemView[] {
+  return spec.op === "sync"
+    ? spec.steps.map((s) => ({
+        label: s.kind === "copy" ? `copy ${s.src.node}:${s.src.path} -> ${s.dst.node}:${s.dst.dir}` : `${s.kind} ${s.node}:${s.path}`,
+        state: "pending" as const,
+        bytes: 0,
+        size: s.kind === "copy" ? (s.bytes ?? 0) : 0,
+      }))
+    : spec.items.map((i) => ({ label: `${i.node}:${i.path}`, state: "pending" as const, bytes: 0, size: 0 }));
 }
 
 const q = encodeURIComponent;
@@ -134,25 +190,33 @@ export interface OpQueueDeps {
   isSource: (node: string) => boolean;
   concurrency?: number;
   keep?: number;
+  /** a store shared with the other hub pod of a rollout: jobs survive a restart. leaseMs: how long a silent owner keeps its jobs */
+  shared?: { store: JobStore; leaseMs?: number; tickMs?: number };
 }
 
 export class OpQueue {
   private jobs = new Map<string, Job>();
   private running = 0;
-  constructor(private d: OpQueueDeps) {}
+  private readonly me = randomUUID();
+  private stopping = false;
+  constructor(private d: OpQueueDeps) {
+    // one unref'd timer: heartbeat, progress snapshot, foreign requests, adoption of jobs whose owner went silent
+    if (d.shared) setInterval(() => this.tick(), d.shared.tickMs ?? 1000).unref();
+  }
 
   create(spec: OpSpec): OpView {
-    const items: ItemView[] =
-      spec.op === "sync"
-        ? spec.steps.map((s) => ({
-            label: s.kind === "copy" ? `copy ${s.src.node}:${s.src.path} -> ${s.dst.node}:${s.dst.dir}` : `${s.kind} ${s.node}:${s.path}`,
-            state: "pending" as const,
-            bytes: 0,
-            size: s.kind === "copy" ? (s.bytes ?? 0) : 0,
-          }))
-        : spec.items.map((i) => ({ label: `${i.node}:${i.path}`, state: "pending" as const, bytes: 0, size: 0 }));
-    const job: Job = {
-      id: randomUUID(),
+    const job = this.build(spec, randomUUID(), Date.now());
+    this.jobs.set(job.id, job);
+    this.save(job);
+    this.prune();
+    this.pump();
+    return this.view(job, false);
+  }
+
+  private build(spec: OpSpec, id: string, createdAt: number): Job {
+    const items = itemsOf(spec);
+    return {
+      id,
       spec,
       title: titleOf(spec),
       state: "queued",
@@ -162,14 +226,12 @@ export class OpQueue {
       speed: 0,
       items,
       counts: { total: items.length, done: 0, skipped: 0, failed: 0 },
-      createdAt: Date.now(),
+      createdAt,
       abort: new AbortController(),
       pausedDuring: false,
+      savedAt: 0,
+      retried: new Set(),
     };
-    this.jobs.set(job.id, job);
-    this.prune();
-    this.pump();
-    return this.view(job, false);
   }
 
   private view(j: Job, withItems: boolean): OpView {
@@ -198,19 +260,54 @@ export class OpQueue {
   }
 
   list(): OpView[] {
-    return [...this.jobs.values()].sort((a, b) => b.createdAt - a.createdAt).map((j) => this.view(j, false));
+    const own = [...this.jobs.values()].map((j) => this.view(j, false));
+    const other = (this.d.shared?.store.list(SCOPE) ?? []).filter((r) => !this.jobs.has(r.id)).map((r) => this.rowView(r));
+    return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
   }
   get(id: string): OpView | undefined {
     const j = this.jobs.get(id);
-    return j && this.view(j, true);
+    if (j) return this.view(j, true);
+    const r = this.d.shared?.store.get(id, SCOPE);
+    if (!r) return undefined;
+    const v = this.rowView(r);
+    const p = (JSON.parse(r.view) as { _p?: Persisted })._p;
+    if (r.params && p) {
+      try {
+        const spec = (JSON.parse(r.params) as { spec: OpSpec }).spec;
+        v.items = itemsOf(spec).slice(0, MAX_ITEMS_VIEW).map((it, i) => ({ ...it, ...this.itemOf(p, i) }));
+        if (p.c.length > MAX_ITEMS_VIEW) v.itemsTruncated = true;
+      } catch {
+        /* the summary is enough */
+      }
+    }
+    return v;
+  }
+
+  private rowView(r: JobRow): OpView {
+    const { _p, ...v } = JSON.parse(r.view) as OpView & { _p?: Persisted };
+    return v;
+  }
+
+  private itemOf(p: Persisted, i: number): Pick<ItemView, "state" | "bytes" | "note" | "error"> {
+    return { state: STATE[p.c[i] as keyof typeof STATE] ?? "pending", bytes: p.b[i] ?? 0, note: p.x[i]?.n, error: p.x[i]?.e };
+  }
+
+  /** A job another hub runs: ask its owner (flag read at its next tick) and show the row as it is. */
+  private foreign(id: string, flag?: 1 | 2 | 3): OpView | undefined {
+    const sh = this.d.shared;
+    const r = sh?.store.get(id, SCOPE);
+    if (!sh || !r) return undefined;
+    if (flag && live(r.state)) flag === 1 ? sh.store.setCancel(id, SCOPE) : sh.store.setFlag(id, SCOPE, flag);
+    return this.get(id);
   }
 
   cancel(id: string): OpView | undefined {
     const j = this.jobs.get(id);
-    if (!j) return undefined;
+    if (!j) return this.foreign(id, 1);
     if (j.state === "queued") {
       j.state = "canceled";
       j.finishedAt = Date.now();
+      this.save(j);
     } else if (j.state === "running") {
       j.abort.abort();
       j.gate?.open();
@@ -220,32 +317,38 @@ export class OpQueue {
 
   pause(id: string): OpView | undefined {
     const j = this.jobs.get(id);
-    if (!j) return undefined;
+    if (!j) return this.foreign(id, 2);
     if ((j.state === "queued" || j.state === "running") && !j.paused) {
-      j.paused = true;
-      if (j.state === "running") j.pausedDuring = true;
-      let open!: () => void;
-      const promise = new Promise<void>((r) => (open = r));
-      j.gate = { promise, open };
+      this.hold(j);
+      this.save(j);
     }
     return this.view(j, false);
   }
 
+  private hold(j: Job) {
+    j.paused = true;
+    if (j.state === "running") j.pausedDuring = true;
+    let open!: () => void;
+    const promise = new Promise<void>((r) => (open = r));
+    j.gate = { promise, open };
+  }
+
   resume(id: string): OpView | undefined {
     const j = this.jobs.get(id);
-    if (!j) return undefined;
+    if (!j) return this.foreign(id, 3);
     if (j.paused) {
       j.paused = false;
       j.gate?.open();
       j.gate = undefined;
+      this.save(j);
     }
     return this.view(j, false);
   }
 
   /** Answer a pending conflict question. `all` applies the answer to the rest of the job. */
-  resolve(id: string, action: Choice, all: boolean): OpView | undefined | "none" {
+  resolve(id: string, action: Choice, all: boolean): OpView | undefined | "none" | "moving" {
     const j = this.jobs.get(id);
-    if (!j) return undefined;
+    if (!j) return this.d.shared?.store.get(id, SCOPE) ? "moving" : undefined; // the other hub asked; it is being handed over
     if (!j.waiting) return "none";
     j.waiting.resolve({ action, all });
     return this.view(j, false);
@@ -253,7 +356,15 @@ export class OpQueue {
 
   dismiss(id: string): boolean {
     const j = this.jobs.get(id);
-    if (!j || j.state === "queued" || j.state === "running") return false;
+    const sh = this.d.shared;
+    if (!j) {
+      const r = sh?.store.get(id, SCOPE);
+      if (!sh || !r || live(r.state)) return false;
+      sh.store.delete(id, SCOPE);
+      return true;
+    }
+    if (j.state === "queued" || j.state === "running") return false;
+    sh?.store.delete(id, SCOPE);
     return this.jobs.delete(id);
   }
 
@@ -261,17 +372,179 @@ export class OpQueue {
     const keep = this.d.keep ?? 50;
     const finished = [...this.jobs.values()].filter((j) => j.finishedAt).sort((a, b) => a.finishedAt! - b.finishedAt!);
     for (const j of finished.slice(0, Math.max(0, finished.length - keep))) this.jobs.delete(j.id);
+    this.d.shared?.store.prune(SCOPE, keep, Date.now());
+  }
+
+  // ---------------------------------------------------------------- persistence
+
+  private snapshot(j: Job): OpView {
+    const v = this.view(j, false);
+    if (j.finishedAt) {
+      v.items = j.items.slice(0, FINISHED_ITEMS).map((i) => ({ ...i }));
+      if (j.items.length > FINISHED_ITEMS) v.itemsTruncated = true;
+    }
+    return v;
+  }
+
+  /** The view column: the snapshot, plus for a live job the compact state a new owner needs. Credentials in URLs are scrubbed. */
+  private stored(j: Job): string {
+    const v: OpView & { _p?: Persisted } = this.snapshot(j);
+    if (!j.finishedAt) {
+      const x: Persisted["x"] = {};
+      let last = -1;
+      const b = j.items.map((i, n) => {
+        if (i.note || i.error) x[n] = { n: clip(i.note), e: clip(i.error) };
+        if (i.bytes) last = n;
+        return i.bytes;
+      });
+      v._p = { c: j.items.map((i) => CODE[i.state]).join(""), b: b.slice(0, last + 1), x, policy: j.policy, paused: j.paused, scanned: !!j.scanned, waiting: !!j.waiting || !!j.wasWaiting, progress: j.progress };
+    }
+    return scrub(JSON.stringify(v));
+  }
+
+  /** Write the job through. Per-item updates (force=false) of a big job are coalesced to one write per 250 ms; the tick flushes the rest. */
+  private save(j: Job, force = true) {
+    const sh = this.d.shared;
+    if (!sh || j.lost) return;
+    const now = Date.now();
+    if (!force && j.items.length > FINISHED_ITEMS && now - j.savedAt < 250) {
+      j.dirty = true;
+      return;
+    }
+    j.savedAt = now;
+    const fin = j.finishedAt !== undefined;
+    let params: string | null = null; // null: keep what the row has
+    if (fin) params = "";
+    else if (!j.specStored) {
+      const spec = JSON.stringify({ spec: j.spec });
+      // over the cap the job is stored without its spec: it shows up, but a restart fails it instead of resuming it
+      params = sh.store.paramsBytes(SCOPE) + spec.length > MAX_PARAMS_BYTES ? null : spec;
+    }
+    const ok = sh.store.put({
+      id: j.id, scope: SCOPE, kind: "ops", title: j.title, params, view: this.stored(j),
+      state: j.state, owner: this.me, beat: now, created_at: j.createdAt, finished_at: j.finishedAt ?? null,
+    });
+    if (ok && !fin && params !== null) j.specStored = true;
+    j.dirty = !ok;
+    const row = ok ? undefined : sh.store.get(j.id, SCOPE);
+    if (row && row.owner !== this.me) this.drop(j);
+  }
+
+  /** Another hub owns the job now: forget it here (the running code stops at its next checkpoint). */
+  private drop(j: Job) {
+    j.lost = true;
+    this.jobs.delete(j.id);
+  }
+
+  /** One heartbeat round. A busy database only skips it; nothing here waits. */
+  tick() {
+    const sh = this.d.shared;
+    if (!sh || this.stopping) return;
+    try {
+      const now = Date.now();
+      const all = [...this.jobs.values()];
+      for (const j of all) if (j.dirty) this.save(j);
+      const mine = all.filter((j) => live(j.state) && !j.lost);
+      const lost = sh.store.beatAll(this.me, mine.map((j) => ({ id: j.id, view: this.stored(j) })), now);
+      if (!lost) return; // busy: skip the whole round
+      for (const id of lost) {
+        const j = this.jobs.get(id)!;
+        const r = sh.store.get(id, SCOPE);
+        if (!r) this.save(j); // the first write was skipped
+        else if (r.owner !== this.me) this.drop(j);
+      }
+      for (const id of sh.store.canceled(this.me)) this.cancel(id);
+      for (const f of sh.store.flagged(this.me)) {
+        if (f.cancel === 2) this.pause(f.id);
+        else this.resume(f.id);
+        sh.store.clearFlag(f.id, f.cancel);
+      }
+      for (const r of sh.store.orphans(SCOPE, this.me, now - (sh.leaseMs ?? 30_000))) {
+        if (this.jobs.has(r.id)) continue;
+        if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) this.adopt(r);
+      }
+    } catch {
+      /* try again next tick */
+    }
+  }
+
+  /**
+   * Carry on a job whose owner is gone. Finished items are skipped by the loops. The item that was in flight: a copy/move is
+   * marked failed (a half-written destination, never retried), anything else is retried (a 404 then counts as done).
+   */
+  private adopt(r: JobRow) {
+    const sh = this.d.shared!;
+    try {
+      if (!r.params) throw new Error("not resumable");
+      const spec = (JSON.parse(r.params) as { spec: OpSpec }).spec;
+      const v = JSON.parse(r.view) as OpView & { _p: Persisted };
+      const p = v._p;
+      const j = this.build(spec, r.id, r.created_at);
+      const transfer = spec.op === "copy" || spec.op === "move";
+      j.policy = p.policy;
+      j.scanned = p.scanned;
+      j.specStored = true;
+      j.progress = { ...p.progress, current: "" };
+      j.startedAt = v.startedAt;
+      j.items.forEach((iv, i) => {
+        Object.assign(iv, this.itemOf(p, i));
+        if (iv.state === "pending" && !transfer) j.retried.add(i); // the last updates may not have been written: it may be done
+        if (iv.state !== "running") return;
+        if (transfer && !p.waiting) {
+          iv.state = "failed";
+          iv.error = INTERRUPTED;
+        } else {
+          iv.state = "pending"; // a question not yet answered, an idempotent step, or a remove
+          j.retried.add(i);
+        }
+      });
+      j.counts = { total: j.items.length, done: 0, skipped: 0, failed: 0 };
+      for (const iv of j.items) if (iv.state === "done" || iv.state === "skipped" || iv.state === "failed") j.counts[iv.state]++;
+      j.progress.bytes = j.items.reduce((n, i) => n + i.bytes, 0);
+      if (p.paused) this.hold(j);
+      this.jobs.set(j.id, j);
+      this.save(j);
+      this.pump();
+    } catch {
+      const now = Date.now();
+      const { _p, ...v } = JSON.parse(r.view) as OpView & { _p?: Persisted };
+      sh.store.put({ ...r, view: JSON.stringify({ ...v, state: "failed", error: "Interrupted by a restart. Start it again.", finishedAt: now }), params: "", state: "failed", owner: this.me, beat: now, finished_at: now });
+    }
+  }
+
+  /**
+   * Shutdown: stop at the current item boundary (the running item may finish for up to `ms`, then it is aborted), write the live
+   * jobs as they stand and hand them over at once (beat 0). Nothing is persisted as canceled: the next hub resumes them.
+   */
+  async interrupt(ms = 3000) {
+    this.stopping = true;
+    const liveJobs = () => [...this.jobs.values()].filter((j) => live(j.state));
+    for (const j of liveJobs()) {
+      j.wasWaiting = !!j.waiting;
+      if (j.waiting || j.paused) {
+        j.abort.abort();
+        j.gate?.open();
+      }
+    }
+    for (const end = Date.now() + ms; this.running > 0 && Date.now() < end; ) await sleep(20);
+    for (const j of liveJobs()) j.abort.abort();
+    for (const end = Date.now() + 300; this.running > 0 && Date.now() < end; ) await sleep(10);
+    for (const j of liveJobs()) this.save(j);
+    this.d.shared?.store.release(this.me);
   }
 
   private pump() {
+    if (this.stopping) return;
     for (const j of this.jobs.values()) {
       if (this.running >= (this.d.concurrency ?? 2)) return;
       if (j.state !== "queued") continue;
       this.running++;
       j.state = "running";
-      j.startedAt = Date.now();
+      j.startedAt ??= Date.now();
+      this.save(j);
       void this.exec(j)
         .catch((e) => {
+          if (this.stopping || j.lost) return; // interrupted or taken over: the job is not finished, so it is not recorded as canceled
           if (j.abort.signal.aborted || e instanceof Aborted) j.state = "canceled";
           else {
             j.state = "failed";
@@ -279,9 +552,11 @@ export class OpQueue {
           }
         })
         .finally(() => {
+          this.running--;
+          if ((this.stopping || j.lost) && live(j.state)) return;
           j.finishedAt = Date.now();
           j.progress.current = "";
-          this.running--;
+          this.save(j);
           this.prune();
           this.pump();
         });
@@ -299,9 +574,10 @@ export class OpQueue {
       last = j.progress.bytes;
       j.speed = j.paused || j.waiting ? 0 : j.speed * 0.5 + delta * 0.5;
     }, 1000);
+    ticker.unref();
     try {
       const ctx = this.ctx(j);
-      await ctx.checkpoint();
+      await ctx.boundary();
       const spec = j.spec;
       if (spec.op === "copy" || spec.op === "move") await this.runTransfer(j, ctx, spec);
       else if (spec.op === "sync") await this.runSync(j, ctx, spec);
@@ -324,17 +600,23 @@ export class OpQueue {
   private ctx(j: Job) {
     const sig = j.abort.signal;
     const checkpoint = async () => {
-      if (sig.aborted) throw new Aborted();
+      if (sig.aborted || j.lost) throw new Aborted();
       while (j.paused && j.gate) {
         await j.gate.promise;
-        if (sig.aborted) throw new Aborted();
+        if (sig.aborted || j.lost) throw new Aborted();
       }
+    };
+    // between items only: a shutdown lets the current item finish
+    const boundary = async () => {
+      if (this.stopping) throw new Aborted();
+      await checkpoint();
     };
     const ask = async (c: PendingConflict): Promise<Choice> => {
       if (j.policy !== "ask") return j.policy as Choice;
       await checkpoint();
       const answer = await new Promise<{ action: Choice; all: boolean }>((resolve, reject) => {
         j.waiting = { conflict: c, resolve };
+        this.save(j);
         sig.addEventListener("abort", () => reject(new Aborted()), { once: true });
       }).finally(() => {
         j.waiting = undefined;
@@ -342,7 +624,7 @@ export class OpQueue {
       if (answer.all) j.policy = answer.action;
       return answer.action;
     };
-    return { sig, checkpoint, ask };
+    return { sig, checkpoint, boundary, ask };
   }
 
   private async failed(r: Response, what: string): Promise<OpError> {
@@ -416,9 +698,10 @@ export class OpQueue {
   private async runRemove(j: Job, ctx: ReturnType<OpQueue["ctx"]>, spec: Extract<OpSpec, { op: "trash" | "delete" }>) {
     j.progress.totalEntries = spec.items.length;
     for (let i = 0; i < spec.items.length; i++) {
-      await ctx.checkpoint();
+      await ctx.boundary();
       const it = spec.items[i]!;
       const iv = j.items[i]!;
+      if (iv.state !== "pending") continue; // done before a restart
       iv.state = "running";
       j.progress.current = it.path;
       try {
@@ -426,23 +709,36 @@ export class OpQueue {
         iv.state = "done";
         j.counts.done++;
       } catch (e) {
-        if (ctx.sig.aborted) throw new Aborted();
-        iv.state = "failed";
-        iv.error = (e as Error).message;
-        j.counts.failed++;
+        if (ctx.sig.aborted || j.lost) throw new Aborted();
+        if (this.goneOnRetry(j, i, e)) {
+          iv.state = "done";
+          j.counts.done++;
+        } else {
+          iv.state = "failed";
+          iv.error = (e as Error).message;
+          j.counts.failed++;
+        }
       }
       j.progress.entries++;
+      this.save(j, false);
     }
+  }
+
+  /** The retry of an item that was in flight at a restart found nothing to remove: the first attempt did it. */
+  private goneOnRetry(j: Job, i: number, e: unknown): boolean {
+    return j.retried.has(i) && e instanceof OpError && e.status === 404 && !e.message.startsWith("unknown node");
   }
 
   private async runSync(j: Job, ctx: ReturnType<OpQueue["ctx"]>, spec: Extract<OpSpec, { op: "sync" }>) {
     j.progress.totalEntries = spec.steps.length;
     j.progress.totalBytes = spec.steps.reduce((n, s) => n + (s.kind === "copy" ? (s.bytes ?? 0) : 0), 0);
     for (let i = 0; i < spec.steps.length; i++) {
-      await ctx.checkpoint();
+      await ctx.boundary();
       const s = spec.steps[i]!;
       const iv = j.items[i]!;
+      if (iv.state !== "pending") continue;
       iv.state = "running";
+      if (s.kind === "copy") this.save(j);
       try {
         if (s.kind === "mkdir") {
           j.progress.current = `mkdir ${s.path}`;
@@ -462,41 +758,53 @@ export class OpQueue {
         iv.state = "done";
         j.counts.done++;
       } catch (e) {
-        if (ctx.sig.aborted) throw new Aborted();
-        iv.state = "failed";
-        iv.error = (e as Error).message;
-        j.counts.failed++;
+        if (ctx.sig.aborted || j.lost) throw new Aborted();
+        if (s.kind === "trash" && this.goneOnRetry(j, i, e)) {
+          iv.state = "done";
+          j.counts.done++;
+        } else {
+          iv.state = "failed";
+          iv.error = (e as Error).message;
+          j.counts.failed++;
+        }
       }
       j.progress.entries++;
+      this.save(j, false);
     }
   }
 
   private async runTransfer(j: Job, ctx: ReturnType<OpQueue["ctx"]>, spec: Extract<OpSpec, { op: "copy" | "move" }>) {
-    // Totals first, so progress has a denominator.
-    j.progress.current = "scanning";
-    const sizes: StatLite[] = [];
-    for (const it of spec.items) {
-      await ctx.checkpoint();
-      const t = this.target(it.node);
-      const st = await this.statOf(t, it.path, ctx.sig).catch((e) => {
-        if (ctx.sig.aborted) throw new Aborted();
-        throw e;
-      });
-      sizes.push(st ?? { type: "missing" });
-      if (st) {
-        const m = await this.measure(t, it.path, st, ctx.sig);
-        j.progress.totalBytes += m.bytes;
-        j.progress.totalEntries += m.files;
-        j.items[sizes.length - 1]!.size = m.bytes;
+    // Totals first, so progress has a denominator (a resumed job already has them).
+    if (!j.scanned) {
+      j.progress.current = "scanning";
+      j.progress.totalBytes = 0;
+      j.progress.totalEntries = 0;
+      for (let i = 0; i < spec.items.length; i++) {
+        await ctx.boundary();
+        const it = spec.items[i]!;
+        const t = this.target(it.node);
+        const st = await this.statOf(t, it.path, ctx.sig).catch((e) => {
+          if (ctx.sig.aborted) throw new Aborted();
+          throw e;
+        });
+        if (st) {
+          const m = await this.measure(t, it.path, st, ctx.sig);
+          j.progress.totalBytes += m.bytes;
+          j.progress.totalEntries += m.files;
+          j.items[i]!.size = m.bytes;
+        }
       }
+      j.scanned = true;
     }
     const preserveTimes = spec.preserveTimes === true;
     for (let i = 0; i < spec.items.length; i++) {
-      await ctx.checkpoint();
+      await ctx.boundary();
       const it = spec.items[i]!;
       const iv = j.items[i]!;
+      if (iv.state !== "pending") continue;
       iv.state = "running";
       j.progress.current = it.path;
+      this.save(j); // a restart must find this item in flight: its destination may be half written
       const before = j.progress.bytes;
       try {
         const r = await this.copyOne(j, ctx, it, spec.dst, { overwrite: false, preserveTimes, move: spec.op === "move" }, iv);
@@ -504,12 +812,13 @@ export class OpQueue {
         if (r === "skipped") j.counts.skipped++;
         else j.counts.done++;
       } catch (e) {
-        if (ctx.sig.aborted) throw new Aborted();
+        if (ctx.sig.aborted || j.lost) throw new Aborted();
         iv.state = "failed";
         iv.error = (e as Error).message;
         j.counts.failed++;
       }
       iv.bytes = j.progress.bytes - before;
+      this.save(j, false);
     }
   }
 
