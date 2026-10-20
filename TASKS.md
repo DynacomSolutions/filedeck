@@ -36,6 +36,7 @@ ETA: 2026-10-18 18:00 ICT
 | FD-20 | Release v0.3.11 (size cache epic: du CLI and token, skill, tree folder sizes, fanotify watcher) | done | claude-20261018-release-v0311 | release-v0311 | 3.FD-10, 3.FD-11, 3.FD-12, 3.FD-13 | | Released and rolled out with no downtime; du API token verified end to end. |
 | FD-21 | /api/du reports watched true when the fanotify watcher covers the path and is not stale, so the CLI stops warning about missed changes | done | claude-20261018-du-watched | du-watched-flag | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/70 (28f52d0). Deploys with 3.FD-22. |
 | FD-22 | Release v0.3.12 so the du watched flag (3.FD-21) deploys | done | claude-20261018-release-v0312 | release-v0312 | 3.FD-21 | | Released v0.3.12 and rolled out with no downtime; cached du answers now report watched true where the change watcher covers the path. |
+| FD-41 | The details panel shows a folder's stored size (and when it was measured) without starting a scan | in_progress | claude-20261020-details-size | details-size | | 2026-10-21 01:30 ICT | |
 
 ## 4. du scan robustness
 ETA: 2026-10-21 01:00 ICT
