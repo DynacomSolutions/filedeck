@@ -8,6 +8,7 @@ import * as ar from "./archive.ts";
 import { Jobs } from "./jobs.ts";
 import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
+import { hitsReadOnly } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
@@ -38,6 +39,17 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   const limits: ar.ArchiveLimits = { maxEntries: cfg.archiveMaxEntries, maxBytes: cfg.archiveMaxBytes };
   const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
   const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
+
+  jobs.register("compress", async (p) => {
+    const b = p as { dir: string; names: string[]; format: string; name?: string; level?: number; encryptHeaders?: boolean; splitBytes?: number; exclude?: string[]; destDir?: string };
+    try {
+      if ([b.dir, b.destDir].some((t) => t !== undefined && hitsReadOnly(root, cfg.readOnly, t))) throw new ops.FsError(403, "read-only volume");
+      const plan = await ar.prepareCompress(root, b.dir, b.names, b.format, b.name, { level: b.level, encryptHeaders: b.encryptHeaders === true, splitBytes: b.splitBytes, exclude: b.exclude ?? [], destDir: b.destDir });
+      return { run: (ctl) => ar.runCompress(plan, limits, ctl) };
+    } catch (e) {
+      return { run: async () => Promise.reject(e) }; // a refusal fails the job with its message
+    }
+  });
 
   // The password (if any) arrives base64-encoded in `x-filedeck-password`, never in a URL or a body, so it is not audit-logged.
   const pw = (c: Context) => passwordFromHeader(c.req.header("x-filedeck-password"));
@@ -94,7 +106,9 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
       destDir: b.destDir === undefined ? undefined : str(b.destDir, "destDir"),
       password: pw(c),
     });
-    const job = jobs.create("compress", `Compress ${plan.names.length} item(s) to ${plan.outName}`, (ctl) => ar.runCompress(plan, limits, ctl));
+    // Allowlisted fields only, and none at all when a password was given: that job is failed after a restart, never stored.
+    const params = plan.password ? undefined : { dir: b.dir, names: b.names, format: b.format, name: b.name, level: b.level, encryptHeaders: b.encryptHeaders, splitBytes: b.splitBytes, exclude: b.exclude, destDir: b.destDir };
+    const job = jobs.create("compress", `Compress ${plan.names.length} item(s) to ${plan.outName}`, (ctl) => ar.runCompress(plan, limits, ctl), undefined, undefined, { params });
     return c.json(job, 202);
   });
 

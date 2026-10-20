@@ -56,6 +56,19 @@ export function writeTargets(method: string, route: string, query: (k: string) =
   return [];
 }
 
+/** Whether changing `target` would touch a read-only volume (a bad path is the caller's own 400). */
+export function hitsReadOnly(root: string, prefixes: string[], target: string): boolean {
+  try {
+    // both the link itself and where it leads count
+    const own = resolveInRoot(root, target, { followFinal: false }).virtual;
+    const far = resolveInRoot(root, target, { followFinal: true }).virtual;
+    return prefixes.some((p) => under(own, p) || under(far, p));
+  } catch (e) {
+    if (!(e instanceof PathError)) throw e;
+    return false;
+  }
+}
+
 export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandler {
   return async (c, next) => {
     if (prefixes.length === 0 || ["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return next();
@@ -68,18 +81,7 @@ export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandl
         /* the route reports the bad body itself */
       }
     }
-    for (const t of writeTargets(c.req.method, c.req.path, (k) => c.req.query(k), body)) {
-      let hit = false;
-      try {
-        // both the link itself and where it leads count
-        const own = resolveInRoot(root, t, { followFinal: false }).virtual;
-        const far = resolveInRoot(root, t, { followFinal: true }).virtual;
-        hit = prefixes.some((p) => under(own, p) || under(far, p));
-      } catch (e) {
-        if (!(e instanceof PathError)) throw e; // a bad path is the route's 400
-      }
-      if (hit) return c.json({ error: "read-only volume" }, 403);
-    }
+    if (writeTargets(c.req.method, c.req.path, (k) => c.req.query(k), body).some((t) => hitsReadOnly(root, prefixes, t))) return c.json({ error: "read-only volume" }, 403);
     return next();
   };
 }

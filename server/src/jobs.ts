@@ -90,6 +90,11 @@ export class Jobs {
   private stopping = false;
   private adopting = new Set<string>();
 
+  /** How an adopted job of this kind is run again (no-op without a shared store). */
+  register(kind: string, rebuild: Rebuild) {
+    if (this.shared) (this.shared.rebuild ??= {})[kind] = rebuild;
+  }
+
   /**
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
