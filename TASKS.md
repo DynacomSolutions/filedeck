@@ -33,3 +33,10 @@
 | FD-20 | Release v0.3.11 (size cache epic: du CLI and token, skill, tree folder sizes, fanotify watcher) | done | claude-20261018-release-v0311 | release-v0311 | 3.FD-10, 3.FD-11, 3.FD-12, 3.FD-13 |  | Released and rolled out with no downtime; du API token verified end to end. |
 | FD-21 | /api/du reports watched true when the fanotify watcher covers the path and is not stale, so the CLI stops warning about missed changes | done | claude-20261018-du-watched | du-watched-flag | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/70 (28f52d0). Deploys with 3.FD-22. |
 | FD-22 | Release v0.3.12 so the du watched flag (3.FD-21) deploys | done | claude-20261018-release-v0312 | release-v0312 | 3.FD-21 | | Released v0.3.12 and rolled out with no downtime; cached du answers now report watched true where the change watcher covers the path. |
+
+## 4. du scan robustness
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| FD-23 | `filedeck du` scans are never cut short by FILEDECK_WALK_MAX_ENTRIES: the size walk stores and forgets each folder as soon as its children are done, so memory follows tree depth, not tree size; the cap stays for listing, search and archive paths | in progress | claude-20261020-du-scan-fixes | du-scan-fixes | | | `filedeck du -h -d 2` on hq0 .data reported "scan hit the entry limit, sizes are partial" (89G shown). |
+| FD-24 | Agent /healthz answers during big scans: scan rows are written on a worker thread (the main thread only reads), so a contended disk no longer stalls the event loop and kubelet stops killing filedeck-agent-hq0 | in progress | claude-20261020-du-scan-fixes | du-scan-fixes | | | filedeck-agent-hq0 restarted 8+ times on 20 Oct 2026 (liveness timeouts, then `HTTP 502: agent unreachable`). |
+| FD-25 | Release v0.3.13 so FD-23 and FD-24 deploy | in progress | claude-20261020-du-scan-fixes | du-scan-fixes | 4.FD-23, 4.FD-24 | | |

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { rmSync, type Stats } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import { openDb } from "./index-cache.ts";
 import { FsError } from "./fsops.ts";
 import { TRASH_DIR, resolveRead, virtualJoin } from "./paths.ts";
@@ -18,7 +19,7 @@ import type { SizeResult } from "./props.ts";
  *    than `ttlMs` ago: entries added, removed or renamed change the folder mtime, an in-place edit of a
  *    file does not. Without the change watcher (fanwatch.ts) the own stats can therefore be stale up to `ttlMs`;
  *  - everything else is re-read (readdir + lstat) and its row replaced;
- *  - a scan that hits the entry cap is returned but never stored, so stored totals are always complete.
+ *  - a scan is never cut short and never partial; its memory use follows the depth of the tree, not its size (see `walk`).
  *
  * Like `folderSize` before it: symlinks are not followed, other devices are not entered, the trash
  * store is skipped. Hard links are counted once per link (unlike du).
@@ -48,16 +49,16 @@ interface Node extends Row {
   kids: string[];
   fixed: boolean;
   reused: boolean;
+  /** the folder this one rolls up into */
+  up?: Node;
+  /** child folders not finished yet; the folder is stored and dropped from memory when this reaches 0 */
+  pending: number;
 }
 
 interface Walk {
-  root: Node;
-  nodes: Map<string, Node>;
-  /** parents before children */
-  order: Node[];
+  root: Row;
   /** folders read from disk (not reused from the store) */
   read: number;
-  truncated: boolean;
 }
 
 export interface DuEntry {
@@ -84,19 +85,72 @@ const below = (p: string) => {
 
 const COLS = ["path", "parent", "ino", "dev", "mtime_ms", "scanned_at", ...METRICS.map((m) => `own_${m}`), ...METRICS.map((m) => `tot_${m}`)];
 
+/**
+ * Body of the writer worker (plain JavaScript, evaluated as a worker like index-cache.ts's trim worker). Stores of a
+ * scan are synchronous SQLite work; on a busy disk one chunk blocks for seconds, which on the main thread starved
+ * /healthz and got the agent killed by its liveness probe. Messages: {id, op: "commit", items, last} writes folder rows
+ * (see SizeStore.commitInline for the same logic on an in-memory store) and {id, op: "exec", sql, params} runs one statement.
+ */
+const WRITER_WORKER = `
+process.emitWarning = () => {};
+const { workerData, parentPort } = require("node:worker_threads");
+const { DatabaseSync } = require("node:sqlite");
+const { file, COLS, METRICS } = workerData;
+const db = new DatabaseSync(file);
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192");
+const put = db.prepare("INSERT OR REPLACE INTO sizes (" + COLS.join(",") + ") VALUES (" + COLS.map(() => "?").join(",") + ")");
+const kids = db.prepare("SELECT path, dev FROM sizes WHERE parent = ?");
+const get = db.prepare("SELECT * FROM sizes WHERE path = ?");
+const delTree = db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)");
+const parentOf = (p) => (p === "/" ? "" : p.slice(0, p.lastIndexOf("/")) || "/");
+const below = (p) => { const pre = p === "/" ? "/" : p + "/"; return [pre, pre.slice(0, -1) + "0"]; };
+const commit = ({ items, last }) => {
+  db.exec("BEGIN");
+  try {
+    const old = last ? get.get(last.path) : undefined;
+    for (const it of items) {
+      if (it.keep) { const keep = new Set(it.keep); for (const k of kids.all(it.path)) if (Number(k.dev) === it.dev && !keep.has(k.path)) delTree.run(k.path, ...below(k.path)); }
+      put.run(...it.row);
+    }
+    if (old) {
+      const anc = [];
+      for (let a = parentOf(last.path); a; a = parentOf(a)) { const r = get.get(a); if (!r) continue; if (Number(r.dev) !== last.dev) break; anc.push(a); }
+      if (anc.length) {
+        const set = METRICS.map((m) => "tot_" + m + " = tot_" + m + " + " + Math.trunc(last.tot[m] - Number(old["tot_" + m]))).join(", ");
+        db.prepare("UPDATE sizes SET " + set + " WHERE path IN (" + anc.map(() => "?").join(",") + ")").run(...anc);
+      }
+    }
+    db.exec("COMMIT");
+  } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
+};
+parentPort.on("message", (m) => {
+  try {
+    if (m.op === "commit") commit(m); else db.prepare(m.sql).run(...m.params);
+    parentPort.postMessage({ id: m.id });
+  } catch (e) { parentPort.postMessage({ id: m.id, err: String(e && e.message || e) }); }
+});
+`;
+
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
   private db: DatabaseSync | null = null;
   private q!: Record<"get" | "put" | "kids" | "delTree", StatementSync>;
   private held: { path: string; done: Promise<void> }[] = [];
+  private file = ":memory:";
+  private writer?: Worker;
+  private pending = new Map<number, { res: () => void; rej: (e: Error) => void }>();
+  private seq = 0;
+  /** the latest `write`: a walk waits for it so it never reads rows a stale mark is about to change */
+  private tail: Promise<void> = Promise.resolve();
   private warned = false;
   /** nodes of the latest walks (up to maxEntries rows in total), kept only while the database is unusable so `tree` can still answer */
   private walks: Map<string, Row>[] = [];
 
   constructor(
     file: string,
-    private o: { root: string; ttlMs: number; maxEntries: number; commitChunk?: number },
+    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number },
   ) {
+    this.file = file;
     // Like IndexCache: a file that cannot be opened is replaced once, then the store runs uncached.
     for (let attempt = 0; attempt < 2 && !this.db; attempt++) {
       try {
@@ -150,18 +204,51 @@ export class SizeStore {
     try {
       return fn();
     } catch (e) {
-      this.warn(e);
-      try {
-        this.db.close();
-      } catch {
-        /* already broken */
-      }
-      this.db = null;
+      this.giveUp(e);
       return dflt;
     }
   }
 
+  private giveUp(e: unknown) {
+    this.warn(e);
+    try {
+      this.db?.close();
+    } catch {
+      /* already broken */
+    }
+    this.db = null;
+  }
+
+  /** Run one request on the writer worker (started on first use); a file-backed store only. */
+  private send(m: Record<string, unknown>): Promise<void> {
+    if (!this.writer) {
+      const w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false });
+      w.unref();
+      const fail = (e: Error) => {
+        if (this.writer === w) this.writer = undefined;
+        for (const p of this.pending.values()) p.rej(e);
+        this.pending.clear();
+      };
+      w.on("message", (r: { id: number; err?: string }) => {
+        const p = this.pending.get(r.id);
+        this.pending.delete(r.id);
+        if (r.err) p?.rej(new Error(r.err));
+        else p?.res();
+      });
+      w.once("error", fail);
+      w.once("exit", (code) => fail(new Error(`size writer exit ${code}`)));
+      this.writer = w;
+    }
+    return new Promise((res, rej) => {
+      const id = ++this.seq;
+      this.pending.set(id, { res, rej });
+      this.writer!.postMessage({ ...m, id });
+    });
+  }
+
   close() {
+    void this.writer?.terminate();
+    this.writer = undefined;
     this.db?.close();
   }
 
@@ -238,157 +325,189 @@ export class SizeStore {
   }
 
   /**
-   * Walk `virtual`, reusing stored folders (see the rules above) unless `fresh`.
+   * Walk `virtual`, reusing stored folders (see the rules above) unless `fresh`, and store the result.
    * `force` re-reads the start folder whatever its row says; `trust` takes the start folder's stored
    * child folders as they are (when their inode and device still match) instead of validating their subtrees (applyChanged).
+   *
+   * Memory does not grow with the tree: a folder is finished once its children are (its totals are then final), written
+   * and forgotten, so only the unfinished path from the start folder down is held. Rows go to the store bottom-up in
+   * chunks (one transaction each, yielding between them); the start folder and the ancestors go in the last one. A walk
+   * that fails after rows were written marks the subtree stale so the next scan re-reads it (parents above would
+   * otherwise keep totals from before).
    */
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; force?: boolean; trust?: boolean }): Promise<Walk> {
     const dev = Number(st.dev);
-    const nodes = new Map<string, Node>();
-    const order: Node[] = [];
-    const stack: { virtual: string; real: string; root: boolean; s: Stats }[] = [{ virtual, real, root: true, s: st }];
+    const stack: { virtual: string; real: string; root: boolean; s: Stats; up?: Node }[] = [{ virtual, real, root: true, s: st }];
     const now = Date.now();
+    const chunk = this.o.commitChunk ?? COMMIT_CHUNK;
     let seen = 0;
     let bytes = 0;
     let read = 0;
-    let truncated = false;
-    while (stack.length && !truncated) {
-      if (ctl.signal.aborted) throw new FsError(400, "canceled");
-      const t = stack.pop()!;
-      const s = t.s;
-      ctl.progress.current = t.virtual;
-      const ino = Number(s.ino);
-      const stored = this.get(t.virtual);
-      const kids = stored ? this.kidsOf(t.virtual, dev) : [];
-      let kidStats: Stats[] | undefined;
-      let reusable = !mode.fresh && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && now - stored.scanned_at < this.o.ttlMs && kids.length === stored.own.dirs - stored.own.mounts;
-      if (reusable) {
-        // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
-        kidStats = await Promise.all(kids.map((k) => fs.lstat(path.join(t.real, path.posix.basename(k.path))).catch(() => null))) as Stats[];
-        reusable = kidStats.every((k) => k && k.isDirectory() && Number(k.dev) === dev);
-      }
-      const node: Node = reusable
-        ? { ...stored!, kids: kids.map((k) => k.path), fixed: false, reused: true }
-        : { path: t.virtual, parent: parentOf(t.virtual), ino, dev, mtime_ms: s.mtimeMs, scanned_at: now, own: zero(), tot: zero(), kids: [], fixed: false, reused: false };
-      nodes.set(node.path, node);
-      order.push(node);
-      if (node.reused) {
-        seen += node.own.files + node.own.symlinks + node.own.other + node.own.dirs;
-        bytes += node.own.bytes;
-        kids.forEach((k, i) => stack.push({ virtual: k.path, real: path.join(t.real, path.posix.basename(k.path)), root: false, s: kidStats![i]! }));
-        ctl.progress.entries = seen;
-        ctl.progress.bytes = bytes;
-        if (seen >= this.o.maxEntries) truncated = true;
-        continue;
-      }
-      read++;
-      let names: string[];
-      try {
-        names = await fs.readdir(t.real);
-      } catch {
-        node.own.errors++;
-        continue;
-      }
-      const byPath = new Map(kids.map((k) => [k.path, k]));
-      for (let i = 0; i < names.length && !truncated; i += 32) {
-        if (ctl.signal.aborted) throw new FsError(400, "canceled");
-        const got = await Promise.all(
-          names.slice(i, i + 32).map(async (n) => {
-            if (n === TRASH_DIR) return null;
-            const r = path.join(t.real, n);
-            try {
-              return { n, r, s: await fs.lstat(r) };
-            } catch {
-              node.own.errors++;
-              return null;
-            }
-          }),
-        );
-        for (const g of got) {
-          if (!g) continue;
-          if (seen >= this.o.maxEntries) {
-            truncated = true;
-            break;
+    let root: Node | undefined;
+    let buf: Node[] = [];
+    let written = false;
+    /** rows kept for `tree` while the database is unusable (bounded) */
+    const rows = new Map<string, Row>();
+
+    const flush = async (last: Node | null) => {
+      const part = buf;
+      buf = [];
+      if (this.db) {
+        if (this.file === ":memory:") this.safe(() => this.commitInline(last, part), false);
+        else {
+          // a file-backed store writes on the worker thread: the main thread only reads, so a stalled disk cannot hold the event loop
+          const items = part.map((n) => ({ path: n.path, dev: n.dev, keep: n.reused ? null : n.kids, row: [n.path, n.parent, n.ino, n.dev, n.mtime_ms, n.scanned_at, ...METRICS.map((m) => n.own[m]), ...METRICS.map((m) => n.tot[m])] }));
+          try {
+            await this.send({ op: "commit", items, last: last ? { path: last.path, dev: last.dev, tot: last.tot } : null });
+          } catch (e) {
+            this.giveUp(e);
           }
-          seen++;
-          const disk = Number(g.s.blocks) * 512;
-          if (g.s.isDirectory()) {
-            node.own.dirs++;
-            node.own.disk += disk;
-            if (Number(g.s.dev) !== dev) node.own.mounts++;
-            else {
-              const v = virtualJoin(t.virtual, g.n);
-              node.kids.push(v);
-              const prior = mode.trust && t.root ? byPath.get(v) : undefined;
-              // a folder deleted and recreated under the same name is not the stored one, even with the same inode number (freed inodes are reused at once); its mtime tells
-              if (prior && prior.ino === Number(g.s.ino) && prior.dev === Number(g.s.dev) && prior.mtime_ms === g.s.mtimeMs) nodes.set(v, { ...prior, kids: [], fixed: true, reused: true });
-              else stack.push({ virtual: v, real: g.r, root: false, s: g.s });
-            }
-          } else if (g.s.isSymbolicLink()) {
-            node.own.symlinks++;
-            node.own.disk += disk;
-          } else if (g.s.isFile()) {
-            node.own.files++;
-            node.own.bytes += Number(g.s.size);
-            bytes += Number(g.s.size);
-            node.own.disk += disk;
-          } else node.own.other++;
         }
-        ctl.progress.entries = seen;
-        ctl.progress.bytes = bytes;
-        await tick();
+        written = true;
       }
-    }
-    // Children are always after their parent in `order`, so a reverse pass rolls totals up.
-    for (let i = order.length - 1; i >= 0; i--) {
-      const n = order[i]!;
-      n.tot = { ...n.own };
-      for (const k of n.kids) {
-        const kn = nodes.get(k);
-        if (kn) addTo(n.tot, kn.tot);
+      if (!this.db) for (const n of part) if (rows.size < this.o.maxEntries || n === last) rows.set(n.path, { path: n.path, parent: n.parent, ino: n.ino, dev: n.dev, mtime_ms: n.mtime_ms, scanned_at: n.scanned_at, own: n.own, tot: n.tot });
+    };
+
+    /** `n` has all its children: its totals are final. Store it, roll it into its parent, and go up while parents complete too. */
+    const finish = async (n: Node | undefined) => {
+      for (; n; n = n.up) {
+        if (!n.fixed) buf.push(n);
+        const up = n.up;
+        if (up) {
+          addTo(up.tot, n.tot);
+          up.pending--;
+        } else root = n;
+        if (!up || buf.length >= chunk) {
+          await flush(up ? null : n);
+          if (up) await tick();
+        }
+        if (up && up.pending > 0) return;
       }
+    };
+
+    try {
+      while (stack.length) {
+        if (ctl.signal.aborted) throw new FsError(400, "canceled");
+        const t = stack.pop()!;
+        const s = t.s;
+        ctl.progress.current = t.virtual;
+        const ino = Number(s.ino);
+        const stored = this.get(t.virtual);
+        const kids = stored ? this.kidsOf(t.virtual, dev) : [];
+        let kidStats: Stats[] | undefined;
+        let reusable = !mode.fresh && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && now - stored.scanned_at < this.o.ttlMs && kids.length === stored.own.dirs - stored.own.mounts;
+        if (reusable) {
+          // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
+          kidStats = await Promise.all(kids.map((k) => fs.lstat(path.join(t.real, path.posix.basename(k.path))).catch(() => null))) as Stats[];
+          reusable = kidStats.every((k) => k && k.isDirectory() && Number(k.dev) === dev);
+        }
+        const node: Node = reusable
+          ? { ...stored!, tot: { ...stored!.own }, kids: [], fixed: false, reused: true, up: t.up, pending: kids.length }
+          : { path: t.virtual, parent: parentOf(t.virtual), ino, dev, mtime_ms: s.mtimeMs, scanned_at: now, own: zero(), tot: zero(), kids: [], fixed: false, reused: false, up: t.up, pending: 0 };
+        if (node.reused) {
+          seen += node.own.files + node.own.symlinks + node.own.other + node.own.dirs;
+          bytes += node.own.bytes;
+          kids.forEach((k, i) => stack.push({ virtual: k.path, real: path.join(t.real, path.posix.basename(k.path)), root: false, s: kidStats![i]!, up: node }));
+          ctl.progress.entries = seen;
+          ctl.progress.bytes = bytes;
+          if (!node.pending) await finish(node);
+          continue;
+        }
+        read++;
+        let names: string[];
+        try {
+          names = await fs.readdir(t.real);
+        } catch {
+          node.own.errors++;
+          node.tot = { ...node.own };
+          await finish(node);
+          continue;
+        }
+        const byPath = new Map(kids.map((k) => [k.path, k]));
+        const fixedKids: Row[] = [];
+        for (let i = 0; i < names.length; i += 32) {
+          if (ctl.signal.aborted) throw new FsError(400, "canceled");
+          const got = await Promise.all(
+            names.slice(i, i + 32).map(async (n) => {
+              if (n === TRASH_DIR) return null;
+              const r = path.join(t.real, n);
+              try {
+                return { n, r, s: await fs.lstat(r) };
+              } catch {
+                node.own.errors++;
+                return null;
+              }
+            }),
+          );
+          for (const g of got) {
+            if (!g) continue;
+            seen++;
+            const disk = Number(g.s.blocks) * 512;
+            if (g.s.isDirectory()) {
+              node.own.dirs++;
+              node.own.disk += disk;
+              if (Number(g.s.dev) !== dev) node.own.mounts++;
+              else {
+                const v = virtualJoin(t.virtual, g.n);
+                node.kids.push(v);
+                const prior = mode.trust && t.root ? byPath.get(v) : undefined;
+                // a folder deleted and recreated under the same name is not the stored one, even with the same inode number (freed inodes are reused at once); its mtime tells
+                if (prior && prior.ino === Number(g.s.ino) && prior.dev === Number(g.s.dev) && prior.mtime_ms === g.s.mtimeMs) fixedKids.push(prior);
+                else {
+                  node.pending++;
+                  stack.push({ virtual: v, real: g.r, root: false, s: g.s, up: node });
+                }
+              }
+            } else if (g.s.isSymbolicLink()) {
+              node.own.symlinks++;
+              node.own.disk += disk;
+            } else if (g.s.isFile()) {
+              node.own.files++;
+              node.own.bytes += Number(g.s.size);
+              bytes += Number(g.s.size);
+              node.own.disk += disk;
+            } else node.own.other++;
+          }
+          ctl.progress.entries = seen;
+          ctl.progress.bytes = bytes;
+          await tick();
+        }
+        node.tot = { ...node.own };
+        for (const k of fixedKids) addTo(node.tot, k.tot);
+        if (!node.pending) await finish(node);
+      }
+    } catch (e) {
+      if (written) await this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]);
+      throw e;
     }
-    return { root: order[0]!, nodes, order, read, truncated };
+    if (!this.db) this.keep(rows);
+    return { root: root!, read };
   }
 
-  /**
-   * Store a complete walk: replace rescanned rows, drop vanished child folders, fix the ancestors. Written bottom-up in
-   * chunks (one transaction each, yielding between them) so a huge scan does not block the event loop; the start
-   * folder and the ancestors go in the last transaction, so totals above are only changed once everything below is stored.
-   */
-  private async commit({ root, order, nodes }: Walk, chunk = COMMIT_CHUNK) {
-    if (!this.db) return void this.keep(nodes);
-    const todo = order.filter((n) => !n.fixed).reverse();
-    let ok = true;
-    for (let i = 0; i < todo.length && ok; i += chunk) {
-      const lastChunk = i + chunk >= todo.length;
-      ok = this.safe(() => {
-        const db = this.db!;
-        db.exec("BEGIN");
-        try {
-          const old = lastChunk ? this.get(root.path) : undefined;
-          for (const n of todo.slice(i, i + chunk)) {
-            if (!n.reused) {
-              const keep = new Set(n.kids);
-              for (const k of this.kidsOf(n.path, n.dev)) if (!keep.has(k.path)) this.delTree(k.path);
-            }
-            this.put(n);
-          }
-          if (old) {
-            const d = { ...root.tot };
-            addTo(d, old.tot, -1);
-            this.addToAncestors(root.path, d, root.dev);
-          }
-          db.exec("COMMIT");
-        } catch (e) {
-          db.exec("ROLLBACK");
-          throw e;
+  /** The writer worker's `commit` (WRITER_WORKER) for a store that has no file: one transaction. `last` = the start folder, whose change is added to the ancestors. */
+  private commitInline(last: Row | null, part: Node[]): boolean {
+    const db = this.db!;
+    db.exec("BEGIN");
+    try {
+      const old = last ? this.get(last.path) : undefined;
+      for (const n of part) {
+        if (!n.reused) {
+          const keep = new Set(n.kids);
+          for (const k of this.kidsOf(n.path, n.dev)) if (!keep.has(k.path)) this.delTree(k.path);
         }
-        return true;
-      }, false);
-      if (!lastChunk) await tick();
+        this.put(n);
+      }
+      if (last && old) {
+        const d = { ...last.tot };
+        addTo(d, old.tot, -1);
+        this.addToAncestors(last.path, d, last.dev);
+      }
+      db.exec("COMMIT");
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
     }
-    if (!ok) this.keep(nodes);
+    return true;
   }
 
   private keep(nodes: Map<string, Row>) {
@@ -407,9 +526,9 @@ export class SizeStore {
     return this.db !== null;
   }
 
-  private result(n: Node, truncated: boolean): SizeResult {
+  private result(n: Row): SizeResult {
     const t = n.tot;
-    return { path: n.path, files: t.files, dirs: t.dirs, symlinks: t.symlinks, other: t.other, bytes: t.bytes, diskBytes: t.disk, truncated, mountsSkipped: t.mounts, errors: t.errors };
+    return { path: n.path, files: t.files, dirs: t.dirs, symlinks: t.symlinks, other: t.other, bytes: t.bytes, diskBytes: t.disk, truncated: false, mountsSkipped: t.mounts, errors: t.errors };
   }
 
   /** `du` of one folder through the store. A single file is answered directly and not stored. */
@@ -437,9 +556,9 @@ export class SizeStore {
         throw e;
       }
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0 };
+      await this.tail;
       const w = await this.walk(r.virtual, r.real, st, ctl, { fresh });
-      if (!w.truncated) await this.commit(w, this.o.commitChunk);
-      return { res: this.result(w.root, w.truncated), read: w.read, ...(after && !w.truncated ? { extra: await after() } : {}) };
+      return { res: this.result(w.root), read: w.read, ...(after ? { extra: await after() } : {}) };
     } finally {
       release();
     }
@@ -465,10 +584,24 @@ export class SizeStore {
     }
   }
 
+  /** One write statement: on the worker for a file-backed store (one writer connection, never the main thread), else inline. */
+  private write(sql: string, params: (string | number)[]): Promise<void> {
+    return (this.tail = this.write1(sql, params));
+  }
+  private async write1(sql: string, params: (string | number)[]): Promise<void> {
+    if (!this.db) return;
+    if (this.file === ":memory:") return this.safe(() => void this.db!.prepare(sql).run(...params), undefined);
+    try {
+      await this.send({ op: "exec", sql, params });
+    } catch (e) {
+      this.giveUp(e);
+    }
+  }
+
   /** Forget how fresh the rows of `virtual` and below are (the watcher lost events): the next scan re-reads them. */
   markStale(virtual: string): void {
     const [lo, hi] = below(virtual);
-    this.safe(() => this.db!.prepare("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)").run(virtual, lo, hi), undefined);
+    void this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, lo, hi]);
   }
 
   private async changed(v: string, ctl: JobCtl): Promise<void> {
@@ -482,11 +615,11 @@ export class SizeStore {
       // The folder itself is gone: its parent's own counts change too, so re-read the parent when it is stored.
       const p = parentOf(v);
       if (p && this.get(p)) return this.changed(p, ctl);
-      this.safe(() => this.delTree(v), undefined);
+      await this.write("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)", [v, ...below(v)]);
       return;
     }
-    const w = await this.walk(v, real, st, ctl, { fresh: false, force: true, trust: true });
-    if (!w.truncated) await this.commit(w, this.o.commitChunk);
+    await this.tail;
+    await this.walk(v, real, st, ctl, { fresh: false, force: true, trust: true });
   }
 
   /** The folder and its folder descendants down to `depth`; with `all`, also the files of the folders above that depth. */

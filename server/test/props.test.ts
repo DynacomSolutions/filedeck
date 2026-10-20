@@ -74,7 +74,7 @@ test("folder size job counts files, folders, links, skips the trash store and ne
   assert.ok((j.result!.diskBytes as number) >= 0);
 });
 
-test("folder size job honours the entry cap and cancel", async () => {
+test("folder size job is not cut short by the entry cap", async () => {
   const small = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_WALK_MAX_ENTRIES: "3" } as never));
   const r = await small.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/tree" }) });
   let j = (await r.json()) as Job;
@@ -82,7 +82,8 @@ test("folder size job honours the entry cap and cancel", async () => {
     await new Promise((res) => setTimeout(res, 20));
     j = (await (await small.request(`/api/jobs/${j.id}`)).json()) as Job;
   }
-  assert.equal(j.result!.truncated, true);
+  assert.equal(j.result!.truncated, false);
+  assert.equal(j.result!.bytes, 5 + 10 + 1);
 });
 
 test("chmod on one entry, with guards", async () => {
