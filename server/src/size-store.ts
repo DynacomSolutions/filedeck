@@ -259,6 +259,7 @@ export class SizeStore {
         CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
         CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS pending_due ON pending(due_at);
+        CREATE INDEX IF NOT EXISTS pending_idle_run ON pending(due_at, last_run);
       `);
       // stores of older versions have no seen_at
       if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec("ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
@@ -980,7 +981,6 @@ export class SizeStore {
     );
   }
 
-  private lastPrune = 0;
   /**
    * Up to `limit` folders whose due time has come, oldest first; they are marked run at `now` and not returned again until noted again.
    * Null when the oldest due time is more than 10 x modifyMs ago (the backlog would take too long to apply): the pending rows are then
@@ -1002,11 +1002,8 @@ export class SizeStore {
       return null;
     }
     if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [now, PENDING_IDLE, p]));
-    // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future)
-    if (now - this.lastPrune > Math.max(t.modifyMs, 1000)) {
-      this.lastPrune = now;
-      await this.write1("DELETE FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?)", [PENDING_IDLE, now - t.modifyMs, now + t.modifyMs]);
-    }
+    // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future), one bounded batch per call
+    await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?) LIMIT ?)", [PENDING_IDLE, now - t.modifyMs, now + t.modifyMs, PENDING_BATCH]);
     return got;
   }
 
