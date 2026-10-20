@@ -21,13 +21,13 @@ after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 /** readdir calls made while `fn` runs */
 async function countReaddir(fn: () => Promise<unknown>): Promise<number> {
-  const orig = fsp.opendir;
+  const orig = fsp.readdir;
   let n = 0;
-  (fsp as { opendir: unknown }).opendir = (...a: unknown[]) => (n++, (orig as (...x: unknown[]) => unknown)(...a));
+  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (n++, (orig as (...x: unknown[]) => unknown)(...a));
   try {
     await fn();
   } finally {
-    (fsp as { opendir: unknown }).opendir = orig;
+    (fsp as { readdir: unknown }).readdir = orig;
   }
   return n;
 }
@@ -534,8 +534,8 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
   const root = fs.mkdtempSync(path.join(tmp, "dl-"));
   for (const d of ["big/sub", "q1", "q2", "p/x", "p/w", "p/z"]) fs.mkdirSync(path.join(root, d), { recursive: true });
   const slow = new Set([path.join(root, "big"), path.join(root, "q1"), path.join(root, "q2")]);
-  const orig = fsp.opendir;
-  (fsp as { opendir: unknown }).opendir = async (p: string, ...a: unknown[]) => {
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
     if (slow.has(String(p))) await sleep(500);
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
@@ -582,7 +582,7 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
     assert.equal(await settle(w.id), "failed");
     assert.equal(await settle(z.id), "done");
   } finally {
-    (fsp as { opendir: unknown }).opendir = orig;
+    (fsp as { readdir: unknown }).readdir = orig;
   }
 });
 
@@ -593,8 +593,8 @@ test("a detached du scan running past a minute is still joined by the repeat req
   fs.mkdirSync(path.join(root, "big/sub"), { recursive: true });
   let open!: () => void;
   const gate = new Promise<void>((r) => (open = r));
-  const orig = fsp.opendir;
-  (fsp as { opendir: unknown }).opendir = async (p: string, ...a: unknown[]) => {
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
     if (String(p) === path.join(root, "big")) await gate;
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
@@ -621,7 +621,7 @@ test("a detached du scan running past a minute is still joined by the repeat req
     assert.equal(((await last.json()) as { entries: unknown[] }).entries.length, 2);
   } finally {
     t.mock.timers.reset();
-    (fsp as { opendir: unknown }).opendir = orig;
+    (fsp as { readdir: unknown }).readdir = orig;
   }
 });
 
@@ -735,7 +735,7 @@ test("abort mid-walk closes every directory and leaves the subtree stale", async
   const dir = at("abort");
   for (let i = 0; i < 300; i++) fs.mkdirSync(path.join(dir, `a${i}`, "b"), { recursive: true });
   const fds = () => (process.platform === "linux" ? fs.readdirSync("/proc/self/fd").length : 0);
-  const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000, commitChunk: 5 });
+  const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000, commitChunk: 5, streamAbove: 0 });
   const before = fds();
   const ac = new AbortController();
   const ctl = { signal: ac.signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } };
@@ -819,14 +819,14 @@ test("applyChanged climbs through gone folders taking each level's lock", async 
 });
 
 test("a stored child that vanishes between the reuse check and the walk is an error", async () => {
-  // 300 children: the vanishing one is on the second page (pages after the first are lstat-ed again as they are handed out)
-  for (let i = 0; i < 300; i++) fs.mkdirSync(at(`rc/k${String(i).padStart(3, "0")}`), { recursive: true });
+  // 1300 children: the vanishing one is past the 1024 rows the reuse check keeps (later pages are lstat-ed again as they are handed out)
+  for (let i = 0; i < 1300; i++) fs.mkdirSync(at(`rc/k${String(i).padStart(4, "0")}`), { recursive: true });
   const s = mk();
   await s.scan("/rc");
   const orig = fsp.lstat;
   let n = 0;
   (fsp as { lstat: unknown }).lstat = async (p: string, ...a: unknown[]) => {
-    if (String(p) === at("rc/k299") && ++n === 2) throw Object.assign(new Error("gone"), { code: "ENOENT" });
+    if (String(p) === at("rc/k1299") && ++n === 2) throw Object.assign(new Error("gone"), { code: "ENOENT" });
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
   try {
@@ -854,3 +854,28 @@ test("a store from before seen_at opens, and the first rescan drops removed fold
   assert.deepEqual((await rows(s2, "/mg")).map((e) => e.path), ["/mg", "/mg/a"]);
   s2.close();
 });
+
+for (const [kind, streamAbove] of [["opendir (streamed)", 0], ["readdir (small folders)", 1e12]] as const) {
+  test(`folder read through ${kind} gives the same totals`, async () => {
+    const dir = at(`rd-${streamAbove}`);
+    for (let i = 0; i < 40; i++) fs.mkdirSync(path.join(dir, `d${i}`, "e"), { recursive: true });
+    for (let i = 0; i < 100; i++) fs.writeFileSync(path.join(dir, `f${i}`), "x");
+    const calls = { opendir: 0, readdir: 0 };
+    const o1 = fsp.opendir;
+    const o2 = fsp.readdir;
+    (fsp as { opendir: unknown }).opendir = (...a: unknown[]) => (calls.opendir++, (o1 as (...x: unknown[]) => unknown)(...a));
+    (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (calls.readdir++, (o2 as (...x: unknown[]) => unknown)(...a));
+    const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000, streamAbove });
+    try {
+      const r = await s.scan(`/rd-${streamAbove}`);
+      assert.deepEqual({ files: r.files, dirs: r.dirs, bytes: r.bytes }, { files: 100, dirs: 80, bytes: 100 });
+    } finally {
+      (fsp as { opendir: unknown }).opendir = o1;
+      (fsp as { readdir: unknown }).readdir = o2;
+    }
+    if (streamAbove === 0) assert.ok(calls.opendir === 81 && calls.readdir === 0);
+    else assert.ok(calls.readdir === 81 && calls.opendir === 0);
+    await agrees(s, `/rd-${streamAbove}`);
+    s.close();
+  });
+}
