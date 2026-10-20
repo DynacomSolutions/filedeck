@@ -256,3 +256,18 @@ test("fanwatch.covers: true on a watched filesystem while the helper runs; false
   await off.start();
   assert.equal(off.covers("/"), false);
 });
+
+test("fanwatch: past maxPending the burst acts like an overflow and later events schedule normally", async () => {
+  const s = setup({ maxPending: 5 });
+  await s.w.start();
+  for (let i = 0; i < 12; i++) s.w.line(`x ${s.root}/data/d${i}`);
+  assert.ok(s.stale.length > 0, "watched trees marked stale");
+  await sleep(150);
+  assert.ok(s.calls.length <= 5, `pending stayed bounded, got ${s.calls.length}`);
+  s.calls.length = 0;
+  s.w.line(`x ${s.root}/data/late`);
+  await sleep(150);
+  assert.deepEqual(s.calls, ["/data/late"]);
+  s.w.stop();
+  s.done();
+});
