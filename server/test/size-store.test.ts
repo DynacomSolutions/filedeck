@@ -1370,3 +1370,25 @@ test("tree of a folder with 300k children is cut at the budget and the read work
     await s.close();
   }
 });
+
+test("a reused rescan and a tree take about one read round trip per folder, or fewer", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "trips-"));
+  for (let i = 0; i < 40; i++) for (const j of ["a", "b"]) fs.mkdirSync(path.join(root, `d${i}`, j), { recursive: true });
+  const s = new SizeStore(path.join(root, "..", `trips-${path.basename(root)}.db`), { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
+  const v = "/" + path.basename(root);
+  let reads = 0;
+  const post = (s as unknown as { post(m: { op: string }, r: boolean): unknown }).post.bind(s);
+  (s as unknown as { post(m: { op: string }, r: boolean): unknown }).post = (m, r) => (m.op === "read" && reads++, post(m, r));
+  try {
+    await s.scan(v);
+    reads = 0;
+    const r = await s.scan(v);
+    assert.equal(r.dirs, 120);
+    assert.ok(reads <= 121 * 1.5, `${reads} reads for 121 folders`);
+    reads = 0;
+    assert.equal((await s.tree(v, 3, false)).entries.length, 121);
+    assert.ok(reads <= 4, `${reads} reads for a tree of 3 levels`);
+  } finally {
+    await s.close();
+  }
+});
