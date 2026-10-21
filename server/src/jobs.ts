@@ -86,6 +86,7 @@ export class Jobs {
     if (shared) setInterval(() => this.tick(), shared.tickMs ?? 1000).unref();
   }
   private timer?: ReturnType<typeof setInterval>;
+  private lastSkipLog = 0;
   private readonly me = randomUUID();
   private stopping = false;
   private adopting = new Set<string>();
@@ -223,7 +224,14 @@ export class Jobs {
       for (const j of all) if (j.dirty && !live(j.state)) this.save(j);
       const mine = all.filter((j) => live(j.state));
       const lost = sh.store.beatAll(this.me, mine.map((j) => ({ id: j.id, view: JSON.stringify({ ...this.view(j), queue: undefined }) })), now);
-      if (!lost) return; // busy: skip the whole round
+      if (!lost) {
+        // busy: skip the whole round (noted at most once a minute)
+        if (now - this.lastSkipLog > 60_000) {
+          this.lastSkipLog = now;
+          console.error(JSON.stringify({ slow: "job-beat-skipped", jobs: mine.map((j) => j.id) }));
+        }
+        return;
+      }
       for (const id of lost) {
         const j = this.jobs.get(id)!;
         const r = sh.store.get(id, sh.scope);
