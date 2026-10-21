@@ -1392,3 +1392,54 @@ test("a reused rescan and a tree take about one read round trip per folder, or f
     await s.close();
   }
 });
+
+test("the pending table and a reopen are served by the workers, never by the main connection", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "pend-"));
+  fs.mkdirSync(path.join(root, "d"));
+  const s = new SizeStore(path.join(root, "sizes.db"), { root, ttlMs: 60_000, maxEntries: 1000 });
+  const p = s as unknown as { db: unknown; retryAt: number };
+  const real = p.db as { close(): void };
+  const boom = () => {
+    throw new Error("main thread touched the database");
+  };
+  p.db = { prepare: boom, exec: boom, close: () => undefined };
+  try {
+    const t = { modifyMs: 10, settleMs: 1 };
+    assert.equal(await s.notePending([{ path: "/d", dueAt: Date.now() - 1, modify: false }], 10), true);
+    assert.deepEqual(await s.takeDue(Date.now(), 10, t), ["/d"]);
+    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), ["/d"]);
+    await s.clearPending();
+    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), []);
+    // after a failure the store reopens through the writer thread
+    p.db = null;
+    p.retryAt = 1;
+    assert.equal((await s.scan("/d")).dirs, 0);
+    assert.ok(p.db, "reopened");
+    assert.equal((await s.tree("/d", 0, false)).entries.length, 1);
+  } finally {
+    real.close();
+    await s.close();
+  }
+});
+
+test("after close(), a read starts no worker and logs nothing; a read pending at close() is not a fault", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "closed-"));
+  fs.mkdirSync(path.join(root, "d"));
+  const s = new SizeStore(path.join(root, "sizes.db"), { root, ttlMs: 60_000, maxEntries: 1000, readDelayMs: 200 });
+  await s.scan("/d");
+  const logged: unknown[] = [];
+  const quiet = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a);
+  try {
+    const pending = s.tree("/d", 0, false);
+    await sleep(50);
+    await s.close();
+    await pending;
+    const w = (s as unknown as { writer?: unknown; reader?: unknown });
+    assert.equal((await s.tree("/d", 0, false)).entries.length, 0);
+    assert.equal(w.writer ?? w.reader, undefined, "no worker after close");
+    assert.deepEqual(logged, []);
+  } finally {
+    console.error = quiet;
+  }
+});

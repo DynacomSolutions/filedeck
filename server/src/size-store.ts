@@ -156,6 +156,17 @@ const SQL = {
   getKids: `SELECT s.*, ${KIDS} FROM sizes s WHERE s.path = ?`,
   getMany: (n: number) => `SELECT s.*, ${KIDS} FROM sizes s WHERE s.path IN (${Array(n).fill("?").join(",")})`,
 };
+const SCHEMA = `
+  CREATE TABLE IF NOT EXISTS sizes (
+    path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino REAL, dev REAL, mtime_ms REAL, scanned_at INTEGER, seen_at INTEGER NOT NULL DEFAULT 0,
+    ${METRICS.map((m) => `own_${m} INTEGER NOT NULL`).join(", ")}, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
+  CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS pending_due ON pending(due_at);
+  CREATE INDEX IF NOT EXISTS pending_idle_run ON pending(due_at, last_run);
+`;
+const ADD_SEEN_AT = "ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0";
 const noCtl = (): JobCtl => ({ signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } });
 const parentOf = (p: string) => (p === "/" ? "" : path.posix.dirname(p));
 /** Exclusive bounds of every path below `p` (the character after "/" is "0"). */
@@ -176,7 +187,7 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, COLS, METRICS, walLimit, reader, readDelayMs } = workerData;
+const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt } = workerData;
 const fs = require("node:fs");
 const db = new DatabaseSync(file);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
@@ -224,7 +235,8 @@ parentPort.on("message", (m) => {
   // a busy database (another connection holds a lock past busy_timeout) is retried a few times with backoff; every op rolls back on failure, so a retry is safe
   for (let attempt = 0; ; attempt++) {
     try {
-      if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
+      if (m.op === "schema") { db.exec(schema); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(addSeenAt); }
+      else if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
       else if (m.op === "commit") commit(m);
       else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
       else db.prepare(m.sql).run(...m.params);
@@ -296,18 +308,9 @@ export class SizeStore {
     try {
       // a long wait here blocks the event loop (and /healthz); a miss only means a re-read from disk
       db.exec("PRAGMA busy_timeout=100");
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS sizes (
-          path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino REAL, dev REAL, mtime_ms REAL, scanned_at INTEGER, seen_at INTEGER NOT NULL DEFAULT 0,
-          ${METRICS.map((m) => `own_${m} INTEGER NOT NULL`).join(", ")}, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}
-        ) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
-        CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS pending_due ON pending(due_at);
-        CREATE INDEX IF NOT EXISTS pending_idle_run ON pending(due_at, last_run);
-      `);
+      db.exec(SCHEMA);
       // stores of older versions have no seen_at
-      if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec("ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
+      if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(ADD_SEEN_AT);
       // Never MAX(seen_at): that scans the whole table before the server listens. A stamp only has to differ from earlier walks' stamps;
       // a clock stepped back can only make a stale child look current until its next re-read, never purge a live one.
       this.stamp = Math.max(this.stamp, Date.now());
@@ -365,17 +368,26 @@ export class SizeStore {
   private retryAt = 0;
   private retryDelay = 30_000;
   /** After a real failure, open the store again (30 s, then doubling to 10 min between tries) so one bad moment does not last until restart. */
-  private reopen() {
+  private reopening?: Promise<void>;
+  private reopen(): Promise<void> | undefined {
     if (this.db || this.file === ":memory:" || !this.retryAt || Date.now() < this.retryAt) return;
-    try {
-      this.open(this.file);
-      this.warned = false;
-      this.retryDelay = 30_000;
-      console.error("size store back");
-    } catch {
-      this.retryDelay = Math.min(this.retryDelay * 2, 600_000);
-      this.retryAt = Date.now() + this.retryDelay;
-    }
+    return (this.reopening ??= (async () => {
+      try {
+        // the schema is checked on the writer thread; the main handle is then only a liveness flag (an empty in-memory one): every read and write goes to the workers
+        await this.post({ op: "schema" }, false);
+        if (this.closed) return;
+        this.db = openDb(":memory:");
+        this.stamp = Math.max(this.stamp, Date.now());
+        this.warned = false;
+        this.retryDelay = 30_000;
+        console.error("size store back");
+      } catch {
+        this.retryDelay = Math.min(this.retryDelay * 2, 600_000);
+        this.retryAt = Date.now() + this.retryDelay;
+      } finally {
+        this.reopening = undefined;
+      }
+    })());
   }
 
   private giveUp(e: unknown) {
@@ -394,9 +406,10 @@ export class SizeStore {
     return this.post(m, false).then(() => undefined);
   }
   private post(m: Record<string, unknown>, read: boolean): Promise<Record<string, unknown>[] | undefined> {
+    if (this.closed) return Promise.resolve(undefined);
     let w = read ? this.reader : this.writer;
     if (!w) {
-      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
       nw.unref();
       const fail = (e: Error) => {
         if (this.writer === nw) this.writer = undefined;
@@ -422,11 +435,18 @@ export class SizeStore {
     });
   }
 
-  /** The returned promise settles once the worker threads are gone (their connections are closed then). */
+  private closed = false;
+  /** The returned promise settles once the worker threads are gone (their connections are closed then). A request still waiting is answered empty, not failed: this is a shutdown, not a fault. */
   close(): Promise<void> {
+    this.closed = true;
+    this.retryAt = 0;
+    for (const p of this.pending.values()) p.res();
+    this.pending.clear();
     const ws = [this.writer?.terminate(), this.reader?.terminate()];
     this.writer = this.reader = undefined;
-    this.db?.close();
+    const db = this.db;
+    this.db = null;
+    db?.close();
     return Promise.all(ws).then(() => undefined);
   }
 
@@ -591,7 +611,7 @@ export class SizeStore {
    * otherwise keep totals from before).
    */
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** a rescan resumed: rows written at or after this time are kept */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
-    this.reopen();
+    await this.reopen();
     const dev = Number(st.dev);
     const now = Date.now();
     const stamp = (this.stamp = Math.max(now, this.stamp + 1));
@@ -1135,17 +1155,20 @@ export class SizeStore {
   async takeDue(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null> {
     if (!this.db) return [];
     const far = now + t.modifyMs + t.settleMs;
-    const got = this.safe(() => {
-      const db = this.db!;
-      const oldest = (db.prepare("SELECT MIN(due_at) d FROM pending").get() as { d: number | null }).d;
-      if (oldest !== null && oldest < PENDING_IDLE && oldest < now - 10 * t.modifyMs) return null;
-      const col = (sql: string, ...a: number[]) => (db.prepare(sql).all(...a) as { path: string }[]).map((r) => r.path);
-      const due = col("SELECT path FROM pending WHERE due_at <= ? ORDER BY due_at LIMIT ?", now, limit);
-      return due.length < limit ? [...due, ...col("SELECT path FROM pending WHERE due_at > ? AND due_at < ? LIMIT ?", far, PENDING_IDLE, limit - due.length)] : due;
-    }, []);
-    if (got === null) {
+    const col = async (sql: string, ...a: number[]) => (await this.read("pending", sql, a, null))?.map((r) => r.path as string);
+    const min = await this.read("pending", "SELECT MIN(due_at) d FROM pending", [], null);
+    if (!min) return [];
+    const oldest = min[0]?.d as number | null | undefined;
+    if (oldest != null && oldest < PENDING_IDLE && oldest < now - 10 * t.modifyMs) {
       await this.clearPending();
       return null;
+    }
+    let got = await col("SELECT path FROM pending WHERE due_at <= ? ORDER BY due_at LIMIT ?", now, limit);
+    if (!got) return [];
+    if (got.length < limit) {
+      const idle = await col("SELECT path FROM pending WHERE due_at > ? AND due_at < ? LIMIT ?", far, PENDING_IDLE, limit - got.length);
+      if (!idle) return [];
+      got = [...got, ...idle];
     }
     if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [now, PENDING_IDLE, p]));
     // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future), one bounded batch per call
@@ -1157,14 +1180,14 @@ export class SizeStore {
   }
 
   /** Folders that ran within the last `withinMs` (their run may not have finished when the process stopped), at most `limit`. */
-  recentRuns(now: number, withinMs: number, limit: number): string[] {
-    return this.safe(() => (this.db!.prepare("SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?").all(PENDING_IDLE, now - withinMs, limit) as { path: string }[]).map((r) => r.path), []);
+  async recentRuns(now: number, withinMs: number, limit: number): Promise<string[]> {
+    return ((await this.read("pending", "SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?", [PENDING_IDLE, now - withinMs, limit], [])) ?? []).map((r) => r.path as string);
   }
 
   /** The watcher lost events: nothing pending is worth keeping, the stale marks cover it. */
   async clearPending(): Promise<void> {
     // bounded batches (the writer never holds one huge transaction), a pause between them; not `write`: size walks wait on its tail
-    while (this.db && this.safe(() => !!this.db!.prepare("SELECT 1 FROM pending LIMIT 1").get(), false)) {
+    while (this.db && (await this.read("pending", "SELECT 1 FROM pending LIMIT 1", [], null))?.length) {
       await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending LIMIT ?)", [PENDING_BATCH]);
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -1197,7 +1220,7 @@ export class SizeStore {
 
   /** The folder and its folder descendants down to `depth`; with `all`, also the files of the folders above that depth. */
   async tree(virtual: string, depth: number, all: boolean): Promise<{ entries: DuEntry[]; truncated: boolean }> {
-    this.reopen();
+    await this.reopen();
     const entries: DuEntry[] = [];
     let budget = this.o.maxEntries;
     let truncated = false;
