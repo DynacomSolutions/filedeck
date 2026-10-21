@@ -308,7 +308,20 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         return kind === "size" ? x.res : { res: x.res, read: x.read };
       },
       onDrop: () => release?.(),
-      gate: async (signal: AbortSignal) => void (release = await sizes.lock(virtual, signal)),
+      gate: async (signal: AbortSignal, self: { id: string; createdAt: number }) => {
+        release = await sizes.lock(virtual, signal);
+        // The lock is per process: during a rollout another process may be walking an overlapping folder, so wait for it too.
+        const overlaps = (p: { path: string }) => p.path === virtual || p.path === "/" || virtual === "/" || p.path.startsWith(virtual + "/") || virtual.startsWith(p.path + "/");
+        try {
+          while (jobs.foreignAhead(["size", "du"], self, overlaps)) {
+            await new Promise((res) => setTimeout(res, 250));
+            if (signal.aborted) throw new ops.FsError(400, "canceled");
+          }
+        } catch (e) {
+          release();
+          throw e;
+        }
+      },
     };
   };
   const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {

@@ -138,3 +138,34 @@ test("an adopted du job without a rescan reads nothing the first run already sto
   assert.ok(rescan.result.read > 0);
   await a.close();
 });
+
+test("a size walk waits for an overlapping walk of another process on the same store, then runs", async () => {
+  const root = path.join(tmp, "xpod");
+  fs.mkdirSync(path.join(root, "big/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "big/sub/f"), "x");
+  const jobsFile = path.join(tmp, "xpod.db");
+  const fsp = (await import("node:fs/promises")).default;
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+    if (String(p) === path.join(root, "big")) await sleep(700);
+    return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
+  };
+  const mk = () => createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_JOBS_FILE: jobsFile } as never));
+  const old = { app: mk() }, fresh = { app: mk() }; // two processes (an old and a new pod) on one job store
+  try {
+    const big = (await (await post(old, "/api/jobs/size", { path: "/big" })).json()) as Job;
+    await sleep(150);
+    const sub = (await (await post(fresh, "/api/jobs/size", { path: "/big/sub" })).json()) as Job;
+    await sleep(150);
+    const mid = (await (await fresh.app.request(`/api/jobs/${sub.id}`)).json()) as Job;
+    assert.equal(mid.state, "queued", "the descendant walk waits for the other process");
+    const b = (await done(old, big.id)) as Job & { finishedAt: number };
+    const s = (await done(fresh, sub.id)) as Job & { startedAt: number };
+    assert.ok(s.state === "done" && b.state === "done");
+    assert.ok(s.startedAt >= b.finishedAt, "walks overlapped");
+  } finally {
+    (fsp as { readdir: unknown }).readdir = orig;
+    await (old.app as unknown as { close(): Promise<void> }).close();
+    await (fresh.app as unknown as { close(): Promise<void> }).close();
+  }
+});
