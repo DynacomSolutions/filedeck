@@ -93,3 +93,19 @@ ETA: 2026-10-21 09:00 ICT
 | FD-52 | Interrupted size, du, perms and password-free compress jobs re-run under the same id after a restart; extract and passworded compress fail clearly; secrets never stored | done | | | 8.FD-51 | 2026-10-21 07:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/101 |
 | FD-53 | Hub bulk operations persist and resume after a hub restart; the in-flight copy or move item is marked failed, never retried blindly | done | | | 8.FD-50 | 2026-10-21 08:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/102 |
 | FD-54 | Release so epic 8 deploys | done | | | 8.FD-49, 8.FD-52, 8.FD-53 | 2026-10-21 09:00 ICT | Release run 39505147773 succeeded; the hub and all agents run 0.3.22 and their job stores are in place. |
+
+## 9. Job rows and size cache
+ETA: 2026-10-21 16:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| FD-55 | Job rows: one subject line with ellipsis and full-text popover, then a pills line with the server and a coloured status pill | in_review | | job-rows |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105 |
+| FD-56 | Job cancel is an X button at the top right of the row | in_review | | job-rows |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105 |
+| FD-57 | Up to two detail lines under the progress bar, one line each with ellipsis and a popover with the rest | in_review | | job-rows |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105 |
+| FD-58 | Size job detail lines: size, entries and ETA; then the folder being read | in_review | | job-rows |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105 |
+| FD-59 | No conflicting size jobs: a second request for the same path joins the live job, overlapping paths never walk together | in_review | | job-rows |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105 |
+| FD-60 | Sizes are cached indefinitely: Calculate size uses the cache by default with a separate Rescan, watched folders are trusted without the revalidate TTL, unwatched folders revalidate after it, and a job adopted after a restart reuses what was already stored | in_review | | job-rows |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105, rescan resume being added |
+| FD-61 | The root mount shows twice under a node ("/" and "/ (root)") in the sidebar tree | in_review | | root-dup |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/106 |
+| FD-62 | Two du requests for the same path join one job instead of queuing a second walk | todo | |  | 9.FD-59 | 2026-10-21 15:00 ICT | Gap found in PR 105. |
+| FD-63 | Size scan progress stalls for minutes at a time on a large tree (seen on /usr, before and after a restart) | todo | |  |  | 2026-10-21 15:30 ICT | Found in the 8.FD-54 live restart test. |
+| FD-64 | The CLI size wait gives up after its own 900 s limit while the job is still running; it should keep following a live job | todo | |  |  | 2026-10-21 15:00 ICT | Found in the 8.FD-54 live restart test. |
+| FD-65 | Release v0.3.23 so epic 9 deploys | todo | |  | 9.FD-55, 9.FD-56, 9.FD-57, 9.FD-58, 9.FD-59, 9.FD-60, 9.FD-61, 9.FD-62, 9.FD-63, 9.FD-64 | 2026-10-21 16:00 ICT |  |

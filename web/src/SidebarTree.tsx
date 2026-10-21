@@ -188,22 +188,26 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
       if (n.online && m?.status === "ready") t.usage = serverUsage(m.mounts) ?? undefined;
       t.auto = current?.node === n.name;
       if (!n.online || !openNow(t)) return t;
-      const kids: TNode[] = [dirNode(id, n.name, "/", { name: "/ (root)" } as Entry), { id: `${id}:trash`, kind: "trash", label: "Trash", icon: <Trash2 />, node: n.name, expandable: false, defaultOpen: false }];
-      if (m?.status === "ready")
-        for (const x of m.mounts) {
-          const mt = dirNode(id + ":m", n.name, x.mountpoint, { name: x.mountpoint } as Entry);
-          mt.kind = "mount";
-          mt.icon = <HardDrive />;
-          mt.tip = `${x.device} (${x.fstype})${x.network ? " - network drive" : ""}${x.unreachable ? " - not responding" : ""}${x.readOnly ? " - read-only" : ""}`;
-          mt.extra = (
-            <>
-              {x.network && <span className={"net-badge" + (x.unreachable ? " bad" : "")}>{x.netKind ?? "network"}</span>}
-              {x.readOnly && <span className="net-badge">read-only</span>}
-            </>
-          );
-          if (x.total > 0) mt.usage = { used: x.used, total: x.total };
-          kids.push(mt);
-        }
+      const asMount = (mt: TNode, x: Mount): TNode => {
+        mt.kind = "mount";
+        mt.icon = <HardDrive />;
+        mt.tip = `${x.device} (${x.fstype})${x.network ? " - network drive" : ""}${x.unreachable ? " - not responding" : ""}${x.readOnly ? " - read-only" : ""}`;
+        mt.extra = (
+          <>
+            {x.network && <span className={"net-badge" + (x.unreachable ? " bad" : "")}>{x.netKind ?? "network"}</span>}
+            {x.readOnly && <span className="net-badge">read-only</span>}
+          </>
+        );
+        if (x.total > 0) mt.usage = { used: x.used, total: x.total };
+        return mt;
+      };
+      const ms = m?.status === "ready" ? m.mounts : [];
+      // The root filesystem is the "/ (root)" row itself, not a second row.
+      const rootRow = dirNode(id, n.name, "/", { name: "/ (root)" } as Entry);
+      const rootMount = ms.find((x) => x.mountpoint === "/");
+      if (rootMount) asMount(rootRow, rootMount);
+      const kids: TNode[] = [rootRow, { id: `${id}:trash`, kind: "trash", label: "Trash", icon: <Trash2 />, node: n.name, expandable: false, defaultOpen: false }];
+      for (const x of ms) if (x !== rootMount) kids.push(asMount(dirNode(id + ":m", n.name, x.mountpoint, { name: x.mountpoint } as Entry), x));
       t.children = kids;
       t.load = "mounts";
       if (!m || m.status === "loading") t.note = { kind: "loading", text: "Reading mounts..." };

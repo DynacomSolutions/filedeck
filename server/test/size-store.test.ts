@@ -1225,4 +1225,28 @@ test("an interrupted rescan keeps the folders it read: the resumed one reads few
   const resumed = await s.scanRead("/resume", undefined, since);
   assert.ok(resumed.read < full.read, `resumed read ${resumed.read} of ${full.read}`);
   assert.deepEqual(resumed.res, full.res);
+
+test("a slow writer does not stop the walk while a chunk commits", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "slowwriter-"));
+  for (let i = 0; i < 30; i++) {
+    fs.mkdirSync(path.join(root, `d${i}`));
+    for (let j = 0; j < 3; j++) fs.writeFileSync(path.join(root, `d${i}`, `f${j}`), "x");
+  }
+  const st = new SizeStore(path.join(root, "..", `slow-${path.basename(root)}.db`), { root: tmp, ttlMs: 60_000, maxEntries: 100_000, commitChunk: 5 });
+  const ctl = { signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } };
+  const orig = (st as unknown as { send(m: unknown): Promise<void> }).send.bind(st);
+  let first: { before: number; after: number } | undefined;
+  (st as unknown as { send(m: unknown): Promise<void> }).send = async (m) => {
+    const mine = !first && (first = { before: ctl.progress.entries, after: 0 });
+    await sleep(500);
+    if (mine) first!.after = ctl.progress.entries;
+    return orig(m);
+  };
+  try {
+    const r = await st.scan("/" + path.basename(root), ctl, true);
+    assert.equal(r.dirs, 30);
+    assert.ok(first!.after > first!.before, `entries stood at ${first!.before} during the first commit`);
+  } finally {
+    st.close();
+  }
 });
