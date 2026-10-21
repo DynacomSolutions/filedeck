@@ -1217,6 +1217,7 @@ test("a folder under the change watcher is trusted past the TTL until it is mark
   await sleep(20);
   assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "unwatched: the TTL forces a re-read");
   s.covers = () => true;
+  await sleep(20);
   assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "rows older than the watcher keep the TTL rule");
   s.watchedSince = () => 0;
   await s.scan("/ttl-watched");
