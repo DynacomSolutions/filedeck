@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useUploads, pauseUpload, resumeUpload, cancelUpload, retryFailed, dismissUpload, type UpBatch } from "./uploads";
 import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type JobView, type NodeInfo, type OpJob } from "./api";
 import { Check, Circle, Loader, Minus, X } from "lucide-react";
@@ -18,19 +18,32 @@ function pct(j: JobView): number | null {
   return null;
 }
 
-const cut = (w: HTMLElement) => w.scrollWidth > w.clientWidth;
-/** One line with an ellipsis; the full text opens as a tooltip only when it is cut off. */
-const Ell = ({ text }: { text: string }) => (
-  <Tip fill label={text} when={cut}>
-    <span>{text}</span>
-  </Tip>
-);
+const cut = (w: HTMLElement) => w.scrollWidth > w.clientWidth || w.scrollHeight > w.clientHeight + 1;
+/** One line (or, with `wrap`, up to two) with an ellipsis; the full text opens as a tooltip only when it is cut off, and then the text takes focus so keyboard and touch reach it. */
+function Ell({ text }: { text: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [isCut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current?.parentElement;
+    if (!el) return;
+    const measure = () => setCut(cut(el));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text]);
+  return (
+    <Tip fill label={text} when={cut}>
+      <span ref={ref} tabIndex={isCut ? 0 : undefined}>{text}</span>
+    </Tip>
+  );
+}
 /** Top right of a row: cancel while live, dismiss once finished (uploads and failed rows keep their dismiss). */
 const Corner = ({ title, live, onCancel, onDismiss }: { title: string; live: boolean; onCancel: () => void; onDismiss: () => void }) =>
   live ? (
     <Tip label="Cancel"><button className="job-x" aria-label={`Cancel ${title}`} onClick={onCancel}><X /></button></Tip>
   ) : (
-    <Tip label="Dismiss"><button className="job-x" aria-label="Dismiss" onClick={onDismiss}><X /></button></Tip>
+    <Tip label="Dismiss"><button className="job-x" aria-label={`Dismiss ${title}`} onClick={onDismiss}><X /></button></Tip>
   );
 /** Subject line with the corner button, then the server and status pills (row actions sit at the right of the pills). */
 function Top({ title, server, pill, corner, children }: { title: string; server: string; pill: ReturnType<typeof statusPill>; corner: React.ReactNode; children?: React.ReactNode }) {
@@ -48,10 +61,10 @@ function Top({ title, server, pill, corner, children }: { title: string; server:
     </>
   );
 }
-const Lines = ({ lines }: { lines: string[] }) => (
+const Lines = ({ lines, wrap }: { lines: string[]; wrap?: boolean }) => (
   <>
     {lines.slice(0, 2).map((l, i) => (
-      <div key={i} className="muted job-detail"><Ell text={l} /></div>
+      <div key={i} className={"muted job-detail" + (wrap ? " wrap" : "")}><Ell text={l} /></div>
     ))}
   </>
 );
@@ -63,7 +76,7 @@ function JobRow({ node, job, stale, onChange }: { node: string; job: JobView; st
     <li className={"job " + job.state}>
       <Top title={job.title} server={node} pill={statusPill(job.state, { stale, who: "agent", pct: p })} corner={<Corner title={job.title} live={live(job)} onCancel={() => act(() => api.cancelJob(node, job.id))} onDismiss={() => act(() => api.dismissJob(node, job.id))} />} />
       {live(job) && (p === null ? <progress aria-label={job.title} /> : <progress aria-label={job.title} max={100} value={p} />)}
-      <Lines lines={jobLines(job, Date.now())} />
+      <Lines lines={jobLines(job, Date.now())} wrap={job.state === "failed"} />
     </li>
   );
 }
@@ -135,7 +148,7 @@ function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJo
           <label className="ck"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /><span className="ck-box" aria-hidden="true"><Ic.Check /></span><span>Apply to all remaining</span></label>
         </div>
       )}
-      <Lines lines={detailLines(job, eta, live)} />
+      <Lines lines={detailLines(job, eta, live)} wrap={job.state === "failed"} />
       <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}><Ic.List /> {expanded ? "Hide items" : `Items (${c.total})`}</button>
       {expanded && (
         <ul className="job-items" aria-label="Items">

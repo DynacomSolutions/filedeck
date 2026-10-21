@@ -157,7 +157,8 @@ input[type=checkbox]{accent-color:var(--accent)}
 .job-pill.red{border-color:color-mix(in srgb,var(--fd-bad) 45%,transparent);background:color-mix(in srgb,var(--fd-bad) 14%,transparent);color:var(--fd-bad)}
 .job-pill.muted{color:var(--muted);background:transparent}
 .job progress{width:100%;height:6px;accent-color:var(--accent);margin-top:.3rem}
-.job-detail{font-size:.72rem;margin-top:.2rem}
+.job-detail{font-size:.72rem;margin-top:.2rem}.job-detail span:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.job-detail.wrap .tip--fill{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 
 /* dialogs */
 .modal-back{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:60}
