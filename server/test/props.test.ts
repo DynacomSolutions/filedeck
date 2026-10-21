@@ -75,6 +75,23 @@ test("folder size job counts files, folders, links, skips the trash store and ne
   assert.ok((j.result!.diskBytes as number) >= 0);
 });
 
+test("two size requests for one path share one job and one walk", async () => {
+  const [a, b] = await Promise.all([post("/api/jobs/size", { path: "/tree/sub" }), post("/api/jobs/size", { path: "/tree/sub" })]);
+  const [ja, jb] = [(await a.json()) as Job, (await b.json()) as Job];
+  assert.equal(ja.id, jb.id);
+  assert.equal(((await (await app.request("/api/jobs")).json()) as { jobs: (Job & { kind: string })[] }).jobs.filter((j) => j.kind === "size" && j.id === ja.id).length, 1);
+  assert.equal((await finish(await post("/api/jobs/size", { path: "/tree/sub" }))).state, "done");
+});
+
+test("a size job starts with the previous scan as its expected total", async () => {
+  const first = await finish(await post("/api/jobs/size", { path: "/tree" }));
+  const r = first.result as Record<string, number>;
+  const sum = r.files! + r.dirs! + r.symlinks! + r.other!;
+  const again = (await finish(await post("/api/jobs/size", { path: "/tree" }))) as Job & { progress: { totalEntries: number; totalBytes: number } };
+  assert.equal(again.progress.totalEntries, sum);
+  assert.equal(again.progress.totalBytes, r.bytes);
+});
+
 test("folder size job is not cut short by the entry cap", async () => {
   const small = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_WALK_MAX_ENTRIES: "3" } as never));
   const r = await small.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/tree" }) });
@@ -128,4 +145,15 @@ test("recursive chmod is a job, scoped, and does not follow links or touch the t
   assert.equal(modeOf("tree/sub/b.txt"), 0o600, "dirs scope leaves files alone");
   assert.equal(modeOf("tree/.filedeck-trash/x/data"), 0o600);
   assert.equal(modeOf("tree/.filedeck-trash/x"), 0o700, "trash store folders untouched");
+});
+
+test("two du requests for one path, even with other options, join one job and one walk", async () => {
+  const dedupe = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+  const get = (q: string) => dedupe.request(`/api/du?path=/tree/sub&${q}`);
+  const [a, b] = await Promise.all([get("depth=0"), get("depth=1")]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  assert.equal(((await (await dedupe.request("/api/jobs")).json()) as { jobs: unknown[] }).jobs.length, 1, "one walk");
+  assert.ok(((await b.json()) as { entries: unknown[] }).entries.length > 1);
+  await (dedupe as unknown as { close(): Promise<void> }).close();
 });

@@ -44,7 +44,7 @@ export interface JobCtl {
 }
 
 /** What an adopted job needs to run again; built from the stored allowlisted params. */
-export type Rebuild = (params: unknown) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal) => Promise<void> }>;
+export type Rebuild = (params: unknown) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void> }>;
 
 /** Shared store: `scope` names this process's jobs, `rebuild` restarts adopted kinds (others fail), the lease is how long a silent owner keeps its jobs. */
 export interface JobsStore {
@@ -100,7 +100,7 @@ export class Jobs {
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number }): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number }): JobView {
     const job: Job = {
       id: meta?.id ?? randomUUID(),
       params: meta?.params === undefined ? null : JSON.stringify(meta.params),
@@ -117,7 +117,7 @@ export class Jobs {
     this.save(job);
     if (gate) {
       job.gated = true;
-      gate(job.abort.signal)
+      gate(job.abort.signal, { id: job.id, createdAt: job.createdAt })
         .then(
           () => void (job.gated = false),
           (e) => {
@@ -153,6 +153,38 @@ export class Jobs {
     const own = [...this.jobs.values()].map((j) => this.view(j));
     const other = (this.shared?.store.list(this.shared.scope) ?? []).filter((r) => !this.jobs.has(r.id)).map(rowView);
     return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /** A queued or running job of `kind` whose params match: this process's own, or one only the shared store knows (another pod during a rollout). */
+  findLive(kind: string, match: (params: any) => boolean): JobView | undefined {
+    const ok = (s: string | null | undefined) => {
+      try {
+        return !!s && match(JSON.parse(s));
+      } catch {
+        return false;
+      }
+    };
+    for (const j of this.jobs.values()) if (j.kind === kind && live(j.state) && ok(j.params)) return this.view(j);
+    const r = this.shared?.store.list(this.shared.scope).find((x) => x.kind === kind && live(x.state) && !this.jobs.has(x.id) && ok(x.params));
+    return r && rowView(r);
+  }
+
+  /**
+   * True while another process holds a live job of `kinds` with matching params that runs now or was created before `self`
+   * (the one created first goes first, so two processes never wait for each other). Rollout guard: a lock is per process.
+   */
+  foreignAhead(kinds: string[], self: { id: string; createdAt: number }, match: (params: any) => boolean): boolean {
+    const sh = this.shared;
+    if (!sh) return false;
+    return sh.store.list(sh.scope).some((r) => {
+      if (!kinds.includes(r.kind) || !live(r.state) || r.owner === this.me || this.jobs.has(r.id)) return false;
+      try {
+        if (!r.params || !match(JSON.parse(r.params))) return false;
+      } catch {
+        return false;
+      }
+      return r.state === "running" || r.created_at < self.createdAt || (r.created_at === self.createdAt && r.id < self.id);
+    });
   }
 
   get(id: string): JobView | undefined {

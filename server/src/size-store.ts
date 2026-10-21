@@ -505,7 +505,7 @@ export class SizeStore {
    * A walk that fails after rows were written marks the subtree stale so the next scan re-reads it (parents above would
    * otherwise keep totals from before).
    */
-  private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; force?: boolean; trust?: boolean }): Promise<Walk> {
+  private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** a rescan resumed: rows written at or after this time are kept */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
     this.reopen();
     const dev = Number(st.dev);
     const now = Date.now();
@@ -737,7 +737,7 @@ export class SizeStore {
       const s = t.s;
       const ino = Number(s.ino);
       const [stored, storedKids] = this.getWithKids(t.virtual);
-      let reusable = !mode.fresh && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && now - stored.scanned_at < this.o.ttlMs && storedKids === stored.own.dirs - stored.own.mounts;
+      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && (now - stored.scanned_at < this.o.ttlMs || (stored.scanned_at >= this.watchedSince() && this.covers(t.virtual))) && storedKids === stored.own.dirs - stored.own.mounts;
       let first: { page: Row[]; ks: (Stats | null)[]; complete: boolean } | undefined;
       if (reusable) {
         // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
@@ -821,7 +821,8 @@ export class SizeStore {
       }
     } catch (e) {
       await drain();
-      if (written) await this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]);
+      // A resumable rescan keeps the folders it finished (rows stamped since it began are final); everything older is marked stale.
+      if (written) await this.write("UPDATE sizes SET scanned_at = 0 WHERE (path = ? OR (path > ? AND path < ?)) AND scanned_at < ?", [virtual, ...below(virtual), mode.since ?? Infinity]);
       throw e;
     } finally {
       for (const f of frames) await f.close();
@@ -875,6 +876,8 @@ export class SizeStore {
 
   /** Set by the agent when a change watcher is running: true when it keeps the stored sizes of `virtual` current. */
   covers: (virtual: string) => boolean = () => false;
+  /** Rows older than this were not watched all their life (the watcher started later): they keep the TTL rule. */
+  watchedSince: () => number = () => Infinity;
 
   /** false once the database is unusable: nothing is cached any more */
   get persistent(): boolean {
@@ -896,7 +899,7 @@ export class SizeStore {
    * `release` is a lock from `lock(virtual)` the caller already holds; it is released when the scan ends.
    * `after` runs once the scan is stored, still under the lock, so it never sees a half-written scan.
    */
-  async scanRead<T = undefined>(virtual: string, ctl: JobCtl = noCtl(), fresh = false, release?: () => void, after?: () => Promise<T>): Promise<{ res: SizeResult; read: number; extra?: T }> {
+  async scanRead<T = undefined>(virtual: string, ctl: JobCtl = noCtl(), fresh: boolean | number = false, release?: () => void, after?: () => Promise<T>): Promise<{ res: SizeResult; read: number; extra?: T }> {
     release ??= await this.lock(resolveRead(this.o.root, virtual).virtual);
     try {
       const r = resolveRead(this.o.root, virtual);
@@ -912,7 +915,13 @@ export class SizeStore {
       }
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0 };
       await this.tail;
-      const w = await this.walk(r.virtual, r.real, st, ctl, { fresh });
+      // The previous scan is the expected total (progress and ETA); read before the walk replaces it.
+      const prev = this.get(r.virtual);
+      if (prev && !ctl.progress.totalEntries) {
+        ctl.progress.totalEntries = prev.tot.files + prev.tot.dirs + prev.tot.symlinks + prev.tot.other;
+        ctl.progress.totalBytes = prev.tot.bytes;
+      }
+      const w = await this.walk(r.virtual, r.real, st, ctl, { fresh: !!fresh, since: typeof fresh === "number" ? fresh : undefined });
       return { res: this.result(w.root), read: w.read, ...(after ? { extra: await after() } : {}) };
     } finally {
       release();

@@ -279,7 +279,7 @@ test("du sees a change deep in the tree at once (no stale shortcut)", async () =
   // in place edit: no folder mtime changes, so only the exact size job sees it
   fs.appendFileSync(at("d1/sub/deep/f"), "22");
   const size = async () => {
-    let j = (await (await app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/d1" }) })).json()) as { id: string; state: string; result?: { bytes: number } };
+    let j = (await (await app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/d1", fresh: true }) })).json()) as { id: string; state: string; result?: { bytes: number } };
     for (let i = 0; i < 200 && (j.state === "queued" || j.state === "running"); i++) {
       await sleep(20);
       j = (await (await app.request(`/api/jobs/${j.id}`)).json()) as typeof j;
@@ -543,7 +543,7 @@ test("the tree for an answer is built under the scan's lock", async () => {
 
 test("scans: requests do not wait for overlapping scans, a vanished start folder cannot deadlock, cancel works while waiting", async () => {
   const root = fs.mkdtempSync(path.join(tmp, "dl-"));
-  for (const d of ["big/sub", "q1", "q2", "p/x", "p/w", "p/z"]) fs.mkdirSync(path.join(root, d), { recursive: true });
+  for (const d of ["big/sub", "big/sub2", "q1", "q2", "p/x", "p/w", "p/z"]) fs.mkdirSync(path.join(root, d), { recursive: true });
   const slow = new Set([path.join(root, "big"), path.join(root, "q1"), path.join(root, "q2")]);
   const orig = fsp.readdir;
   (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
@@ -573,7 +573,7 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
     assert.equal(r.status, 202);
     assert.ok(Date.now() - t < 400, "GET du waited for the lock");
     // a waiting job can be canceled, and it does not block the one after it
-    const doomed = await post("/big/sub");
+    const doomed = await post("/big/sub2");
     await app.request(`/api/jobs/${doomed.id}/cancel`, { method: "POST" });
     assert.equal(await settle(doomed.id), "canceled");
     assert.equal(await settle(big.id), "done");
@@ -1185,6 +1185,50 @@ test("limiter runs at most n tasks at once and runs them all", async () => {
   assert.equal(lim.queued, 0);
 });
 
+test("a folder under the change watcher is trusted past the TTL until it is marked stale", async () => {
+  const d = at("ttl-watched");
+  fs.mkdirSync(path.join(d, "a/b"), { recursive: true });
+  fs.writeFileSync(path.join(d, "a/b/f"), "x");
+  const s = mk(1);
+  await s.scan("/ttl-watched");
+  await sleep(20);
+  assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "unwatched: the TTL forces a re-read");
+  s.covers = () => true;
+  assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "rows older than the watcher keep the TTL rule");
+  s.watchedSince = () => 0;
+  await s.scan("/ttl-watched");
+  await sleep(20);
+  assert.equal(await countReaddir(() => s.scan("/ttl-watched")), 0, "watched: no re-read");
+  s.markStale("/ttl-watched");
+  await sleep(20);
+  assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "marked stale: re-read");
+});
+
+test("an interrupted rescan keeps the folders it read: the resumed one reads fewer and ends with the same totals", async () => {
+  const d = at("resume");
+  for (let i = 0; i < 12; i++) {
+    fs.mkdirSync(path.join(d, `d${String(i).padStart(2, "0")}`), { recursive: true });
+    fs.writeFileSync(path.join(d, `d${String(i).padStart(2, "0")}/f`), "x".repeat(i + 1));
+  }
+  const s = mk(60_000, 100_000, 1);
+  const full = await s.scanRead("/resume", undefined, true);
+  await sleep(5);
+  const since = Date.now();
+  // abort the rescan after 10 directory reads
+  const ac = new AbortController();
+  const orig = fsp.readdir;
+  let n = 0;
+  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (++n === 8 && ac.abort(), (orig as (...x: unknown[]) => unknown)(...a));
+  try {
+    await assert.rejects(s.scanRead("/resume", { signal: ac.signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } }, since));
+  } finally {
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
+  const resumed = await s.scanRead("/resume", undefined, since);
+  assert.ok(resumed.read < full.read, `resumed read ${resumed.read} of ${full.read}`);
+  assert.deepEqual(resumed.res, full.res);
+});
+
 test("a slow writer does not stop the walk while a chunk commits", async () => {
   const root = fs.mkdtempSync(path.join(tmp, "slowwriter-"));
   for (let i = 0; i < 30; i++) {
@@ -1208,4 +1252,39 @@ test("a slow writer does not stop the walk while a chunk commits", async () => {
   } finally {
     st.close();
   }
+});
+
+test("a joined du request does not wait for a later walk that holds the lock", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "dujoin-"));
+  fs.mkdirSync(path.join(root, "big/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "big/sub/f"), "x");
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+    if (String(p) === path.join(root, "big")) await sleep(600);
+    return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
+  };
+  try {
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "150" } as never));
+    const post = (p: string, fresh = false) => app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: p, fresh }) });
+    await post("/big/sub");
+    await post("/big", true); // queued behind the first, holds the lock next
+    const t = Date.now();
+    const r = await app.request("/api/du?path=/big/sub&depth=0");
+    assert.ok(Date.now() - t < 450, "GET du waited for the lock");
+    assert.ok(r.status === 200 || r.status === 202);
+  } finally {
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
+});
+
+test("a rescan does not join a cached size job", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "rescan-join-"));
+  fs.mkdirSync(path.join(root, "d"), { recursive: true });
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never));
+  const post = async (fresh: boolean) => ((await (await app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/d", fresh }) })).json()) as { id: string }).id;
+  const a = await post(false);
+  assert.equal(await post(false), a, "a cached request joins");
+  const b = await post(true);
+  assert.notEqual(b, a, "a rescan queues its own job");
+  assert.equal(await post(true), b, "a second rescan joins the rescan");
 });

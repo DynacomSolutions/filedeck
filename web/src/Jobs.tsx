@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useUploads, pauseUpload, resumeUpload, cancelUpload, retryFailed, dismissUpload, type UpBatch } from "./uploads";
 import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type JobView, type NodeInfo, type OpJob } from "./api";
 import { Check, Circle, Loader, Minus, X } from "lucide-react";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 import { gaveUp } from "./jobPoll";
+import { etaText, jobLines, statusPill } from "./jobRow";
 import { HISTORY_KEY, IDLE_COLLAPSE_MS, addToHistory, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
 
 const COLLAPSE_KEY = "filedeck-jobs-collapsed";
@@ -17,77 +18,90 @@ function pct(j: JobView): number | null {
   return null;
 }
 
+const cut = (w: HTMLElement) => w.scrollWidth > w.clientWidth || w.scrollHeight > w.clientHeight + 1;
+/** One line (or, with `wrap`, up to two) with an ellipsis; the full text opens as a tooltip only when it is cut off, and then the text takes focus so keyboard and touch reach it. */
+function Ell({ text }: { text: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [isCut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current?.parentElement;
+    if (!el) return;
+    const measure = () => setCut(cut(el));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text]);
+  return (
+    <Tip fill label={text} when={cut}>
+      <span ref={ref} tabIndex={isCut ? 0 : undefined}>{text}</span>
+    </Tip>
+  );
+}
+/** Top right of a row: cancel while live, dismiss once finished (uploads and failed rows keep their dismiss). */
+const Corner = ({ title, live, onCancel, onDismiss }: { title: string; live: boolean; onCancel: () => void; onDismiss: () => void }) =>
+  live ? (
+    <Tip label="Cancel"><button className="job-x" aria-label={`Cancel ${title}`} onClick={onCancel}><X /></button></Tip>
+  ) : (
+    <Tip label="Dismiss"><button className="job-x" aria-label={`Dismiss ${title}`} onClick={onDismiss}><X /></button></Tip>
+  );
+/** Subject line with the corner button, then the server and status pills (row actions sit at the right of the pills). */
+function Top({ title, server, pill, corner, children }: { title: string; server: string; pill: ReturnType<typeof statusPill>; corner: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <>
+      <div className="job-head">
+        <b className="job-title"><Ell text={title} /></b>
+        {corner}
+      </div>
+      <div className="job-pills">
+        <span className="job-pill">{server}</span>
+        <span className={"job-pill " + pill.tone}>{pill.label}</span>
+        {children && <span className="job-acts">{children}</span>}
+      </div>
+    </>
+  );
+}
+const Lines = ({ lines, wrap }: { lines: string[]; wrap?: boolean }) => (
+  <>
+    {lines.slice(0, 2).map((l, i) => (
+      <div key={i} className={"muted job-detail" + (wrap ? " wrap" : "")}><Ell text={l} /></div>
+    ))}
+  </>
+);
+
 function JobRow({ node, job, stale, onChange }: { node: string; job: JobView; stale: boolean; onChange: () => void }) {
   const p = pct(job);
   const act = (fn: () => Promise<unknown>) => void fn().catch(() => undefined).finally(onChange);
-  const skipped = job.result?.skipped;
-  const skippedN = skipped ? skipped.symlinks + skipped.hardlinks + skipped.special : 0;
   return (
     <li className={"job " + job.state}>
-      <div className="job-line">
-        <b>{job.title}</b>
-        <span className="muted"> on {node}</span>
-        <span className="job-state">
-          {stale && live(job) && " waiting for the agent"}
-          {!stale && job.state === "running" && (p === null ? " running" : ` ${p}%`)}
-          {!stale && job.state === "queued" && " queued"}
-          {job.state === "done" && " done"}
-          {job.state === "canceled" && " canceled"}
-          {job.state === "failed" && " failed"}
-        </span>
-        {live(job) ? (
-          <button onClick={() => act(() => api.cancelJob(node, job.id))}><Ic.X /> Cancel</button>
-        ) : (
-          <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => act(() => api.dismissJob(node, job.id))}><X /></button></Tip>
-        )}
-      </div>
-      {live(job) && (
-        <>
-          {p === null ? <progress aria-label={job.title} /> : <progress aria-label={job.title} max={100} value={p} />}
-          <div className="muted job-detail">
-            {fmtSize(job.progress.bytes)}
-            {job.progress.totalBytes > 0 && ` / ${fmtSize(job.progress.totalBytes)}`} · {job.progress.entries}
-            {job.progress.totalEntries > 0 && ` / ${job.progress.totalEntries}`} entries
-            {job.progress.current && ` · ${job.progress.current}`}
-          </div>
-        </>
-      )}
-      {job.state === "failed" && <div className="fp-err">{job.error}</div>}
-      {job.state === "done" && job.result?.path && (
-        <div className="muted job-detail">
-          {job.result.path}
-          {skippedN > 0 && ` · ${skippedN} link/special entr${skippedN === 1 ? "y" : "ies"} skipped for safety`}
-        </div>
-      )}
+      <Top title={job.title} server={node} pill={statusPill(job.state, { stale, who: "agent", pct: p })} corner={<Corner title={job.title} live={live(job)} onCancel={() => act(() => api.cancelJob(node, job.id))} onDismiss={() => act(() => api.dismissJob(node, job.id))} />} />
+      {live(job) && (p === null ? <progress aria-label={job.title} /> : <progress aria-label={job.title} max={100} value={p} />)}
+      <Lines lines={jobLines(job, Date.now())} wrap={job.state === "failed"} />
     </li>
   );
 }
 
-const fmtEta = (sec: number) => (sec < 90 ? `${Math.ceil(sec)}s` : sec < 5400 ? `${Math.round(sec / 60)} min` : `${(sec / 3600).toFixed(1)} h`);
 const opPct = (j: OpJob): number | null => {
   const p = j.progress;
   if (p.totalBytes > 0) return Math.min(100, Math.round((p.bytes / p.totalBytes) * 100));
   if (p.totalEntries > 0) return Math.min(100, Math.round((p.entries / p.totalEntries) * 100));
   return null;
 };
-const STATE_LABEL: Record<string, string> = { queued: "queued", paused: "paused", waiting: "waiting for you", done: "done", failed: "failed", canceled: "canceled" };
 
-function detailLine(job: OpJob, eta: number | null, live: boolean): string {
+function detailLines(job: OpJob, eta: number | null, live: boolean): string[] {
   const p = job.progress;
-  if (job.state === "queued") return "waiting for a free slot";
-  if (p.current === "scanning") return "scanning...";
+  if (job.state === "queued") return ["waiting for a free slot"];
+  if (p.current === "scanning") return ["scanning..."];
   const unit = job.op === "copy" || job.op === "move" ? "files" : job.op === "sync" ? "steps" : "items";
   const parts: string[] = [];
-  if (p.totalBytes > 0 || p.bytes > 0) parts.push(`${fmtSize(p.bytes)}${p.totalBytes > 0 ? ` / ${fmtSize(p.totalBytes)}` : ""}`);
+  if (p.totalBytes > 0 || p.bytes > 0) parts.push(`${fmtSize(p.bytes)}${p.totalBytes > 0 ? ` of ${fmtSize(p.totalBytes)}` : ""}`);
   if (job.state === "running" && job.speed > 0) parts.push(`${fmtSize(job.speed)}/s`);
-  if (eta !== null) parts.push(`${fmtEta(eta)} left`);
-  if (p.totalEntries > 0) parts.push(`${p.entries} / ${p.totalEntries} ${unit}`);
-  if (live && p.current) parts.push(p.current);
-  if (!live) {
-    const c = job.counts;
-    parts.push(`${c.done} done${c.skipped ? `, ${c.skipped} skipped` : ""}${c.failed ? `, ${c.failed} failed` : ""}`);
-  }
-  return parts.join(" · ");
+  if (eta !== null) parts.push(etaText(eta));
+  if (p.totalEntries > 0) parts.push(`${p.entries.toLocaleString()} of ${p.totalEntries.toLocaleString()} ${unit}`);
+  const c = job.counts;
+  const tally = `${c.done} done${c.skipped ? `, ${c.skipped} skipped` : ""}${c.failed ? `, ${c.failed} failed` : ""}`;
+  if (job.state === "failed" && job.error) return [parts.join(", ") || tally, job.error].filter(Boolean);
+  return [parts.join(", "), live ? p.current : tally].filter(Boolean);
 }
 
 /** A hub-side bulk job: per-item progress, throughput, pause/cancel and the conflict question. */
@@ -104,9 +118,12 @@ function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJo
   const c = job.counts;
   return (
     <li className={"job op " + job.state} data-job-id={job.id}>
-      <div className="job-line">
-        <b className="job-title">{job.title}</b>
-        <span className="job-state">{stale && live ? " waiting for the hub" : job.state === "running" ? (p === null ? " running" : ` ${p}%`) : ` ${STATE_LABEL[job.state] ?? job.state}`}</span>
+      <Top
+        title={job.title}
+        server="hub"
+        pill={statusPill(job.state, { stale, who: "hub", pct: p })}
+        corner={<Corner title={job.title} live={live} onCancel={() => act(() => api.opAction(job.id, "cancel"))} onDismiss={() => act(() => api.dismissOp(job.id))} />}
+      >
         {live && job.state !== "waiting" && (
           job.state === "paused" ? (
             <button onClick={() => act(() => api.opAction(job.id, "resume"))}><Ic.Play /> Resume</button>
@@ -114,8 +131,7 @@ function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJo
             <button onClick={() => act(() => api.opAction(job.id, "pause"))}><Ic.Pause /> Pause</button>
           )
         )}
-        {live ? <button onClick={() => act(() => api.opAction(job.id, "cancel"))}><Ic.X /> Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => act(() => api.dismissOp(job.id))}><X /></button></Tip>}
-      </div>
+      </Top>
       {live && (p === null ? <progress aria-label={job.title} /> : <progress aria-label={job.title} max={100} value={p} />)}
       {live && job.conflict && (
         <div className="job-ask" role="group" aria-label="Name conflict">
@@ -132,8 +148,7 @@ function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJo
           <label className="ck"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /><span className="ck-box" aria-hidden="true"><Ic.Check /></span><span>Apply to all remaining</span></label>
         </div>
       )}
-      <div className="muted job-detail">{detailLine(job, eta, live)}</div>
-      {job.state === "failed" && job.error && <div className="fp-err">{job.error}</div>}
+      <Lines lines={detailLines(job, eta, live)} wrap={job.state === "failed"} />
       <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}><Ic.List /> {expanded ? "Hide items" : `Items (${c.total})`}</button>
       {expanded && (
         <ul className="job-items" aria-label="Items">
@@ -160,28 +175,25 @@ function UploadRow({ b, expanded, onToggle }: { b: UpBatch; expanded: boolean; o
   const done = b.files.filter((f) => f.state === "done").length;
   const failed = b.files.filter((f) => f.state === "failed").length;
   const eta = b.state === "running" && b.speed > 0 ? (b.totalBytes - sent) / b.speed : null;
-  const label = b.state === "running" ? ` ${p}%` : ` ${b.state}`;
   return (
     <li className={"job op upload " + b.state} data-job-id={b.id}>
-      <div className="job-line">
-        <b>{b.title}</b>
-        <span className="muted"> to {b.node}:{b.dir}</span>
-        <span className="job-state">{label}</span>
+      <Top
+        title={b.title}
+        server={b.node}
+        pill={statusPill(b.state, { pct: b.state === "running" ? p : null })}
+        corner={<Corner title={b.title} live={live} onCancel={() => cancelUpload(b.id)} onDismiss={() => dismissUpload(b.id)} />}
+      >
         {b.state === "running" && <button onClick={() => pauseUpload(b.id)}><Ic.Pause /> Pause</button>}
         {b.state === "paused" && <button onClick={() => resumeUpload(b.id)}><Ic.Play /> Resume</button>}
         {failed > 0 && !live && <button onClick={() => retryFailed(b.id)}><Ic.RotateCw /> Retry failed</button>}
-        {live ? <button onClick={() => cancelUpload(b.id)}><Ic.X /> Cancel</button> : <Tip label="Dismiss"><button aria-label="Dismiss" onClick={() => dismissUpload(b.id)}><X /></button></Tip>}
-      </div>
+      </Top>
       {live && <progress aria-label={b.title} max={100} value={p} />}
-      <div className="muted job-detail">
-        {[
-          `${fmtSize(sent)} / ${fmtSize(b.totalBytes)}`,
-          b.state === "running" && b.speed > 0 ? `${fmtSize(b.speed)}/s` : "",
-          eta !== null ? `${fmtEta(eta)} left` : "",
-          `${done} / ${b.files.length} files${b.dirs.length ? `, ${b.dirs.length} folders` : ""}`,
-          failed ? `${failed} failed` : "",
-        ].filter(Boolean).join(" · ")}
-      </div>
+      <Lines
+        lines={[
+          [`${fmtSize(sent)} of ${fmtSize(b.totalBytes)}`, b.state === "running" && b.speed > 0 ? `${fmtSize(b.speed)}/s` : "", eta !== null ? etaText(eta) : ""].filter(Boolean).join(", "),
+          [`${done} of ${b.files.length} files${b.dirs.length ? `, ${b.dirs.length} folders` : ""}`, failed ? `${failed} failed` : "", `to ${b.dir}`].filter(Boolean).join(", "),
+        ]}
+      />
       <button type="button" className="job-more" aria-expanded={expanded} onClick={onToggle}><Ic.List /> {expanded ? "Hide items" : `Items (${b.files.length})`}</button>
       {expanded && (
         <ul className="job-items" aria-label="Items">

@@ -47,6 +47,7 @@ export interface ChangeSink {
   clearPending?(): Promise<void>;
 }
 
+const MAXFS = 256;
 const FLUSH_MS = 250;
 const FLUSH_MAX = 2000;
 const DRAIN_BATCH = 256;
@@ -84,6 +85,8 @@ export class FanWatch {
   private warned = false;
   private marks: string[] = [];
   private unwatched: string[] = [];
+  /** when the helper reported #ready (every mark is in place); Infinity while it is not running or not ready */
+  private readyAt = Infinity;
   private settleMs: number;
   private modifyMs: number;
 
@@ -119,7 +122,10 @@ export class FanWatch {
       const mounts = all.filter((m) => !m.network && !m.unreachable);
       this.unwatched = all.filter((m) => m.network || m.unreachable).map((m) => m.mountpoint);
       const hostPaths = mounts.map((m) => (this.o.root === "/" ? m.mountpoint : this.o.root + (m.mountpoint === "/" ? "" : m.mountpoint)));
-      this.marks = mounts.map((m) => m.mountpoint);
+      // the helper marks at most MAXFS filesystems (server/native): the rest are not watched
+      this.marks = mounts.slice(0, MAXFS).map((m) => m.mountpoint);
+      this.unwatched.push(...mounts.slice(MAXFS).map((m) => m.mountpoint));
+      hostPaths.length = Math.min(hostPaths.length, MAXFS);
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
       if (!this.recovered && this.store.recentRuns) {
         // folders taken just before a stop or crash may not have been applied: re-read them on the next read
@@ -130,12 +136,14 @@ export class FanWatch {
       if (this.stopped) return;
       const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["ignore", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
       this.proc = p;
+      this.readyAt = Infinity;
       let err = "";
       p.stderr?.on("data", (d: Buffer) => (err = (err + d).slice(-500)));
       p.on("error", (e: Error) => this.warn(e.message));
       p.on("exit", (code: number | null, sig: string | null) => {
         if (this.proc !== p) return;
         this.proc = null;
+        this.readyAt = Infinity;
         if (this.stopped) return;
         // 2 = not permitted, 3 = not supported: retrying cannot help. Anything else may have lost events.
         if (code === 2 || code === 3 || !this.o.helper) return this.warn(err.trim() || `helper exited (${code})`);
@@ -175,11 +183,16 @@ export class FanWatch {
    * Overflow and exit mark the rows stale, so the next read re-scans them and is current again.
    */
   covers(virtual: string): boolean {
-    if (!this.proc) return false;
+    if (!this.proc || this.readyAt === Infinity) return false; // marks are not all in place yet
     const under = (dir: string, v: string) => dir === "/" || v === dir || v.startsWith(dir + "/");
     const home = (v: string, dirs: string[]) => dirs.filter((d) => under(d, v)).reduce((a, d) => Math.max(a, d.length), -1);
     if (home(virtual, this.marks) <= home(virtual, this.unwatched)) return false;
     return !this.unwatched.some((d) => d !== virtual && under(virtual, d));
+  }
+
+  /** Rows written before this time were not watched while they aged (the restart gap): the size store gives them the TTL rule, not the watcher's trust. */
+  watchedSince(): number {
+    return this.readyAt;
   }
 
   stop() {
@@ -191,13 +204,22 @@ export class FanWatch {
     this.mem.clear();
     this.proc?.kill();
     this.proc = null;
+    this.readyAt = Infinity;
   }
 
   /** One helper output line. */
   line(l: string) {
     if (l === "!overflow") return this.overflow();
-    if (l.startsWith("#ready")) this.backoff = 0;
-    if (l.startsWith("c ")) return void this.note(`cannot watch ${unescapeLine(l.slice(2))}, changes there are seen only by age and folder mtime`);
+    if (l.startsWith("#ready")) {
+      this.backoff = 0;
+      this.readyAt = Date.now();
+    }
+    if (l.startsWith("c ")) {
+      const host = unescapeLine(l.slice(2));
+      const v = mapPath(this.o.root, host);
+      if (v) this.unwatched.push(v); // the mark failed: stored sizes there are never trusted past the TTL
+      return void this.note(`cannot watch ${host}, changes there are seen only by age and folder mtime`);
+    }
     const kind = l[0];
     if ((kind !== "x" && kind !== "w" && kind !== "m") || l[1] !== " ") return;
     const v = mapPath(this.o.root, unescapeLine(l.slice(2)));

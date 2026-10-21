@@ -263,6 +263,9 @@ test("fanwatch.covers: true on a watched filesystem while the helper runs; false
   const s = setup();
   fs.mkdirSync(path.join(s.root, "net"));
   await s.w.start();
+  assert.equal(s.w.covers("/data/a/b"), false, "not before the helper is ready");
+  s.w.line("#ready 2");
+  assert.ok(Number.isFinite(s.w.watchedSince()));
   assert.equal(s.w.covers("/data/a/b"), true);
   assert.equal(s.w.covers("/other"), true);
   assert.equal(s.w.covers("/net"), false);
@@ -277,6 +280,18 @@ test("fanwatch.covers: true on a watched filesystem while the helper runs; false
   const off = new FanWatch({ applyChanged: async () => {}, markStale: () => {} }, { helper: "", root: "/", procMounts: "/proc/mounts" });
   await off.start();
   assert.equal(off.covers("/"), false);
+});
+
+test("fanwatch.covers: a path the helper could not mark is never covered", async () => {
+  const s = setup();
+  await s.w.start();
+  s.w.line("#ready 2");
+  s.w.line(`c ${s.root}/data/x`);
+  assert.equal(s.w.covers("/data/x"), false);
+  assert.equal(s.w.covers("/data/x/y"), false);
+  assert.equal(s.w.covers("/data/a/b"), true);
+  s.w.stop();
+  s.done();
 });
 
 test("fanwatch: without a usable store, past maxPending the burst acts like an overflow and later events schedule normally", async () => {

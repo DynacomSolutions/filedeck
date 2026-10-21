@@ -153,6 +153,7 @@ export interface JobView {
   error?: string;
   result?: { path?: string; size?: number; files?: number; skipped?: { symlinks: number; hardlinks: number; special: number } };
   createdAt: number;
+  startedAt?: number;
   /** queued compare jobs: what runs or waits ahead of this one */
   queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
 }
@@ -485,7 +486,7 @@ export const api = {
   opResolve: (id: string, action: "skip" | "overwrite" | "rename", all: boolean) => opReq(`/${id}/resolve`, "POST", { action, all }).then((r) => j<OpJob>(r)),
   dismissOp: (id: string) => opReq(`/${id}`, "DELETE").then((r) => j<unknown>(r)),
   props: (node: string, path: string) => fetch(`${nodeBase(node)}/api/fs/props?path=${enc(path)}`).then((r) => j<Props>(r)),
-  startSize: (node: string, path: string) => postJob(node, "size", { path }),
+  startSize: (node: string, path: string, fresh = false) => postJob(node, "size", { path, fresh }),
   job: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}`).then((r) => j<JobView>(r)),
   /** One entry changes at once (result); a recursive change starts a job (JobView with `id`). */
   perms: (node: string, b: PermsBody) =>
