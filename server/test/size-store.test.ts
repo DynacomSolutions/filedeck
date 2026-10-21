@@ -1340,3 +1340,33 @@ test("a slow store read does not block the event loop", async () => {
     s.close();
   }
 });
+
+test("tree of a folder with 300k children is cut at the budget and the read worker survives", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "oom-"));
+  const file = path.join(root, "sizes.db");
+  const o = { root, ttlMs: 1, maxEntries: 1000 };
+  await new SizeStore(file, o).close();
+  const db = new DatabaseSync(file);
+  const cols = (db.prepare("PRAGMA table_info(sizes)").all() as { name: string }[]).map((c) => c.name);
+  const ins = db.prepare(`INSERT INTO sizes (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`);
+  const row = (p: string, par: string) => cols.map((c) => (c === "path" ? p : c === "parent" ? par : 1));
+  db.exec("BEGIN");
+  ins.run(...row("/p", "/"));
+  for (let i = 0; i < 300_000; i++) ins.run(...row(`/p/some-longish-folder-name-${i}`, "/p"));
+  db.exec("COMMIT");
+  db.close();
+  const s = new SizeStore(file, o);
+  const quiet = console.error;
+  const logged: unknown[] = [];
+  console.error = (...a: unknown[]) => void logged.push(a);
+  try {
+    const t = await s.tree("/p", 1, false);
+    assert.equal(t.entries.length, 1000);
+    assert.equal(t.truncated, true);
+    assert.equal((await s.tree("/p", 0, false)).entries.length, 1, "the store is still up");
+    assert.deepEqual(logged, []);
+  } finally {
+    console.error = quiet;
+    await s.close();
+  }
+});

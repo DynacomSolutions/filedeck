@@ -139,6 +139,11 @@ function slowLog(what: string, ms: number, path: string) {
   lastSlowLog = Date.now();
   console.error(JSON.stringify({ slow: what, ms: Math.round(ms), path }));
 }
+const SQL = {
+  get: "SELECT * FROM sizes WHERE path = ?",
+  kidPage: "SELECT * FROM sizes WHERE parent = ? AND dev = ? AND path > ? ORDER BY path LIMIT ?",
+  getKids: "SELECT s.*, (SELECT COUNT(*) FROM sizes k WHERE k.parent = s.path AND k.dev = s.dev) AS kids FROM sizes s WHERE s.path = ?",
+};
 const noCtl = (): JobCtl => ({ signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } });
 const parentOf = (p: string) => (p === "/" ? "" : path.posix.dirname(p));
 /** Exclusive bounds of every path below `p` (the character after "/" is "0"). */
@@ -200,19 +205,14 @@ const commit = ({ items, last }) => {
     db.exec("COMMIT");
   } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
 };
-const reads = {
-  get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
-  kids: db.prepare("SELECT * FROM sizes WHERE parent = ? ORDER BY path"),
-  kidPage: db.prepare("SELECT * FROM sizes WHERE parent = ? AND dev = ? AND path > ? ORDER BY path LIMIT ?"),
-  getKids: db.prepare("SELECT s.*, (SELECT COUNT(*) FROM sizes k WHERE k.parent = s.path AND k.dev = s.dev) AS kids FROM sizes s WHERE s.path = ?"),
-};
+const prepared = new Map();
 const isBusy = (e) => !!e && (e.errcode === 5 || e.errcode === 6 || /database (table )?is locked/i.test(String(e.message)));
 const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 parentPort.on("message", (m) => {
   // a busy database (another connection holds a lock past busy_timeout) is retried a few times with backoff; every op rolls back on failure, so a retry is safe
   for (let attempt = 0; ; attempt++) {
     try {
-      if (m.op === "read") { if (readDelayMs) nap(readDelayMs); parentPort.postMessage({ id: m.id, rows: reads[m.q].all(...m.params) }); return; }
+      if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
       else if (m.op === "commit") commit(m);
       else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
       else db.prepare(m.sql).run(...m.params);
@@ -235,7 +235,7 @@ const PENDING_BATCH = 10_000;
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
   private db: DatabaseSync | null = null;
-  private q!: Record<"get" | "put" | "kids" | "kidPage" | "getKids" | "touch" | "delTree", StatementSync>;
+  private q!: Record<"get" | "put" | "kidPage" | "getKids" | "touch" | "delTree", StatementSync>;
   /** deepest frame stack of the latest walk (tests: memory follows depth, not width) */
   lastWalkFrames = 0;
   private held: { path: string; done: Promise<void> }[] = [];
@@ -300,11 +300,10 @@ export class SizeStore {
       // a clock stepped back can only make a stale child look current until its next re-read, never purge a live one.
       this.stamp = Math.max(this.stamp, Date.now());
       this.q = {
-        get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
+        get: db.prepare(SQL.get),
         put: db.prepare(`INSERT OR REPLACE INTO sizes (${COLS.join(",")}) VALUES (${COLS.map(() => "?").join(",")})`),
-        kids: db.prepare("SELECT * FROM sizes WHERE parent = ? ORDER BY path"),
-        kidPage: db.prepare("SELECT * FROM sizes WHERE parent = ? AND dev = ? AND path > ? ORDER BY path LIMIT ?"),
-        getKids: db.prepare("SELECT s.*, (SELECT COUNT(*) FROM sizes k WHERE k.parent = s.path AND k.dev = s.dev) AS kids FROM sizes s WHERE s.path = ?"),
+        kidPage: db.prepare(SQL.kidPage),
+        getKids: db.prepare(SQL.getKids),
         touch: db.prepare("UPDATE sizes SET seen_at = ? WHERE path = ?"),
         delTree: db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)"),
       };
@@ -469,11 +468,11 @@ export class SizeStore {
    * One read statement: on the read worker for a file-backed store (the main thread never waits for the disk; the request is queued after
    * every commit acknowledged so far, so it sees them), else inline. A busy database answers `dflt`, any other failure gives the store up.
    */
-  private async read(q: "get" | "kids" | "kidPage" | "getKids", params: (string | number)[], dflt: Record<string, unknown>[] | null): Promise<Record<string, unknown>[] | null> {
+  private async read(q: string, sql: string, params: (string | number)[], dflt: Record<string, unknown>[] | null): Promise<Record<string, unknown>[] | null> {
     if (!this.db) return dflt;
     const t0 = performance.now();
     try {
-      return this.file === ":memory:" ? this.inline(q, params) : ((await this.post({ op: "read", q, params }, true)) ?? []);
+      return this.file === ":memory:" ? this.inline(q, sql, params) : ((await this.post({ op: "read", sql, params }, true)) ?? []);
     } catch (e) {
       this.failed(e);
       return dflt;
@@ -482,12 +481,13 @@ export class SizeStore {
     }
   }
   /** The in-memory store reads on the main thread (no file, no disk wait). */
-  private inline(q: "get" | "kids" | "kidPage" | "getKids", params: (string | number)[]): Record<string, unknown>[] {
+  private inline(q: string, sql: string, params: (string | number)[]): Record<string, unknown>[] {
+    const st = (this.q as Record<string, StatementSync | undefined>)[q] ?? this.db!.prepare(sql);
     if (q === "get" || q === "getKids") {
-      const r = this.q[q].get(...params);
+      const r = st.get(...params);
       return r ? [r] : [];
     }
-    return this.q[q].all(...params) as Record<string, unknown>[];
+    return st.all(...params) as Record<string, unknown>[];
   }
   /** Same as `get` for the in-memory store only (inside a synchronous transaction). */
   private getInline(p: string): Row | undefined {
@@ -497,26 +497,39 @@ export class SizeStore {
     }, undefined);
   }
   private async get(p: string): Promise<Row | undefined> {
-    const r = (await this.read("get", [p], []))?.[0];
+    const r = (await this.read("get", SQL.get, [p], []))?.[0];
     return r && this.toRow(r);
   }
-  /** Stored child folders on device `dev` (a row of another device is a scanned mount point, not part of this folder). */
-  private async kidsOf(p: string, dev: number): Promise<Row[]> {
-    return ((await this.read("kids", [p], [])) ?? []).map((r) => this.toRow(r)).filter((k) => k.dev === dev);
+  /**
+   * Stored child folders (same device as their parent: a row of another device is a scanned mount point, not part of the folder) of the folders `ps`,
+   * grouped by parent, at most `max` rows in all: a folder with millions of children is never loaded at once.
+   */
+  private async levelKids(ps: string[], max: number): Promise<Map<string, Row[]>> {
+    const out = new Map<string, Row[]>();
+    for (let i = 0; i < ps.length && max > 0; i += 200) {
+      const chunk = ps.slice(i, i + 200);
+      const sql = `SELECT k.* FROM sizes k JOIN sizes p ON p.path = k.parent AND p.dev = k.dev WHERE k.parent IN (${chunk.map(() => "?").join(",")}) ORDER BY k.parent, k.path LIMIT ?`;
+      for (const r of (await this.read("levelKids", sql, [...chunk, max], [])) ?? []) {
+        const k = this.toRow(r);
+        out.get(k.parent)?.push(k) ?? out.set(k.parent, [k]);
+        max--;
+      }
+    }
+    return out;
   }
   /** Up to `PAGE` stored child folders on device `dev` after path `after` (keyset paging, so a folder with millions never loads at once). */
   /** null when the read failed (a busy database): not the same as "no more rows" */
   private async kidPage(p: string, dev: number, after: string): Promise<Row[] | null> {
-    return (await this.read("kidPage", [p, dev, after, PAGE], null))?.map((r) => this.toRow(r)) ?? null;
+    return (await this.read("kidPage", SQL.kidPage, [p, dev, after, PAGE], null))?.map((r) => this.toRow(r)) ?? null;
   }
   /** Is `p` stored? null when the read failed. */
   private async has(p: string): Promise<boolean | null> {
-    const r = await this.read("get", [p], null);
+    const r = await this.read("get", SQL.get, [p], null);
     return r && r.length > 0;
   }
   /** A stored folder with the number of its stored child folders on its own device (one statement: this runs once per folder of every walk). */
   private async getWithKids(p: string): Promise<[Row | undefined, number]> {
-    const r = (await this.read("getKids", [p], []))?.[0];
+    const r = (await this.read("getKids", SQL.getKids, [p], []))?.[0];
     return [r && this.toRow(r), r ? Number(r.kids) : 0];
   }
   /** Up to 256 stored child folders (by path, after `after`) whose `seen_at` is not `stamp`; keyset paging keeps a purge linear. */
@@ -1158,6 +1171,8 @@ export class SizeStore {
     let level = [top];
     for (let d = 0; level.length; d++) {
       const next: Row[] = [];
+      // children beyond what the budget still allows (plus one, to see the cut) are never read
+      const kids = walk || d >= depth ? undefined : await this.levelKids(level.map((r) => r.path), budget - level.length + 1);
       for (const r of level) {
         if (budget-- <= 0) {
           truncated = true;
@@ -1165,7 +1180,7 @@ export class SizeStore {
         }
         entries.push(asEntry(r));
         if (d >= depth) continue;
-        for (const k of walk ? walk.values() : await this.kidsOf(r.path, r.dev)) if (!walk || (k.parent === r.path && k.dev === r.dev)) next.push(k);
+        for (const k of walk ? walk.values() : kids!.get(r.path) ?? []) if (!walk || (k.parent === r.path && k.dev === r.dev)) next.push(k);
         if (all) {
           const left = await this.filesOf(r.path, budget);
           budget -= left.entries.length;
