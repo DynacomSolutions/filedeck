@@ -877,7 +877,7 @@ test("a store from before seen_at opens, and the first rescan drops removed fold
   const f = path.join(fs.mkdtempSync(path.join(tmp, "mig-")), "sizes.db");
   const s1 = new SizeStore(f, { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
   await s1.scan("/mg");
-  s1.close();
+  await s1.close();
   const raw = new DatabaseSync(f);
   raw.exec("ALTER TABLE sizes DROP COLUMN seen_at");
   raw.close();
@@ -1310,4 +1310,136 @@ test("a rescan does not join a cached size job", async () => {
   const b = await post(true);
   assert.notEqual(b, a, "a rescan queues its own job");
   assert.equal(await post(true), b, "a second rescan joins the rescan");
+});
+
+test("a slow store read does not block the event loop", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "slow-read-"));
+  fs.mkdirSync(path.join(root, "d"), { recursive: true });
+  fs.writeFileSync(path.join(root, "d", "f"), "x");
+  const file = path.join(root, "sizes.db");
+  const o = { root, ttlMs: 60_000, maxEntries: 1000 };
+  const a = new SizeStore(file, o);
+  await a.scan("/d");
+  a.close();
+  const s = new SizeStore(file, { ...o, readDelayMs: 500 });
+  let last = performance.now();
+  let lag = 0;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    lag = Math.max(lag, now - last - 10);
+    last = now;
+  }, 10);
+  try {
+    const t0 = performance.now();
+    const t = await s.tree("/d", 0, false);
+    assert.ok(performance.now() - t0 >= 450, "the read took its delay");
+    assert.equal(t.entries.length, 1);
+    assert.ok(lag < 50, `event loop lagged ${Math.round(lag)} ms`);
+  } finally {
+    clearInterval(timer);
+    s.close();
+  }
+});
+
+test("tree of a folder with 300k children is cut at the budget and the read worker survives", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "oom-"));
+  const file = path.join(root, "sizes.db");
+  const o = { root, ttlMs: 1, maxEntries: 1000 };
+  await new SizeStore(file, o).close();
+  const db = new DatabaseSync(file);
+  const cols = (db.prepare("PRAGMA table_info(sizes)").all() as { name: string }[]).map((c) => c.name);
+  const ins = db.prepare(`INSERT INTO sizes (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`);
+  const row = (p: string, par: string) => cols.map((c) => (c === "path" ? p : c === "parent" ? par : 1));
+  db.exec("BEGIN");
+  ins.run(...row("/p", "/"));
+  for (let i = 0; i < 300_000; i++) ins.run(...row(`/p/some-longish-folder-name-${i}`, "/p"));
+  db.exec("COMMIT");
+  db.close();
+  const s = new SizeStore(file, o);
+  const quiet = console.error;
+  const logged: unknown[] = [];
+  console.error = (...a: unknown[]) => void logged.push(a);
+  try {
+    const t = await s.tree("/p", 1, false);
+    assert.equal(t.entries.length, 1000);
+    assert.equal(t.truncated, true);
+    assert.equal((await s.tree("/p", 0, false)).entries.length, 1, "the store is still up");
+    assert.deepEqual(logged, []);
+  } finally {
+    console.error = quiet;
+    await s.close();
+  }
+});
+
+test("a reused rescan and a tree take about one read round trip per folder, or fewer", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "trips-"));
+  for (let i = 0; i < 40; i++) for (const j of ["a", "b"]) fs.mkdirSync(path.join(root, `d${i}`, j), { recursive: true });
+  const s = new SizeStore(path.join(root, "..", `trips-${path.basename(root)}.db`), { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
+  const v = "/" + path.basename(root);
+  let reads = 0;
+  const post = (s as unknown as { post(m: { op: string }, r: boolean): unknown }).post.bind(s);
+  (s as unknown as { post(m: { op: string }, r: boolean): unknown }).post = (m, r) => (m.op === "read" && reads++, post(m, r));
+  try {
+    await s.scan(v);
+    reads = 0;
+    const r = await s.scan(v);
+    assert.equal(r.dirs, 120);
+    assert.ok(reads <= 121 * 1.5, `${reads} reads for 121 folders`);
+    reads = 0;
+    assert.equal((await s.tree(v, 3, false)).entries.length, 121);
+    assert.ok(reads <= 4, `${reads} reads for a tree of 3 levels`);
+  } finally {
+    await s.close();
+  }
+});
+
+test("the pending table and a reopen are served by the workers, never by the main connection", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "pend-"));
+  fs.mkdirSync(path.join(root, "d"));
+  const s = new SizeStore(path.join(root, "sizes.db"), { root, ttlMs: 60_000, maxEntries: 1000 });
+  const p = s as unknown as { db: unknown; retryAt: number };
+  const real = p.db as { close(): void };
+  const boom = () => {
+    throw new Error("main thread touched the database");
+  };
+  p.db = { prepare: boom, exec: boom, close: () => undefined };
+  try {
+    const t = { modifyMs: 10, settleMs: 1 };
+    assert.equal(await s.notePending([{ path: "/d", dueAt: Date.now() - 1, modify: false }], 10), true);
+    assert.deepEqual(await s.takeDue(Date.now(), 10, t), ["/d"]);
+    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), ["/d"]);
+    await s.clearPending();
+    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), []);
+    // after a failure the store reopens through the writer thread
+    p.db = null;
+    p.retryAt = 1;
+    assert.equal((await s.scan("/d")).dirs, 0);
+    assert.ok(p.db, "reopened");
+    assert.equal((await s.tree("/d", 0, false)).entries.length, 1);
+  } finally {
+    real.close();
+    await s.close();
+  }
+});
+
+test("after close(), a read starts no worker and logs nothing; a read pending at close() is not a fault", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "closed-"));
+  fs.mkdirSync(path.join(root, "d"));
+  const s = new SizeStore(path.join(root, "sizes.db"), { root, ttlMs: 60_000, maxEntries: 1000, readDelayMs: 200 });
+  await s.scan("/d");
+  const logged: unknown[] = [];
+  const quiet = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a);
+  try {
+    const pending = s.tree("/d", 0, false);
+    await sleep(50);
+    await s.close();
+    await pending;
+    const w = (s as unknown as { writer?: unknown; reader?: unknown });
+    assert.equal((await s.tree("/d", 0, false)).entries.length, 0);
+    assert.equal(w.writer ?? w.reader, undefined, "no worker after close");
+    assert.deepEqual(logged, []);
+  } finally {
+    console.error = quiet;
+  }
 });

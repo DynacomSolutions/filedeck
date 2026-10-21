@@ -43,7 +43,7 @@ export interface ChangeSink {
   /** folders due at `now` (oldest first, at most `limit`), marked as run; null = the backlog is too old to drain, the pending rows are dropped */
   takeDue?(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null>;
   /** folders that ran within `withinMs` (a crash may have cut the run short) */
-  recentRuns?(now: number, withinMs: number, limit: number): string[];
+  recentRuns?(now: number, withinMs: number, limit: number): string[] | Promise<string[]>;
   clearPending?(): Promise<void>;
 }
 
@@ -131,7 +131,7 @@ export class FanWatch {
       if (!this.recovered && this.store.recentRuns) {
         // folders taken just before a stop or crash may not have been applied: re-read them on the next read
         this.recovered = true;
-        const recent = this.store.recentRuns(Date.now(), 60_000, 1001);
+        const recent = await this.store.recentRuns(Date.now(), 60_000, 1001);
         for (const m of recent.length > 1000 ? this.marks : recent) this.store.markStale(m);
       }
       if (this.stopped) return;
