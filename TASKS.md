@@ -95,7 +95,7 @@ ETA: 2026-10-21 09:00 ICT
 | FD-54 | Release so epic 8 deploys | done | | | 8.FD-49, 8.FD-52, 8.FD-53 | 2026-10-21 09:00 ICT | Release run 39505147773 succeeded; the hub and all agents run 0.3.22 and their job stores are in place. |
 
 ## 9. Job rows and size cache
-ETA: 2026-10-22 12:00 ICT
+ETA: 2026-10-21 18:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-55 | Job rows: one subject line with ellipsis and full-text popover, then a pills line with the server and a coloured status pill | done | | job-rows |  | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105 |
