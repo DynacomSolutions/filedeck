@@ -1201,3 +1201,28 @@ test("a folder under the change watcher is trusted past the TTL until it is mark
   await sleep(20);
   assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "marked stale: re-read");
 });
+
+test("an interrupted rescan keeps the folders it read: the resumed one reads fewer and ends with the same totals", async () => {
+  const d = at("resume");
+  for (let i = 0; i < 12; i++) {
+    fs.mkdirSync(path.join(d, `d${String(i).padStart(2, "0")}`), { recursive: true });
+    fs.writeFileSync(path.join(d, `d${String(i).padStart(2, "0")}/f`), "x".repeat(i + 1));
+  }
+  const s = mk(60_000, 100_000, 1);
+  const full = await s.scanRead("/resume", undefined, true);
+  await sleep(5);
+  const since = Date.now();
+  // abort the rescan after 10 directory reads
+  const ac = new AbortController();
+  const orig = fsp.readdir;
+  let n = 0;
+  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (++n === 8 && ac.abort(), (orig as (...x: unknown[]) => unknown)(...a));
+  try {
+    await assert.rejects(s.scanRead("/resume", { signal: ac.signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } }, since));
+  } finally {
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
+  const resumed = await s.scanRead("/resume", undefined, since);
+  assert.ok(resumed.read < full.read, `resumed read ${resumed.read} of ${full.read}`);
+  assert.deepEqual(resumed.res, full.res);
+});

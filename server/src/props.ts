@@ -299,7 +299,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
 
   // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
-  const scanParts = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
+  const scanParts = <T,>(kind: "size" | "du", virtual: string, fresh: boolean | number, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
     let release: (() => void) | undefined;
     return {
       run: async (ctl: JobCtl) => {
@@ -312,12 +312,14 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     };
   };
   const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
-    const p = scanParts(kind, virtual, fresh, after, done);
-    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh } });
+    // a rescan remembers when it began: a restart keeps the folders it already read
+    const freshSince = fresh ? Date.now() : undefined;
+    const p = scanParts(kind, virtual, freshSince ?? false, after, done);
+    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh, freshSince } });
   };
   // An adopted scan runs again under its id, confined again and without `after` (a du client repeats its request once the job is done).
   for (const kind of ["size", "du"] as const) {
-    jobs.register(kind, async (p) => scanParts(kind, resolveRead(cfg.root, (p as { path: string }).path).virtual, (p as { fresh: boolean }).fresh));
+    jobs.register(kind, async (p) => scanParts(kind, resolveRead(cfg.root, (p as { path: string }).path).virtual, (p as { fresh: boolean }).fresh ? ((p as { freshSince?: number }).freshSince ?? true) : false));
   }
 
   // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
