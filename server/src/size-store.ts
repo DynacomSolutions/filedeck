@@ -410,7 +410,6 @@ export class SizeStore {
     let w = read ? this.reader : this.writer;
     if (!w) {
       const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
-      nw.unref();
       const fail = (e: Error) => {
         if (this.writer === nw) this.writer = undefined;
         if (this.reader === nw) this.reader = undefined;
@@ -419,11 +418,13 @@ export class SizeStore {
       nw.on("message", (r: { id: number; err?: string; busy?: boolean; rows?: Record<string, unknown>[] }) => {
         const p = this.pending.get(r.id);
         this.pending.delete(r.id);
+        if (![...this.pending.values()].some((q) => q.w === nw)) nw.unref(); // idle: an idle worker must not keep the process alive
         if (r.err) p?.rej(Object.assign(new Error(r.err), { busy: r.busy }));
         else p?.res(r.rows);
       });
       nw.once("error", fail);
       nw.once("exit", (code) => fail(new Error(`size writer exit ${code}`)));
+      nw.unref(); // after the listeners (adding a 'message' listener re-refs the port); a request in flight refs it again, see below
       if (read) this.reader = nw;
       else this.writer = nw;
     }
@@ -431,6 +432,7 @@ export class SizeStore {
     return new Promise((res, rej) => {
       const id = ++this.seq;
       this.pending.set(id, { w: ww, res, rej });
+      ww.ref(); // a request in flight keeps the process alive until it is answered
       ww.postMessage({ ...m, id });
     });
   }
@@ -1170,11 +1172,13 @@ export class SizeStore {
       if (!idle) return [];
       got = [...got, ...idle];
     }
-    if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [now, PENDING_IDLE, p]));
+    // the run starts after the reads above (slow on a loaded disk), so stamp it now: a modify row then waits modifyMs from the run, not from before the reads
+    const ran = Math.max(now, Date.now());
+    if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [ran, PENDING_IDLE, p]));
     // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future), one bounded batch per call
-    if (now - this.lastPrune > 1000) {
-      this.lastPrune = now;
-      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?) LIMIT ?)", [PENDING_IDLE, now - t.modifyMs, now + t.modifyMs, PENDING_BATCH]);
+    if (ran - this.lastPrune > 1000) {
+      this.lastPrune = ran;
+      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?) LIMIT ?)", [PENDING_IDLE, ran - t.modifyMs, ran + t.modifyMs, PENDING_BATCH]);
     }
     return got;
   }

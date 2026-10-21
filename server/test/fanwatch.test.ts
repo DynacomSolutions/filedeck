@@ -379,6 +379,25 @@ test("fanwatch + SizeStore file: modify events wait modifyMs after the last run,
   f.done();
 });
 
+test("SizeStore.takeDue stamps the run after its reads, so a modify row waits modifyMs from the run, not from before the reads", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-store-")));
+  const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 1000, readDelayMs: 100 }); // every read takes 100 ms
+  const t = { modifyMs: 300, settleMs: 5 };
+  await st.notePending([{ path: "/a", dueAt: Date.now(), modify: false }], 300);
+  assert.deepEqual(await st.takeDue(Date.now(), 10, t), ["/a"]);
+  const ranAt = Date.now();
+  await st.notePending([{ path: "/a", dueAt: Date.now(), modify: true }], 300);
+  assert.deepEqual(await st.takeDue(ranAt + 250, 10, t), [], "held back until the run plus modifyMs");
+  await st.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("SizeStore workers do not keep the process alive once idle (the image build hung after the tests)", () => {
+  const r = spawnSync(process.execPath, ["--import", "tsx", path.resolve(import.meta.dirname, "idle-exit.ts")], { timeout: 20_000, encoding: "utf8" });
+  assert.equal(r.error, undefined, "the process exits by itself: " + r.error);
+  assert.equal(r.status, 0, r.stderr);
+});
+
 test("fanwatch + SizeStore file: a modify row that fell due after the active window is still applied", async () => {
   const f = fileStore();
   const w = new FanWatch(f.sink, opts);
