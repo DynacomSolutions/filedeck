@@ -877,7 +877,7 @@ test("a store from before seen_at opens, and the first rescan drops removed fold
   const f = path.join(fs.mkdtempSync(path.join(tmp, "mig-")), "sizes.db");
   const s1 = new SizeStore(f, { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
   await s1.scan("/mg");
-  s1.close();
+  await s1.close();
   const raw = new DatabaseSync(f);
   raw.exec("ALTER TABLE sizes DROP COLUMN seen_at");
   raw.close();
@@ -1310,4 +1310,33 @@ test("a rescan does not join a cached size job", async () => {
   const b = await post(true);
   assert.notEqual(b, a, "a rescan queues its own job");
   assert.equal(await post(true), b, "a second rescan joins the rescan");
+});
+
+test("a slow store read does not block the event loop", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "slow-read-"));
+  fs.mkdirSync(path.join(root, "d"), { recursive: true });
+  fs.writeFileSync(path.join(root, "d", "f"), "x");
+  const file = path.join(root, "sizes.db");
+  const o = { root, ttlMs: 60_000, maxEntries: 1000 };
+  const a = new SizeStore(file, o);
+  await a.scan("/d");
+  a.close();
+  const s = new SizeStore(file, { ...o, readDelayMs: 500 });
+  let last = performance.now();
+  let lag = 0;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    lag = Math.max(lag, now - last - 10);
+    last = now;
+  }, 10);
+  try {
+    const t0 = performance.now();
+    const t = await s.tree("/d", 0, false);
+    assert.ok(performance.now() - t0 >= 450, "the read took its delay");
+    assert.equal(t.entries.length, 1);
+    assert.ok(lag < 50, `event loop lagged ${Math.round(lag)} ms`);
+  } finally {
+    clearInterval(timer);
+    s.close();
+  }
 });

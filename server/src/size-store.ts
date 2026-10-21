@@ -159,10 +159,11 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, COLS, METRICS, walLimit } = workerData;
+const { file, COLS, METRICS, walLimit, reader, readDelayMs } = workerData;
 const fs = require("node:fs");
 const db = new DatabaseSync(file);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
+// the reader worker only runs "read" ops: a second connection, so a read never waits behind a commit (WAL) and the main thread never waits for the disk
 // A reader holding a snapshot stops the automatic (passive) checkpoint from restarting the WAL, which then grows without bound and slows every read and commit.
 // Past the limit, wait briefly for readers and truncate; a busy attempt is skipped and tried again 2 s later, so a pinned snapshot costs the writer at most 0.5 s in 2.5.
 let lastTrim = 0;
@@ -199,16 +200,23 @@ const commit = ({ items, last }) => {
     db.exec("COMMIT");
   } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
 };
+const reads = {
+  get: db.prepare("SELECT * FROM sizes WHERE path = ?"),
+  kids: db.prepare("SELECT * FROM sizes WHERE parent = ? ORDER BY path"),
+  kidPage: db.prepare("SELECT * FROM sizes WHERE parent = ? AND dev = ? AND path > ? ORDER BY path LIMIT ?"),
+  getKids: db.prepare("SELECT s.*, (SELECT COUNT(*) FROM sizes k WHERE k.parent = s.path AND k.dev = s.dev) AS kids FROM sizes s WHERE s.path = ?"),
+};
 const isBusy = (e) => !!e && (e.errcode === 5 || e.errcode === 6 || /database (table )?is locked/i.test(String(e.message)));
 const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 parentPort.on("message", (m) => {
   // a busy database (another connection holds a lock past busy_timeout) is retried a few times with backoff; every op rolls back on failure, so a retry is safe
   for (let attempt = 0; ; attempt++) {
     try {
-      if (m.op === "commit") commit(m);
+      if (m.op === "read") { if (readDelayMs) nap(readDelayMs); parentPort.postMessage({ id: m.id, rows: reads[m.q].all(...m.params) }); return; }
+      else if (m.op === "commit") commit(m);
       else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
       else db.prepare(m.sql).run(...m.params);
-      trim();
+      if (!reader) trim();
       parentPort.postMessage({ id: m.id });
       return;
     } catch (e) {
@@ -233,8 +241,9 @@ export class SizeStore {
   private held: { path: string; done: Promise<void> }[] = [];
   private file = ":memory:";
   private writer?: Worker;
+  private reader?: Worker;
   private io = limiter(AHEAD);
-  private pending = new Map<number, { res: () => void; rej: (e: Error) => void }>();
+  private pending = new Map<number, { w: Worker; res: (rows?: Record<string, unknown>[]) => void; rej: (e: Error) => void }>();
   private seq = 0;
   /** the latest `write`: a walk waits for it so it never reads rows a stale mark is about to change */
   private tail: Promise<void> = Promise.resolve();
@@ -246,7 +255,7 @@ export class SizeStore {
 
   constructor(
     file: string,
-    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; walLimitBytes?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number },
+    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; /** tests: every read on the worker sleeps this long, to show the main thread is not held */ readDelayMs?: number; walLimitBytes?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number },
   ) {
     this.file = file;
     // Like IndexCache: a file that cannot be opened is replaced once, then the store runs uncached.
@@ -369,37 +378,45 @@ export class SizeStore {
     this.db = null;
   }
 
-  /** Run one request on the writer worker (started on first use); a file-backed store only. */
+  /** Run one request on the writer worker (started on first use), or on the read worker; a file-backed store only. */
   private send(m: Record<string, unknown>): Promise<void> {
-    if (!this.writer) {
-      const w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false });
-      w.unref();
+    return this.post(m, false).then(() => undefined);
+  }
+  private post(m: Record<string, unknown>, read: boolean): Promise<Record<string, unknown>[] | undefined> {
+    let w = read ? this.reader : this.writer;
+    if (!w) {
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      nw.unref();
       const fail = (e: Error) => {
-        if (this.writer === w) this.writer = undefined;
-        for (const p of this.pending.values()) p.rej(e);
-        this.pending.clear();
+        if (this.writer === nw) this.writer = undefined;
+        if (this.reader === nw) this.reader = undefined;
+        for (const [id, p] of this.pending) if (p.w === nw) { p.rej(e); this.pending.delete(id); }
       };
-      w.on("message", (r: { id: number; err?: string; busy?: boolean }) => {
+      nw.on("message", (r: { id: number; err?: string; busy?: boolean; rows?: Record<string, unknown>[] }) => {
         const p = this.pending.get(r.id);
         this.pending.delete(r.id);
         if (r.err) p?.rej(Object.assign(new Error(r.err), { busy: r.busy }));
-        else p?.res();
+        else p?.res(r.rows);
       });
-      w.once("error", fail);
-      w.once("exit", (code) => fail(new Error(`size writer exit ${code}`)));
-      this.writer = w;
+      nw.once("error", fail);
+      nw.once("exit", (code) => fail(new Error(`size writer exit ${code}`)));
+      if (read) this.reader = nw;
+      else this.writer = nw;
     }
+    const ww = w;
     return new Promise((res, rej) => {
       const id = ++this.seq;
-      this.pending.set(id, { res, rej });
-      this.writer!.postMessage({ ...m, id });
+      this.pending.set(id, { w: ww, res, rej });
+      ww.postMessage({ ...m, id });
     });
   }
 
-  close() {
-    void this.writer?.terminate();
-    this.writer = undefined;
+  /** The returned promise settles once the worker threads are gone (their connections are closed then). */
+  close(): Promise<void> {
+    const ws = [this.writer?.terminate(), this.reader?.terminate()];
+    this.writer = this.reader = undefined;
     this.db?.close();
+    return Promise.all(ws).then(() => undefined);
   }
 
   /**
@@ -448,37 +465,59 @@ export class SizeStore {
     }
     return { path: r.path as string, parent: r.parent as string, ino: Number(r.ino), dev: Number(r.dev), mtime_ms: Number(r.mtime_ms), scanned_at: Number(r.scanned_at), seen_at: Number(r.seen_at), own, tot };
   }
-  private get(p: string): Row | undefined {
+  /**
+   * One read statement: on the read worker for a file-backed store (the main thread never waits for the disk; the request is queued after
+   * every commit acknowledged so far, so it sees them), else inline. A busy database answers `dflt`, any other failure gives the store up.
+   */
+  private async read(q: "get" | "kids" | "kidPage" | "getKids", params: (string | number)[], dflt: Record<string, unknown>[] | null): Promise<Record<string, unknown>[] | null> {
+    if (!this.db) return dflt;
+    const t0 = performance.now();
+    try {
+      return this.file === ":memory:" ? this.inline(q, params) : ((await this.post({ op: "read", q, params }, true)) ?? []);
+    } catch (e) {
+      this.failed(e);
+      return dflt;
+    } finally {
+      if (performance.now() - t0 > SLOW_READ_MS) slowLog(`size-read-${q}`, performance.now() - t0, String(params[0]));
+    }
+  }
+  /** The in-memory store reads on the main thread (no file, no disk wait). */
+  private inline(q: "get" | "kids" | "kidPage" | "getKids", params: (string | number)[]): Record<string, unknown>[] {
+    if (q === "get" || q === "getKids") {
+      const r = this.q[q].get(...params);
+      return r ? [r] : [];
+    }
+    return this.q[q].all(...params) as Record<string, unknown>[];
+  }
+  /** Same as `get` for the in-memory store only (inside a synchronous transaction). */
+  private getInline(p: string): Row | undefined {
     return this.safe(() => {
       const r = this.q.get.get(p);
       return r && this.toRow(r);
     }, undefined);
   }
+  private async get(p: string): Promise<Row | undefined> {
+    const r = (await this.read("get", [p], []))?.[0];
+    return r && this.toRow(r);
+  }
   /** Stored child folders on device `dev` (a row of another device is a scanned mount point, not part of this folder). */
-  private kidsOf(p: string, dev: number): Row[] {
-    return this.safe(() => this.q.kids.all(p).map((r) => this.toRow(r)).filter((k) => k.dev === dev), []);
+  private async kidsOf(p: string, dev: number): Promise<Row[]> {
+    return ((await this.read("kids", [p], [])) ?? []).map((r) => this.toRow(r)).filter((k) => k.dev === dev);
   }
   /** Up to `PAGE` stored child folders on device `dev` after path `after` (keyset paging, so a folder with millions never loads at once). */
   /** null when the read failed (a busy database): not the same as "no more rows" */
-  private kidPage(p: string, dev: number, after: string): Row[] | null {
-    const t0 = performance.now();
-    const out = this.safe(() => this.q.kidPage.all(p, dev, after, PAGE).map((r) => this.toRow(r)), null);
-    if (performance.now() - t0 > SLOW_READ_MS) slowLog("size-read-kidPage", performance.now() - t0, p);
-    return out;
+  private async kidPage(p: string, dev: number, after: string): Promise<Row[] | null> {
+    return (await this.read("kidPage", [p, dev, after, PAGE], null))?.map((r) => this.toRow(r)) ?? null;
   }
   /** Is `p` stored? null when the read failed. */
-  private has(p: string): boolean | null {
-    return this.safe(() => !!this.q.get.get(p), null);
+  private async has(p: string): Promise<boolean | null> {
+    const r = await this.read("get", [p], null);
+    return r && r.length > 0;
   }
   /** A stored folder with the number of its stored child folders on its own device (one statement: this runs once per folder of every walk). */
-  private getWithKids(p: string): [Row | undefined, number] {
-    const t0 = performance.now();
-    const out = this.safe(() => {
-      const r = this.q.getKids.get(p);
-      return [r && this.toRow(r), r ? Number(r.kids) : 0] as [Row | undefined, number];
-    }, [undefined, 0]);
-    if (performance.now() - t0 > SLOW_READ_MS) slowLog("size-read-getWithKids", performance.now() - t0, p);
-    return out;
+  private async getWithKids(p: string): Promise<[Row | undefined, number]> {
+    const r = (await this.read("getKids", [p], []))?.[0];
+    return [r && this.toRow(r), r ? Number(r.kids) : 0];
   }
   /** Up to 256 stored child folders (by path, after `after`) whose `seen_at` is not `stamp`; keyset paging keeps a purge linear. */
   private kidStale(p: string, dev: number, stamp: number, after: string): string[] {
@@ -494,7 +533,7 @@ export class SizeStore {
   private addToAncestors(p: string, d: Sums, dev: number) {
     const anc: string[] = [];
     for (let a = parentOf(p); a; a = parentOf(a)) {
-      const row = this.get(a);
+      const row = this.getInline(a);
       if (!row) continue;
       if (row.dev !== dev) break;
       anc.push(a);
@@ -585,10 +624,10 @@ export class SizeStore {
      */
     const ahead = (v: string, r: string) => {
       if (this.io.queued >= AHEAD_QUEUE) return;
-      const row = mode.fresh ? undefined : this.get(v);
-      if (row && row.own.dirs - row.own.mounts === 0) return; // reused leaf: nothing under it is stat-ed
       void this.io(async () => {
-        const kids = row ? this.kidPage(v, dev, "") : null;
+        const row = mode.fresh ? undefined : await this.get(v);
+        if (row && row.own.dirs - row.own.mounts === 0) return; // reused leaf: nothing under it is stat-ed
+        const kids = row ? await this.kidPage(v, dev, "") : null;
         const names = kids?.length ? kids.map((k) => path.posix.basename(k.path)) : ((await listAhead(r)) as string[]).slice(0, AHEAD_NAMES);
         await Promise.all(names.map((n) => fs.lstat(path.join(r, n)).catch(() => undefined)));
       }).catch(() => undefined);
@@ -665,7 +704,7 @@ export class SizeStore {
                 if (Number(g.s.dev) !== dev) node.own.mounts++;
                 else {
                   const v = virtualJoin(vpath, g.n);
-                  const prior = mode.trust && isRoot ? getRow(v) : undefined;
+                  const prior = mode.trust && isRoot ? await getRow(v) : undefined;
                   // a folder deleted and recreated under the same name is not the stored one, even with the same inode number (freed inodes are reused at once); its mtime tells
                   if (prior && prior.parent === vpath && prior.ino === Number(g.s.ino) && prior.dev === Number(g.s.dev) && prior.mtime_ms === g.s.mtimeMs) {
                     addTo(node.tot, prior.tot);
@@ -721,7 +760,7 @@ export class SizeStore {
             if (at >= page.length) {
               if (done) return end();
               canceled();
-              page = fetch(after) ?? [];
+              page = (await fetch(after)) ?? [];
               at = 0;
               if (page.length < PAGE) done = true;
               if (!page.length) return end();
@@ -749,7 +788,7 @@ export class SizeStore {
       ctl.progress.current = t.virtual;
       const s = t.s;
       const ino = Number(s.ino);
-      const [stored, storedKids] = this.getWithKids(t.virtual);
+      const [stored, storedKids] = await this.getWithKids(t.virtual);
       let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && (now - stored.scanned_at < this.o.ttlMs || (stored.scanned_at >= this.watchedSince() && this.covers(t.virtual))) && storedKids === stored.own.dirs - stored.own.mounts;
       let first: { page: Row[]; ks: (Stats | null)[]; complete: boolean } | undefined;
       if (reusable) {
@@ -757,7 +796,7 @@ export class SizeStore {
         let total = 0;
         for (let after = "", more = stored!.own.dirs - stored!.own.mounts > 0; reusable && more; ) {
           canceled();
-          const page = this.kidPage(t.virtual, dev, after);
+          const page = await this.kidPage(t.virtual, dev, after);
           if (!page) {
             reusable = false; // could not read the stored children: re-read the folder
             break;
@@ -851,7 +890,7 @@ export class SizeStore {
     const db = this.db!;
     db.exec("BEGIN");
     try {
-      const old = last ? this.get(last.path) : undefined;
+      const old = last ? this.getInline(last.path) : undefined;
       for (const n of part) {
         if (n.touch) {
           this.q.touch.run(n.seen_at, n.path);
@@ -929,7 +968,7 @@ export class SizeStore {
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0 };
       await this.tail;
       // The previous scan is the expected total (progress and ETA); read before the walk replaces it.
-      const prev = this.get(r.virtual);
+      const prev = await this.get(r.virtual);
       if (prev && !ctl.progress.totalEntries) {
         ctl.progress.totalEntries = prev.tot.files + prev.tot.dirs + prev.tot.symlinks + prev.tot.other;
         ctl.progress.totalBytes = prev.tot.bytes;
@@ -950,11 +989,11 @@ export class SizeStore {
     let v = resolveRead(this.o.root, virtual).virtual;
     let release = await this.lock(parentOf(v) || v);
     try {
-      const known = this.has(v);
+      const known = await this.has(v);
       if (known === null) return this.markStale(parentOf(v) || v); // busy: the event must not be lost, the next scan re-reads
       if (!known) {
         const p = parentOf(v);
-        const pk = p ? this.has(p) : false;
+        const pk = p ? await this.has(p) : false;
         if (pk === null) return this.markStale(p);
         if (!pk) return;
         v = p;
@@ -1092,7 +1131,7 @@ export class SizeStore {
     } catch {
       // The folder itself is gone: its parent's own counts change too, so re-read the parent when it is stored.
       const p = parentOf(v);
-      const pk = p ? this.has(p) : false;
+      const pk = p ? await this.has(p) : false;
       if (pk === null) {
         this.markStale(p);
         return undefined;
@@ -1114,7 +1153,7 @@ export class SizeStore {
     let truncated = false;
     const asEntry = (r: Row): DuEntry => ({ path: r.path, type: "dir", bytes: r.tot.bytes, diskBytes: r.tot.disk, files: r.tot.files, dirs: r.tot.dirs, scannedAt: r.scanned_at });
     const walk = this.db ? undefined : [...this.walks].reverse().find((w) => w.has(virtual));
-    const top = this.db ? this.get(virtual) : walk?.get(virtual);
+    const top = this.db ? await this.get(virtual) : walk?.get(virtual);
     if (!top) return { entries, truncated };
     let level = [top];
     for (let d = 0; level.length; d++) {
@@ -1126,7 +1165,7 @@ export class SizeStore {
         }
         entries.push(asEntry(r));
         if (d >= depth) continue;
-        for (const k of walk ? walk.values() : this.kidsOf(r.path, r.dev)) if (!walk || (k.parent === r.path && k.dev === r.dev)) next.push(k);
+        for (const k of walk ? walk.values() : await this.kidsOf(r.path, r.dev)) if (!walk || (k.parent === r.path && k.dev === r.dev)) next.push(k);
         if (all) {
           const left = await this.filesOf(r.path, budget);
           budget -= left.entries.length;
