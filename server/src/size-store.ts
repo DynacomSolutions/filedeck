@@ -1183,6 +1183,19 @@ export class SizeStore {
     return got;
   }
 
+  /**
+   * Re-reads ended at `endedAt`: a folder's last run is now its end, so a modify event waits modifyMs from the end of a slow run.
+   * `hold` also pushes a row that is waiting (a modify event arrived during the run) to endedAt + modifyMs; false when a settle event
+   * arrived, which is not held back. The row is created if the prune removed it meanwhile.
+   */
+  async noteRan(runs: { path: string; endedAt: number; hold: boolean }[], modifyMs: number): Promise<void> {
+    if (!this.db || !runs.length) return;
+    await this.writeMany(
+      "INSERT INTO pending (path, due_at, last_run) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET last_run = ?3, due_at = CASE WHEN ?4 AND due_at < ?2 THEN MAX(due_at, ?3 + ?5) ELSE due_at END",
+      runs.map((r) => [r.path, PENDING_IDLE, r.endedAt, r.hold ? 1 : 0, modifyMs]),
+    );
+  }
+
   /** Folders that ran within the last `withinMs` (their run may not have finished when the process stopped), at most `limit`. */
   async recentRuns(now: number, withinMs: number, limit: number): Promise<string[]> {
     return ((await this.read("pending", "SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?", [PENDING_IDLE, now - withinMs, limit], [])) ?? []).map((r) => r.path as string);

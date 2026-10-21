@@ -321,6 +321,7 @@ function fileStore() {
     notePending: st.notePending.bind(st),
     takeDue: st.takeDue.bind(st),
     recentRuns: st.recentRuns.bind(st),
+    noteRan: st.noteRan.bind(st),
     clearPending: st.clearPending.bind(st),
   };
   const count = () => (st as unknown as { db: { prepare(s: string): { get(): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending").get().n;
@@ -390,6 +391,32 @@ test("SizeStore.takeDue stamps the run after its reads, so a modify row waits mo
   assert.deepEqual(await st.takeDue(ranAt + 250, 10, t), [], "held back until the run plus modifyMs");
   await st.close();
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("fanwatch + SizeStore file: after a re-read slower than modifyMs the next modify run waits modifyMs from its end", async () => {
+  const f = fileStore();
+  const starts: number[] = [];
+  let ended = 0;
+  const sink = {
+    ...f.sink,
+    applyChanged: async () => {
+      starts.push(Date.now());
+      if (starts.length === 1) {
+        await sleep(450); // slower than modifyMs
+        ended = Date.now();
+      }
+    },
+  };
+  const w = new FanWatch(sink, opts);
+  w.line("m /d/a");
+  await until(() => starts.length === 1, 2000);
+  await sleep(100);
+  w.line("m /d/a"); // during the slow run
+  await until(() => starts.length === 2, 3000);
+  assert.equal(starts.length, 2);
+  assert.ok(starts[1]! - ended >= 290, `second run ${starts[1]! - ended} ms after the first ended`);
+  w.stop();
+  f.done();
 });
 
 test("SizeStore workers do not keep the process alive once idle (the image build hung after the tests)", () => {
