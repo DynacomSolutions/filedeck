@@ -143,7 +143,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
     setSize(null);
     try {
       const j = await sizeJob.watch(await api.startSize(node, path, fresh));
-      if (j.state === "done") setSize(j.result as unknown as SizeResult);
+      if (j.state === "done") setSize(((j.result as { res?: SizeResult }).res ?? j.result) as unknown as SizeResult); // a joined du job answers {res, read}
       else if (j.state === "failed") setErr(j.error ?? "size failed");
     } catch (e) {
       setErr((e as Error).message);

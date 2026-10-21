@@ -146,3 +146,14 @@ test("recursive chmod is a job, scoped, and does not follow links or touch the t
   assert.equal(modeOf("tree/.filedeck-trash/x/data"), 0o600);
   assert.equal(modeOf("tree/.filedeck-trash/x"), 0o700, "trash store folders untouched");
 });
+
+test("two du requests for one path, even with other options, join one job and one walk", async () => {
+  const dedupe = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+  const get = (q: string) => dedupe.request(`/api/du?path=/tree/sub&${q}`);
+  const [a, b] = await Promise.all([get("depth=0"), get("depth=1")]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  assert.equal(((await (await dedupe.request("/api/jobs")).json()) as { jobs: unknown[] }).jobs.length, 1, "one walk");
+  assert.ok(((await b.json()) as { entries: unknown[] }).entries.length > 1);
+  await (dedupe as unknown as { close(): Promise<void> }).close();
+});

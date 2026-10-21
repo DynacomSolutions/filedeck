@@ -322,6 +322,9 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     jobs.register(kind, async (p) => scanParts(kind, resolveRead(cfg.root, (p as { path: string }).path).virtual, (p as { fresh: boolean }).fresh ? ((p as { freshSince?: number }).freshSince ?? true) : false));
   }
 
+  // The live size or du job of a path, own, adopted or only in the shared store: a second request joins it instead of queuing another walk.
+  const liveScan = (virtual: string) => jobs.findLive("du", (p) => p.path === virtual) ?? jobs.findLive("size", (p) => p.path === virtual);
+
   // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
   app.post("/api/jobs/size", async (c) => {
     const b = await json<{ path?: string; fresh?: boolean }>(c);
@@ -329,7 +332,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
     // one live size job per path: a second request attaches to it
-    const same = jobs.findLive("size", (p) => p.path === r.virtual);
+    const same = liveScan(r.virtual);
     return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
   });
 
@@ -372,7 +375,8 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (!run || !v || (v.state !== "queued" && v.state !== "running" && !replay)) {
       const mine: DuRun = { id: "", detached: false };
       run = mine;
-      v = startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }));
+      // joined: the reply tree is read once that job is done
+      v = liveScan(r.virtual) ?? startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }));
       mine.id = v.id;
       duRuns.set(key, mine);
     }
@@ -393,15 +397,24 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       }
       if (v!.state === "canceled") throw new ops.FsError(409, "canceled");
       if (v!.state === "failed") throw new ops.FsError(500, v!.error ?? "failed");
-      const { res } = v!.result as { res: SizeResult };
+      const jr = v!.result as SizeResult & { res?: SizeResult; read?: number }; // a du job answers {res, read}, a joined size job the result itself
+      const res = jr.res ?? jr;
       if (res.truncated) {
         // A capped scan is never stored: answer with the partial totals of the folder alone.
         return c.json({ path: r.virtual, entries: [{ path: r.virtual, type: "dir", bytes: res.bytes, diskBytes: res.diskBytes, files: res.files, dirs: res.dirs }], cached: false, truncated: true, watched: false });
       }
-      const t = run.out?.tree;
+      let t = run.out?.tree;
+      if (!run.out) {
+        const rel = await sizes.lock(r.virtual); // never a half-written scan
+        try {
+          t = await sizes.tree(r.virtual, depth, all);
+        } finally {
+          rel();
+        }
+      }
       if (!t?.entries.length) throw new ops.FsError(404, "not found");
       // cached: nothing was read from disk and the answer comes from the database (not from a degraded, uncached store)
-      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || run.out!.read === 0) && sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
+      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || (run.out ? run.out.read : jr.read ?? -1) === 0) && sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
     } finally {
       if (!run.detached) forget();
       else if (replay) forget();
