@@ -74,6 +74,7 @@ export class FanWatch {
   /** the store is read for due folders only until this time (events were noted lately) or after a take that found some; the first drain always reads */
   private activeUntil = 0;
   private firstTake = true;
+  private lastTake = 0;
   private recovered = false;
   private resume: (() => void) | null = null;
   private timer: NodeJS.Timeout | null = null;
@@ -291,8 +292,10 @@ export class FanWatch {
       while (!this.stopped) {
         const now = Date.now();
         let batch: string[] | null = [];
-        if (this.store.takeDue && (this.firstTake || now <= this.activeUntil)) {
+        if (this.store.takeDue && (this.firstTake || now <= this.activeUntil || now - this.lastTake >= this.modifyMs)) {
+          // the periodic read catches a row that fell due after activeUntil (a modify row waits for last_run + modifyMs, an event loop stall can skip its window)
           this.firstTake = false;
+          this.lastTake = now;
           batch = await this.store.takeDue(now, DRAIN_BATCH, { modifyMs: this.modifyMs, settleMs: this.settleMs });
           if (batch === null) {
             this.note("changed folders are too far behind, treating it as an overflow");

@@ -379,6 +379,20 @@ test("fanwatch + SizeStore file: modify events wait modifyMs after the last run,
   f.done();
 });
 
+test("fanwatch + SizeStore file: a modify row that fell due after the active window is still applied", async () => {
+  const f = fileStore();
+  const w = new FanWatch(f.sink, opts);
+  w.line("m /d/a");
+  await until(() => f.calls.length === 1);
+  w.line("m /d/a");
+  await sleep(60); // the row is stored, due at last run + modifyMs
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 450); // a stalled event loop skips the whole window
+  await until(() => f.calls.length === 2, 3000);
+  assert.equal(f.calls.length, 2, "row not stranded");
+  w.stop();
+  f.done();
+});
+
 test("fanwatch + SizeStore file: overflow clears pending rows and marks stale", async () => {
   const f = fileStore();
   const w = new FanWatch(f.sink, { ...opts, settleMs: 60_000 });
