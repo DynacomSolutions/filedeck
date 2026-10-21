@@ -126,6 +126,17 @@ const AHEAD_NAMES = 64;
 /** taken at load: read-ahead listings are not the walk's own reads (tests count those on `fs.readdir`) */
 const listAhead = fs.readdir;
 const tick = () => new Promise<void>((r) => setImmediate(r));
+/** commits that may be in flight while the walk goes on (the walk waits for the oldest one only when this many are queued) */
+const COMMITS_IN_FLIGHT = 2;
+const SLOW_SEND_MS = 1000;
+const SLOW_READ_MS = 200;
+let lastSlowLog = 0;
+/** One structured line for a slow store call, at most one every 5 s; no file names but the scan's own path. */
+function slowLog(what: string, ms: number, path: string) {
+  if (Date.now() - lastSlowLog < 5000) return;
+  lastSlowLog = Date.now();
+  console.error(JSON.stringify({ slow: what, ms: Math.round(ms), path }));
+}
 const noCtl = (): JobCtl => ({ signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } });
 const parentOf = (p: string) => (p === "/" ? "" : path.posix.dirname(p));
 /** Exclusive bounds of every path below `p` (the character after "/" is "0"). */
@@ -188,7 +199,7 @@ parentPort.on("message", (m) => {
       parentPort.postMessage({ id: m.id });
       return;
     } catch (e) {
-      if (isBusy(e) && attempt < 3) { nap(250 << attempt); continue; }
+      if (isBusy(e) && attempt < 3) { console.error(JSON.stringify({ slow: "size-writer-busy", op: m.op, attempt, retryMs: 250 << attempt })); nap(250 << attempt); continue; }
       parentPort.postMessage({ id: m.id, err: String(e && e.message || e), busy: isBusy(e) });
       return;
     }
@@ -437,7 +448,10 @@ export class SizeStore {
   /** Up to `PAGE` stored child folders on device `dev` after path `after` (keyset paging, so a folder with millions never loads at once). */
   /** null when the read failed (a busy database): not the same as "no more rows" */
   private kidPage(p: string, dev: number, after: string): Row[] | null {
-    return this.safe(() => this.q.kidPage.all(p, dev, after, PAGE).map((r) => this.toRow(r)), null);
+    const t0 = performance.now();
+    const out = this.safe(() => this.q.kidPage.all(p, dev, after, PAGE).map((r) => this.toRow(r)), null);
+    if (performance.now() - t0 > SLOW_READ_MS) slowLog("size-read-kidPage", performance.now() - t0, p);
+    return out;
   }
   /** Is `p` stored? null when the read failed. */
   private has(p: string): boolean | null {
@@ -445,10 +459,13 @@ export class SizeStore {
   }
   /** A stored folder with the number of its stored child folders on its own device (one statement: this runs once per folder of every walk). */
   private getWithKids(p: string): [Row | undefined, number] {
-    return this.safe(() => {
+    const t0 = performance.now();
+    const out = this.safe(() => {
       const r = this.q.getKids.get(p);
       return [r && this.toRow(r), r ? Number(r.kids) : 0] as [Row | undefined, number];
     }, [undefined, 0]);
+    if (performance.now() - t0 > SLOW_READ_MS) slowLog("size-read-getWithKids", performance.now() - t0, p);
+    return out;
   }
   /** Up to 256 stored child folders (by path, after `after`) whose `seen_at` is not `stamp`; keyset paging keeps a purge linear. */
   private kidStale(p: string, dev: number, stamp: number, after: string): string[] {
@@ -501,6 +518,11 @@ export class SizeStore {
     let buf: Node[] = [];
     let written = false;
     let dirty = false;
+    /** commits sent to the writer and not yet answered; it runs them in order, so the walk need not wait for each one */
+    const inflight: Promise<void>[] = [];
+    const drain = async () => {
+      while (inflight.length) await inflight.shift();
+    };
     const frames: Frame[] = [];
     this.lastWalkFrames = 0;
     /** rows kept for `tree` while the database is unusable (bounded) */
@@ -521,12 +543,22 @@ export class SizeStore {
               ? { path: n.path, dev: n.dev, touch: n.seen_at }
               : { path: n.path, dev: n.dev, purge: n.purge ? n.seen_at : null, row: [n.path, n.parent, n.ino, n.dev, n.mtime_ms, n.scanned_at, n.seen_at, ...METRICS.map((m) => n.own[m]), ...METRICS.map((m) => n.tot[m])] },
           );
-          try {
-            await this.send({ op: "commit", items, last: last ? { path: last.path, dev: last.dev, tot: last.tot } : null });
-          } catch (e) {
-            if (this.isBusy(e)) dirty = true; // not stored: the subtree is marked stale at the end
-            this.failed(e);
-          }
+          const t0 = performance.now();
+          inflight.push(
+            this.send({ op: "commit", items, last: last ? { path: last.path, dev: last.dev, tot: last.tot } : null }).then(
+              () => {
+                if (performance.now() - t0 > SLOW_SEND_MS) slowLog("size-commit", performance.now() - t0, virtual);
+              },
+              (e) => {
+                if (this.isBusy(e)) dirty = true; // not stored: the subtree is marked stale at the end
+                this.failed(e);
+              },
+            ),
+          );
+          const w0 = performance.now();
+          if (last) await drain();
+          else if (inflight.length >= COMMITS_IN_FLIGHT) await inflight.shift();
+          if (performance.now() - w0 > SLOW_SEND_MS) slowLog("size-flush-wait", performance.now() - w0, virtual);
         }
         written = true;
       }
@@ -788,11 +820,13 @@ export class SizeStore {
         }
       }
     } catch (e) {
+      await drain();
       if (written) await this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]);
       throw e;
     } finally {
       for (const f of frames) await f.close();
     }
+    await drain();
     if (dirty && this.db) await this.write("UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]);
     if (!this.db) this.keep(rows);
     return { root: root!, read };
