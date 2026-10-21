@@ -147,10 +147,17 @@ input[type=checkbox]{accent-color:var(--accent)}
 .jobs-body{overflow:auto;padding:0 .9rem .5rem;min-height:0}
 .jobs ul{list-style:none;margin:0;padding:0}
 .job{padding:.5rem 0;border-top:1px solid var(--border);font-size:.78rem}
-.job-line{display:flex;flex-wrap:wrap;gap:.1rem .5rem;align-items:baseline}.job-line b{overflow-wrap:anywhere}.job-state{flex:1}.job-line button{padding:0 .6rem;min-height:24px;font-size:.72rem}
+.job-head{display:flex;align-items:flex-start;gap:.4rem}.job-title{flex:1;min-width:0}.job-title .tip--fill,.job-detail .tip--fill{display:block}
+.job-x{flex:none;padding:0;min-width:24px;min-height:24px}.job-x svg{width:14px;height:14px}
+.job-pills{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem;margin-top:.25rem}.job-acts{margin-left:auto;display:flex;gap:.3rem}.job-acts button{padding:0 .6rem;min-height:24px;font-size:.72rem}
+.job-pill{padding:0 .45rem;border:1px solid var(--border);border-radius:999px;background:var(--pill-bg);font-size:.68rem;line-height:1.5;color:var(--fg-soft,var(--fg));white-space:nowrap}
+.job-pill.accent{border-color:var(--accent-line);background:var(--accent-tint);color:var(--accent-text)}
+.job-pill.amber{border-color:color-mix(in srgb,var(--fd-diff) 45%,transparent);background:color-mix(in srgb,var(--fd-diff) 14%,transparent);color:var(--fd-diff)}
+.job-pill.green{border-color:color-mix(in srgb,var(--fd-right) 45%,transparent);background:color-mix(in srgb,var(--fd-right) 14%,transparent);color:var(--fd-right)}
+.job-pill.red{border-color:color-mix(in srgb,var(--fd-bad) 45%,transparent);background:color-mix(in srgb,var(--fd-bad) 14%,transparent);color:var(--fd-bad)}
+.job-pill.muted{color:var(--muted);background:transparent}
 .job progress{width:100%;height:6px;accent-color:var(--accent);margin-top:.3rem}
-.job-detail{font-size:.72rem;overflow-wrap:anywhere}
-.job.failed .job-state{color:var(--accent-text)}
+.job-detail{font-size:.72rem;margin-top:.2rem}
 
 /* dialogs */
 .modal-back{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:60}
@@ -904,9 +911,6 @@ button,button:hover,button:active,.btn--secondary,.btn--danger,.btn--ghost,.user
 .crumbs>.crumb:not(.last) .crumb-t{overflow:visible}
 
 /* job rows: title on its own line, then status and actions; themed checkbox (native input stays underneath for keyboard and screen readers) */
-.job-line .job-title{flex:0 0 100%}
-.job-line .job-state{flex:1 1 auto;color:var(--muted);font-size:.72rem}
-.job.waiting .job-state{color:var(--accent-text);font-weight:600}
 label.ck{position:relative;display:flex;align-items:center;gap:.5rem;min-height:44px;margin:0 -.3rem -.3rem;padding:0 .3rem;border-radius:var(--radius-sm);font-size:.74rem;font-weight:600;color:var(--fg);text-transform:none;letter-spacing:0;cursor:pointer}
 label.ck:hover{background:var(--surface-3)}
 label.ck input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
@@ -936,7 +940,6 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .fp-row{height:88px;flex-wrap:wrap;align-content:flex-start;row-gap:0}
   .fp-row .addr{order:5;flex:1 1 100%;min-width:0}
 }
-.job-line{gap:.1rem .3rem}.job-line button{padding:0 .45rem}
 .addr>.tip:has(.addr-fill){flex:1 1000 24px!important;min-width:0!important}.addr-fill{flex:1 1000 24px!important;min-width:0!important}
 .pv-code{flex:1;min-height:0;width:100%;align-self:stretch;height:100%}
 .pv-code .monaco-editor,.pv-code .monaco-editor-background,.pv-code .monaco-editor .margin{background:var(--surface)}

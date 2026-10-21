@@ -153,6 +153,7 @@ export interface JobView {
   error?: string;
   result?: { path?: string; size?: number; files?: number; skipped?: { symlinks: number; hardlinks: number; special: number } };
   createdAt: number;
+  startedAt?: number;
   /** queued compare jobs: what runs or waits ahead of this one */
   queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
 }
