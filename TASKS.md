@@ -95,7 +95,7 @@ ETA: 2026-10-21 09:00 ICT
 | FD-54 | Release so epic 8 deploys | done | | | 8.FD-49, 8.FD-52, 8.FD-53 | 2026-10-21 09:00 ICT | Release run 39505147773 succeeded; the hub and all agents run 0.3.22 and their job stores are in place. |
 
 ## 9. Job rows and size cache
-ETA: 2026-10-21 19:00 ICT
+ETA: 2026-10-21 17:36 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | FD-55 | Job rows: one subject line with ellipsis and full-text popover, then a pills line with the server and a coloured status pill | done | | job-rows | | 2026-10-21 14:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/105 |
@@ -114,7 +114,7 @@ ETA: 2026-10-21 19:00 ICT
 | FD-72 | Image build tests fail and hang as root: a fanwatch modify re-run fires after 241 ms instead of 300 ms (fanwatch.test.ts:374), then the suite hangs until the 15 minute timeout | done | | release-build-hang | | 2026-10-21 17:45 ICT | Release run 39566764618. Causes: the size-store worker was unref'd before its message listener re-ref'd it, so an open store kept the process alive (hang); takeDue stamped last_run before its now-async reads, so a modify re-run could fire early. Fixed in https://github.com/DynacomSolutions/filedeck/pull/127; PR CI now runs the full server suite as root (480 pass, 0 fail). |
 | FD-73 | Root suite test race: a TTL test re-scanned within the 1 ms TTL and expected a re-read (size-store.test.ts:1220), failing the v0.3.27 release PR CI | done | | ttl-test-race | | 2026-10-21 17:15 ICT | PR CI run 39573141218; fixed by sleeping past the TTL before the assertion. https://github.com/DynacomSolutions/filedeck/pull/129 |
 | FD-74 | The change watcher stamps a folder's last run when it takes the row, not when the re-read finishes, so after a slow re-read the next modify re-run can come sooner than modifyMs after it | done | | fanwatch-last-run | | 2026-10-21 18:30 ICT | Pre-existing; noted while fixing 9.FD-72. The watcher now records each folder's run end through the writer worker (noteRan) and pushes a waiting modify row to the end plus modifyMs. https://github.com/DynacomSolutions/filedeck/pull/132; root suite green in PR CI. |
-| FD-75 | Release v0.3.28 so 9.FD-74 deploys | in_progress | | | 9.FD-74 | 2026-10-21 18:30 ICT | |
+| FD-75 | Release v0.3.28 so 9.FD-74 deploys | done | | | 9.FD-74 | 2026-10-21 18:30 ICT | Release and main CI green on 26c385c; the hub and all agents run 0.3.28 (17:36 ICT). |
 | FD-64 | The CLI size wait gives up after its own 900 s limit while the job is still running; it should keep following a live job | done | | | | 2026-10-21 15:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/109, the CLI had no 900 s cap; the default 3600 s --timeout is now no cap |
 | FD-65 | Release v0.3.23 so epic 9 deploys | done | | | 9.FD-55, 9.FD-56, 9.FD-57, 9.FD-58, 9.FD-59, 9.FD-60, 9.FD-61, 9.FD-62, 9.FD-63, 9.FD-64 | 2026-10-21 13:30 ICT | Release run 39547863442 succeeded; the hub and all agents run 0.3.23. |
 | FD-66 | Root-only fanwatch test fails on main after v0.3.23: settle event not held back (fanwatch.test.ts:377) | done | | fanwatch-modify | | 2026-10-21 14:00 ICT | Root cause: fanwatch drain() only read due modify rows inside the active window, so an event loop stall past settleMs left a watched change unread until the next event. Fixed in https://github.com/DynacomSolutions/filedeck/pull/111; the root fanwatch step passed in PR CI. |
