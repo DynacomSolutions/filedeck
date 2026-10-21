@@ -43,6 +43,8 @@ export interface ChangeSink {
   /** folders due at `now` (oldest first, at most `limit`), marked as run; null = the backlog is too old to drain, the pending rows are dropped */
   takeDue?(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null>;
   /** folders that ran within `withinMs` (a crash may have cut the run short) */
+  /** re-reads ended at `endedAt`: modifyMs counts from there. `hold` = push a waiting row to endedAt + modifyMs (false when a settle event arrived since the folder was taken) */
+  noteRan?(runs: { path: string; endedAt: number; hold: boolean }[], modifyMs: number): Promise<void>;
   recentRuns?(now: number, withinMs: number, limit: number): string[] | Promise<string[]>;
   clearPending?(): Promise<void>;
 }
@@ -81,6 +83,8 @@ export class FanWatch {
   /** fallback while the store is unusable: due time per folder (capped by maxPending), and last runs for the modify interval */
   private mem = new Map<string, number>();
   private lastRun = new Map<string, number>();
+  /** folders taken but not yet re-read to the end: true once a settle event for it was handed to the store meanwhile */
+  private taken = new Map<string, boolean>();
   private draining = false;
   private stopped = false;
   private warned = false;
@@ -254,6 +258,7 @@ export class FanWatch {
     if (!this.buf.size) return;
     const items = [...this.buf].map(([path, e]) => ({ path, dueAt: e.at, modify: e.modify }));
     this.buf = new Map();
+    for (const i of items) if (!i.modify && this.taken.has(i.path)) this.taken.set(i.path, true);
     this.inflight++;
     try {
       if (this.store.notePending && (await this.store.notePending(items, this.modifyMs))) return void (this.activeUntil = Date.now() + this.modifyMs + this.settleMs);
@@ -282,6 +287,25 @@ export class FanWatch {
   private async tick() {
     await this.flush();
     await this.drain();
+  }
+
+  /** The re-reads ended (or failed): modifyMs counts from their end, not from when the folders were taken. One write per batch. */
+  private async ran(ends: [string, number][]) {
+    const runs = ends.map(([path, endedAt]) => ({ path, endedAt, hold: !this.taken.get(path) }));
+    for (const [v] of ends) this.taken.delete(v);
+    for (const { path, endedAt, hold } of runs) {
+      if (this.lastRun.has(path)) {
+        this.lastRun.delete(path);
+        this.lastRun.set(path, endedAt);
+      }
+      const at = this.mem.get(path);
+      if (at !== undefined && hold) this.mem.set(path, Math.max(at, endedAt + this.modifyMs));
+    }
+    try {
+      if (runs.length) await this.store.noteRan?.(runs, this.modifyMs);
+    } catch {
+      /* the rows keep the take time */
+    }
   }
 
   /** Apply the folders whose time has come, one after the other, taking them from the store a batch at a time. */
@@ -317,6 +341,8 @@ export class FanWatch {
           }
         }
         if (!batch.length) break;
+        for (const v of batch) this.taken.set(v, false);
+        const ends: [string, number][] = [];
         for (const v of batch) {
           if (this.stopped) break;
           try {
@@ -324,7 +350,9 @@ export class FanWatch {
           } catch {
             /* a folder that vanished or cannot be read: the next scan deals with it */
           }
+          ends.push([v, Date.now()]);
         }
+        await this.ran(ends); // before the next take, so a row noted during the batch is held until modifyMs after its folder's end
         if (this.store.takeDue) this.activeUntil = Math.max(this.activeUntil, Date.now() + this.modifyMs + this.settleMs); // rows may remain after a slow batch
       }
     } finally {
