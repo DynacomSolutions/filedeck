@@ -323,7 +323,11 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   }
 
   // The live size or du job of a path, own, adopted or only in the shared store: a second request joins it instead of queuing another walk.
-  const liveScan = (virtual: string) => jobs.findLive("du", (p) => p.path === virtual) ?? jobs.findLive("size", (p) => p.path === virtual);
+  // A rescan (`fresh`) only joins a rescan: a cached job would answer it with stale rows.
+  const liveScan = (virtual: string, fresh: boolean) => {
+    const m = (p: { path: string; fresh?: boolean }) => p.path === virtual && (!fresh || p.fresh === true);
+    return jobs.findLive("du", m) ?? jobs.findLive("size", m);
+  };
 
   // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
   app.post("/api/jobs/size", async (c) => {
@@ -332,7 +336,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
     // one live size job per path: a second request attaches to it
-    const same = liveScan(r.virtual);
+    const same = liveScan(r.virtual, b.fresh === true);
     return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
   });
 
@@ -376,7 +380,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       const mine: DuRun = { id: "", detached: false };
       run = mine;
       // joined: the reply tree is read once that job is done
-      v = liveScan(r.virtual) ?? startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }));
+      v = liveScan(r.virtual, fresh) ?? startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }));
       mine.id = v.id;
       duRuns.set(key, mine);
     }
@@ -405,11 +409,23 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       }
       let t = run.out?.tree;
       if (!run.out) {
-        const rel = await sizes.lock(r.virtual); // never a half-written scan
+        // never a half-written scan; the wait is bounded like the job wait, a later walk queued ahead can hold the lock
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), Math.max(0, arrived + cfg.duWaitMs - Date.now()));
+        signal.addEventListener("abort", () => ac.abort(), { once: true });
         try {
-          t = await sizes.tree(r.virtual, depth, all);
+          const rel = await sizes.lock(r.virtual, ac.signal);
+          try {
+            t = await sizes.tree(r.virtual, depth, all);
+          } finally {
+            rel();
+          }
+        } catch (e) {
+          if (!ac.signal.aborted) throw e;
+          run.detached = true; // the repeat request is answered from this finished scan
+          return c.json({ jobId: id, state: "done" }, 202);
         } finally {
-          rel();
+          clearTimeout(timer);
         }
       }
       if (!t?.entries.length) throw new ops.FsError(404, "not found");

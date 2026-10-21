@@ -737,7 +737,7 @@ export class SizeStore {
       const s = t.s;
       const ino = Number(s.ino);
       const [stored, storedKids] = this.getWithKids(t.virtual);
-      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && (now - stored.scanned_at < this.o.ttlMs || this.covers(t.virtual)) && storedKids === stored.own.dirs - stored.own.mounts;
+      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && (now - stored.scanned_at < this.o.ttlMs || (stored.scanned_at >= this.watchedSince() && this.covers(t.virtual))) && storedKids === stored.own.dirs - stored.own.mounts;
       let first: { page: Row[]; ks: (Stats | null)[]; complete: boolean } | undefined;
       if (reusable) {
         // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
@@ -876,6 +876,8 @@ export class SizeStore {
 
   /** Set by the agent when a change watcher is running: true when it keeps the stored sizes of `virtual` current. */
   covers: (virtual: string) => boolean = () => false;
+  /** Rows older than this were not watched all their life (the watcher started later): they keep the TTL rule. */
+  watchedSince: () => number = () => Infinity;
 
   /** false once the database is unusable: nothing is cached any more */
   get persistent(): boolean {

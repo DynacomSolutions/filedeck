@@ -1194,6 +1194,8 @@ test("a folder under the change watcher is trusted past the TTL until it is mark
   await sleep(20);
   assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "unwatched: the TTL forces a re-read");
   s.covers = () => true;
+  assert.ok((await countReaddir(() => s.scan("/ttl-watched"))) > 0, "rows older than the watcher keep the TTL rule");
+  s.watchedSince = () => 0;
   await s.scan("/ttl-watched");
   await sleep(20);
   assert.equal(await countReaddir(() => s.scan("/ttl-watched")), 0, "watched: no re-read");
@@ -1250,4 +1252,39 @@ test("a slow writer does not stop the walk while a chunk commits", async () => {
   } finally {
     st.close();
   }
+});
+
+test("a joined du request does not wait for a later walk that holds the lock", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "dujoin-"));
+  fs.mkdirSync(path.join(root, "big/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "big/sub/f"), "x");
+  const orig = fsp.readdir;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+    if (String(p) === path.join(root, "big")) await sleep(600);
+    return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
+  };
+  try {
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "150" } as never));
+    const post = (p: string, fresh = false) => app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: p, fresh }) });
+    await post("/big/sub");
+    await post("/big", true); // queued behind the first, holds the lock next
+    const t = Date.now();
+    const r = await app.request("/api/du?path=/big/sub&depth=0");
+    assert.ok(Date.now() - t < 450, "GET du waited for the lock");
+    assert.ok(r.status === 200 || r.status === 202);
+  } finally {
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
+});
+
+test("a rescan does not join a cached size job", async () => {
+  const root = fs.mkdtempSync(path.join(tmp, "rescan-join-"));
+  fs.mkdirSync(path.join(root, "d"), { recursive: true });
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never));
+  const post = async (fresh: boolean) => ((await (await app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/d", fresh }) })).json()) as { id: string }).id;
+  const a = await post(false);
+  assert.equal(await post(false), a, "a cached request joins");
+  const b = await post(true);
+  assert.notEqual(b, a, "a rescan queues its own job");
+  assert.equal(await post(true), b, "a second rescan joins the rescan");
 });

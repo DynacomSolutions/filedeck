@@ -264,6 +264,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   registerGitDiffRoutes(app, cfg);
   const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts });
   sizes.covers = (v) => fan.covers(v);
+  sizes.watchedSince = () => fan.watchedSince();
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
   (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
   (app as unknown as { close: () => Promise<void> }).close = async () => {
