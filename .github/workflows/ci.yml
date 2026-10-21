@@ -90,10 +90,11 @@ jobs:
           set -o pipefail
           (cd server && node --import tsx --test --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
         timeout-minutes: 15
-      - name: Run the fanotify helper test as root (a skip is a failure here)
-        run: sudo env "PATH=$PATH" FILEDECK_REQUIRE_FANWATCH=1 node --import tsx --test test/fanwatch.test.ts
+      # The image build runs the whole suite as root (Dockerfile), so run it that way here too; a skip of the fanotify helper test is a failure.
+      - name: Run the server tests as root, as the image build does
+        run: sudo env "PATH=$PATH" FILEDECK_REQUIRE_FANWATCH=1 npm test
         working-directory: server
-        timeout-minutes: 5
+        timeout-minutes: 10
 
   web:
     needs: changes
