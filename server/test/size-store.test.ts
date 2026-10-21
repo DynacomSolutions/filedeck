@@ -1225,6 +1225,7 @@ test("an interrupted rescan keeps the folders it read: the resumed one reads few
   const resumed = await s.scanRead("/resume", undefined, since);
   assert.ok(resumed.read < full.read, `resumed read ${resumed.read} of ${full.read}`);
   assert.deepEqual(resumed.res, full.res);
+});
 
 test("a slow writer does not stop the walk while a chunk commits", async () => {
   const root = fs.mkdtempSync(path.join(tmp, "slowwriter-"));
