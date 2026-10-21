@@ -154,6 +154,20 @@ export class Jobs {
     return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
   }
 
+  /** A queued or running job of `kind` whose params match: this process's own, or one only the shared store knows (another pod during a rollout). */
+  findLive(kind: string, match: (params: any) => boolean): JobView | undefined {
+    const ok = (s: string | null | undefined) => {
+      try {
+        return !!s && match(JSON.parse(s));
+      } catch {
+        return false;
+      }
+    };
+    for (const j of this.jobs.values()) if (j.kind === kind && live(j.state) && ok(j.params)) return this.view(j);
+    const r = this.shared?.store.list(this.shared.scope).find((x) => x.kind === kind && live(x.state) && !this.jobs.has(x.id) && ok(x.params));
+    return r && rowView(r);
+  }
+
   get(id: string): JobView | undefined {
     const j = this.jobs.get(id);
     if (j) return this.view(j);

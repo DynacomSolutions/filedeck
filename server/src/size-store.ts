@@ -878,6 +878,12 @@ export class SizeStore {
       }
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0 };
       await this.tail;
+      // The previous scan is the expected total (progress and ETA); read before the walk replaces it.
+      const prev = this.get(r.virtual);
+      if (prev && !ctl.progress.totalEntries) {
+        ctl.progress.totalEntries = prev.tot.files + prev.tot.dirs + prev.tot.symlinks + prev.tot.other;
+        ctl.progress.totalBytes = prev.tot.bytes;
+      }
       const w = await this.walk(r.virtual, r.real, st, ctl, { fresh });
       return { res: this.result(w.root), read: w.read, ...(after ? { extra: await after() } : {}) };
     } finally {

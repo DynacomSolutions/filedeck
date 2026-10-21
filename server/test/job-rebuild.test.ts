@@ -109,3 +109,22 @@ test("an adopted compress into a volume that became read-only is refused", async
   assert.match(j.error!, /read-only/);
   await a.close();
 });
+
+test("a size request attaches to a live job only the shared store shows", async () => {
+  const a = agent();
+  const row = orphan(a.jobsFile, "size", { path: "/tree", fresh: true }, "foreign-1");
+  new JobStore(a.jobsFile).put({ ...row, beat: Date.now() }); // fresh heartbeat: still owned by the other pod
+  const j = (await (await post(a, "/api/jobs/size", { path: "/tree" })).json()) as Job;
+  assert.equal(j.id, "foreign-1");
+  await a.close();
+});
+
+test("adopted overlapping size jobs never walk together", async () => {
+  const a = agent();
+  orphan(a.jobsFile, "size", { path: "/tree/sub", fresh: true }, "adopt-desc");
+  orphan(a.jobsFile, "size", { path: "/tree", fresh: true }, "adopt-anc");
+  const [d, n] = [await done(a, "adopt-desc"), await done(a, "adopt-anc")] as (Job & { startedAt: number; finishedAt: number })[];
+  assert.ok(d!.state === "done" && n!.state === "done");
+  assert.ok(n!.startedAt >= d!.finishedAt || d!.startedAt >= n!.finishedAt, "walks overlapped");
+  await a.close();
+});

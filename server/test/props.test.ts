@@ -75,6 +75,23 @@ test("folder size job counts files, folders, links, skips the trash store and ne
   assert.ok((j.result!.diskBytes as number) >= 0);
 });
 
+test("two size requests for one path share one job and one walk", async () => {
+  const [a, b] = await Promise.all([post("/api/jobs/size", { path: "/tree/sub" }), post("/api/jobs/size", { path: "/tree/sub" })]);
+  const [ja, jb] = [(await a.json()) as Job, (await b.json()) as Job];
+  assert.equal(ja.id, jb.id);
+  assert.equal(((await (await app.request("/api/jobs")).json()) as { jobs: (Job & { kind: string })[] }).jobs.filter((j) => j.kind === "size" && j.id === ja.id).length, 1);
+  assert.equal((await finish(await post("/api/jobs/size", { path: "/tree/sub" }))).state, "done");
+});
+
+test("a size job starts with the previous scan as its expected total", async () => {
+  const first = await finish(await post("/api/jobs/size", { path: "/tree" }));
+  const r = first.result as Record<string, number>;
+  const sum = r.files! + r.dirs! + r.symlinks! + r.other!;
+  const again = (await finish(await post("/api/jobs/size", { path: "/tree" }))) as Job & { progress: { totalEntries: number; totalBytes: number } };
+  assert.equal(again.progress.totalEntries, sum);
+  assert.equal(again.progress.totalBytes, r.bytes);
+});
+
 test("folder size job is not cut short by the entry cap", async () => {
   const small = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_WALK_MAX_ENTRIES: "3" } as never));
   const r = await small.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/tree" }) });

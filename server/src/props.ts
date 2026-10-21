@@ -326,7 +326,9 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
-    return c.json(startScan("size", r.virtual, b.fresh !== false), 202);
+    // one live size job per path: a second request attaches to it
+    const same = jobs.findLive("size", (p) => p.path === r.virtual);
+    return c.json(same ?? startScan("size", r.virtual, b.fresh !== false), 202);
   });
 
   // GET /api/du?path=&depth=&all=&fresh=&cachedOnly=: unchanged folders are validated (one lstat each), changed ones re-read, then the
