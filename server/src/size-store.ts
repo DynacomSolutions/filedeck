@@ -88,6 +88,8 @@ export interface DuEntry {
 /** rows kept in memory in total (all remembered walks) while the database is unusable, whatever `maxEntries` says: a big scan must not fill the heap */
 const FALLBACK_ROWS = 20_000;
 const COMMIT_CHUNK = 5000;
+/** the writer truncates its WAL file once it is bigger than this */
+const WAL_LIMIT = 64 << 20;
 /** child entries lstat-ed at once, and stored child rows fetched at once */
 const BATCH = 32;
 const PAGE = 256;
@@ -157,9 +159,19 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, COLS, METRICS } = workerData;
+const { file, COLS, METRICS, walLimit } = workerData;
+const fs = require("node:fs");
 const db = new DatabaseSync(file);
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192");
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
+// A reader holding a snapshot stops the automatic (passive) checkpoint from restarting the WAL, which then grows without bound and slows every read and commit.
+// Past the limit, wait briefly for readers and truncate; a busy attempt is skipped and tried again 2 s later, so a pinned snapshot costs the writer at most 0.5 s in 2.5.
+let lastTrim = 0;
+const trim = () => {
+  if (Date.now() - lastTrim < 2000) return;
+  try { if (fs.statSync(file + "-wal").size <= walLimit) return; } catch { return; }
+  lastTrim = Date.now();
+  try { db.exec("PRAGMA busy_timeout=500"); db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {} finally { db.exec("PRAGMA busy_timeout=10000"); }
+};
 const put = db.prepare("INSERT OR REPLACE INTO sizes (" + COLS.join(",") + ") VALUES (" + COLS.map(() => "?").join(",") + ")");
 const stale = db.prepare("SELECT path FROM sizes WHERE parent = ? AND dev = ? AND seen_at <> ? AND path > ? ORDER BY path LIMIT 256");
 const touch = db.prepare("UPDATE sizes SET seen_at = ? WHERE path = ?");
@@ -196,6 +208,7 @@ parentPort.on("message", (m) => {
       if (m.op === "commit") commit(m);
       else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
       else db.prepare(m.sql).run(...m.params);
+      trim();
       parentPort.postMessage({ id: m.id });
       return;
     } catch (e) {
@@ -233,7 +246,7 @@ export class SizeStore {
 
   constructor(
     file: string,
-    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number },
+    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; walLimitBytes?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number },
   ) {
     this.file = file;
     // Like IndexCache: a file that cannot be opened is replaced once, then the store runs uncached.
@@ -359,7 +372,7 @@ export class SizeStore {
   /** Run one request on the writer worker (started on first use); a file-backed store only. */
   private send(m: Record<string, unknown>): Promise<void> {
     if (!this.writer) {
-      const w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false });
+      const w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false });
       w.unref();
       const fail = (e: Error) => {
         if (this.writer === w) this.writer = undefined;

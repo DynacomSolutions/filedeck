@@ -762,6 +762,27 @@ test("abort mid-walk closes every directory and leaves the subtree stale", async
   s.close();
 });
 
+test("writer WAL stays bounded: a reader's snapshot delays the checkpoint, the file shrinks once it lets go", async () => {
+  const dir = at("walcap");
+  for (let i = 0; i < 1500; i++) fs.mkdirSync(path.join(dir, `a${i}`, "b"), { recursive: true });
+  const file = path.join(fs.mkdtempSync(path.join(tmp, "db-")), "sizes.db");
+  const s = new SizeStore(file, { root: tmp, ttlMs: 60_000, maxEntries: 1_000_000, commitChunk: 20, walLimitBytes: 64 << 10 });
+  const reader = new DatabaseSync(file);
+  reader.exec("BEGIN");
+  reader.prepare("SELECT COUNT(*) FROM sizes").get(); // pins a snapshot
+  await s.scan("/walcap", undefined, true);
+  const wal = () => fs.statSync(file + "-wal").size;
+  assert.ok(wal() > 64 << 10, "the pinned snapshot keeps the WAL from restarting");
+  reader.exec("COMMIT");
+  reader.close();
+  await sleep(2100);
+  await s.scan("/walcap", undefined, true);
+  await sleep(2100); // trims are at least 2 s apart: the next write after the pause truncates what the scan grew
+  await s.scan("/walcap/a1/b", undefined, true);
+  assert.ok(wal() <= 64 << 10, `WAL ${wal()} bytes after the reader let go`);
+  s.close();
+});
+
 test("walk keeps one frame per level: 20k empty subfolders in one folder", async () => {
   const dir = at("many");
   fs.mkdirSync(dir);
