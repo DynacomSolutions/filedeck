@@ -753,10 +753,33 @@ test("abort mid-walk closes every directory and leaves the subtree stale", async
   const timer = setInterval(() => ctl.progress.entries > 100 && ac.abort(), 1);
   await assert.rejects(s.scan("/abort", ctl), /canceled/);
   clearInterval(timer);
+  // read-ahead listings (readdir/lstat started before the abort) may still hold a descriptor for a moment; a leaked Dir never goes away
+  for (let i = 0; i < 100 && fds() !== before; i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(fds(), before);
   // rows written before the abort are marked stale, so the next scan re-reads them
   const left = (s as unknown as { db: { prepare(q: string): { get(): { n: number; m: number } } } }).db.prepare("SELECT COUNT(*) AS n, MAX(scanned_at) AS m FROM sizes").get();
   assert.ok(left.n > 0 && left.m === 0);
+  s.close();
+});
+
+test("writer WAL stays bounded: a reader's snapshot delays the checkpoint, the file shrinks once it lets go", async () => {
+  const dir = at("walcap");
+  for (let i = 0; i < 1500; i++) fs.mkdirSync(path.join(dir, `a${i}`, "b"), { recursive: true });
+  const file = path.join(fs.mkdtempSync(path.join(tmp, "db-")), "sizes.db");
+  const s = new SizeStore(file, { root: tmp, ttlMs: 60_000, maxEntries: 1_000_000, commitChunk: 20, walLimitBytes: 64 << 10 });
+  const reader = new DatabaseSync(file);
+  reader.exec("BEGIN");
+  reader.prepare("SELECT COUNT(*) FROM sizes").get(); // pins a snapshot
+  await s.scan("/walcap", undefined, true);
+  const wal = () => fs.statSync(file + "-wal").size;
+  assert.ok(wal() > 64 << 10, "the pinned snapshot keeps the WAL from restarting");
+  reader.exec("COMMIT");
+  reader.close();
+  await sleep(2100);
+  await s.scan("/walcap", undefined, true);
+  await sleep(2100); // trims are at least 2 s apart: the next write after the pause truncates what the scan grew
+  await s.scan("/walcap/a1/b", undefined, true);
+  assert.ok(wal() <= 64 << 10, `WAL ${wal()} bytes after the reader let go`);
   s.close();
 });
 
