@@ -139,10 +139,10 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
     };
   }, [node, path, isDir]);
 
-  const calc = async () => {
+  const calc = async (fresh = false) => {
     setSize(null);
     try {
-      const j = await sizeJob.watch(await api.startSize(node, path));
+      const j = await sizeJob.watch(await api.startSize(node, path, fresh));
       if (j.state === "done") setSize(j.result as unknown as SizeResult);
       else if (j.state === "failed") setErr(j.error ?? "size failed");
     } catch (e) {
@@ -300,6 +300,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
                   {size.truncated && " · stopped at the entry limit, so this is a lower bound"}
                   {size.mountsSkipped > 0 && ` · ${size.mountsSkipped} other filesystem(s) not counted`}
                   {size.errors > 0 && ` · ${size.errors} unreadable`}
+                  {" "}<button type="button" onClick={() => void calc(true)}><Ic.RotateCw /> Rescan</button>
                 </span>
               ) : sj && live(sj) ? (
                 <span>

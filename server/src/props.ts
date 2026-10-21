@@ -320,7 +320,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     jobs.register(kind, async (p) => scanParts(kind, resolveRead(cfg.root, (p as { path: string }).path).virtual, (p as { fresh: boolean }).fresh));
   }
 
-  // "Calculate" in the properties dialog: exact, so every folder is re-read unless the caller says otherwise.
+  // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
   app.post("/api/jobs/size", async (c) => {
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
@@ -328,7 +328,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     await fs.stat(r.real);
     // one live size job per path: a second request attaches to it
     const same = jobs.findLive("size", (p) => p.path === r.virtual);
-    return c.json(same ?? startScan("size", r.virtual, b.fresh !== false), 202);
+    return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
   });
 
   // GET /api/du?path=&depth=&all=&fresh=&cachedOnly=: unchanged folders are validated (one lstat each), changed ones re-read, then the

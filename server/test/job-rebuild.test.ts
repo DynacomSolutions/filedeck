@@ -128,3 +128,13 @@ test("adopted overlapping size jobs never walk together", async () => {
   assert.ok(n!.startedAt >= d!.finishedAt || d!.startedAt >= n!.finishedAt, "walks overlapped");
   await a.close();
 });
+
+test("an adopted du job without a rescan reads nothing the first run already stored", async () => {
+  const a = agent();
+  await done(a, ((await (await post(a, "/api/jobs/size", { path: "/tree" })).json()) as Job).id);
+  const cached = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: false }, "adopt-du-cached").id);
+  assert.equal(cached.result.read, 0);
+  const rescan = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: true }, "adopt-du-fresh").id);
+  assert.ok(rescan.result.read > 0);
+  await a.close();
+});
