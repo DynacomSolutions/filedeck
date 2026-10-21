@@ -12,7 +12,12 @@ process.exitCode = await run(args, process.env, {
   fetch,
   out: (s) => void process.stdout.write(s),
   err: (s) => void process.stderr.write(s),
-  sleep: (ms) => new Promise((r) => (AbortSignal.any([ac.signal, AbortSignal.timeout(ms)]).addEventListener("abort", () => r(), { once: true }))),
+  // A ref'd timer: AbortSignal.timeout is unref'd, so sleeping on it alone lets the event loop empty (exit 13).
+  sleep: (ms) =>
+    new Promise((r) => {
+      const t = setTimeout(r, ms);
+      ac.signal.addEventListener("abort", () => (clearTimeout(t), r()), { once: true });
+    }),
   signal: ac.signal,
   now: Date.now,
 });

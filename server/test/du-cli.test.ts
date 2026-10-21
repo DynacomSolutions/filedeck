@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
+import type { AddressInfo } from "node:net";
 import { parseArgs, humanSize, blocks, run, type RunIo, UsageError } from "../src/du-cli.ts";
 
 test("flags: combined short flags, attached depth, long forms, operands", () => {
@@ -197,4 +200,37 @@ test("500 still fails at once; 503 past the deadline times out", async () => {
   b.io.now = () => (t += 40_000);
   assert.equal(await run(["--timeout", "100", "n:/"], env, b.io), 1);
   assert.match(b.err.join(""), /timed out after 100 s/);
+});
+
+test("real CLI process follows a running job across poll sleeps and does not exit 13", async () => {
+  let polls = 0;
+  const ans = { path: "/u", entries: [E("/u", 4096)], cached: false, truncated: false, watched: false };
+  const srv = createServer((req, res) => {
+    const body = req.url!.includes("/jobs/")
+      ? { state: ++polls < 4 ? "running" : "done", progress: { entries: polls, totalEntries: 0, bytes: 1, current: "/u" } }
+      : polls >= 4 ? ans : { jobId: "J" };
+    // Connection: close, so no keep-alive socket holds the child's event loop open between polls.
+    res.writeHead(req.url!.includes("/jobs/") || polls >= 4 ? 200 : 202, { "content-type": "application/json", connection: "close" });
+    res.end(JSON.stringify(body));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const child = spawn(process.execPath, ["--no-warnings", "--experimental-transform-types", new URL("../src/cli.ts", import.meta.url).pathname, "du", "-s", "n:/u"], {
+      env: { ...process.env, FILEDECK_URL: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, FILEDECK_TOKEN: "tok" },
+    });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    const code = await new Promise((r) => child.on("close", r));
+    assert.equal(code, 0);
+    assert.equal(out, "4\tn:/u\n");
+    assert.ok(polls >= 4);
+  } finally {
+    srv.close();
+  }
+});
+
+test("a failure while our job still runs says so and exits non-zero", async () => {
+  const h = harness((u) => (u.includes("/jobs/") ? j({}, 500) : j({ jobId: "J" }, 202)));
+  assert.equal(await run(["-s", "n:/u"], env, h.io), 1);
+  assert.match(h.err.join(""), /job J keeps running on the server; run the same command again to rejoin it/);
 });

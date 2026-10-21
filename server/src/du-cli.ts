@@ -228,6 +228,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
     const label = `${t.node}:${t.path}`;
     answered = false;
     let jobId = "";
+    let running = false; // a job of ours may still be running on the server
     const api = `${base}/api/nodes/${encodeURIComponent(t.node)}/api`;
     const q = new URLSearchParams({ path: t.path });
     if (o.depth !== undefined) q.set("depth", String(o.depth));
@@ -242,6 +243,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
       while (r.status === 202) {
         polled = true;
         jobId = ((await r.json()) as { jobId: string }).jobId;
+        running = true;
         let lost = false;
         for (;;) {
           stopIfAsked();
@@ -259,12 +261,14 @@ export async function run(argv: string[], env: Record<string, string | undefined
           if (!jr.ok) throw new Error(`job ${jobId}: HTTP ${jr.status}`);
           const j = (await jr.json()) as Job;
           if (j.state === "done") break;
+          if (j.state === "failed" || j.state === "canceled") running = false;
           if (j.state === "failed" || j.state === "canceled") throw new Error(`scan ${j.state}${j.error ? `: ${j.error}` : ""}`);
           const p = j.progress;
           io.err(`filedeck du: ${label}: ${j.state}${p ? `, ${p.entries} entries, ${humanSize(p.bytes)}` : ""}\n`);
           await io.sleep(1000);
         }
         if (lost) continue;
+        running = false;
         r = await patient(url, label); // for a minute the repeat is answered from the scan that just finished
       }
       if (!r.ok) {
@@ -285,7 +289,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
       const stopped = e instanceof Interrupted;
       io.err(`filedeck du: ${label}: ${stopped ? "interrupted" : (e as Error).message}\n`);
       // The job is not cancelled; the same request joins it, so rerunning the command resumes the wait.
-      if (jobId && (stopped || /^timed out/.test((e as Error).message)))
+      if (jobId && running)
         io.err(`filedeck du: ${label}: job ${jobId} keeps running on the server; run the same command again to rejoin it\n`);
       status = stopped ? 130 : 1;
       if (stopped) break;
