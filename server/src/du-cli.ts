@@ -8,7 +8,8 @@ export interface DuOptions {
   apparent: boolean;
   fresh: boolean;
   json: boolean;
-  timeout: number;
+  /** Seconds in total; undefined follows a live job with no cap. */
+  timeout: number | undefined;
   targets: { node: string; path: string }[];
 }
 
@@ -20,13 +21,13 @@ export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size]
       --apparent-size print apparent sizes (bytes) instead of disk usage
       --fresh         re-read every folder instead of reusing stored sizes
       --json          print the hub's answer as JSON
-      --timeout SECONDS  give up after this long in total (default 3600)
+      --timeout SECONDS  give up after this long in total (default: follow a live job until it ends)
 environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token)`;
 
 export class UsageError extends Error {}
 
 export function parseArgs(argv: string[]): DuOptions {
-  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, json: false, timeout: 3600, targets: [] };
+  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, json: false, timeout: undefined, targets: [] };
   const depth = (v: string | undefined) => {
     if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`invalid maximum depth '${v ?? ""}'`);
     return Number(v);
@@ -144,6 +145,8 @@ export interface RunIo {
   err: (s: string) => void;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+  /** Aborted on Ctrl-C. */
+  signal?: AbortSignal;
 }
 
 interface Job {
@@ -153,6 +156,7 @@ interface Job {
 }
 
 class Transient extends Error {}
+class Interrupted extends Error {}
 
 export async function run(argv: string[], env: Record<string, string | undefined>, io: RunIo): Promise<number> {
   let o: DuOptions;
@@ -173,12 +177,16 @@ export async function run(argv: string[], env: Record<string, string | undefined
     return 2;
   }
   const headers = { "x-filedeck-token": token };
-  const deadline = io.now() + o.timeout * 1000;
+  const deadline = o.timeout === undefined ? Infinity : io.now() + o.timeout * 1000;
+  const stopIfAsked = () => {
+    if (io.signal?.aborted) throw new Interrupted();
+  };
   const get = async (url: string) => {
     let r: Response;
     try {
-      r = await io.fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(Math.max(1, deadline - io.now())) });
+      r = await io.fetch(url, { headers, redirect: "manual", signal: AbortSignal.any([...(io.signal ? [io.signal] : []), ...(deadline === Infinity ? [] : [AbortSignal.timeout(Math.max(1, deadline - io.now()))])]) });
     } catch (e) {
+      stopIfAsked();
       throw new Transient(`cannot reach ${base}: ${(e as Error).message}`);
     }
     if (r.status === 401) throw new Error("the hub rejected FILEDECK_TOKEN (401)");
@@ -207,9 +215,11 @@ export async function run(argv: string[], env: Record<string, string | undefined
       }
       // A wrong URL or a dead hub must not hang for the whole timeout: patience starts with the first real answer.
       if (!answered && n >= 3) throw new Error(plain);
+      stopIfAsked();
       if (io.now() >= deadline) throw new Error(`timed out after ${o.timeout} s (${last})`);
       if (!said) io.err(`filedeck du: ${label}: ${last}, retrying\n`);
       await io.sleep(wait);
+      stopIfAsked();
       wait = Math.min(wait * 2, 15000);
     }
   };
@@ -217,6 +227,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
   for (const t of o.targets) {
     const label = `${t.node}:${t.path}`;
     answered = false;
+    let jobId = "";
     const api = `${base}/api/nodes/${encodeURIComponent(t.node)}/api`;
     const q = new URLSearchParams({ path: t.path });
     if (o.depth !== undefined) q.set("depth", String(o.depth));
@@ -230,9 +241,10 @@ export async function run(argv: string[], env: Record<string, string | undefined
       let rejoined = false;
       while (r.status === 202) {
         polled = true;
-        const { jobId } = (await r.json()) as { jobId: string };
+        jobId = ((await r.json()) as { jobId: string }).jobId;
         let lost = false;
         for (;;) {
+          stopIfAsked();
           if (io.now() > deadline) throw new Error(`timed out after ${o.timeout} s`);
           const jr = await patient(`${api}/jobs/${encodeURIComponent(jobId)}`, label);
           if (jr.status === 404 && !rejoined) {
@@ -270,8 +282,13 @@ export async function run(argv: string[], env: Record<string, string | undefined
         io.err(`filedeck du: ${label}: answered from stored sizes${age}${ans.watched ? "" : "; changes since may be missing, use --fresh to re-read"}\n`);
       }
     } catch (e) {
-      io.err(`filedeck du: ${label}: ${(e as Error).message}\n`);
-      status = 1;
+      const stopped = e instanceof Interrupted;
+      io.err(`filedeck du: ${label}: ${stopped ? "interrupted" : (e as Error).message}\n`);
+      // The job is not cancelled; the same request joins it, so rerunning the command resumes the wait.
+      if (jobId && (stopped || /^timed out/.test((e as Error).message)))
+        io.err(`filedeck du: ${label}: job ${jobId} keeps running on the server; run the same command again to rejoin it\n`);
+      status = stopped ? 130 : 1;
+      if (stopped) break;
     }
   }
   return status;

@@ -125,6 +125,27 @@ test("--timeout gives up while polling", async () => {
   assert.throws(() => parseArgs(["--timeout", "0", "n:/"]), UsageError);
 });
 
+test("no --timeout: a live job is followed past an hour; timeout and Ctrl-C name the job", async () => {
+  assert.equal(parseArgs(["n:/"]).timeout, undefined);
+  let polls = 0;
+  let t = 0;
+  const done = ok();
+  const h = harness((u) => (u.includes("/jobs/") ? j({ state: ++polls < 5 ? "running" : "done" }) : polls ? done.clone() : j({ jobId: "J", state: "running" }, 202)));
+  h.io.now = () => (t += 3_600_000);
+  assert.equal(await run(["n:/"], env, h.io), 0);
+  assert.equal(polls, 5);
+  const ac = new AbortController();
+  const g = harness((u) => (u.includes("/jobs/") ? j({ state: "running" }) : j({ jobId: "J", state: "running" }, 202)));
+  g.io.signal = ac.signal;
+  g.io.sleep = async () => ac.abort();
+  assert.equal(await run(["n:/"], env, g.io), 130);
+  assert.match(g.err.join(""), /job J keeps running on the server; run the same command again/);
+  const k = harness((u) => (u.includes("/jobs/") ? j({ state: "running" }) : j({ jobId: "J", state: "running" }, 202)));
+  k.io.now = () => (t += 40_000);
+  assert.equal(await run(["--timeout", "100", "n:/"], env, k.io), 1);
+  assert.match(k.err.join(""), /job J keeps running/);
+});
+
 const ok = () => j({ path: "/", entries: [E("/", 1)], cached: false, truncated: false, watched: false });
 
 test("transient 503 on the first request and on a poll is waited out, one notice per streak", async () => {
