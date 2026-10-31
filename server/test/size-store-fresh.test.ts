@@ -74,6 +74,11 @@ function hold(s: SizeStore, pick: (m: Any) => boolean) {
   };
   return { release, held: () => held };
 }
+/** the watcher applied what is pending: take it and report the re-reads ended */
+async function settlePending(s: SizeStore) {
+  const got = (await s.takeDue(Date.now(), 100, { modifyMs: 100, settleMs: 1 })) ?? [];
+  await s.noteRan(got.map((p) => ({ path: p, endedAt: Date.now(), hold: false })), 100);
+}
 const rowsOf = (db: string, sql: string) => {
   const d = new DatabaseSync(db, { readOnly: true });
   try {
@@ -204,11 +209,11 @@ test("freshTree: needs a validating walk after the watcher was ready, and nothin
   a.quiet = () => false;
   assert.equal(await s.freshTree("/", 1, false), null, "a change is waiting in the watcher");
   a.quiet = () => true;
-  await s.notePending([{ path: "/b/z", dueAt: Date.now() + 60_000, modify: false }], 100);
+  await s.notePending([{ path: "/b/z", dueAt: Date.now() - 10, modify: false }], 100);
   assert.equal(await s.freshTree("/", 1, false), null, "pending below");
   assert.equal(await s.freshTree("/b/z", 1, false), null, "pending on the folder");
   assert.ok(await s.freshTree("/a", 1, false), "an unrelated folder is still fresh");
-  await s.clearPending();
+  await settlePending(s);
   assert.ok(await s.freshTree("/", 1, false));
   s.markStale("/b");
   assert.equal(await s.freshTree("/", 1, false), null, "a mark below");
@@ -227,12 +232,12 @@ test("freshTree: a validated walk of an ancestor covers a folder below it; a pen
   fs.renameSync(path.join(root, "a/x"), path.join(root, "a/x.old"));
   fs.mkdirSync(path.join(root, "a/x"));
   fs.writeFileSync(path.join(root, "a/x/big"), "z".repeat(1000));
-  await s.notePending([{ path: "/a", dueAt: Date.now() + 60_000, modify: false }], 100);
+  await s.notePending([{ path: "/a", dueAt: Date.now() - 10, modify: false }], 100);
   assert.equal(await s.freshTree("/a/x", 0, false), null, "pending parent");
-  await s.clearPending();
-  await s.notePending([{ path: "/", dueAt: Date.now() + 60_000, modify: false }], 100);
+  await settlePending(s);
+  await s.notePending([{ path: "/", dueAt: Date.now() - 10, modify: false }], 100);
   assert.equal(await s.freshTree("/a/x", 0, false), null, "pending grandparent");
-  await s.clearPending();
+  await settlePending(s);
   // the same after an overflow: dirty marks on the ancestors
   assert.equal(await backlog(s, ["/", "/a", "/a/x.old"]), null);
   assert.equal(await s.freshTree("/a/x", 0, false), null, "dirty ancestors");
@@ -284,13 +289,12 @@ test("freshTree: a change in the restart gap is not served, rows within the TTL 
   a.quiet = () => true;
   a.watchedSince = () => ready;
   assert.equal(await s2.freshTree("/", 0, false), null);
-  // a walk that reuses rows only because they are young (not because the watcher kept them) does not validate either
-  await s2.scan("/");
-  assert.equal(await s2.freshTree("/", 0, false), null);
-  // a rescan after the watcher was ready does
+  // a plain walk under the running watcher re-reads the rows that predate it, so it can vouch for the tree when it ends (liveness right after a restart)
   await sleep(5);
-  await s2.scan("/", undefined, true);
+  const w = await s2.scanRead("/");
+  assert.ok(w.read > 0, "the old rows were re-read, not reused on their age");
   assert.equal(bytes(await s2.freshTree("/", 0, false)), 10);
+  assert.equal((await s2.scanRead("/")).read, 0, "and the next walk reuses them");
 });
 
 test("freshTree: an old row of another device, or a mark above a mount point, does not block a validated folder", async () => {
