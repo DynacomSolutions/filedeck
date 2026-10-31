@@ -402,7 +402,6 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         if (s.entries.length) return c.json({ path: r.virtual, entries: s.entries, cached: sizes.persistent, truncated: s.truncated, watched: sizes.covers(r.virtual), stale: true });
       }
     }
-    if (stopping()) throw leaving();
     const key = [r.virtual, depth, all, fresh].join("\0");
     // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
     for (const [k, d] of duRuns) {
@@ -416,8 +415,9 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (!run || !v || (v.state !== "queued" && v.state !== "running" && !replay)) {
       const mine: DuRun = { id: "", detached: false };
       run = mine;
-      // joined: the reply tree is read once that job is done
-      v = liveScan(r.virtual, fresh) ?? startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read, untrusted: x.untrusted }), "cli");
+      // joined: the reply tree is read once that job is done. While stopping, only a new job is refused: the answer of a finished or running one is still good
+      // (refusing it would send the repeat to the next process, which walks the whole tree again).
+      v = liveScan(r.virtual, fresh) ?? (stopping() ? (() => { throw leaving(); })() : startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read, untrusted: x.untrusted }), "cli"));
       mine.id = v.id;
       duRuns.set(key, mine);
     }
@@ -474,7 +474,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       // `stale`: the walk reused rows on their age under a running watcher (they may have changed while no watcher saw it), or the repeat of a finished job
       // comes after a change the watcher has reported
       // (a stale mark made after the job ended: an overflow or a helper exit loses events and leaves only that)
-      const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && ((sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual))) || sizes.markedSince(r.virtual, v!.finishedAt ?? 0)));
+      const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && ((sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual))) || sizes.markedSince(r.virtual, v!.startedAt ?? v!.createdAt)));
       return c.json({ path: r.virtual, entries: t.entries, cached: (replay || (run.out ? run.out.read : jr.read ?? -1) === 0) && sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual), ...(stale ? { stale: true } : {}) });
     } finally {
       if (!keep) {

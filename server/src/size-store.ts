@@ -1499,10 +1499,10 @@ export class SizeStore {
     this.markWrite((this.tail = this.txn(parts).then(() => undefined)));
   }
 
-  /** Has a stale mark been made on `p`, above it or below it after `t`? (An overflow or a helper exit leaves only marks: the pending rows it dropped are gone.) */
+  /** Has a stale mark been made on `p`, above it or below it, at or after `t`? (An overflow or a helper exit leaves only marks: the pending rows it dropped are gone.) */
   markedSince(p: string, t: number): boolean {
     const [lo, hi] = below(p);
-    for (const [m, at] of this.marks) if (at > t && (m === p || p.startsWith(m === "/" ? "/" : m + "/") || (m > lo && m < hi))) return true;
+    for (const [m, at] of this.marks) if (at >= t && (m === p || p.startsWith(m === "/" ? "/" : m + "/") || (m > lo && m < hi))) return true;
     return false;
   }
 
@@ -1873,7 +1873,8 @@ export class SizeStore {
       // events lost (an overflow) and a store that was unusable are gaps: nothing from before them is vouched for, but the run goes on
       since = Math.max(since, lostAt, this.floor);
       await this.post({ op: "meta", sql: "UPDATE watch_sessions SET beat = ?, since = ? WHERE id = ?", params: [Date.now(), since, id] }, false);
-      if (this.firstEpoch) await this.post({ op: "meta", sql: "UPDATE watch_sessions SET min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [minEpoch ?? this.firstEpoch, id] }, false);
+      const mine = minEpoch ?? (this.firstEpoch || null); // (a run that carried but never held the lease passes its predecessor's value on)
+      if (mine !== null) await this.post({ op: "meta", sql: "UPDATE watch_sessions SET min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [mine, id] }, false);
       const newer = ((await this.read("sessionNewer", "SELECT 1 FROM watch_sessions WHERE id > ? AND mounts_hash = ? LIMIT 1", [id, mountsHash], null)) ?? []).length > 0;
       return { since, newer, minEpoch };
     } catch {

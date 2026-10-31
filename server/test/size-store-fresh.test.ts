@@ -764,3 +764,71 @@ test("R4 in the window between SIGTERM and the lease release a size job is refus
   assert.equal((await a.request("/api/du?path=/t&depth=1&fresh=1")).status, 503);
   await lv;
 });
+
+let hookTree: (() => Promise<void>) | undefined;
+const origTree = SizeStore.prototype.tree;
+SizeStore.prototype.tree = async function (this: Any, ...a: Any[]) {
+  const h = hookTree;
+  hookTree = undefined; // once
+  if (h) await h();
+  return (origTree as Any).apply(this, a);
+} as Any;
+
+for (const qs of ["fresh=1", "all=0"]) {
+  test(`W1 (${qs}) an overflow after the walk read the tree but before the job finished: the repeat is flagged stale`, async () => {
+    const w = quittingAgent("w1" + qs.slice(0, 3), { FILEDECK_HANDOVER_MS: "100" });
+    const a = w.start();
+    await sleep(300);
+    // the job's reply tree read is slow: the folder changes and the watcher overflows meanwhile
+    hookTree = async () => {
+      fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+      fs.writeFileSync(w.ev, "!overflow\n");
+      await sleep(400);
+    };
+    const url = `/api/du?path=/t&depth=1&${qs}`;
+    const first = await a.request(url);
+    assert.equal(first.status, 202);
+    const { jobId } = await jsonOf(first);
+    for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+    await sleep(300);
+    const r = await a.request(url);
+    const b = await jsonOf(r);
+    assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `old size ${b.entries?.[0]?.bytes} unflagged`);
+  });
+}
+
+test("S1 a du --fresh finished before SIGTERM is answered from the finished scan in the stopping window; only a new job is refused", async () => {
+  const w = quittingAgent("s1", { FILEDECK_HANDOVER_MS: "1500" }, 200);
+  const a = w.start();
+  await sleep(300);
+  const url = "/api/du?path=/t&depth=1&fresh=1";
+  const first = await a.request(url);
+  assert.equal(first.status, 202);
+  const { jobId } = await jsonOf(first);
+  for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+  const lv = a.leave();
+  await sleep(50);
+  const r = await a.request(url);
+  assert.equal(r.status, 200, "the finished scan's answer was refused");
+  assert.equal((await a.request("/api/du?path=/t&depth=0&fresh=1")).status, 503, "a new job is refused");
+  await lv;
+});
+
+test("a run that carried a predecessor's chain but never held the lease passes the predecessor's min_epoch on", async () => {
+  const { root, s: A, db } = fixture("minepoch");
+  await A.scan("/");
+  const B = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 300 });
+  stores.push(B);
+  await B.mayScan();
+  assert.equal(B.isWriter, false);
+  const t0 = Date.now() - 100;
+  const a = await A.sessionStart("h", t0);
+  await A.sessionTick(a!, "h", t0);
+  await A.sessionEnd(a!, true);
+  const b = await B.sessionStart("h", t0 + 50);
+  const t = await B.sessionTick(b!, "h", t0 + 50);
+  assert.equal(t?.minEpoch, 1);
+  const d = new DatabaseSync(db, { readOnly: true });
+  assert.equal((d.prepare("SELECT min_epoch m FROM watch_sessions WHERE id = ?").get(b!) as { m: number }).m, 1);
+  d.close();
+});
