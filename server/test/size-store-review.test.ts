@@ -1,6 +1,6 @@
 // Regression tests for the ways the "never serve a changed folder as fresh" invariant was found to break (second review of the validated/dirty design).
 // Each test asserts the invariant: the fast path answers either null or the true size.
-import { test, before, after } from "node:test";
+import { test as nodeTest, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,6 +10,9 @@ import { SizeStore } from "../src/size-store.ts";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 
+/** every test here starts agents, helpers and workers: a leak must fail the test, not hang the runner */
+const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
+
 type Any = any; // the tests reach into private state on purpose
 let tmp: string;
 const stores: SizeStore[] = [];
@@ -18,7 +21,7 @@ const realNow = Date.now;
 before(() => void (tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-review-")))));
 after(async () => {
   Date.now = realNow;
-  for (const a of agents) await a.close().catch(() => {});
+  for (const a of agents) await Promise.race([a.close().catch(() => {}), new Promise((r) => setTimeout(r, 15_000))]);
   for (const s of stores) await s.close().catch(() => {});
   fs.rmSync(tmp, { recursive: true, force: true });
 });

@@ -1,5 +1,5 @@
 // A rolling deploy: the new process starts its watcher while the old one still runs, and takes the store's writer lease when the old one lets go.
-import { test, before, after } from "node:test";
+import { test as nodeTest, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -9,6 +9,9 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { FanWatch, type HelperProc } from "../src/fanwatch.ts";
 import { SizeStore } from "../src/size-store.ts";
+
+/** every test here starts agents, helpers and workers: a leak must fail the test, not hang the runner */
+const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
 
 type Any = any; // private state on purpose
 class Fake extends EventEmitter implements HelperProc {
@@ -30,7 +33,7 @@ let tmp: string;
 const things: { close(): Promise<void> | void }[] = [];
 before(() => void (tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-handover-")))));
 after(async () => {
-  for (const t of things) await t.close();
+  for (const t of things) await Promise.race([Promise.resolve(t.close()).catch(() => undefined), new Promise((r) => setTimeout(r, 15_000))]);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

@@ -1,4 +1,4 @@
-import { test, before, after } from "node:test";
+import { test as nodeTest, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,13 +10,16 @@ import { FanWatch } from "../src/fanwatch.ts";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 
+/** every test here starts agents, helpers and workers: a leak must fail the test, not hang the runner */
+const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
+
 let tmp: string;
 const stores: SizeStore[] = [];
 const agents: { close(): Promise<void> }[] = [];
 before(() => void (tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-fresh-")))));
 after(async () => {
   for (const s of stores) await s.close();
-  for (const a of agents) await a.close().catch(() => {});
+  for (const a of agents) await Promise.race([a.close().catch(() => {}), new Promise((r) => setTimeout(r, 15_000))]);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
