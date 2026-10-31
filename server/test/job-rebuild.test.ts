@@ -15,7 +15,7 @@ after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const SECRET = "Tr0ub4dor&3-correct horse";
 
-type Job = { id: string; state: string; createdAt: number; result?: any; error?: string };
+type Job = { id: string; origin?: string; state: string; createdAt: number; result?: any; error?: string };
 function agent(env: Record<string, string> = {}) {
   const root = path.join(tmp, `root${n}`);
   fs.mkdirSync(path.join(root, "tree/sub"), { recursive: true });
@@ -40,9 +40,9 @@ async function done(a: { app: { request: Function } }, id: string): Promise<Job>
   throw new Error("job did not finish");
 }
 /** A row left by an owner that handed over (beat 0): the agent under test adopts it on its next tick. */
-function orphan(file: string, kind: string, params: unknown, id = `adopt-${n}`): JobRow {
+function orphan(file: string, kind: string, params: unknown, id = `adopt-${n}`, origin?: string): JobRow {
   const createdAt = 1_000_000 + n;
-  const view = { id, kind, title: "t", state: "running", progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" }, createdAt };
+  const view = { id, kind, title: "t", state: "running", ...(origin ? { origin } : {}), progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" }, createdAt };
   const row = { id, scope: "t", kind, title: "t", params: params === null ? null : JSON.stringify(params), view: JSON.stringify(view), state: "running", owner: "dead", beat: 0, created_at: createdAt, finished_at: null };
   assert.ok(new JobStore(file).put(row));
   return { ...row, cancel: 0 };
@@ -168,4 +168,29 @@ test("a size walk waits for an overlapping walk of another process on the same s
     await (old.app as unknown as { close(): Promise<void> }).close();
     await (fresh.app as unknown as { close(): Promise<void> }).close();
   }
+});
+
+test("origin: the UI endpoint starts a ui job, GET /api/du a cli job, and the job list carries it", async () => {
+  const a = agent();
+  const ui = (await (await post(a, "/api/jobs/size", { path: "/tree" })).json()) as Job;
+  assert.equal(ui.origin, "ui");
+  assert.equal((await done(a, ui.id)).origin, "ui");
+  const r = (await a.app.request("/api/du?path=/tree/sub&fresh=1")) as Response;
+  assert.equal(r.status, 200);
+  const list = ((await (await a.app.request("/api/jobs")).json()) as { jobs: Job[] }).jobs;
+  assert.deepEqual(list.map((j) => j.origin).sort(), ["cli", "ui"]);
+  assert.equal(new JobStore(a.jobsFile).get(ui.id, "t") && JSON.parse(new JobStore(a.jobsFile).get(ui.id, "t")!.view).origin, "ui");
+  await a.close();
+});
+
+test("origin: an adopted job keeps its stored origin; old rows without one default by kind", async () => {
+  const a = agent();
+  const kept = await done(a, orphan(a.jobsFile, "size", { path: "/tree" }, "o-watch", "watcher").id);
+  assert.equal(kept.origin, "watcher");
+  const oldDu = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: false }, "o-du").id);
+  assert.equal(oldDu.origin, "cli");
+  const oldSize = await done(a, orphan(a.jobsFile, "size", { path: "/tree", fresh: false }, "o-size").id);
+  assert.equal(oldSize.origin, "ui");
+  assert.equal(JSON.parse(new JobStore(a.jobsFile).get("o-watch", "t")!.view).origin, "watcher");
+  await a.close();
 });

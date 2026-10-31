@@ -7,7 +7,7 @@ import { namesOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
 import { hitsReadOnly } from "./readonly.ts";
-import type { JobCtl, Jobs } from "./jobs.ts";
+import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { SizeStore, type DuEntry } from "./size-store.ts";
 import { spillPath } from "./index-cache.ts";
@@ -324,11 +324,11 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       },
     };
   };
-  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
+  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void, origin: JobOrigin = "ui") => {
     // a rescan remembers when it began: a restart keeps the folders it already read
     const freshSince = fresh ? Date.now() : undefined;
     const p = scanParts(kind, virtual, freshSince ?? false, after, done);
-    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh, freshSince } });
+    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh, freshSince }, origin });
   };
   // An adopted scan runs again under its id, confined again and without `after` (a du client repeats its request once the job is done).
   for (const kind of ["size", "du"] as const) {
@@ -393,7 +393,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       const mine: DuRun = { id: "", detached: false };
       run = mine;
       // joined: the reply tree is read once that job is done
-      v = liveScan(r.virtual, fresh) ?? startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }));
+      v = liveScan(r.virtual, fresh) ?? startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }), "cli");
       mine.id = v.id;
       duRuns.set(key, mine);
     }

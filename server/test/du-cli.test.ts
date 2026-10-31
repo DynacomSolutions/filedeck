@@ -125,23 +125,46 @@ test("--timeout gives up while polling", async () => {
   assert.equal(await run(["--timeout", "100", "n:/"], env, h.io), 1);
   assert.match(h.err.join(""), /timed out after 100 s/);
   assert.equal(parseArgs(["--timeout=5", "n:/"]).timeout, 5);
-  assert.throws(() => parseArgs(["--timeout", "0", "n:/"]), UsageError);
+  assert.equal(parseArgs(["--timeout", "0", "n:/"]).timeout, 0);
+  assert.throws(() => parseArgs(["--timeout", "-1", "n:/"]), UsageError);
 });
 
-test("no --timeout: a live job is followed past an hour; timeout and Ctrl-C name the job", async () => {
-  assert.equal(parseArgs(["n:/"]).timeout, undefined);
+test("default timeout is 600 s: a scan that outlasts it is given up, --timeout 0 follows on", async () => {
+  assert.equal(parseArgs(["n:/"]).timeout, 600);
+  let t = 0;
+  const h = harness((u) => (u.includes("/jobs/") ? j({ state: "running" }) : j({ jobId: "J", state: "running" }, 202)));
+  h.io.now = () => (t += 400_000);
+  assert.equal(await run(["n:/"], env, h.io), 1);
+  assert.match(h.err.join(""), /timed out after 600 s/);
+});
+
+test("--cached sends cachedOnly=1, never scans, and reports a folder that is not stored", async () => {
+  const h = harness(() => new Response(null, { status: 204 }));
+  assert.equal(await run(["-s", "--cached", "n:/d", "n:/e"], env, h.io), 1);
+  assert.equal(h.calls.length, 2);
+  for (const c of h.calls) assert.match(c, /depth=0&cachedOnly=1$/);
+  assert.match(h.err.join(""), /n:\/d: not stored yet; run without --cached to scan it/);
+  assert.equal(h.out.join(""), "");
+  const g = harness(() => j({ path: "/d", entries: [E("/d", 2048)], cached: true, truncated: false, watched: true }));
+  assert.equal(await run(["-s", "--cached", "n:/d"], env, g.io), 0);
+  assert.equal(g.out.join(""), "2\tn:/d\n");
+  assert.throws(() => parseArgs(["--cached", "--fresh", "n:/"]), UsageError);
+});
+
+test("--timeout 0: a live job is followed past an hour; timeout and Ctrl-C name the job", async () => {
+  assert.equal(parseArgs(["--timeout", "0", "n:/"]).timeout, 0);
   let polls = 0;
   let t = 0;
   const done = ok();
   const h = harness((u) => (u.includes("/jobs/") ? j({ state: ++polls < 5 ? "running" : "done" }) : polls ? done.clone() : j({ jobId: "J", state: "running" }, 202)));
   h.io.now = () => (t += 3_600_000);
-  assert.equal(await run(["n:/"], env, h.io), 0);
+  assert.equal(await run(["--timeout", "0", "n:/"], env, h.io), 0);
   assert.equal(polls, 5);
   const ac = new AbortController();
   const g = harness((u) => (u.includes("/jobs/") ? j({ state: "running" }) : j({ jobId: "J", state: "running" }, 202)));
   g.io.signal = ac.signal;
   g.io.sleep = async () => ac.abort();
-  assert.equal(await run(["n:/"], env, g.io), 130);
+  assert.equal(await run(["--timeout", "0", "n:/"], env, g.io), 130);
   assert.match(g.err.join(""), /job J keeps running on the server; run the same command again/);
   const k = harness((u) => (u.includes("/jobs/") ? j({ state: "running" }) : j({ jobId: "J", state: "running" }, 202)));
   k.io.now = () => (t += 40_000);

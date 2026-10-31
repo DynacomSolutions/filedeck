@@ -84,7 +84,7 @@ Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_
 A `du` for the folders on your nodes, answered from the hub's stored folder sizes instead of walking the disk each time.
 
 ```sh
-filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] [--timeout SECONDS] node:/path...
+filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached] [--json] [--timeout SECONDS] node:/path...
 ```
 
 | Flag | Meaning |
@@ -94,8 +94,9 @@ filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] [--timeou
 | `-a` | Also list files |
 | `--apparent-size` | Bytes of content instead of disk usage |
 | `--fresh` | Re-read every folder instead of reusing stored sizes |
+| `--cached` | Answer from stored sizes only: never starts a scan, and says so when a folder is not stored (exit 1). Conflicts with `--fresh` |
 | `--json` | Print the hub's answer as JSON (one object per argument) |
-| `--timeout SECONDS` | Give up on an argument after this long in total (default: none, a live job is followed until it ends; Ctrl-C leaves it running, rerun to rejoin) and exit 1 |
+| `--timeout SECONDS` | Give up on an argument after this long in total (default: 600; `0` follows a live job with no cap; Ctrl-C or the timeout leaves the job running, rerun to rejoin) and exit 1 |
 
 Without `-h` the unit is 1 KiB blocks, as in `du`. Children are printed before their parent. Paths are `node:/path`, where `node` is a node name from the sidebar. A long scan answers with a job; the CLI polls it and prints progress on stderr. When the answer comes from stored sizes it says so on stderr (with the age of the oldest folder), because changes since the last scan may be missing; `--fresh` avoids that. Exit status is 0 on success, 1 if any argument failed, 2 for a usage or configuration error.
 

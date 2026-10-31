@@ -3,6 +3,9 @@ import type { JobRow, JobStore } from "./job-store.ts";
 
 export type JobState = "queued" | "running" | "done" | "failed" | "canceled";
 
+/** Who started a job: `ui` a person in the web UI, the rest run in the background (a CLI client, the file watcher, or an adopted job of one of those). */
+export type JobOrigin = "ui" | "cli" | "watcher" | "adopted";
+
 export interface Progress {
   bytes: number;
   /** 0 until known */
@@ -17,6 +20,8 @@ export interface JobView {
   kind: string;
   title: string;
   state: JobState;
+  /** who started it; views stored before origins existed are filled in on read */
+  origin: JobOrigin;
   progress: Progress;
   error?: string;
   result?: unknown;
@@ -69,7 +74,11 @@ interface Job extends JobView {
 }
 
 const live = (s: string) => s === "queued" || s === "running";
-const rowView = (r: JobRow) => JSON.parse(r.view) as JobView;
+/** Stored views from before origins existed: a du job came from the CLI, anything else from the UI. */
+const rowView = (r: JobRow): JobView => {
+  const v = JSON.parse(r.view) as JobView;
+  return v.origin ? v : { ...v, origin: r.kind === "du" ? "cli" : "ui" };
+};
 
 /** Background job queue: bounded concurrency, progress, cancel. In memory, or shared through a JobStore: bounded concurrency, progress, cancel. */
 export class Jobs {
@@ -100,13 +109,14 @@ export class Jobs {
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number }): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin }): JobView {
     const job: Job = {
       id: meta?.id ?? randomUUID(),
       params: meta?.params === undefined ? null : JSON.stringify(meta.params),
       kind,
       title,
       state: "queued",
+      origin: meta?.origin ?? "ui",
       progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" },
       createdAt: meta?.createdAt ?? Date.now(),
       run,
@@ -297,7 +307,7 @@ export class Jobs {
     try {
       const params = JSON.parse(r.params!);
       const b = await sh.rebuild![r.kind]!(params);
-      this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at });
+      this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: rowView(r).origin });
     } catch {
       const now = Date.now();
       sh.store.put({ ...r, view: JSON.stringify(this.interrupted(r, now)), state: "failed", owner: this.me, beat: now, finished_at: now });

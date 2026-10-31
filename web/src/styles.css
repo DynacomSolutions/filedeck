@@ -144,6 +144,12 @@ input[type=checkbox]{accent-color:var(--accent)}
 .jobs-toggle .n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--fg)}
 .jobs-toggle svg{width:12px;height:12px;transition:transform var(--fast) var(--ease)}
 .jobs.collapsed .jobs-toggle svg{transform:rotate(-90deg)}
+.jobs-bg{flex:0 1 auto;border-top:1px solid var(--border);padding:0 .9rem;display:flex;flex-direction:column;min-height:0}
+.jobs-bg-toggle{display:flex;align-items:center;gap:.4rem;width:100%;min-height:0;padding:.35rem 0;font-size:.72rem;color:var(--muted);border:0;background:transparent;box-shadow:none;text-align:left}
+.jobs-bg-toggle:hover:not(:disabled){color:var(--fg);background:transparent;border:0}
+.jobs-bg-toggle svg{width:12px;height:12px}
+.jobs-bg-toggle .n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--fg)}
+.jobs-bg-list{flex:1 1 auto;min-height:0;max-height:16rem;overflow:auto;padding-bottom:.4rem!important}
 .jobs-body{overflow:auto;padding:0 .9rem .5rem;min-height:0}
 .jobs ul{list-style:none;margin:0;padding:0}
 .job{padding:.5rem 0;border-top:1px solid var(--border);font-size:.78rem}

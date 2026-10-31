@@ -144,11 +144,14 @@ export interface WriteResult {
   etag: string;
 }
 export type JobState = "queued" | "running" | "done" | "failed" | "canceled";
+/** Who started a job; only `ui` jobs belong in the main jobs list. Absent on agents from before origins existed. */
+export type JobOrigin = "ui" | "cli" | "watcher" | "adopted";
 export interface JobView {
   id: string;
   kind: string;
   title: string;
   state: JobState;
+  origin?: JobOrigin;
   progress: { bytes: number; totalBytes: number; entries: number; totalEntries: number; current: string };
   error?: string;
   result?: { path?: string; size?: number; files?: number; skipped?: { symlinks: number; hardlinks: number; special: number } };
