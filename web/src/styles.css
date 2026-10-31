@@ -1021,6 +1021,13 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .phone-only{display:inline-flex}
   .site-header__inner{height:44px}
   .selbar b.selbar-none{display:none}
+  .hide-phone{display:none!important}
+  /* every selection action stays reachable: compact icon buttons, and the bar scrolls rather than clipping; Clear is pinned at the right edge */
+  .selbar{overflow-x:auto;gap:0 .3rem}
+  .selbar>.tip{flex:0 1 auto;min-width:0;max-width:4.6rem;overflow:hidden}.selbar b{overflow:hidden;text-overflow:ellipsis}
+  .selbar-actions{gap:.1rem}
+  .selbar-actions button{padding:0 .2rem;min-width:32px}
+  .selbar-actions .tip:last-child{position:sticky;right:0;background:var(--surface)}
   .selbar>.tip:has(.selbar-none){display:none}
   .side{position:fixed;top:var(--vv-top,0);left:0;z-index:70;height:var(--vvh,100dvh);max-height:none;width:min(19rem,86vw);transform:translateX(-102%);visibility:hidden;transition:transform .18s ease,visibility 0s linear .18s;border:0;box-shadow:var(--shadow-3)}
   .side.open{transform:none;visibility:visible;transition:transform .18s ease}

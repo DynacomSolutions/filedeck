@@ -585,7 +585,7 @@ export function App() {
   return (
     <div className="app">
       <CompareCtx.Provider value={routedCompare}>
-      <Sidebar drawer={phone && drawerOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
+      <Sidebar drawer={phone && drawerOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
       <div className="app-col">
       <header className="site-header">
         <div className="site-header__inner">
@@ -615,7 +615,7 @@ export function App() {
                 <button aria-label="Compare panels" aria-haspopup={panelSel.length > 2 ? "menu" : undefined} onClick={compareClick}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
               </Tip>
             )}
-                        <Tip label="Keyboard shortcuts" shortcut="?"><button onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
+                        <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
           </div>
         </div>
       </header>

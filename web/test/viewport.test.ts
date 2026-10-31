@@ -102,3 +102,12 @@ test("the editor pane has no second close button that would drop unsaved edits",
   const fp = readFileSync(new URL("../src/FilePanel.tsx", import.meta.url), "utf8");
   assert.match(fp, /\{!gitDiff && !editing && \(\s*<Tip label=\{propsOpen && !editing/);
 });
+
+test("phone selection bar scrolls instead of clipping, and Clear is pinned", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.selbar\{overflow-x:auto;/);
+  assert.match(css, /\.selbar-actions \.tip:last-child\{position:sticky;right:0/);
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /className="hide-phone" onClick/);
+  assert.match(app, /phone-only side-set" aria-label="Keyboard shortcuts"/);
+});
