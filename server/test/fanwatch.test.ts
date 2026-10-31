@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { FanWatch, mapPath, unescapeLine, type HelperProc } from "../src/fanwatch.ts";
+import { DatabaseSync } from "node:sqlite";
 import { SizeStore } from "../src/size-store.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -383,14 +384,18 @@ test("fanwatch + SizeStore file: modify events wait modifyMs after the last run,
 
 test("SizeStore.takeDue stamps the run after its reads, so a modify row waits modifyMs from the run, not from before the reads", async () => {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-store-")));
-  const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 1000, readDelayMs: 100 }); // every read takes 100 ms
+  const file = path.join(dir, "sizes.db");
+  const st = new SizeStore(file, { root: dir, ttlMs: 60_000, maxEntries: 1000, readDelayMs: 100 }); // every read takes 100 ms
   const t = { modifyMs: 300, settleMs: 5 };
   await st.notePending([{ path: "/a", dueAt: Date.now(), modify: false }], 300);
-  assert.deepEqual(await st.takeDue(Date.now(), 10, t), ["/a"]);
-  const ranAt = Date.now(); // the run was stamped up to a few ms (the writes after it) before this
-  await st.notePending([{ path: "/a", dueAt: Date.now(), modify: true }], 300);
-  // stamped after the reads: due at run + 300 > ranAt + 150 (while the writes took under 150 ms); stamped before them (two 100 ms reads earlier): due <= ranAt + 100
-  assert.deepEqual(await st.takeDue(ranAt + 150, 10, t), [], "held back until the run plus modifyMs");
+  const t0 = Date.now();
+  assert.deepEqual(await st.takeDue(t0, 10, t), ["/a"]);
+  // takeDue makes at least two reads of 100 ms (the oldest row, then the due rows) before it stamps the run. Stamped from the `now` it was given, last_run would be t0.
+  // Only a lower bound is asserted: a slow runner can make the stamp later, never earlier.
+  const d = new DatabaseSync(file, { readOnly: true });
+  const lastRun = (d.prepare("SELECT last_run r FROM pending WHERE path = '/a'").get() as { r: number }).r;
+  d.close();
+  assert.ok(lastRun >= t0 + 150, `stamped ${lastRun - t0} ms after the call began`);
   await st.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
