@@ -124,8 +124,8 @@ ETA: 2026-10-21 17:36 ICT
 ETA: 2026-10-31 17:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 76 | Rename shows a full input where the name was, not an ellipsis, uncropped by other columns | in_progress | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | |
-| 77 | After clicking a column header (sort and similar), keyboard navigation focuses the file list again | in_progress | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | |
+| 76 | Rename shows a full input where the name was, not an ellipsis, uncropped by other columns | in_review | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/138 |
+| 77 | After clicking a column header (sort and similar), keyboard navigation focuses the file list again | in_review | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/138 |
 
 ## 11. Background size jobs
 ETA: 2026-10-31 22:00 ICT
