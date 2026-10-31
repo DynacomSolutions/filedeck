@@ -179,6 +179,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const [filterOpen, setFilterOpen] = useState(!!leaf.q);
   const filterInput = useRef<HTMLInputElement>(null);
   const secRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLElement>(null);
   const focusAfterNavigation = useRef<{ node: string; path: string } | null>(null);
   const locationRef = useRef({ node, path });
@@ -899,6 +900,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             const keep = cursor ? visible.find((x) => x.path === cursor) : undefined;
             const go = keep ?? visible[0];
             if (go) selectOnly(go.path);
+        ref={listRef}
           }
         }}
         onClick={(e) => e.target === e.currentTarget && (onClearOthers(), setSel(new Set()), setCursor(null))}
@@ -939,7 +941,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         ) : (
         <table className="ft cols" aria-busy={loading} style={tableStyle(columns.state, gitCol)}>
           <ColGroup state={columns.state} cols={columns.cols} git={gitCol} />
-          <thead>
+          <thead
+            onPointerUp={(e) => {
+              // A header click (sort, resize handle) leaves focus on the header or the body; hand it back to the list
+              // so keyboard navigation shows as focused. Right click opens the column menu, which owns focus.
+              if (e.button === 0) listRef.current?.focus({ preventScroll: true });
+            }}
+          >
             <HeaderRow s={columns.state} cols={columns.cols} git={gitCol} sort={sort} onSort={sortBy} onMenu={(x, y, items) => setMenu({ x, y, items })} />
           </thead>
           <tbody>
