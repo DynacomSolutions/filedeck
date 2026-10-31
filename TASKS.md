@@ -128,9 +128,13 @@ ETA: 2026-10-31 17:00 ICT
 | 77 | After clicking a column header (sort and similar), keyboard navigation focuses the file list again | in_progress | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | |
 
 ## 11. Background size jobs
-ETA: 2026-10-31 20:00 ICT
+ETA: 2026-10-31 22:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 78 | Find why size jobs for .worktrees and DynacomSolutions keep running | in_progress | claude-20261031-size-jobs | | | 2026-10-31 16:00 ICT | Lead: every non-cachedOnly /api/du call (the du CLI agents use) creates a visible du job.<br>A du CLI call on .worktrees stayed queued. |
-| 79 | Watched folders answer du and size requests from the store without a scan job | todo | | | 11.78 | 2026-10-31 20:00 ICT | |
-| 80 | Jobs not started in the UI run in the background, listed in a separate background jobs view | todo | | | 11.78 | 2026-10-31 20:00 ICT | CLI, API, watcher and adopted jobs. |
+| 78 | Find why size jobs for .worktrees and DynacomSolutions keep running | done | claude-20261031-size-jobs | | | 2026-10-31 16:00 ICT | Watcher overflow marks whole watched trees stale, so du rescans 5M+ files.<br>Size commits take up to 3 h.<br>Every /api/du call is a visible job, queued behind overlapping scans. |
+| 79 | Watched folders answer du and size requests from the store without a scan job | in_progress | claude-20261031-size-store | size-store-fresh | 11.78 | 2026-10-31 21:00 ICT | |
+| 80 | Jobs not started in the UI run in the background, listed in a separate background jobs view | in_progress | claude-20261031-bg-jobs | background-jobs | 11.78 | 2026-10-31 19:30 ICT | CLI, API, watcher and adopted jobs. |
+| 81 | Watcher overflow re-reads only the folders that were pending, not whole watched trees | in_progress | claude-20261031-size-store | size-store-fresh | 11.78 | 2026-10-31 21:00 ICT | |
+| 82 | Size-store commits no longer stall for hours during a big rescan | in_progress | claude-20261031-size-store | size-store-fresh | 11.78 | 2026-10-31 21:00 ICT | Seen: size-commit up to 11.9M ms. |
+| 83 | du CLI has a default timeout and a cached-only flag; the skill says to use them | in_progress | claude-20261031-bg-jobs | background-jobs | 11.78 | 2026-10-31 19:30 ICT | |
+| 84 | Release so epics 10 and 11 deploy | todo | | | 10.76, 10.77, 11.79, 11.80, 11.81, 11.82, 11.83 | 2026-10-31 22:00 ICT | |
