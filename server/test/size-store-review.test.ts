@@ -372,4 +372,10 @@ test("perf: the live-pending lookup does not scan the idle pending rows", async 
   console.log(`# freshTree / with 400k idle pending rows: ${ms.toFixed(1)} ms`);
   assert.equal(bytes(t), 15);
   assert.ok(ms < 40, `took ${ms} ms`);
+  // the periodic housekeeping statements use the partial index too, not a scan of every idle row
+  const d2 = new DatabaseSync(db, { readOnly: true });
+  const plan = (q: string) => (d2.prepare("EXPLAIN QUERY PLAN " + q).all(1, 2) as { detail: string }[]).map((r) => r.detail).join(" | ");
+  const lost = plan("SELECT path FROM pending WHERE (due_at < 8640000000000000 OR taker IS NOT NULL) AND taker IS NOT NULL AND taker < ?2 AND ?1");
+  d2.close();
+  assert.match(lost, /pending_live/);
 });

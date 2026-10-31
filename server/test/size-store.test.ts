@@ -1168,7 +1168,7 @@ test("200k idle pending rows: start and first drain read them only by index, the
   // the writer's statements cannot be spied on: check their plans instead
   const db = new DatabaseSync(file);
   const plan = (q: string, ...a: number[]) => (db.prepare("EXPLAIN QUERY PLAN " + q).all(...a) as { detail: string }[]).map((r) => r.detail).join(" | ");
-  const prune = plan("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?) LIMIT ?)", 1, 2, 3, 4);
+  const prune = plan("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND taker IS NULL AND (last_run < ? OR last_run > ?) LIMIT ?)", 1, 2, 3, 4);
   const recent = plan("SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?", 1, 2, 3);
   db.close();
   assert.doesNotMatch(prune, /SCAN pending(?! USING)/);

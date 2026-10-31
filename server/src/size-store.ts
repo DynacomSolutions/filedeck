@@ -377,7 +377,11 @@ export class SizeStore {
       db.exec(SCHEMA);
       // stores of older versions have no seen_at
       if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(ADD_SEEN_AT);
-      if (!db.prepare("PRAGMA table_info(pending)").all().some((c) => c.name === "taker")) db.exec(ADD_TAKER);
+      try {
+        db.prepare("SELECT taker FROM pending LIMIT 0"); // stores of older versions have no taker
+      } catch {
+        db.exec(ADD_TAKER);
+      }
       db.exec(TRIGGERS);
       // Never MAX(seen_at): that scans the whole table before the server listens. A stamp only has to differ from earlier walks' stamps;
       // a clock stepped back can only make a stale child look current until its next re-read, never purge a live one.
@@ -1425,8 +1429,8 @@ export class SizeStore {
       await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND taker IS NULL AND (last_run < ? OR last_run > ?) LIMIT ?)", [PENDING_IDLE, ran - t.modifyMs, ran + t.modifyMs, PENDING_BATCH]);
       // a take that was never reported ended (its process died mid-batch) becomes a dirty mark after TAKE_LOST_MS, so it stops blocking readers and is still not forgotten
       await this.txn([
-        { sql: "INSERT INTO dirty (path, at) SELECT path, ?1 FROM pending WHERE taker IS NOT NULL AND taker < ?2 ON CONFLICT(path) DO UPDATE SET at = MAX(at + 1, excluded.at)", rows: [[ran, ran - TAKE_LOST_MS]] },
-        { sql: "UPDATE pending SET taker = NULL WHERE taker IS NOT NULL AND taker < ?", rows: [[ran - TAKE_LOST_MS]] },
+        { sql: `INSERT INTO dirty (path, at) SELECT path, ?1 FROM pending WHERE ${PENDING_LIVE} AND taker IS NOT NULL AND taker < ?2 ON CONFLICT(path) DO UPDATE SET at = MAX(at + 1, excluded.at)`, rows: [[ran, ran - TAKE_LOST_MS]] },
+        { sql: `UPDATE pending SET taker = NULL WHERE ${PENDING_LIVE} AND taker IS NOT NULL AND taker < ?`, rows: [[ran - TAKE_LOST_MS]] },
       ]);
     }
     return got;
