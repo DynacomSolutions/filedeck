@@ -139,7 +139,7 @@ ETA: 2026-10-31 23:00 ICT
 | 83 | du CLI has a default timeout and a cached-only flag; the skill says to use them | done | claude-20261031-bg-jobs | background-jobs | 11.78 | 2026-10-31 19:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/141; CI green. |
 | 84 | Release so 11.79, 11.81 and 11.82 deploy | todo | | | 11.79, 11.81, 11.82 | 2026-10-31 23:00 ICT | |
 | 85 | Release v0.3.29 so 10.76, 10.77, 11.80 and 11.83 deploy | superseded | claude-20261031-release-v0329 | release-v0329 | 10.76, 10.77, 11.80, 11.83 | 2026-10-31 17:30 ICT | Superseded by 11.86. v0.3.29 tag pushed; Release run 41185463592 failed the image scan (dompurify advisories), no image published.<br>Release PR https://github.com/DynacomSolutions/filedeck/pull/143. |
-| 86 | Release v0.3.30 so 10.76, 10.77, 11.80 and 11.83 deploy | blocked_on_owner | claude-20261031-release-v0330 | release-v0330 | 10.76, 10.77, 11.80, 11.83 | 2026-10-31 18:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/145 merged (7ad994c); dompurify 3.4.17.<br>Owner: approve the agent tag push, or run `git -C /home/Storage/Projects/repositories/.worktrees/DynacomSolutions/.base/filedeck push origin 7ad994c81954b02e31880568db0c5a5b846c5be3:refs/tags/v0.3.30` |
+| 86 | Release v0.3.30 so 10.76, 10.77, 11.80 and 11.83 deploy | done | claude-20261031-release-v0330 | release-v0330 | 10.76, 10.77, 11.80, 11.83 | 2026-10-31 18:30 ICT | Released 31 Oct (#145); hub and all agents on 0.3.30, 0 restarts |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
