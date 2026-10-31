@@ -4,6 +4,7 @@ import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type Jo
 import { Check, Circle, Loader, Minus, X } from "lucide-react";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
+import { splitByOrigin } from "./jobOrigin";
 import { gaveUp } from "./jobPoll";
 import { etaText, jobLines, statusPill } from "./jobRow";
 import { HISTORY_KEY, IDLE_COLLAPSE_MS, addToHistory, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
@@ -254,6 +255,7 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   const cleared = useRef(new Set<string>());
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory);
   const [showHistory, setShowHistory] = useState(false);
+  const [showBg, setShowBg] = useState(false);
   const [, tick] = useState(0);
 
   const track = useCallback((key: string, state: string, endedAt: number | undefined, createdAt: number, title: string, where: string | undefined, attention: boolean, detail: string | undefined) => {
@@ -309,7 +311,7 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     prev.current = { jobs: next, ops: opList };
     setStale(down);
     for (const [node, l] of Object.entries(next))
-      for (const j of l) {
+      for (const j of splitByOrigin(l).fore) {
         const sk = j.result?.skipped;
         track(`j:${node}:${j.id}`, j.state, undefined, j.createdAt, j.title, node, !!sk && sk.symlinks + sk.hardlinks + sk.special > 0, j.state === "failed" ? j.error : j.result?.path);
       }
@@ -392,7 +394,10 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   // Clean, finished jobs leave the live list a few seconds after ending (failures linger longer); history keeps them.
   const opRows = ops.filter((o) => opLive(o) || lingers("o:" + o.id));
   const upRows = uploads.filter((u) => !(u.state === "done" || u.state === "failed" || u.state === "canceled") || lingers("u:" + u.id));
-  const rows = Object.entries(jobs).flatMap(([node, l]) => l.filter((j) => live(j) || lingers(`j:${node}:${j.id}`)).map((job) => ({ node, job })));
+  // Background jobs (CLI, watcher) never open the tray, count in its badge or enter its history: they have their own view, live ones only.
+  const split = Object.entries(jobs).map(([node, l]) => ({ node, ...splitByOrigin(l) }));
+  const rows = split.flatMap(({ node, fore }) => fore.filter((j) => live(j) || lingers(`j:${node}:${j.id}`)).map((job) => ({ node, job })));
+  const bgRows = split.flatMap(({ node, back }) => back.filter(live).map((job) => ({ node, job })));
   const running = rows.filter((r) => live(r.job)).length + opRows.filter(opLive).length + upRows.filter((u) => u.state === "running" || u.state === "paused").length;
   const total = rows.length + opRows.length + upRows.length;
   // Questions need attention, so the tray opens by itself.
@@ -419,7 +424,7 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     return () => clearTimeout(t);
   }, [idle]);
 
-  if (!total && !history.length) return null;
+  if (!total && !history.length && !bgRows.length) return null;
   const folded = (collapsed || autoCollapsed) && !asking;
   const clearHistory = () => {
     setHistory([]);
@@ -433,7 +438,7 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
       <button type="button" className="jobs-toggle" aria-expanded={!folded} onClick={() => setCollapsedPersist(!folded)}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
         Jobs
-        <span className="n">{asking ? "needs an answer" : running > 0 ? `${running} running` : total > 0 ? total : `${history.length} past`}</span>
+        <span className="n">{asking ? "needs an answer" : running > 0 ? `${running} running` : total > 0 ? total : history.length > 0 ? `${history.length} past` : "idle"}</span>
       </button>
       {!folded && (
         <div className="jobs-body">
@@ -474,6 +479,20 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
                 </ul>
               )}
             </div>
+          )}
+        </div>
+      )}
+      {bgRows.length > 0 && (
+        <div className="jobs-bg">
+          <button type="button" className="jobs-bg-toggle" aria-expanded={showBg} aria-controls="jobs-background" onClick={() => setShowBg(!showBg)}>
+            <Ic.Activity /> Background jobs <span className="n">{bgRows.length}</span>
+          </button>
+          {showBg && (
+            <ul id="jobs-background" className="jobs-bg-list" aria-label="Background jobs list">
+              {bgRows.map(({ node, job }) => (
+                <JobRow key={node + job.id} node={node} job={job} stale={stale.has(node)} onChange={() => void poll()} />
+              ))}
+            </ul>
           )}
         </div>
       )}
