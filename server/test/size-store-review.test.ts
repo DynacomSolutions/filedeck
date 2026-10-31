@@ -177,7 +177,7 @@ test("N4 what a dead writer left half done is recorded when the next one takes t
   const B = open(db, root, { leaseMs: 300 });
   for (let i = 0; i < 200 && !B.isWriter; i++) await sleep(20);
   assert.ok(B.isWriter, "the lease lapsed and B took it");
-  await sleep(100);
+  for (let i = 0; i < 100 && !rows(db, "SELECT 1 FROM dirty").length; i++) await sleep(20); // (an acquire that met a busy file tries again on the next beat)
   assert.deepEqual(rows(db, "SELECT path FROM dirty").map((r) => r.path), ["/a/x"], "the take of the dead writer");
   assert.deepEqual(rows(db, "SELECT path FROM stale_trees").map((r) => r.path), ["/"], "its walk");
   assert.equal(rows(db, "SELECT COUNT(*) n FROM walking")[0].n, 0);

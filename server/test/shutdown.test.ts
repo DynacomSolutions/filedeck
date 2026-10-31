@@ -10,12 +10,12 @@ import { installShutdown } from "../src/shutdown.ts";
 import { IndexCache } from "../src/index-cache.ts";
 
 const listen = async (server: http.Server) => {
-  await new Promise<void>((r) => server.listen(0, r));
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   return (server.address() as AddressInfo).port;
 };
 const get = (port: number) =>
   new Promise<string>((resolve, reject) =>
-    http.get({ port, agent: false }, (res) => {
+    http.get({ host: "127.0.0.1", port, agent: false }, (res) => {
       let b = "";
       res.on("data", (d) => (b += d));
       res.on("end", () => resolve(b));
