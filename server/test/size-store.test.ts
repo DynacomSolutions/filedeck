@@ -757,8 +757,10 @@ test("abort mid-walk closes every directory and leaves the subtree stale", async
   for (let i = 0; i < 100 && fds() !== before; i++) await new Promise((r) => setTimeout(r, 10));
   assert.ok(fds() <= before, `${fds()} descriptors open, ${before} before`); // fewer is fine: unrelated handles of earlier tests may close meanwhile
   // rows written before the abort are marked stale, so the next scan re-reads them
+  // (a stale mark on the subtree, not a rewrite of its rows)
   const left = (s as unknown as { db: { prepare(q: string): { get(): { n: number; m: number } } } }).db.prepare("SELECT COUNT(*) AS n, MAX(scanned_at) AS m FROM sizes").get();
-  assert.ok(left.n > 0 && left.m === 0);
+  const markAt = (s as unknown as { markAt(p: string): number }).markAt("/abort");
+  assert.ok(left.n > 0 && left.m <= markAt, `rows ${left.m} not older than the mark ${markAt}`);
   s.close();
 });
 

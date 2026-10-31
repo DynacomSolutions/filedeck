@@ -117,6 +117,8 @@ export interface DuAnswer {
   cached: boolean;
   truncated: boolean;
   watched: boolean;
+  /** answered from stored rows some of which are out of date, because a scan of an overlapping folder is running (no job was started) */
+  stale?: boolean;
 }
 
 /** The API lists folders level by level; du lists children before their parent, in path order. */
@@ -293,6 +295,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
       if (o.json) io.out(JSON.stringify({ node: t.node, ...ans }) + "\n");
       else for (const l of formatLines(t.node, ans, o)) io.out(l + "\n");
       if (ans.truncated) io.err(`filedeck du: ${label}: scan hit the entry limit, sizes are partial\n`);
+      if (ans.stale) io.err(`filedeck du: ${label}: sizes may be out of date: a scan of an overlapping folder is running; run the command again once it has ended\n`);
       // A repeat after our own job is cached by contract, but that scan just ran: only say so when nobody scanned for us.
       if (ans.cached && !polled) {
         const oldest = Math.min(...ans.entries.map((e) => e.scannedAt ?? Infinity));

@@ -40,7 +40,7 @@ export interface ChangeSink {
   markStale(virtual: string): void;
   /** keep changed folders on disk: false when that is not possible (the watcher then keeps them in memory) */
   notePending?(items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number): Promise<boolean>;
-  /** folders due at `now` (oldest first, at most `limit`), marked as run; null = the backlog is too old to drain, the pending rows are dropped */
+  /** folders due at `now` (oldest first, at most `limit`), marked as run; null = the backlog was too old to drain: the store marked the pending folders stale itself and dropped the rows */
   takeDue?(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null>;
   /** folders that ran within `withinMs` (a crash may have cut the run short) */
   /** re-reads ended at `endedAt`: modifyMs counts from there. `hold` = push a waiting row to endedAt + modifyMs (false when a settle event arrived since the folder was taken) */
@@ -195,6 +195,20 @@ export class FanWatch {
     return !this.unwatched.some((d) => d !== virtual && under(virtual, d));
   }
 
+  /**
+   * True when no change of `virtual`, of the folder above it or of anything below it is waiting in this watcher (buffered, held in memory or
+   * taken and not yet applied). Changes waiting in the store's pending table are the store's to check.
+   */
+  settled(virtual: string): boolean {
+    const up = virtual === "/" ? "" : virtual.slice(0, virtual.lastIndexOf("/")) || "/";
+    const pre = virtual === "/" ? "/" : virtual + "/";
+    const hit = (p: string) => p === virtual || p === up || p.startsWith(pre);
+    for (const p of this.buf.keys()) if (hit(p)) return false;
+    for (const p of this.mem.keys()) if (hit(p)) return false;
+    for (const p of this.taken.keys()) if (hit(p)) return false;
+    return true;
+  }
+
   /** Rows written before this time were not watched while they aged (the restart gap): the size store gives them the TTL rule, not the watcher's trust. */
   watchedSince(): number {
     return this.readyAt;
@@ -322,8 +336,8 @@ export class FanWatch {
           this.lastTake = now;
           batch = await this.store.takeDue(now, DRAIN_BATCH, { modifyMs: this.modifyMs, settleMs: this.settleMs });
           if (batch === null) {
-            this.note("changed folders are too far behind, treating it as an overflow");
-            for (const m of this.marks) this.store.markStale(m);
+            // the store marked just those folders stale (nothing was lost, only not applied): the watched trees stay trusted
+            this.note("changed folders are too far behind, marking them stale to be re-read on access");
             break;
           }
         }

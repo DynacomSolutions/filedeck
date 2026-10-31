@@ -460,10 +460,11 @@ test("fanwatch + SizeStore file: a backlog older than 10 x modifyMs becomes an o
   const w = new FanWatch(slow, { ...opts, settleMs: 1, modifyMs: 20 });
   (w as unknown as { marks: string[] }).marks = ["/"];
   for (let i = 0; i < 600; i++) w.line(`x /d/${i}`);
-  await until(() => f.stale.length > 0, 10_000);
-  assert.deepEqual(f.stale, ["/"]);
+  await until(() => f.calls.length > 0 && !(w as unknown as { draining: boolean }).draining, 10_000);
   await sleep(100);
-  assert.equal(f.count(), 0, "pending rows dropped");
+  assert.deepEqual(f.stale, [], "no watched tree is marked stale: the store marks only the pending folders");
+  const waiting = (f.st as unknown as { db: { prepare(s: string): { get(a: number): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending WHERE due_at < ?").get(Number.MAX_SAFE_INTEGER).n;
+  assert.equal(waiting, 0, "no pending row left waiting");
   assert.ok(f.calls.length < 600);
   w.stop();
   f.done();

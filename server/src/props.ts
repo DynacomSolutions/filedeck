@@ -379,6 +379,20 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       if (!t.entries.length) return c.body(null, 204);
       return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
     }
+    if (!fresh) {
+      // Watched and every stored row of the subtree fresh (the reuse rule): answer from the store at once, no job, no lock. A scan holding a lock
+      // on an overlapping folder is no reason to wait: its commits are atomic per row and only ever write newer values.
+      const t = await sizes.freshTree(r.virtual, depth, all);
+      if (t) return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: true });
+      // Something is stale, and a scan of another overlapping folder (a parent or child, here or in another process) is live: a job for this
+      // path would queue behind it (gate above), possibly for hours. Answer from the stored rows instead, marked `stale: true`, and start nothing:
+      // the scan ahead refreshes its own part, and the next request starts a job when something is still stale. Same-path scans are joined below.
+      const overlap = (p: { path: string }) => p.path !== r.virtual && (p.path === "/" || r.virtual === "/" || p.path.startsWith(r.virtual + "/") || r.virtual.startsWith(p.path + "/"));
+      if (jobs.findLive("du", overlap) ?? jobs.findLive("size", overlap)) {
+        const s = await sizes.tree(r.virtual, depth, all);
+        if (s.entries.length) return c.json({ path: r.virtual, entries: s.entries, cached: sizes.persistent, truncated: s.truncated, watched: sizes.covers(r.virtual), stale: true });
+      }
+    }
     const key = [r.virtual, depth, all, fresh].join("\0");
     // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
     for (const [k, d] of duRuns) {
