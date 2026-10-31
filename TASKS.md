@@ -145,7 +145,7 @@ ETA: 2026-11-01 02:00 ICT
 ETA: 2026-11-01 01:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 87 | Preview shows the real file type (text, code, images) instead of hex | in_progress | claude-20261031-preview-type | preview-type | | 2026-10-31 23:30 ICT | Reported by owner 31 Oct |
-| 88 | Editor supports select and select all (keyboard and a visible action) | in_progress | claude-20261031-editor-mobile | editor-mobile | | 2026-11-01 01:00 ICT | Reported by owner 31 Oct |
-| 89 | Mobile: panels no longer crushed, on-screen keyboard never covers the edit input | in_progress | claude-20261031-editor-mobile | editor-mobile | | 2026-11-01 01:00 ICT | Covers rename and editor inputs |
+| 87 | Preview shows the real file type (text, code, images) instead of hex | done | claude-20261031-preview-type | preview-type |  | 2026-10-31 23:30 ICT | Merged #150<br>Unknown or missing extensions now sniffed; live after next release |
+| 88 | Editor supports select and select all (keyboard and a visible action) | done | claude-20261031-editor-mobile | editor-mobile |  | 2026-11-01 01:00 ICT | Merged #151<br>Select all action, Ctrl/Cmd+A from toolbar; live after next release |
+| 89 | Mobile: panels no longer crushed, on-screen keyboard never covers the edit input | done | claude-20261031-editor-mobile | editor-mobile |  | 2026-11-01 01:00 ICT | Merged #151<br>Phone drawer, one panel at a time, viewport tracking<br>Real iOS and Android keyboards untested |
 
