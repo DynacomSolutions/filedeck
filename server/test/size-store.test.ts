@@ -755,7 +755,7 @@ test("abort mid-walk closes every directory and leaves the subtree stale", async
   clearInterval(timer);
   // read-ahead listings (readdir/lstat started before the abort) may still hold a descriptor for a moment; a leaked Dir never goes away
   for (let i = 0; i < 100 && fds() !== before; i++) await new Promise((r) => setTimeout(r, 10));
-  assert.equal(fds(), before);
+  assert.ok(fds() <= before, `${fds()} descriptors open, ${before} before`); // fewer is fine: unrelated handles of earlier tests may close meanwhile
   // rows written before the abort are marked stale, so the next scan re-reads them
   const left = (s as unknown as { db: { prepare(q: string): { get(): { n: number; m: number } } } }).db.prepare("SELECT COUNT(*) AS n, MAX(scanned_at) AS m FROM sizes").get();
   assert.ok(left.n > 0 && left.m === 0);
