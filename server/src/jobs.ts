@@ -98,6 +98,10 @@ export class Jobs {
   private lastSkipLog = 0;
   private readonly me = randomUUID();
   private stopping = false;
+  /** Shutting down: jobs are being interrupted (not cancelled by anyone), and new ones would never be run or reported. */
+  get isStopping(): boolean {
+    return this.stopping;
+  }
   private adopting = new Set<string>();
 
   /** How an adopted job of this kind is run again (no-op without a shared store). */

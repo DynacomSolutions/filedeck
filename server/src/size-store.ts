@@ -182,7 +182,8 @@ const SCHEMA = `
   -- folders known to have changed (a backlog the watcher could not apply): the row of the folder itself may be out of date since \`at\`
   CREATE TABLE IF NOT EXISTS dirty (path TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID;
   -- a full walk of the path ended cleanly while the watcher was running; it began at \`started\`
-  CREATE TABLE IF NOT EXISTS validated (path TEXT PRIMARY KEY, started INTEGER NOT NULL) WITHOUT ROWID;
+  -- \`epoch\`: the writer lease the walk ran under. A validation of an earlier lease counts only inside a clean watcher hand-over (see \`carried\`).
+  CREATE TABLE IF NOT EXISTS validated (path TEXT PRIMARY KEY, started INTEGER NOT NULL, epoch INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
   -- the one process that may write: \`epoch\` grows with every change of holder, every write transaction checks it (fencing)
   CREATE TABLE IF NOT EXISTS writer (id INTEGER PRIMARY KEY CHECK (id = 1), epoch INTEGER NOT NULL, owner TEXT NOT NULL, beat INTEGER NOT NULL, released INTEGER NOT NULL DEFAULT 0);
   -- a walk in progress (first chunk committed, root not yet): if its writer dies the subtree is marked stale by the next writer
@@ -223,6 +224,7 @@ const BACKGROUND_DDL = [
 ];
 const UNTRUSTED = "(ver = 0 OR scanned_at = 0)";
 const ADD_VER = "ALTER TABLE sizes ADD COLUMN ver INTEGER NOT NULL DEFAULT 0";
+const ADD_VALIDATED_EPOCH = "ALTER TABLE validated ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0";
 const ADD_SEEN_AT = "ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0";
 const noCtl = (): JobCtl => ({ signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } });
 const parentOf = (p: string) => (p === "/" ? "" : path.posix.dirname(p));
@@ -244,7 +246,7 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, triggers } = workerData;
+const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers } = workerData;
 const fs = require("node:fs");
 const db = new DatabaseSync(file);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
@@ -322,7 +324,7 @@ parentPort.on("message", (m) => {
   // a busy database (another connection holds a lock past busy_timeout) is retried a few times with backoff; every op rolls back on failure, so a retry is safe
   for (let attempt = 0; ; attempt++) {
     try {
-      if (m.op === "schema") { db.exec(schema); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(addSeenAt); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "ver")) db.exec(addVer); if (!db.prepare("PRAGMA table_info(pending)").all().some((c) => c.name === "taker")) db.exec(addTaker); db.exec(triggers); }
+      if (m.op === "schema") { db.exec(schema); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(addSeenAt); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "ver")) db.exec(addVer); if (!db.prepare("PRAGMA table_info(validated)").all().some((c) => c.name === "epoch")) db.exec(addValidatedEpoch); if (!db.prepare("PRAGMA table_info(pending)").all().some((c) => c.name === "taker")) db.exec(addTaker); db.exec(triggers); }
       else if (m.op === "acquire") { parentPort.postMessage({ id: m.id, rows: [{ epoch: acquire(m) }] }); return; }
       else if (m.op === "beat") {
         const r = fence && db.prepare("UPDATE writer SET beat = ? WHERE id = 1 AND epoch = ? AND owner = ?").run(Date.now(), fence.epoch, fence.owner);
@@ -390,7 +392,7 @@ export class SizeStore {
   private readonly owner = randomUUID();
   private leaseTimer?: NodeJS.Timeout;
   private firstLease: Promise<void> = Promise.resolve();
-  private waiters: (() => void)[] = [];
+  private waiters: { res: () => void; rej: (e: Error) => void }[] = [];
   /** marks made while this process was not the writer: written when it becomes one */
   private unsaved = new Map<string, number>();
   /** the partial indexes exist (the fast path waits for them: without them its lookups scan the table) */
@@ -445,6 +447,7 @@ export class SizeStore {
       // stores of older versions have no seen_at
       if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(ADD_SEEN_AT);
       if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "ver")) db.exec(ADD_VER);
+      if (!db.prepare("PRAGMA table_info(validated)").all().some((c) => c.name === "epoch")) db.exec(ADD_VALIDATED_EPOCH);
       try {
         db.prepare("SELECT taker FROM pending LIMIT 0"); // stores of older versions have no taker
       } catch {
@@ -543,16 +546,20 @@ export class SizeStore {
     } finally {
       this.acquiring = false;
     }
-    for (const w of this.waiters.splice(0)) w();
+    for (const w of this.waiters.splice(0)) w.res();
     this.background();
   }
   /** Resolves when this process holds the lease; rejects when `signal` aborts. */
   async whenWriter(signal?: AbortSignal): Promise<void> {
     if (await this.mayScan()) return;
+    if (this.leaving) throw new FsError(503, "this process is stopping");
     return new Promise((res, rej) => {
-      const w = () => {
-        signal?.removeEventListener("abort", ab);
-        res();
+      const w = {
+        res: () => {
+          signal?.removeEventListener("abort", ab);
+          res();
+        },
+        rej,
       };
       const ab = () => {
         this.waiters = this.waiters.filter((x) => x !== w);
@@ -562,6 +569,10 @@ export class SizeStore {
       signal?.addEventListener("abort", ab, { once: true });
       this.waiters.push(w);
     });
+  }
+  /** This process is shutting down: it starts no more size work and will not take the lease. */
+  get stopping(): boolean {
+    return this.leaving;
   }
   /** Writes wait for the first lease attempt; false (nothing written) for a process that is not the writer. */
   private async canWrite(): Promise<boolean> {
@@ -673,7 +684,7 @@ export class SizeStore {
     if (this.closed) return Promise.resolve(undefined);
     let w = read ? this.reader : this.writer;
     if (!w) {
-      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, triggers: TRIGGERS, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
       const fail = (e: Error) => {
         if (this.writer === nw) this.writer = undefined;
         if (this.reader === nw) this.reader = undefined;
@@ -719,6 +730,7 @@ export class SizeStore {
   /** Hand the lease over at once (the next process need not wait for it to lapse); a request still in flight on the writer thread goes first. Writes fail from here on. */
   async releaseLease(): Promise<void> {
     this.leaving = true;
+    for (const w of this.waiters.splice(0)) w.rej(new FsError(503, "this process is stopping")); // (a job waiting for the lease is handed to the next process)
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.leaseTimer = undefined;
     if (this.epoch && this.file !== ":memory:") await Promise.race([this.post({ op: "release" }, false).catch(() => undefined), new Promise((r) => setTimeout(r, 2000))]);
@@ -1291,7 +1303,7 @@ export class SizeStore {
       if (whole) parts.push({ sql: ORPHAN_DIRTY, rows: [[]] }); // dirty marks of folders that are no longer stored point at nothing
       if (vouch) {
         this.maxValidated = Math.max(this.maxValidated, now);
-        parts.push({ sql: "DELETE FROM validated WHERE path > ? AND path < ? AND started < ?", rows: [[lo, hi, now]] }, { sql: "INSERT INTO validated (path, started) VALUES (?1, ?2) ON CONFLICT(path) DO UPDATE SET started = MAX(started, ?2)", rows: [[virtual, now]] });
+        parts.push({ sql: "DELETE FROM validated WHERE path > ? AND path < ? AND started < ?", rows: [[lo, hi, now]] }, { sql: "INSERT INTO validated (path, started, epoch) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET epoch = CASE WHEN ?2 >= started THEN ?3 ELSE epoch END, started = MAX(started, ?2)", rows: [[virtual, now, epoch]] });
       }
       if (parts.length) await this.txn(parts);
     }
@@ -1344,6 +1356,9 @@ export class SizeStore {
   private ready(): number {
     return Math.max(this.watchedSince(), this.floor);
   }
+
+  /** Set by the agent: did this process's watcher take its watched time over from a predecessor that ended clean? */
+  carried: () => boolean = () => false;
 
   /** Set by the agent when a change watcher is running: true when it keeps the stored sizes of `virtual` current. */
   covers: (virtual: string) => boolean = () => false;
@@ -1761,7 +1776,9 @@ export class SizeStore {
         return false;
       }
       // a validation counts only from a folder of the same device: a walk of an ancestor never entered a mount point below it
-      const v = await this.read("freshV", `SELECT v.started FROM validated v JOIN sizes s ON s.path = v.path WHERE v.path IN (${ph}) AND s.dev = ?`, [...chain, top.dev], null);
+      // (a validation of an earlier lease counts only when the watcher's time was carried over from a run that ended clean: otherwise the walk may have reused a row whose change
+      // the earlier process never got to the store)
+      const v = await this.read("freshV", `SELECT v.started FROM validated v JOIN sizes s ON s.path = v.path WHERE v.path IN (${ph}) AND s.dev = ? AND (v.epoch = ? OR ?)`, [...chain, top.dev, this.epoch, this.carried() ? 1 : 0], null);
       if (!v) return false;
       const best = Math.max(0, ...v.map((r) => Number(r.started)));
       if (best === 0 || best < this.ready()) return false;
@@ -1828,19 +1845,20 @@ export class SizeStore {
    * Heartbeat of session `id`, and the two facts a watcher needs: the `since` it may use (the run before it must have ended cleanly, after this one was ready, over the same
    * mounts), never earlier than a gap (events lost, the store unusable), and whether a newer run over the same mounts is ready (the older may stop then).
    */
-  async sessionTick(id: number, mountsHash: string, readyAt: number, lostAt = 0): Promise<{ since: number; newer: boolean } | null> {
+  async sessionTick(id: number, mountsHash: string, readyAt: number, lostAt = 0): Promise<{ since: number; newer: boolean; carried: boolean } | null> {
     if (!this.db || this.file === ":memory:") return null;
     try {
       const me = (await this.read("session", "SELECT since FROM watch_sessions WHERE id = ?", [id], null))?.[0];
       if (!me) return null;
       const prev = (await this.read("sessionPrev", "SELECT mounts_hash h, since, ended_at e, clean c FROM watch_sessions WHERE id = (SELECT MAX(id) FROM watch_sessions WHERE id < ?)", [id], null))?.[0];
       let since = readyAt;
-      if (prev && prev.h === mountsHash && prev.e != null && Number(prev.e) >= readyAt && Number(prev.c) === 1) since = Math.min(since, Number(prev.since));
+      const carried = !!prev && prev.h === mountsHash && prev.e != null && Number(prev.e) >= readyAt && Number(prev.c) === 1;
+      if (carried) since = Math.min(since, Number(prev.since));
       // events lost (an overflow) and a store that was unusable are gaps: nothing from before them is vouched for, but the run goes on
       since = Math.max(since, lostAt, this.floor);
       await this.post({ op: "meta", sql: "UPDATE watch_sessions SET beat = ?, since = ? WHERE id = ?", params: [Date.now(), since, id] }, false);
       const newer = ((await this.read("sessionNewer", "SELECT 1 FROM watch_sessions WHERE id > ? AND mounts_hash = ? LIMIT 1", [id, mountsHash], null)) ?? []).length > 0;
-      return { since, newer };
+      return { since, newer, carried };
     } catch {
       return null;
     }

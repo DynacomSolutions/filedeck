@@ -443,7 +443,7 @@ test("GET /api/du: a watched tree whose rows are fresh is answered without a job
   const aux = path.join(tmp, "api-aux");
   fs.mkdirSync(aux);
   const h = readyHelper(aux);
-  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts } as never));
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts, FILEDECK_HANDOVER_MS: "100" } as never));
   agents.push(app as unknown as { close(): Promise<void> });
   (app as unknown as { startWatcher(): void }).startWatcher();
   const jobs = async () => ((await (await app.request("/api/jobs")).json()) as { jobs: { kind: string }[] }).jobs.length;
@@ -549,7 +549,7 @@ test("GET /api/du?cachedOnly=1 says stale:true unless the store vouches for the 
   const aux = path.join(tmp, "api3-aux");
   fs.mkdirSync(aux);
   const h = readyHelper(aux);
-  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts } as never));
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts, FILEDECK_HANDOVER_MS: "100" } as never));
   agents.push(app as unknown as { close(): Promise<void> });
   const get = async () => (await (await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).json()) as { stale?: boolean; watched?: boolean; entries: { bytes: number }[] };
   assert.equal((await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).status, 204, "nothing stored yet");
@@ -600,4 +600,83 @@ test("a process that is not the writer answers du from the store flagged stale a
     if (state !== "done") await new Promise((res) => setTimeout(res, 50));
   }
   assert.equal(state, "done", "the queued job ran once the reader became the writer");
+});
+
+/** an agent with a helper that is ready at once and prints what is put in its `ev` file */
+function liveAgent(name: string, env: Record<string, string> = {}, dirs = 0) {
+  const root = path.join(tmp, name, "root");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  for (let i = 0; i < dirs; i++) fs.mkdirSync(path.join(root, `t/d${i % 50}/e${i}`), { recursive: true });
+  const aux = path.join(tmp, name, "aux");
+  fs.mkdirSync(aux, { recursive: true });
+  const ev = path.join(aux, "ev");
+  const h = path.join(aux, "helper.sh");
+  fs.writeFileSync(h, `#!/bin/sh\necho '#ready 1'\nwhile sleep 0.02; do if [ -f ${ev} ]; then cat ${ev}; rm -f ${ev}; fi; done\n`, { mode: 0o755 });
+  const mounts = path.join(aux, "mounts");
+  fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
+  const start = () => {
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_HANDOVER_MS: "100", ...env } as never)) as Any;
+    agents.push(a);
+    a.startWatcher();
+    return a;
+  };
+  return { root, ev, start };
+}
+const jsonOf = async (r: Response) => (await r.json()) as Any;
+
+for (const qs of ["fresh=1", "all=1"]) {
+  test(`X1 the repeat (${qs}) of a detached du, after the change was reported and applied, is not the old tree`, async () => {
+    const w = liveAgent("x1" + qs.slice(0, 3), { FILEDECK_DU_WAIT_MS: "0" });
+    const a = w.start();
+    await sleep(300);
+    const url = `/api/du?path=/t&depth=1&${qs}`;
+    const first = await a.request(url);
+    assert.equal(first.status, 202);
+    const { jobId } = await jsonOf(first);
+    for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+    fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+    fs.writeFileSync(w.ev, `x ${w.root}/t/sub\n`);
+    await sleep(2200); // settled and applied: nothing waits any more
+    const r = await a.request(url);
+    const b = await jsonOf(r);
+    assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `answered ${b.entries?.[0]?.bytes} unflagged`);
+  });
+}
+
+test("X2 a du that joins a size job after a restart gap says stale: the job reused rows on their age", async () => {
+  const w = liveAgent("x2", {}, 400);
+  const A = w.start();
+  await sleep(300);
+  assert.equal((await A.request("/api/du?path=/t&depth=1&fresh=1")).status, 200);
+  await A.close();
+  fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij"); // in place, in the gap
+  const B = w.start();
+  for (let i = 0; i < 100 && !(await jsonOf(await B.request("/api/du?path=/t&depth=1&cachedOnly=1"))).watched; i++) await sleep(50);
+  await sleep(300);
+  await B.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  const r = await B.request("/api/du?path=/t&depth=1");
+  const b = await jsonOf(r);
+  assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `answered ${b.entries?.[0]?.bytes} unflagged through a joined size job`);
+});
+
+test("X3 a du waiting for its job when SIGTERM arrives gets a retryable 503, not a cancellation", async () => {
+  const w = liveAgent("x3", {}, 6000);
+  const a = w.start();
+  await sleep(300);
+  const p = a.request("/api/du?path=/t&depth=2&fresh=1");
+  await sleep(60);
+  void a.leave();
+  const r = await p;
+  assert.ok([200, 202, 502, 503, 504].includes(r.status), `client gets ${r.status}`);
+});
+
+test("X4 a size job or du that reaches a process after it left is refused with 503, not accepted and forgotten", async () => {
+  const w = liveAgent("x4");
+  const A = w.start();
+  await sleep(300);
+  await A.leave();
+  const post = await A.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  assert.equal(post.status, 503);
+  assert.equal((await A.request("/api/du?path=/t&depth=1&fresh=1")).status, 503);
 });

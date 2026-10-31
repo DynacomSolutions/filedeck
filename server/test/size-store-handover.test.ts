@@ -60,6 +60,7 @@ function world(name: string) {
     store.covers = (v) => w.covers(v);
     store.watchedSince = () => w.watchedSince();
     store.quiet = (v) => w.settled(v);
+    store.carried = () => w.carried();
     things.push({ close: () => store.close() }, { close: () => w.stop() });
     return { id, store, helper, w, root, event: (v: string, kind = "x") => helper.stdout.write(`${kind} ${root}${v}\n`) };
   };
@@ -222,4 +223,203 @@ test("the shutdown signal starts the hand-over at once, not after the connection
   stop();
   await sleep(250);
   assert.deepEqual(events, ["signal", "drained", "cleanup"]);
+});
+
+const kill = (p: Proc) => {
+  clearInterval((p.store as Any).leaseTimer);
+  (p.store as Any).tryLease = async () => {};
+  p.w.stop();
+};
+const bytes = (t: Any) => t?.entries?.[0]?.bytes ?? null;
+
+test("V1 a crash in the overlap: a walk of the old process begun after the new one was ready reused a row whose change never reached the store; the new one does not vouch for it", async () => {
+  const { root, db, proc } = world("v1");
+  const A = proc("A");
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  assert.ok(await A.store.freshTree("/", 0, false));
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890"); // in place; the event is still in A's kernel queue or pipe, not in the store
+  await sleep(5);
+  const B = proc("B");
+  await up(B); // B's marks come after the change: it never sees it
+  await sleep(10);
+  const r = await A.store.scanRead("/"); // a plain du on A in the overlap: rows reused under A's trust, the walk vouches
+  assert.equal(r.untrusted, false);
+  assert.ok(rows(db, "SELECT started FROM validated")[0].started > B.w.watchedSince() - 1);
+  kill(A); // SIGKILL, OOM, the hard exit: no session end
+  await until(() => B.store.isWriter && (B.store as Any).idxReady);
+  await sleep(200);
+  assert.equal(B.w.carried(), false);
+  const t = await B.store.freshTree("/a/x", 0, false);
+  assert.ok(t === null || bytes(t) === 10, `served ${bytes(t)} as fresh`);
+});
+
+test("V1b the same without a crash: the old helper's sync times out, the run ends unclean, its overlap validation does not count", async () => {
+  const { root, db, proc } = world("v1b");
+  const A = proc("A");
+  await up(A);
+  (A.helper as Any).stdin = { write: () => true }; // never answers: no #sync within the time allowed
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await sleep(5);
+  const B = proc("B");
+  await up(B);
+  await sleep(10);
+  await A.store.scanRead("/");
+  await A.w.handover();
+  await A.store.close();
+  assert.equal(rows(db, "SELECT clean FROM watch_sessions ORDER BY id")[0].clean, 0);
+  await until(() => B.store.isWriter && (B.store as Any).idxReady);
+  await sleep(200);
+  const t = await B.store.freshTree("/a/x", 0, false);
+  assert.ok(t === null || bytes(t) === 10, `served ${bytes(t)} as fresh`);
+});
+
+test("V1c a clean hand-over keeps the old process's validation, a rescan of the new one makes its own", async () => {
+  const { db, proc } = world("v1c");
+  const A = proc("A");
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  const B = proc("B");
+  await up(B);
+  await A.w.handover();
+  await A.store.close();
+  await until(() => B.store.isWriter && B.w.carried());
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 5000);
+  assert.ok(await B.store.freshTree("/", 0, false), "carried: epoch 1's validation counts");
+  assert.equal(rows(db, "SELECT epoch FROM validated")[0].epoch, 1);
+});
+
+test("V2 a walk begun under one lease is fenced once the next exists", async () => {
+  const { root, db, proc } = world("v2");
+  const A = proc("A");
+  (A.store as Any).o.commitChunk = 1;
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  const send = (A.store as Any).send.bind(A.store);
+  let gate!: () => void;
+  const g = new Promise<void>((r) => (gate = r));
+  let held = false;
+  (A.store as Any).send = async (m: Any) => {
+    if (m.op === "commit" && !held) {
+      held = true;
+      await g;
+    }
+    return send(m);
+  };
+  const w = A.store.scanRead("/", undefined, true).then(() => "ended", (e: Any) => String(e.message));
+  await until(() => held);
+  clearInterval((A.store as Any).leaseTimer);
+  (A.store as Any).tryLease = async () => {}; // A stalls: no more beats
+  const B = proc("B");
+  await until(() => B.store.isWriter);
+  fs.writeFileSync(path.join(root, "a/y/f"), "1234567890");
+  gate();
+  assert.match(await w, /lease/);
+  assert.equal(rows(db, "SELECT COUNT(*) n FROM sizes WHERE ver = 1 AND path = '/a/y' AND tot_bytes = 10")[0].n, 0);
+});
+
+test("V3 a writer that lost the lease and got it back under a stalled walk does not vouch for what that walk read", async () => {
+  const { root, proc } = world("v3");
+  const A = proc("A");
+  (A.store as Any).o.commitChunk = 1;
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  const send = (A.store as Any).send.bind(A.store);
+  let gate!: () => void;
+  const g = new Promise<void>((r) => (gate = r));
+  let held = false;
+  (A.store as Any).send = async (m: Any) => {
+    if (m.op === "commit" && !held) {
+      held = true;
+      await g;
+    }
+    return send(m);
+  };
+  const tl = (A.store as Any).tryLease.bind(A.store);
+  const w = A.store.scan("/", undefined, true).then(() => "ended", (e: Any) => String(e.message));
+  await until(() => held);
+  (A.store as Any).tryLease = async () => {};
+  const B = proc("B");
+  await until(() => B.store.isWriter);
+  await sleep(50);
+  fs.writeFileSync(path.join(root, "a/y/f"), "1234567890");
+  A.event("/a/y");
+  await sleep(50);
+  await B.store.close();
+  (A.store as Any).epoch = 0;
+  (A.store as Any).idxReady = false;
+  (A.store as Any).tryLease = tl;
+  await until(() => A.store.isWriter && (A.store as Any).idxReady);
+  gate();
+  await w;
+  await sleep(400);
+  const t = await A.store.freshTree("/a", 1, false);
+  assert.ok(t === null || bytes(t) === 15, `served ${bytes(t)}`);
+});
+
+test("S5 a store outage in the life of a process does not end its watcher run unclean: the hand-over carries the floor", async () => {
+  const { db, proc } = world("s5");
+  const A = proc("A");
+  await up(A);
+  const s = A.store as Any;
+  const id = (A.w as Any).session.id;
+  s.floor = Date.now();
+  await A.store.sessionEnd(id, true, 0);
+  const r = rows(db, "SELECT clean, since FROM watch_sessions WHERE id = " + id)[0];
+  assert.equal(r.clean, 1);
+  assert.equal(r.since, s.floor);
+});
+
+test("E1 a helper whose stdin is gone: the hand-over does not crash, the run is unclean, and the lease is released", async () => {
+  const { db, proc } = world("e1");
+  const A = proc("A");
+  await up(A);
+  const EPIPE = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+  const listeners: (() => void)[] = [];
+  (A.helper as Any).stdin = {
+    on: (_: string, f: () => void) => void listeners.push(f),
+    removeListener: () => undefined,
+    write: () => {
+      setImmediate(() => listeners.forEach((f) => f())); // the error event arrives, as a socket's does
+      void EPIPE;
+      return true;
+    },
+  };
+  const B = proc("B");
+  await up(B);
+  await A.w.handover();
+  await A.store.releaseLease();
+  assert.equal(rows(db, "SELECT clean FROM watch_sessions ORDER BY id")[0].clean, 0);
+});
+
+test("E2 a real helper process that closed its stdin: writing the sync request is not an unhandled error", async () => {
+  const dir = path.join(tmp, "e2");
+  fs.mkdirSync(dir, { recursive: true });
+  const h = path.join(dir, "h.sh");
+  fs.writeFileSync(h, "#!/bin/sh\nexec 0<&-\necho '#ready 1'\nexec sleep 30\n", { mode: 0o755 });
+  const m = path.join(dir, "mounts");
+  fs.writeFileSync(m, "/dev/x / ext4 rw 0 0\n");
+  const ends: boolean[] = [];
+  const sink: Any = { isWriter: true, applyChanged: async () => {}, markStale() {}, notePending: async () => true, takeDue: async () => [], noteRan: async () => {}, markDirty: async () => true, sessionStart: async () => 1, sessionTick: async () => ({ since: 1, newer: true, carried: false }), sessionEnd: async (_: number, c: boolean) => void ends.push(c) };
+  const w: Any = new FanWatch(sink, { helper: h, root: "/tmp", procMounts: m, settleMs: 1, modifyMs: 1, sessionMs: 10 });
+  const errors: unknown[] = [];
+  const onUncaught = (e: unknown) => void errors.push(e);
+  process.on("uncaughtException", onUncaught);
+  try {
+    await w.start();
+    await until(() => !!w.session);
+    await sleep(100);
+    await w.handover();
+    await sleep(300);
+  } finally {
+    process.off("uncaughtException", onUncaught);
+  }
+  assert.deepEqual(errors, []);
+  assert.deepEqual(ends, [false]);
 });

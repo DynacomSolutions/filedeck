@@ -16,7 +16,7 @@ import { TRASH_DIR } from "./paths.ts";
 
 export interface HelperProc extends EventEmitter {
   /** a line written here is answered with `#sync` once the helper has read every event the kernel had queued (see `FanWatch.sync`) */
-  stdin?: { write(s: string): unknown } | null;
+  stdin?: { write(s: string): unknown; on?(ev: "error", f: () => void): unknown; removeListener?(ev: "error", f: () => void): unknown } | null;
   stdout: Readable | null;
   stderr: Readable | null;
   kill(): boolean;
@@ -58,7 +58,7 @@ export interface ChangeSink {
   readonly isWriter?: boolean;
   /** watcher sessions: see SizeStore.sessionStart / sessionTick / sessionEnd */
   sessionStart?(mountsHash: string, readyAt: number): Promise<number | null>;
-  sessionTick?(id: number, mountsHash: string, readyAt: number, lostAt: number): Promise<{ since: number; newer: boolean } | null>;
+  sessionTick?(id: number, mountsHash: string, readyAt: number, lostAt: number): Promise<{ since: number; newer: boolean; carried: boolean } | null>;
   sessionEnd?(id: number, clean: boolean, lostAt: number): Promise<void>;
 }
 
@@ -106,7 +106,8 @@ export class FanWatch {
   private since = Infinity;
   /** when events were last lost (a kernel overflow, too many held in memory): nothing from before it is vouched for, the run goes on */
   private lostAt = 0;
-  private clean = true;
+  /** the run continues a predecessor that ended clean (see `SizeStore.sessionTick`): its validations count */
+  private carriedOver = false;
   private syncing: (() => void)[] = [];
   private lastSession = 0;
   private handingOver = false;
@@ -162,6 +163,7 @@ export class FanWatch {
       this.readyAt = Infinity;
       let err = "";
       p.stderr?.on("data", (d: Buffer) => (err = (err + d).slice(-500)));
+      p.stdin?.on?.("error", () => {}); // a helper that is gone: writing to it must not be an unhandled error (a sync then simply does not happen)
       p.on("error", (e: Error) => this.warn(e.message));
       p.on("exit", (code: number | null, sig: string | null) => {
         if (this.proc !== p) return;
@@ -231,6 +233,10 @@ export class FanWatch {
   }
 
   /** Rows written before this time were not watched while they aged (the restart gap): the size store gives them the TTL rule, not the watcher's trust. */
+  carried(): boolean {
+    return this.carriedOver;
+  }
+
   watchedSince(): number {
     return this.readyAt === Infinity ? Infinity : this.since;
   }
@@ -238,7 +244,7 @@ export class FanWatch {
   private endSession(clean: boolean) {
     const s = this.session;
     this.session = null;
-    if (s) void this.store.sessionEnd?.(s.id, clean && this.clean, this.lostAt);
+    if (s) void this.store.sessionEnd?.(s.id, clean, this.lostAt);
   }
 
   /**
@@ -246,14 +252,14 @@ export class FanWatch {
    * mounts reports ready (at most `handoverMs`), and only then end the run as clean. The newer process continues the watched time from this run's `since`, so
    * nothing it stored has to be read again. Without a newer process the run ends clean anyway: its events are all in the store.
    */
-  async handover(): Promise<void> {
+  async handover(waitMs = this.o.handoverMs ?? 6000): Promise<void> {
     this.handingOver = true;
     try {
       if (this.proc && this.readyAt !== Infinity && this.session) {
         const sess = this.session;
         for (let i = 0; this.draining && i < 100; i++) await new Promise((r) => setTimeout(r, 20));
         await this.flush();
-        const until = Date.now() + (this.o.handoverMs ?? 6000);
+        const until = Date.now() + waitMs;
         while (Date.now() < until && this.session === sess) {
           const t = await this.store.sessionTick?.(sess.id, sess.hash, sess.readyAt, this.lostAt);
           if (!t || t.newer) break;
@@ -265,7 +271,7 @@ export class FanWatch {
         await this.flush();
         const clean = synced && !this.resume && !this.buf.size && !this.mem.size && !this.inflight && !this.draining && !this.taken.size;
         this.session = null;
-        await this.store.sessionEnd?.(sess.id, clean && this.clean, this.lostAt);
+        await this.store.sessionEnd?.(sess.id, clean, this.lostAt);
       }
     } finally {
       this.stop();
@@ -279,12 +285,15 @@ export class FanWatch {
     return new Promise((res) => {
       const done = (ok: boolean) => {
         clearTimeout(timer);
+        stdin.removeListener?.("error", broken);
         this.syncing = this.syncing.filter((f) => f !== fire);
         res(ok);
       };
       const fire = () => done(true);
       const timer = setTimeout(() => done(false), timeoutMs);
       this.syncing.push(fire);
+      const broken = () => done(false);
+      stdin.on?.("error", broken);
       try {
         stdin.write("sync\n");
       } catch {
@@ -314,7 +323,7 @@ export class FanWatch {
       this.readyAt = Date.now();
       this.since = this.readyAt;
       this.lostAt = 0;
-      this.clean = true;
+      this.carriedOver = false;
       void this.beginSession(this.readyAt);
     }
     if (l.startsWith("c ")) {
@@ -342,7 +351,10 @@ export class FanWatch {
     if (!s || Date.now() - this.lastSession < (this.o.sessionMs ?? SESSION_MS) || this.handingOver) return;
     this.lastSession = Date.now();
     const t = await this.store.sessionTick?.(s.id, s.hash, s.readyAt, this.lostAt);
-    if (t && this.session === s) this.since = Math.max(t.since, this.lostAt);
+    if (t && this.session === s) {
+      this.since = Math.max(t.since, this.lostAt);
+      this.carriedOver = t.carried;
+    }
   }
 
   /** Events were lost: forget the pending folders and let the next read re-scan the watched trees. */

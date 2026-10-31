@@ -305,7 +305,8 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       run: async (ctl: JobCtl) => {
         const x = await sizes.scanRead(virtual, ctl, fresh, release, after);
         done?.(x);
-        return kind === "size" ? x.res : { res: x.res, read: x.read, untrusted: x.untrusted };
+        // (`untrusted` also in a size job's result: a du that joins it answers from it)
+        return kind === "size" ? { ...x.res, untrusted: x.untrusted } : { res: x.res, read: x.read, untrusted: x.untrusted };
       },
       onDrop: () => release?.(),
       gate: async (signal: AbortSignal, self: { id: string; createdAt: number }) => {
@@ -345,12 +346,15 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     return jobs.findLive("du", m) ?? jobs.findLive("size", m);
   };
 
+  // This process is stopping (SIGTERM): a job started now would never be run here nor saved for the next process. The client retries (the du CLI waits through 503).
+  const leaving = () => new ops.FsError(503, "this process is shutting down; try again");
   // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
   app.post("/api/jobs/size", async (c) => {
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
+    if (sizes.stopping) throw leaving();
     // one live size job per path (while another process holds the store's writer lease the job waits for it: see the gate): a second request attaches to it
     const same = liveScan(r.virtual, b.fresh === true);
     return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
@@ -397,6 +401,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         if (s.entries.length) return c.json({ path: r.virtual, entries: s.entries, cached: sizes.persistent, truncated: s.truncated, watched: sizes.covers(r.virtual), stale: true });
       }
     }
+    if (sizes.stopping) throw leaving();
     const key = [r.virtual, depth, all, fresh].join("\0");
     // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
     for (const [k, d] of duRuns) {
@@ -430,7 +435,8 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         run.detached = true;
         return c.json({ jobId: id, state: v!.state }, 202);
       }
-      if (v!.state === "canceled") throw new ops.FsError(409, "canceled");
+      // (a job the shutdown interrupted is not cancelled: the client retries against the next process)
+      if (v!.state === "canceled") throw jobs.isStopping ? leaving() : new ops.FsError(409, "canceled");
       if (v!.state === "failed") throw new ops.FsError(500, v!.error ?? "failed");
       const jr = v!.result as SizeResult & { res?: SizeResult; read?: number; untrusted?: boolean }; // a du job answers {res, read}, a joined size job the result itself
       const res = jr.res ?? jr;
@@ -438,8 +444,9 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         // A capped scan is never stored: answer with the partial totals of the folder alone.
         return c.json({ path: r.virtual, entries: [{ path: r.virtual, type: "dir", bytes: res.bytes, diskBytes: res.diskBytes, files: res.files, dirs: res.dirs }], cached: false, truncated: true, watched: false });
       }
-      let t = run.out?.tree;
-      if (!run.out) {
+      // The repeat of a finished job re-reads the tree from the store: what was applied since the job ended is in it. (A fresh answer comes from the job's own result.)
+      let t = replay ? undefined : run.out?.tree;
+      if (!t) {
         // never a half-written scan; the wait is bounded like the job wait, a later walk queued ahead can hold the lock
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), Math.max(0, arrived + cfg.duWaitMs - Date.now()));

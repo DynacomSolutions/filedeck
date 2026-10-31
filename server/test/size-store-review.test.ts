@@ -518,7 +518,7 @@ test("T1 a change made in the restart gap is answered with stale:true or with it
   const mounts = path.join(aux, "mounts");
   fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
   const mk = () => {
-    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts } as never)) as Any;
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_HANDOVER_MS: "100" } as never)) as Any;
     agents.push(a);
     a.startWatcher();
     return a;
@@ -552,7 +552,7 @@ test("T2 the repeat of a detached du, after the folder changed and the watcher r
   fs.writeFileSync(h, `#!/bin/sh\necho '#ready 1'\nwhile sleep 0.02; do if [ -f ${ev} ]; then cat ${ev}; rm -f ${ev}; fi; done\n`, { mode: 0o755 });
   const mounts = path.join(aux, "mounts");
   fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
-  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_DU_WAIT_MS: "0" } as never)) as Any;
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_DU_WAIT_MS: "0", FILEDECK_HANDOVER_MS: "100" } as never)) as Any;
   agents.push(app);
   app.startWatcher();
   await sleep(300);
