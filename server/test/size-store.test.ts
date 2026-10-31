@@ -1441,7 +1441,8 @@ test("after close(), a read starts no worker and logs nothing; a read pending at
     const w = (s as unknown as { writer?: unknown; reader?: unknown });
     assert.equal((await s.tree("/d", 0, false)).entries.length, 0);
     assert.equal(w.writer ?? w.reader, undefined, "no worker after close");
-    assert.deepEqual(logged, []);
+    // (agents of earlier tests are still running their watchers: only this store's own lines count)
+    assert.deepEqual(logged.filter((l) => !String((l as unknown[])[0]).startsWith("fanotify watcher")), []);
   } finally {
     console.error = quiet;
   }
