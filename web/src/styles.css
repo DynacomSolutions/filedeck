@@ -989,11 +989,9 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 /* ---- phone: one view at a time, keyboard-aware ---- */
 .fp-phonepane{flex:1;min-height:0;min-width:0;display:flex;flex-direction:column}
 .fp-phonepane>*{flex:1;min-height:0}
-.ed-head .ed-selall{white-space:nowrap}
 @media(max-width:700px){
   .fp.phone-pane>.fp-bar,.fp.phone-pane>.fp-filter,.fp.phone-pane>.fp-err{display:none}
   /* Browse a folder or read a file: the sidebar gets out of the way while a pane is open or the keyboard is up. */
-  .app:has(.fp-phonepane) .side,html.kb-open .side{display:none}
   .main{padding:.3rem}
   .phone-tabs{display:flex;gap:.3rem;padding:.2rem .1rem .4rem;overflow-x:auto;flex:none}
   .phone-tabs button{flex:0 0 auto;min-height:36px;max-width:11rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1002,5 +1000,31 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .main>.phone-tabs{flex:none}
   .main>.phone-leaf{flex:1;min-height:0}
   .modal,.modal.wide{max-height:calc(var(--vvh,100dvh) - 16px);overflow:auto}
-  .ed-head .ed-selall .sa-l{display:none}
 }
+
+/* ---- editor toolbar: the file name keeps priority; labels collapse to icons when the pane is narrow ---- */
+.ed.inline,.ed.in-pane{container:edpane/inline-size}
+.ed-head button{white-space:nowrap}
+.ed.inline .ed-head b,.ed.in-pane .ed-head b{display:flex;align-items:center;flex:0 1 auto;min-width:min(9rem,45%)}
+.ed.inline .ed-head b .tip,.ed.in-pane .ed-head b .tip{min-width:0}
+.ed.inline .ed-head b .tip>span,.ed.in-pane .ed-head b .tip>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+@container edpane (max-width:560px){
+  .ed-head>.muted{display:none}
+  .ed-head .ed-lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .ed-head button{min-width:34px;padding:0 .45rem}
+}
+
+/* ---- phone: the sidebar is an off-canvas drawer opened from the top bar ---- */
+.phone-only{display:none}
+.drawer-back{display:none}
+@media(max-width:700px){
+  .phone-only{display:inline-flex}
+  .site-header__inner{height:44px}
+  .selbar b.selbar-none{display:none}
+  .selbar>.tip:has(.selbar-none){display:none}
+  .side{position:fixed;top:var(--vv-top,0);left:0;z-index:70;height:var(--vvh,100dvh);max-height:none;width:min(19rem,86vw);transform:translateX(-102%);visibility:hidden;transition:transform .18s ease,visibility 0s linear .18s;border:0;box-shadow:var(--shadow-3)}
+  .side.open{transform:none;visibility:visible;transition:transform .18s ease}
+  .side-brand{display:flex}
+  .drawer-back{display:block;position:fixed;inset:0;z-index:65;background:rgba(0,0,0,.5)}
+}
+@media(max-width:700px) and (prefers-reduced-motion:reduce){.side,.side.open{transition:none}}

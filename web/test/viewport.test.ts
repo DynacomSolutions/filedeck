@@ -88,3 +88,17 @@ test("phone layout shows one panel at a time with a switcher", () => {
   const fp = readFileSync(new URL("../src/FilePanel.tsx", import.meta.url), "utf8");
   assert.match(fp, /pane && phone \? \([\s\S]*?className="fp-phonepane"/);
 });
+
+test("phone sidebar is an off-canvas drawer with focus trap, Escape and backdrop close", () => {
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /className="drawer-back" onClick=\{onCloseDrawer\}/);
+  assert.match(app, /function DrawerGuard[\s\S]*?useDialogFocus\(root\)[\s\S]*?e\.key === "Escape"/);
+  assert.match(app, /onOpen=\{\(n, p, h\) => \{ closeDrawer\(\); openFromSide/);
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(css, /@media\(max-width:700px\)\{\s*\.phone-only\{display:inline-flex\}[\s\S]*?\.side\{position:fixed;[^}]*translateX\(-102%\)/);
+});
+
+test("the editor pane has no second close button that would drop unsaved edits", () => {
+  const fp = readFileSync(new URL("../src/FilePanel.tsx", import.meta.url), "utf8");
+  assert.match(fp, /\{!gitDiff && !editing && \(\s*<Tip label=\{propsOpen && !editing/);
+});
