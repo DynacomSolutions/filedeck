@@ -551,14 +551,15 @@ test("GET /api/du?cachedOnly=1 says stale:true unless the store vouches for the 
   const h = readyHelper(aux);
   const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts } as never));
   agents.push(app as unknown as { close(): Promise<void> });
-  const get = async () => (await (await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).json()) as { stale?: boolean; entries: { bytes: number }[] };
+  const get = async () => (await (await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).json()) as { stale?: boolean; watched?: boolean; entries: { bytes: number }[] };
   assert.equal((await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).status, 204, "nothing stored yet");
   assert.equal((await app.request("/api/du?path=/t&depth=1")).status, 200);
   assert.equal((await get()).stale, true, "stored, but the watcher is not running");
   (app as unknown as { startWatcher(): void }).startWatcher();
-  for (let i = 0; i < 100 && (await get()).stale !== true; i++) await sleep(20);
+  for (let i = 0; i < 300 && (await get()).watched !== true; i++) await sleep(20); // the watcher is ready
+  assert.equal((await get()).stale, true, "ready, but nothing validated since");
   assert.equal((await app.request("/api/du?path=/t&depth=1&fresh=1")).status, 200); // a rescan after the watcher was ready
-  for (let i = 0; i < 100 && (await get()).stale === true; i++) await sleep(50);
+  for (let i = 0; i < 200 && (await get()).stale === true; i++) await sleep(50);
   assert.equal((await get()).stale, undefined);
 });
 

@@ -1407,10 +1407,10 @@ test("the pending table and a reopen are served by the workers, never by the mai
   };
   p.db = { prepare: boom, exec: boom, close: () => undefined };
   try {
-    const t = { modifyMs: 10, settleMs: 1 };
-    assert.equal(await s.notePending([{ path: "/d", dueAt: Date.now() - 1, modify: false }], 10), true);
+    const t = { modifyMs: 10_000, settleMs: 1 }; // (the first write waits for the writer lease: a short modifyMs would make the backlog look too old)
+    assert.equal(await s.notePending([{ path: "/d", dueAt: Date.now() - 1, modify: false }], 10_000), true);
     assert.deepEqual(await s.takeDue(Date.now(), 10, t), ["/d"]);
-    await s.noteRan([{ path: "/d", endedAt: Date.now(), hold: false }], 10);
+    await s.noteRan([{ path: "/d", endedAt: Date.now(), hold: false }], 10_000);
     await s.clearPending();
     assert.deepEqual(await s.takeDue(Date.now(), 10, t), []);
     // after a failure the store reopens through the writer thread
