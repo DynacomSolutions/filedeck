@@ -1,4 +1,5 @@
 import { PANEL_MIME } from "./dock";
+import { usePhone } from "./viewport";
 import { Dropdown } from "./Dropdown";
 import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -236,6 +237,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const closedFor = leaf.closed ?? null;
   const setClosedFor = (p: string | null) => onPatch({ closed: p ?? undefined });
   const [narrow, setNarrow] = useState(false);
+  const phone = usePhone();
   useEffect(() => {
     const el = secRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -1284,7 +1286,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       data-fp={leaf.id}
       tabIndex={-1}
       onKeyDown={onKeyDown}
-      className={"fp" + (active ? " active" : "") + (panelPicked ? " picked" : "") + (over === "." ? " drop" : "")}
+      className={"fp" + (phone && pane ? " phone-pane" : "") + (active ? " active" : "") + (panelPicked ? " picked" : "") + (over === "." ? " drop" : "")}
       onMouseDown={(e) => {
         onFocus();
         // .ed = the editor/diff overlay rendered inside this panel: taking focus there would steal it from Monaco
@@ -1398,7 +1400,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         </div>
       )}
       {err && <div id={createErrorId} className="fp-err" role="alert">{err}</div>}
-      {pane ? (
+      {pane && phone ? (
+        // Phone: one view at a time. The side pane takes the whole panel; its close button returns to the list.
+        <div className="fp-phonepane">{pane}</div>
+      ) : pane ? (
         <Group key={dock + (narrow ? "-n" : "")} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
           onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock: savedDock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
           {first && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}

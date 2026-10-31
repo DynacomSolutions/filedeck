@@ -22,6 +22,7 @@ import { SelectionBar, type SelRef } from "./Selection";
 import { GitCompareArrows, Keyboard, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
+import { usePhone } from "./viewport";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
 
@@ -232,6 +233,7 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer }: { nodesState:
 
 export function App() {
   const nodesState = useNodes();
+  const phone = usePhone();
   const nodes = useMemo(() => nodesState.nodes ?? [], [nodesState.nodes]);
   const [tree, setTree] = useState<Tree | null>(initial?.tree ?? null);
   const [activeId, setActiveId] = useState(initial?.active ?? "");
@@ -601,7 +603,19 @@ export function App() {
       <div className="body">
         <main className="main" aria-label="File panels">
           <h1 className="visually-hidden">Files</h1>
-          {tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
+          {tree && phone && tree.kind === "split" ? (
+            // Phone: panels are not squeezed side by side; one is shown and a strip switches between them.
+            <>
+              <nav className="phone-tabs" aria-label="Panels">
+                {leaves(tree).map((l, i) => (
+                  <button key={l.id} type="button" aria-current={l.id === (activeLeaf?.id ?? activeId)} onClick={() => setActiveId(l.id)}>
+                    {i + 1}. {l.path === "/" ? l.node : l.path.slice(l.path.lastIndexOf("/") + 1)}
+                  </button>
+                ))}
+              </nav>
+              <div className="phone-leaf" key={activeLeaf?.id}>{render(activeLeaf ?? leaves(tree)[0]!, count(tree))}</div>
+            </>
+          ) : tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
           {trash && (
             <Suspense fallback={null}>
               <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => closeView(() => setTrash(null))} onStatus={setStatus} />
