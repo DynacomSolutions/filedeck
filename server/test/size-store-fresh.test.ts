@@ -155,7 +155,7 @@ test("a stale tree mark is O(1), is honoured by the next walk and is spent by it
   assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM stale_trees")[0].n, 0);
 });
 
-test("a mark survives a restart and is seen by a second store on the same file", async () => {
+test("a mark survives a restart (the next writer loads it)", async () => {
   const { root, s, db } = fixture("mark-restart");
   await s.scan("/");
   s.markStale("/b");
@@ -163,14 +163,6 @@ test("a mark survives a restart and is seen by a second store on the same file",
   const s2 = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000 });
   stores.push(s2);
   assert.equal((await s2.scanRead("/")).read, 2, "/b and /b/z");
-  // another process: its marks reach this one through the file
-  const s3 = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000 });
-  stores.push(s3);
-  await validate(s3);
-  assert.ok(await s3.freshTree("/a", 0, false));
-  s2.markStale("/a");
-  await until(async () => (await s3.freshTree("/a", 0, false)) === null, 5000);
-  assert.equal(await s3.freshTree("/a", 0, false), null, "the other store's mark is honoured");
 });
 
 test("marks past the cap collapse into one on / in one transaction, later than every mark", async () => {
@@ -289,12 +281,13 @@ test("freshTree: a change in the restart gap is not served, rows within the TTL 
   a.quiet = () => true;
   a.watchedSince = () => ready;
   assert.equal(await s2.freshTree("/", 0, false), null);
-  // a plain walk under the running watcher re-reads the rows that predate it, so it can vouch for the tree when it ends (liveness right after a restart)
+  // a plain walk reuses what is young (cheap, as before) but cannot vouch for rows the watcher did not keep current
   await sleep(5);
-  const w = await s2.scanRead("/");
-  assert.ok(w.read > 0, "the old rows were re-read, not reused on their age");
+  await s2.scanRead("/");
+  assert.equal(await s2.freshTree("/", 0, false), null);
+  // a rescan reads everything after the watcher was ready, and does
+  await s2.scan("/", undefined, true);
   assert.equal(bytes(await s2.freshTree("/", 0, false)), 10);
-  assert.equal((await s2.scanRead("/")).read, 0, "and the next walk reuses them");
 });
 
 test("freshTree: an old row of another device, or a mark above a mount point, does not block a validated folder", async () => {
@@ -547,4 +540,54 @@ test("commit stall regression: stale marks on a huge store do not rewrite rows o
   assert.equal((q.prepare("SELECT COUNT(*) n FROM sizes WHERE scanned_at = 0").get() as { n: number }).n, 0, "rows were not rewritten");
   assert.ok((q.prepare("SELECT COUNT(*) n FROM stale_trees").get() as { n: number }).n <= 2);
   q.close();
+});
+
+test("GET /api/du?cachedOnly=1 says stale:true unless the store vouches for the rows", async () => {
+  const root = path.join(tmp, "api3");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  const aux = path.join(tmp, "api3-aux");
+  fs.mkdirSync(aux);
+  const h = readyHelper(aux);
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts } as never));
+  agents.push(app as unknown as { close(): Promise<void> });
+  const get = async () => (await (await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).json()) as { stale?: boolean; entries: { bytes: number }[] };
+  assert.equal((await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).status, 204, "nothing stored yet");
+  assert.equal((await app.request("/api/du?path=/t&depth=1")).status, 200);
+  assert.equal((await get()).stale, true, "stored, but the watcher is not running");
+  (app as unknown as { startWatcher(): void }).startWatcher();
+  for (let i = 0; i < 100 && (await get()).stale !== true; i++) await sleep(20);
+  assert.equal((await app.request("/api/du?path=/t&depth=1&fresh=1")).status, 200); // a rescan after the watcher was ready
+  for (let i = 0; i < 100 && (await get()).stale === true; i++) await sleep(50);
+  assert.equal((await get()).stale, undefined);
+});
+
+test("a process that is not the writer answers du from the store flagged stale, starts no job, and refuses a size job", async () => {
+  const root = path.join(tmp, "api4");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  const aux = path.join(tmp, "api4-aux");
+  fs.mkdirSync(aux);
+  const mk = () => {
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux } as never));
+    agents.push(a as unknown as { close(): Promise<void> });
+    return a;
+  };
+  const writer = mk();
+  assert.equal((await writer.request("/api/du?path=/t&depth=1")).status, 200); // stores /t
+  const reader = mk();
+  const jobs = async () => ((await (await reader.request("/api/jobs")).json()) as { jobs: unknown[] }).jobs.length;
+  const jobsBefore = await jobs(); // (the job list is shared: the writer's own du job is in it)
+  const r = await reader.request("/api/du?path=/t&depth=1");
+  assert.equal(r.status, 200);
+  const b = (await r.json()) as { stale?: boolean; entries: { bytes: number }[] };
+  assert.equal(b.stale, true);
+  assert.equal(b.entries[0]!.bytes, 3);
+  assert.equal((await reader.request("/api/du?path=/t&depth=1&fresh=1")).status, 503, "a rescan is the writer's");
+  assert.equal((await reader.request("/api/du?path=/t/sub&depth=0")).status, 200, "a stored folder");
+  fs.mkdirSync(path.join(root, "u"));
+  assert.equal((await reader.request("/api/du?path=/u&depth=0")).status, 503, "nothing stored to answer from");
+  const post = await reader.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  assert.equal(post.status, 503);
+  assert.equal(await jobs(), jobsBefore, "no job was started by the reader");
 });

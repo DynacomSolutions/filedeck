@@ -321,8 +321,9 @@ function fileStore() {
     markStale: (v: string) => void stale.push(v),
     notePending: st.notePending.bind(st),
     takeDue: st.takeDue.bind(st),
-    recentRuns: st.recentRuns.bind(st),
     noteRan: st.noteRan.bind(st),
+    markDirty: st.markDirty.bind(st),
+    isWriter: true, // the only store on its file: it gets the lease at once (a sink that is spread into another keeps the value)
     clearPending: st.clearPending.bind(st),
   };
   const count = () => (st as unknown as { db: { prepare(s: string): { get(): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending").get().n;
@@ -477,39 +478,12 @@ test("fanwatch + SizeStore file: a backlog older than 10 x modifyMs becomes an o
   f.done();
 });
 
-test("fanwatch + SizeStore file: folders run just before a restart are marked stale at start; a stepped-back clock still drains", async () => {
-  const f = fileStore();
-  const old = Date.now() - 1000;
-  await f.st.notePending([{ path: "/r", dueAt: old, modify: false }], 300);
-  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
-  await f.st.notePending([{ path: "/future", dueAt: Date.now() + 3_600_000, modify: false }], 300);
-  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/future"]);
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
-  const mounts = path.join(root, "m");
-  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n");
-  const w = new FanWatch(f.sink, { ...opts, helper: "fake", root, procMounts: mounts, spawn: () => new Fake() });
-  await w.start();
-  assert.deepEqual(f.stale.sort(), ["/future", "/r"]);
-  w.stop();
-  fs.rmSync(root, { recursive: true });
-  f.done();
-});
-
-test("fanwatch + SizeStore file: folders run just before a restart become dirty one by one, no watched tree is marked", async () => {
+test("fanwatch + SizeStore file: a due time far in the future (the clock stepped back) still drains", async () => {
   const f = fileStore();
   await f.st.notePending([{ path: "/r", dueAt: Date.now() - 1000, modify: false }], 300);
   assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
-  const mounts = path.join(root, "m");
-  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n");
-  const dirty: string[][] = [];
-  const sink = { ...f.sink, markDirty: async (p: string[]) => (dirty.push(p), true) };
-  const w = new FanWatch(sink, { ...opts, helper: "fake", root, procMounts: mounts, spawn: () => new Fake() });
-  await w.start();
-  assert.deepEqual(dirty, [["/r"]]);
-  assert.deepEqual(f.stale, []);
-  w.stop();
-  fs.rmSync(root, { recursive: true });
+  await f.st.notePending([{ path: "/future", dueAt: Date.now() + 3_600_000, modify: false }], 300);
+  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/future"]);
   f.done();
 });
 

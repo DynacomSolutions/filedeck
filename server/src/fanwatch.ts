@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable } from "node:stream";
 import { listMounts } from "./mounts.ts";
@@ -33,6 +34,10 @@ export interface FanWatchOptions {
   restartMaxMs?: number;
   /** pending changed folders held in memory (only while the store is unusable) before the burst is treated like a kernel overflow */
   maxPending?: number;
+  /** on `handover`, how long the helper keeps running for a newer process to take over (default 6000) */
+  handoverMs?: number;
+  /** how often the watcher's run reports to the store and asks for the `since` it may use (default 1000) */
+  sessionMs?: number;
 }
 
 export interface ChangeSink {
@@ -42,20 +47,24 @@ export interface ChangeSink {
   notePending?(items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number): Promise<boolean>;
   /** folders due at `now` (oldest first, at most `limit`), marked as run; null = the backlog was too old to drain: the store marked the pending folders stale itself and dropped the rows */
   takeDue?(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null>;
-  /** folders that ran within `withinMs` (a crash may have cut the run short) */
   /** re-reads ended at `endedAt`: modifyMs counts from there. `hold` = push a waiting row to endedAt + modifyMs (false when a settle event arrived since the folder was taken) */
   noteRan?(runs: { path: string; endedAt: number; hold: boolean }[], modifyMs: number): Promise<void>;
-  recentRuns?(now: number, withinMs: number, limit: number): string[] | Promise<string[]>;
   clearPending?(): Promise<void>;
   /** durable dirty marks for folders whose last run may not have finished (see SizeStore.markDirty); false when not possible */
   markDirty?(paths: string[]): Promise<boolean>;
+  /** false while another process holds the store's writer lease: this one only reads, so events wait in memory and nothing is applied */
+  readonly isWriter?: boolean;
+  /** watcher sessions: see SizeStore.sessionStart / sessionTick / sessionEnd */
+  sessionStart?(mountsHash: string, readyAt: number): Promise<number | null>;
+  sessionTick?(id: number, mountsHash: string, readyAt: number): Promise<{ since: number; newer: boolean } | null>;
+  sessionEnd?(id: number, clean: boolean): Promise<void>;
 }
 
 const MAXFS = 256;
 const FLUSH_MS = 250;
 const FLUSH_MAX = 2000;
 const DRAIN_BATCH = 256;
-const RECENT_MAX = 50_000;
+const SESSION_MS = 1000;
 
 /** Agent virtual path of a helper path (as the helper's mount namespace sees it, i.e. under the agent root), or null outside the root or inside a trash store. */
 export function mapPath(root: string, hostPath: string): string | null {
@@ -82,7 +91,6 @@ export class FanWatch {
   private activeUntil = 0;
   private firstTake = true;
   private lastTake = 0;
-  private recovered = false;
   private resume: (() => void) | null = null;
   private timer: NodeJS.Timeout | null = null;
   /** fallback while the store is unusable: due time per folder (capped by maxPending), and last runs for the modify interval */
@@ -91,6 +99,12 @@ export class FanWatch {
   /** folders taken but not yet re-read to the end: true once a settle event for it was handed to the store meanwhile */
   private taken = new Map<string, boolean>();
   private draining = false;
+  /** the watcher's run in the store (see SizeStore.sessionStart), the time from which every change was seen without a gap, and whether it saw every change so far */
+  private session: { id: number; hash: string; readyAt: number } | null = null;
+  private since = Infinity;
+  private clean = true;
+  private lastSession = 0;
+  private handingOver = false;
   private stopped = false;
   private warned = false;
   private marks: string[] = [];
@@ -137,14 +151,6 @@ export class FanWatch {
       this.unwatched.push(...mounts.slice(MAXFS).map((m) => m.mountpoint));
       hostPaths.length = Math.min(hostPaths.length, MAXFS);
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
-      if (!this.recovered && this.store.recentRuns) {
-        // folders taken just before a stop or crash may not have been applied: re-read them on the next read
-        this.recovered = true;
-        const recent = await this.store.recentRuns(Date.now(), 60_000, RECENT_MAX + 1);
-        // folder by folder when the store can record them; else, or when that fails or there are very many, the watched trees as a whole
-        const marked = recent.length <= RECENT_MAX && !!this.store.markDirty && (await this.store.markDirty(recent));
-        if (!marked) for (const m of this.store.markDirty || recent.length > 1000 ? this.marks : recent) this.store.markStale(m);
-      }
       if (this.stopped) return;
       const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["ignore", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
       this.proc = p;
@@ -156,6 +162,7 @@ export class FanWatch {
         if (this.proc !== p) return;
         this.proc = null;
         this.readyAt = Infinity;
+        this.endSession(false);
         if (this.stopped) return;
         // 2 = not permitted, 3 = not supported: retrying cannot help. Anything else may have lost events.
         if (code === 2 || code === 3 || !this.o.helper) return this.warn(err.trim() || `helper exited (${code})`);
@@ -220,7 +227,41 @@ export class FanWatch {
 
   /** Rows written before this time were not watched while they aged (the restart gap): the size store gives them the TTL rule, not the watcher's trust. */
   watchedSince(): number {
-    return this.readyAt;
+    return this.readyAt === Infinity ? Infinity : Math.min(this.readyAt, this.since);
+  }
+
+  private endSession(clean: boolean) {
+    const s = this.session;
+    this.session = null;
+    if (s) void this.store.sessionEnd?.(s.id, clean && this.clean);
+  }
+
+  /**
+   * Stop for a rolling deploy: take no more work, hand every event noted so far to the store, keep the helper running until a newer process over the same
+   * mounts reports ready (at most `handoverMs`), and only then end the run as clean. The newer process continues the watched time from this run's `since`, so
+   * nothing it stored has to be read again. Without a newer process the run ends clean anyway: its events are all in the store.
+   */
+  async handover(): Promise<void> {
+    this.handingOver = true;
+    try {
+      if (this.proc && this.readyAt !== Infinity && this.session) {
+        for (let i = 0; this.draining && i < 100; i++) await new Promise((r) => setTimeout(r, 20));
+        await this.flush();
+        const until = Date.now() + (this.o.handoverMs ?? 6000);
+        const sess = this.session;
+        while (Date.now() < until && this.session === sess) {
+          const t = await this.store.sessionTick?.(sess.id, sess.hash, sess.readyAt);
+          if (!t || t.newer) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        await this.flush(); // what arrived while waiting
+        const clean = !this.buf.size && !this.mem.size && !this.inflight;
+        this.session = null;
+        await this.store.sessionEnd?.(sess.id, clean && this.clean);
+      }
+    } finally {
+      this.stop();
+    }
   }
 
   stop() {
@@ -241,6 +282,9 @@ export class FanWatch {
     if (l.startsWith("#ready")) {
       this.backoff = 0;
       this.readyAt = Date.now();
+      this.since = this.readyAt;
+      this.clean = true;
+      void this.beginSession(this.readyAt);
     }
     if (l.startsWith("c ")) {
       const host = unescapeLine(l.slice(2));
@@ -254,8 +298,25 @@ export class FanWatch {
     if (v) this.schedule(v, kind === "m");
   }
 
+  private async beginSession(readyAt: number) {
+    if (!this.store.sessionStart) return;
+    const hash = createHash("sha1").update([...this.marks].sort().join("\0")).digest("hex");
+    const id = await this.store.sessionStart(hash, readyAt);
+    if (id !== null && !this.stopped && this.readyAt === readyAt) this.session = { id, hash, readyAt };
+  }
+
+  /** Once a second: the run's heartbeat, and the `since` the store lets it use now that the run before it may have ended. */
+  private async sessionTick() {
+    const s = this.session;
+    if (!s || Date.now() - this.lastSession < (this.o.sessionMs ?? SESSION_MS) || this.handingOver) return;
+    this.lastSession = Date.now();
+    const t = await this.store.sessionTick?.(s.id, s.hash, s.readyAt);
+    if (t && this.session === s && this.clean) this.since = Math.min(this.since, t.since);
+  }
+
   /** Events were lost: forget the pending folders and let the next read re-scan the watched trees. */
   private overflow() {
+    this.clean = false;
     this.buf.clear();
     this.mem.clear();
     void this.store.clearPending?.();
@@ -305,6 +366,7 @@ export class FanWatch {
       if (cur !== undefined && cur <= at) continue;
       if (cur === undefined && this.mem.size >= (this.o.maxPending ?? 50_000)) {
         this.note("too many changed folders pending, treating it as an overflow");
+        this.clean = false;
         this.mem.clear();
         for (const m of this.marks) this.store.markStale(m);
         return;
@@ -316,6 +378,7 @@ export class FanWatch {
   private async tick() {
     await this.flush();
     await this.drain();
+    await this.sessionTick();
   }
 
   /** The re-reads ended (or failed): modifyMs counts from their end, not from when the folders were taken. One write per batch. */
@@ -342,7 +405,7 @@ export class FanWatch {
     if (this.draining) return;
     this.draining = true;
     try {
-      while (!this.stopped) {
+      while (!this.stopped && !this.handingOver && this.store.isWriter !== false) {
         const now = Date.now();
         let batch: string[] | null = [];
         if (this.store.takeDue && (this.firstTake || now <= this.activeUntil || now - this.lastTake >= this.modifyMs)) {
@@ -373,13 +436,19 @@ export class FanWatch {
         for (const v of batch) this.taken.set(v, false);
         const ends: [string, number][] = [];
         for (const v of batch) {
-          if (this.stopped) break;
+          if (this.stopped || this.handingOver) break;
           try {
             await this.store.applyChanged(v);
           } catch {
             /* a folder that vanished or cannot be read: the next scan deals with it */
           }
           ends.push([v, Date.now()]);
+        }
+        // taken and not applied (the process is stopping): dirty, so the next process re-reads them
+        const rest = batch.filter((v) => !ends.some(([e]) => e === v));
+        if (rest.length) {
+          for (const v of rest) this.taken.delete(v);
+          void this.store.markDirty?.(rest);
         }
         await this.ran(ends); // before the next take, so a row noted during the batch is held until modifyMs after its folder's end
         if (this.store.takeDue) this.activeUntil = Math.max(this.activeUntil, Date.now() + this.modifyMs + this.settleMs); // rows may remain after a slow batch

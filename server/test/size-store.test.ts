@@ -363,7 +363,7 @@ test("a folder with 150k stored children can be listed", async () => {
   const s = mk(60_000, 1_000_000);
   const db = s as unknown as { put(r: unknown): void; db: { exec(q: string): void } };
   const own = { bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0 };
-  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, seen_at: 1, own, tot: own });
+  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, seen_at: 1, ver: 1, own, tot: own });
   db.db.exec("BEGIN");
   db.put(row("/big", "/"));
   for (let i = 0; i < 150_000; i++) db.put(row(`/big/${i}`, "/big"));
@@ -1410,9 +1410,9 @@ test("the pending table and a reopen are served by the workers, never by the mai
     const t = { modifyMs: 10, settleMs: 1 };
     assert.equal(await s.notePending([{ path: "/d", dueAt: Date.now() - 1, modify: false }], 10), true);
     assert.deepEqual(await s.takeDue(Date.now(), 10, t), ["/d"]);
-    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), ["/d"]);
+    await s.noteRan([{ path: "/d", endedAt: Date.now(), hold: false }], 10);
     await s.clearPending();
-    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), []);
+    assert.deepEqual(await s.takeDue(Date.now(), 10, t), []);
     // after a failure the store reopens through the writer thread
     p.db = null;
     p.retryAt = 1;

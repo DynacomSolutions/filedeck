@@ -309,6 +309,8 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       },
       onDrop: () => release?.(),
       gate: async (signal: AbortSignal, self: { id: string; createdAt: number }) => {
+        // an adopted job waits here while another process holds the store's writer lease (a rolling deploy): only the writer walks
+        await sizes.whenWriter(signal);
         release = await sizes.lock(virtual, signal);
         // The lock is per process: during a rollout another process may be walking an overlapping folder, so wait for it too.
         const overlaps = (p: { path: string }) => p.path === virtual || p.path === "/" || virtual === "/" || p.path.startsWith(virtual + "/") || virtual.startsWith(p.path + "/");
@@ -342,12 +344,15 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     return jobs.findLive("du", m) ?? jobs.findLive("size", m);
   };
 
+  // Another process holds the store's writer lease (a rolling deploy, or this one has not got it yet): this one answers from the store and starts no size work.
+  const readOnly = () => new ops.FsError(503, "another process is writing the size store; try again in a moment");
   // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
   app.post("/api/jobs/size", async (c) => {
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
+    if (!(await sizes.mayScan())) throw readOnly();
     // one live size job per path: a second request attaches to it
     const same = liveScan(r.virtual, b.fresh === true);
     return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
@@ -375,9 +380,17 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const fresh = flag(q("fresh"));
     // cachedOnly=1: answer from stored rows only. Never scans, never waits for a lock; 204 when the folder is not stored.
     if (flag(q("cachedOnly"))) {
-      const t = await sizes.tree(r.virtual, depth, all);
+      // `stale: true` unless the store can vouch for the rows (the same test as the fast path below)
+      const f = await sizes.freshTree(r.virtual, depth, all);
+      const t = f ?? (await sizes.tree(r.virtual, depth, all));
       if (!t.entries.length) return c.body(null, 204);
-      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
+      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual), ...(f ? {} : { stale: true }) });
+    }
+    if (!(await sizes.mayScan())) {
+      // not the writer: rows as they are, flagged, and no job (a rescan is what the writer does)
+      const t = fresh ? undefined : await sizes.tree(r.virtual, depth, all);
+      if (!t?.entries.length) throw readOnly();
+      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual), stale: true });
     }
     if (!fresh) {
       // Any live scan of an overlapping folder, here or in another process, may be rewriting rows or holding changes it has not applied: no fast path while one runs.
