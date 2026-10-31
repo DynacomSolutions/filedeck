@@ -815,14 +815,41 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   });
   const nameEditor = (en: Entry) =>
     renaming === en.path ? (
-      <input
-        autoFocus
+      // A textarea so a name wider than the list wraps onto extra lines instead of scrolling out of view.
+      <textarea
+        className="rn-input"
+        rows={1}
+        spellCheck={false}
+        aria-label={`New name for ${en.name}`}
         defaultValue={en.name}
+        style={{ "--rn-w": `${Math.min(Math.max(en.name.length + 3, 12), 80)}ch` } as React.CSSProperties}
+        ref={(el) => {
+          if (!el || el.dataset.init) return;
+          el.dataset.init = "1";
+          // grow over the columns to the right, but never past the visible list edge (that would scroll the list)
+          const box = el.closest(".fp-scroll");
+          if (box && !el.closest(".tile")) el.style.maxWidth = `${Math.max(box.clientWidth - (el.getBoundingClientRect().left - box.getBoundingClientRect().left) - 8, 192)}px`;
+          el.style.height = "auto";
+          el.style.height = `${el.scrollHeight}px`;
+          el.focus({ preventScroll: true });
+          // select the stem like a desktop file manager: "report.final.pdf" selects "report.final"
+          const dot = en.name.lastIndexOf(".");
+          el.setSelectionRange(0, dot > 0 && en.type !== "dir" ? dot : en.name.length);
+        }}
         onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          const el = e.currentTarget;
+          // file names never hold newlines: strip them (paste) and regrow to the wrapped height
+          if (/[\r\n]/.test(el.value)) el.value = el.value.replace(/[\r\n]+/g, "");
+          el.style.height = "auto";
+          el.style.height = `${el.scrollHeight}px`;
+        }}
         onBlur={() => setRenaming(null)}
         onKeyDown={(e) => {
           if (e.key === "Escape") setRenaming(null);
           if (e.key === "Enter") {
+            e.preventDefault();
             const v = e.currentTarget.value.trim();
             setRenaming(null);
             if (v && v !== en.name) void run("Rename", () => api.rename(node, en.path, join(parent(en.path), v)));
@@ -888,6 +915,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   ) : null;
   const listing = cside && cmpCtl ? <CompareBody ctl={cmpCtl} side={cside} /> : searchView ?? (
       <div
+        ref={listRef}
         className="fp-scroll"
         tabIndex={0}
         role="group"
@@ -900,7 +928,6 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             const keep = cursor ? visible.find((x) => x.path === cursor) : undefined;
             const go = keep ?? visible[0];
             if (go) selectOnly(go.path);
-        ref={listRef}
           }
         }}
         onClick={(e) => e.target === e.currentTarget && (onClearOthers(), setSel(new Set()), setCursor(null))}
@@ -931,7 +958,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               return (
                 <div key={en.path} role="group" aria-label={`${en.name}${sel.has(en.path) ? ", selected" : ""}`} {...itemProps(en, isDir, "tile ")}>
                   <Thumb node={node} entry={en} isDir={isDir} />
-                  <Tip label={en.name} fill><div className="tile-name">{nameEditor(en)}</div></Tip>
+                  {renaming === en.path ? (
+                    // no Tip here: its wrapper clips overflow and its bubble would cover the editor
+                    <div className="tile-name renaming">{nameEditor(en)}</div>
+                  ) : (
+                    <Tip label={en.name} fill><div className="tile-name">{nameEditor(en)}</div></Tip>
+                  )}
                   {gitMark(en, isDir) && <div className="tile-git">{gitMark(en, isDir)}</div>}
                 </div>
               );
@@ -976,7 +1008,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
                 <tr key={en.path} {...itemProps(en, isDir, "")}>
-                  <td className="name">
+                  <td className={"name" + (renaming === en.path ? " renaming" : "")}>
                     <FileIcon className="ico" dir={isDir} type={en.type} />
                     {nameEditor(en)}
                     {gitCol && <div className="git-inline">{gitMark(en, isDir)}</div>}

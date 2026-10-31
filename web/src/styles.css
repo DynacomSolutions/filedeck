@@ -970,3 +970,12 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .fp .pv-head button,.fp .pv-head .pv-dockbtn,.fp .pv-head .pv-acts>*,.fp .pv-head .pv-extra .pv-dockbtn,.fp .ed-head button{min-width:34px!important;min-height:34px!important;height:34px!important;padding:0 .4rem}
   .pv-head .pv-acts,.pv-head .pv-extra,.pv-head .pv-extra .pv-dock{gap:0}
 }
+
+/* Rename in the details table: the input starts where the name was and may grow over the columns to its right, so a
+   long name is never cropped by the size / date / git cells. */
+.ft td.name.renaming{position:relative;z-index:6;overflow:visible;text-overflow:clip}
+.ft td.name .rn-input{position:absolute;flex:none;width:var(--rn-w,auto);min-width:12rem;z-index:6;height:auto;min-height:30px;margin:-4px 0;box-sizing:border-box;resize:none;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;line-height:22px;font:inherit;font-weight:600;font-size:.88rem;color:var(--fg);background:var(--surface-2);border:0;border-radius:var(--radius-btn);box-shadow:var(--shadow-1);padding:.3rem .6rem;vertical-align:middle}
+.ft td.name .rn-input:focus{outline:none;box-shadow:0 0 0 2px var(--accent)}
+/* grid: the editor overlays the tile (and the tiles below it) and wraps the name over as many lines as it needs */
+.tile-name.renaming{position:relative;display:block;overflow:visible;-webkit-line-clamp:unset;min-height:2.4em;z-index:6}
+.tile-name .rn-input{position:absolute;top:0;left:0;width:100%;min-width:100%;box-sizing:border-box;resize:none;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;text-align:center;font:inherit;font-size:.78rem;font-weight:600;line-height:1.3;color:var(--fg);background:var(--surface-2);border:0;border-radius:var(--radius-btn);box-shadow:inset 0 0 0 2px var(--accent);padding:.2rem .3rem;outline:none}
