@@ -13,5 +13,5 @@ const server = serve({ fetch: app.fetch, port: cfg.port }, (i) => {
 });
 (server as Server).requestTimeout = 0; // long uploads/downloads; the ingress sets its own limits
 (server as Server).headersTimeout = 30_000;
-const stop = installShutdown(server as Server, () => (app as { close?: () => Promise<void> }).close?.());
+const stop = installShutdown(server as Server, () => (app as { close?: () => Promise<void> }).close?.(), { onSignal: () => (app as { leave?: () => Promise<void> }).leave?.() });
 for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, stop);

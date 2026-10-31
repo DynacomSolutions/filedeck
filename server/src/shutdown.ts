@@ -6,6 +6,8 @@ export interface ShutdownOptions {
   /** absolute limit for the whole shutdown, whatever is still running */
   hardMs?: number;
   exit?: (code: number) => void;
+  /** runs at the very start of the shutdown, beside the drain: work the next process waits for (releasing a lease) must not queue behind open connections */
+  onSignal?: () => Promise<void> | void;
 }
 
 /**
@@ -21,6 +23,7 @@ export function installShutdown(server: Server, cleanup: () => Promise<void> | v
     if (started) return exit(1);
     started = true;
     setTimeout(() => exit(1), hardMs).unref();
+    void Promise.resolve(o.onSignal?.()).catch(() => undefined);
     const drain = setTimeout(() => server.closeAllConnections(), drainMs);
     drain.unref();
     // Registered before close(): the callback fires only when the last socket is gone, not when listening stops.

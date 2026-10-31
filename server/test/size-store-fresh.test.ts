@@ -1,0 +1,834 @@
+import { test as nodeTest, before, after } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { SizeStore } from "../src/size-store.ts";
+import fsp from "node:fs/promises";
+import { FanWatch } from "../src/fanwatch.ts";
+import { createAgent } from "../src/agent.ts";
+import { loadConfig } from "../src/config.ts";
+
+/** every test here starts agents, helpers and workers: a leak must fail the test, not hang the runner */
+const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
+
+let tmp: string;
+const stores: SizeStore[] = [];
+const agents: { close(): Promise<void> }[] = [];
+before(() => void (tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-fresh-")))));
+after(async () => {
+  for (const s of stores) await s.close();
+  for (const a of agents) await Promise.race([a.close().catch(() => {}), new Promise((r) => setTimeout(r, 15_000))]);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const until = async (f: () => boolean | Promise<boolean>, ms = 20_000) => {
+  for (const t0 = Date.now(); !(await f()) && Date.now() - t0 < ms; ) await sleep(20);
+};
+function fixture(name: string) {
+  const root = path.join(tmp, name);
+  for (const d of ["a/x", "a/y", "b/z"]) fs.mkdirSync(path.join(root, d), { recursive: true });
+  for (const f of ["a/x/f", "a/y/f", "b/z/f"]) fs.writeFileSync(path.join(root, f), "12345");
+  const db = path.join(tmp, `${name}.db`); // beside the tree, not in it
+  const s = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 100_000 });
+  stores.push(s);
+  return { root, s, db };
+}
+const scannedAt = (db: string, p: string) => {
+  const d = new DatabaseSync(db, { readOnly: true });
+  try {
+    return (d.prepare("SELECT scanned_at s FROM sizes WHERE path = ?").get(p) as { s: number } | undefined)?.s;
+  } finally {
+    d.close();
+  }
+};
+
+
+type Any = any; // the tests reach into private state on purpose
+/** a store as a running watcher leaves it: ready at once and covering everything, then one full walk (rows re-read after the ready time are trusted) */
+async function validate(s: SizeStore, p = "/") {
+  const ready = Date.now();
+  const a = s as Any;
+  a.covers = () => true;
+  a.quiet = () => true;
+  a.watchedSince = () => ready;
+  await sleep(5);
+  await s.scan(p, undefined, true);
+}
+const bytes = (t: { entries: { bytes: number }[] } | null) => t?.entries?.[0]?.bytes ?? null;
+const backlog = async (s: SizeStore, ps: string[]) => {
+  await s.notePending(ps.map((path) => ({ path, dueAt: Date.now() - 10_000, modify: false })), 100);
+  return s.takeDue(Date.now(), 10, { modifyMs: 100, settleMs: 1 });
+};
+/** hold back the commit sends the picker chooses until released */
+function hold(s: SizeStore, pick: (m: Any) => boolean) {
+  const a = s as Any;
+  const orig = a.send.bind(s);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let held = false;
+  a.send = async (m: Any) => {
+    if (m.op === "commit" && pick(m)) {
+      held = true;
+      await gate;
+    }
+    return orig(m);
+  };
+  return { release, held: () => held };
+}
+/** the watcher applied what is pending: take it and report the re-reads ended */
+async function settlePending(s: SizeStore) {
+  const got = (await s.takeDue(Date.now(), 100, { modifyMs: 100, settleMs: 1 })) ?? [];
+  await s.noteRan(got.map((p) => ({ path: p, endedAt: Date.now(), hold: false })), 100);
+}
+const rowsOf = (db: string, sql: string) => {
+  const d = new DatabaseSync(db, { readOnly: true });
+  try {
+    return d.prepare(sql).all() as Any[];
+  } finally {
+    d.close();
+  }
+};
+
+test("overflow: only the pending folders become dirty, nothing is zeroed, and an in-place change in one is seen by the next walk", async () => {
+  const { root, s, db } = fixture("overflow");
+  await s.scan("/");
+  await sleep(20);
+  // an in-place edit changes no folder mtime: only the dirty mark can make the store notice it
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await s.notePending([{ path: "/a/x", dueAt: Date.now() - 10_000, modify: false }], 100);
+  assert.equal(await s.takeDue(Date.now(), 10, { modifyMs: 100, settleMs: 1 }), null, "backlog too old");
+  assert.deepEqual(rowsOf(db, "SELECT path FROM dirty").map((r) => r.path), ["/a/x"]);
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM sizes WHERE scanned_at = 0")[0].n, 0, "no row rewritten");
+  assert.equal((s as Any).marks.size, 0, "no tree mark");
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM pending WHERE due_at < ?".replace("?", String(Number.MAX_SAFE_INTEGER)))[0].n, 0, "nothing left pending");
+  const r = await s.scanRead("/");
+  assert.equal(r.read, 1, "only the dirty folder is re-read");
+  assert.equal(r.res.bytes, 10 + 5 + 5, "the unseen in-place change is counted");
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM dirty")[0].n, 0, "cleared by the walk that re-read it");
+  assert.equal((await s.scanRead("/")).read, 0);
+});
+
+test("overflow: a pending folder that is not stored makes its stored parent dirty", async () => {
+  const { s, db } = fixture("overflow-parent");
+  await s.scan("/");
+  assert.equal(await backlog(s, ["/a/new"]), null);
+  assert.deepEqual(rowsOf(db, "SELECT path FROM dirty").map((r) => r.path), ["/a"]);
+});
+
+test("overflow: the dirty marks and the pending rows change in one transaction (a failure loses nothing)", async () => {
+  const { s, db } = fixture("overflow-tx");
+  await s.scan("/");
+  const a = s as Any;
+  const orig = a.txn.bind(s);
+  a.txn = async () => false;
+  assert.equal(await backlog(s, ["/a/x"]), null);
+  a.txn = orig;
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM dirty")[0].n, 0);
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM pending WHERE due_at < 9007199254740991")[0].n, 1, "still pending");
+  assert.equal(await s.takeDue(Date.now(), 10, { modifyMs: 100, settleMs: 1 }), null, "next take tries again");
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM dirty")[0].n, 1);
+});
+
+test("a dirty mark survives a walk that read the folder before it was written (the walk does not clear what it did not see)", async () => {
+  const { root, s, db } = fixture("dirty-race");
+  await s.scan("/");
+  await validate(s);
+  const h = hold(s, () => true);
+  const w = s.scan("/", undefined, true);
+  while (!h.held()) await sleep(5);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await backlog(s, ["/a/x"]);
+  h.release();
+  await w;
+  assert.deepEqual(rowsOf(db, "SELECT path FROM dirty").map((r) => r.path), ["/a/x"], "still dirty: the walk's rows are older than the change");
+  assert.equal(await s.freshTree("/", 0, false), null);
+  assert.equal((await s.scanRead("/")).res.bytes, 20);
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM dirty")[0].n, 0);
+});
+
+test("a stale tree mark is O(1), is honoured by the next walk and is spent by it", async () => {
+  const { s, db } = fixture("mark");
+  await s.scan("/");
+  assert.equal((await s.scanRead("/")).read, 0);
+  s.markStale("/a");
+  assert.equal((await s.scanRead("/")).read, 3, "/a, /a/x and /a/y re-read; /b reused");
+  assert.equal((await s.scanRead("/")).read, 0, "the mark is spent");
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM stale_trees")[0].n, 0);
+});
+
+test("a mark survives a restart (the next writer loads it)", async () => {
+  const { root, s, db } = fixture("mark-restart");
+  await s.scan("/");
+  s.markStale("/b");
+  await s.close();
+  const s2 = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000 });
+  stores.push(s2);
+  assert.equal((await s2.scanRead("/")).read, 2, "/b and /b/z");
+});
+
+test("marks past the cap collapse into one on / in one transaction, later than every mark", async () => {
+  const { s, db } = fixture("mark-cap");
+  await s.scan("/");
+  for (let i = 0; i < 300; i++) s.markStale(`/m${i}`);
+  await s.scan("/b"); // a read after the writes: the writer ran them in order
+  await until(() => rowsOf(db, "SELECT COUNT(*) n FROM stale_trees")[0].n <= 256);
+  const rows = rowsOf(db, "SELECT path, at FROM stale_trees");
+  assert.ok(rows.length < 256 && rows.some((r) => r.path === "/"), JSON.stringify(rows.length));
+});
+
+test("a persisted mark ahead of the clock does not make a newer mark look older", async () => {
+  const { s } = fixture("mark-clock");
+  const a = s as Any;
+  a.marks.set("/a", Date.now() + 3_600_000);
+  s.markStale("/a/x");
+  assert.ok(a.marks.get("/a/x") > a.marks.get("/a"), "the new mark is later than the persisted one");
+});
+
+test("freshTree: needs a validating walk after the watcher was ready, and nothing pending, dirty, marked or being applied", async () => {
+  const { s } = fixture("fresh");
+  await s.scan("/");
+  const a = s as Any;
+  a.covers = () => true;
+  a.quiet = () => true;
+  a.watchedSince = () => Date.now();
+  assert.equal(await s.freshTree("/", 1, false), null, "nothing validated since the watcher was ready");
+  await validate(s);
+  const t = await s.freshTree("/", 1, false);
+  assert.equal(bytes(t), 15);
+  assert.equal(await s.freshTree("/", 1, true), null, "all=1 lists files from disk: never here");
+  a.covers = () => false;
+  assert.equal(await s.freshTree("/", 1, false), null, "not watched");
+  a.covers = () => true;
+  a.quiet = () => false;
+  assert.equal(await s.freshTree("/", 1, false), null, "a change is waiting in the watcher");
+  a.quiet = () => true;
+  await s.notePending([{ path: "/b/z", dueAt: Date.now() - 10, modify: false }], 100);
+  assert.equal(await s.freshTree("/", 1, false), null, "pending below");
+  assert.equal(await s.freshTree("/b/z", 1, false), null, "pending on the folder");
+  assert.ok(await s.freshTree("/a", 1, false), "an unrelated folder is still fresh");
+  await settlePending(s);
+  assert.ok(await s.freshTree("/", 1, false));
+  s.markStale("/b");
+  assert.equal(await s.freshTree("/", 1, false), null, "a mark below");
+  assert.equal(await s.freshTree("/b/z", 1, false), null, "a mark above");
+  assert.ok(await s.freshTree("/a", 1, false), "a mark elsewhere does not matter");
+  await s.scan("/");
+  assert.ok(await s.freshTree("/", 1, false), "a walk that began after the mark and reused only trusted rows validates the tree again");
+});
+
+test("freshTree: a validated walk of an ancestor covers a folder below it; a pending ancestor does not let the folder through", async () => {
+  const { root, s } = fixture("fresh-chain");
+  await s.scan("/");
+  await validate(s);
+  assert.ok(await s.freshTree("/a/x", 0, false));
+  // a swapped folder: the helper reports the parent (and the old and new names); the child below must not be served from before
+  fs.renameSync(path.join(root, "a/x"), path.join(root, "a/x.old"));
+  fs.mkdirSync(path.join(root, "a/x"));
+  fs.writeFileSync(path.join(root, "a/x/big"), "z".repeat(1000));
+  await s.notePending([{ path: "/a", dueAt: Date.now() - 10, modify: false }], 100);
+  assert.equal(await s.freshTree("/a/x", 0, false), null, "pending parent");
+  await settlePending(s);
+  await s.notePending([{ path: "/", dueAt: Date.now() - 10, modify: false }], 100);
+  assert.equal(await s.freshTree("/a/x", 0, false), null, "pending grandparent");
+  await settlePending(s);
+  // the same after an overflow: dirty marks on the ancestors
+  assert.equal(await backlog(s, ["/", "/a", "/a/x.old"]), null);
+  assert.equal(await s.freshTree("/a/x", 0, false), null, "dirty ancestors");
+  assert.equal(await s.freshTree("/a/y", 0, false), null);
+  assert.equal((await s.scanRead("/a/x")).res.bytes, 1000);
+});
+
+test("freshTree: not while a walk is half done (its repaired child is stored, the total above is not yet)", async () => {
+  const { root, s } = fixture("fresh-midwalk", );
+  await s.scan("/");
+  await validate(s);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  assert.equal(await backlog(s, ["/a/x"]), null);
+  const h = hold(s, (m) => m.last);
+  (s as Any).o.commitChunk = 1;
+  const w = s.scan("/", undefined, true);
+  while (!h.held()) await sleep(5);
+  assert.equal(await s.freshTree("/", 0, false), null, "the walk holds the lock, and the folder is still dirty");
+  h.release();
+  await w;
+});
+
+test("freshTree after a killed walk: the dirty mark stays until a walk ends cleanly", async () => {
+  const { root, s, db } = fixture("fresh-killed");
+  await s.scan("/");
+  await validate(s);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  assert.equal(await backlog(s, ["/a/x"]), null);
+  const ac = new AbortController();
+  const ctl = { signal: ac.signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } };
+  (s as Any).o.commitChunk = 1;
+  const timer = setInterval(() => ctl.progress.entries > 2 && ac.abort(), 1);
+  await assert.rejects(s.scan("/", ctl, true), /canceled/);
+  clearInterval(timer);
+  assert.equal(rowsOf(db, "SELECT COUNT(*) n FROM dirty")[0].n, 1);
+  assert.equal(await s.freshTree("/", 0, false), null);
+});
+
+test("freshTree: a change in the restart gap is not served, rows within the TTL notwithstanding", async () => {
+  const { root, s, db } = fixture("fresh-gap");
+  await s.scan("/");
+  await s.close();
+  fs.rmSync(path.join(root, "a/y"), { recursive: true });
+  const s2 = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000 });
+  stores.push(s2);
+  const a = s2 as Any;
+  const ready = Date.now();
+  a.covers = () => true;
+  a.quiet = () => true;
+  a.watchedSince = () => ready;
+  assert.equal(await s2.freshTree("/", 0, false), null);
+  // a plain walk reuses what is young (cheap, as before) but cannot vouch for rows the watcher did not keep current
+  await sleep(5);
+  await s2.scanRead("/");
+  assert.equal(await s2.freshTree("/", 0, false), null);
+  // a rescan reads everything after the watcher was ready, and does
+  await s2.scan("/", undefined, true);
+  assert.equal(bytes(await s2.freshTree("/", 0, false)), 10);
+});
+
+test("freshTree: an old row of another device, or a mark above a mount point, does not block a validated folder", async () => {
+  const { s, db } = fixture("fresh-mount");
+  await s.scan("/");
+  const d = new DatabaseSync(db);
+  d.prepare("INSERT INTO sizes (path,parent,ino,dev,mtime_ms,scanned_at,seen_at,own_bytes,own_disk,own_files,own_symlinks,own_other,own_dirs,own_mounts,own_errors,tot_bytes,tot_disk,tot_files,tot_symlinks,tot_other,tot_dirs,tot_mounts,tot_errors) VALUES ('/a/mnt','/a',1,999,1,?,1,7,7,1,0,0,0,0,0,7,7,1,0,0,0,0,0)").run(Date.now() - 10 * 3_600_000);
+  d.close();
+  s.markStale("/a");
+  await validate(s);
+  assert.equal(bytes(await s.freshTree("/", 0, false)), 15);
+  assert.ok(await s.freshTree("/a", 0, false));
+  assert.equal((s as Any).marks.size, 0, "the mark above the mount point was spent by the walk of /");
+});
+
+test("freshTree: no change is served while it is being taken for apply (rows already idle, prune still in flight)", async () => {
+  const { root, s } = fixture("fresh-take");
+  await s.scan("/");
+  await validate(s);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await s.notePending([{ path: "/a/x", dueAt: Date.now() - 10, modify: false }], 100_000);
+  const a = s as Any;
+  const orig = a.write1.bind(s);
+  let go!: () => void;
+  const g = new Promise<void>((r) => (go = r));
+  let held = false;
+  a.write1 = async (q: string, p: unknown[]) => {
+    held = true;
+    await g;
+    return orig(q, p);
+  };
+  const t = s.takeDue(Date.now(), 10, { modifyMs: 100_000, settleMs: 1 });
+  while (!held) await sleep(5);
+  assert.equal(await s.freshTree("/", 0, false), null, "taken, not yet applied");
+  go();
+  assert.deepEqual(await t, ["/a/x"]);
+  assert.equal(await s.freshTree("/", 0, false), null, "still being applied");
+  await s.applyChanged("/a/x");
+  await s.noteRan([{ path: "/a/x", endedAt: Date.now(), hold: false }], 100_000);
+  assert.equal(bytes(await s.freshTree("/", 0, false)), 20);
+});
+
+test("freshTree is a handful of lookups: 500k other rows do not slow it", async () => {
+  const { s, db } = fixture("fresh-cost");
+  await s.scan("/");
+  const d = new DatabaseSync(db);
+  d.exec("PRAGMA synchronous=OFF; BEGIN");
+  const ins = d.prepare("INSERT INTO sizes (path,parent,ino,dev,mtime_ms,scanned_at,seen_at,own_bytes,own_disk,own_files,own_symlinks,own_other,own_dirs,own_mounts,own_errors,tot_bytes,tot_disk,tot_files,tot_symlinks,tot_other,tot_dirs,tot_mounts,tot_errors) VALUES (?,?,1,1,1,1,1,1,1,1,0,0,0,0,0,1,1,1,0,0,0,0,0)");
+  for (let i = 0; i < 500_000; i++) ins.run(`/w/t${i % 50}/d${i}`, `/w/t${i % 50}`);
+  d.exec("COMMIT");
+  d.close();
+  await validate(s, "/a");
+  const t0 = performance.now();
+  const t = await s.freshTree("/a", 1, false);
+  const ms = performance.now() - t0;
+  console.log(`# freshTree with 500k old rows elsewhere: ${ms.toFixed(1)} ms`);
+  assert.ok(t);
+  assert.ok(ms < 150, `took ${ms} ms`);
+});
+
+test("a first open that finds the file locked is not a corrupt store: nothing is deleted and it opens once the lock is gone", async () => {
+  const dbf = path.join(tmp, "locked.db");
+  const root = path.join(tmp, "locked-root");
+  fs.mkdirSync(path.join(root, "a"), { recursive: true });
+  const o = new DatabaseSync(dbf);
+  // a store of the previous version: no dirty/validated/stale_trees tables
+  const cols = ["bytes", "disk", "files", "symlinks", "other", "dirs", "mounts", "errors"];
+  const metrics = [...cols.map((m) => `own_${m} INTEGER NOT NULL DEFAULT 0`), ...cols.map((m) => `tot_${m} INTEGER NOT NULL DEFAULT 0`)].join(", ");
+  o.exec(`PRAGMA journal_mode=WAL; CREATE TABLE sizes (path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino REAL, dev REAL, mtime_ms REAL, scanned_at INTEGER, seen_at INTEGER NOT NULL DEFAULT 0, ${metrics}) WITHOUT ROWID; CREATE INDEX sizes_parent ON sizes(parent); CREATE TABLE pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID; INSERT INTO sizes (path,parent) VALUES ('/keep','/')`);
+  const ino = fs.statSync(dbf).ino;
+  o.exec("BEGIN IMMEDIATE");
+  const quiet = console.error;
+  console.error = () => undefined;
+  let s: SizeStore;
+  try {
+    s = new SizeStore(dbf, { root, ttlMs: 1000, maxEntries: 1000 });
+  } finally {
+    console.error = quiet;
+  }
+  stores.push(s);
+  o.exec("COMMIT");
+  o.close();
+  assert.equal(fs.statSync(dbf).ino, ino, "same file");
+  (s as Any).retryAt = 1; // do not wait out the retry delay
+  assert.equal((await s.scan("/a")).dirs, 0);
+  await until(() => s.persistent, 5000);
+  assert.equal(s.persistent, true, "usable after the lock was released");
+  assert.equal(rowsOf(dbf, "SELECT COUNT(*) n FROM sizes WHERE path = '/keep'")[0].n, 1, "the old rows are still there");
+  assert.ok(rowsOf(dbf, "SELECT name FROM sqlite_master WHERE name = 'dirty'").length);
+});
+
+test("a corrupt file is still replaced", async () => {
+  const dbf = path.join(tmp, "corrupt.db");
+  fs.writeFileSync(dbf, "this is not a database ".repeat(200));
+  const root = path.join(tmp, "corrupt-root");
+  fs.mkdirSync(path.join(root, "a"), { recursive: true });
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    const s = new SizeStore(dbf, { root, ttlMs: 1000, maxEntries: 1000 });
+    stores.push(s);
+    assert.equal((await s.scan("/a")).dirs, 0);
+    assert.equal(s.persistent, true);
+  } finally {
+    console.error = quiet;
+  }
+});
+
+test("FanWatch.settled: false while a flush is in the store's hands, while output is paused, and for ancestors and descendants", async () => {
+  let go!: () => void;
+  const g = new Promise<void>((r) => (go = r));
+  const sink = { applyChanged: async () => {}, markStale() {}, notePending: async () => (await g, true), takeDue: async () => [] as string[] };
+  const w = new FanWatch(sink, { helper: "x", root: "/", procMounts: "/proc/mounts" });
+  const a = w as Any;
+  assert.equal(w.settled("/a"), true);
+  w.line("x /a/x/y");
+  assert.equal(w.settled("/a"), false, "buffered, below");
+  assert.equal(w.settled("/a/x/y/z"), false, "buffered, above");
+  assert.equal(w.settled("/b"), true);
+  const p = a.flush();
+  assert.equal(w.settled("/a"), false, "swapped out of the buffer, not stored yet");
+  go();
+  await p;
+  assert.equal(w.settled("/a"), true, "stored: the store's pending table answers from here");
+  a.resume = () => {};
+  assert.equal(w.settled("/b"), false, "events may sit in the pipe");
+  w.stop();
+});
+
+test("the store tells a folder it handed out is still being applied until noteRan", async () => {
+  const { s } = fixture("taken");
+  await s.scan("/");
+  await s.notePending([{ path: "/a/x", dueAt: Date.now() - 10, modify: false }], 100);
+  assert.deepEqual(await s.takeDue(Date.now(), 10, { modifyMs: 100, settleMs: 1 }), ["/a/x"]);
+  assert.ok((s as Any).taken.has("/a/x"));
+  await s.noteRan([{ path: "/a/x", endedAt: Date.now(), hold: false }], 100);
+  assert.ok(!(s as Any).taken.has("/a/x"));
+});
+
+/** a helper that is ready at once and reports nothing: the watcher covers the whole root without a kernel */
+function readyHelper(dir: string) {
+  const f = path.join(dir, "helper.sh");
+  fs.writeFileSync(f, "#!/bin/sh\necho '#ready 1'\nexec sleep 3600\n", { mode: 0o755 });
+  const mounts = path.join(dir, "mounts");
+  fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
+  return { f, mounts };
+}
+
+test("GET /api/du: a watched tree whose rows are fresh is answered without a job", async () => {
+  const root = path.join(tmp, "api");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  const aux = path.join(tmp, "api-aux");
+  fs.mkdirSync(aux);
+  const h = readyHelper(aux);
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts, FILEDECK_HANDOVER_MS: "100" } as never));
+  agents.push(app as unknown as { close(): Promise<void> });
+  (app as unknown as { startWatcher(): void }).startWatcher();
+  const jobs = async () => ((await (await app.request("/api/jobs")).json()) as { jobs: { kind: string }[] }).jobs.length;
+  // no stored rows yet and not covered yet: a job runs
+  const first = await app.request("/api/du?path=/t&depth=1");
+  assert.equal(first.status, 200);
+  assert.equal(await jobs(), 1);
+  let ans: { cached: boolean; watched: boolean } = { cached: false, watched: false };
+  for (let i = 0; i < 100; i++) {
+    ans = (await (await app.request("/api/du?path=/t&depth=1")).json()) as typeof ans;
+    if (ans.watched) break;
+    await sleep(50);
+  }
+  assert.equal(ans.watched, true, "watcher ready");
+  // rows stored before the watcher was ready are not vouched for: one rescan after it, then the fast path
+  assert.equal((await app.request("/api/du?path=/t&depth=1&fresh=1")).status, 200);
+  const before = await jobs();
+  for (let i = 0; i < 3; i++) {
+    const r = await app.request("/api/du?path=/t&depth=1");
+    const b = (await r.json()) as { cached: boolean; watched: boolean; entries: { path: string; bytes: number }[]; stale?: boolean };
+    assert.equal(r.status, 200);
+    assert.deepEqual([b.cached, b.watched, b.stale], [true, true, undefined]);
+    assert.equal(b.entries[0]!.bytes, 3);
+  }
+  assert.equal(await jobs(), before, "no job for fresh watched data");
+});
+
+test("GET /api/du: a live scan of an overlapping folder is not waited for: stored rows answer with stale:true, and no job is started", async () => {
+  const root = path.join(tmp, "api2");
+  fs.mkdirSync(path.join(root, "p/child"), { recursive: true });
+  fs.writeFileSync(path.join(root, "p/child/f"), "abc");
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "300" } as never));
+  agents.push(app as unknown as { close(): Promise<void> });
+  assert.equal((await app.request("/api/du?path=/p&depth=1")).status, 200); // stores /p
+  // the child rescan is held inside its first directory read
+  const orig = fsp.readdir;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let reading = false;
+  (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
+    if (String(p).endsWith("/p/child")) {
+      reading = true;
+      await gate;
+    }
+    return (orig as (...x: unknown[]) => unknown)(p, ...a);
+  };
+  try {
+    const post = await app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/p/child", fresh: true }) });
+    assert.equal(post.status, 202);
+    const job = (await post.json()) as { id: string };
+    while (!reading) await sleep(5);
+    const jobsBefore = ((await (await app.request("/api/jobs")).json()) as { jobs: unknown[] }).jobs.length;
+    const t0 = Date.now();
+    const r = await app.request("/api/du?path=/p&depth=1");
+    assert.equal(r.status, 200, "answered at once");
+    const body = (await r.json()) as { stale?: boolean; entries: { path: string }[] };
+    assert.equal(body.stale, true);
+    assert.equal(body.entries[0]!.path, "/p");
+    assert.ok(Date.now() - t0 < 250, `${Date.now() - t0} ms`);
+    assert.equal(((await (await app.request("/api/jobs")).json()) as { jobs: unknown[] }).jobs.length, jobsBefore, "no job was started");
+    release();
+    for (let i = 0; i < 200; i++) {
+      if (((await (await app.request(`/api/jobs/${job.id}`)).json()) as { state: string }).state === "done") break;
+      await sleep(20);
+    }
+  } finally {
+    release();
+    (fsp as { readdir: unknown }).readdir = orig;
+  }
+});
+
+test("commit stall regression: stale marks on a huge store do not rewrite rows or hold the writer; a scan queued behind them is not delayed", async () => {
+  // Before: markStale was `UPDATE sizes SET scanned_at = 0 WHERE path = ? OR (path > ? AND path < ?)` over the whole subtree, on the one writer
+  // thread: ~1.9 s per mark at 1M rows, ~28 s for 6 marks at 3M, and every scan commit queued behind them (size-commit stalls). Now one mark row each.
+  const { root, s, db } = fixture("stall");
+  await s.scan("/");
+  await sleep(50);
+  const d = new DatabaseSync(db);
+  d.exec("PRAGMA synchronous=OFF; BEGIN");
+  const ins = d.prepare("INSERT INTO sizes (path,parent,ino,dev,mtime_ms,scanned_at,seen_at,own_bytes,own_disk,own_files,own_symlinks,own_other,own_dirs,own_mounts,own_errors,tot_bytes,tot_disk,tot_files,tot_symlinks,tot_other,tot_dirs,tot_mounts,tot_errors) VALUES (?,?,1,1,1,?,1,1,1,1,0,0,0,0,0,1,1,1,0,0,0,0,0)");
+  const N = 500_000;
+  for (let i = 0; i < N; i++) ins.run(`/w/t${i % 50}/d${i}`, `/w/t${i % 50}`, Date.now());
+  d.exec("COMMIT");
+  d.close();
+  const t0 = performance.now();
+  for (let i = 0; i < 6; i++) s.markStale(i % 2 ? "/" : "/w");
+  fs.writeFileSync(path.join(root, "a/x/g"), "z");
+  const r = await s.scan("/a/x", undefined, true);
+  const ms = performance.now() - t0;
+  assert.equal(r.files, 2);
+  console.log(`# stall bench: ${N} rows, 6 marks + small scan: ${ms.toFixed(0)} ms`);
+  assert.ok(ms < 1500, `took ${ms} ms`);
+  const q = new DatabaseSync(db, { readOnly: true });
+  assert.equal((q.prepare("SELECT COUNT(*) n FROM sizes WHERE scanned_at = 0").get() as { n: number }).n, 0, "rows were not rewritten");
+  assert.ok((q.prepare("SELECT COUNT(*) n FROM stale_trees").get() as { n: number }).n <= 2);
+  q.close();
+});
+
+test("GET /api/du?cachedOnly=1 says stale:true unless the store vouches for the rows", async () => {
+  const root = path.join(tmp, "api3");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  const aux = path.join(tmp, "api3-aux");
+  fs.mkdirSync(aux);
+  const h = readyHelper(aux);
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h.f, FILEDECK_PROC_MOUNTS: h.mounts, FILEDECK_HANDOVER_MS: "100" } as never));
+  agents.push(app as unknown as { close(): Promise<void> });
+  const get = async () => (await (await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).json()) as { stale?: boolean; watched?: boolean; entries: { bytes: number }[] };
+  assert.equal((await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).status, 204, "nothing stored yet");
+  assert.equal((await app.request("/api/du?path=/t&depth=1")).status, 200);
+  assert.equal((await get()).stale, true, "stored, but the watcher is not running");
+  (app as unknown as { startWatcher(): void }).startWatcher();
+  for (let i = 0; i < 300 && (await get()).watched !== true; i++) await sleep(20); // the watcher is ready
+  assert.equal((await get()).stale, true, "ready, but nothing validated since");
+  assert.equal((await app.request("/api/du?path=/t&depth=1&fresh=1")).status, 200); // a rescan after the watcher was ready
+  for (let i = 0; i < 200 && (await get()).stale === true; i++) await sleep(50);
+  assert.equal((await get()).stale, undefined);
+});
+
+test("a process that is not the writer answers du from the store flagged stale and starts no job; a rescan or a size job waits for the lease instead of failing", async () => {
+  const root = path.join(tmp, "api4");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  const aux = path.join(tmp, "api4-aux");
+  fs.mkdirSync(aux);
+  const mk = () => {
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_DU_WAIT_MS: "200" } as never));
+    agents.push(a as unknown as { close(): Promise<void> });
+    return a;
+  };
+  const writer = mk();
+  assert.equal((await writer.request("/api/du?path=/t&depth=1")).status, 200); // stores /t
+  const reader = mk();
+  const jobs = async () => ((await (await reader.request("/api/jobs")).json()) as { jobs: unknown[] }).jobs.length;
+  const jobsBefore = await jobs(); // (the job list is shared: the writer's own du job is in it)
+  const r = await reader.request("/api/du?path=/t&depth=1");
+  assert.equal(r.status, 200);
+  const b = (await r.json()) as { stale?: boolean; entries: { bytes: number }[] };
+  assert.equal(b.stale, true);
+  assert.equal(b.entries[0]!.bytes, 3);
+  assert.equal(await jobs(), jobsBefore, "no job was started for a stored folder");
+  assert.equal((await reader.request("/api/du?path=/t/sub&depth=0")).status, 200, "a stored folder");
+  // a rescan, an unstored folder and a size job queue until the lease is free
+  const post = await reader.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  assert.equal(post.status, 202);
+  const job = (await post.json()) as { id: string };
+  assert.equal((await reader.request("/api/du?path=/t&depth=1&fresh=1")).status, 202, "waits for the writer");
+  await new Promise((res) => setTimeout(res, 300));
+  assert.equal(((await (await reader.request(`/api/jobs/${job.id}`)).json()) as { state: string }).state, "queued");
+  await (writer as unknown as { close(): Promise<void> }).close(); // the lease is released
+  let state = "queued";
+  for (let i = 0; i < 300 && state !== "done"; i++) {
+    state = ((await (await reader.request(`/api/jobs/${job.id}`)).json()) as { state: string }).state;
+    if (state !== "done") await new Promise((res) => setTimeout(res, 50));
+  }
+  assert.equal(state, "done", "the queued job ran once the reader became the writer");
+});
+
+/** an agent with a helper that is ready at once and prints what is put in its `ev` file */
+function liveAgent(name: string, env: Record<string, string> = {}, dirs = 0) {
+  const root = path.join(tmp, name, "root");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  for (let i = 0; i < dirs; i++) fs.mkdirSync(path.join(root, `t/d${i % 50}/e${i}`), { recursive: true });
+  const aux = path.join(tmp, name, "aux");
+  fs.mkdirSync(aux, { recursive: true });
+  const ev = path.join(aux, "ev");
+  const h = path.join(aux, "helper.sh");
+  fs.writeFileSync(h, `#!/bin/sh\necho '#ready 1'\nwhile sleep 0.02; do if [ -f ${ev} ]; then cat ${ev}; rm -f ${ev}; fi; done\n`, { mode: 0o755 });
+  const mounts = path.join(aux, "mounts");
+  fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
+  const start = () => {
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_HANDOVER_MS: "100", ...env } as never)) as Any;
+    agents.push(a);
+    a.startWatcher();
+    return a;
+  };
+  return { root, ev, start };
+}
+const jsonOf = async (r: Response) => (await r.json()) as Any;
+
+for (const qs of ["fresh=1", "all=1"]) {
+  test(`X1 the repeat (${qs}) of a detached du, after the change was reported and applied, is not the old tree`, async () => {
+    const w = liveAgent("x1" + qs.slice(0, 3), { FILEDECK_DU_WAIT_MS: "0" });
+    const a = w.start();
+    await sleep(300);
+    const url = `/api/du?path=/t&depth=1&${qs}`;
+    const first = await a.request(url);
+    assert.equal(first.status, 202);
+    const { jobId } = await jsonOf(first);
+    for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+    fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+    fs.writeFileSync(w.ev, `x ${w.root}/t/sub\n`);
+    await sleep(2200); // settled and applied: nothing waits any more
+    const r = await a.request(url);
+    const b = await jsonOf(r);
+    assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `answered ${b.entries?.[0]?.bytes} unflagged`);
+  });
+}
+
+test("X2 a du that joins a size job after a restart gap says stale: the job reused rows on their age", async () => {
+  const w = liveAgent("x2", {}, 400);
+  const A = w.start();
+  await sleep(300);
+  assert.equal((await A.request("/api/du?path=/t&depth=1&fresh=1")).status, 200);
+  await A.close();
+  fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij"); // in place, in the gap
+  const B = w.start();
+  for (let i = 0; i < 100 && !(await jsonOf(await B.request("/api/du?path=/t&depth=1&cachedOnly=1"))).watched; i++) await sleep(50);
+  await sleep(300);
+  await B.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  const r = await B.request("/api/du?path=/t&depth=1");
+  const b = await jsonOf(r);
+  assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `answered ${b.entries?.[0]?.bytes} unflagged through a joined size job`);
+});
+
+test("X3 a du waiting for its job when SIGTERM arrives gets a retryable 503, not a cancellation", async () => {
+  const w = liveAgent("x3", {}, 6000);
+  const a = w.start();
+  await sleep(300);
+  const p = a.request("/api/du?path=/t&depth=2&fresh=1");
+  await sleep(60);
+  void a.leave();
+  const r = await p;
+  assert.ok([200, 202, 502, 503, 504].includes(r.status), `client gets ${r.status}`);
+});
+
+test("X4 a size job or du that reaches a process after it left is refused with 503, not accepted and forgotten", async () => {
+  const w = liveAgent("x4");
+  const A = w.start();
+  await sleep(300);
+  await A.leave();
+  const post = await A.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  assert.equal(post.status, 503);
+  assert.equal((await A.request("/api/du?path=/t&depth=1&fresh=1")).status, 503);
+});
+
+/** like liveAgent, and the helper exits when `quit` appears (a crash; the watcher restarts it after its backoff) */
+function quittingAgent(name: string, env: Record<string, string> = {}, dirs = 0) {
+  const w = liveAgent(name, { FILEDECK_DU_WAIT_MS: "0", ...env }, dirs);
+  const aux = path.dirname(w.ev);
+  const quit = path.join(aux, "quit");
+  fs.writeFileSync(path.join(aux, "helper.sh"), `#!/bin/sh\necho '#ready 1'\nwhile sleep 0.02; do if [ -f ${quit} ]; then rm -f ${quit}; exit 1; fi; if [ -f ${w.ev} ]; then cat ${w.ev}; rm -f ${w.ev}; fi; done\n`, { mode: 0o755 });
+  return { ...w, quit };
+}
+let lastStore: Any;
+const origLock = SizeStore.prototype.lock;
+SizeStore.prototype.lock = function (this: Any, ...a: Any[]) {
+  lastStore = this;
+  return (origLock as Any).apply(this, a);
+} as Any;
+
+for (const qs of ["fresh=1", "all=0"]) {
+  test(`R1 the repeat (${qs}) after an overflow: the change is known only as a stale mark, and the answer says so`, async () => {
+    const w = quittingAgent("r1" + qs.slice(0, 3));
+    const a = w.start();
+    await sleep(300);
+    const url = `/api/du?path=/t&depth=1&${qs}`;
+    const first = await a.request(url);
+    assert.equal(first.status, 202);
+    const { jobId } = await jsonOf(first);
+    for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+    fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+    fs.writeFileSync(w.ev, "!overflow\n");
+    await sleep(300);
+    const r = await a.request(url);
+    const b = await jsonOf(r);
+    assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `old size ${b.entries?.[0]?.bytes} unflagged`);
+  });
+}
+
+test("R2 the repeat after the helper died and came back: the event died with it, the same stale mark", async () => {
+  const w = quittingAgent("r2");
+  const a = w.start();
+  await sleep(300);
+  const url = "/api/du?path=/t&depth=1";
+  const first = await a.request(url);
+  assert.equal(first.status, 202);
+  const { jobId } = await jsonOf(first);
+  for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+  fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+  fs.writeFileSync(w.quit, "");
+  await sleep(2000);
+  const r = await a.request(url);
+  const b = await jsonOf(r);
+  assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `old size ${b.entries?.[0]?.bytes} unflagged`);
+});
+
+test("R3 a replay that cannot get the lock in time answers 202 done and keeps the entry: the next repeat is the finished job, not a new walk", async () => {
+  const w = quittingAgent("r3", {}, 200);
+  const a = w.start();
+  await sleep(300);
+  const url = "/api/du?path=/t&depth=1&fresh=1";
+  const first = await a.request(url);
+  assert.equal(first.status, 202);
+  const id = (await jsonOf(first)).jobId;
+  for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${id}`))).state !== "done"; i++) await sleep(20);
+  const rel = await lastStore.lock("/t"); // an overlapping walk holds the lock past the wait
+  const second = await a.request(url);
+  assert.equal(second.status, 202);
+  assert.equal((await jsonOf(second)).jobId, id);
+  rel();
+  const third = await a.request(url);
+  assert.equal(third.status, 200, "answered from the finished job (a new rescan would be 202)");
+});
+
+test("R4 in the window between SIGTERM and the lease release a size job is refused, not accepted and forgotten; R5 so is a du", async () => {
+  const w = liveAgent("r4", { FILEDECK_HANDOVER_MS: "1500", FILEDECK_DU_WAIT_MS: "800" });
+  const a = w.start();
+  await sleep(300);
+  const lv = a.leave();
+  await sleep(50);
+  const post = await a.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  assert.equal(post.status, 503);
+  assert.equal((await a.request("/api/du?path=/t&depth=1&fresh=1")).status, 503);
+  await lv;
+});
+
+let hookTree: (() => Promise<void>) | undefined;
+const origTree = SizeStore.prototype.tree;
+SizeStore.prototype.tree = async function (this: Any, ...a: Any[]) {
+  const h = hookTree;
+  hookTree = undefined; // once
+  if (h) await h();
+  return (origTree as Any).apply(this, a);
+} as Any;
+
+for (const qs of ["fresh=1", "all=0"]) {
+  test(`W1 (${qs}) an overflow after the walk read the tree but before the job finished: the repeat is flagged stale`, async () => {
+    const w = quittingAgent("w1" + qs.slice(0, 3), { FILEDECK_HANDOVER_MS: "100" });
+    const a = w.start();
+    await sleep(300);
+    // the job's reply tree read is slow: the folder changes and the watcher overflows meanwhile
+    hookTree = async () => {
+      fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+      fs.writeFileSync(w.ev, "!overflow\n");
+      await sleep(400);
+    };
+    const url = `/api/du?path=/t&depth=1&${qs}`;
+    const first = await a.request(url);
+    assert.equal(first.status, 202);
+    const { jobId } = await jsonOf(first);
+    for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+    await sleep(300);
+    const r = await a.request(url);
+    const b = await jsonOf(r);
+    assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `old size ${b.entries?.[0]?.bytes} unflagged`);
+  });
+}
+
+test("S1 a du --fresh finished before SIGTERM is answered from the finished scan in the stopping window; only a new job is refused", async () => {
+  const w = quittingAgent("s1", { FILEDECK_HANDOVER_MS: "1500" }, 200);
+  const a = w.start();
+  await sleep(300);
+  const url = "/api/du?path=/t&depth=1&fresh=1";
+  const first = await a.request(url);
+  assert.equal(first.status, 202);
+  const { jobId } = await jsonOf(first);
+  for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+  const lv = a.leave();
+  await sleep(50);
+  const r = await a.request(url);
+  assert.equal(r.status, 200, "the finished scan's answer was refused");
+  assert.equal((await a.request("/api/du?path=/t&depth=0&fresh=1")).status, 503, "a new job is refused");
+  await lv;
+});
+
+test("a run that carried a predecessor's chain but never held the lease passes the predecessor's min_epoch on", async () => {
+  const { root, s: A, db } = fixture("minepoch");
+  await A.scan("/");
+  const B = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 300 });
+  stores.push(B);
+  await B.mayScan();
+  assert.equal(B.isWriter, false);
+  const t0 = Date.now() - 100;
+  const a = await A.sessionStart("h", t0);
+  await A.sessionTick(a!, "h", t0);
+  await A.sessionEnd(a!, true);
+  const b = await B.sessionStart("h", t0 + 50);
+  const t = await B.sessionTick(b!, "h", t0 + 50);
+  assert.equal(t?.minEpoch, 1);
+  const d = new DatabaseSync(db, { readOnly: true });
+  assert.equal((d.prepare("SELECT min_epoch m FROM watch_sessions WHERE id = ?").get(b!) as { m: number }).m, 1);
+  d.close();
+});

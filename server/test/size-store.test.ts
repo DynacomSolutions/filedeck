@@ -363,7 +363,7 @@ test("a folder with 150k stored children can be listed", async () => {
   const s = mk(60_000, 1_000_000);
   const db = s as unknown as { put(r: unknown): void; db: { exec(q: string): void } };
   const own = { bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0 };
-  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, seen_at: 1, own, tot: own });
+  const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, seen_at: 1, ver: 1, own, tot: own });
   db.db.exec("BEGIN");
   db.put(row("/big", "/"));
   for (let i = 0; i < 150_000; i++) db.put(row(`/big/${i}`, "/big"));
@@ -757,8 +757,10 @@ test("abort mid-walk closes every directory and leaves the subtree stale", async
   for (let i = 0; i < 100 && fds() !== before; i++) await new Promise((r) => setTimeout(r, 10));
   assert.ok(fds() <= before, `${fds()} descriptors open, ${before} before`); // fewer is fine: unrelated handles of earlier tests may close meanwhile
   // rows written before the abort are marked stale, so the next scan re-reads them
+  // (a stale mark on the subtree, not a rewrite of its rows)
   const left = (s as unknown as { db: { prepare(q: string): { get(): { n: number; m: number } } } }).db.prepare("SELECT COUNT(*) AS n, MAX(scanned_at) AS m FROM sizes").get();
-  assert.ok(left.n > 0 && left.m === 0);
+  const markAt = (s as unknown as { markAt(p: string): number }).markAt("/abort");
+  assert.ok(left.n > 0 && left.m <= markAt, `rows ${left.m} not older than the mark ${markAt}`);
   s.close();
 });
 
@@ -1166,7 +1168,7 @@ test("200k idle pending rows: start and first drain read them only by index, the
   // the writer's statements cannot be spied on: check their plans instead
   const db = new DatabaseSync(file);
   const plan = (q: string, ...a: number[]) => (db.prepare("EXPLAIN QUERY PLAN " + q).all(...a) as { detail: string }[]).map((r) => r.detail).join(" | ");
-  const prune = plan("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND (last_run < ? OR last_run > ?) LIMIT ?)", 1, 2, 3, 4);
+  const prune = plan("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND taker IS NULL AND (last_run < ? OR last_run > ?) LIMIT ?)", 1, 2, 3, 4);
   const recent = plan("SELECT path FROM pending WHERE due_at = ? AND last_run >= ? LIMIT ?", 1, 2, 3);
   db.close();
   assert.doesNotMatch(prune, /SCAN pending(?! USING)/);
@@ -1405,12 +1407,12 @@ test("the pending table and a reopen are served by the workers, never by the mai
   };
   p.db = { prepare: boom, exec: boom, close: () => undefined };
   try {
-    const t = { modifyMs: 10, settleMs: 1 };
-    assert.equal(await s.notePending([{ path: "/d", dueAt: Date.now() - 1, modify: false }], 10), true);
+    const t = { modifyMs: 10_000, settleMs: 1 }; // (the first write waits for the writer lease: a short modifyMs would make the backlog look too old)
+    assert.equal(await s.notePending([{ path: "/d", dueAt: Date.now() - 1, modify: false }], 10_000), true);
     assert.deepEqual(await s.takeDue(Date.now(), 10, t), ["/d"]);
-    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), ["/d"]);
+    await s.noteRan([{ path: "/d", endedAt: Date.now(), hold: false }], 10_000);
     await s.clearPending();
-    assert.deepEqual(await s.recentRuns(Date.now(), 60_000, 10), []);
+    assert.deepEqual(await s.takeDue(Date.now(), 10, t), []);
     // after a failure the store reopens through the writer thread
     p.db = null;
     p.retryAt = 1;
@@ -1439,7 +1441,8 @@ test("after close(), a read starts no worker and logs nothing; a read pending at
     const w = (s as unknown as { writer?: unknown; reader?: unknown });
     assert.equal((await s.tree("/d", 0, false)).entries.length, 0);
     assert.equal(w.writer ?? w.reader, undefined, "no worker after close");
-    assert.deepEqual(logged, []);
+    // (agents of earlier tests are still running their watchers: only this store's own lines count)
+    assert.deepEqual(logged.filter((l) => !String((l as unknown[])[0]).startsWith("fanotify watcher")), []);
   } finally {
     console.error = quiet;
   }

@@ -117,6 +117,11 @@ export interface DuAnswer {
   cached: boolean;
   truncated: boolean;
   watched: boolean;
+  /**
+   * the rows may be out of date: another process is writing the store (a rolling deploy) or a scan of an overlapping folder is running (no job was started),
+   * the walk reused rows on their age while the change watcher was running, or a change was reported after the scan
+   */
+  stale?: boolean;
 }
 
 /** The API lists folders level by level; du lists children before their parent, in path order. */
@@ -293,6 +298,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
       if (o.json) io.out(JSON.stringify({ node: t.node, ...ans }) + "\n");
       else for (const l of formatLines(t.node, ans, o)) io.out(l + "\n");
       if (ans.truncated) io.err(`filedeck du: ${label}: scan hit the entry limit, sizes are partial\n`);
+      if (ans.stale) io.err(`filedeck du: ${label}: sizes may be out of date (another scan or a deploy is running, or rows older than the change watcher were reused); run the command again in a moment, or use --fresh to re-read\n`);
       // A repeat after our own job is cached by contract, but that scan just ran: only say so when nobody scanned for us.
       if (ans.cached && !polled) {
         const oldest = Math.min(...ans.entries.map((e) => e.scannedAt ?? Infinity));

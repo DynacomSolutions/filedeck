@@ -299,18 +299,22 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
 
   // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
-  const scanParts = <T,>(kind: "size" | "du", virtual: string, fresh: boolean | number, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void) => {
+  const scanParts = <T,>(kind: "size" | "du", virtual: string, fresh: boolean | number, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; untrusted: boolean; extra?: T }) => void) => {
     let release: (() => void) | undefined;
     return {
       run: async (ctl: JobCtl) => {
         const x = await sizes.scanRead(virtual, ctl, fresh, release, after);
         done?.(x);
-        return kind === "size" ? x.res : { res: x.res, read: x.read };
+        // (`untrusted` also in a size job's result: a du that joins it answers from it)
+        return kind === "size" ? { ...x.res, untrusted: x.untrusted } : { res: x.res, read: x.read, untrusted: x.untrusted };
       },
       onDrop: () => release?.(),
       gate: async (signal: AbortSignal, self: { id: string; createdAt: number }) => {
+        // an adopted job waits here while another process holds the store's writer lease (a rolling deploy): only the writer walks
+        await sizes.whenWriter(signal);
         release = await sizes.lock(virtual, signal);
-        // The lock is per process: during a rollout another process may be walking an overlapping folder, so wait for it too.
+        // Compatibility with 0.3.31 (removable once no such process can share the store file, together with Jobs.foreignAhead): its lock is per process, and it walks without the
+        // writer lease, so during a rollout wait for its overlapping walks too.
         const overlaps = (p: { path: string }) => p.path === virtual || p.path === "/" || virtual === "/" || p.path.startsWith(virtual + "/") || virtual.startsWith(p.path + "/");
         try {
           while (jobs.foreignAhead(["size", "du"], self, overlaps)) {
@@ -324,7 +328,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       },
     };
   };
-  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; extra?: T }) => void, origin: JobOrigin = "ui") => {
+  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; untrusted: boolean; extra?: T }) => void, origin: JobOrigin = "ui") => {
     // a rescan remembers when it began: a restart keeps the folders it already read
     const freshSince = fresh ? Date.now() : undefined;
     const p = scanParts(kind, virtual, freshSince ?? false, after, done);
@@ -342,13 +346,17 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     return jobs.findLive("du", m) ?? jobs.findLive("size", m);
   };
 
+  // This process is stopping (SIGTERM): a job started now would never be run here nor saved for the next process. The client retries (the du CLI waits through 503).
+  const stopping = () => jobs.isStopping || sizes.stopping; // (jobs stop first on SIGTERM; the lease goes after the hand-over)
+  const leaving = () => new ops.FsError(503, "this process is shutting down; try again");
   // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
   app.post("/api/jobs/size", async (c) => {
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
-    // one live size job per path: a second request attaches to it
+    if (stopping()) throw leaving();
+    // one live size job per path (while another process holds the store's writer lease the job waits for it: see the gate): a second request attaches to it
     const same = liveScan(r.virtual, b.fresh === true);
     return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
   });
@@ -359,7 +367,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   interface DuRun {
     id: string;
     detached: boolean;
-    out?: { tree: { entries: DuEntry[]; truncated: boolean } | undefined; read: number };
+    out?: { tree: { entries: DuEntry[]; truncated: boolean } | undefined; read: number; untrusted: boolean };
   }
   const duRuns = new Map<string, DuRun>();
   const DETACHED_KEEP_MS = 60_000;
@@ -375,9 +383,24 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const fresh = flag(q("fresh"));
     // cachedOnly=1: answer from stored rows only. Never scans, never waits for a lock; 204 when the folder is not stored.
     if (flag(q("cachedOnly"))) {
-      const t = await sizes.tree(r.virtual, depth, all);
+      // `stale: true` unless the store can vouch for the rows (the same test as the fast path below)
+      const f = await sizes.freshTree(r.virtual, depth, all);
+      const t = f ?? (await sizes.tree(r.virtual, depth, all));
       if (!t.entries.length) return c.body(null, 204);
-      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
+      return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual), ...(f ? {} : { stale: true }) });
+    }
+    if (!fresh) {
+      // Watched, validated by a clean walk since the watcher became ready, and nothing pending or dirty on the folder, below it or above it: answer
+      // from the store at once, no job (see SizeStore.freshTree). Only the writer vouches.
+      const t = await sizes.freshTree(r.virtual, depth, all);
+      if (t) return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: true });
+      // Not vouched for, and either another process holds the writer lease (a rolling deploy) or a scan of another overlapping folder is live (a job here would
+      // queue behind it, possibly for hours): answer from the stored rows, flagged `stale: true`, and start nothing; the next request starts a job if it is still needed.
+      const overlap = (p: { path: string }) => p.path !== r.virtual && (p.path === "/" || r.virtual === "/" || p.path.startsWith(r.virtual + "/") || r.virtual.startsWith(p.path + "/"));
+      if (!(await sizes.mayScan()) || jobs.findLive("du", overlap) || jobs.findLive("size", overlap)) {
+        const s = await sizes.tree(r.virtual, depth, all);
+        if (s.entries.length) return c.json({ path: r.virtual, entries: s.entries, cached: sizes.persistent, truncated: s.truncated, watched: sizes.covers(r.virtual), stale: true });
+      }
     }
     const key = [r.virtual, depth, all, fresh].join("\0");
     // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
@@ -392,8 +415,9 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (!run || !v || (v.state !== "queued" && v.state !== "running" && !replay)) {
       const mine: DuRun = { id: "", detached: false };
       run = mine;
-      // joined: the reply tree is read once that job is done
-      v = liveScan(r.virtual, fresh) ?? startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read }), "cli");
+      // joined: the reply tree is read once that job is done. While stopping, only a new job is refused: the answer of a finished or running one is still good
+      // (refusing it would send the repeat to the next process, which walks the whole tree again).
+      v = liveScan(r.virtual, fresh) ?? (stopping() ? (() => { throw leaving(); })() : startScan("du", r.virtual, fresh, () => sizes.tree(r.virtual, depth, all), (x) => (mine.out = { tree: x.extra, read: x.read, untrusted: x.untrusted }), "cli"));
       mine.id = v.id;
       duRuns.set(key, mine);
     }
@@ -401,6 +425,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const forget = () => {
       if (duRuns.get(key) === run) duRuns.delete(key);
     };
+    let keep = false; // the entry stays for the repeat request (a replay that could not get the lock in time)
     try {
       const signal = c.req.raw.signal;
       while ((v!.state === "queued" || v!.state === "running") && Date.now() < arrived + cfg.duWaitMs && !signal.aborted) {
@@ -412,16 +437,18 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         run.detached = true;
         return c.json({ jobId: id, state: v!.state }, 202);
       }
-      if (v!.state === "canceled") throw new ops.FsError(409, "canceled");
+      // (a job the shutdown interrupted is not cancelled: the client retries against the next process)
+      if (v!.state === "canceled") throw jobs.isStopping ? leaving() : new ops.FsError(409, "canceled");
       if (v!.state === "failed") throw new ops.FsError(500, v!.error ?? "failed");
-      const jr = v!.result as SizeResult & { res?: SizeResult; read?: number }; // a du job answers {res, read}, a joined size job the result itself
+      const jr = v!.result as SizeResult & { res?: SizeResult; read?: number; untrusted?: boolean }; // a du job answers {res, read}, a joined size job the result itself
       const res = jr.res ?? jr;
       if (res.truncated) {
         // A capped scan is never stored: answer with the partial totals of the folder alone.
         return c.json({ path: r.virtual, entries: [{ path: r.virtual, type: "dir", bytes: res.bytes, diskBytes: res.diskBytes, files: res.files, dirs: res.dirs }], cached: false, truncated: true, watched: false });
       }
-      let t = run.out?.tree;
-      if (!run.out) {
+      // The repeat of a finished job re-reads the tree from the store: what was applied since the job ended is in it. (A fresh answer comes from the job's own result.)
+      let t = replay ? undefined : run.out?.tree;
+      if (!t) {
         // never a half-written scan; the wait is bounded like the job wait, a later walk queued ahead can hold the lock
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), Math.max(0, arrived + cfg.duWaitMs - Date.now()));
@@ -436,6 +463,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         } catch (e) {
           if (!ac.signal.aborted) throw e;
           run.detached = true; // the repeat request is answered from this finished scan
+          keep = true;
           return c.json({ jobId: id, state: "done" }, 202);
         } finally {
           clearTimeout(timer);
@@ -443,10 +471,16 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       }
       if (!t?.entries.length) throw new ops.FsError(404, "not found");
       // cached: nothing was read from disk and the answer comes from the database (not from a degraded, uncached store)
-      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || (run.out ? run.out.read : jr.read ?? -1) === 0) && sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
+      // `stale`: the walk reused rows on their age under a running watcher (they may have changed while no watcher saw it), or the repeat of a finished job
+      // comes after a change the watcher has reported
+      // (a stale mark made after the job ended: an overflow or a helper exit loses events and leaves only that)
+      const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && ((sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual))) || sizes.markedSince(r.virtual, v!.startedAt ?? v!.createdAt)));
+      return c.json({ path: r.virtual, entries: t.entries, cached: (replay || (run.out ? run.out.read : jr.read ?? -1) === 0) && sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual), ...(stale ? { stale: true } : {}) });
     } finally {
-      if (!run.detached) forget();
-      else if (replay) forget();
+      if (!keep) {
+        if (!run.detached) forget();
+        else if (replay) forget();
+      }
     }
   });
 

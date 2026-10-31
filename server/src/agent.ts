@@ -262,14 +262,25 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   registerGitRoutes(app, cfg);
   const index = registerDiffRoutes(app, cfg);
   registerGitDiffRoutes(app, cfg);
-  const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts });
+  const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs });
   sizes.covers = (v) => fan.covers(v);
   sizes.watchedSince = () => fan.watchedSince();
+  sizes.quiet = (v) => fan.settled(v);
+  sizes.chainMin = () => fan.chainMin();
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
   (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
+  // On SIGTERM, at once (not after the connections drain): stop the jobs (their rows are handed to the next process), hand the watcher's events and watched time
+  // to the store, and release the size store's writer lease, so the next process can write while this one is still answering its last requests.
+  let leaving: Promise<void> | undefined;
+  const leave = () =>
+    (leaving ??= (async () => {
+      await jobs.interrupt();
+      await fan.handover();
+      await sizes.releaseLease();
+    })());
+  (app as unknown as { leave: () => Promise<void> }).leave = leave;
   (app as unknown as { close: () => Promise<void> }).close = async () => {
-    await jobs.interrupt(); // first: aborted jobs clean their staging and the rows are handed to the next process
-    fan.stop();
+    await leave();
     index.close();
     sizes.close();
   };

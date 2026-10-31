@@ -98,6 +98,10 @@ export class Jobs {
   private lastSkipLog = 0;
   private readonly me = randomUUID();
   private stopping = false;
+  /** Shutting down: jobs are being interrupted (not cancelled by anyone), and new ones would never be run or reported. */
+  get isStopping(): boolean {
+    return this.stopping;
+  }
   private adopting = new Set<string>();
 
   /** How an adopted job of this kind is run again (no-op without a shared store). */
@@ -181,7 +185,8 @@ export class Jobs {
 
   /**
    * True while another process holds a live job of `kinds` with matching params that runs now or was created before `self`
-   * (the one created first goes first, so two processes never wait for each other). Rollout guard: a lock is per process.
+   * (the one created first goes first, so two processes never wait for each other). Rollout guard for 0.3.31, which has no writer lease: a lock is per process.
+   * Removable once no such process can share the store file.
    */
   foreignAhead(kinds: string[], self: { id: string; createdAt: number }, match: (params: any) => boolean): boolean {
     const sh = this.shared;

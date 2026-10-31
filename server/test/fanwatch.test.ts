@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { FanWatch, mapPath, unescapeLine, type HelperProc } from "../src/fanwatch.ts";
+import { DatabaseSync } from "node:sqlite";
 import { SizeStore } from "../src/size-store.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -320,8 +321,9 @@ function fileStore() {
     markStale: (v: string) => void stale.push(v),
     notePending: st.notePending.bind(st),
     takeDue: st.takeDue.bind(st),
-    recentRuns: st.recentRuns.bind(st),
     noteRan: st.noteRan.bind(st),
+    markDirty: st.markDirty.bind(st),
+    isWriter: true, // the only store on its file: it gets the lease at once (a sink that is spread into another keeps the value)
     clearPending: st.clearPending.bind(st),
   };
   const count = () => (st as unknown as { db: { prepare(s: string): { get(): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending").get().n;
@@ -383,13 +385,18 @@ test("fanwatch + SizeStore file: modify events wait modifyMs after the last run,
 
 test("SizeStore.takeDue stamps the run after its reads, so a modify row waits modifyMs from the run, not from before the reads", async () => {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-store-")));
-  const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 1000, readDelayMs: 100 }); // every read takes 100 ms
+  const file = path.join(dir, "sizes.db");
+  const st = new SizeStore(file, { root: dir, ttlMs: 60_000, maxEntries: 1000, readDelayMs: 100 }); // every read takes 100 ms
   const t = { modifyMs: 300, settleMs: 5 };
   await st.notePending([{ path: "/a", dueAt: Date.now(), modify: false }], 300);
-  assert.deepEqual(await st.takeDue(Date.now(), 10, t), ["/a"]);
-  const ranAt = Date.now();
-  await st.notePending([{ path: "/a", dueAt: Date.now(), modify: true }], 300);
-  assert.deepEqual(await st.takeDue(ranAt + 250, 10, t), [], "held back until the run plus modifyMs");
+  const t0 = Date.now();
+  assert.deepEqual(await st.takeDue(t0, 10, t), ["/a"]);
+  // takeDue makes at least two reads of 100 ms (the oldest row, then the due rows) before it stamps the run. Stamped from the `now` it was given, last_run would be t0.
+  // Only a lower bound is asserted: a slow runner can make the stamp later, never earlier.
+  const d = new DatabaseSync(file, { readOnly: true });
+  const lastRun = (d.prepare("SELECT last_run r FROM pending WHERE path = '/a'").get() as { r: number }).r;
+  d.close();
+  assert.ok(lastRun >= t0 + 150, `stamped ${lastRun - t0} ms after the call began`);
   await st.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -444,10 +451,11 @@ test("fanwatch + SizeStore file: overflow clears pending rows and marks stale", 
   const f = fileStore();
   const w = new FanWatch(f.sink, { ...opts, settleMs: 60_000 });
   for (let i = 0; i < 3000; i++) w.line(`x /d/${i}`);
-  await until(() => f.count() >= 1000);
-  assert.ok(f.count() > 0);
+  // every flush must have landed: a flush still in flight at the overflow would insert rows after the clear (harmless, the marks cover them, but not what is asserted here)
+  await until(() => f.count() >= 3000);
+  assert.equal(f.count(), 3000);
   w.line("!overflow");
-  await sleep(100);
+  await until(() => f.count() === 0);
   assert.equal(f.count(), 0);
   assert.equal(f.calls.length, 0);
   w.stop();
@@ -460,30 +468,22 @@ test("fanwatch + SizeStore file: a backlog older than 10 x modifyMs becomes an o
   const w = new FanWatch(slow, { ...opts, settleMs: 1, modifyMs: 20 });
   (w as unknown as { marks: string[] }).marks = ["/"];
   for (let i = 0; i < 600; i++) w.line(`x /d/${i}`);
-  await until(() => f.stale.length > 0, 10_000);
-  assert.deepEqual(f.stale, ["/"]);
+  await until(() => f.calls.length > 0 && !(w as unknown as { draining: boolean }).draining, 10_000);
   await sleep(100);
-  assert.equal(f.count(), 0, "pending rows dropped");
+  assert.deepEqual(f.stale, [], "no watched tree is marked stale: the store marks only the pending folders");
+  const waiting = (f.st as unknown as { db: { prepare(s: string): { get(a: number): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending WHERE due_at < ?").get(Number.MAX_SAFE_INTEGER).n;
+  assert.equal(waiting, 0, "no pending row left waiting");
   assert.ok(f.calls.length < 600);
   w.stop();
   f.done();
 });
 
-test("fanwatch + SizeStore file: folders run just before a restart are marked stale at start; a stepped-back clock still drains", async () => {
+test("fanwatch + SizeStore file: a due time far in the future (the clock stepped back) still drains", async () => {
   const f = fileStore();
-  const old = Date.now() - 1000;
-  await f.st.notePending([{ path: "/r", dueAt: old, modify: false }], 300);
+  await f.st.notePending([{ path: "/r", dueAt: Date.now() - 1000, modify: false }], 300);
   assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
   await f.st.notePending([{ path: "/future", dueAt: Date.now() + 3_600_000, modify: false }], 300);
   assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/future"]);
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
-  const mounts = path.join(root, "m");
-  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n");
-  const w = new FanWatch(f.sink, { ...opts, helper: "fake", root, procMounts: mounts, spawn: () => new Fake() });
-  await w.start();
-  assert.deepEqual(f.stale.sort(), ["/future", "/r"]);
-  w.stop();
-  fs.rmSync(root, { recursive: true });
   f.done();
 });
 
