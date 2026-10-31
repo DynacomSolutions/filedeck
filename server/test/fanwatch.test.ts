@@ -346,7 +346,8 @@ test("fanwatch + SizeStore file: many events of one folder become one row, appli
 
 test("fanwatch + SizeStore file: 100k distinct folders keep the heap structures bounded and all get applied", async () => {
   const f = fileStore();
-  const w = new FanWatch(f.sink, opts);
+  // modifyMs 600_000 puts the 10*modifyMs overflow limit (about 100 min) out of reach on slow runners.
+  const w = new FanWatch(f.sink, { ...opts, modifyMs: 600_000 });
   const priv = w as unknown as { buf: Map<string, unknown>; mem: Map<string, unknown>; timer: unknown };
   let maxBuf = 0;
   for (let i = 0; i < 100_000; i++) {
