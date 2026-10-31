@@ -58,7 +58,7 @@ export interface ChangeSink {
   readonly isWriter?: boolean;
   /** watcher sessions: see SizeStore.sessionStart / sessionTick / sessionEnd */
   sessionStart?(mountsHash: string, readyAt: number): Promise<number | null>;
-  sessionTick?(id: number, mountsHash: string, readyAt: number, lostAt: number): Promise<{ since: number; newer: boolean; carried: boolean } | null>;
+  sessionTick?(id: number, mountsHash: string, readyAt: number, lostAt: number): Promise<{ since: number; newer: boolean; minEpoch: number | null } | null>;
   sessionEnd?(id: number, clean: boolean, lostAt: number): Promise<void>;
 }
 
@@ -107,7 +107,7 @@ export class FanWatch {
   /** when events were last lost (a kernel overflow, too many held in memory): nothing from before it is vouched for, the run goes on */
   private lostAt = 0;
   /** the run continues a predecessor that ended clean (see `SizeStore.sessionTick`): its validations count */
-  private carriedOver = false;
+  private chain: number | null = null;
   private syncing: (() => void)[] = [];
   private lastSession = 0;
   private handingOver = false;
@@ -233,8 +233,8 @@ export class FanWatch {
   }
 
   /** Rows written before this time were not watched while they aged (the restart gap): the size store gives them the TTL rule, not the watcher's trust. */
-  carried(): boolean {
-    return this.carriedOver;
+  chainMin(): number | null {
+    return this.chain;
   }
 
   watchedSince(): number {
@@ -323,7 +323,7 @@ export class FanWatch {
       this.readyAt = Date.now();
       this.since = this.readyAt;
       this.lostAt = 0;
-      this.carriedOver = false;
+      this.chain = null;
       void this.beginSession(this.readyAt);
     }
     if (l.startsWith("c ")) {
@@ -353,7 +353,7 @@ export class FanWatch {
     const t = await this.store.sessionTick?.(s.id, s.hash, s.readyAt, this.lostAt);
     if (t && this.session === s) {
       this.since = Math.max(t.since, this.lostAt);
-      this.carriedOver = t.carried;
+      this.chain = t.minEpoch;
     }
   }
 

@@ -266,7 +266,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   sizes.covers = (v) => fan.covers(v);
   sizes.watchedSince = () => fan.watchedSince();
   sizes.quiet = (v) => fan.settled(v);
-  sizes.carried = () => fan.carried();
+  sizes.chainMin = () => fan.chainMin();
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
   (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
   // On SIGTERM, at once (not after the connections drain): stop the jobs (their rows are handed to the next process), hand the watcher's events and watched time

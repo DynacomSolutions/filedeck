@@ -347,6 +347,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   };
 
   // This process is stopping (SIGTERM): a job started now would never be run here nor saved for the next process. The client retries (the du CLI waits through 503).
+  const stopping = () => jobs.isStopping || sizes.stopping; // (jobs stop first on SIGTERM; the lease goes after the hand-over)
   const leaving = () => new ops.FsError(503, "this process is shutting down; try again");
   // "Calculate" in the properties dialog: answered from the store (unchanged folders cost one lstat); `fresh: true` is the explicit rescan.
   app.post("/api/jobs/size", async (c) => {
@@ -354,7 +355,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
     await fs.stat(r.real);
-    if (sizes.stopping) throw leaving();
+    if (stopping()) throw leaving();
     // one live size job per path (while another process holds the store's writer lease the job waits for it: see the gate): a second request attaches to it
     const same = liveScan(r.virtual, b.fresh === true);
     return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
@@ -401,7 +402,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         if (s.entries.length) return c.json({ path: r.virtual, entries: s.entries, cached: sizes.persistent, truncated: s.truncated, watched: sizes.covers(r.virtual), stale: true });
       }
     }
-    if (sizes.stopping) throw leaving();
+    if (stopping()) throw leaving();
     const key = [r.virtual, depth, all, fresh].join("\0");
     // A detached run is kept while its job is queued or running and for a minute after it ends (not after the 202).
     for (const [k, d] of duRuns) {
@@ -424,6 +425,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const forget = () => {
       if (duRuns.get(key) === run) duRuns.delete(key);
     };
+    let keep = false; // the entry stays for the repeat request (a replay that could not get the lock in time)
     try {
       const signal = c.req.raw.signal;
       while ((v!.state === "queued" || v!.state === "running") && Date.now() < arrived + cfg.duWaitMs && !signal.aborted) {
@@ -461,6 +463,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         } catch (e) {
           if (!ac.signal.aborted) throw e;
           run.detached = true; // the repeat request is answered from this finished scan
+          keep = true;
           return c.json({ jobId: id, state: "done" }, 202);
         } finally {
           clearTimeout(timer);
@@ -470,11 +473,14 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       // cached: nothing was read from disk and the answer comes from the database (not from a degraded, uncached store)
       // `stale`: the walk reused rows on their age under a running watcher (they may have changed while no watcher saw it), or the repeat of a finished job
       // comes after a change the watcher has reported
-      const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual)));
+      // (a stale mark made after the job ended: an overflow or a helper exit loses events and leaves only that)
+      const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && ((sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual))) || sizes.markedSince(r.virtual, v!.finishedAt ?? 0)));
       return c.json({ path: r.virtual, entries: t.entries, cached: (replay || (run.out ? run.out.read : jr.read ?? -1) === 0) && sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual), ...(stale ? { stale: true } : {}) });
     } finally {
-      if (!run.detached) forget();
-      else if (replay) forget();
+      if (!keep) {
+        if (!run.detached) forget();
+        else if (replay) forget();
+      }
     }
   });
 

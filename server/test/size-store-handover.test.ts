@@ -60,7 +60,7 @@ function world(name: string) {
     store.covers = (v) => w.covers(v);
     store.watchedSince = () => w.watchedSince();
     store.quiet = (v) => w.settled(v);
-    store.carried = () => w.carried();
+    store.chainMin = () => w.chainMin();
     things.push({ close: () => store.close() }, { close: () => w.stop() });
     return { id, store, helper, w, root, event: (v: string, kind = "x") => helper.stdout.write(`${kind} ${root}${v}\n`) };
   };
@@ -250,7 +250,7 @@ test("V1 a crash in the overlap: a walk of the old process begun after the new o
   kill(A); // SIGKILL, OOM, the hard exit: no session end
   await until(() => B.store.isWriter && (B.store as Any).idxReady);
   await sleep(200);
-  assert.equal(B.w.carried(), false);
+  assert.equal((B.w.chainMin() !== null), false);
   const t = await B.store.freshTree("/a/x", 0, false);
   assert.ok(t === null || bytes(t) === 10, `served ${bytes(t)} as fresh`);
 });
@@ -287,7 +287,7 @@ test("V1c a clean hand-over keeps the old process's validation, a rescan of the 
   await up(B);
   await A.w.handover();
   await A.store.close();
-  await until(() => B.store.isWriter && B.w.carried());
+  await until(() => B.store.isWriter && (B.w.chainMin() !== null));
   await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 5000);
   assert.ok(await B.store.freshTree("/", 0, false), "carried: epoch 1's validation counts");
   assert.equal(rows(db, "SELECT epoch FROM validated")[0].epoch, 1);
@@ -406,7 +406,7 @@ test("E2 a real helper process that closed its stdin: writing the sync request i
   const m = path.join(dir, "mounts");
   fs.writeFileSync(m, "/dev/x / ext4 rw 0 0\n");
   const ends: boolean[] = [];
-  const sink: Any = { isWriter: true, applyChanged: async () => {}, markStale() {}, notePending: async () => true, takeDue: async () => [], noteRan: async () => {}, markDirty: async () => true, sessionStart: async () => 1, sessionTick: async () => ({ since: 1, newer: true, carried: false }), sessionEnd: async (_: number, c: boolean) => void ends.push(c) };
+  const sink: Any = { isWriter: true, applyChanged: async () => {}, markStale() {}, notePending: async () => true, takeDue: async () => [], noteRan: async () => {}, markDirty: async () => true, sessionStart: async () => 1, sessionTick: async () => ({ since: 1, newer: true, minEpoch: null }), sessionEnd: async (_: number, c: boolean) => void ends.push(c) };
   const w: Any = new FanWatch(sink, { helper: h, root: "/tmp", procMounts: m, settleMs: 1, modifyMs: 1, sessionMs: 10 });
   const errors: unknown[] = [];
   const onUncaught = (e: unknown) => void errors.push(e);
@@ -422,4 +422,110 @@ test("E2 a real helper process that closed its stdin: writing the sync request i
   }
   assert.deepEqual(errors, []);
   assert.deepEqual(ends, [false]);
+});
+
+/** A writes then crashes in the overlap with B, so B refuses A's validation; the event died with A */
+async function crashInOverlap(name: string) {
+  const { root, db, proc } = world(name);
+  const A = proc("A");
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await sleep(5);
+  const B = proc("B");
+  await up(B);
+  await sleep(10);
+  await A.store.scanRead("/");
+  kill(A);
+  await until(() => B.store.isWriter && (B.store as Any).idxReady);
+  await sleep(200);
+  return { root, db, proc, B };
+}
+
+test("C1 A unclean, B clean, C: the validation B refused is not counted again by C", async () => {
+  const { proc, B } = await crashInOverlap("c1");
+  assert.equal(B.w.chainMin(), null);
+  assert.equal(await B.store.freshTree("/a/x", 0, false), null, "control: B refuses it");
+  const C = proc("C");
+  await up(C);
+  await B.w.handover();
+  await B.store.close();
+  await until(() => C.store.isWriter && (C.store as Any).idxReady && C.w.chainMin() !== null);
+  await sleep(200);
+  assert.notEqual(C.w.chainMin(), null, "C carries B's time");
+  const t = await C.store.freshTree("/a/x", 0, false);
+  assert.ok(t === null || bytes(t) === 10, `served ${bytes(t)} as fresh`);
+});
+
+test("C2 A clean, B unclean, C: C does not carry", async () => {
+  const { root, proc } = world("c2");
+  const A = proc("A");
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  const B = proc("B");
+  await up(B);
+  await A.w.handover();
+  await A.store.close();
+  await until(() => B.store.isWriter && (B.store as Any).idxReady && B.w.chainMin() !== null);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 3000);
+  assert.ok(await B.store.freshTree("/", 0, false), "control: B carried");
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await sleep(5);
+  const C = proc("C");
+  await up(C);
+  await sleep(10);
+  await B.store.scanRead("/");
+  kill(B);
+  await until(() => C.store.isWriter && (C.store as Any).idxReady);
+  await sleep(200);
+  assert.equal(C.w.chainMin(), null);
+  const t = await C.store.freshTree("/a/x", 0, false);
+  assert.ok(t === null || bytes(t) === 10, `served ${bytes(t)} as fresh`);
+});
+
+test("C3 a carried run that overflows: the carried validation stops counting", async () => {
+  const { proc } = world("c3");
+  const A = proc("A");
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  const B = proc("B");
+  await up(B);
+  await A.w.handover();
+  await A.store.close();
+  await until(() => B.store.isWriter && (B.store as Any).idxReady && B.w.chainMin() !== null);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 3000);
+  B.helper.stdout.write("!overflow\n");
+  await sleep(300);
+  assert.equal(await B.store.freshTree("/", 0, false), null);
+});
+
+test("C4 liveness: after a crash the first rescan brings the fast path back, on a new lease and without a chain", async () => {
+  const { B } = await crashInOverlap("c4");
+  assert.equal(await B.store.freshTree("/", 0, false), null);
+  await B.store.scan("/", undefined, true);
+  await sleep(5);
+  const t = await B.store.freshTree("/", 0, false);
+  assert.ok(t, "fast path back");
+  assert.equal(bytes(t), 20);
+});
+
+test("C5 a carried run that loses and regains the lease (no other holder wrote) still answers from the fast path", async () => {
+  const { proc } = world("c5");
+  const A = proc("A");
+  await up(A);
+  await A.store.scan("/", undefined, true);
+  await sleep(5);
+  const B = proc("B");
+  await up(B);
+  await A.w.handover();
+  await A.store.close();
+  await until(() => B.store.isWriter && (B.store as Any).idxReady && B.w.chainMin() !== null);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 3000);
+  (B.store as Any).loseLease();
+  await until(() => B.store.isWriter && (B.store as Any).idxReady);
+  await sleep(100);
+  assert.ok(await B.store.freshTree("/", 0, false));
 });

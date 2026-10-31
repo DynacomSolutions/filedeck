@@ -189,7 +189,7 @@ const SCHEMA = `
   -- a walk in progress (first chunk committed, root not yet): if its writer dies the subtree is marked stale by the next writer
   CREATE TABLE IF NOT EXISTS walking (path TEXT PRIMARY KEY, epoch INTEGER NOT NULL, started INTEGER NOT NULL) WITHOUT ROWID;
   -- one row per watcher run (see FanWatch): \`since\` is the time from which the changes of the watched filesystems were seen without a gap
-  CREATE TABLE IF NOT EXISTS watch_sessions (id INTEGER PRIMARY KEY, mounts_hash TEXT NOT NULL, ready_at INTEGER NOT NULL, since INTEGER NOT NULL, beat INTEGER NOT NULL, ended_at INTEGER, clean INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS watch_sessions (id INTEGER PRIMARY KEY, mounts_hash TEXT NOT NULL, ready_at INTEGER NOT NULL, since INTEGER NOT NULL, beat INTEGER NOT NULL, ended_at INTEGER, clean INTEGER NOT NULL DEFAULT 0, min_epoch INTEGER);
 `;
 /** subtree stale marks kept; past this they collapse into one mark on "/" */
 const MARKS_MAX = 256;
@@ -496,6 +496,8 @@ export class SizeStore {
     this.leaseTimer.unref();
   }
   private leaving = false;
+  /** the first writer epoch this process held: validations of earlier epochs count only inside an unbroken clean watcher chain (`chainMin`) */
+  private firstEpoch = 0;
   private async tryLease(): Promise<void> {
     if (this.closed || this.leaving || !this.db) return;
     try {
@@ -523,6 +525,7 @@ export class SizeStore {
   private acquiring = false;
   private async acquired(e: number) {
     this.epoch = e;
+    this.firstEpoch ||= e;
     this.acquiring = true; // (the first lease attempt is what is running: its own writes must not wait for it)
     try {
       // a read that failed (busy) must not look like "nothing to recover": the next tick tries again
@@ -1299,7 +1302,8 @@ export class SizeStore {
       const spent = tooDeep ? [] : startMarks.filter(([m, at]) => (m === virtual || (m > lo && m < hi)) && at < now && this.marks.get(m) === at);
       for (const [m] of spent) this.marks.delete(m);
       if (spent.length) parts.push({ sql: "DELETE FROM stale_trees WHERE path = ? AND at = ?", rows: spent });
-      const vouch = whole && !untrusted && !tooDeep && ready0 <= now && this.ready() === ready0 && this.covers(virtual);
+      // (a lease lost and taken again under the walk: others wrote meanwhile, what the walk read may be older than that)
+      const vouch = whole && !untrusted && !tooDeep && ready0 <= now && this.ready() === ready0 && this.covers(virtual) && this.epoch === epoch;
       if (whole) parts.push({ sql: ORPHAN_DIRTY, rows: [[]] }); // dirty marks of folders that are no longer stored point at nothing
       if (vouch) {
         this.maxValidated = Math.max(this.maxValidated, now);
@@ -1357,8 +1361,11 @@ export class SizeStore {
     return Math.max(this.watchedSince(), this.floor);
   }
 
-  /** Set by the agent: did this process's watcher take its watched time over from a predecessor that ended clean? */
-  carried: () => boolean = () => false;
+  /**
+   * Set by the agent: the oldest writer epoch whose validations this process's watcher may vouch for. A run that continues a predecessor that ended clean has the
+   * predecessor's value; any other run has none (null: its own first epoch), so a validation refused once is never counted again further down the chain.
+   */
+  chainMin: () => number | null = () => null;
 
   /** Set by the agent when a change watcher is running: true when it keeps the stored sizes of `virtual` current. */
   covers: (virtual: string) => boolean = () => false;
@@ -1490,6 +1497,13 @@ export class SizeStore {
       return;
     }
     this.markWrite((this.tail = this.txn(parts).then(() => undefined)));
+  }
+
+  /** Has a stale mark been made on `p`, above it or below it after `t`? (An overflow or a helper exit leaves only marks: the pending rows it dropped are gone.) */
+  markedSince(p: string, t: number): boolean {
+    const [lo, hi] = below(p);
+    for (const [m, at] of this.marks) if (at > t && (m === p || p.startsWith(m === "/" ? "/" : m + "/") || (m > lo && m < hi))) return true;
+    return false;
   }
 
   /** Newest mark on `p` or a folder above it (0 = none). */
@@ -1778,7 +1792,7 @@ export class SizeStore {
       // a validation counts only from a folder of the same device: a walk of an ancestor never entered a mount point below it
       // (a validation of an earlier lease counts only when the watcher's time was carried over from a run that ended clean: otherwise the walk may have reused a row whose change
       // the earlier process never got to the store)
-      const v = await this.read("freshV", `SELECT v.started FROM validated v JOIN sizes s ON s.path = v.path WHERE v.path IN (${ph}) AND s.dev = ? AND (v.epoch = ? OR ?)`, [...chain, top.dev, this.epoch, this.carried() ? 1 : 0], null);
+      const v = await this.read("freshV", `SELECT v.started FROM validated v JOIN sizes s ON s.path = v.path WHERE v.path IN (${ph}) AND s.dev = ? AND v.epoch >= ?`, [...chain, top.dev, this.chainMin() ?? this.firstEpoch], null);
       if (!v) return false;
       const best = Math.max(0, ...v.map((r) => Number(r.started)));
       if (best === 0 || best < this.ready()) return false;
@@ -1845,20 +1859,23 @@ export class SizeStore {
    * Heartbeat of session `id`, and the two facts a watcher needs: the `since` it may use (the run before it must have ended cleanly, after this one was ready, over the same
    * mounts), never earlier than a gap (events lost, the store unusable), and whether a newer run over the same mounts is ready (the older may stop then).
    */
-  async sessionTick(id: number, mountsHash: string, readyAt: number, lostAt = 0): Promise<{ since: number; newer: boolean; carried: boolean } | null> {
+  async sessionTick(id: number, mountsHash: string, readyAt: number, lostAt = 0): Promise<{ since: number; newer: boolean; minEpoch: number | null } | null> {
     if (!this.db || this.file === ":memory:") return null;
     try {
       const me = (await this.read("session", "SELECT since FROM watch_sessions WHERE id = ?", [id], null))?.[0];
       if (!me) return null;
-      const prev = (await this.read("sessionPrev", "SELECT mounts_hash h, since, ended_at e, clean c FROM watch_sessions WHERE id = (SELECT MAX(id) FROM watch_sessions WHERE id < ?)", [id], null))?.[0];
+      const prev = (await this.read("sessionPrev", "SELECT mounts_hash h, since, ended_at e, clean c, min_epoch m FROM watch_sessions WHERE id = (SELECT MAX(id) FROM watch_sessions WHERE id < ?)", [id], null))?.[0];
       let since = readyAt;
       const carried = !!prev && prev.h === mountsHash && prev.e != null && Number(prev.e) >= readyAt && Number(prev.c) === 1;
       if (carried) since = Math.min(since, Number(prev.since));
+      // the chain's oldest usable epoch: the predecessor's when carried (null while it never held the lease: then this process's own first epoch), else this process's own first epoch
+      const minEpoch: number | null = carried && prev.m != null ? Number(prev.m) : null;
       // events lost (an overflow) and a store that was unusable are gaps: nothing from before them is vouched for, but the run goes on
       since = Math.max(since, lostAt, this.floor);
       await this.post({ op: "meta", sql: "UPDATE watch_sessions SET beat = ?, since = ? WHERE id = ?", params: [Date.now(), since, id] }, false);
+      if (this.firstEpoch) await this.post({ op: "meta", sql: "UPDATE watch_sessions SET min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [minEpoch ?? this.firstEpoch, id] }, false);
       const newer = ((await this.read("sessionNewer", "SELECT 1 FROM watch_sessions WHERE id > ? AND mounts_hash = ? LIMIT 1", [id, mountsHash], null)) ?? []).length > 0;
-      return { since, newer, carried };
+      return { since, newer, minEpoch };
     } catch {
       return null;
     }
@@ -1866,7 +1883,7 @@ export class SizeStore {
   /** The watcher stops. `clean`: it saw every change until now and has handed them all to the store (see FanWatch.handover). */
   async sessionEnd(id: number, clean: boolean, lostAt = 0): Promise<void> {
     if (!this.db || this.file === ":memory:") return;
-    await this.post({ op: "meta", sql: "UPDATE watch_sessions SET ended_at = ?, clean = ?, since = MAX(since, ?, ?) WHERE id = ?", params: [Date.now(), clean ? 1 : 0, lostAt, this.floor, id] }, false).catch(() => undefined);
+    await this.post({ op: "meta", sql: "UPDATE watch_sessions SET ended_at = ?, clean = ?, since = MAX(since, ?, ?), min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [Date.now(), clean ? 1 : 0, lostAt, this.floor, this.firstEpoch || null, id] }, false).catch(() => undefined);
   }
 
   /** Non-folder children of one folder, straight from disk (rows are per folder, not per file). */

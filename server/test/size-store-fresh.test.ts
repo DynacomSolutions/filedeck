@@ -680,3 +680,84 @@ test("X4 a size job or du that reaches a process after it left is refused with 5
   assert.equal(post.status, 503);
   assert.equal((await A.request("/api/du?path=/t&depth=1&fresh=1")).status, 503);
 });
+
+/** like liveAgent, and the helper exits when `quit` appears (a crash; the watcher restarts it after its backoff) */
+function quittingAgent(name: string, env: Record<string, string> = {}, dirs = 0) {
+  const w = liveAgent(name, { FILEDECK_DU_WAIT_MS: "0", ...env }, dirs);
+  const aux = path.dirname(w.ev);
+  const quit = path.join(aux, "quit");
+  fs.writeFileSync(path.join(aux, "helper.sh"), `#!/bin/sh\necho '#ready 1'\nwhile sleep 0.02; do if [ -f ${quit} ]; then rm -f ${quit}; exit 1; fi; if [ -f ${w.ev} ]; then cat ${w.ev}; rm -f ${w.ev}; fi; done\n`, { mode: 0o755 });
+  return { ...w, quit };
+}
+let lastStore: Any;
+const origLock = SizeStore.prototype.lock;
+SizeStore.prototype.lock = function (this: Any, ...a: Any[]) {
+  lastStore = this;
+  return (origLock as Any).apply(this, a);
+} as Any;
+
+for (const qs of ["fresh=1", "all=0"]) {
+  test(`R1 the repeat (${qs}) after an overflow: the change is known only as a stale mark, and the answer says so`, async () => {
+    const w = quittingAgent("r1" + qs.slice(0, 3));
+    const a = w.start();
+    await sleep(300);
+    const url = `/api/du?path=/t&depth=1&${qs}`;
+    const first = await a.request(url);
+    assert.equal(first.status, 202);
+    const { jobId } = await jsonOf(first);
+    for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+    fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+    fs.writeFileSync(w.ev, "!overflow\n");
+    await sleep(300);
+    const r = await a.request(url);
+    const b = await jsonOf(r);
+    assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `old size ${b.entries?.[0]?.bytes} unflagged`);
+  });
+}
+
+test("R2 the repeat after the helper died and came back: the event died with it, the same stale mark", async () => {
+  const w = quittingAgent("r2");
+  const a = w.start();
+  await sleep(300);
+  const url = "/api/du?path=/t&depth=1";
+  const first = await a.request(url);
+  assert.equal(first.status, 202);
+  const { jobId } = await jsonOf(first);
+  for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${jobId}`))).state !== "done"; i++) await sleep(20);
+  fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
+  fs.writeFileSync(w.quit, "");
+  await sleep(2000);
+  const r = await a.request(url);
+  const b = await jsonOf(r);
+  assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, `old size ${b.entries?.[0]?.bytes} unflagged`);
+});
+
+test("R3 a replay that cannot get the lock in time answers 202 done and keeps the entry: the next repeat is the finished job, not a new walk", async () => {
+  const w = quittingAgent("r3", {}, 200);
+  const a = w.start();
+  await sleep(300);
+  const url = "/api/du?path=/t&depth=1&fresh=1";
+  const first = await a.request(url);
+  assert.equal(first.status, 202);
+  const id = (await jsonOf(first)).jobId;
+  for (let i = 0; i < 500 && (await jsonOf(await a.request(`/api/jobs/${id}`))).state !== "done"; i++) await sleep(20);
+  const rel = await lastStore.lock("/t"); // an overlapping walk holds the lock past the wait
+  const second = await a.request(url);
+  assert.equal(second.status, 202);
+  assert.equal((await jsonOf(second)).jobId, id);
+  rel();
+  const third = await a.request(url);
+  assert.equal(third.status, 200, "answered from the finished job (a new rescan would be 202)");
+});
+
+test("R4 in the window between SIGTERM and the lease release a size job is refused, not accepted and forgotten; R5 so is a du", async () => {
+  const w = liveAgent("r4", { FILEDECK_HANDOVER_MS: "1500", FILEDECK_DU_WAIT_MS: "800" });
+  const a = w.start();
+  await sleep(300);
+  const lv = a.leave();
+  await sleep(50);
+  const post = await a.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
+  assert.equal(post.status, 503);
+  assert.equal((await a.request("/api/du?path=/t&depth=1&fresh=1")).status, 503);
+  await lv;
+});
