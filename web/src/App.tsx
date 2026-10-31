@@ -22,6 +22,8 @@ import { SelectionBar, type SelRef } from "./Selection";
 import { GitCompareArrows, Keyboard, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
+import { usePhone } from "./viewport";
+import { useDialogFocus } from "./dialogFocus";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
 
@@ -210,9 +212,24 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot]);
 }
 
-function Sidebar({ nodesState, current, onOpen, onTrash, footer }: { nodesState: NodesState; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode }) {
+/** Mounted only while the phone drawer is open: traps focus, restores it on close, and closes on Escape. */
+function DrawerGuard({ root, onClose }: { root: React.RefObject<HTMLElement | null>; onClose: () => void }) {
+  useDialogFocus(root);
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && onClose();
+    document.addEventListener("keydown", k);
+    return () => document.removeEventListener("keydown", k);
+  }, [onClose]);
+  return null;
+}
+
+function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onCloseDrawer }: { nodesState: NodesState; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode; drawer: boolean; onCloseDrawer: () => void }) {
+  const root = useRef<HTMLElement>(null);
   return (
-    <aside className="side">
+    <>
+    {drawer && <div className="drawer-back" onClick={onCloseDrawer} aria-hidden="true" />}
+    {drawer && <DrawerGuard root={root} onClose={onCloseDrawer} />}
+    <aside ref={root} id="side-drawer" className={"side" + (drawer ? " open" : "")} {...(drawer ? { role: "dialog", "aria-modal": true, "aria-label": "Navigation" } : {})}>
       <div className="side-brand">
         <span className="brand-name">
           <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -227,11 +244,15 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer }: { nodesState:
       </div>
       {footer}
     </aside>
+    </>
   );
 }
 
 export function App() {
   const nodesState = useNodes();
+  const phone = usePhone();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
   const nodes = useMemo(() => nodesState.nodes ?? [], [nodesState.nodes]);
   const [tree, setTree] = useState<Tree | null>(initial?.tree ?? null);
   const [activeId, setActiveId] = useState(initial?.active ?? "");
@@ -564,10 +585,11 @@ export function App() {
   return (
     <div className="app">
       <CompareCtx.Provider value={routedCompare}>
-      <Sidebar nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={openFromSide} onTrash={(node) => setTrash({ node, volume: "" })} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => settingsOpen ? closeView(() => setSettingsOpen(false)) : setSettingsOpen(true)}><Ic.Settings /></button></Tip></div></>} />
+      <Sidebar drawer={phone && drawerOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
       <div className="app-col">
       <header className="site-header">
         <div className="site-header__inner">
+          <Tip label="Folders and settings"><button type="button" className="phone-only drawer-btn" aria-label="Open navigation" aria-controls="side-drawer" aria-expanded={phone && drawerOpen} onClick={() => setDrawerOpen(true)}><Ic.Menu /></button></Tip>
           <SelectionBar
             refs={Object.values(sels).flat()}
             panelCount={Object.keys(sels).length}
@@ -593,7 +615,7 @@ export function App() {
                 <button aria-label="Compare panels" aria-haspopup={panelSel.length > 2 ? "menu" : undefined} onClick={compareClick}><GitCompareArrows /> <span className="bl">Compare panels</span></button>
               </Tip>
             )}
-                        <Tip label="Keyboard shortcuts" shortcut="?"><button onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
+                        <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
           </div>
         </div>
       </header>
@@ -601,7 +623,19 @@ export function App() {
       <div className="body">
         <main className="main" aria-label="File panels">
           <h1 className="visually-hidden">Files</h1>
-          {tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
+          {tree && phone && tree.kind === "split" ? (
+            // Phone: panels are not squeezed side by side; one is shown and a strip switches between them.
+            <>
+              <nav className="phone-tabs" aria-label="Panels">
+                {leaves(tree).map((l, i) => (
+                  <button key={l.id} type="button" aria-current={l.id === (activeLeaf?.id ?? activeId)} onClick={() => setActiveId(l.id)}>
+                    {i + 1}. {l.path === "/" ? l.node : l.path.slice(l.path.lastIndexOf("/") + 1)}
+                  </button>
+                ))}
+              </nav>
+              <div className="phone-leaf" key={activeLeaf?.id}>{render(activeLeaf ?? leaves(tree)[0]!, count(tree))}</div>
+            </>
+          ) : tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
           {trash && (
             <Suspense fallback={null}>
               <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => closeView(() => setTrash(null))} onStatus={setStatus} />

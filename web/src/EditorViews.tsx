@@ -5,6 +5,7 @@ import * as monaco from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { ConflictError, api, fmtSize, type TextFile } from "./api";
 import { gitApi } from "./git";
+import { selectAllGoesToEditor, selectAllInEditor } from "./editorKeys";
 import { languageForPath, modelUri, monacoTheme } from "./monacoSetup";
 import { ArrowLeftRight } from "lucide-react";
 import * as Ic from "lucide-react";
@@ -84,6 +85,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
   const [conflict, setConflict] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const theme = useTheme();
+  const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const dirty = loaded !== null && text !== loaded.content;
   useLeaveGuard(dirty);
 
@@ -128,7 +130,18 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
   };
 
   return (
-    <div className={"ed" + (inline ? " inline" : "")} role="dialog" aria-label={`Editing ${base(path)}`}>
+    <div
+      className={"ed" + (inline ? " inline" : "")}
+      role="dialog"
+      aria-label={`Editing ${base(path)}`}
+      onKeyDown={(e) => {
+        // Focus on a toolbar button must not turn Ctrl/Cmd+A into "select the whole page" or a file-list action.
+        if (selectAllGoesToEditor(e, e.target as Element) && selectAllInEditor(editorRef.current)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
+    >
       <div className="ed-head" role="group" aria-label="Editor toolbar">
         <b>
           {dirty && <Tip label="Unsaved changes"><span className="dirty-dot" role="img" aria-label="Unsaved changes" /></Tip>}
@@ -136,8 +149,9 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
         </b>
         <span className="muted">{node}:{path}{loaded ? ` · ${fmtSize(loaded.size)}` : ""}</span>
         <span className="ed-spacer" />
-        <Tip label="Save" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save"}</button></Tip>
-        <Tip label="Close"><button onClick={close}><Ic.X /> Close</button></Tip>
+        <Tip label="Select all" shortcut="Ctrl+A"><button type="button" className="ed-selall" aria-label="Select all" disabled={!loaded} onClick={() => selectAllInEditor(editorRef.current)}><Ic.TextSelect /><span className="ed-lbl"> Select all</span></button></Tip>
+        <Tip label="Save" shortcut="Ctrl+S"><button aria-label="Save" onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /><span className="ed-lbl"> {saving ? "Saving..." : "Save"}</span></button></Tip>
+        <Tip label="Close"><button aria-label="Close" onClick={close}><Ic.X /><span className="ed-lbl"> Close</span></button></Tip>
         {extra}
       </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
@@ -151,7 +165,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
             theme={theme}
             options={OPTS}
             onChange={(v) => setText(v ?? "")}
-            onMount={(e) => e.focus()}
+            onMount={(e) => { editorRef.current = e; e.focus(); }}
             loading={<div className="pad muted">Loading editor...</div>}
           />
         )}
@@ -256,8 +270,8 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
             {inline ? <Ic.Columns2 /> : <Ic.Rows2 />} {inline ? "Side by side" : "Inline"}
           </button>
         </Tip>
-        <Tip label="Save right side" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save right"}</button></Tip>
-        <Tip label="Close"><button onClick={close}><Ic.X /> Close</button></Tip>
+        <Tip label="Save right side" shortcut="Ctrl+S"><button aria-label="Save" onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save right"}</button></Tip>
+        <Tip label="Close"><button aria-label="Close" onClick={close}><Ic.X /><span className="ed-lbl"> Close</span></button></Tip>
         {extra}
       </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
