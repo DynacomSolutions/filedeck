@@ -566,7 +566,8 @@ test("T2 the repeat of a detached du, after the folder changed and the watcher r
   }
   fs.writeFileSync(path.join(root, "t/sub/f"), "abcdefghij");
   fs.writeFileSync(ev, `x ${root}/t/sub\n`);
-  await sleep(150); // the watcher has it (settle 1 s: not applied yet)
+  for (let i = 0; i < 200 && fs.existsSync(ev); i++) await sleep(20); // the helper has printed it
+  await sleep(450); // the watcher has handed it to the store (a flush every 250 ms) and has not applied it yet (settle 1 s)
   const r = await app.request("/api/du?path=/t&depth=1");
   const b = (await r.json()) as Any;
   assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, "old size with no stale flag");
