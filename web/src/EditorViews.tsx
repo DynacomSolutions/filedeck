@@ -149,9 +149,9 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
         </b>
         <span className="muted">{node}:{path}{loaded ? ` · ${fmtSize(loaded.size)}` : ""}</span>
         <span className="ed-spacer" />
-        <Tip label="Select all" shortcut="Ctrl+A"><button type="button" className="ed-selall" aria-label="Select all" disabled={!loaded} onClick={() => selectAllInEditor(editorRef.current)}><Ic.TextSelect /><span className="sa-l"> Select all</span></button></Tip>
-        <Tip label="Save" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save"}</button></Tip>
-        <Tip label="Close"><button onClick={close}><Ic.X /> Close</button></Tip>
+        <Tip label="Select all" shortcut="Ctrl+A"><button type="button" className="ed-selall" aria-label="Select all" disabled={!loaded} onClick={() => selectAllInEditor(editorRef.current)}><Ic.TextSelect /><span className="ed-lbl"> Select all</span></button></Tip>
+        <Tip label="Save" shortcut="Ctrl+S"><button aria-label="Save" onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /><span className="ed-lbl"> {saving ? "Saving..." : "Save"}</span></button></Tip>
+        <Tip label="Close"><button aria-label="Close" onClick={close}><Ic.X /><span className="ed-lbl"> Close</span></button></Tip>
         {extra}
       </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
@@ -270,8 +270,8 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
             {inline ? <Ic.Columns2 /> : <Ic.Rows2 />} {inline ? "Side by side" : "Inline"}
           </button>
         </Tip>
-        <Tip label="Save right side" shortcut="Ctrl+S"><button onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save right"}</button></Tip>
-        <Tip label="Close"><button onClick={close}><Ic.X /> Close</button></Tip>
+        <Tip label="Save right side" shortcut="Ctrl+S"><button aria-label="Save" onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /> {saving ? "Saving..." : "Save right"}</button></Tip>
+        <Tip label="Close"><button aria-label="Close" onClick={close}><Ic.X /><span className="ed-lbl"> Close</span></button></Tip>
         {extra}
       </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}

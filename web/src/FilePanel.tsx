@@ -718,7 +718,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           options={DOCKS.map((d) => ({ value: d.dock, label: d.label.replace("Dock side panel ", "").replace(/^./, (c) => c.toUpperCase()) + (narrow && d.dock === "left" ? " (stacks on top)" : narrow && d.dock === "right" ? " (stacks below)" : ""), Icon: d.icon }))}
           onChange={(v) => { restoreDockSelectFocus.current = true; setDock(v as Dock); }}
         />
-        {!gitDiff && (
+        {!gitDiff && !editing && (
           <Tip label={propsOpen && !editing ? "Close properties" : "Close preview"}>
             <button
               type="button"
