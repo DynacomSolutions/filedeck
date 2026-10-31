@@ -7,14 +7,18 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SizeStore } from "../src/size-store.ts";
+import { createAgent } from "../src/agent.ts";
+import { loadConfig } from "../src/config.ts";
 
 type Any = any; // the tests reach into private state on purpose
 let tmp: string;
 const stores: SizeStore[] = [];
+const agents: { close(): Promise<void> }[] = [];
 const realNow = Date.now;
 before(() => void (tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-review-")))));
 after(async () => {
   Date.now = realNow;
+  for (const a of agents) await a.close().catch(() => {});
   for (const s of stores) await s.close().catch(() => {});
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -469,4 +473,226 @@ test("P1b an old version's canceled walk zeroes the subtree and rewrote children
   assert.equal(await s.freshTree("/a", 0, false), null);
   assert.equal(await s.freshTree("/a/x", 0, false), null, "the chain above it is zeroed");
   assert.ok(await s.freshTree("/b", 0, false));
+});
+
+test("U1 a store of the previous version (no ver, no taker, none of the new tables) opens at once, as the writer, and its rows are read again once", async () => {
+  const root = path.join(tmp, "u1-root");
+  fs.mkdirSync(path.join(root, "a/x"), { recursive: true });
+  fs.writeFileSync(path.join(root, "a/x/f"), "12345");
+  const dbf = path.join(tmp, "u1.db");
+  // the schema of 0.3.31 and a scan it made
+  const cols = ["bytes", "disk", "files", "symlinks", "other", "dirs", "mounts", "errors"];
+  const metrics = [...cols.map((m) => `own_${m} INTEGER NOT NULL`), ...cols.map((m) => `tot_${m} INTEGER NOT NULL`)].join(", ");
+  const o = new DatabaseSync(dbf);
+  o.exec(`PRAGMA journal_mode=WAL; CREATE TABLE sizes (path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino REAL, dev REAL, mtime_ms REAL, scanned_at INTEGER, seen_at INTEGER NOT NULL DEFAULT 0, ${metrics}) WITHOUT ROWID; CREATE INDEX sizes_parent ON sizes(parent); CREATE TABLE pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID; CREATE INDEX pending_due ON pending(due_at); CREATE INDEX pending_idle_run ON pending(due_at, last_run);`);
+  const st = fs.statSync(root);
+  o.prepare(`INSERT INTO sizes VALUES ('/', '', ?, ?, ?, ?, 1, 0,0,0,0,0,1,0,0, 5,5,1,0,0,1,0,0)`).run(st.ino, st.dev, st.mtimeMs, realNow());
+  o.close();
+  const errs: string[] = [];
+  const quiet = console.error;
+  console.error = (...a: unknown[]) => void errs.push(a.join(" "));
+  let s: SizeStore;
+  try {
+    s = new SizeStore(dbf, { root, ttlMs: 3_600_000, maxEntries: 1000 });
+    stores.push(s);
+    await s.mayScan();
+  } finally {
+    console.error = quiet;
+  }
+  assert.equal(s.persistent, true, "usable right after the upgrade: " + errs.join(" | "));
+  assert.equal(s.isWriter, true);
+  assert.equal(rows(dbf, "SELECT ver FROM sizes WHERE path = '/'")[0].ver, 0, "the old row is not trusted");
+  const w = await s.scanRead("/", undefined, true);
+  assert.equal(w.res.bytes, 5);
+  assert.ok(rows(dbf, "SELECT ver FROM sizes WHERE path = '/'")[0].ver > 0, "and is rewritten under the lease");
+});
+
+test("T1 a change made in the restart gap is answered with stale:true or with its real size, never as if current", async () => {
+  const root = path.join(tmp, "t1-root");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  const aux = path.join(tmp, "t1-aux");
+  fs.mkdirSync(aux);
+  const h = path.join(aux, "helper.sh");
+  fs.writeFileSync(h, "#!/bin/sh\necho '#ready 1'\nexec sleep 3600\n", { mode: 0o755 });
+  const mounts = path.join(aux, "mounts");
+  fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
+  const mk = () => {
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts } as never)) as Any;
+    agents.push(a);
+    a.startWatcher();
+    return a;
+  };
+  const A = mk();
+  await sleep(300);
+  assert.equal((await A.request("/api/du?path=/t&depth=1&fresh=1")).status, 200);
+  const a1 = (await (await A.request("/api/du?path=/t&depth=1")).json()) as Any;
+  assert.deepEqual([a1.watched, a1.stale, a1.entries[0].bytes], [true, undefined, 3]);
+  await A.close();
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abcdefghij"); // in place: no folder mtime changes; nobody is watching
+  const B = mk();
+  for (let i = 0; i < 100; i++) {
+    const r = (await (await B.request("/api/du?path=/t&depth=1")).json()) as Any;
+    if (r.watched) break;
+    await sleep(50);
+  }
+  await sleep(200);
+  const b = (await (await B.request("/api/du?path=/t&depth=1")).json()) as Any;
+  assert.ok(b.stale === true || b.entries[0].bytes === 10, `answered ${b.entries[0].bytes} with no stale flag`);
+});
+
+test("T2 the repeat of a detached du, after the folder changed and the watcher reported it, is flagged stale", async () => {
+  const root = path.join(tmp, "t2-root");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  const aux = path.join(tmp, "t2-aux");
+  fs.mkdirSync(aux);
+  const ev = path.join(aux, "ev");
+  const h = path.join(aux, "helper.sh");
+  fs.writeFileSync(h, `#!/bin/sh\necho '#ready 1'\nwhile sleep 0.02; do if [ -f ${ev} ]; then cat ${ev}; rm -f ${ev}; fi; done\n`, { mode: 0o755 });
+  const mounts = path.join(aux, "mounts");
+  fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_FANWATCH: h, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_DU_WAIT_MS: "0" } as never)) as Any;
+  agents.push(app);
+  app.startWatcher();
+  await sleep(300);
+  const first = await app.request("/api/du?path=/t&depth=1");
+  assert.equal(first.status, 202);
+  const { jobId } = (await first.json()) as Any;
+  for (let i = 0; i < 200; i++) {
+    const j = (await (await app.request(`/api/jobs/${jobId}`)).json()) as Any;
+    if (j.state === "done") break;
+    await sleep(20);
+  }
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abcdefghij");
+  fs.writeFileSync(ev, `x ${root}/t/sub\n`);
+  await sleep(150); // the watcher has it (settle 1 s: not applied yet)
+  const r = await app.request("/api/du?path=/t&depth=1");
+  const b = (await r.json()) as Any;
+  assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, "old size with no stale flag");
+});
+
+test("A-empty a failed read of the dead writer's takes at acquire does not switch the fast path on over them", async () => {
+  const { root, s: A, db } = fixture("aempty", { leaseMs: 300 });
+  await A.scan("/");
+  await validate(A);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await A.notePending([dueNow("/a/x")], 300);
+  assert.deepEqual(await A.takeDue(realNow(), 10, { modifyMs: 300, settleMs: 1 }), ["/a/x"]);
+  crash(A);
+  const B = open(db, root, { leaseMs: 300 });
+  const rd = (B as Any).read.bind(B);
+  let failures = 2;
+  (B as Any).read = async (q: string, sql: string, p: Any, d: Any) => (q === "taken" && failures-- > 0 ? d : rd(q, sql, p, d)); // a busy reader answers its default
+  for (let i = 0; i < 300 && !(B as Any).idxReady; i++) await sleep(20);
+  assert.ok(B.isWriter);
+  arm(B, 0);
+  await sleep(50);
+  assert.deepEqual(rows(db, "SELECT path FROM dirty").map((r) => r.path), ["/a/x"], "the take of the dead writer was recorded after the retry");
+  assert.equal(await B.freshTree("/a/x", 0, false), null);
+});
+
+test("A-return an acquire whose write fails once is tried again: the fast path comes on and adopted jobs wake", async () => {
+  const { root, s: A, db } = fixture("areturn", { leaseMs: 300 });
+  await A.scan("/");
+  await validate(A);
+  await A.notePending([dueNow("/a/x")], 300);
+  await A.takeDue(realNow(), 10, { modifyMs: 300, settleMs: 1 });
+  crash(A);
+  const B = open(db, root, { leaseMs: 300 });
+  const tx = (B as Any).txn.bind(B);
+  let n = 0;
+  (B as Any).txn = async (p: Any) => (n++ === 0 ? false : tx(p));
+  for (let i = 0; i < 300 && !(B as Any).idxReady; i++) await sleep(20);
+  assert.ok((B as Any).idxReady, "the second try went through");
+  let woke = false;
+  void B.whenWriter().then(() => (woke = true));
+  await sleep(50);
+  assert.equal(woke, true);
+  assert.equal(rows(db, "SELECT COUNT(*) n FROM pending WHERE taker IS NOT NULL")[0].n, 0);
+  assert.equal(rows(db, "SELECT COUNT(*) n FROM dirty")[0].n, 1);
+});
+
+test("L11a a walk whose root commit fails busy leaves no walking row behind; L11b a missed beat does not lose the lease or turn later rows into ver 0", async () => {
+  const { s, db } = fixture("l11", { leaseMs: 600 });
+  await s.scan("/");
+  const a = s as Any;
+  const orig = a.send.bind(s);
+  let fail = true;
+  a.send = async (m: Any) => {
+    if (m.op === "commit" && m.last && !m.last.up && fail) {
+      fail = false;
+      throw Object.assign(new Error("database is locked"), { busy: true });
+    }
+    return orig(m);
+  };
+  const quiet = console.error;
+  console.error = () => undefined;
+  try {
+    await s.scan("/", undefined, true);
+  } finally {
+    console.error = quiet;
+  }
+  await sleep(50);
+  assert.equal(rows(db, "SELECT COUNT(*) n FROM walking")[0].n, 0, "the walking row was removed (the tree is marked stale instead)");
+  assert.ok(rows(db, "SELECT COUNT(*) n FROM stale_trees")[0].n >= 1);
+  // a beat that cannot get the database
+  const post = a.post.bind(s);
+  a.post = async (m: Any, r: boolean) => {
+    if (m.op === "beat") throw Object.assign(new Error("database is locked"), { busy: true });
+    return post(m, r);
+  };
+  await a.tryLease();
+  assert.equal(s.isWriter, true, "still the writer");
+  a.post = post;
+  await s.scan("/", undefined, true);
+  assert.equal(rows(db, "SELECT COUNT(*) n FROM sizes WHERE ver = 0")[0].n, 0);
+});
+
+test("L10 a committing writer keeps its lease alive: the commit's fence check refreshes the beat", async () => {
+  const { s, db } = fixture("l10", { leaseMs: 60_000 });
+  await s.scan("/");
+  const before = rows(db, "SELECT beat FROM writer")[0].beat;
+  crash(s); // no heartbeat messages
+  await sleep(20);
+  await s.scan("/", undefined, true);
+  assert.ok(rows(db, "SELECT beat FROM writer")[0].beat > before);
+});
+
+test("N5' a change applied while the same writer's whole walk runs is not served stale-as-fresh", async () => {
+  const { root, s: A, db } = fixture("n5s", { leaseMs: 300 });
+  await A.scan("/");
+  await validate(A);
+  const h = hold(A, (m) => m.last);
+  const w = A.scan("/");
+  while (!h.held()) await sleep(5);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
+  await A.notePending([dueNow("/a/x")], T.modifyMs);
+  const got = (await A.takeDue(realNow(), 10, T))!;
+  const ap = Promise.all(got.map((p) => A.applyChanged(p)));
+  h.release();
+  await w;
+  await ap;
+  await A.noteRan(got.map((p) => ({ path: p, endedAt: realNow(), hold: true })), T.modifyMs);
+  const t = await A.freshTree("/", 0, false);
+  assert.ok(t === null || bytes(t) === 20, `served ${bytes(t)}; stored ${rows(db, "SELECT tot_bytes b FROM sizes WHERE path = '/'")[0].b}`);
+});
+
+test("P5' a second event while the first take of the same folder runs ends with the newer size", async () => {
+  const { root, s: A } = fixture("p5s", { leaseMs: 300 });
+  await A.scan("/");
+  await validate(A);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567");
+  await A.notePending([dueNow("/a/x")], T.modifyMs);
+  await A.takeDue(realNow(), 10, T);
+  const h = hold(A, (m) => m.last);
+  const wa = A.applyChanged("/a/x");
+  while (!h.held()) await sleep(5);
+  fs.writeFileSync(path.join(root, "a/x/f"), "1234567890AB");
+  await A.notePending([dueNow("/a/x")], T.modifyMs);
+  h.release();
+  await wa;
+  await A.noteRan([{ path: "/a/x", endedAt: realNow(), hold: true }], T.modifyMs);
+  const t = await A.freshTree("/a/x", 0, false);
+  assert.ok(t === null || bytes(t) === 12, `served ${bytes(t)}`);
 });

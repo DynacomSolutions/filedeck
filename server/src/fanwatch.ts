@@ -15,6 +15,8 @@ import { TRASH_DIR } from "./paths.ts";
  */
 
 export interface HelperProc extends EventEmitter {
+  /** a line written here is answered with `#sync` once the helper has read every event the kernel had queued (see `FanWatch.sync`) */
+  stdin?: { write(s: string): unknown } | null;
   stdout: Readable | null;
   stderr: Readable | null;
   kill(): boolean;
@@ -56,8 +58,8 @@ export interface ChangeSink {
   readonly isWriter?: boolean;
   /** watcher sessions: see SizeStore.sessionStart / sessionTick / sessionEnd */
   sessionStart?(mountsHash: string, readyAt: number): Promise<number | null>;
-  sessionTick?(id: number, mountsHash: string, readyAt: number): Promise<{ since: number; newer: boolean } | null>;
-  sessionEnd?(id: number, clean: boolean): Promise<void>;
+  sessionTick?(id: number, mountsHash: string, readyAt: number, lostAt: number): Promise<{ since: number; newer: boolean } | null>;
+  sessionEnd?(id: number, clean: boolean, lostAt: number): Promise<void>;
 }
 
 const MAXFS = 256;
@@ -102,7 +104,10 @@ export class FanWatch {
   /** the watcher's run in the store (see SizeStore.sessionStart), the time from which every change was seen without a gap, and whether it saw every change so far */
   private session: { id: number; hash: string; readyAt: number } | null = null;
   private since = Infinity;
+  /** when events were last lost (a kernel overflow, too many held in memory): nothing from before it is vouched for, the run goes on */
+  private lostAt = 0;
   private clean = true;
+  private syncing: (() => void)[] = [];
   private lastSession = 0;
   private handingOver = false;
   private stopped = false;
@@ -152,7 +157,7 @@ export class FanWatch {
       hostPaths.length = Math.min(hostPaths.length, MAXFS);
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
       if (this.stopped) return;
-      const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["ignore", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
+      const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["pipe", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
       this.proc = p;
       this.readyAt = Infinity;
       let err = "";
@@ -227,13 +232,13 @@ export class FanWatch {
 
   /** Rows written before this time were not watched while they aged (the restart gap): the size store gives them the TTL rule, not the watcher's trust. */
   watchedSince(): number {
-    return this.readyAt === Infinity ? Infinity : Math.min(this.readyAt, this.since);
+    return this.readyAt === Infinity ? Infinity : this.since;
   }
 
   private endSession(clean: boolean) {
     const s = this.session;
     this.session = null;
-    if (s) void this.store.sessionEnd?.(s.id, clean && this.clean);
+    if (s) void this.store.sessionEnd?.(s.id, clean && this.clean, this.lostAt);
   }
 
   /**
@@ -245,23 +250,47 @@ export class FanWatch {
     this.handingOver = true;
     try {
       if (this.proc && this.readyAt !== Infinity && this.session) {
+        const sess = this.session;
         for (let i = 0; this.draining && i < 100; i++) await new Promise((r) => setTimeout(r, 20));
         await this.flush();
         const until = Date.now() + (this.o.handoverMs ?? 6000);
-        const sess = this.session;
         while (Date.now() < until && this.session === sess) {
-          const t = await this.store.sessionTick?.(sess.id, sess.hash, sess.readyAt);
+          const t = await this.store.sessionTick?.(sess.id, sess.hash, sess.readyAt, this.lostAt);
           if (!t || t.newer) break;
           await new Promise((r) => setTimeout(r, 100));
         }
-        await this.flush(); // what arrived while waiting
-        const clean = !this.buf.size && !this.mem.size && !this.inflight;
+        // A newer run is watching now, so only what this one has not yet read from its helper can be missing: ask the helper to read what the kernel has queued
+        // and wait for its answer. Without that (an old helper, a stuck pipe) the run is not reported clean.
+        const synced = await this.sync(1500);
+        await this.flush();
+        const clean = synced && !this.resume && !this.buf.size && !this.mem.size && !this.inflight && !this.draining && !this.taken.size;
         this.session = null;
-        await this.store.sessionEnd?.(sess.id, clean && this.clean);
+        await this.store.sessionEnd?.(sess.id, clean && this.clean, this.lostAt);
       }
     } finally {
       this.stop();
     }
+  }
+
+  /** True when the helper has written every event the kernel had queued when this was called and `line` has seen them all. */
+  private sync(timeoutMs: number): Promise<boolean> {
+    const stdin = this.proc?.stdin;
+    if (!stdin) return Promise.resolve(false);
+    return new Promise((res) => {
+      const done = (ok: boolean) => {
+        clearTimeout(timer);
+        this.syncing = this.syncing.filter((f) => f !== fire);
+        res(ok);
+      };
+      const fire = () => done(true);
+      const timer = setTimeout(() => done(false), timeoutMs);
+      this.syncing.push(fire);
+      try {
+        stdin.write("sync\n");
+      } catch {
+        done(false);
+      }
+    });
   }
 
   stop() {
@@ -279,10 +308,12 @@ export class FanWatch {
   /** One helper output line. */
   line(l: string) {
     if (l === "!overflow") return this.overflow();
+    if (l === "#sync") return void this.syncing.slice().forEach((f) => f());
     if (l.startsWith("#ready")) {
       this.backoff = 0;
       this.readyAt = Date.now();
       this.since = this.readyAt;
+      this.lostAt = 0;
       this.clean = true;
       void this.beginSession(this.readyAt);
     }
@@ -310,13 +341,13 @@ export class FanWatch {
     const s = this.session;
     if (!s || Date.now() - this.lastSession < (this.o.sessionMs ?? SESSION_MS) || this.handingOver) return;
     this.lastSession = Date.now();
-    const t = await this.store.sessionTick?.(s.id, s.hash, s.readyAt);
-    if (t && this.session === s && this.clean) this.since = Math.min(this.since, t.since);
+    const t = await this.store.sessionTick?.(s.id, s.hash, s.readyAt, this.lostAt);
+    if (t && this.session === s) this.since = Math.max(t.since, this.lostAt);
   }
 
   /** Events were lost: forget the pending folders and let the next read re-scan the watched trees. */
   private overflow() {
-    this.clean = false;
+    this.since = this.lostAt = Math.max(this.since, Date.now());
     this.buf.clear();
     this.mem.clear();
     void this.store.clearPending?.();
@@ -366,7 +397,7 @@ export class FanWatch {
       if (cur !== undefined && cur <= at) continue;
       if (cur === undefined && this.mem.size >= (this.o.maxPending ?? 50_000)) {
         this.note("too many changed folders pending, treating it as an overflow");
-        this.clean = false;
+        this.since = this.lostAt = Math.max(this.since, Date.now());
         this.mem.clear();
         for (const m of this.marks) this.store.markStale(m);
         return;
@@ -447,8 +478,8 @@ export class FanWatch {
         // taken and not applied (the process is stopping): dirty, so the next process re-reads them
         const rest = batch.filter((v) => !ends.some(([e]) => e === v));
         if (rest.length) {
+          if (!(await this.store.markDirty?.(rest))) for (const v of rest) this.store.markStale(v);
           for (const v of rest) this.taken.delete(v);
-          void this.store.markDirty?.(rest);
         }
         await this.ran(ends); // before the next take, so a row noted during the batch is held until modifyMs after its folder's end
         if (this.store.takeDue) this.activeUntil = Math.max(this.activeUntil, Date.now() + this.modifyMs + this.settleMs); // rows may remain after a slow batch

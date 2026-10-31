@@ -268,9 +268,18 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   sizes.quiet = (v) => fan.settled(v);
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
   (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
+  // On SIGTERM, at once (not after the connections drain): stop the jobs (their rows are handed to the next process), hand the watcher's events and watched time
+  // to the store, and release the size store's writer lease, so the next process can write while this one is still answering its last requests.
+  let leaving: Promise<void> | undefined;
+  const leave = () =>
+    (leaving ??= (async () => {
+      await jobs.interrupt();
+      await fan.handover();
+      await sizes.releaseLease();
+    })());
+  (app as unknown as { leave: () => Promise<void> }).leave = leave;
   (app as unknown as { close: () => Promise<void> }).close = async () => {
-    await jobs.interrupt(); // first: aborted jobs clean their staging and the rows are handed to the next process
-    await fan.handover(); // then the watcher: its events go to the store and a newer process takes over the watched time
+    await leave();
     index.close();
     sizes.close();
   };

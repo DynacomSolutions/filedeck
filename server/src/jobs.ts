@@ -181,7 +181,8 @@ export class Jobs {
 
   /**
    * True while another process holds a live job of `kinds` with matching params that runs now or was created before `self`
-   * (the one created first goes first, so two processes never wait for each other). Rollout guard: a lock is per process.
+   * (the one created first goes first, so two processes never wait for each other). Rollout guard for 0.3.31, which has no writer lease: a lock is per process.
+   * Removable once no such process can share the store file.
    */
   foreignAhead(kinds: string[], self: { id: string; createdAt: number }, match: (params: any) => boolean): boolean {
     const sh = this.shared;

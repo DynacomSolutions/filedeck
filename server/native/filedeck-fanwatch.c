@@ -13,6 +13,7 @@
  *   m PATH            a file in PATH was modified (an ongoing write; repeated at most once a second)
  *   c PATH            PATH could not be watched (aliases of an already watched filesystem are not reported)
  *   !overflow         the kernel dropped events: everything watched must be rescanned
+ *   #sync             answer to a line on stdin: every event the kernel had queued by then has been printed above
  * Messages go to stderr. Exit status: 0 stdout closed, 1 usage or runtime error, 2 not permitted
  * (missing capability), 3 not supported (old kernel, or no filesystem could be marked).
  */
@@ -22,6 +23,7 @@
 #include <limits.h>
 #include <linux/fanotify.h>
 #include <signal.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,7 +144,7 @@ static int fail(int code, const char *msg, const char *arg) {
 int main(int argc, char **argv) {
 	if (argc < 2) return fail(1, "usage: filedeck-fanwatch PATH...", NULL);
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
-	int fan = (int)syscall(SYS_fanotify_init, FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_CLOEXEC, O_RDONLY | O_LARGEFILE);
+	int fan = (int)syscall(SYS_fanotify_init, FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_CLOEXEC | FAN_NONBLOCK, O_RDONLY | O_LARGEFILE);
 	if (fan < 0) {
 		if (errno == EPERM) return fail(2, "not permitted: fanotify needs CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH", strerror(errno));
 		return fail(3, "fanotify_init failed (kernel 5.9 or newer is needed)", strerror(errno));
@@ -187,16 +189,34 @@ int main(int argc, char **argv) {
 	out(ready, (size_t)snprintf(ready, sizeof ready, "#ready %d\n", nfs));
 
 	static char buf[256 * 1024] __attribute__((aligned(8)));
+	struct pollfd pfd[2] = {{.fd = fan, .events = POLLIN}, {.fd = 0, .events = POLLIN}};
 	for (;;) {
-		ssize_t len = read(fan, buf, sizeof buf);
-		if (len < 0) {
+		if (poll(pfd, 2, -1) < 0) {
 			if (errno == EINTR) continue;
-			return fail(1, "read failed", strerror(errno));
+			return fail(1, "poll failed", strerror(errno));
 		}
-		for (const struct fanotify_event_metadata *ev = (const void *)buf; FAN_EVENT_OK(ev, len); ev = FAN_EVENT_NEXT(ev, len)) {
-			if (ev->vers != FANOTIFY_METADATA_VERSION) return fail(1, "fanotify metadata version mismatch", NULL);
-			handle(ev);
-			if (ev->fd >= 0) close(ev->fd);
+		int want_sync = 0;
+		if (pfd[1].fd >= 0 && (pfd[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+			/* a line from the parent asks for a sync; end of input (or no input at all) just stops listening to it */
+			char in[64];
+			ssize_t n = read(0, in, sizeof in);
+			if (n > 0) want_sync = 1;
+			else if (n == 0 || errno != EINTR) pfd[1].fd = -1;
 		}
+		/* read what the kernel has queued (the descriptor does not block): for a sync, all of it, before answering */
+		for (;;) {
+			ssize_t len = read(fan, buf, sizeof buf);
+			if (len < 0) {
+				if (errno == EINTR) continue;
+				if (errno == EAGAIN) break;
+				return fail(1, "read failed", strerror(errno));
+			}
+			for (const struct fanotify_event_metadata *ev = (const void *)buf; FAN_EVENT_OK(ev, len); ev = FAN_EVENT_NEXT(ev, len)) {
+				if (ev->vers != FANOTIFY_METADATA_VERSION) return fail(1, "fanotify metadata version mismatch", NULL);
+				handle(ev);
+				if (ev->fd >= 0) close(ev->fd);
+			}
+		}
+		if (want_sync) out("#sync\n", 6);
 	}
 }

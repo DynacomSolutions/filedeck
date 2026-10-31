@@ -563,14 +563,14 @@ test("GET /api/du?cachedOnly=1 says stale:true unless the store vouches for the 
   assert.equal((await get()).stale, undefined);
 });
 
-test("a process that is not the writer answers du from the store flagged stale, starts no job, and refuses a size job", async () => {
+test("a process that is not the writer answers du from the store flagged stale and starts no job; a rescan or a size job waits for the lease instead of failing", async () => {
   const root = path.join(tmp, "api4");
   fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
   fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
   const aux = path.join(tmp, "api4-aux");
   fs.mkdirSync(aux);
   const mk = () => {
-    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux } as never));
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_DU_WAIT_MS: "200" } as never));
     agents.push(a as unknown as { close(): Promise<void> });
     return a;
   };
@@ -584,11 +584,20 @@ test("a process that is not the writer answers du from the store flagged stale, 
   const b = (await r.json()) as { stale?: boolean; entries: { bytes: number }[] };
   assert.equal(b.stale, true);
   assert.equal(b.entries[0]!.bytes, 3);
-  assert.equal((await reader.request("/api/du?path=/t&depth=1&fresh=1")).status, 503, "a rescan is the writer's");
+  assert.equal(await jobs(), jobsBefore, "no job was started for a stored folder");
   assert.equal((await reader.request("/api/du?path=/t/sub&depth=0")).status, 200, "a stored folder");
-  fs.mkdirSync(path.join(root, "u"));
-  assert.equal((await reader.request("/api/du?path=/u&depth=0")).status, 503, "nothing stored to answer from");
+  // a rescan, an unstored folder and a size job queue until the lease is free
   const post = await reader.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/t" }) });
-  assert.equal(post.status, 503);
-  assert.equal(await jobs(), jobsBefore, "no job was started by the reader");
+  assert.equal(post.status, 202);
+  const job = (await post.json()) as { id: string };
+  assert.equal((await reader.request("/api/du?path=/t&depth=1&fresh=1")).status, 202, "waits for the writer");
+  await new Promise((res) => setTimeout(res, 300));
+  assert.equal(((await (await reader.request(`/api/jobs/${job.id}`)).json()) as { state: string }).state, "queued");
+  await (writer as unknown as { close(): Promise<void> }).close(); // the lease is released
+  let state = "queued";
+  for (let i = 0; i < 300 && state !== "done"; i++) {
+    state = ((await (await reader.request(`/api/jobs/${job.id}`)).json()) as { state: string }).state;
+    if (state !== "done") await new Promise((res) => setTimeout(res, 50));
+  }
+  assert.equal(state, "done", "the queued job ran once the reader became the writer");
 });
