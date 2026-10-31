@@ -463,9 +463,13 @@ test("saving a 10k item copy writes a small compact state, fast; the spec is sto
   const store = new JobStore(f);
   const job = (q as unknown as { jobs: Map<string, unknown> }).jobs.get(id);
   const save = (q as unknown as { save(j: unknown): void }).save.bind(q);
-  const t0 = performance.now();
-  for (let i = 0; i < 50; i++) save(job);
-  const per = (performance.now() - t0) / 50;
+  // the fastest of several batches: a loaded machine slows some batches, never makes one faster than the code allows
+  let per = Infinity;
+  for (let k = 0; k < 5; k++) {
+    const t0 = performance.now();
+    for (let i = 0; i < 20; i++) save(job);
+    per = Math.min(per, (performance.now() - t0) / 20);
+  }
   const row = store.get(id, "ops")!;
   assert.ok(row.view.length < 40_000, `view is ${row.view.length} bytes`);
   assert.ok(row.params!.length > 100_000);
