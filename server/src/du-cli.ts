@@ -8,26 +8,32 @@ export interface DuOptions {
   apparent: boolean;
   fresh: boolean;
   json: boolean;
-  /** Seconds in total; undefined follows a live job with no cap. */
-  timeout: number | undefined;
+  /** Only answer from stored sizes (`cachedOnly=1`): never starts a scan. */
+  cached: boolean;
+  /** Seconds in total; 0 follows a live job with no cap. */
+  timeout: number;
   targets: { node: string; path: string }[];
 }
 
-export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh] [--json] [--timeout SECONDS] node:/path...
+/** Default cap in seconds for following a scan; `--timeout 0` removes it. */
+export const DEFAULT_TIMEOUT = 600;
+
+export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached] [--json] [--timeout SECONDS] node:/path...
   -s, --summarize     only a total for each argument (same as -d 0)
   -h, --human-readable  sizes like 1.5K, 23M
   -d, --max-depth=N   print entries only N or fewer levels below the argument (0 to 64)
   -a, --all           also print files
       --apparent-size print apparent sizes (bytes) instead of disk usage
       --fresh         re-read every folder instead of reusing stored sizes
+      --cached        answer from stored sizes only; never starts a scan (reports folders that are not stored)
       --json          print the hub's answer as JSON
-      --timeout SECONDS  give up after this long in total (default: follow a live job until it ends)
+      --timeout SECONDS  give up after this long in total (default: 600; 0 follows a live job until it ends)
 environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token)`;
 
 export class UsageError extends Error {}
 
 export function parseArgs(argv: string[]): DuOptions {
-  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, json: false, timeout: undefined, targets: [] };
+  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, cached: false, json: false, timeout: DEFAULT_TIMEOUT, targets: [] };
   const depth = (v: string | undefined) => {
     if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`invalid maximum depth '${v ?? ""}'`);
     return Number(v);
@@ -47,10 +53,11 @@ export function parseArgs(argv: string[]): DuOptions {
       else if (name === "--all") o.all = true;
       else if (name === "--apparent-size") o.apparent = true;
       else if (name === "--fresh") o.fresh = true;
+      else if (name === "--cached") o.cached = true;
       else if (name === "--json") o.json = true;
       else if (name === "--timeout") {
         const v = val ?? argv[++i];
-        if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1) throw new UsageError(`invalid timeout '${v ?? ""}'`);
+        if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`invalid timeout '${v ?? ""}'`);
         o.timeout = Number(v);
       } else if (name === "--max-depth") o.depth = depth(val ?? argv[++i]);
       else throw new UsageError(`unrecognized option '${a}'`);
@@ -69,6 +76,7 @@ export function parseArgs(argv: string[]): DuOptions {
   }
   if (!o.targets.length) throw new UsageError("missing node:/path operand");
   if (o.summarize && o.depth !== undefined && o.depth !== 0) throw new UsageError("summarizing conflicts with --max-depth=" + o.depth);
+  if (o.cached && o.fresh) throw new UsageError("--cached conflicts with --fresh");
   if (o.summarize) o.depth = 0;
   if (o.depth !== undefined && o.depth > 64) throw new UsageError("maximum depth is 64");
   return o;
@@ -177,7 +185,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
     return 2;
   }
   const headers = { "x-filedeck-token": token };
-  const deadline = o.timeout === undefined ? Infinity : io.now() + o.timeout * 1000;
+  const deadline = o.timeout === 0 ? Infinity : io.now() + o.timeout * 1000;
   const stopIfAsked = () => {
     if (io.signal?.aborted) throw new Interrupted();
   };
@@ -235,10 +243,16 @@ export async function run(argv: string[], env: Record<string, string | undefined
     else q.set("depth", "64");
     if (o.all) q.set("all", "1");
     if (o.fresh) q.set("fresh", "1");
+    if (o.cached) q.set("cachedOnly", "1");
     const url = `${api}/du?${q}`;
     try {
       let polled = false;
       let r = await patient(url, label);
+      if (o.cached && r.status === 204) {
+        io.err(`filedeck du: ${label}: not stored yet; run without --cached to scan it\n`);
+        status = 1;
+        continue;
+      }
       let rejoined = false;
       while (r.status === 202) {
         polled = true;
