@@ -1,23 +1,18 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { SkeletonLines } from "./Skeleton";
-import { canEdit, fileUrl, fmtDate, fmtSize, isArchive, type Entry } from "./api";
+import { canEdit, fileUrl, fmtDate, fmtSize, type Entry } from "./api";
 import { ArchiveView } from "./ArchiveView";
 import { OfficeView } from "./OfficeView";
 import { PdfView } from "./PdfView";
-import { LEGACY_OFFICE, OFFICE_EXT } from "./officeParse";
 import { HexView } from "./HexView";
 import { MarkdownView } from "./MarkdownView";
-import { AUDIO_EXT, MediaPlayer, VIDEO_EXT } from "./MediaPlayers";
-import { isTextName } from "./highlight";
+import { MediaPlayer } from "./MediaPlayers";
+import { extOf, looksLikeText, previewKind, SNIFF_BYTES, type PreviewKind } from "./previewKind";
 import { PlainOrCode } from "./PlainOrCode";
 import { Tip } from "./Tooltip";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import * as Ic from "lucide-react";
 
-const ext = (n: string) => n.slice(n.lastIndexOf(".") + 1).toLowerCase();
-const IMG = ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico"];
-const VID = VIDEO_EXT;
-const AUD = AUDIO_EXT;
 function Text({ url, path }: { url: string; path: string }) {
   const [t, setT] = useState<string | null>(null);
   useEffect(() => {
@@ -34,6 +29,25 @@ function Text({ url, path }: { url: string; path: string }) {
   return <PlainOrCode id={url} name={path.slice(path.lastIndexOf("/") + 1)} text={t} />;
 }
 
+/** For a name that says nothing about its type: read the first bytes and report "text" or "binary" (null while loading). */
+function useSniff(url: string, size: number, enabled: boolean): "text" | "binary" | null {
+  const [r, setR] = useState<"text" | "binary" | null>(null);
+  useEffect(() => {
+    setR(null);
+    if (!enabled) return;
+    const ctl = new AbortController();
+    fetch(url, { headers: { range: `bytes=0-${Math.min(size, SNIFF_BYTES) - 1}` }, signal: ctl.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const bytes = new Uint8Array(await res.arrayBuffer()).subarray(0, SNIFF_BYTES);
+        setR(looksLikeText(bytes, size > bytes.length) ? "text" : "binary");
+      })
+      .catch((e: Error) => e.name !== "AbortError" && setR("binary"));
+    return () => ctl.abort();
+  }, [url, size, enabled]);
+  return r;
+}
+
 /** The image fades in once decoded; until then a placeholder block holds the space. */
 function Img({ url, alt }: { url: string; alt: string }) {
   const [ok, setOk] = useState(false);
@@ -48,12 +62,14 @@ function Img({ url, alt }: { url: string; alt: string }) {
 
 export function Preview({ node, entry, onEdit, extra }: { node: string; entry: Entry; onEdit: (node: string, path: string) => void; extra?: ReactNode }) {
   const url = fileUrl(node, entry.path);
-  const e = ext(entry.name);
+  const e = extOf(entry.name);
   const [hex, setHex] = useState(false);
   useEffect(() => setHex(false), [node, entry.path]);
-  const isOffice = OFFICE_EXT.includes(e) && (e !== "csv" && e !== "tsv" || entry.size <= 8 * 1024 * 1024);
+  const byName = previewKind(entry.name, entry.size);
+  const sniffed = useSniff(url, entry.size, byName === "unknown");
+  const kind: PreviewKind | "sniffing" = byName !== "unknown" ? byName : sniffed === null ? "sniffing" : sniffed === "text" ? "text" : "unknown";
   const [menu, setMenu] = useState<{ x: number; y: number; opener: HTMLElement } | null>(null);
-  const known = isArchive(entry.name) || IMG.includes(e) || VID.includes(e) || AUD.includes(e) || e === "pdf" || isOffice || LEGACY_OFFICE.includes(e) || e === "md" || e === "markdown" || isTextName(entry.name) || entry.size === 0;
+  const known = kind !== "unknown" && kind !== "sniffing";
   const items: MenuItem[] = [
     ...(entry.size > 0 && known ? [{ label: hex ? "Back to preview" : "Hex dump", icon: hex ? Ic.Eye : Ic.Binary, onSelect: () => setHex(!hex) } satisfies MenuItem] : []),
     { label: "Download", onSelect: () => {
@@ -83,28 +99,28 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
         {menu && <ContextMenu x={menu.x} y={menu.y} opener={menu.opener} items={items} onClose={() => setMenu(null)} />}
       </div>
       <div className="pv-body">
-        {hex || (!known && entry.size > 0) ? (
+        {kind === "sniffing" ? (
+          <SkeletonLines lines={10} />
+        ) : hex || (kind === "unknown" && entry.size > 0) ? (
           <HexView node={node} path={entry.path} size={entry.size} />
-        ) : isArchive(entry.name) ? (
+        ) : kind === "archive" ? (
           <ArchiveView node={node} entry={entry} />
-        ) : IMG.includes(e) ? (
+        ) : kind === "image" ? (
           <Img url={url} alt={entry.name} />
-        ) : VID.includes(e) ? (
+        ) : kind === "video" ? (
           <MediaPlayer node={node} path={entry.path} name={entry.name} kind="video" />
-        ) : AUD.includes(e) ? (
+        ) : kind === "audio" ? (
           <MediaPlayer node={node} path={entry.path} name={entry.name} kind="audio" />
-        ) : e === "pdf" ? (
+        ) : kind === "pdf" ? (
           <PdfView node={node} path={entry.path} name={entry.name} />
-        ) : isOffice ? (
+        ) : kind === "office" ? (
           <OfficeView node={node} path={entry.path} ext={e} size={entry.size} />
-        ) : LEGACY_OFFICE.includes(e) ? (
+        ) : kind === "legacy-office" ? (
           <div className="pv-empty muted">Legacy .{e} files cannot be rendered here. Use Hex to inspect, or Download.</div>
-        ) : e === "md" || e === "markdown" ? (
+        ) : kind === "markdown" ? (
           <MarkdownView node={node} path={entry.path} />
-        ) : isTextName(entry.name) || entry.size === 0 ? (
-          <Text url={url} path={entry.path} />
         ) : (
-          <div className="pv-empty muted">No preview for this type</div>
+          <Text url={url} path={entry.path} />
         )}
       </div>
     </div>
