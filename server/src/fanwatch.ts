@@ -47,12 +47,15 @@ export interface ChangeSink {
   noteRan?(runs: { path: string; endedAt: number; hold: boolean }[], modifyMs: number): Promise<void>;
   recentRuns?(now: number, withinMs: number, limit: number): string[] | Promise<string[]>;
   clearPending?(): Promise<void>;
+  /** durable dirty marks for folders whose last run may not have finished (see SizeStore.markDirty); false when not possible */
+  markDirty?(paths: string[]): Promise<boolean>;
 }
 
 const MAXFS = 256;
 const FLUSH_MS = 250;
 const FLUSH_MAX = 2000;
 const DRAIN_BATCH = 256;
+const RECENT_MAX = 50_000;
 
 /** Agent virtual path of a helper path (as the helper's mount namespace sees it, i.e. under the agent root), or null outside the root or inside a trash store. */
 export function mapPath(root: string, hostPath: string): string | null {
@@ -73,6 +76,8 @@ export class FanWatch {
   /** events not yet handed to the store: the only per-folder state in memory, at most FLUSH_MAX entries */
   private buf = new Map<string, { at: number; modify: boolean }>();
   private inflight = 0;
+  /** events handed to the store and not yet stored (count per folder) */
+  private flushing = new Map<string, number>();
   /** the store is read for due folders only until this time (events were noted lately) or after a take that found some; the first drain always reads */
   private activeUntil = 0;
   private firstTake = true;
@@ -135,8 +140,10 @@ export class FanWatch {
       if (!this.recovered && this.store.recentRuns) {
         // folders taken just before a stop or crash may not have been applied: re-read them on the next read
         this.recovered = true;
-        const recent = await this.store.recentRuns(Date.now(), 60_000, 1001);
-        for (const m of recent.length > 1000 ? this.marks : recent) this.store.markStale(m);
+        const recent = await this.store.recentRuns(Date.now(), 60_000, RECENT_MAX + 1);
+        // folder by folder when the store can record them; else, or when that fails or there are very many, the watched trees as a whole
+        const marked = recent.length <= RECENT_MAX && !!this.store.markDirty && (await this.store.markDirty(recent));
+        if (!marked) for (const m of this.store.markDirty || recent.length > 1000 ? this.marks : recent) this.store.markStale(m);
       }
       if (this.stopped) return;
       const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["ignore", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
@@ -196,14 +203,16 @@ export class FanWatch {
   }
 
   /**
-   * True when no change of `virtual`, of the folder above it or of anything below it is waiting in this watcher (buffered, held in memory or
-   * taken and not yet applied). Changes waiting in the store's pending table are the store's to check.
+   * True when no change of `virtual`, of any folder above it or of anything below it is waiting in this watcher: still in the helper's pipe (reading is
+   * paused), buffered, being handed to the store, held in memory, or taken and not yet applied. Changes in the store's pending table, and the ones
+   * the store handed out, are the store's to check (SizeStore.freshTree).
    */
   settled(virtual: string): boolean {
-    const up = virtual === "/" ? "" : virtual.slice(0, virtual.lastIndexOf("/")) || "/";
+    if (this.resume) return false; // output is not being read: events may be waiting in the pipe
     const pre = virtual === "/" ? "/" : virtual + "/";
-    const hit = (p: string) => p === virtual || p === up || p.startsWith(pre);
+    const hit = (p: string) => p === "/" || p === virtual || p.startsWith(pre) || virtual.startsWith(p + "/");
     for (const p of this.buf.keys()) if (hit(p)) return false;
+    for (const p of this.flushing.keys()) if (hit(p)) return false;
     for (const p of this.mem.keys()) if (hit(p)) return false;
     for (const p of this.taken.keys()) if (hit(p)) return false;
     return true;
@@ -274,10 +283,16 @@ export class FanWatch {
     this.buf = new Map();
     for (const i of items) if (!i.modify && this.taken.has(i.path)) this.taken.set(i.path, true);
     this.inflight++;
+    for (const i of items) this.flushing.set(i.path, (this.flushing.get(i.path) ?? 0) + 1);
     try {
       if (this.store.notePending && (await this.store.notePending(items, this.modifyMs))) return void (this.activeUntil = Date.now() + this.modifyMs + this.settleMs);
       this.keepInMemory(items);
     } finally {
+      for (const i of items) {
+        const n = (this.flushing.get(i.path) ?? 1) - 1;
+        if (n > 0) this.flushing.set(i.path, n);
+        else this.flushing.delete(i.path);
+      }
       this.inflight--;
       this.resume?.();
     }

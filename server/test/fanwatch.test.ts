@@ -387,9 +387,10 @@ test("SizeStore.takeDue stamps the run after its reads, so a modify row waits mo
   const t = { modifyMs: 300, settleMs: 5 };
   await st.notePending([{ path: "/a", dueAt: Date.now(), modify: false }], 300);
   assert.deepEqual(await st.takeDue(Date.now(), 10, t), ["/a"]);
-  const ranAt = Date.now();
+  const ranAt = Date.now(); // the run was stamped up to a few ms (the writes after it) before this
   await st.notePending([{ path: "/a", dueAt: Date.now(), modify: true }], 300);
-  assert.deepEqual(await st.takeDue(ranAt + 250, 10, t), [], "held back until the run plus modifyMs");
+  // stamped after the reads: due at run + 300 > ranAt + 150 (while the writes took under 150 ms); stamped before them (two 100 ms reads earlier): due <= ranAt + 100
+  assert.deepEqual(await st.takeDue(ranAt + 150, 10, t), [], "held back until the run plus modifyMs");
   await st.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -484,6 +485,24 @@ test("fanwatch + SizeStore file: folders run just before a restart are marked st
   const w = new FanWatch(f.sink, { ...opts, helper: "fake", root, procMounts: mounts, spawn: () => new Fake() });
   await w.start();
   assert.deepEqual(f.stale.sort(), ["/future", "/r"]);
+  w.stop();
+  fs.rmSync(root, { recursive: true });
+  f.done();
+});
+
+test("fanwatch + SizeStore file: folders run just before a restart become dirty one by one, no watched tree is marked", async () => {
+  const f = fileStore();
+  await f.st.notePending([{ path: "/r", dueAt: Date.now() - 1000, modify: false }], 300);
+  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-root-")));
+  const mounts = path.join(root, "m");
+  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n");
+  const dirty: string[][] = [];
+  const sink = { ...f.sink, markDirty: async (p: string[]) => (dirty.push(p), true) };
+  const w = new FanWatch(sink, { ...opts, helper: "fake", root, procMounts: mounts, spawn: () => new Fake() });
+  await w.start();
+  assert.deepEqual(dirty, [["/r"]]);
+  assert.deepEqual(f.stale, []);
   w.stop();
   fs.rmSync(root, { recursive: true });
   f.done();

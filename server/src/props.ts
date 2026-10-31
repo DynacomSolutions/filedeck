@@ -380,15 +380,18 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: sizes.covers(r.virtual) });
     }
     if (!fresh) {
-      // Watched and every stored row of the subtree fresh (the reuse rule): answer from the store at once, no job, no lock. A scan holding a lock
-      // on an overlapping folder is no reason to wait: its commits are atomic per row and only ever write newer values.
-      const t = await sizes.freshTree(r.virtual, depth, all);
-      if (t) return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: true });
-      // Something is stale, and a scan of another overlapping folder (a parent or child, here or in another process) is live: a job for this
-      // path would queue behind it (gate above), possibly for hours. Answer from the stored rows instead, marked `stale: true`, and start nothing:
-      // the scan ahead refreshes its own part, and the next request starts a job when something is still stale. Same-path scans are joined below.
-      const overlap = (p: { path: string }) => p.path !== r.virtual && (p.path === "/" || r.virtual === "/" || p.path.startsWith(r.virtual + "/") || r.virtual.startsWith(p.path + "/"));
-      if (jobs.findLive("du", overlap) ?? jobs.findLive("size", overlap)) {
+      // Any live scan of an overlapping folder, here or in another process, may be rewriting rows or holding changes it has not applied: no fast path while one runs.
+      const overlap = (p: { path: string }) => p.path === "/" || r.virtual === "/" || p.path === r.virtual || p.path.startsWith(r.virtual + "/") || r.virtual.startsWith(p.path + "/");
+      const live = jobs.findLive("du", overlap) ?? jobs.findLive("size", overlap);
+      const same = !!live && !!liveScan(r.virtual, false); // a scan of this very folder is joined below
+      if (!live) {
+        // Watched, validated by a clean walk since the watcher became ready, and nothing pending or dirty on the folder, below it or above it: answer
+        // from the store at once, no job (see SizeStore.freshTree). Anything else gets a job, as before.
+        const t = await sizes.freshTree(r.virtual, depth, all);
+        if (t) return c.json({ path: r.virtual, entries: t.entries, cached: sizes.persistent, truncated: t.truncated, watched: true });
+      } else if (!same) {
+        // A scan of another overlapping folder is live and this path is not fresh: a job here would queue behind it (gate above), possibly for hours.
+        // Answer from the stored rows, flagged `stale: true`, and start nothing; the scan refreshes its part and the next request starts a job if needed.
         const s = await sizes.tree(r.virtual, depth, all);
         if (s.entries.length) return c.json({ path: r.virtual, entries: s.entries, cached: sizes.persistent, truncated: s.truncated, watched: sizes.covers(r.virtual), stale: true });
       }

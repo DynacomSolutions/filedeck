@@ -48,6 +48,8 @@ interface Row {
   tot: Sums;
   /** number of stored child folders on its own device, when the read that gave this row counted them */
   kids?: number;
+  /** when the folder was marked dirty (see `dirty` in SCHEMA), when the read that gave this row looked */
+  dirty?: number;
 }
 
 /** One folder of an in-flight walk. `fixed` = a stored row taken as-is (its subtree is not walked). */
@@ -150,11 +152,13 @@ function slowLog(what: string, ms: number, path: string) {
   console.error(JSON.stringify({ slow: what, ms: Math.round(ms), path }));
 }
 const KIDS = "(SELECT COUNT(*) FROM sizes k WHERE k.parent = s.path AND k.dev = s.dev) AS kids";
+/** the dirty mark of a stored folder (null = none): such a row is never reused, see `dirty` in SCHEMA */
+const DIRTY = "(SELECT d.at FROM dirty d WHERE d.path = s.path) AS dirty_at";
 const SQL = {
-  get: "SELECT * FROM sizes WHERE path = ?",
-  kidPage: `SELECT s.*, ${KIDS} FROM sizes s WHERE s.parent = ? AND s.dev = ? AND s.path > ? ORDER BY s.path LIMIT ?`,
-  getKids: `SELECT s.*, ${KIDS} FROM sizes s WHERE s.path = ?`,
-  getMany: (n: number) => `SELECT s.*, ${KIDS} FROM sizes s WHERE s.path IN (${Array(n).fill("?").join(",")})`,
+  get: `SELECT s.*, ${DIRTY} FROM sizes s WHERE s.path = ?`,
+  kidPage: `SELECT s.*, ${KIDS}, ${DIRTY} FROM sizes s WHERE s.parent = ? AND s.dev = ? AND s.path > ? ORDER BY s.path LIMIT ?`,
+  getKids: `SELECT s.*, ${KIDS}, ${DIRTY} FROM sizes s WHERE s.path = ?`,
+  getMany: (n: number) => `SELECT s.*, ${KIDS}, ${DIRTY} FROM sizes s WHERE s.path IN (${Array(n).fill("?").join(",")})`,
 };
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS sizes (
@@ -165,15 +169,21 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS pending_due ON pending(due_at);
   CREATE INDEX IF NOT EXISTS pending_idle_run ON pending(due_at, last_run);
+  -- recursive stale marks: the watcher lost events, nothing at or below the path is known to be current since \`at\`
   CREATE TABLE IF NOT EXISTS stale_trees (path TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID;
+  -- folders known to have changed (a backlog the watcher could not apply): the row of the folder itself may be out of date since \`at\`
+  CREATE TABLE IF NOT EXISTS dirty (path TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID;
+  -- a full walk of the path ended cleanly while the watcher was running; it began at \`started\`
+  CREATE TABLE IF NOT EXISTS validated (path TEXT PRIMARY KEY, started INTEGER NOT NULL) WITHOUT ROWID;
 `;
-/**
- * Built apart from SCHEMA: on a store of millions of rows it takes seconds, so a file-backed store builds it on the writer thread
- * after it opened and the "fresh without a walk" answer waits for it (see `freshTree`).
- */
-const SCANNED_INDEX = "CREATE INDEX IF NOT EXISTS sizes_scanned ON sizes(scanned_at)";
 /** subtree stale marks kept; past this they collapse into one mark on "/" */
 const MARKS_MAX = 256;
+/** dirty folders one walk remembers to clear when it ends (the rest stay dirty and are re-read once more by the next walk) */
+const DIRTY_SEEN_MAX = 50_000;
+const MARK_SQL = "INSERT INTO stale_trees (path, at) VALUES (?1, ?2) ON CONFLICT(path) DO UPDATE SET at = MAX(at, ?2)";
+/** params: folder, its parent, time. The folder's own row when stored, else its stored parent's. */
+const DIRTY_SQL =
+  "INSERT INTO dirty (path, at) SELECT path, ?3 FROM sizes WHERE path = CASE WHEN EXISTS (SELECT 1 FROM sizes WHERE path = ?1) THEN ?1 ELSE ?2 END ON CONFLICT(path) DO UPDATE SET at = MAX(at, excluded.at)";
 const ADD_SEEN_AT = "ALTER TABLE sizes ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0";
 const noCtl = (): JobCtl => ({ signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } });
 const parentOf = (p: string) => (p === "/" ? "" : path.posix.dirname(p));
@@ -213,7 +223,10 @@ const put = db.prepare("INSERT OR REPLACE INTO sizes (" + COLS.join(",") + ") VA
 const stale = db.prepare("SELECT path FROM sizes WHERE parent = ? AND dev = ? AND seen_at <> ? AND path > ? ORDER BY path LIMIT 256");
 const touch = db.prepare("UPDATE sizes SET seen_at = ? WHERE path = ?");
 const get = db.prepare("SELECT * FROM sizes WHERE path = ?");
-const delTree = db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)");
+const delTreeRows = db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)");
+// prepared on first use: the table may not exist yet when this worker starts (the "schema" op creates it on a store of an older version)
+let delDirty;
+const delTree = { run: (p, lo, hi) => { delTreeRows.run(p, lo, hi); (delDirty ??= db.prepare("DELETE FROM dirty WHERE path = ? OR (path > ? AND path < ?)")).run(p, lo, hi); } };
 const parentOf = (p) => (p === "/" ? "" : p.slice(0, p.lastIndexOf("/")) || "/");
 const below = (p) => { const pre = p === "/" ? "/" : p + "/"; return [pre, pre.slice(0, -1) + "0"]; };
 const commit = ({ items, last }) => {
@@ -246,6 +259,7 @@ parentPort.on("message", (m) => {
       if (m.op === "schema") { db.exec(schema); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(addSeenAt); }
       else if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
       else if (m.op === "commit") commit(m);
+      else if (m.op === "tx") { db.exec("BEGIN"); try { for (const part of m.parts) { const st = db.prepare(part.sql); for (const r of part.rows) st.run(...r); } db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
       else if (m.op === "many") { const st = db.prepare(m.sql); db.exec("BEGIN"); try { for (const r of m.rows) st.run(...r); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } }
       else db.prepare(m.sql).run(...m.params);
       if (!reader) trim();
@@ -267,7 +281,7 @@ const PENDING_BATCH = 10_000;
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
   private db: DatabaseSync | null = null;
-  private q!: Record<"get" | "put" | "kidPage" | "getKids" | "touch" | "delTree", StatementSync>;
+  private q!: Record<"get" | "put" | "kidPage" | "getKids" | "touch" | "delTree" | "delDirty", StatementSync>;
   /** deepest frame stack of the latest walk (tests: memory follows depth, not width) */
   lastWalkFrames = 0;
   private held: { path: string; done: Promise<void> }[] = [];
@@ -288,9 +302,8 @@ export class SizeStore {
    * Persisted in `stale_trees`; the map is the copy the walk consults (a few entries, set at once, before the write is queued).
    */
   private marks = new Map<string, number>();
-  /** `sizes_scanned` exists (always for an in-memory store) */
-  private scanIdx = false;
-  private scanIdxBuilding = false;
+  /** pending folders handed out by `takeDue` and not yet reported by `noteRan`: their change is being applied */
+  private taken = new Set<string>();
   /** nodes of the latest walks (up to maxEntries rows in total), kept only while the database is unusable so `tree` can still answer */
   private walks: Map<string, Row>[] = [];
 
@@ -305,6 +318,17 @@ export class SizeStore {
         this.open(file);
       } catch (e) {
         this.db = null;
+        // Only a file SQLite calls corrupt is replaced. A busy one (another connection holds the write lock while the schema is migrated,
+        // e.g. two processes during a rollout) is a good store: it is opened later through the writer thread, which waits for the lock.
+        if (this.isBusy(e)) {
+          this.retryAt = Date.now() + 1000;
+          return;
+        }
+        if (!this.isCorrupt(e)) {
+          this.warn(e);
+          this.retryAt = Date.now() + this.retryDelay;
+          return;
+        }
         try {
           if (attempt === 0 && file !== ":memory:") for (const f of [file, file + "-wal", file + "-shm"]) rmSync(f, { force: true });
         } catch {
@@ -332,10 +356,6 @@ export class SizeStore {
       // a clock stepped back can only make a stale child look current until its next re-read, never purge a live one.
       this.stamp = Math.max(this.stamp, Date.now());
       for (const r of db.prepare("SELECT path, at FROM stale_trees").all()) this.marks.set(r.path as string, Math.max(this.marks.get(r.path as string) ?? 0, Number(r.at)));
-      if (file === ":memory:") {
-        db.exec(SCANNED_INDEX);
-        this.scanIdx = true;
-      }
       this.q = {
         get: db.prepare(SQL.get),
         put: db.prepare(`INSERT OR REPLACE INTO sizes (${COLS.join(",")}) VALUES (${COLS.map(() => "?").join(",")})`),
@@ -343,32 +363,24 @@ export class SizeStore {
         getKids: db.prepare(SQL.getKids),
         touch: db.prepare("UPDATE sizes SET seen_at = ? WHERE path = ?"),
         delTree: db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)"),
+        delDirty: db.prepare("DELETE FROM dirty WHERE path = ? OR (path > ? AND path < ?)"),
       };
     } catch (e) {
       db.close();
       throw e;
     }
     this.db = db;
-    this.buildScanIdx();
-  }
-
-  /** Build `sizes_scanned` on the writer thread (file-backed store); `scanIdx` is set once it exists. */
-  private buildScanIdx() {
-    if (this.scanIdx || this.scanIdxBuilding || this.closed || this.file === ":memory:") return;
-    this.scanIdxBuilding = true;
-    this.post({ op: "exec", sql: SCANNED_INDEX, params: [] }, false).then(
-      () => {
-        this.scanIdx = !this.closed;
-        this.scanIdxBuilding = false;
-      },
-      () => void (this.scanIdxBuilding = false),
-    );
   }
 
   private warn(e: unknown) {
     if (this.warned) return;
     this.warned = true;
     console.error("size store unavailable, folder sizes are not cached:", (e as Error)?.message ?? e);
+  }
+
+  private isCorrupt(e: unknown): boolean {
+    const x = e as { errcode?: number; message?: string } | null;
+    return !!x && (x.errcode === 11 || x.errcode === 26 || /malformed|not a database/i.test(String(x.message)));
   }
 
   /** A locked database ("database is locked", SQLITE_BUSY / SQLITE_LOCKED): another connection holds it for a moment, nothing is broken. */
@@ -414,8 +426,7 @@ export class SizeStore {
         if (this.closed) return;
         this.db = openDb(":memory:");
         this.stamp = Math.max(this.stamp, Date.now());
-        for (const r of (await this.read("marks", "SELECT path, at FROM stale_trees", [], [])) ?? []) this.marks.set(r.path as string, Math.max(this.marks.get(r.path as string) ?? 0, Number(r.at)));
-        this.buildScanIdx();
+        await this.refreshMarks();
         this.warned = false;
         this.retryDelay = 30_000;
         console.error("size store back");
@@ -476,8 +487,21 @@ export class SizeStore {
   }
 
   private closed = false;
+  /** mark writes not yet committed: a shutdown waits for them (a mark lost at exit would let a change look fresh after the restart) */
+  private markWrites = new Set<Promise<void>>();
+  private markWrite(p: Promise<void>) {
+    this.markWrites.add(p);
+    void p.finally(() => this.markWrites.delete(p));
+  }
   /** The returned promise settles once the worker threads are gone (their connections are closed then). A request still waiting is answered empty, not failed: this is a shutdown, not a fault. */
   close(): Promise<void> {
+    if (this.markWrites.size && !this.closed) {
+      const wait = Promise.race([Promise.all([...this.markWrites]), new Promise((r) => setTimeout(r, 2000))]);
+      return wait.then(() => this.closeNow(), () => this.closeNow());
+    }
+    return this.closeNow();
+  }
+  private closeNow(): Promise<void> {
     this.closed = true;
     this.retryAt = 0;
     for (const p of this.pending.values()) p.res();
@@ -536,6 +560,7 @@ export class SizeStore {
     }
     const row: Row = { path: r.path as string, parent: r.parent as string, ino: Number(r.ino), dev: Number(r.dev), mtime_ms: Number(r.mtime_ms), scanned_at: Number(r.scanned_at), seen_at: Number(r.seen_at), own, tot };
     if (r.kids !== undefined) row.kids = Number(r.kids);
+    if (r.dirty_at != null) row.dirty = Number(r.dirty_at);
     return row;
   }
   /**
@@ -621,6 +646,7 @@ export class SizeStore {
   }
   private delTree(p: string) {
     this.q.delTree.run(p, ...below(p));
+    this.q.delDirty.run(p, ...below(p)); // a folder that is gone is not dirty
   }
   /** Add `d` to the totals of the stored ancestors of `p`, up to the first one on another device (a mount point's parent does not contain it). */
   private addToAncestors(p: string, d: Sums, dev: number) {
@@ -653,16 +679,29 @@ export class SizeStore {
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** a rescan resumed: rows written at or after this time are kept */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
     await this.reopen();
     const dev = Number(st.dev);
+    // A walk of a whole tree (not the watcher's re-read of one changed folder) begins at a barrier: every dirty mark and stale mark written before it is
+    // committed and visible to the reads below, so what the walk clears at its end is only what it could see. Marks of other processes are merged in.
+    const whole = !mode.trust && !mode.force;
+    if (whole) {
+      await this.barrier();
+      await this.refreshMarks();
+    }
     // after every mark (few): rows this walk writes must count as fresh, even when a mark was made in this millisecond
-    const now = Math.max(Date.now(), ...[...this.marks.values()].map((m) => m + 1));
+    const now = this.nextAt();
+    const ready0 = this.watchedSince();
+    const startMarks = whole ? [...this.marks] : [];
+    /** dirty folders re-read by this walk (path, mark time seen): cleared when it ends cleanly */
+    const seenDirty: [string, number][] = [];
+    /** a stored folder was reused on the age rule alone, not because the watcher kept it current: the walk cannot vouch for the tree */
+    let untrusted = false;
+    /** a folder past DU_MAX_DEPTH was counted, not entered: marks below it were not looked at */
+    let tooDeep = false;
     const stamp = (this.stamp = Math.max(now, this.stamp + 1));
     const chunk = this.o.commitChunk ?? COMMIT_CHUNK;
     let seen = 0;
     let bytes = 0;
     let read = 0;
     let root: Node | undefined;
-    /** marked folders this walk entered (a mount point below the start is not entered, its mark stays) */
-    const entered: string[] = [];
     let buf: Node[] = [];
     let written = false;
     let dirty = false;
@@ -812,7 +851,7 @@ export class SizeStore {
                   const v = virtualJoin(vpath, g.n);
                   const prior = mode.trust && isRoot ? await getRow(v) : undefined;
                   // a folder deleted and recreated under the same name is not the stored one, even with the same inode number (freed inodes are reused at once); its mtime tells
-                  if (prior && prior.parent === vpath && prior.ino === Number(g.s.ino) && prior.dev === Number(g.s.dev) && prior.mtime_ms === g.s.mtimeMs) {
+                  if (prior && prior.dirty === undefined && prior.parent === vpath && prior.ino === Number(g.s.ino) && prior.dev === Number(g.s.dev) && prior.mtime_ms === g.s.mtimeMs) {
                     addTo(node.tot, prior.tot);
                     buf.push({ ...prior, seen_at: stamp, reused: true, touch: true });
                   } else batch.push({ virtual: v, real: g.r, s: g.s });
@@ -900,9 +939,9 @@ export class SizeStore {
       const ino = Number(s.ino);
       const stored = t.stored === undefined ? await this.getWithKids(t.virtual) : t.stored ?? undefined;
       const storedKids = stored?.kids ?? 0;
-      if (this.marks.has(t.virtual)) entered.push(t.virtual);
       const marked = this.markAt(t.virtual);
-      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && stored.scanned_at > marked && (now - stored.scanned_at < this.o.ttlMs || (stored.scanned_at >= this.watchedSince() && this.covers(t.virtual))) && storedKids === stored.own.dirs - stored.own.mounts;
+      if (stored?.dirty !== undefined && seenDirty.length < DIRTY_SEEN_MAX) seenDirty.push([t.virtual, stored.dirty]);
+      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && stored.dirty === undefined && stored.scanned_at > marked && (now - stored.scanned_at < this.o.ttlMs || (stored.scanned_at >= this.watchedSince() && this.covers(t.virtual))) && storedKids === stored.own.dirs - stored.own.mounts;
       let first: { page: Row[]; ks: (Stats | null)[]; complete: boolean } | undefined;
       if (reusable) {
         // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
@@ -932,6 +971,7 @@ export class SizeStore {
         reusable &&= total === storedKids;
       }
       if (reusable) {
+        if (!(stored!.scanned_at >= this.watchedSince() && this.covers(t.virtual))) untrusted = true;
         const node: Node = { ...stored!, tot: { ...stored!.own }, seen_at: stamp, reused: true, up: t.up };
         seen += node.own.files + node.own.symlinks + node.own.other + node.own.dirs;
         bytes += node.own.bytes;
@@ -975,6 +1015,7 @@ export class SizeStore {
             // too deep to enter: counted, not walked. A reused node's stored `own` must not carry it (it would pile up on every scan; the folder is read again anyway as the child has no row)
             if (!f.node.reused) f.node.own.errors++;
             f.node.tot.errors++;
+            tooDeep = true;
             continue;
           }
           const nf = await open({ ...c, root: false, up: f.node });
@@ -995,8 +1036,21 @@ export class SizeStore {
       for (const f of frames) await f.close();
     }
     await drain();
-    if (dirty && this.db) this.markStale(virtual, Math.max(Date.now(), now));
-    else if (!mode.trust && entered.length) this.clearMarks(entered, now);
+    if (dirty && this.db) this.markStale(virtual, Math.max(this.nextAt(), now));
+    else if (this.db) {
+      // The walk ended cleanly: every row is committed. What it re-read is no longer dirty (only the mark it saw: a newer one stays); marks it
+      // knew about at the start and that are older than it are spent; and if the watcher kept the whole tree current throughout, it is vouched for.
+      const parts: { sql: string; rows: (string | number)[][] }[] = [];
+      if (seenDirty.length) parts.push({ sql: "DELETE FROM dirty WHERE path = ? AND at = ?", rows: seenDirty });
+      const [lo, hi] = below(virtual);
+      const spent = tooDeep ? [] : startMarks.filter(([m, at]) => (m === virtual || (m > lo && m < hi)) && at < now && this.marks.get(m) === at);
+      for (const [m] of spent) this.marks.delete(m);
+      if (spent.length) parts.push({ sql: "DELETE FROM stale_trees WHERE path = ? AND at = ?", rows: spent });
+      if (whole && !untrusted && !tooDeep && ready0 <= now && this.watchedSince() === ready0 && this.covers(virtual)) {
+        parts.push({ sql: "DELETE FROM validated WHERE path > ? AND path < ? AND started < ?", rows: [[lo, hi, now]] }, { sql: "INSERT INTO validated (path, started) VALUES (?1, ?2) ON CONFLICT(path) DO UPDATE SET started = MAX(started, ?2)", rows: [[virtual, now]] });
+      }
+      if (parts.length) await this.txn(parts);
+    }
     if (!this.db) this.keep(rows);
     return { root: root!, read };
   }
@@ -1140,22 +1194,27 @@ export class SizeStore {
   }
 
   /**
-   * Forget how fresh the rows of `virtual` and below are (the watcher lost events): the next scan re-reads them.
+   * The watcher lost events for `virtual` and below: nothing there is known to be current since `at`, the next walk re-reads it and
+   * `freshTree` refuses it until a walk that began later ended cleanly.
    * One mark row, not a rewrite of the subtree: O(1) whatever the tree holds. Rows written afterwards by a walk that began before the
-   * mark count as stale too (their `scanned_at` is the walk's start), which the old rewrite could not tell.
+   * mark count as stale too (their `scanned_at` is the walk's start). `at` is later than every mark known, so a clock that stepped back
+   * cannot make a new mark look older than a persisted one.
    */
-  markStale(virtual: string, at = Date.now()): void {
+  markStale(virtual: string, at = this.nextAt()): void {
     if (!this.db || this.markAt(virtual) >= at) return;
     this.marks.set(virtual, Math.max(this.marks.get(virtual) ?? 0, at));
     if (this.marks.size > MARKS_MAX) {
+      // too many to keep apart: one mark on "/" as new as the newest, replaced in one transaction
       const top = Math.max(...this.marks.values());
       this.marks.clear();
       this.marks.set("/", top);
-      void this.write("DELETE FROM stale_trees WHERE path <> '/'", []);
-      virtual = "/";
-      at = top;
+      this.markWrite((this.tail = this.txn([
+        { sql: "DELETE FROM stale_trees WHERE path <> '/'", rows: [[]] },
+        { sql: MARK_SQL, rows: [["/", top]] },
+      ]).then(() => undefined)));
+      return;
     }
-    void this.write("INSERT INTO stale_trees (path, at) VALUES (?1, ?2) ON CONFLICT(path) DO UPDATE SET at = MAX(at, ?2)", [virtual, at]);
+    this.markWrite(this.write(MARK_SQL, [virtual, at]));
   }
 
   /** Newest mark on `p` or a folder above it (0 = none). */
@@ -1165,13 +1224,58 @@ export class SizeStore {
     for (let a = p; a; a = parentOf(a)) m = Math.max(m, this.marks.get(a) ?? 0);
     return m;
   }
+  private nextAt(): number {
+    let m = 0;
+    for (const v of this.marks.values()) m = Math.max(m, v);
+    return Math.max(Date.now(), m + 1);
+  }
 
-  /** A walk that began at `before` entered these marked folders and re-read or validated everything below: their older marks are spent. */
-  private clearMarks(paths: string[], before: number) {
-    const gone = paths.filter((p) => (this.marks.get(p) ?? Infinity) < before);
-    if (!gone.length) return;
-    for (const p of gone) this.marks.delete(p);
-    void this.writeMany("DELETE FROM stale_trees WHERE path = ? AND at < ?", gone.map((p) => [p, before]));
+  /** Marks other processes wrote (the file is shared): merged in, never lowered. */
+  private async refreshMarks(): Promise<void> {
+    for (const r of (await this.read("marks", "SELECT path, at FROM stale_trees", [], [])) ?? []) this.marks.set(r.path as string, Math.max(this.marks.get(r.path as string) ?? 0, Number(r.at)));
+  }
+
+  /** Statements of one transaction, each run for every row of its list: on the writer worker for a file-backed store, else inline. False when the store is unusable. */
+  private async txn(parts: { sql: string; rows: (string | number)[][] }[]): Promise<boolean> {
+    if (!this.db) return false;
+    if (this.file === ":memory:") {
+      return this.safe(() => {
+        this.db!.exec("BEGIN");
+        try {
+          for (const part of parts) {
+            const st = this.db!.prepare(part.sql);
+            for (const r of part.rows) st.run(...r);
+          }
+          this.db!.exec("COMMIT");
+        } catch (e) {
+          this.db!.exec("ROLLBACK");
+          throw e;
+        }
+        return true;
+      }, false);
+    }
+    try {
+      await this.send({ op: "tx", parts });
+      return true;
+    } catch (e) {
+      this.failed(e);
+      return false;
+    }
+  }
+
+  /** Every write queued before this call has been committed when it returns (the writer runs requests in order). */
+  private async barrier(): Promise<void> {
+    if (this.db && this.file !== ":memory:") await this.post({ op: "exec", sql: "SELECT 1", params: [] }, false).catch((e) => this.failed(e));
+  }
+
+  /**
+   * These folders changed and could not be applied one by one: their rows may be out of date. One transaction: the dirty mark of each stored folder
+   * (or, for a folder with no row, of its stored parent), so a failure leaves nothing half done. `touch` is more of the same statements to run in it.
+   * A dirty folder is never reused by a walk and never vouched for by `freshTree`; the walk that re-reads it and ends cleanly clears the mark.
+   */
+  async markDirty(paths: string[], also: { sql: string; rows: (string | number)[][] }[] = []): Promise<boolean> {
+    const at = Date.now();
+    return this.txn([{ sql: DIRTY_SQL, rows: paths.map((p) => [p, parentOf(p), at]) }, ...also]);
   }
 
   /** Many rows of one statement in one transaction: on the writer worker for a file-backed store, else inline. False when the store is unusable. */
@@ -1225,7 +1329,7 @@ export class SizeStore {
   /**
    * Up to `limit` folders whose due time has come, oldest first; they are marked run at `now` and not returned again until noted again.
    * Null when the oldest due time is more than 10 x modifyMs ago (the backlog would take too long to apply): the pending folders are then
-   * marked stale one by one and dropped (`staleBacklog`); no watched tree is marked, only what changed is re-read on its next access. Due times far in the future (the clock stepped back) count as due.
+   * marked dirty one by one and dropped (`staleBacklog`); no watched tree is marked, only what changed is re-read on its next access. Due times far in the future (the clock stepped back) count as due.
    */
   async takeDue(now: number, limit: number, t: { modifyMs: number; settleMs: number }): Promise<string[] | null> {
     if (!this.db) return [];
@@ -1245,6 +1349,8 @@ export class SizeStore {
       if (!idle) return [];
       got = [...got, ...idle];
     }
+    // from here until noteRan the change is being applied: `freshTree` must not vouch for these folders (the rows go idle below, before the caller knows)
+    for (const p of got) this.taken.add(p);
     // the run starts after the reads above (slow on a loaded disk), so stamp it now: a modify row then waits modifyMs from the run, not from before the reads
     const ran = Math.max(now, Date.now());
     if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", got.map((p) => [ran, PENDING_IDLE, p]));
@@ -1262,6 +1368,7 @@ export class SizeStore {
    * arrived, which is not held back. The row is created if the prune removed it meanwhile.
    */
   async noteRan(runs: { path: string; endedAt: number; hold: boolean }[], modifyMs: number): Promise<void> {
+    for (const r of runs) this.taken.delete(r.path);
     if (!this.db || !runs.length) return;
     await this.writeMany(
       "INSERT INTO pending (path, due_at, last_run) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET last_run = ?3, due_at = CASE WHEN ?4 AND due_at < ?2 THEN MAX(due_at, ?3 + ?5) ELSE due_at END",
@@ -1275,11 +1382,10 @@ export class SizeStore {
   }
 
   /**
-   * Instead of applying a backlog that is too old: take every pending folder (as `takeDue` does: the row goes idle, a later event makes a new
-   * one) and then mark its stored row stale, a bounded batch at a time with a pause between. A folder that is not stored marks its stored
-   * parent instead (what `applyChanged` would re-read). A crash between the take and the mark leaves an idle row with a recent `last_run`, which
-   * `recentRuns` turns into a stale mark at the next start. Nothing that changed is left looking fresh: its own row is stale, and a walk that
-   * reuses the folders above still enters it and recomputes their totals from it.
+   * Instead of applying a backlog that is too old: every pending folder gets a durable dirty mark (its stored row, or the stored parent of a folder with
+   * no row) in the same transaction that makes the pending row idle, a bounded batch at a time with a pause between. Either both happen or neither, so
+   * a failure leaves the folder pending. A dirty folder is re-read by the next walk that reaches it, never reused, and `freshTree` refuses it, its
+   * ancestors and everything above it until that walk ended cleanly; so a walk that is running, or that was killed, cannot make the change look applied.
    */
   private async staleBacklog(now: number): Promise<void> {
     while (this.db) {
@@ -1287,8 +1393,8 @@ export class SizeStore {
       if (!rows?.length) return;
       const ps = rows.map((r) => r.path as string);
       const ran = Math.max(now, Date.now());
-      if (!(await this.writeMany("UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", ps.map((p) => [ran, PENDING_IDLE, p])))) return;
-      if (!(await this.writeMany("UPDATE sizes SET scanned_at = 0 WHERE path = ?1 OR (path = ?2 AND NOT EXISTS (SELECT 1 FROM sizes WHERE path = ?1))", ps.map((p) => [p, parentOf(p)])))) return;
+      // one transaction, dirty first: the change is recorded durably in the same commit that stops it being pending
+      if (!(await this.markDirty(ps, [{ sql: "UPDATE pending SET last_run = ?, due_at = ? WHERE path = ?", rows: ps.map((p) => [ran, PENDING_IDLE, p]) }]))) return;
       await new Promise((r) => setTimeout(r, 5));
     }
   }
@@ -1319,7 +1425,10 @@ export class SizeStore {
         return undefined;
       }
       if (pk) return p;
-      await this.write("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)", [v, ...below(v)]);
+      await (this.tail = this.txn([
+        { sql: "DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)", rows: [[v, ...below(v)]] },
+        { sql: "DELETE FROM dirty WHERE path = ? OR (path > ? AND path < ?)", rows: [[v, ...below(v)]] },
+      ]).then(() => undefined));
       return undefined;
     }
     await this.tail;
@@ -1327,41 +1436,41 @@ export class SizeStore {
     return undefined;
   }
 
-  /** Set by the agent: no change of `virtual` (its folder, the one above, or below) is waiting in the watcher, not yet applied. */
+  /** Set by the agent: no change of `virtual` (its folder, the one above, or below) is waiting in the watcher (buffered, being handed to the store, or being applied). */
   quiet: (virtual: string) => boolean = () => false;
 
   /**
-   * The answer of `tree` without any walk, or null when it cannot be vouched for: the watcher must cover the folder and hold no unapplied change
-   * of it, and every stored row of its subtree must be fresh by the reuse rule (a walk would reuse it without reading it): scanned after the
-   * newest stale mark above it and, unless scanned within `ttlMs`, after the watcher became ready. Checked with index lookups, not a walk.
-   * A folder with no row, or any stale row below, is null: the caller scans.
+   * The answer of `tree` with no walk, or null when it cannot be vouched for. It is vouched for only when ALL of these hold, none of them read from row timestamps:
+   *  - the watcher covers the folder, holds no change of it (`quiet`), and no change of it is being applied (`taken`) or walked (a held lock) in this process;
+   *  - a walk that began at or after the watcher became ready, and ended cleanly with the watcher on throughout, covers it (`validated`: the folder or an ancestor),
+   *    and began after every stale mark on the folder, above it or below it;
+   *  - nothing is pending or dirty on the folder, below it, or on any folder above it (a swapped ancestor changes everything under it).
+   * Checked before and after the stored rows are read; each check is a few primary-key lookups whatever the size of the store. `all` (every file listed from disk)
+   * is not answered here. Overlapping scan jobs of other processes are the caller's to check (props.ts).
    */
   async freshTree(virtual: string, depth: number, all: boolean): Promise<{ entries: DuEntry[]; truncated: boolean } | null> {
-    if (!this.db || !this.scanIdx || !this.covers(virtual) || !this.quiet(virtual)) {
-      if (this.db && !this.scanIdx) this.buildScanIdx();
-      return null;
-    }
-    const base = Math.min(Date.now() - this.o.ttlMs + 1, this.watchedSince());
-    const thr = Math.max(base, this.markAt(virtual) + 1);
-    // a row is stale when scanned_at < threshold (0 = marked stale one by one, see staleBacklog)
-    const stale = async (p: string, t: number, mustExist: boolean): Promise<boolean> => {
-      const self = await this.get(p);
-      if (self ? self.scanned_at < t : mustExist) return true;
-      const [lo, hi] = below(p);
-      const r = await this.read("freshBad", "SELECT 1 FROM sizes INDEXED BY sizes_scanned WHERE scanned_at < ? AND path > ? AND path < ? LIMIT 1", [t, lo, hi], null);
-      return !r || r.length > 0;
-    };
-    if (await stale(virtual, thr, true)) return null;
-    // marks inside the subtree are stricter for their own part of it
+    if (all || !this.db || !this.covers(virtual)) return null;
+    const chain: string[] = [];
+    for (let a = virtual; a; a = parentOf(a)) chain.push(a);
     const [lo, hi] = below(virtual);
-    for (const [m, at] of [...this.marks]) if (m > lo && m < hi && (await stale(m, Math.max(thr, at + 1), false))) return null;
-    // changes noted and not applied yet
-    const up = parentOf(virtual);
-    const pend = await this.read("freshPending", "SELECT 1 FROM pending WHERE due_at < ? AND (path = ? OR path = ? OR (path > ? AND path < ?)) LIMIT 1", [PENDING_IDLE, virtual, up, lo, hi], null);
-    if (!pend || pend.length) return null;
-    if (!this.quiet(virtual)) return null; // an event arrived while the store was read
+    const ph = chain.map(() => "?").join(",");
+    const overlaps = (p: string) => p === "/" || virtual === "/" || p === virtual || p.startsWith(virtual + "/") || virtual.startsWith(p + "/");
+    const ok = async (): Promise<boolean> => {
+      if (!this.quiet(virtual) || [...this.taken].some(overlaps) || this.held.some((h) => overlaps(h.path))) return false;
+      await this.refreshMarks();
+      const v = await this.read("freshV", `SELECT started FROM validated WHERE path IN (${ph})`, chain, null);
+      if (!v) return false;
+      const best = Math.max(0, ...v.map((r) => Number(r.started)));
+      if (best === 0 || best < this.watchedSince()) return false;
+      for (const [m, at] of this.marks) if ((chain.includes(m) || (m > lo && m < hi)) && best <= at) return false;
+      const d = await this.read("freshDirty", `SELECT 1 FROM dirty WHERE path IN (${ph}) OR (path > ? AND path < ?) LIMIT 1`, [...chain, lo, hi], null);
+      if (!d || d.length) return false;
+      const p = await this.read("freshPending", `SELECT 1 FROM pending WHERE due_at < ? AND (path IN (${ph}) OR (path > ? AND path < ?)) LIMIT 1`, [PENDING_IDLE, ...chain, lo, hi], null);
+      return !!p && !p.length && this.quiet(virtual) && ![...this.taken].some(overlaps);
+    };
+    if (!(await ok())) return null;
     const t = await this.tree(virtual, depth, all);
-    return t.entries.length ? t : null;
+    return t.entries.length && (await ok()) ? t : null;
   }
 
   /** The folder and its folder descendants down to `depth`; with `all`, also the files of the folders above that depth. */
