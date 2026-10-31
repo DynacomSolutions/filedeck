@@ -444,10 +444,11 @@ test("fanwatch + SizeStore file: overflow clears pending rows and marks stale", 
   const f = fileStore();
   const w = new FanWatch(f.sink, { ...opts, settleMs: 60_000 });
   for (let i = 0; i < 3000; i++) w.line(`x /d/${i}`);
-  await until(() => f.count() >= 1000);
-  assert.ok(f.count() > 0);
+  // every flush must have landed: a flush still in flight at the overflow would insert rows after the clear (harmless, the marks cover them, but not what is asserted here)
+  await until(() => f.count() >= 3000);
+  assert.equal(f.count(), 3000);
   w.line("!overflow");
-  await sleep(100);
+  await until(() => f.count() === 0);
   assert.equal(f.count(), 0);
   assert.equal(f.calls.length, 0);
   w.stop();
