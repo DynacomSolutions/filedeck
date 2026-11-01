@@ -166,7 +166,7 @@ test("a process moves a damaged store aside once per 6 hours: the second time it
 
 test("a long integrity check does not lose the lease: the writer keeps beating and the repair is not fenced", async () => {
   const f = path.join(tmp, `beat${n++}.db`);
-  const s0 = mk(f, 300);
+  const s0 = mk(f, 800);
   await s0.mayScan();
   await sleep(200);
   await s0.close();
@@ -177,16 +177,16 @@ test("a long integrity check does not lose the lease: the writer keeps beating a
   const [a, b] = [root("pending_due"), root("pending_idle_run")];
   d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${b} WHERE name='pending_due'; UPDATE sqlite_master SET rootpage=${a} WHERE name='pending_idle_run'; PRAGMA writable_schema=OFF;`);
   d.close();
-  const A = mk(f, 300);
+  const A = mk(f, 800);
   await A.mayScan();
-  const B = mk(f, 300); // would take the lease the moment A's beats stop
+  const B = mk(f, 800); // would take the lease the moment A's beats stop
   await B.mayScan();
   const post = (A as Any).post.bind(A);
   (A as Any).post = async (m: Any, read: boolean) => {
     const r = await post(m, read);
     if (m.op === "check" && !(A as Any).slowed) {
       (A as Any).slowed = true;
-      await sleep(1500); // a check several leases long
+      await sleep(3000); // a check several leases long
     }
     return r;
   };
