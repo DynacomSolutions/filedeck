@@ -37,17 +37,18 @@ test("another instance reads, lists and cancels a job it does not own", async ()
 
 test("a silent owner's job is failed by an adopter, same id; a beating owner keeps it", async () => {
   const f = file();
-  const a = mk(f);
-  const b = mk(f);
+  const lease = 2000; // (a stall of the loaded host's event loop has to be longer than this to pass for a silent owner)
+  const a = mk(f, lease);
+  const b = mk(f, lease);
   const v = a.create("x", "slow", hang);
   await sleep(10);
   b.tick();
   assert.equal(b.get(v.id)?.state, "running"); // lease not over
   a.tick(); // beat
-  await sleep(40);
+  await sleep(lease / 5);
   b.tick();
   assert.equal(b.get(v.id)?.state, "running");
-  await sleep(70);
+  await sleep(lease + 100);
   b.tick();
   const got = b.get(v.id)!;
   assert.equal(got.state, "failed");
