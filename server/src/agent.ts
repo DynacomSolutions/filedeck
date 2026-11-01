@@ -259,8 +259,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const jobs = registerArchiveRoutes(app, cfg);
   registerPdfRoutes(app, cfg);
   const sizes = registerPropsRoutes(app, cfg, jobs);
-  // Prometheus text for the size store: 1 when it answers from its file, and whether its file is damaged beyond repair (an operator must move it aside)
-  app.get("/api/metrics", (c) => {
+  // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only these two 0/1 gauges may ever be served here): 1 when it answers from its file, and whether its file is damaged beyond repair (an operator must move it aside)
+  app.get("/metrics", (c) => {
     const h = sizes.health();
     return c.text(
       [

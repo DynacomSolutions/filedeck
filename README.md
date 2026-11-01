@@ -110,7 +110,7 @@ Run it from the image (`filedeck du ...` is on the `PATH`), from a checkout afte
 
 ### The stored sizes file
 
-An agent keeps its stored folder sizes in a SQLite file. If only an index of that file is damaged the agent rebuilds it and logs one line. If the file is not SQLite or its tables are damaged, the agent never moves, changes or deletes it: it keeps answering without the cache (sizes are read from disk, `cached` is false), retries with a growing delay, and logs one line that names the file. The Prometheus text at `GET /api/metrics` on the agent shows `filedeck_size_store_available` (0 while sizes are not cached) and `filedeck_size_store_damaged` (1 when the file cannot be repaired). To recover: stop the agent, rename the store file and its `-wal` and `-shm` files aside (keep them if you want to look at them), and start the agent again; it makes a new store and reads the folders once more.
+An agent keeps its stored folder sizes in a SQLite file. If only an index of that file is damaged the agent rebuilds it and logs one line. If the file is not SQLite or its tables are damaged, the agent never moves, changes or deletes it: it keeps answering without the cache (sizes are read from disk, `cached` is false), retries with a growing delay, and logs one line that names the file. The Prometheus text at `GET /metrics` on the agent port (no token, only these two 0/1 gauges) shows `filedeck_size_store_available` (0 while sizes are not cached) and `filedeck_size_store_damaged` (1 when the file cannot be repaired). To recover: stop the agent, rename the store file and its `-wal` and `-shm` files aside (keep them if you want to look at them), and start the agent again; it makes a new store and reads the folders once more.
 
 ## Archives and passwords
 

@@ -146,9 +146,9 @@ ETA: 2026-11-01 13:00 ICT
 | 94 | Abandoned CLI du jobs are dropped, not kept queued or adopted after a restart | done | claude-20261101-size-followups | size-followups | 11.84 | 2026-11-01 17:00 ICT | 14 CLI du jobs from 31 Oct were still queued and were adopted by the new release<br>Their clients gave up after the 600 s CLI timeout<br>Merged https://github.com/DynacomSolutions/filedeck/pull/159 |
 | 95 | Size store with corrupt indexes rebuilds them instead of running with no cache | done | claude-20261101-size-followups | size-followups | 11.84 | 2026-11-01 17:00 ICT | One agent store fails quick_check: wrong entry count in indexes pending_due and pending_idle_run<br>Since 11.91 the store is kept, but that agent runs with no size cache<br>Merged https://github.com/DynacomSolutions/filedeck/pull/159 |
 | 96 | Release v0.3.33 | in_progress | claude-20261101-release-v0333 | release-v0333 | 11.94, 11.95 | | |
-| 97 | Repair attempt lost when lease lapses | todo | | | 11.95 | | The repaired flag is set before the repair op returns<br>A fenced repair is never retried |
-| 98 | Unreadable size store stays uncached | todo | | | 11.95 | | Rename it to `<file>.corrupt-<timestamp>` with -wal and -shm and start fresh instead of running uncached for the process lifetime |
-| 99 | Throttle foreign job touches | todo | | | 11.94 | | touch writes seen_at to the shared jobs DB every 20 ms<br>Limit to about 1 per second per id |
+| 97 | Repair attempt lost when lease lapses | todo | | | 11.95 | 2026-11-01 17:00 ICT | The repaired flag is set before the repair op returns<br>A fenced repair is never retried |
+| 98 | Unreadable size store stays uncached | todo | | | 11.95 | 2026-11-01 17:00 ICT | Rename it to `<file>.corrupt-<timestamp>` with -wal and -shm and start fresh instead of running uncached for the process lifetime |
+| 99 | Throttle foreign job touches | todo | | | 11.94 | 2026-11-01 17:00 ICT | touch writes seen_at to the shared jobs DB every 20 ms<br>Limit to about 1 per second per id |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
