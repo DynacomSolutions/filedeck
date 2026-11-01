@@ -283,6 +283,27 @@ const begin = () => {
   if (!fence || checkFence.run(fence.epoch, fence.owner).changes === 0) { try { db.exec("ROLLBACK"); } catch {} fence = null; throw new Error("fenced: this process no longer holds the writer lease"); }
 };
 const inTx = (fn) => { begin(); try { fn(); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } };
+// Index-only corruption: quick_check names only indexes (an index that disagrees with its table is rebuilt from the table, which loses nothing). Run in a fenced write
+// transaction, so only the lease holder repairs; anything else in the report (table pages, the header) leaves the file untouched.
+const INDEX_ONLY = /^(?:wrong # of entries in index (\\S+)|row \\d+ missing from index (\\S+)|non-unique entry in index (\\S+)|row \\d+ values differ from index (\\S+))$/;
+const problems = () => db.prepare("PRAGMA quick_check(200)").all().map((r) => String(r.quick_check)).filter((x) => x !== "ok");
+const repair = () => {
+  begin();
+  const quit = (o) => { try { db.exec("ROLLBACK"); } catch {} return o; };
+  try {
+    const first = problems();
+    if (!first.length) return quit({ rebuilt: "" });
+    const names = new Set();
+    for (const p of first) { const m = INDEX_ONLY.exec(p); if (!m) return quit({ rebuilt: "", problem: p }); names.add(m[1] || m[2] || m[3] || m[4]); }
+    const known = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((r) => r.name));
+    for (const n of names) if (!known.has(n)) return quit({ rebuilt: "", problem: "unknown index " + n });
+    for (const n of names) db.exec('REINDEX "' + n.replace(/"/g, '""') + '"');
+    const left = problems();
+    if (left.length) return quit({ rebuilt: "", problem: left[0] });
+    db.exec("COMMIT");
+    return { rebuilt: [...names].join(", ") };
+  } catch (e) { quit(); throw e; }
+};
 const acquire = ({ owner, leaseMs }) => {
   let epoch = 0;
   db.exec("BEGIN IMMEDIATE");
@@ -332,6 +353,7 @@ parentPort.on("message", (m) => {
         parentPort.postMessage({ id: m.id, rows: [{ epoch: fence ? fence.epoch : 0 }] });
         return;
       }
+      else if (m.op === "repair") { parentPort.postMessage({ id: m.id, rows: [repair()] }); return; }
       else if (m.op === "release") { if (fence) db.prepare("UPDATE writer SET released = 1 WHERE id = 1 AND epoch = ? AND owner = ?").run(fence.epoch, fence.owner); fence = null; }
       else if (m.op === "meta") { const r = db.prepare(m.sql).run(...m.params); parentPort.postMessage({ id: m.id, rows: [{ id: Number(r.lastInsertRowid), changes: Number(r.changes) }] }); return; }
       else if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
@@ -668,7 +690,33 @@ export class SizeStore {
     })());
   }
 
+  /**
+   * A malformed database may be only its indexes (a crash left a rebuildable index out of step with its table). Once per store, the writer checks it: if quick_check names
+   * nothing but indexes they are rebuilt from their tables inside one fenced write transaction, and the store opens again at the next use. Anything else is left as it is.
+   */
+  private repaired = false;
+  private async repairIndexes(): Promise<void> {
+    if (this.repaired || this.closed || this.file === ":memory:") return;
+    this.repaired = true;
+    let done = false;
+    try {
+      // only the lease holder repairs (the same single-writer rule as every write; the call is idempotent for the current holder)
+      if (!Number((await this.post({ op: "acquire", owner: this.owner, leaseMs: this.leaseMs() }, false))?.[0]?.epoch ?? 0)) return;
+      const r = (await this.post({ op: "repair" }, false))?.[0] as { rebuilt?: string; problem?: string } | undefined;
+      if (r?.rebuilt) {
+        done = true;
+        console.error(`size store: rebuilt ${r.rebuilt.includes(",") ? "indexes" : "index"} ${r.rebuilt} (they disagreed with their tables)`);
+        this.retryAt = Date.now();
+      }
+    } catch {
+      /* the store stays unavailable and is retried as before */
+    } finally {
+      if (!done) await this.post({ op: "release" }, false).catch(() => undefined);
+    }
+  }
+
   private giveUp(e: unknown) {
+    if (this.isCorrupt(e)) void this.repairIndexes();
     this.retryAt = Date.now() + this.retryDelay;
     this.warn(e);
     try {
