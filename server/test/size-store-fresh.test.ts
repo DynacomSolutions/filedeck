@@ -482,10 +482,12 @@ test("GET /api/du: a live scan of an overlapping folder is not waited for: store
   fs.writeFileSync(path.join(root, "p/child/f"), "abc");
   const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "300" } as never));
   agents.push(app as unknown as { close(): Promise<void> });
-  for (let i = 0; i < 600; i++) {
-    if ((await app.request("/api/du?path=/p&depth=1")).status === 200) break; // stores /p (a repeat after a 202 is answered from that scan)
-    await sleep(50);
+  let stored = 0;
+  for (let i = 0; i < 600 && stored !== 200; i++) {
+    stored = (await app.request("/api/du?path=/p&depth=1")).status; // stores /p (a repeat after a 202 is answered from that scan)
+    if (stored !== 200) await sleep(50);
   }
+  assert.equal(stored, 200, "/p is stored");
   // the child rescan is held inside its first directory read
   const orig = fsp.readdir;
   let release!: () => void;
