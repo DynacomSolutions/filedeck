@@ -288,6 +288,7 @@ const flag = (v: string | undefined) => v === "1";
 
 /** The size store lives next to the compare index; its `du` is a bounded, cancellable walk that reuses unchanged folders. */
 export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStore {
+  jobs.abandonMs = cfg.duAbandonMs;
   const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : spillPath("sizes"), { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
   const json = async <T,>(c: Context): Promise<T> => {
     try {
@@ -422,6 +423,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       duRuns.set(key, mine);
     }
     const id = run.id;
+    jobs.touch(id);
     const forget = () => {
       if (duRuns.get(key) === run) duRuns.delete(key);
     };
@@ -430,6 +432,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       const signal = c.req.raw.signal;
       while ((v!.state === "queued" || v!.state === "running") && Date.now() < arrived + cfg.duWaitMs && !signal.aborted) {
         await new Promise((res) => setTimeout(res, 20));
+        jobs.touch(id);
         v = jobs.get(id) ?? { ...v!, state: "failed", error: "job lost" };
       }
       if (v!.state === "queued" || v!.state === "running") {

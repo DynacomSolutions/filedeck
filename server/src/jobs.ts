@@ -28,6 +28,8 @@ export interface JobView {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** CLI du jobs: when a client last waited on or polled the job (see Jobs.abandonMs) */
+  seenAt?: number;
   /** queued jobs only: what is ahead of this one */
   queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
 }
@@ -103,6 +105,30 @@ export class Jobs {
     return this.stopping;
   }
   private adopting = new Set<string>();
+  /**
+   * Grace period (ms, 0 = off) for CLI `du` jobs: one that no client has waited on or polled (`touch`) for longer is cancelled while it is still queued,
+   * and is not adopted after a restart. Jobs of any other kind or origin are never affected.
+   */
+  abandonMs = 0;
+  private reaper?: ReturnType<typeof setInterval>;
+
+  /** A client waits on or polls this job: it is not abandoned. */
+  touch(id: string) {
+    const j = this.jobs.get(id);
+    if (j) j.seenAt = Date.now();
+  }
+
+  private abandonable(kind: string, origin: JobOrigin): boolean {
+    return this.abandonMs > 0 && kind === "du" && origin === "cli";
+  }
+
+  /** Cancel queued CLI du jobs nobody has asked about within the grace period. */
+  private reap() {
+    const now = Date.now();
+    for (const j of [...this.jobs.values()]) {
+      if (j.state === "queued" && this.abandonable(j.kind, j.origin) && now - (j.seenAt ?? j.createdAt) > this.abandonMs) this.cancel(j.id);
+    }
+  }
 
   /** How an adopted job of this kind is run again (no-op without a shared store). */
   register(kind: string, rebuild: Rebuild) {
@@ -128,6 +154,10 @@ export class Jobs {
       abort: new AbortController(),
     };
     this.jobs.set(job.id, job);
+    if (!this.reaper && this.abandonable(kind, job.origin)) {
+      this.reaper = setInterval(() => this.reap(), Math.max(50, Math.min(5000, this.abandonMs / 4)));
+      this.reaper.unref();
+    }
     this.save(job);
     if (gate) {
       job.gated = true;
@@ -292,6 +322,12 @@ export class Jobs {
       for (const id of sh.store.canceled(this.me)) this.cancel(id);
       for (const r of sh.store.orphans(sh.scope, this.me, now - (sh.leaseMs ?? 30_000))) {
         if (this.jobs.has(r.id) || this.adopting.has(r.id)) continue;
+        const v = rowView(r);
+        if (this.abandonable(r.kind, v.origin) && now - (v.seenAt ?? r.created_at) > this.abandonMs) {
+          // a CLI du nobody has asked about for the grace period: its client gave up, so drop it instead of walking for no one
+          if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) sh.store.put({ ...r, view: JSON.stringify({ ...v, state: "canceled", finishedAt: now }), state: "canceled", owner: this.me, beat: now, finished_at: now });
+          continue;
+        }
         if (r.params && sh.rebuild?.[r.kind]) {
           if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) void this.adopt(r);
         } else sh.store.failClaim(r, this.me, JSON.stringify(this.interrupted(r, now)), now);
@@ -312,7 +348,9 @@ export class Jobs {
     try {
       const params = JSON.parse(r.params!);
       const b = await sh.rebuild![r.kind]!(params);
-      this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: rowView(r).origin });
+      const v = rowView(r);
+      this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: v.origin });
+      if (v.seenAt) this.jobs.get(r.id)!.seenAt = v.seenAt;
     } catch {
       const now = Date.now();
       sh.store.put({ ...r, view: JSON.stringify(this.interrupted(r, now)), state: "failed", owner: this.me, beat: now, finished_at: now });
