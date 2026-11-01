@@ -104,8 +104,12 @@ test("sftp: without a pin a changed host key is refused and named", async () => 
   let second: Awaited<ReturnType<typeof startSftp>> | undefined;
   try {
     await backend.ping(); // first key seen and remembered
+    // the backend reuses its connection until ssh2 reports it closed, so wait for that event: a request sent
+    // before the drop is noticed fails on the dead socket ("remote error") instead of meeting the new key
+    const held = (backend as unknown as { conn: ssh2.Client | null }).conn;
+    const dropped = held ? new Promise<void>((r) => held.once("close", () => r())) : Promise.resolve();
     await first.close();
-    await new Promise((r) => setTimeout(r, 200)); // let the dropped connection be noticed
+    await dropped;
     second = await startSftp(tmp, "alice", "pw", port); // same address, new key: what a restarted rclone serve sftp does
     await assert.rejects(backend.ping(), (e: unknown) => e instanceof FsError && e.message === HOST_KEY_CHANGED && e.extra?.reason === "hostkey");
   } finally {
