@@ -382,9 +382,10 @@ test("a first open that finds the file locked is not a corrupt store: nothing is
   assert.ok(rowsOf(dbf, "SELECT name FROM sqlite_master WHERE name = 'dirty'").length);
 });
 
-test("a corrupt file is still replaced", async () => {
+test("a corrupt file is never deleted: the store runs uncached and the file is kept as it was", async () => {
   const dbf = path.join(tmp, "corrupt.db");
   fs.writeFileSync(dbf, "this is not a database ".repeat(200));
+  const before = fs.readFileSync(dbf);
   const root = path.join(tmp, "corrupt-root");
   fs.mkdirSync(path.join(root, "a"), { recursive: true });
   const quiet = console.error;
@@ -393,7 +394,8 @@ test("a corrupt file is still replaced", async () => {
     const s = new SizeStore(dbf, { root, ttlMs: 1000, maxEntries: 1000 });
     stores.push(s);
     assert.equal((await s.scan("/a")).dirs, 0);
-    assert.equal(s.persistent, true);
+    assert.equal(s.persistent, false);
+    assert.equal(fs.readFileSync(dbf).compare(before), 0);
   } finally {
     console.error = quiet;
   }

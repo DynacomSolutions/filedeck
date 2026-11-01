@@ -17,6 +17,8 @@ export interface JobRow {
   cancel: number;
   created_at: number;
   finished_at: number | null;
+  /** when a client last waited on or polled the job through any process (0 = never recorded) */
+  seen_at?: number;
 }
 
 const LIVE = "state IN ('queued','running')";
@@ -39,6 +41,8 @@ export class JobStore {
         db.exec(`CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, scope TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
           params TEXT, view TEXT NOT NULL, state TEXT NOT NULL, owner TEXT NOT NULL, beat INTEGER NOT NULL,
           cancel INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, finished_at INTEGER)`);
+        // stores of older versions have no seen_at (they ignore it)
+        if (!db.prepare("PRAGMA table_info(jobs)").all().some((c) => c.name === "seen_at")) db.exec("ALTER TABLE jobs ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
         db.prepare("SELECT count(*) FROM jobs").get();
         this.db = db;
       } catch (e) {
@@ -99,6 +103,16 @@ export class JobStore {
       }
       return undefined;
     }
+  }
+
+  /** A client waits on or polls this live job through any process: record it for the owner (best effort, a busy database skips it). */
+  seen(id: string, scope: string, now: number) {
+    this.run(`UPDATE jobs SET seen_at=? WHERE id=? AND scope=? AND seen_at<? AND ${LIVE}`, (s) => void s.run(now, id, scope, now), undefined);
+  }
+
+  /** When a client was last recorded for the job (0 = never, or unknown). */
+  seenAt(id: string, scope: string): number {
+    return this.run("SELECT seen_at FROM jobs WHERE id=? AND scope=?", (s) => Number((s.get(id, scope) as { seen_at?: number } | undefined)?.seen_at ?? 0), 0);
   }
 
   get(id: string, scope: string): JobRow | undefined {

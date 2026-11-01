@@ -34,6 +34,8 @@ export interface Config {
   fanwatch: string;
   /** `GET /api/du` answers 202 with a job id when its scan takes longer than this */
   duWaitMs: number;
+  /** a CLI du job nobody waits on or polls for this long is dropped (0 = never) */
+  duAbandonMs: number;
   /** on SIGTERM, how long the change watcher keeps running for a newer process to take over its watched time (ms) */
   handoverMs: number;
   listConcurrency: number;
@@ -137,6 +139,7 @@ export function loadConfig(env = process.env): Config {
     indexRevalidateMs: Number(env.FILEDECK_INDEX_REVALIDATE_MS ?? 30 * 60_000),
     fanwatch: env.FILEDECK_FANWATCH ?? "",
     duWaitMs: Number(env.FILEDECK_DU_WAIT_MS ?? 10_000),
+    duAbandonMs: Number(env.FILEDECK_DU_ABANDON_MS ?? 120_000),
     handoverMs: Number(env.FILEDECK_HANDOVER_MS ?? 6000),
     listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
     diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),

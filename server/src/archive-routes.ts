@@ -87,6 +87,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));
   app.get("/api/jobs/:id", (c) => {
+    jobs.touch(c.req.param("id")); // a client polling a CLI du job keeps it alive
     const j = jobs.get(c.req.param("id"));
     return j ? c.json(j) : c.json({ error: "not found" }, 404);
   });

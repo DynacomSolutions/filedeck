@@ -28,6 +28,8 @@ export interface JobView {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** CLI du jobs: when a client last waited on or polled the job (see Jobs.abandonMs) */
+  seenAt?: number;
   /** queued jobs only: what is ahead of this one */
   queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
 }
@@ -103,6 +105,45 @@ export class Jobs {
     return this.stopping;
   }
   private adopting = new Set<string>();
+  /**
+   * Grace period (ms, 0 = off) for CLI `du` jobs: one that no client has waited on or polled (`touch`) for longer is cancelled while it is still queued,
+   * and is not adopted after a restart. Jobs of any other kind or origin are never affected.
+   */
+  abandonMs = 0;
+  private reaper?: ReturnType<typeof setInterval>;
+
+  /** A client waits on or polls this job: it is not abandoned. A job another process owns is recorded in the shared store, where its owner reads it. */
+  touch(id: string) {
+    const now = Date.now();
+    const j = this.jobs.get(id);
+    if (j) j.seenAt = now;
+    else this.shared?.store.seen(id, this.shared.scope, now);
+  }
+
+  private abandonable(kind: string, origin: JobOrigin): boolean {
+    return this.abandonMs > 0 && kind === "du" && origin === "cli";
+  }
+
+  /** The latest time a client was seen on a job of this process (here, or through another process), 0 = not known. */
+  private seenOf(j: Job): number {
+    if (this.shared && this.abandonable(j.kind, j.origin)) j.seenAt = Math.max(j.seenAt ?? 0, this.shared.store.seenAt(j.id, this.shared.scope)) || undefined;
+    return j.seenAt ?? 0;
+  }
+
+  /** Forget a job at once (nothing is left to find: a returning client gets 404 and asks for the scan again). */
+  private forget(j: Job) {
+    this.cancel(j.id);
+    this.jobs.delete(j.id);
+    this.shared?.store.delete(j.id, this.shared.scope);
+  }
+
+  /** Forget queued CLI du jobs nobody has asked about within the grace period. */
+  private reap() {
+    const now = Date.now();
+    for (const j of [...this.jobs.values()]) {
+      if (j.state === "queued" && this.abandonable(j.kind, j.origin) && now - (this.seenOf(j) || j.createdAt) > this.abandonMs) this.forget(j);
+    }
+  }
 
   /** How an adopted job of this kind is run again (no-op without a shared store). */
   register(kind: string, rebuild: Rebuild) {
@@ -128,6 +169,10 @@ export class Jobs {
       abort: new AbortController(),
     };
     this.jobs.set(job.id, job);
+    if (!this.reaper && this.abandonable(kind, job.origin)) {
+      this.reaper = setInterval(() => this.reap(), Math.max(50, Math.min(5000, this.abandonMs / 4)));
+      this.reaper.unref();
+    }
     this.save(job);
     if (gate) {
       job.gated = true;
@@ -270,6 +315,7 @@ export class Jobs {
       const all = [...this.jobs.values()];
       for (const j of all) if (j.dirty && !live(j.state)) this.save(j);
       const mine = all.filter((j) => live(j.state));
+      for (const j of mine) this.seenOf(j); // (the view written below carries what other processes recorded)
       const lost = sh.store.beatAll(this.me, mine.map((j) => ({ id: j.id, view: JSON.stringify({ ...this.view(j), queue: undefined }) })), now);
       if (!lost) {
         // busy: skip the whole round (noted at most once a minute)
@@ -292,6 +338,13 @@ export class Jobs {
       for (const id of sh.store.canceled(this.me)) this.cancel(id);
       for (const r of sh.store.orphans(sh.scope, this.me, now - (sh.leaseMs ?? 30_000))) {
         if (this.jobs.has(r.id) || this.adopting.has(r.id)) continue;
+        const v = rowView(r);
+        const seen = Math.max(r.seen_at ?? 0, v.seenAt ?? 0);
+        if (this.abandonable(r.kind, v.origin) && seen > 0 && now - seen > this.abandonMs) {
+          // a CLI du whose client was last seen longer ago than the grace period: it gave up, so forget the job instead of walking for no one (unknown = adopt)
+          if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) sh.store.delete(r.id, sh.scope);
+          continue;
+        }
         if (r.params && sh.rebuild?.[r.kind]) {
           if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) void this.adopt(r);
         } else sh.store.failClaim(r, this.me, JSON.stringify(this.interrupted(r, now)), now);
@@ -312,7 +365,10 @@ export class Jobs {
     try {
       const params = JSON.parse(r.params!);
       const b = await sh.rebuild![r.kind]!(params);
-      this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: rowView(r).origin });
+      const v = rowView(r);
+      this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: v.origin });
+      // a client of the old owner may still be polling: it gets the grace period from now on, not from a seen time that was never recorded
+      this.jobs.get(r.id)!.seenAt = Math.max(r.seen_at ?? 0, v.seenAt ?? 0) || Date.now();
     } catch {
       const now = Date.now();
       sh.store.put({ ...r, view: JSON.stringify(this.interrupted(r, now)), state: "failed", owner: this.me, beat: now, finished_at: now });
