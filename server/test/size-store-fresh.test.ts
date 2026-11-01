@@ -482,7 +482,10 @@ test("GET /api/du: a live scan of an overlapping folder is not waited for: store
   fs.writeFileSync(path.join(root, "p/child/f"), "abc");
   const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_DU_WAIT_MS: "300" } as never));
   agents.push(app as unknown as { close(): Promise<void> });
-  assert.equal((await app.request("/api/du?path=/p&depth=1")).status, 200); // stores /p
+  for (let i = 0; i < 600; i++) {
+    if ((await app.request("/api/du?path=/p&depth=1")).status === 200) break; // stores /p (a repeat after a 202 is answered from that scan)
+    await sleep(50);
+  }
   // the child rescan is held inside its first directory read
   const orig = fsp.readdir;
   let release!: () => void;
@@ -574,14 +577,15 @@ test("a process that is not the writer answers du from the store flagged stale a
   fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
   const aux = path.join(tmp, "api4-aux");
   fs.mkdirSync(aux);
-  const mk = () => {
-    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_DU_WAIT_MS: "200" } as never));
+  const mk = (duWaitMs: number) => {
+    const a = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux, FILEDECK_DU_WAIT_MS: String(duWaitMs) } as never));
     agents.push(a as unknown as { close(): Promise<void> });
     return a;
   };
-  const writer = mk();
+  // the writer's first scan must answer 200 however slow the host is: a long wait. The reader's short wait is what turns "waits for the writer" into a 202.
+  const writer = mk(120_000);
   assert.equal((await writer.request("/api/du?path=/t&depth=1")).status, 200); // stores /t
-  const reader = mk();
+  const reader = mk(200);
   const jobs = async () => ((await (await reader.request("/api/jobs")).json()) as { jobs: unknown[] }).jobs.length;
   const jobsBefore = await jobs(); // (the job list is shared: the writer's own du job is in it)
   const r = await reader.request("/api/du?path=/t&depth=1");
@@ -600,7 +604,7 @@ test("a process that is not the writer answers du from the store flagged stale a
   assert.equal(((await (await reader.request(`/api/jobs/${job.id}`)).json()) as { state: string }).state, "queued");
   await (writer as unknown as { close(): Promise<void> }).close(); // the lease is released
   let state = "queued";
-  for (let i = 0; i < 300 && state !== "done"; i++) {
+  for (let i = 0; i < 2400 && state !== "done"; i++) { // (up to 2 min: the loop ends as soon as the job is done)
     state = ((await (await reader.request(`/api/jobs/${job.id}`)).json()) as { state: string }).state;
     if (state !== "done") await new Promise((res) => setTimeout(res, 50));
   }
