@@ -711,16 +711,22 @@ export class SizeStore {
         // only the lease holder repairs (the same single-writer rule as every write; for the current holder this returns its epoch)
         if (!Number((await this.post({ op: "acquire", owner: this.owner, leaseMs: this.leaseMs() }, false))?.[0]?.epoch ?? 0)) return;
         this.repairLease = true;
-        this.repaired = true;
         const r = (await this.post({ op: "repair" }, false))?.[0] as { rebuilt?: string; problem?: string } | undefined;
+        // the attempt counts only once the repair itself has answered: a fenced one (the lease lapsed during the long check) is tried again
+        this.repaired = true;
         if (r?.rebuilt) {
           done = true;
           console.error(`size store: rebuilt ${r.rebuilt.includes(",") ? "indexes" : "index"} ${r.rebuilt} from the table${r.rebuilt.includes(",") ? "s" : ""}`);
           this.retryAt = Date.now();
         } else if (r?.problem) console.error(`size store: not repaired, the file is kept as it is: ${r.problem}`);
       } catch (err) {
-        // the store stays unavailable and is retried as before (a fenced write means another process took the lease: nothing to say)
-        if (!this.isFenced(err) && !this.closed) console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
+        // the store stays unavailable and is retried as before
+        if (this.isFenced(err)) {
+          if (!this.closed) console.error("size store: repair not done, another process took the writer lease; it is tried again");
+        } else if (!this.closed) {
+          this.repaired = true;
+          console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
+        }
       } finally {
         if (!done && this.repairLease) {
           this.repairLease = false;

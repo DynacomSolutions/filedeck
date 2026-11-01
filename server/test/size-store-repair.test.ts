@@ -236,3 +236,44 @@ test("a corrupt file at open is never deleted: it is looked at by the writer and
   assert.ok(l2.some((l) => /not repaired, the file is kept/.test(l)), l2.join("\n"));
   assert.equal(page().compare(damaged), 0);
 });
+
+test("a repair fenced because the lease lapsed during the first check does not spend the one attempt: a later try repairs", async () => {
+  const file = await schemaFile();
+  const d = new DatabaseSync(file);
+  const root = (name: string) => Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = ?").get(name) as Any).r);
+  const [a, b] = [root("pending_due"), root("pending_idle_run")];
+  d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${b} WHERE name='pending_due'; UPDATE sqlite_master SET rootpage=${a} WHERE name='pending_idle_run'; PRAGMA writable_schema=OFF;`);
+  d.close();
+  const A = new SizeStore(file, { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 60_000 });
+  stores.push(A);
+  await A.mayScan();
+  // another process takes the lease just before the repair's write transaction (what a check longer than the lease lets happen)
+  const post = (A as Any).post.bind(A);
+  let steal = true;
+  (A as Any).post = async (m: Any, read: boolean) => {
+    if (m.op === "repair" && steal) {
+      steal = false;
+      const x = new DatabaseSync(file);
+      x.exec("UPDATE writer SET epoch = epoch + 1, owner = 'other', beat = " + Date.now() + ", released = 0 WHERE id = 1");
+      x.close();
+    }
+    return post(m, read);
+  };
+  const first = await capture(async () => {
+    (A as Any).giveUp(malformed());
+    await (A as Any).repairing;
+  });
+  assert.equal((A as Any).repaired, false, "a fenced repair is not counted");
+  assert.notDeepEqual(integrity(file), ["ok"]);
+  assert.ok(first.lines.some((l) => /repair not done/.test(l)), first.lines.join("\n"));
+  // the other process leaves; the next failure of the store repairs it
+  const x = new DatabaseSync(file);
+  x.exec("UPDATE writer SET released = 1 WHERE id = 1");
+  x.close();
+  const second = await capture(async () => {
+    (A as Any).giveUp(malformed());
+    await (A as Any).repairing;
+  });
+  assert.deepEqual(integrity(file), ["ok"], second.lines.join("\n"));
+  assert.equal((A as Any).repaired, true);
+});
