@@ -87,9 +87,9 @@ test("a client polling through another process keeps the owner's queued job aliv
   const shared = (store: JobStore) => ({ store, scope: "t", tickMs: 50, leaseMs: 30_000 });
   const A = new Jobs(2, 100, undefined, undefined, shared(new JobStore(file)));
   const B = new Jobs(2, 100, undefined, undefined, shared(new JobStore(file)));
-  A.abandonMs = B.abandonMs = 300;
+  A.abandonMs = B.abandonMs = 1500; // (a poll through another process is recorded at most once a second)
   const j = A.create("du", "t", async () => 1, undefined, never, { origin: "cli", params: { path: "/x", fresh: false } });
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 40; i++) {
     B.touch(j.id);
     await sleep(50);
   }
@@ -97,7 +97,7 @@ test("a client polling through another process keeps the owner's queued job aliv
   assert.equal(B.get(j.id)!.state, "queued");
   assert.ok(JSON.parse(new JobStore(file).get(j.id, "t")!.view).seenAt > 0, "the owner's heartbeat carries the time other processes recorded");
   // and once nobody polls, the owner forgets it
-  await sleep(700);
+  await sleep(1800);
   assert.equal(A.get(j.id), undefined);
   assert.equal(new JobStore(file).get(j.id, "t"), undefined);
 });
@@ -153,4 +153,29 @@ test("the du CLI whose job was forgotten while it was away asks for the scan aga
   assert.match(err.join(""), /job lost, asking for the scan again/);
   assert.match(out.join(""), /\/tree/);
   await a.close();
+});
+
+test("a poll through another process writes the shared store at most once a second per job", async () => {
+  const file = path.join(tmp, `rate${n++}.db`);
+  const shared = (store: JobStore) => ({ store, scope: "t", tickMs: 50, leaseMs: 30_000 });
+  const storeB = new JobStore(file);
+  const writes: string[] = [];
+  const seen = storeB.seen.bind(storeB);
+  storeB.seen = (id, scope, now) => (writes.push(id), seen(id, scope, now));
+  const A = new Jobs(2, 100, undefined, undefined, shared(new JobStore(file)));
+  const B = new Jobs(2, 100, undefined, undefined, shared(storeB));
+  A.abandonMs = B.abandonMs = 60_000;
+  const j1 = A.create("du", "t", async () => 1, undefined, never, { origin: "cli", params: { path: "/x", fresh: false } });
+  const j2 = A.create("du", "t", async () => 1, undefined, never, { origin: "cli", params: { path: "/y", fresh: false } });
+  const t0 = Date.now();
+  while (Date.now() - t0 < 1300) {
+    B.touch(j1.id);
+    B.touch(j2.id);
+    await sleep(20);
+  }
+  assert.ok(writes.filter((x) => x === j1.id).length >= 2 && writes.filter((x) => x === j1.id).length <= 3, writes.length + " writes for job 1");
+  assert.ok(writes.filter((x) => x === j2.id).length >= 2 && writes.filter((x) => x === j2.id).length <= 3, "per job id");
+  assert.ok(new JobStore(file).seenAt(j1.id, "t") > 0, "and the time is still recorded");
+  A.cancel(j1.id);
+  A.cancel(j2.id);
 });
