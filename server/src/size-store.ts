@@ -289,31 +289,35 @@ const inTx = (fn) => { begin(); try { fn(); db.exec("COMMIT"); } catch (e) { try
 const INDEX_ONLY = /^(?:wrong # of entries in index (\\S+)|row \\d+ missing from index (\\S+)|non-unique entry in index (\\S+)|row \\d+ values differ from index (\\S+))$/;
 const problems = () => db.prepare("PRAGMA integrity_check(200)").all().map((r) => String(r.integrity_check)).filter((x) => x !== "ok");
 const ident = (n) => '"' + n.replace(/"/g, '""') + '"';
-const repair = () => {
-  // the long read happens before the write lock is taken
+const isCorruptE = (e) => !!e && (e.errcode === 11 || e.errcode === 26 || /malformed|not a database/i.test(String(e.message)));
+// Runs on the READER worker, so the writer keeps beating while a long check runs. Only damage (SQLITE_CORRUPT, SQLITE_NOTADB) becomes a \`problem\`: any other error
+// (I/O, full disk, out of memory, interrupted, cannot open) is thrown, the file is kept and the check is tried again.
+const check = () => {
   let first;
-  try { first = problems(); } catch (e) { return { rebuilt: "", problem: "integrity_check failed: " + String(e && e.message || e) }; }
-  if (!first.length) return { rebuilt: "" };
+  try { first = problems(); } catch (e) { if (isCorruptE(e)) return { problem: "integrity_check failed: " + String(e && e.message || e) }; throw e; }
+  if (!first.length) return { names: [] };
   const names = new Set();
-  for (const p of first) { const m = INDEX_ONLY.exec(p); if (!m) return { rebuilt: "", problem: p }; names.add(m[1] || m[2] || m[3] || m[4]); }
+  for (const p of first) { const m = INDEX_ONLY.exec(p); if (!m) return { problem: p }; names.add(m[1] || m[2] || m[3] || m[4]); }
   for (const n of names) {
     const ix = db.prepare("SELECT tbl_name t, sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(n);
-    if (!ix || !ix.sql) return { rebuilt: "", problem: "unknown index " + n };
+    if (!ix || !ix.sql) return { problem: "unknown index " + n };
     const w = /\\sWHERE\\s([\\s\\S]+)$/i.exec(ix.sql);
     const where = w ? " WHERE " + w[1] : "";
     try {
       const viaIndex = Number(db.prepare("SELECT count(*) c FROM " + ident(ix.t) + " INDEXED BY " + ident(n) + where).get().c);
       const viaTable = Number(db.prepare("SELECT count(*) c FROM " + ident(ix.t) + " NOT INDEXED" + where).get().c);
-      if (viaIndex > viaTable) return { rebuilt: "", problem: "index " + n + " has more entries than its table" };
-    } catch (e) { return { rebuilt: "", problem: "index " + n + " cannot be read: " + String(e && e.message || e) }; }
+      if (viaIndex > viaTable) return { problem: "index " + n + " has more entries than its table" };
+    } catch (e) { if (isCorruptE(e)) return { problem: "index " + n + " cannot be read: " + String(e && e.message || e) }; throw e; }
   }
+  return { names: [...names] };
+};
+// Runs on the WRITER worker: only the rebuild itself, in one fenced write transaction.
+const repair = (names) => {
   begin();
   try {
     for (const n of names) db.exec("REINDEX " + ident(n));
-    const left = problems();
-    if (left.length) { db.exec("ROLLBACK"); return { rebuilt: "", problem: left[0] }; }
     db.exec("COMMIT");
-    return { rebuilt: [...names].join(", ") };
+    return { rebuilt: names.join(", ") };
   } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
 };
 const acquire = ({ owner, leaseMs }) => {
@@ -365,7 +369,8 @@ parentPort.on("message", (m) => {
         parentPort.postMessage({ id: m.id, rows: [{ epoch: fence ? fence.epoch : 0 }] });
         return;
       }
-      else if (m.op === "repair") { parentPort.postMessage({ id: m.id, rows: [repair()] }); return; }
+      else if (m.op === "check") { parentPort.postMessage({ id: m.id, rows: [check()] }); return; }
+      else if (m.op === "repair") { parentPort.postMessage({ id: m.id, rows: [repair(m.names)] }); return; }
       else if (m.op === "release") { if (fence) db.prepare("UPDATE writer SET released = 1 WHERE id = 1 AND epoch = ? AND owner = ?").run(fence.epoch, fence.owner); fence = null; }
       else if (m.op === "meta") { const r = db.prepare(m.sql).run(...m.params); parentPort.postMessage({ id: m.id, rows: [{ id: Number(r.lastInsertRowid), changes: Number(r.changes) }] }); return; }
       else if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
@@ -441,7 +446,7 @@ export class SizeStore {
     this.file = file;
     if (file === ":memory:") this.epoch = 1;
     // A file that cannot be opened is never deleted: a busy one is opened later through the writer thread, a corrupt one is checked for index-only damage by the
-    // lease holder (see repairIndexes) and otherwise left as it is, the store running uncached.
+    // lease holder (see repairIndexes) and otherwise kept as it is (see markDamaged), the store running uncached.
     try {
       this.open(file);
     } catch (e) {
@@ -682,6 +687,7 @@ export class SizeStore {
         this.startLease();
         this.warned = false;
         this.retryDelay = 30_000;
+        this.damaged = false;
         console.error("size store back");
       } catch {
         this.retryDelay = Math.min(this.retryDelay * 2, 600_000);
@@ -695,33 +701,60 @@ export class SizeStore {
   /**
    * A malformed database may be only its indexes (a crash left an index out of step with its table). The lease holder checks it (integrity_check): if that names
    * nothing but indexes, and none has more entries than its table, they are rebuilt from their tables inside one fenced write transaction and the store opens again
-   * at its next use. Anything else is left as it is: the file is never deleted. Tried again after an error until this process has been the holder once and checked.
+   * at its next use. Anything else is kept as it is (never moved or deleted; see markDamaged). Tried again after an error until this process has been the holder once and checked.
    */
   private repaired = false;
   private repairing?: Promise<void>;
   /** the worker holds the lease for a repair that has not been followed by a reopen (released at shutdown) */
   private repairLease = false;
+  /** The file is damaged and cannot be repaired here (not SQLite, or damage beyond its indexes): it is kept as it is and an operator must move it aside. */
+  private damaged = false;
   private repairIndexes(): Promise<void> {
     if (this.repaired || this.closed || this.leaving || this.file === ":memory:") return Promise.resolve();
     return (this.repairing ??= (async () => {
       let done = false;
+      let beat: NodeJS.Timeout | undefined;
       try {
         // the normal acquire-then-acquired() path runs at the reopen: nothing here is main-thread lease state
         this.loseLease();
         // only the lease holder repairs (the same single-writer rule as every write; for the current holder this returns its epoch)
         if (!Number((await this.post({ op: "acquire", owner: this.owner, leaseMs: this.leaseMs() }, false))?.[0]?.epoch ?? 0)) return;
         this.repairLease = true;
+        // the check reads on the reader worker for as long as it takes: the lease is kept alive from here (the store's own beat is not running while it is unusable)
+        beat = setInterval(() => void this.post({ op: "beat" }, false).catch(() => undefined), Math.max(20, Math.floor(this.leaseMs() / 3)));
+        const c = (await this.post({ op: "check" }, true))?.[0] as { names?: string[]; problem?: string } | undefined;
+        if (!c) return;
+        let r: { rebuilt?: string; problem?: string } = { rebuilt: "" };
+        if (c.problem) r = { problem: c.problem };
+        else if (c.names?.length) {
+          r = (await this.post({ op: "repair", names: c.names }, false))?.[0] as { rebuilt?: string };
+          // the rebuilt file must now be clean (a check on the reader, the writer is free again)
+          const again = (await this.post({ op: "check" }, true))?.[0] as { names?: string[]; problem?: string } | undefined;
+          if (again?.problem || again?.names?.length) r = { problem: again.problem ?? "still damaged after the rebuild: " + again.names!.join(", ") };
+        }
+        clearInterval(beat);
+        beat = undefined;
+        // the attempt counts only once the check and the repair have answered: a fenced one (the lease lapsed) is tried again
         this.repaired = true;
-        const r = (await this.post({ op: "repair" }, false))?.[0] as { rebuilt?: string; problem?: string } | undefined;
         if (r?.rebuilt) {
           done = true;
           console.error(`size store: rebuilt ${r.rebuilt.includes(",") ? "indexes" : "index"} ${r.rebuilt} from the table${r.rebuilt.includes(",") ? "s" : ""}`);
           this.retryAt = Date.now();
-        } else if (r?.problem) console.error(`size store: not repaired, the file is kept as it is: ${r.problem}`);
+        } else if (r?.problem) this.markDamaged(r.problem);
+        else this.retryAt = Date.now(); // (nothing wrong with the file now: the failure was a passing one)
       } catch (err) {
-        // the store stays unavailable and is retried as before (a fenced write means another process took the lease: nothing to say)
-        if (!this.isFenced(err) && !this.closed) console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
+        // the store stays unavailable and is retried as before
+        if (this.isFenced(err)) {
+          if (!this.closed) console.error("size store: repair not done, another process took the writer lease; it is tried again");
+        } else if (!this.closed) {
+          // damage the open itself reported (not SQLite) is final; anything else (I/O, memory, a full disk) keeps the file and the attempt
+          if (this.isNotDb(err)) {
+            this.repaired = true;
+            this.markDamaged((err as Error).message);
+          } else console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
+        }
       } finally {
+        if (beat) clearInterval(beat);
         if (!done && this.repairLease) {
           this.repairLease = false;
           await this.post({ op: "release" }, false).catch(() => undefined);
@@ -729,6 +762,21 @@ export class SizeStore {
         this.repairing = undefined;
       }
     })());
+  }
+
+  /** The file cannot be repaired. It is never moved, changed or deleted by the agent: it stays as it is, folder sizes are not cached (retried with backoff), and one clear line says what to do. */
+  private markDamaged(why: string) {
+    this.damaged = true;
+    console.error(`size store: ${this.file} is damaged and cannot be repaired (${why}). Folder sizes are not cached. Stop the agent, move the file and its -wal and -shm aside, then start it again.`);
+  }
+
+  /** For the metrics route: is the store answering from its file, and is its file damaged beyond repair. */
+  health(): { available: boolean; damaged: boolean } {
+    return { available: this.file === ":memory:" || !!this.db, damaged: this.damaged };
+  }
+  private isNotDb(e: unknown): boolean {
+    const x = e as { errcode?: number; message?: string } | null;
+    return !!x && (x.errcode === 26 || /not a database/i.test(String(x.message)));
   }
 
   private giveUp(e: unknown) {

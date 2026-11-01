@@ -116,9 +116,19 @@ export class Jobs {
   touch(id: string) {
     const now = Date.now();
     const j = this.jobs.get(id);
-    if (j) j.seenAt = now;
-    else this.shared?.store.seen(id, this.shared.scope, now);
+    if (j) {
+      j.seenAt = now;
+      return;
+    }
+    if (!this.shared) return;
+    // a waiting request polls every 20 ms: the shared database gets one write a second per job (the owner's grace period is far longer)
+    if (now - (this.sharedSeen.get(id) ?? 0) < 1000) return;
+    this.sharedSeen.set(id, now);
+    if (this.sharedSeen.size > 256) for (const [k, t] of this.sharedSeen) if (now - t >= 1000) this.sharedSeen.delete(k);
+    this.shared.store.seen(id, this.shared.scope, now);
   }
+  /** when each job of another process was last recorded in the shared store (see `touch`) */
+  private sharedSeen = new Map<string, number>();
 
   private abandonable(kind: string, origin: JobOrigin): boolean {
     return this.abandonMs > 0 && kind === "du" && origin === "cli";

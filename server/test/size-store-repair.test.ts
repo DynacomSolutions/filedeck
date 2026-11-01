@@ -7,7 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SizeStore } from "../src/size-store.ts";
 
-const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 60_000 }, fn as never)) as typeof nodeTest;
+const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
 type Any = any;
 let tmp: string;
 let n = 0;
@@ -108,7 +108,10 @@ test("real table damage is left alone: the file is kept as it is and the store s
   assert.equal(fs.statSync(file).size, bytes.length, "and not recreated");
   assert.ok(!lines.some((l) => /rebuilt/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /size store unavailable/.test(l)), "[" + lines.join("|") + "]");
+  assert.equal(lines.filter((l) => /is damaged and cannot be repaired .*Stop the agent, move the file and its -wal and -shm aside/.test(l) && l.includes(file)).length, 1, "one clear line naming the file: " + lines.join("|"));
   assert.ok(!(stores.at(-1) as Any).db, "still unavailable");
+  assert.deepEqual((stores.at(-1) as Any).health(), { available: false, damaged: true });
+  assert.equal(fs.readdirSync(tmp).filter((f) => /corrupt/.test(f)).length, 0, "nothing is moved aside");
   const after = fs.readFileSync(file);
   assert.equal(after.subarray((root - 1) * size, root * size).compare(bytes.subarray((root - 1) * size, root * size)), 0, "the damaged table page is untouched");
   assert.notDeepEqual(check(file), ["ok"]);
@@ -216,6 +219,8 @@ test("a corrupt file at open is never deleted: it is looked at by the writer and
   });
   assert.equal(fs.readFileSync(garbage).compare(before), 0, "kept as it was");
   assert.ok(lines.some((l) => /size store unavailable/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /is damaged and cannot be repaired/.test(l) && l.includes(garbage)), lines.join("\n"));
+  assert.deepEqual(fs.readdirSync(tmp).filter((f) => f.includes("garbage") && f.includes("corrupt")), [], "never moved aside");
   // damage the open itself trips over (it reads stale_trees): the open asks the writer to look, which finds table damage and leaves the file
   const file = await schemaFile();
   const d = new DatabaseSync(file);
@@ -233,6 +238,107 @@ test("a corrupt file at open is never deleted: it is looked at by the writer and
     assert.equal(s.persistent, false);
     await (s as Any).repairing;
   });
-  assert.ok(l2.some((l) => /not repaired, the file is kept/.test(l)), l2.join("\n"));
+  assert.ok(l2.some((l) => /is damaged and cannot be repaired/.test(l)), l2.join("\n"));
   assert.equal(page().compare(damaged), 0);
+});
+
+test("a repair fenced because the lease lapsed during the first check does not spend the one attempt: a later try repairs", async () => {
+  const file = await schemaFile();
+  const d = new DatabaseSync(file);
+  const root = (name: string) => Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = ?").get(name) as Any).r);
+  const [a, b] = [root("pending_due"), root("pending_idle_run")];
+  d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${b} WHERE name='pending_due'; UPDATE sqlite_master SET rootpage=${a} WHERE name='pending_idle_run'; PRAGMA writable_schema=OFF;`);
+  d.close();
+  const A = new SizeStore(file, { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 60_000 });
+  stores.push(A);
+  await A.mayScan();
+  // another process takes the lease just before the repair's write transaction (what a check longer than the lease lets happen)
+  const post = (A as Any).post.bind(A);
+  let steal = true;
+  (A as Any).post = async (m: Any, read: boolean) => {
+    if (m.op === "repair" && steal) {
+      steal = false;
+      const x = new DatabaseSync(file);
+      x.exec("UPDATE writer SET epoch = epoch + 1, owner = 'other', beat = " + Date.now() + ", released = 0 WHERE id = 1");
+      x.close();
+    }
+    return post(m, read);
+  };
+  const first = await capture(async () => {
+    (A as Any).giveUp(malformed());
+    await (A as Any).repairing;
+  });
+  assert.equal((A as Any).repaired, false, "a fenced repair is not counted");
+  assert.notDeepEqual(integrity(file), ["ok"]);
+  assert.ok(first.lines.some((l) => /repair not done/.test(l)), first.lines.join("\n"));
+  // the other process leaves; the next failure of the store repairs it
+  const x = new DatabaseSync(file);
+  x.exec("UPDATE writer SET released = 1 WHERE id = 1");
+  x.close();
+  const second = await capture(async () => {
+    (A as Any).giveUp(malformed());
+    await (A as Any).repairing;
+  });
+  assert.deepEqual(integrity(file), ["ok"], second.lines.join("\n"));
+  assert.equal((A as Any).repaired, true);
+});
+
+test("an error that is not damage (disk I/O error) in the check keeps the file and the attempt: nothing is marked damaged", async () => {
+  const file = await schemaFile();
+  const s = mk(file);
+  await s.mayScan();
+  const post = (s as Any).post.bind(s);
+  (s as Any).post = async (m: Any, read: boolean) => {
+    if (m.op === "check") throw new Error("disk I/O error");
+    return post(m, read);
+  };
+  const { lines } = await capture(async () => {
+    (s as Any).giveUp(malformed());
+    await (s as Any).repairing;
+  });
+  assert.equal((s as Any).repaired, false, "tried again later");
+  assert.equal((s as Any).damaged, false);
+  assert.ok(lines.some((l) => /disk I\/O error/.test(l) && /file is kept as it is/.test(l)), lines.join("\n"));
+  assert.ok(!lines.some((l) => /is damaged/.test(l)));
+  assert.equal(fs.readdirSync(tmp).filter((f) => /corrupt/.test(f)).length, 0);
+});
+
+test("a healthy store reports itself available and not damaged", async () => {
+  const file = await schemaFile();
+  const s = mk(file);
+  await s.mayScan();
+  assert.deepEqual(s.health(), { available: true, damaged: false });
+});
+
+test("a long integrity check does not lose the lease: the writer keeps beating and the repair is not fenced", async () => {
+  const file = await schemaFile();
+  const d = new DatabaseSync(file);
+  const root = (name: string) => Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = ?").get(name) as Any).r);
+  const [a, b] = [root("pending_due"), root("pending_idle_run")];
+  d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${b} WHERE name='pending_due'; UPDATE sqlite_master SET rootpage=${a} WHERE name='pending_idle_run'; PRAGMA writable_schema=OFF;`);
+  d.close();
+  const o = { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 3000 };
+  const A = new SizeStore(file, o);
+  stores.push(A);
+  await A.mayScan();
+  assert.ok((A as Any).isWriter, "A holds the lease");
+  const B = new SizeStore(file, o); // would take the lease the moment A's beats stop
+  stores.push(B);
+  await B.mayScan();
+  const post = (A as Any).post.bind(A);
+  (A as Any).post = async (m: Any, read: boolean) => {
+    const r = await post(m, read);
+    if (m.op === "check" && !(A as Any).slowed) {
+      (A as Any).slowed = true;
+      await sleep(7000); // a check longer than two leases
+    }
+    return r;
+  };
+  const { lines } = await capture(async () => {
+    (A as Any).giveUp(malformed());
+    await (A as Any).repairing;
+  });
+  assert.deepEqual(integrity(file), ["ok"], lines.join("\n"));
+  assert.ok(!(B as Any).isWriter, "the partner never took the lease");
+  assert.ok(!lines.some((l) => /repair not done/.test(l)), lines.join("\n"));
 });

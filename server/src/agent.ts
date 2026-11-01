@@ -259,6 +259,23 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const jobs = registerArchiveRoutes(app, cfg);
   registerPdfRoutes(app, cfg);
   const sizes = registerPropsRoutes(app, cfg, jobs);
+  // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only these two 0/1 gauges may ever be served here): 1 when it answers from its file, and whether its file is damaged beyond repair (an operator must move it aside)
+  app.get("/metrics", (c) => {
+    const h = sizes.health();
+    return c.text(
+      [
+        "# HELP filedeck_size_store_available 1 when the folder-size store answers from its file, 0 when sizes are not cached",
+        "# TYPE filedeck_size_store_available gauge",
+        `filedeck_size_store_available ${h.available ? 1 : 0}`,
+        "# HELP filedeck_size_store_damaged 1 when the store file is damaged and cannot be repaired by the agent",
+        "# TYPE filedeck_size_store_damaged gauge",
+        `filedeck_size_store_damaged ${h.damaged ? 1 : 0}`,
+        "",
+      ].join("\n"),
+      200,
+      { "content-type": "text/plain; version=0.0.4" },
+    );
+  });
   registerGitRoutes(app, cfg);
   const index = registerDiffRoutes(app, cfg);
   registerGitDiffRoutes(app, cfg);

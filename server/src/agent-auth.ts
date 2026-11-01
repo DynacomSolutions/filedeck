@@ -5,7 +5,8 @@ import type { MiddlewareHandler } from "hono";
  * Optional shared secret between the hub and the agents (FILEDECK_AGENT_TOKEN
  * on both). When set, an agent answers 401 to every request that does not
  * carry `Authorization: Bearer <token>`, except the unauthenticated liveness
- * probe `/healthz`. It sits behind the NetworkPolicy as a second layer: a pod
+ * probe `/healthz` and `/metrics`. `/metrics` is scraped by pod IP without credentials and exposes only the two 0/1 size-store gauges (keep it that way:
+ * nothing that names a path, a node or a size may be added to it). It sits behind the NetworkPolicy as a second layer: a pod
  * that is allowed to reach an agent still cannot use it without the secret.
  */
 const digest = (s: string) => createHash("sha256").update(s).digest();
@@ -14,7 +15,7 @@ export function agentAuth(token: string | undefined): MiddlewareHandler {
   if (!token) return (_c, next) => next();
   const want = digest(token);
   return async (c, next) => {
-    if (c.req.path === "/healthz") return next();
+    if (c.req.path === "/healthz" || c.req.path === "/metrics") return next();
     const m = /^Bearer (.+)$/.exec(c.req.header("authorization") ?? "");
     if (!m || !timingSafeEqual(digest(m[1] as string), want)) return c.json({ error: "unauthorized" }, 401);
     return next();

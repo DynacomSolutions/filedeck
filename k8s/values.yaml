@@ -14,6 +14,14 @@ image:
 
 port: 8080
 
+# Prometheus-style scraping of the agents' GET /metrics (pod IP and port, no credentials). Agent pods carry
+# app.kubernetes.io/name=<chart name> and app.kubernetes.io/component=agent, and the container port is named http.
+metrics:
+  scrapeFrom:
+    # Namespace labels of the scraper, for example {matchLabels: {kubernetes.io/metadata.name: <namespace>}}.
+    # Empty (default) adds no ingress rule.
+    namespaceSelector: {}
+
 # Optional shared secret between the hub and the agents, on top of the NetworkPolicy. When `secretName` is set, an
 # existing Secret in the release namespace (created out of band, never in Git) is mounted as FILEDECK_AGENT_TOKEN
 # into the hub and every agent; agents then answer 401 to anything without it (except /healthz). Create it with a long
