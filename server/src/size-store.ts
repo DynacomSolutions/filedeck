@@ -933,13 +933,7 @@ export class SizeStore {
           if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
         }
       }
-      // a new store in its place before the mutex is let go (a process that was waiting for it finds a SQLite file, not the gap)
-      const fresh = openDb(this.file);
-      try {
-        fresh?.exec(SCHEMA);
-      } finally {
-        fresh?.close();
-      }
+      // (the new store is made by whoever opens the path next, under the same mutex: the workers create the tables of an empty file)
       moved = base;
     });
     if (moved) {
