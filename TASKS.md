@@ -128,7 +128,7 @@ ETA: 2026-10-31 17:00 ICT
 | 77 | After clicking a column header (sort and similar), keyboard navigation focuses the file list again | done | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/138<br>CI green; web tests 105/105; checked in headless Chromium with mocked data. |
 
 ## 11. Background size jobs
-ETA: 2026-11-01 21:00 ICT
+ETA: 2026-11-01 23:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 78 | Find why size jobs for .worktrees and DynacomSolutions keep running | done | claude-20261031-size-jobs | | | 2026-10-31 16:00 ICT | Watcher overflow marks whole watched trees stale, so du rescans 5M+ files.<br>Size commits take up to 3 h.<br>Every /api/du call is a visible job, queued behind overlapping scans. |
@@ -150,8 +150,8 @@ ETA: 2026-11-01 21:00 ICT
 | 98 | Unreadable size store needs an operator, says so clearly | done | claude-20261101-size-followups-2 | size-followups-2 | 11.95 | 2026-11-01 16:30 ICT | Owner decision: no automatic move-aside (3 reviews found multi-process races)<br>Store stays uncached with a clear log line and metric; operator moves it aside with the agent stopped<br>Damaged store moved aside by hand at 15:00 ICT 1 Nov, cache back<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
 | 99 | Throttle foreign job touches | done | claude-20261101-size-followups-2 | size-followups-2 | 11.94 | 2026-11-01 16:30 ICT | touch writes seen_at to the shared jobs DB every 20 ms<br>Limit to about 1 per second per id<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
 | 100 | Release v0.3.35 | done | claude-20261101-release-v0335 | release-v0335 | 11.97, 11.98, 11.99 | | Ships 11.97 to 11.99 and the /metrics gauges<br>v0.3.34 build failed: multi-line damaged-store log, fixed in https://github.com/DynacomSolutions/filedeck/pull/166<br>Live 17:11 ICT; gauges in VictoriaMetrics, all 4 agents available 1, damaged 0 |
-| 101 | 300k-children tree test is flaky under load | in_progress | claude-20261101-flakes | flake-300k-tree | | 2026-11-01 21:00 ICT | `tree of a folder with 300k children is cut at the budget and the read worker survives` failed once in CI on PR 166, passed on re-run<br>Also failed once locally under load on 31 Oct |
-| 102 | Make size-store and watcher tests pass under heavy host load | todo | | | | | Failed only at load average over 100: 100k-folder fanwatch test, C2 lease carry, index-swap and lost-rows repair tests<br>Pass in CI and alone |
+| 101 | 300k-children tree test is flaky under load | in_review | claude-20261101-flakes | flake-300k-tree | | 2026-11-01 20:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/173<br>Cause: slow-read timing note logged under load; assertion ignores only that format<br>20 of 20 under load |
+| 102 | Make size-store and watcher tests pass under heavy host load | in_progress | claude-20261101-flakes | flake-load-tests | | 2026-11-01 23:00 ICT | Load-only failures: 100k fanwatch, C2 lease carry, repair index-swap and lost-rows, handover cancelled, fresh non-writer du<br>Pass in CI and alone |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
