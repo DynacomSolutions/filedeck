@@ -128,7 +128,7 @@ ETA: 2026-10-31 17:00 ICT
 | 77 | After clicking a column header (sort and similar), keyboard navigation focuses the file list again | done | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/138<br>CI green; web tests 105/105; checked in headless Chromium with mocked data. |
 
 ## 11. Background size jobs
-ETA: 2026-11-01 13:00 ICT
+ETA: 2026-11-01 21:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 78 | Find why size jobs for .worktrees and DynacomSolutions keep running | done | claude-20261031-size-jobs | | | 2026-10-31 16:00 ICT | Watcher overflow marks whole watched trees stale, so du rescans 5M+ files.<br>Size commits take up to 3 h.<br>Every /api/du call is a visible job, queued behind overlapping scans. |
@@ -142,7 +142,7 @@ ETA: 2026-11-01 13:00 ICT
 | 86 | Release v0.3.30 so 10.76, 10.77, 11.80 and 11.83 deploy | done | claude-20261031-release-v0330 | release-v0330 | 10.76, 10.77, 11.80, 11.83 | 2026-10-31 18:30 ICT | Released 31 Oct (#145); hub and all agents on 0.3.30, 0 restarts |
 | 91 | Size store has one writer at a time, with lease and fencing; a waiting process serves reads | done | claude-20261031-size-store | size-store-fresh | 11.78 | 2026-11-01 07:30 ICT | Owner decision 31 Oct<br>Merged https://github.com/DynacomSolutions/filedeck/pull/156 |
 | 92 | Watcher sessions hand over on rolling deploys, so a restart does not rescan | done | claude-20261031-size-store | size-store-fresh | 11.91 | 2026-11-01 07:30 ICT | Merged https://github.com/DynacomSolutions/filedeck/pull/156 |
-| 93 | SFTP host-key test is flaky under load | todo | | | | | `sftp: without a pin a changed host key is refused and named` (server/test/sftp-hostkey.test.ts) failed 2 times in about 20 full runs<br>likely restarting the fake SFTP server on the same port after 200 ms. |
+| 93 | SFTP host-key test is flaky under load | in_progress | claude-20261101-flakes | flake-sftp-hostkey | | 2026-11-01 21:00 ICT | `sftp: without a pin a changed host key is refused and named` (server/test/sftp-hostkey.test.ts) failed 2 times in about 20 full runs<br>likely restarting the fake SFTP server on the same port after 200 ms. |
 | 94 | Abandoned CLI du jobs are dropped, not kept queued or adopted after a restart | done | claude-20261101-size-followups | size-followups | 11.84 | 2026-11-01 17:00 ICT | 14 CLI du jobs from 31 Oct were still queued and were adopted by the new release<br>Their clients gave up after the 600 s CLI timeout<br>Merged https://github.com/DynacomSolutions/filedeck/pull/159 |
 | 95 | Size store with corrupt indexes rebuilds them instead of running with no cache | done | claude-20261101-size-followups | size-followups | 11.84 | 2026-11-01 17:00 ICT | One agent store fails quick_check: wrong entry count in indexes pending_due and pending_idle_run<br>Since 11.91 the store is kept, but that agent runs with no size cache<br>Merged https://github.com/DynacomSolutions/filedeck/pull/159 |
 | 96 | Release v0.3.33 | done | claude-20261101-release-v0333 | release-v0333 | 11.94, 11.95 | 2026-11-01 13:30 ICT | Released v0.3.33 (https://github.com/DynacomSolutions/filedeck/pull/160)<br>Hub and all agents on 0.3.33 by 13:30 ICT<br>Abandoned 31 Oct du jobs dropped<br>One agent store has table damage, so repair refused; needs 11.98 |
@@ -150,7 +150,7 @@ ETA: 2026-11-01 13:00 ICT
 | 98 | Unreadable size store needs an operator, says so clearly | done | claude-20261101-size-followups-2 | size-followups-2 | 11.95 | 2026-11-01 16:30 ICT | Owner decision: no automatic move-aside (3 reviews found multi-process races)<br>Store stays uncached with a clear log line and metric; operator moves it aside with the agent stopped<br>Damaged store moved aside by hand at 15:00 ICT 1 Nov, cache back<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
 | 99 | Throttle foreign job touches | done | claude-20261101-size-followups-2 | size-followups-2 | 11.94 | 2026-11-01 16:30 ICT | touch writes seen_at to the shared jobs DB every 20 ms<br>Limit to about 1 per second per id<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
 | 100 | Release v0.3.35 | done | claude-20261101-release-v0335 | release-v0335 | 11.97, 11.98, 11.99 | | Ships 11.97 to 11.99 and the /metrics gauges<br>v0.3.34 build failed: multi-line damaged-store log, fixed in https://github.com/DynacomSolutions/filedeck/pull/166<br>Live 17:11 ICT; gauges in VictoriaMetrics, all 4 agents available 1, damaged 0 |
-| 101 | 300k-children tree test is flaky under load | todo | | | | | `tree of a folder with 300k children is cut at the budget and the read worker survives` failed once in CI on PR 166, passed on re-run<br>Also failed once locally under load on 31 Oct |
+| 101 | 300k-children tree test is flaky under load | in_progress | claude-20261101-flakes | flake-300k-tree | | 2026-11-01 21:00 ICT | `tree of a folder with 300k children is cut at the budget and the read worker survives` failed once in CI on PR 166, passed on re-run<br>Also failed once locally under load on 31 Oct |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
