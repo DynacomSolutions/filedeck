@@ -89,20 +89,20 @@ test("fanwatch: events of one folder coalesce, other folders stay separate, path
 });
 
 test("fanwatch: ongoing modify re-reads a folder at most every modifyMs", async () => {
-  const s = setup();
+  // a long interval: a loaded host that stretches the sleeps below by seconds must not reach the end of it
+  const s = setup({ modifyMs: 5000 });
   await s.w.start();
   s.w.line(`m ${s.root}/data/a`);
-  await sleep(100);
-  assert.equal(s.calls.length, 1);
+  await until(() => s.calls.length === 1);
   for (let i = 0; i < 5; i++) {
     s.w.line(`m ${s.root}/data/a`);
     await sleep(30);
   }
   assert.equal(s.calls.length, 1, "held back inside the interval");
-  await sleep(300);
+  await until(() => s.calls.length === 2);
   assert.equal(s.calls.length, 2);
   s.w.line(`w ${s.root}/data/a`); // a finished write is not held back by the modify interval
-  await sleep(100);
+  await until(() => s.calls.length === 3);
   assert.equal(s.calls.length, 3);
   s.w.stop();
   s.done();
@@ -333,6 +333,14 @@ const opts = { helper: "x", root: "/", procMounts: "/proc/mounts", settleMs: 5, 
 const until = async (f: () => boolean, ms = 20_000) => {
   for (const t0 = Date.now(); !f() && Date.now() - t0 < ms; ) await sleep(20);
 };
+/** Wait until `n()` reaches `target`. The deadline is for a stall, not for the whole run: it restarts whenever `n()` has grown, so a loaded host that is slow but moving does not fail. */
+const untilCount = async (n: () => number, target: number, stallMs = 20_000) => {
+  let best = -1;
+  for (let t0 = Date.now(); n() < target && Date.now() - t0 < stallMs; ) {
+    if (n() > best) [best, t0] = [n(), Date.now()];
+    await sleep(20);
+  }
+};
 
 test("fanwatch + SizeStore file: many events of one folder become one row, applied once", async () => {
   const f = fileStore();
@@ -358,7 +366,7 @@ test("fanwatch + SizeStore file: 100k distinct folders keep the heap structures 
   }
   assert.ok(maxBuf <= 2000, `buffer reached ${maxBuf}`);
   assert.ok(priv.timer, "one shared timer");
-  await until(() => f.calls.length >= 100_000);
+  await untilCount(() => f.calls.length, 100_000); // (throughput, not latency, is what a loaded host changes)
   assert.equal(f.calls.length, 100_000);
   assert.equal(new Set(f.calls).size, 100_000);
   assert.equal(priv.mem.size, 0);
@@ -480,8 +488,9 @@ test("fanwatch + SizeStore file: a backlog older than 10 x modifyMs becomes an o
 
 test("fanwatch + SizeStore file: a due time far in the future (the clock stepped back) still drains", async () => {
   const f = fileStore();
-  await f.st.notePending([{ path: "/r", dueAt: Date.now() - 1000, modify: false }], 300);
-  assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
+  const now = Date.now(); // (taken once: a slow write must not age the row past takeDue's "too far behind" limit)
+  await f.st.notePending([{ path: "/r", dueAt: now - 1000, modify: false }], 300);
+  assert.deepEqual(await f.st.takeDue(now, 10, { modifyMs: 300, settleMs: 5 }), ["/r"]);
   await f.st.notePending([{ path: "/future", dueAt: Date.now() + 3_600_000, modify: false }], 300);
   assert.deepEqual(await f.st.takeDue(Date.now(), 10, { modifyMs: 300, settleMs: 5 }), ["/future"]);
   f.done();

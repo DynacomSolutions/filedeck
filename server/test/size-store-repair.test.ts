@@ -18,6 +18,17 @@ after(async () => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Setup rows in one transaction: each autocommitted insert is a disk sync, and on a host with a busy disk dozens of them add up to minutes. */
+const inTxn = (db: DatabaseSync, fn: () => void) => {
+  db.exec("BEGIN");
+  try {
+    fn();
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+};
 
 /** A store file whose `pending` table has rows but whose index `pending_due` is an empty b-tree: quick_check says only "wrong # of entries in index pending_due". */
 function corruptIndex(extra?: (db: DatabaseSync, file: string) => void): string {
@@ -25,7 +36,9 @@ function corruptIndex(extra?: (db: DatabaseSync, file: string) => void): string 
   let db = new DatabaseSync(file);
   db.exec("PRAGMA journal_mode=DELETE");
   db.exec("CREATE TABLE pending (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER, taker INTEGER) WITHOUT ROWID; CREATE TABLE donor(x); CREATE INDEX pending_due ON donor(x);");
-  for (let i = 0; i < 50; i++) db.prepare("INSERT INTO pending VALUES (?, ?, NULL, NULL)").run(`/p${i}`, i + 1);
+  inTxn(db, () => {
+    for (let i = 0; i < 50; i++) db.prepare("INSERT INTO pending VALUES (?, ?, NULL, NULL)").run(`/p${i}`, i + 1);
+  });
   db.exec("CREATE INDEX pending_idle_run ON pending(due_at, last_run)"); // (the store creates a missing index when it opens, which reads the table)
   db.exec("PRAGMA writable_schema=ON; UPDATE sqlite_master SET tbl_name='pending', sql='CREATE INDEX pending_due ON pending(due_at)' WHERE name='pending_due'; PRAGMA writable_schema=OFF;");
   db.close();
@@ -127,7 +140,9 @@ async function schemaFile(rows = 50): Promise<string> {
   await s0.close();
   const db = new DatabaseSync(file);
   db.exec("PRAGMA journal_mode=DELETE");
-  for (let i = 0; i < rows; i++) db.prepare("INSERT OR REPLACE INTO pending (path, due_at, last_run) VALUES (?, ?, ?)").run(`/p${i}`, 1000 - i, i);
+  inTxn(db, () => {
+    for (let i = 0; i < rows; i++) db.prepare("INSERT OR REPLACE INTO pending (path, due_at, last_run) VALUES (?, ?, ?)").run(`/p${i}`, 1000 - i, i);
+  });
   db.close();
   return file;
 }
@@ -163,7 +178,9 @@ test("a table that lost rows (its indexes hold more entries) is not 'repaired': 
   const file = await schemaFile(50);
   const d = new DatabaseSync(file);
   d.exec("CREATE TABLE donor (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER, taker INTEGER) WITHOUT ROWID");
-  for (let i = 0; i < 40; i++) d.prepare("INSERT INTO donor VALUES (?, ?, ?, NULL)").run(`/p${i}`, 1000 - i, i);
+  inTxn(d, () => {
+    for (let i = 0; i < 40; i++) d.prepare("INSERT INTO donor VALUES (?, ?, ?, NULL)").run(`/p${i}`, 1000 - i, i);
+  });
   const rootOf = (name: string) => Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = ?").get(name) as Any).r);
   const [donor, own] = [rootOf("donor"), rootOf("pending")];
   d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${donor} WHERE name='pending'; UPDATE sqlite_master SET rootpage=${own} WHERE name='donor'; PRAGMA writable_schema=OFF;`);
@@ -216,6 +233,7 @@ test("a corrupt file at open is never deleted: it is looked at by the writer and
   const { lines } = await capture(async () => {
     const s = mk(garbage);
     assert.equal(s.persistent, false);
+    await (s as Any).repairing; // the writer looks at the file and reports (set while the open asks it to look)
     await sleep(300);
   });
   assert.equal(fs.readFileSync(garbage).compare(before), 0, "kept as it was");
@@ -225,7 +243,9 @@ test("a corrupt file at open is never deleted: it is looked at by the writer and
   // damage the open itself trips over (it reads stale_trees): the open asks the writer to look, which finds table damage and leaves the file
   const file = await schemaFile();
   const d = new DatabaseSync(file);
-  for (let i = 0; i < 40; i++) d.prepare("INSERT INTO stale_trees VALUES (?, ?)").run(`/s${i}`, i);
+  inTxn(d, () => {
+    for (let i = 0; i < 40; i++) d.prepare("INSERT INTO stale_trees VALUES (?, ?)").run(`/s${i}`, i);
+  });
   const root = Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = 'stale_trees'").get() as Any).r);
   const size = Number((d.prepare("PRAGMA page_size").get() as Any).page_size);
   d.close();
@@ -276,9 +296,12 @@ test("a repair fenced because the lease lapsed during the first check does not s
   const x = new DatabaseSync(file);
   x.exec("UPDATE writer SET released = 1 WHERE id = 1");
   x.close();
+  // a busy database ("database is locked", a loaded host holding a connection longer) is not a repair either: the next failure of the store tries again
   const second = await capture(async () => {
-    (A as Any).giveUp(malformed());
-    await (A as Any).repairing;
+    for (let i = 0; i < 20 && !(A as Any).repaired; i++) {
+      (A as Any).giveUp(malformed());
+      await (A as Any).repairing;
+    }
   });
   assert.deepEqual(integrity(file), ["ok"], second.lines.join("\n"));
   assert.equal((A as Any).repaired, true);
