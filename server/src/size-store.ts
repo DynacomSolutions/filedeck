@@ -767,7 +767,10 @@ export class SizeStore {
   /** The file cannot be repaired. It is never moved, changed or deleted by the agent: it stays as it is, folder sizes are not cached (retried with backoff), and one clear line says what to do. */
   private markDamaged(why: string) {
     this.damaged = true;
-    console.error(`size store: ${this.file} is damaged and cannot be repaired (${why}). Folder sizes are not cached. Stop the agent, move the file and its -wal and -shm aside, then start it again.`);
+    // integrity_check reports one problem per line: keep the log to one line and its first few problems, so the instruction is never buried
+    const parts = why.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const brief = parts.slice(0, 3).join("; ") + (parts.length > 3 ? `; and ${parts.length - 3} more` : "");
+    console.error(`size store: ${this.file} is damaged and cannot be repaired (${brief}). Folder sizes are not cached. Stop the agent, move the file and its -wal and -shm aside, then start it again.`);
   }
 
   /** For the metrics route: is the store answering from its file, and is its file damaged beyond repair. */

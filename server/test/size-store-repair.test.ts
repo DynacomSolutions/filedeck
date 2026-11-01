@@ -109,6 +109,7 @@ test("real table damage is left alone: the file is kept as it is and the store s
   assert.ok(!lines.some((l) => /rebuilt/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /size store unavailable/.test(l)), "[" + lines.join("|") + "]");
   assert.equal(lines.filter((l) => /is damaged and cannot be repaired .*Stop the agent, move the file and its -wal and -shm aside/.test(l) && l.includes(file)).length, 1, "one clear line naming the file: " + lines.join("|"));
+  assert.ok(lines.filter((l) => /cannot be repaired/.test(l)).every((l) => !l.includes("\n")), "the damaged line is one line");
   assert.ok(!(stores.at(-1) as Any).db, "still unavailable");
   assert.deepEqual((stores.at(-1) as Any).health(), { available: false, damaged: true });
   assert.equal(fs.readdirSync(tmp).filter((f) => /corrupt/.test(f)).length, 0, "nothing is moved aside");
@@ -341,4 +342,17 @@ test("a long integrity check does not lose the lease: the writer keeps beating a
   assert.deepEqual(integrity(file), ["ok"], lines.join("\n"));
   assert.ok(!(B as Any).isWriter, "the partner never took the lease");
   assert.ok(!lines.some((l) => /repair not done/.test(l)), lines.join("\n"));
+});
+
+test("the damaged-store line is one line even when the check reports many problems", async () => {
+  const file = path.join(tmp, "oneline.db");
+  const s = mk(file);
+  const why = ["*** in database main ***", "On tree page 2 cell 49: Extends off end of page", "On tree page 2 cell 48: Extends off end of page", "On tree page 2 cell 47: Extends off end of page", "On tree page 2 cell 46: Extends off end of page"].join("\n");
+  const { lines } = await capture(async () => {
+    (s as Any).markDamaged(why);
+  });
+  const hit = lines.filter((l) => /cannot be repaired/.test(l));
+  assert.equal(hit.length, 1, lines.join("|"));
+  assert.ok(!hit[0]!.includes("\n"), hit[0]);
+  assert.match(hit[0]!, /cell 48: Extends off end of page; and 2 more\)\. Folder sizes are not cached\. Stop the agent, move the file and its -wal and -shm aside/);
 });
