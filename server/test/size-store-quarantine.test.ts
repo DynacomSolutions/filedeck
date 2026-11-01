@@ -102,9 +102,12 @@ test("two processes starting on a file that is not SQLite: one moves it, nobody 
       const A = mk(f);
       const B = mk(f);
       for (let i = 0; i < 100 && !aside(f).length; i++) await sleep(50);
-      await sleep(400);
-      await A.tree("/", 1, false).catch(() => undefined);
-      await B.tree("/", 1, false).catch(() => undefined);
+      // (a store that met the mutex busy at its start tries again within a second)
+      for (let i = 0; i < 100 && ![A, B].every((x) => (x as Any).db && (x as Any).retryAt <= Date.now()); i++) {
+        await A.tree("/", 1, false).catch(() => undefined);
+        await B.tree("/", 1, false).catch(() => undefined);
+        await sleep(100);
+      }
       await sleep(300);
       return [A, B];
     });
