@@ -149,7 +149,7 @@ ETA: 2026-11-01 13:00 ICT
 | 97 | Repair attempt lost when lease lapses | done | claude-20261101-size-followups-2 | size-followups-2 | 11.95 | 2026-11-01 16:30 ICT | The repaired flag is set before the repair op returns<br>A fenced repair is never retried<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
 | 98 | Unreadable size store needs an operator, says so clearly | done | claude-20261101-size-followups-2 | size-followups-2 | 11.95 | 2026-11-01 16:30 ICT | Owner decision: no automatic move-aside (3 reviews found multi-process races)<br>Store stays uncached with a clear log line and metric; operator moves it aside with the agent stopped<br>Damaged store moved aside by hand at 15:00 ICT 1 Nov, cache back<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
 | 99 | Throttle foreign job touches | done | claude-20261101-size-followups-2 | size-followups-2 | 11.94 | 2026-11-01 16:30 ICT | touch writes seen_at to the shared jobs DB every 20 ms<br>Limit to about 1 per second per id<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
-| 100 | Release v0.3.34 | in_progress | claude-20261101-release-v0334 | release-v0334 | 11.97, 11.98, 11.99 | 2026-11-01 17:30 ICT | Ships 11.97 to 11.99 and the /metrics gauges |
+| 100 | Release v0.3.34 | in_progress | claude-20261101-release-v0334 | release-v0334 | 11.97, 11.98, 11.99 | 2026-11-01 18:30 ICT | Ships 11.97 to 11.99 and the /metrics gauges |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
