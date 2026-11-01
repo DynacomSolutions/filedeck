@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { rmSync, type Dir, type Stats } from "node:fs";
+import { existsSync, renameSync, rmSync, type Dir, type Stats } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
@@ -292,7 +292,7 @@ const ident = (n) => '"' + n.replace(/"/g, '""') + '"';
 const repair = () => {
   // the long read happens before the write lock is taken
   let first;
-  try { first = problems(); } catch (e) { return { rebuilt: "", problem: "integrity_check failed: " + String(e && e.message || e) }; }
+  try { first = problems(); } catch (e) { if (isBusy(e)) throw e; return { rebuilt: "", problem: "integrity_check failed: " + String(e && e.message || e) }; }
   if (!first.length) return { rebuilt: "" };
   const names = new Set();
   for (const p of first) { const m = INDEX_ONLY.exec(p); if (!m) return { rebuilt: "", problem: p }; names.add(m[1] || m[2] || m[3] || m[4]); }
@@ -441,7 +441,7 @@ export class SizeStore {
     this.file = file;
     if (file === ":memory:") this.epoch = 1;
     // A file that cannot be opened is never deleted: a busy one is opened later through the writer thread, a corrupt one is checked for index-only damage by the
-    // lease holder (see repairIndexes) and otherwise left as it is, the store running uncached.
+    // lease holder (see repairIndexes) and otherwise moved aside (see quarantine), the store running uncached until a new file is made.
     try {
       this.open(file);
     } catch (e) {
@@ -695,7 +695,7 @@ export class SizeStore {
   /**
    * A malformed database may be only its indexes (a crash left an index out of step with its table). The lease holder checks it (integrity_check): if that names
    * nothing but indexes, and none has more entries than its table, they are rebuilt from their tables inside one fenced write transaction and the store opens again
-   * at its next use. Anything else is left as it is: the file is never deleted. Tried again after an error until this process has been the holder once and checked.
+   * at its next use. Anything else is moved aside unchanged (never deleted) and a new store is started. Tried again after an error until this process has been the holder once and checked.
    */
   private repaired = false;
   private repairing?: Promise<void>;
@@ -718,14 +718,18 @@ export class SizeStore {
           done = true;
           console.error(`size store: rebuilt ${r.rebuilt.includes(",") ? "indexes" : "index"} ${r.rebuilt} from the table${r.rebuilt.includes(",") ? "s" : ""}`);
           this.retryAt = Date.now();
-        } else if (r?.problem) console.error(`size store: not repaired, the file is kept as it is: ${r.problem}`);
+        } else if (r?.problem) {
+          console.error(`size store: not repaired: ${r.problem}`);
+          await this.quarantine();
+        }
       } catch (err) {
         // the store stays unavailable and is retried as before
         if (this.isFenced(err)) {
           if (!this.closed) console.error("size store: repair not done, another process took the writer lease; it is tried again");
         } else if (!this.closed) {
-          this.repaired = true;
-          console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
+          if (!this.isBusy(err)) this.repaired = true;
+          if (this.isNotDb(err)) await this.quarantine().catch(() => undefined);
+          else console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
         }
       } finally {
         if (!done && this.repairLease) {
@@ -735,6 +739,44 @@ export class SizeStore {
         this.repairing = undefined;
       }
     })());
+  }
+
+  /**
+   * A file that cannot be repaired (not a database, or damage in its tables) is moved aside, with its -wal and -shm, to `<file>.corrupt-<time>`: never deleted, never
+   * changed. The store then starts afresh at its next use. Only the lease holder gets here (or the file could not be opened at all).
+   */
+  private async quarantine(): Promise<void> {
+    const ws = [this.writer, this.reader];
+    this.writer = this.reader = undefined; // (their connections hold the file)
+    this.loseLease();
+    this.repairLease = false;
+    await Promise.all(ws.map((w) => w?.terminate()));
+    const stamp = new Date().toISOString().replace(/[-:.]/g, "");
+    let base = `${this.file}.corrupt-${stamp}`;
+    for (let i = 1; existsSync(base); i++) base = `${this.file}.corrupt-${stamp}-${i}`;
+    for (const sfx of ["", "-wal", "-shm"]) {
+      try {
+        renameSync(this.file + sfx, base + sfx);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      }
+    }
+    // the workers prepare their statements when they start: the new file needs its tables first
+    const fresh = openDb(this.file);
+    try {
+      fresh?.exec(SCHEMA);
+    } finally {
+      fresh?.close();
+    }
+    console.error(`size store: the damaged file was moved to ${path.basename(base)}, starting a new one`);
+    this.repaired = false; // (damage in the new file is looked at again)
+    this.warned = false;
+    this.retryDelay = 30_000;
+    this.retryAt = Date.now();
+  }
+  private isNotDb(e: unknown): boolean {
+    const x = e as { errcode?: number; message?: string } | null;
+    return !!x && (x.errcode === 26 || /not a database/i.test(String(x.message)));
   }
 
   private giveUp(e: unknown) {
