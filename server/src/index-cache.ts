@@ -56,7 +56,7 @@ export interface IndexStats {
 }
 
 let sqlite: typeof import("node:sqlite") | null | undefined;
-function loadSqlite(): typeof import("node:sqlite") | null {
+export function loadSqlite(): typeof import("node:sqlite") | null {
   if (sqlite !== undefined) return sqlite;
   try {
     // Loaded lazily (and without the ExperimentalWarning on stderr) so processes that never index never pay for it.

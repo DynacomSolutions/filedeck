@@ -241,6 +241,15 @@ export class FanWatch {
     return this.readyAt === Infinity ? Infinity : this.since;
   }
 
+  /** The store's file was replaced (moved aside as damaged): the run is unknown to the new one, and nothing stored before now is vouched for. A new run is started. */
+  restartSession() {
+    this.session = null;
+    this.chain = null;
+    if (this.readyAt === Infinity || this.stopped || this.handingOver) return;
+    this.since = this.lostAt = Math.max(this.since, Date.now());
+    void this.beginSession(this.readyAt);
+  }
+
   private endSession(clean: boolean) {
     const s = this.session;
     this.session = null;
