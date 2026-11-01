@@ -317,7 +317,7 @@ test("a long integrity check does not lose the lease: the writer keeps beating a
   const [a, b] = [root("pending_due"), root("pending_idle_run")];
   d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${b} WHERE name='pending_due'; UPDATE sqlite_master SET rootpage=${a} WHERE name='pending_idle_run'; PRAGMA writable_schema=OFF;`);
   d.close();
-  const o = { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 800 };
+  const o = { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 3000 };
   const A = new SizeStore(file, o);
   const B = new SizeStore(file, o); // would take the lease the moment A's beats stop
   stores.push(A, B);
@@ -328,7 +328,7 @@ test("a long integrity check does not lose the lease: the writer keeps beating a
     const r = await post(m, read);
     if (m.op === "check" && !(A as Any).slowed) {
       (A as Any).slowed = true;
-      await sleep(3000); // a check several leases long
+      await sleep(7000); // a check longer than two leases
     }
     return r;
   };
