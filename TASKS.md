@@ -151,7 +151,7 @@ ETA: 2026-11-01 21:30 ICT
 | 99 | Throttle foreign job touches | done | claude-20261101-size-followups-2 | size-followups-2 | 11.94 | 2026-11-01 16:30 ICT | touch writes seen_at to the shared jobs DB every 20 ms<br>Limit to about 1 per second per id<br>Merged in https://github.com/DynacomSolutions/filedeck/pull/161 |
 | 100 | Release v0.3.35 | done | claude-20261101-release-v0335 | release-v0335 | 11.97, 11.98, 11.99 | | Ships 11.97 to 11.99 and the /metrics gauges<br>v0.3.34 build failed: multi-line damaged-store log, fixed in https://github.com/DynacomSolutions/filedeck/pull/166<br>Live 17:11 ICT; gauges in VictoriaMetrics, all 4 agents available 1, damaged 0 |
 | 101 | 300k-children tree test is flaky under load | done | claude-20261101-flakes | flake-300k-tree | | | https://github.com/DynacomSolutions/filedeck/pull/173 merged, CI green<br>Cause: slow-read timing note logged under load; assertion ignores only that format<br>20 of 20 under load |
-| 102 | Make size-store and watcher tests pass under heavy host load | in_review | claude-20261101-flakes | flake-load-tests | | 2026-11-01 21:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/176<br>Causes: fixed time limits in tests; now wait on events<br>Each file 10 of 10 under load; full suite 2 of 2 |
+| 102 | Make size-store and watcher tests pass under heavy host load | done | claude-20261101-flakes | flake-load-tests | | | https://github.com/DynacomSolutions/filedeck/pull/176 merged, CI green<br>Causes: fixed time limits in tests; now wait on events<br>Each file 10 of 10 under load; full suite 2 of 2 |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
