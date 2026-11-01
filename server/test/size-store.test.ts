@@ -1367,7 +1367,8 @@ test("tree of a folder with 300k children is cut at the budget and the read work
     assert.equal(t.entries.length, 1000);
     assert.equal(t.truncated, true);
     assert.equal((await s.tree("/p", 0, false)).entries.length, 1, "the store is still up");
-    assert.deepEqual(logged, []);
+    // (a "slow read" line is only a timing note and appears on a loaded machine; any other line is a worker fault)
+    assert.deepEqual(logged.filter((l) => !/^\{"slow":"size-read-[a-z]+","ms":\d+,"path":"[^"]*"\}$/.test(String((l as unknown[])[0]))), []);
   } finally {
     console.error = quiet;
     await s.close();
