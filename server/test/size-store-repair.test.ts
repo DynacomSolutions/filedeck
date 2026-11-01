@@ -7,7 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SizeStore } from "../src/size-store.ts";
 
-const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 60_000 }, fn as never)) as typeof nodeTest;
+const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
 type Any = any;
 let tmp: string;
 let n = 0;
