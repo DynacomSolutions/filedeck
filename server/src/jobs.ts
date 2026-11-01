@@ -112,21 +112,36 @@ export class Jobs {
   abandonMs = 0;
   private reaper?: ReturnType<typeof setInterval>;
 
-  /** A client waits on or polls this job: it is not abandoned. */
+  /** A client waits on or polls this job: it is not abandoned. A job another process owns is recorded in the shared store, where its owner reads it. */
   touch(id: string) {
+    const now = Date.now();
     const j = this.jobs.get(id);
-    if (j) j.seenAt = Date.now();
+    if (j) j.seenAt = now;
+    else this.shared?.store.seen(id, this.shared.scope, now);
   }
 
   private abandonable(kind: string, origin: JobOrigin): boolean {
     return this.abandonMs > 0 && kind === "du" && origin === "cli";
   }
 
-  /** Cancel queued CLI du jobs nobody has asked about within the grace period. */
+  /** The latest time a client was seen on a job of this process (here, or through another process), 0 = not known. */
+  private seenOf(j: Job): number {
+    if (this.shared && this.abandonable(j.kind, j.origin)) j.seenAt = Math.max(j.seenAt ?? 0, this.shared.store.seenAt(j.id, this.shared.scope)) || undefined;
+    return j.seenAt ?? 0;
+  }
+
+  /** Forget a job at once (nothing is left to find: a returning client gets 404 and asks for the scan again). */
+  private forget(j: Job) {
+    this.cancel(j.id);
+    this.jobs.delete(j.id);
+    this.shared?.store.delete(j.id, this.shared.scope);
+  }
+
+  /** Forget queued CLI du jobs nobody has asked about within the grace period. */
   private reap() {
     const now = Date.now();
     for (const j of [...this.jobs.values()]) {
-      if (j.state === "queued" && this.abandonable(j.kind, j.origin) && now - (j.seenAt ?? j.createdAt) > this.abandonMs) this.cancel(j.id);
+      if (j.state === "queued" && this.abandonable(j.kind, j.origin) && now - (this.seenOf(j) || j.createdAt) > this.abandonMs) this.forget(j);
     }
   }
 
@@ -300,6 +315,7 @@ export class Jobs {
       const all = [...this.jobs.values()];
       for (const j of all) if (j.dirty && !live(j.state)) this.save(j);
       const mine = all.filter((j) => live(j.state));
+      for (const j of mine) this.seenOf(j); // (the view written below carries what other processes recorded)
       const lost = sh.store.beatAll(this.me, mine.map((j) => ({ id: j.id, view: JSON.stringify({ ...this.view(j), queue: undefined }) })), now);
       if (!lost) {
         // busy: skip the whole round (noted at most once a minute)
@@ -323,9 +339,10 @@ export class Jobs {
       for (const r of sh.store.orphans(sh.scope, this.me, now - (sh.leaseMs ?? 30_000))) {
         if (this.jobs.has(r.id) || this.adopting.has(r.id)) continue;
         const v = rowView(r);
-        if (this.abandonable(r.kind, v.origin) && now - (v.seenAt ?? r.created_at) > this.abandonMs) {
-          // a CLI du nobody has asked about for the grace period: its client gave up, so drop it instead of walking for no one
-          if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) sh.store.put({ ...r, view: JSON.stringify({ ...v, state: "canceled", finishedAt: now }), state: "canceled", owner: this.me, beat: now, finished_at: now });
+        const seen = Math.max(r.seen_at ?? 0, v.seenAt ?? 0);
+        if (this.abandonable(r.kind, v.origin) && seen > 0 && now - seen > this.abandonMs) {
+          // a CLI du whose client was last seen longer ago than the grace period: it gave up, so forget the job instead of walking for no one (unknown = adopt)
+          if (sh.store.claim(r.id, r.owner, r.beat, this.me, now)) sh.store.delete(r.id, sh.scope);
           continue;
         }
         if (r.params && sh.rebuild?.[r.kind]) {
@@ -350,7 +367,8 @@ export class Jobs {
       const b = await sh.rebuild![r.kind]!(params);
       const v = rowView(r);
       this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: v.origin });
-      if (v.seenAt) this.jobs.get(r.id)!.seenAt = v.seenAt;
+      // a client of the old owner may still be polling: it gets the grace period from now on, not from a seen time that was never recorded
+      this.jobs.get(r.id)!.seenAt = Math.max(r.seen_at ?? 0, v.seenAt ?? 0) || Date.now();
     } catch {
       const now = Date.now();
       sh.store.put({ ...r, view: JSON.stringify(this.interrupted(r, now)), state: "failed", owner: this.me, beat: now, finished_at: now });

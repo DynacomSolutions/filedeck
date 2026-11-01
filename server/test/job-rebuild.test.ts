@@ -40,9 +40,9 @@ async function done(a: { app: { request: Function } }, id: string): Promise<Job>
   throw new Error("job did not finish");
 }
 /** A row left by an owner that handed over (beat 0): the agent under test adopts it on its next tick. */
-function orphan(file: string, kind: string, params: unknown, id = `adopt-${n}`, origin?: string, seenAt?: number): JobRow {
+function orphan(file: string, kind: string, params: unknown, id = `adopt-${n}`, origin?: string): JobRow {
   const createdAt = 1_000_000 + n;
-  const view = { id, kind, title: "t", state: "running", ...(origin ? { origin } : {}), ...(seenAt ? { seenAt } : {}), progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" }, createdAt };
+  const view = { id, kind, title: "t", state: "running", ...(origin ? { origin } : {}), progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" }, createdAt };
   const row = { id, scope: "t", kind, title: "t", params: params === null ? null : JSON.stringify(params), view: JSON.stringify(view), state: "running", owner: "dead", beat: 0, created_at: createdAt, finished_at: null };
   assert.ok(new JobStore(file).put(row));
   return { ...row, cancel: 0 };
@@ -132,9 +132,9 @@ test("adopted overlapping size jobs never walk together", async () => {
 test("an adopted du job without a rescan reads nothing the first run already stored", async () => {
   const a = agent();
   await done(a, ((await (await post(a, "/api/jobs/size", { path: "/tree" })).json()) as Job).id);
-  const cached = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: false }, "adopt-du-cached", undefined, Date.now()).id);
+  const cached = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: false }, "adopt-du-cached").id);
   assert.equal(cached.result.read, 0);
-  const rescan = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: true }, "adopt-du-fresh", undefined, Date.now()).id);
+  const rescan = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: true }, "adopt-du-fresh").id);
   assert.ok(rescan.result.read > 0);
   await a.close();
 });
@@ -187,7 +187,7 @@ test("origin: an adopted job keeps its stored origin; old rows without one defau
   const a = agent();
   const kept = await done(a, orphan(a.jobsFile, "size", { path: "/tree" }, "o-watch", "watcher").id);
   assert.equal(kept.origin, "watcher");
-  const oldDu = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: false }, "o-du", undefined, Date.now()).id);
+  const oldDu = await done(a, orphan(a.jobsFile, "du", { path: "/tree", fresh: false }, "o-du").id);
   assert.equal(oldDu.origin, "cli");
   const oldSize = await done(a, orphan(a.jobsFile, "size", { path: "/tree", fresh: false }, "o-size").id);
   assert.equal(oldSize.origin, "ui");
