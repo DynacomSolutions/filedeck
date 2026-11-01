@@ -1,10 +1,10 @@
 import fs from "node:fs/promises";
-import { linkSync, mkdirSync, rmSync, unlinkSync, type Dir, type Stats } from "node:fs";
+import { rmSync, type Dir, type Stats } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
-import { loadSqlite, openDb } from "./index-cache.ts";
+import { openDb } from "./index-cache.ts";
 import { FsError } from "./fsops.ts";
 import { TRASH_DIR, resolveRead, virtualJoin } from "./paths.ts";
 import type { JobCtl } from "./jobs.ts";
@@ -246,25 +246,10 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, lockFile, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers } = workerData;
+const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers } = workerData;
 const fs = require("node:fs");
-// Opening the file waits for the quarantine mutex (a sidecar file held with BEGIN EXCLUSIVE, released if the holder dies): the file is never opened half way through a move.
-let db;
-{
-  const lk = new DatabaseSync(lockFile);
-  try {
-    lk.exec("PRAGMA busy_timeout=0");
-    for (let i = 0; ; i++) {
-      try { lk.exec("BEGIN EXCLUSIVE"); break; } catch (e) { if (!(e && (e.errcode === 5 || e.errcode === 6)) || i > 400) throw e; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25); }
-    }
-    db = new DatabaseSync(file);
-    db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
-    // a file made fresh (empty) gets its tables before the statements below are prepared
-    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'sizes'").get()) db.exec(schema);
-    const st = fs.statSync(file);
-    parentPort.postMessage({ boot: true, ino: st.dev + ":" + st.ino });
-  } finally { try { lk.exec("ROLLBACK"); } catch {} lk.close(); }
-}
+const db = new DatabaseSync(file);
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
 // the reader worker only runs "read" ops: a second connection, so a read never waits behind a commit (WAL) and the main thread never waits for the disk
 // A reader holding a snapshot stops the automatic (passive) checkpoint from restarting the WAL, which then grows without bound and slows every read and commit.
 // Past the limit, wait briefly for readers and truncate; a busy attempt is skipped and tried again 2 s later, so a pinned snapshot costs the writer at most 0.5 s in 2.5.
@@ -408,31 +393,6 @@ parentPort.on("message", (m) => {
 /** `pending.due_at` of a folder that is not waiting but remembers its `last_run` */
 const PENDING_IDLE = Number.MAX_SAFE_INTEGER;
 const PENDING_BATCH = 10_000;
-/** a process moves a damaged store aside at most this often */
-const QUARANTINE_EVERY_MS = 6 * 3600_000;
-const SQLITE_HEADER = Buffer.from("SQLite format 3\0", "latin1");
-/** Hold the quarantine mutex for a short synchronous section (opening the file); throws a busy error after `waitMs`. */
-function lockSync(file: string, waitMs: number): () => void {
-  const S = loadSqlite();
-  if (!S) return () => undefined;
-  mkdirSync(path.dirname(file), { recursive: true });
-  const lk = new S.DatabaseSync(file + ".lock");
-  try {
-    lk.exec(`PRAGMA busy_timeout=${waitMs}`);
-    lk.exec("BEGIN EXCLUSIVE");
-  } catch (e) {
-    lk.close();
-    throw e;
-  }
-  return () => {
-    try {
-      lk.exec("ROLLBACK");
-    } catch {
-      /* nothing open */
-    }
-    lk.close();
-  };
-}
 /** the writer lease: a holder whose heartbeat is older than this has lost it */
 const LEASE_MS = 10_000;
 
@@ -486,14 +446,9 @@ export class SizeStore {
     this.file = file;
     if (file === ":memory:") this.epoch = 1;
     // A file that cannot be opened is never deleted: a busy one is opened later through the writer thread, a corrupt one is checked for index-only damage by the
-    // lease holder (see repairIndexes) and otherwise moved aside (see quarantine), the store running uncached until a new file is made.
+    // lease holder (see repairIndexes) and otherwise kept as it is (see markDamaged), the store running uncached.
     try {
-      const unlock = file === ":memory:" ? () => undefined : lockSync(file, 200);
-      try {
-        this.open(file);
-      } finally {
-        unlock();
-      }
+      this.open(file);
     } catch (e) {
       this.db = null;
       if (this.isBusy(e)) {
@@ -574,12 +529,6 @@ export class SizeStore {
   private firstEpoch = 0;
   private async tryLease(): Promise<void> {
     if (this.closed || this.leaving || !this.db) return;
-    // The path must still be the file the workers opened: another process may have moved it aside (see quarantine). Writing on into the old file would make two stores.
-    if (this.inos.size) {
-      const st = await fs.stat(this.file).catch(() => null);
-      const now = st ? `${st.dev}:${st.ino}` : "";
-      if (!this.closed && [...this.inos.values()].some((i) => i !== now)) return this.followFile();
-    }
     try {
       const op = this.epoch ? { op: "beat" } : { op: "acquire", owner: this.owner, leaseMs: this.leaseMs() };
       const e = Number((await this.post(op, false))?.[0]?.epoch ?? 0);
@@ -738,6 +687,7 @@ export class SizeStore {
         this.startLease();
         this.warned = false;
         this.retryDelay = 30_000;
+        this.damaged = false;
         console.error("size store back");
       } catch {
         this.retryDelay = Math.min(this.retryDelay * 2, 600_000);
@@ -751,26 +701,20 @@ export class SizeStore {
   /**
    * A malformed database may be only its indexes (a crash left an index out of step with its table). The lease holder checks it (integrity_check): if that names
    * nothing but indexes, and none has more entries than its table, they are rebuilt from their tables inside one fenced write transaction and the store opens again
-   * at its next use. Anything else is moved aside unchanged (never deleted) and a new store is started. Tried again after an error until this process has been the holder once and checked.
+   * at its next use. Anything else is kept as it is (never moved or deleted; see markDamaged). Tried again after an error until this process has been the holder once and checked.
    */
   private repaired = false;
   private repairing?: Promise<void>;
   /** the worker holds the lease for a repair that has not been followed by a reopen (released at shutdown) */
   private repairLease = false;
-  /** (device:inode) of the store file as each worker opened it */
-  private inos = new Map<Worker, string>();
-  /** the file at the path was replaced (moved aside by this process or another): the watcher's session and the lease epoch of the old file mean nothing for the new one */
-  onReplaced?: () => void;
-  private lastQuarantine = 0;
+  /** The file is damaged and cannot be repaired here (not SQLite, or damage beyond its indexes): it is kept as it is and an operator must move it aside. */
+  private damaged = false;
   private repairIndexes(): Promise<void> {
     if (this.repaired || this.closed || this.leaving || this.file === ":memory:") return Promise.resolve();
     return (this.repairing ??= (async () => {
       let done = false;
       let beat: NodeJS.Timeout | undefined;
-      let ino = "";
       try {
-        const st = await fs.stat(this.file).catch(() => null);
-        ino = st ? `${st.dev}:${st.ino}` : "";
         // the normal acquire-then-acquired() path runs at the reopen: nothing here is main-thread lease state
         this.loseLease();
         // only the lease holder repairs (the same single-writer rule as every write; for the current holder this returns its epoch)
@@ -796,18 +740,17 @@ export class SizeStore {
           done = true;
           console.error(`size store: rebuilt ${r.rebuilt.includes(",") ? "indexes" : "index"} ${r.rebuilt} from the table${r.rebuilt.includes(",") ? "s" : ""}`);
           this.retryAt = Date.now();
-        } else if (r?.problem) {
-          console.error(`size store: not repaired: ${r.problem}`);
-          await this.quarantine({ ino });
-        } else this.retryAt = Date.now(); // (nothing wrong with the file now: another process may have replaced it)
+        } else if (r?.problem) this.markDamaged(r.problem);
+        else this.retryAt = Date.now(); // (nothing wrong with the file now: the failure was a passing one)
       } catch (err) {
         // the store stays unavailable and is retried as before
         if (this.isFenced(err)) {
           if (!this.closed) console.error("size store: repair not done, another process took the writer lease; it is tried again");
         } else if (!this.closed) {
+          // damage the open itself reported (not SQLite) is final; anything else (I/O, memory, a full disk) keeps the file and the attempt
           if (this.isNotDb(err)) {
             this.repaired = true;
-            await this.quarantine({ ino, notDb: true }).catch((e) => console.error(`size store: the file could not be moved aside: ${(e as Error)?.message ?? e}`));
+            this.markDamaged((err as Error).message);
           } else console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
         }
       } finally {
@@ -821,155 +764,15 @@ export class SizeStore {
     })());
   }
 
-  /** Hold the quarantine mutex (a sidecar `<file>.lock` held with BEGIN EXCLUSIVE; the OS drops it if this process dies) while `fn` runs. */
-  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const S = loadSqlite();
-    if (!S) throw new Error("SQLite is unavailable");
-    mkdirSync(path.dirname(this.file), { recursive: true });
-    const lk = new S.DatabaseSync(this.file + ".lock");
-    try {
-      lk.exec("PRAGMA busy_timeout=0");
-      for (const until = Date.now() + 10_000; ; ) {
-        try {
-          lk.exec("BEGIN EXCLUSIVE");
-          break;
-        } catch (e) {
-          if (!this.isBusy(e) || Date.now() > until) throw e;
-          await new Promise((r) => setTimeout(r, 20 + Math.random() * 30));
-        }
-      }
-    } catch (e) {
-      lk.close();
-      throw e;
-    }
-    try {
-      return await fn();
-    } finally {
-      try {
-        lk.exec("ROLLBACK");
-      } catch {
-        /* nothing open */
-      }
-      lk.close();
-    }
+  /** The file cannot be repaired. It is never moved, changed or deleted by the agent: it stays as it is, folder sizes are not cached (retried with backoff), and one clear line says what to do. */
+  private markDamaged(why: string) {
+    this.damaged = true;
+    console.error(`size store: ${this.file} is damaged and cannot be repaired (${why}). Folder sizes are not cached. Stop the agent, move the file and its -wal and -shm aside, then start it again.`);
   }
 
-  /** Stop both workers (closing their connections) and answer what they were still asked, empty: this is not a fault of the store. */
-  private async dropWorkers(): Promise<void> {
-    const ws = [this.writer, this.reader].filter((w): w is Worker => !!w);
-    this.writer = this.reader = undefined;
-    for (const [id, p] of this.pending) if (ws.includes(p.w)) { this.pending.delete(id); p.res(); }
-    for (const w of ws) this.inos.delete(w);
-    await Promise.all(ws.map((w) => w.terminate()));
-  }
-
-  /**
-   * A file that cannot be repaired (not a database, or damage in its tables) is moved aside, with its -wal and -shm, to `<file>.corrupt-<time>`: never deleted,
-   * never overwritten, never changed. A new store is made in its place. All of it happens under the mutex, and only
-   * - if the path still holds the file that was checked (another process may have moved it already; then this one just opens the new file),
-   * - for a file that is not SQLite: if its header is still not SQLite's (a process that started a moment ago may have made a new one),
-   * - for damaged tables: if this process still holds the writer lease (a no-op write transaction says so).
-   * At most one move per process per 6 hours: a store that is damaged again stays uncached and says so.
-   */
-  private async quarantine(o: { ino?: string; notDb?: boolean } = {}): Promise<void> {
-    if (this.lastQuarantine && Date.now() - this.lastQuarantine < QUARANTINE_EVERY_MS) {
-      console.error("size store: damaged again, not moved aside (one move per 6 hours): the file is kept as it is");
-      this.retryAt = Date.now() + this.retryDelay;
-      this.retryDelay = Math.min(this.retryDelay * 2, 600_000);
-      return;
-    }
-    const ino = o.ino ?? [...this.inos.values()][0] ?? "";
-    let moved = "";
-    await this.withLock(async () => {
-      const st = await fs.stat(this.file).catch(() => null);
-      if (!st || `${st.dev}:${st.ino}` !== ino) return; // (replaced meanwhile)
-      if (o.notDb) {
-        const h = await fs.open(this.file, "r");
-        try {
-          const buf = Buffer.alloc(16);
-          await h.read(buf, 0, 16, 0);
-          if (buf.equals(SQLITE_HEADER)) return;
-        } finally {
-          await h.close();
-        }
-      } else {
-        // (no writer thread: nothing proves the lease; a thread started now would wait for the mutex held here)
-        if (!this.writer) return;
-        try {
-          await this.post({ op: "exec", sql: "UPDATE writer SET beat = beat WHERE id = 1", params: [] }, false);
-        } catch (e) {
-          if (this.isFenced(e)) {
-            console.error("size store: not moved aside, another process holds the writer lease");
-            return;
-          }
-          throw e;
-        }
-      }
-      this.loseLease();
-      this.repairLease = false;
-      await this.dropWorkers();
-      const stamp = new Date().toISOString().replace(/[-:.]/g, "");
-      let base = "";
-      for (let i = 0; !base; i++) {
-        const b = `${this.file}.corrupt-${stamp}${i ? "-" + i : ""}`;
-        try {
-          linkSync(this.file, b); // (claims the name: a link never replaces an existing file)
-          base = b;
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        }
-      }
-      for (const sfx of ["-wal", "-shm"]) {
-        try {
-          linkSync(this.file + sfx, base + sfx);
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-        }
-      }
-      for (const sfx of ["-wal", "-shm", ""]) {
-        try {
-          unlinkSync(this.file + sfx);
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-        }
-      }
-      // (the new store is made by whoever opens the path next, under the same mutex: the workers create the tables of an empty file)
-      moved = base;
-    });
-    if (moved) {
-      this.lastQuarantine = Date.now();
-      console.error(`size store: the damaged file was moved to ${path.basename(moved)}, starting a new one`);
-      this.repaired = false; // (damage in the new file is looked at again)
-      this.warned = false;
-      this.replacedFile();
-    }
-    try {
-      this.db?.close();
-    } catch {
-      /* already broken */
-    }
-    this.db = null;
-    this.retryAt = Date.now();
-  }
-
-  /** The path holds another file than the workers opened (another process moved the old one aside): drop the workers and open the path again, the way a failed store does. */
-  private async followFile(): Promise<void> {
-    console.error("size store: the file was replaced by another process, following it");
-    this.loseLease();
-    await this.dropWorkers();
-    this.replacedFile();
-    try {
-      this.db?.close();
-    } catch {
-      /* already broken */
-    }
-    this.db = null;
-    this.retryAt = Date.now();
-    await this.reopen();
-  }
-  private replacedFile() {
-    this.firstEpoch = 0;
-    this.onReplaced?.();
+  /** For the metrics route: is the store answering from its file, and is its file damaged beyond repair. */
+  health(): { available: boolean; damaged: boolean } {
+    return { available: this.file === ":memory:" || !!this.db, damaged: this.damaged };
   }
   private isNotDb(e: unknown): boolean {
     const x = e as { errcode?: number; message?: string } | null;
@@ -996,15 +799,13 @@ export class SizeStore {
     if (this.closed) return Promise.resolve(undefined);
     let w = read ? this.reader : this.writer;
     if (!w) {
-      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, lockFile: this.file + ".lock", COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
       const fail = (e: Error) => {
-        this.inos.delete(nw);
         if (this.writer === nw) this.writer = undefined;
         if (this.reader === nw) this.reader = undefined;
         for (const [id, p] of this.pending) if (p.w === nw) { p.rej(e); this.pending.delete(id); }
       };
-      nw.on("message", (r: { id: number; boot?: boolean; ino?: string; err?: string; busy?: boolean; rows?: Record<string, unknown>[] }) => {
-        if (r.boot) return void this.inos.set(nw, String(r.ino));
+      nw.on("message", (r: { id: number; err?: string; busy?: boolean; rows?: Record<string, unknown>[] }) => {
         const p = this.pending.get(r.id);
         this.pending.delete(r.id);
         if (![...this.pending.values()].some((q) => q.w === nw)) nw.unref(); // idle: an idle worker must not keep the process alive

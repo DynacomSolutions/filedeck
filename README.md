@@ -108,6 +108,10 @@ Ingress rule: skip login only when `X-Filedeck-Token` is present; the hub then e
 
 Run it from the image (`filedeck du ...` is on the `PATH`), from a checkout after `npm run build` (`npx filedeck du ...` or `node server/dist/cli.js du ...`), or anywhere with Node 22 and the built `server/dist`.
 
+### The stored sizes file
+
+An agent keeps its stored folder sizes in a SQLite file. If only an index of that file is damaged the agent rebuilds it and logs one line. If the file is not SQLite or its tables are damaged, the agent never moves, changes or deletes it: it keeps answering without the cache (sizes are read from disk, `cached` is false), retries with a growing delay, and logs one line that names the file. The Prometheus text at `GET /api/metrics` on the agent shows `filedeck_size_store_available` (0 while sizes are not cached) and `filedeck_size_store_damaged` (1 when the file cannot be repaired). To recover: stop the agent, rename the store file and its `-wal` and `-shm` files aside (keep them if you want to look at them), and start the agent again; it makes a new store and reads the folders once more.
+
 ## Archives and passwords
 
 Compress offers zip, 7z, tar.gz, tar.zst and tar.xz with a compression level (store to ultra), exclude patterns (one glob per line), an archive name and a destination folder. Zip and 7z can also be password protected (zip uses AES-256; a 7z can additionally encrypt its file names) and split into volumes (`name.7z.001`, `.002`, ...; open the first part to browse or extract the set). Extract takes a destination, a subfolder switch, an overwrite policy (keep both, replace, skip) and, for password-protected archives, a password; the archive browser can extract just the ticked entries.
