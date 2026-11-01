@@ -319,9 +319,11 @@ test("a long integrity check does not lose the lease: the writer keeps beating a
   d.close();
   const o = { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 3000 };
   const A = new SizeStore(file, o);
-  const B = new SizeStore(file, o); // would take the lease the moment A's beats stop
-  stores.push(A, B);
+  stores.push(A);
   await A.mayScan();
+  assert.ok((A as Any).isWriter, "A holds the lease");
+  const B = new SizeStore(file, o); // would take the lease the moment A's beats stop
+  stores.push(B);
   await B.mayScan();
   const post = (A as Any).post.bind(A);
   (A as Any).post = async (m: Any, read: boolean) => {
