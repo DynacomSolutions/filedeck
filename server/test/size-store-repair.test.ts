@@ -105,10 +105,134 @@ test("real table damage is left alone: the file is kept as it is and the store s
     await sleep(500);
   });
   assert.ok(fs.existsSync(file), "the file is never deleted");
+  assert.equal(fs.statSync(file).size, bytes.length, "and not recreated");
   assert.ok(!lines.some((l) => /rebuilt/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /size store unavailable/.test(l)), "[" + lines.join("|") + "]");
   assert.ok(!(stores.at(-1) as Any).db, "still unavailable");
   const after = fs.readFileSync(file);
   assert.equal(after.subarray((root - 1) * size, root * size).compare(bytes.subarray((root - 1) * size, root * size)), 0, "the damaged table page is untouched");
   assert.notDeepEqual(check(file), ["ok"]);
+});
+
+const malformed = () => Object.assign(new Error("database disk image is malformed"), { errcode: 11 });
+/** a store file with the real schema (the store creates it), closed again */
+async function schemaFile(rows = 50): Promise<string> {
+  const file = path.join(tmp, `s${n++}.db`);
+  const s0 = new SizeStore(file, { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 5000 });
+  await s0.mayScan();
+  await s0.close();
+  const db = new DatabaseSync(file);
+  db.exec("PRAGMA journal_mode=DELETE");
+  for (let i = 0; i < rows; i++) db.prepare("INSERT OR REPLACE INTO pending (path, due_at, last_run) VALUES (?, ?, ?)").run(`/p${i}`, 1000 - i, i);
+  db.close();
+  return file;
+}
+const integrity = (file: string) => {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    return (db.prepare("PRAGMA integrity_check(20)").all() as Any[]).map((r) => String(r.integrity_check));
+  } finally {
+    db.close();
+  }
+};
+
+test("two indexes whose contents are swapped (equal counts: quick_check says ok) are found by integrity_check and rebuilt", async () => {
+  const file = await schemaFile();
+  const d = new DatabaseSync(file);
+  const root = (name: string) => Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = ?").get(name) as Any).r);
+  const [a, b] = [root("pending_due"), root("pending_idle_run")];
+  d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${b} WHERE name='pending_due'; UPDATE sqlite_master SET rootpage=${a} WHERE name='pending_idle_run'; PRAGMA writable_schema=OFF;`);
+  d.close();
+  assert.deepEqual(check(file), ["ok"], "quick_check does not compare index contents");
+  assert.notDeepEqual(integrity(file), ["ok"]);
+  const { lines } = await capture(async () => {
+    const s = mk(file);
+    await s.mayScan();
+    (s as Any).giveUp(malformed());
+    await (s as Any).repairing;
+  });
+  assert.deepEqual(integrity(file), ["ok"]);
+  assert.equal(lines.filter((l) => /rebuilt indexes pending_due, pending_idle_run|rebuilt indexes pending_idle_run, pending_due/.test(l)).length, 1, lines.join("\n"));
+});
+
+test("a table that lost rows (its indexes hold more entries) is not 'repaired': REINDEX would erase the evidence", async () => {
+  const file = await schemaFile(50);
+  const d = new DatabaseSync(file);
+  d.exec("CREATE TABLE donor (path TEXT PRIMARY KEY, due_at INTEGER NOT NULL, last_run INTEGER, taker INTEGER) WITHOUT ROWID");
+  for (let i = 0; i < 40; i++) d.prepare("INSERT INTO donor VALUES (?, ?, ?, NULL)").run(`/p${i}`, 1000 - i, i);
+  const rootOf = (name: string) => Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = ?").get(name) as Any).r);
+  const [donor, own] = [rootOf("donor"), rootOf("pending")];
+  d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${donor} WHERE name='pending'; UPDATE sqlite_master SET rootpage=${own} WHERE name='donor'; PRAGMA writable_schema=OFF;`);
+  d.close();
+  const msgs = integrity(file);
+  assert.ok(msgs.every((m) => /^wrong # of entries in index/.test(m)), msgs.join("\n")); // the report alone looks like index-only damage
+  const { lines } = await capture(async () => {
+    const s = mk(file);
+    await s.mayScan();
+    (s as Any).giveUp(malformed());
+    await (s as Any).repairing;
+  });
+  assert.ok(!lines.some((l) => /rebuilt/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /more entries than its table/.test(l)), lines.join("\n"));
+  assert.deepEqual(integrity(file), msgs, "the evidence is still there");
+});
+
+test("the one repair attempt is not spent by a process that is not the writer", async () => {
+  const file = await schemaFile();
+  const d = new DatabaseSync(file);
+  const root = (name: string) => Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = ?").get(name) as Any).r);
+  const [a, b] = [root("pending_due"), root("pending_idle_run")];
+  d.exec(`PRAGMA writable_schema=ON; UPDATE sqlite_master SET rootpage=${b} WHERE name='pending_due'; UPDATE sqlite_master SET rootpage=${a} WHERE name='pending_idle_run'; PRAGMA writable_schema=OFF;`);
+  d.close();
+  const o = { root: tmp, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 60_000 };
+  const A = new SizeStore(file, o);
+  stores.push(A);
+  await A.mayScan();
+  const B = new SizeStore(file, o);
+  stores.push(B);
+  await B.mayScan();
+  assert.ok((A as Any).isWriter && !(B as Any).isWriter);
+  (B as Any).giveUp(malformed()); // B meets the damage while A holds the lease
+  await (B as Any).repairing;
+  assert.notDeepEqual(integrity(file), ["ok"], "a non-holder repairs nothing");
+  assert.equal((B as Any).repaired, false);
+  await A.close(); // the holder leaves and releases the lease
+  await sleep(100);
+  const { lines } = await capture(async () => {
+    (B as Any).giveUp(malformed()); // B, now able to take the lease, meets it again
+    await (B as Any).repairing;
+  });
+  assert.deepEqual(integrity(file), ["ok"], lines.join("\n"));
+});
+
+test("a corrupt file at open is never deleted: it is looked at by the writer and, with table damage, left as it is with the store unavailable", async () => {
+  const garbage = path.join(tmp, `garbage${n++}.db`);
+  fs.writeFileSync(garbage, "this is not a database ".repeat(200));
+  const before = fs.readFileSync(garbage);
+  const { lines } = await capture(async () => {
+    const s = mk(garbage);
+    assert.equal(s.persistent, false);
+    await sleep(300);
+  });
+  assert.equal(fs.readFileSync(garbage).compare(before), 0, "kept as it was");
+  assert.ok(lines.some((l) => /size store unavailable/.test(l)), lines.join("\n"));
+  // damage the open itself trips over (it reads stale_trees): the open asks the writer to look, which finds table damage and leaves the file
+  const file = await schemaFile();
+  const d = new DatabaseSync(file);
+  for (let i = 0; i < 40; i++) d.prepare("INSERT INTO stale_trees VALUES (?, ?)").run(`/s${i}`, i);
+  const root = Number((d.prepare("SELECT rootpage r FROM sqlite_master WHERE name = 'stale_trees'").get() as Any).r);
+  const size = Number((d.prepare("PRAGMA page_size").get() as Any).page_size);
+  d.close();
+  const fd = fs.openSync(file, "r+");
+  fs.writeSync(fd, Buffer.alloc(120, 0xff), 0, 120, root * size - 120);
+  fs.closeSync(fd);
+  const page = () => fs.readFileSync(file).subarray((root - 1) * size, root * size);
+  const damaged = Buffer.from(page());
+  const { lines: l2 } = await capture(async () => {
+    const s = mk(file);
+    assert.equal(s.persistent, false);
+    await (s as Any).repairing;
+  });
+  assert.ok(l2.some((l) => /not repaired, the file is kept/.test(l)), l2.join("\n"));
+  assert.equal(page().compare(damaged), 0);
 });

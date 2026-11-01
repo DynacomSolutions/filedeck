@@ -283,26 +283,38 @@ const begin = () => {
   if (!fence || checkFence.run(fence.epoch, fence.owner).changes === 0) { try { db.exec("ROLLBACK"); } catch {} fence = null; throw new Error("fenced: this process no longer holds the writer lease"); }
 };
 const inTx = (fn) => { begin(); try { fn(); db.exec("COMMIT"); } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; } };
-// Index-only corruption: quick_check names only indexes (an index that disagrees with its table is rebuilt from the table, which loses nothing). Run in a fenced write
-// transaction, so only the lease holder repairs; anything else in the report (table pages, the header) leaves the file untouched.
+// Index-only corruption: integrity_check (quick_check never compares an index with its table) names nothing but indexes. An index is derived data, so it is rebuilt from its
+// table with REINDEX, in a fenced write transaction (only the lease holder repairs). Anything else in the report (table pages, the header), or an index with more entries
+// than its table (the table lost rows: REINDEX would erase the evidence), leaves the file untouched.
 const INDEX_ONLY = /^(?:wrong # of entries in index (\\S+)|row \\d+ missing from index (\\S+)|non-unique entry in index (\\S+)|row \\d+ values differ from index (\\S+))$/;
-const problems = () => db.prepare("PRAGMA quick_check(200)").all().map((r) => String(r.quick_check)).filter((x) => x !== "ok");
+const problems = () => db.prepare("PRAGMA integrity_check(200)").all().map((r) => String(r.integrity_check)).filter((x) => x !== "ok");
+const ident = (n) => '"' + n.replace(/"/g, '""') + '"';
 const repair = () => {
+  // the long read happens before the write lock is taken
+  let first;
+  try { first = problems(); } catch (e) { return { rebuilt: "", problem: "integrity_check failed: " + String(e && e.message || e) }; }
+  if (!first.length) return { rebuilt: "" };
+  const names = new Set();
+  for (const p of first) { const m = INDEX_ONLY.exec(p); if (!m) return { rebuilt: "", problem: p }; names.add(m[1] || m[2] || m[3] || m[4]); }
+  for (const n of names) {
+    const ix = db.prepare("SELECT tbl_name t, sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(n);
+    if (!ix || !ix.sql) return { rebuilt: "", problem: "unknown index " + n };
+    const w = /\\sWHERE\\s([\\s\\S]+)$/i.exec(ix.sql);
+    const where = w ? " WHERE " + w[1] : "";
+    try {
+      const viaIndex = Number(db.prepare("SELECT count(*) c FROM " + ident(ix.t) + " INDEXED BY " + ident(n) + where).get().c);
+      const viaTable = Number(db.prepare("SELECT count(*) c FROM " + ident(ix.t) + " NOT INDEXED" + where).get().c);
+      if (viaIndex > viaTable) return { rebuilt: "", problem: "index " + n + " has more entries than its table" };
+    } catch (e) { return { rebuilt: "", problem: "index " + n + " cannot be read: " + String(e && e.message || e) }; }
+  }
   begin();
-  const quit = (o) => { try { db.exec("ROLLBACK"); } catch {} return o; };
   try {
-    const first = problems();
-    if (!first.length) return quit({ rebuilt: "" });
-    const names = new Set();
-    for (const p of first) { const m = INDEX_ONLY.exec(p); if (!m) return quit({ rebuilt: "", problem: p }); names.add(m[1] || m[2] || m[3] || m[4]); }
-    const known = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((r) => r.name));
-    for (const n of names) if (!known.has(n)) return quit({ rebuilt: "", problem: "unknown index " + n });
-    for (const n of names) db.exec('REINDEX "' + n.replace(/"/g, '""') + '"');
+    for (const n of names) db.exec("REINDEX " + ident(n));
     const left = problems();
-    if (left.length) return quit({ rebuilt: "", problem: left[0] });
+    if (left.length) { db.exec("ROLLBACK"); return { rebuilt: "", problem: left[0] }; }
     db.exec("COMMIT");
     return { rebuilt: [...names].join(", ") };
-  } catch (e) { quit(); throw e; }
+  } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
 };
 const acquire = ({ owner, leaseMs }) => {
   let epoch = 0;
@@ -428,30 +440,20 @@ export class SizeStore {
   ) {
     this.file = file;
     if (file === ":memory:") this.epoch = 1;
-    // Like IndexCache: a file that cannot be opened is replaced once, then the store runs uncached.
-    for (let attempt = 0; attempt < 2 && !this.db; attempt++) {
-      try {
-        this.open(file);
-      } catch (e) {
-        this.db = null;
-        // Only a file SQLite calls corrupt is replaced. A busy one (another connection holds the write lock while the schema is migrated,
-        // e.g. two processes during a rollout) is a good store: it is opened later through the writer thread, which waits for the lock.
-        if (this.isBusy(e)) {
-          this.retryAt = Date.now() + 1000;
-          return;
-        }
-        if (!this.isCorrupt(e)) {
-          this.warn(e);
-          this.retryAt = Date.now() + this.retryDelay;
-          return;
-        }
-        try {
-          if (attempt === 0 && file !== ":memory:") for (const f of [file, file + "-wal", file + "-shm"]) rmSync(f, { force: true });
-        } catch {
-          attempt = 1; // cannot clear it: no second try
-        }
-        if (attempt === 1) this.warn(e);
+    // A file that cannot be opened is never deleted: a busy one is opened later through the writer thread, a corrupt one is checked for index-only damage by the
+    // lease holder (see repairIndexes) and otherwise left as it is, the store running uncached.
+    try {
+      this.open(file);
+    } catch (e) {
+      this.db = null;
+      if (this.isBusy(e)) {
+        this.retryAt = Date.now() + 1000;
+        return;
       }
+      this.warn(e);
+      this.retryAt = Date.now() + this.retryDelay;
+      if (this.isCorrupt(e)) void this.repairIndexes();
+      return;
     }
     if (!this.db) {
       this.warn(new Error("SQLite is unavailable"));
@@ -691,28 +693,42 @@ export class SizeStore {
   }
 
   /**
-   * A malformed database may be only its indexes (a crash left a rebuildable index out of step with its table). Once per store, the writer checks it: if quick_check names
-   * nothing but indexes they are rebuilt from their tables inside one fenced write transaction, and the store opens again at the next use. Anything else is left as it is.
+   * A malformed database may be only its indexes (a crash left an index out of step with its table). The lease holder checks it (integrity_check): if that names
+   * nothing but indexes, and none has more entries than its table, they are rebuilt from their tables inside one fenced write transaction and the store opens again
+   * at its next use. Anything else is left as it is: the file is never deleted. Tried again after an error until this process has been the holder once and checked.
    */
   private repaired = false;
-  private async repairIndexes(): Promise<void> {
-    if (this.repaired || this.closed || this.file === ":memory:") return;
-    this.repaired = true;
-    let done = false;
-    try {
-      // only the lease holder repairs (the same single-writer rule as every write; the call is idempotent for the current holder)
-      if (!Number((await this.post({ op: "acquire", owner: this.owner, leaseMs: this.leaseMs() }, false))?.[0]?.epoch ?? 0)) return;
-      const r = (await this.post({ op: "repair" }, false))?.[0] as { rebuilt?: string; problem?: string } | undefined;
-      if (r?.rebuilt) {
-        done = true;
-        console.error(`size store: rebuilt ${r.rebuilt.includes(",") ? "indexes" : "index"} ${r.rebuilt} (they disagreed with their tables)`);
-        this.retryAt = Date.now();
+  private repairing?: Promise<void>;
+  /** the worker holds the lease for a repair that has not been followed by a reopen (released at shutdown) */
+  private repairLease = false;
+  private repairIndexes(): Promise<void> {
+    if (this.repaired || this.closed || this.leaving || this.file === ":memory:") return Promise.resolve();
+    return (this.repairing ??= (async () => {
+      let done = false;
+      try {
+        // the normal acquire-then-acquired() path runs at the reopen: nothing here is main-thread lease state
+        this.loseLease();
+        // only the lease holder repairs (the same single-writer rule as every write; for the current holder this returns its epoch)
+        if (!Number((await this.post({ op: "acquire", owner: this.owner, leaseMs: this.leaseMs() }, false))?.[0]?.epoch ?? 0)) return;
+        this.repairLease = true;
+        this.repaired = true;
+        const r = (await this.post({ op: "repair" }, false))?.[0] as { rebuilt?: string; problem?: string } | undefined;
+        if (r?.rebuilt) {
+          done = true;
+          console.error(`size store: rebuilt ${r.rebuilt.includes(",") ? "indexes" : "index"} ${r.rebuilt} from the table${r.rebuilt.includes(",") ? "s" : ""}`);
+          this.retryAt = Date.now();
+        } else if (r?.problem) console.error(`size store: not repaired, the file is kept as it is: ${r.problem}`);
+      } catch (err) {
+        // the store stays unavailable and is retried as before (a fenced write means another process took the lease: nothing to say)
+        if (!this.isFenced(err) && !this.closed) console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
+      } finally {
+        if (!done && this.repairLease) {
+          this.repairLease = false;
+          await this.post({ op: "release" }, false).catch(() => undefined);
+        }
+        this.repairing = undefined;
       }
-    } catch {
-      /* the store stays unavailable and is retried as before */
-    } finally {
-      if (!done) await this.post({ op: "release" }, false).catch(() => undefined);
-    }
+    })());
   }
 
   private giveUp(e: unknown) {
@@ -784,7 +800,8 @@ export class SizeStore {
     for (const w of this.waiters.splice(0)) w.rej(new FsError(503, "this process is stopping")); // (a job waiting for the lease is handed to the next process)
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.leaseTimer = undefined;
-    if (this.epoch && this.file !== ":memory:") await Promise.race([this.post({ op: "release" }, false).catch(() => undefined), new Promise((r) => setTimeout(r, 2000))]);
+    if ((this.epoch || this.repairLease) && this.file !== ":memory:") await Promise.race([this.post({ op: "release" }, false).catch(() => undefined), new Promise((r) => setTimeout(r, 2000))]);
+    this.repairLease = false;
     this.loseLease();
   }
   private async closeNow(): Promise<void> {
