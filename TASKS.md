@@ -128,7 +128,7 @@ ETA: 2026-10-31 17:00 ICT
 | 77 | After clicking a column header (sort and similar), keyboard navigation focuses the file list again | done | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/138<br>CI green; web tests 105/105; checked in headless Chromium with mocked data. |
 
 ## 11. Background size jobs
-ETA: 2026-11-01 19:00 ICT
+ETA: 2026-11-01 13:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 78 | Find why size jobs for .worktrees and DynacomSolutions keep running | done | claude-20261031-size-jobs | | | 2026-10-31 16:00 ICT | Watcher overflow marks whole watched trees stale, so du rescans 5M+ files.<br>Size commits take up to 3 h.<br>Every /api/du call is a visible job, queued behind overlapping scans. |
@@ -137,12 +137,14 @@ ETA: 2026-11-01 19:00 ICT
 | 81 | Watcher overflow re-reads only the folders that were pending, not whole watched trees | done | claude-20261031-size-store | size-store-fresh | 11.78 | 2026-11-01 07:30 ICT | Third review: cross-process races and full rescan after restart<br>Owner chose single writer (11.91, 11.92)<br>Merged https://github.com/DynacomSolutions/filedeck/pull/156 |
 | 82 | Size-store commits no longer stall for hours during a big rescan | done | claude-20261031-size-store | size-store-fresh | 11.78 | 2026-11-01 07:30 ICT | Third review: cross-process races and full rescan after restart<br>Owner chose single writer (11.91, 11.92)<br>Merged https://github.com/DynacomSolutions/filedeck/pull/156 |
 | 83 | du CLI has a default timeout and a cached-only flag; the skill says to use them | done | claude-20261031-bg-jobs | background-jobs | 11.78 | 2026-10-31 19:30 ICT | https://github.com/DynacomSolutions/filedeck/pull/141; CI green. |
-| 84 | Release so 11.79, 11.81 and 11.82 deploy | in_progress | claude-20261101-release-v0332 | release-v0332 | 11.79, 11.81, 11.82, 11.91, 11.92 | 2026-11-01 08:30 ICT | release v0.3.32 |
+| 84 | Release so 11.79, 11.81 and 11.82 deploy | done | claude-20261101-release-v0332 | release-v0332 | 11.79, 11.81, 11.82, 11.91, 11.92 | 2026-11-01 09:35 ICT | Released v0.3.32 (https://github.com/DynacomSolutions/filedeck/pull/157)<br>Hub and all agents on 0.3.32 at 09:34 ICT, 0 restarts |
 | 85 | Release v0.3.29 so 10.76, 10.77, 11.80 and 11.83 deploy | superseded | claude-20261031-release-v0329 | release-v0329 | 10.76, 10.77, 11.80, 11.83 | 2026-10-31 17:30 ICT | Superseded by 11.86. v0.3.29 tag pushed; Release run 41185463592 failed the image scan (dompurify advisories), no image published.<br>Release PR https://github.com/DynacomSolutions/filedeck/pull/143. |
 | 86 | Release v0.3.30 so 10.76, 10.77, 11.80 and 11.83 deploy | done | claude-20261031-release-v0330 | release-v0330 | 10.76, 10.77, 11.80, 11.83 | 2026-10-31 18:30 ICT | Released 31 Oct (#145); hub and all agents on 0.3.30, 0 restarts |
 | 91 | Size store has one writer at a time, with lease and fencing; a waiting process serves reads | done | claude-20261031-size-store | size-store-fresh | 11.78 | 2026-11-01 07:30 ICT | Owner decision 31 Oct<br>Merged https://github.com/DynacomSolutions/filedeck/pull/156 |
 | 92 | Watcher sessions hand over on rolling deploys, so a restart does not rescan | done | claude-20261031-size-store | size-store-fresh | 11.91 | 2026-11-01 07:30 ICT | Merged https://github.com/DynacomSolutions/filedeck/pull/156 |
 | 93 | SFTP host-key test is flaky under load | todo | | | | | `sftp: without a pin a changed host key is refused and named` (server/test/sftp-hostkey.test.ts) failed 2 times in about 20 full runs<br>likely restarting the fake SFTP server on the same port after 200 ms. |
+| 94 | Abandoned CLI du jobs are dropped, not kept queued or adopted after a restart | in_progress | claude-20261101-size-followups | size-followups | 11.84 | 2026-11-01 13:00 ICT | 14 CLI du jobs from 31 Oct were still queued and were adopted by the new release<br>Their clients gave up after the 600 s CLI timeout |
+| 95 | Size store with corrupt indexes rebuilds them instead of running with no cache | in_progress | claude-20261101-size-followups | size-followups | 11.84 | 2026-11-01 13:00 ICT | One agent store fails quick_check: wrong entry count in indexes pending_due and pending_idle_run<br>Since 11.91 the store is kept, but that agent runs with no size cache |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
