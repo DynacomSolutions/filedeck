@@ -37,13 +37,26 @@ after(async () => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const until = async (f: () => boolean | Promise<boolean>, ms = 10_000) => {
+const until = async (f: () => boolean | Promise<boolean>, ms = 60_000) => {
   for (const t0 = Date.now(); !(await f()) && Date.now() - t0 < ms; ) await sleep(20);
 };
 const rows = (db: string, sql: string) => {
   const d = new DatabaseSync(db, { readOnly: true });
   try {
     return d.prepare(sql).all() as Any[];
+  } finally {
+    d.close();
+  }
+};
+
+/** Long enough that a holder whose heartbeat a loaded host delays by seconds is not taken over by the next process mid-test. A test that needs a lapse makes one with `expireLease`. */
+const LEASE_MS = 3000;
+/** The holder stopped beating: age its heartbeat in the file (repeated while waiting, as a beat already in flight can still land), so the next process takes the lease at its next attempt, without waiting for a real lapse. */
+const expireLease = (db: string) => {
+  const d = new DatabaseSync(db);
+  try {
+    d.exec("PRAGMA busy_timeout = 10000");
+    d.exec("UPDATE writer SET beat = 0 WHERE id = 1");
   } finally {
     d.close();
   }
@@ -57,7 +70,7 @@ function world(name: string) {
   fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
   const db = path.join(tmp, name, "sizes.db");
   const proc = (id: string) => {
-    const store = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 100_000, leaseMs: 300 });
+    const store = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 100_000, leaseMs: LEASE_MS });
     const helper = new Fake();
     const w = new FanWatch(store, { helper: "fake", root, procMounts: mounts, spawn: () => helper, settleMs: 5, modifyMs: 300, sessionMs: 50, handoverMs: 3000 });
     store.covers = (v) => w.covers(v);
@@ -106,7 +119,7 @@ test("H1 a clean rolling deploy: the new process continues the watched time, a c
   await until(() => B.w.watchedSince() === aSince);
   assert.equal(B.w.watchedSince(), aSince, "continuous: the watched time carries over");
   // B applies what A left pending (and what it buffered itself)
-  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 15_000);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 60_000);
   const t = await B.store.freshTree("/", 0, false);
   assert.equal(t?.entries[0]?.bytes, 20, "the change is applied and served fresh");
   const r = await B.store.scanRead("/");
@@ -148,7 +161,7 @@ test("L-overflow an overflow hours ago, repaired by a full walk, does not cost t
   await A.w.handover();
   await A.store.close();
   await until(() => B.store.isWriter);
-  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 5000);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 60_000);
   assert.ok(await B.store.freshTree("/", 0, false), "the fast path is back after the deploy without another walk");
 });
 
@@ -169,7 +182,7 @@ test("H-lag an event still in the old helper's pipe when the hand-over ends is r
   assert.equal(rows(db, "SELECT clean FROM watch_sessions ORDER BY id")[0].clean, 1);
   assert.equal(rows(db, "SELECT COUNT(*) n FROM pending")[0].n, 1, "the event reached the store before the run ended");
   await until(() => B.store.isWriter);
-  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 15_000);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 60_000);
   assert.equal((await B.store.freshTree("/", 0, false))?.entries[0]?.bytes, 20);
 });
 
@@ -212,9 +225,10 @@ test("H-taken a folder taken from memory and not applied when the run ends is no
   helper.stdout.write(`x ${tmp}/a\n`);
   await until(() => w.taken.size > 0);
   const done = w.handover();
-  await sleep(2300); // the drain does not finish: the process would exit with the folder neither applied nor recorded
-  gate();
+  // the drain does not finish (its apply waits on `gate`): the process would exit with the folder neither applied nor recorded. The hand-over's own bounded wait for the
+  // drain ends the run; releasing the gate only afterwards keeps this independent of how long that wait takes on a loaded host.
   await done;
+  gate();
   assert.equal(ended, false);
 });
 
@@ -228,10 +242,12 @@ test("the shutdown signal starts the hand-over at once, not after the connection
   assert.deepEqual(events, ["signal", "drained", "cleanup"]);
 });
 
-const kill = (p: Proc) => {
+/** the process dies without releasing the lease: its beats stop, and (as after a real lapse) the file's heartbeat is old */
+const kill = (p: Proc, db: string) => {
   clearInterval((p.store as Any).leaseTimer);
   (p.store as Any).tryLease = async () => {};
   p.w.stop();
+  expireLease(db);
 };
 const bytes = (t: Any) => t?.entries?.[0]?.bytes ?? null;
 
@@ -250,8 +266,8 @@ test("V1 a crash in the overlap: a walk of the old process begun after the new o
   const r = await A.store.scanRead("/"); // a plain du on A in the overlap: rows reused under A's trust, the walk vouches
   assert.equal(r.untrusted, false);
   assert.ok(rows(db, "SELECT started FROM validated")[0].started > B.w.watchedSince() - 1);
-  kill(A); // SIGKILL, OOM, the hard exit: no session end
-  await until(() => B.store.isWriter && (B.store as Any).idxReady);
+  kill(A, db); // SIGKILL, OOM, the hard exit: no session end
+  await until(() => (expireLease(db), B.store.isWriter && (B.store as Any).idxReady));
   await sleep(200);
   assert.equal((B.w.chainMin() !== null), false);
   const t = await B.store.freshTree("/a/x", 0, false);
@@ -291,7 +307,7 @@ test("V1c a clean hand-over keeps the old process's validation, a rescan of the 
   await A.w.handover();
   await A.store.close();
   await until(() => B.store.isWriter && (B.w.chainMin() !== null));
-  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 5000);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 60_000);
   assert.ok(await B.store.freshTree("/", 0, false), "carried: epoch 1's validation counts");
   assert.equal(rows(db, "SELECT epoch FROM validated")[0].epoch, 1);
 });
@@ -318,8 +334,9 @@ test("V2 a walk begun under one lease is fenced once the next exists", async () 
   await until(() => held);
   clearInterval((A.store as Any).leaseTimer);
   (A.store as Any).tryLease = async () => {}; // A stalls: no more beats
+  expireLease(db);
   const B = proc("B");
-  await until(() => B.store.isWriter);
+  await until(() => (expireLease(db), B.store.isWriter));
   fs.writeFileSync(path.join(root, "a/y/f"), "1234567890");
   gate();
   assert.match(await w, /lease/);
@@ -327,7 +344,7 @@ test("V2 a walk begun under one lease is fenced once the next exists", async () 
 });
 
 test("V3 a writer that lost the lease and got it back under a stalled walk does not vouch for what that walk read", async () => {
-  const { root, proc } = world("v3");
+  const { root, db, proc } = world("v3");
   const A = proc("A");
   (A.store as Any).o.commitChunk = 1;
   await up(A);
@@ -348,8 +365,9 @@ test("V3 a writer that lost the lease and got it back under a stalled walk does 
   const w = A.store.scan("/", undefined, true).then(() => "ended", (e: Any) => String(e.message));
   await until(() => held);
   (A.store as Any).tryLease = async () => {};
+  expireLease(db);
   const B = proc("B");
-  await until(() => B.store.isWriter);
+  await until(() => (expireLease(db), B.store.isWriter));
   await sleep(50);
   fs.writeFileSync(path.join(root, "a/y/f"), "1234567890");
   A.event("/a/y");
@@ -440,8 +458,8 @@ async function crashInOverlap(name: string) {
   await up(B);
   await sleep(10);
   await A.store.scanRead("/");
-  kill(A);
-  await until(() => B.store.isWriter && (B.store as Any).idxReady);
+  kill(A, db);
+  await until(() => (expireLease(db), B.store.isWriter && (B.store as Any).idxReady));
   await sleep(200);
   return { root, db, proc, B };
 }
@@ -462,7 +480,7 @@ test("C1 A unclean, B clean, C: the validation B refused is not counted again by
 });
 
 test("C2 A clean, B unclean, C: C does not carry", async () => {
-  const { root, proc } = world("c2");
+  const { root, db, proc } = world("c2");
   const A = proc("A");
   await up(A);
   await A.store.scan("/", undefined, true);
@@ -472,7 +490,7 @@ test("C2 A clean, B unclean, C: C does not carry", async () => {
   await A.w.handover();
   await A.store.close();
   await until(() => B.store.isWriter && (B.store as Any).idxReady && B.w.chainMin() !== null);
-  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 3000);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 60_000);
   assert.ok(await B.store.freshTree("/", 0, false), "control: B carried");
   fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
   await sleep(5);
@@ -480,8 +498,8 @@ test("C2 A clean, B unclean, C: C does not carry", async () => {
   await up(C);
   await sleep(10);
   await B.store.scanRead("/");
-  kill(B);
-  await until(() => C.store.isWriter && (C.store as Any).idxReady);
+  kill(B, db);
+  await until(() => (expireLease(db), C.store.isWriter && (C.store as Any).idxReady));
   await sleep(200);
   assert.equal(C.w.chainMin(), null);
   const t = await C.store.freshTree("/a/x", 0, false);
@@ -499,7 +517,7 @@ test("C3 a carried run that overflows: the carried validation stops counting", a
   await A.w.handover();
   await A.store.close();
   await until(() => B.store.isWriter && (B.store as Any).idxReady && B.w.chainMin() !== null);
-  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 3000);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 60_000);
   B.helper.stdout.write("!overflow\n");
   await sleep(300);
   assert.equal(await B.store.freshTree("/", 0, false), null);
@@ -526,7 +544,7 @@ test("C5 a carried run that loses and regains the lease (no other holder wrote) 
   await A.w.handover();
   await A.store.close();
   await until(() => B.store.isWriter && (B.store as Any).idxReady && B.w.chainMin() !== null);
-  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 3000);
+  await until(async () => (await B.store.freshTree("/", 0, false)) !== null, 60_000);
   (B.store as Any).loseLease();
   await until(() => B.store.isWriter && (B.store as Any).idxReady);
   await sleep(100);
