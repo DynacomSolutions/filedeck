@@ -61,12 +61,12 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     return c.json(res, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
   });
 
-  // Inode+size identity of a file, so the hub's vault can find a saved password after a rename or move.
+  // Device, inode and size identity of a file (the device keeps two volumes' equal inode numbers apart), so the hub's vault can find a saved password after a rename or move.
   app.get("/api/fs/fid", async (c) => {
     const r = resolveRead(root, c.req.query("path") ?? "");
     const st = await fs.stat(r.real);
     if (!st.isFile()) throw bad("not a regular file");
-    return c.json({ fid: `${st.ino}:${st.size}` });
+    return c.json({ fid: `${st.dev}:${st.ino}:${st.size}` });
   });
 
   // Multi-select / folder download: a zip streamed straight to the client.
