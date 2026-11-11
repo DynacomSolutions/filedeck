@@ -405,3 +405,81 @@ test("/api/transfer: moving a link is refused and the link stays", async () => {
   assert.ok(fs.lstatSync(path.join(A, "lk-top")).isSymbolicLink());
   assert.ok(!fs.existsSync(path.join(B, "in/lk-top")));
 });
+
+// ---- the concurrency limit holds when resumed jobs wait and one of them is canceled
+for (const conc of [1, 2]) {
+  test(`concurrency ${conc}: never more jobs move data than the limit, with resumed jobs waiting and one canceled`, async () => {
+    const stamp = new Map<string, number>();
+    let most = 0;
+    const t: Target = {
+      async fetch(rest, init) {
+        const u = new URL("http://x" + rest);
+        const p = u.searchParams.get("path") ?? "";
+        const op = u.pathname.split("/").pop();
+        if (op === "stat") return p.startsWith("/in/") ? new Response("{}", { status: 404 }) : Response.json({ type: "file", size: 100, mtime: 1 });
+        if (op === "download") {
+          let n = 0;
+          return new Response(
+            new ReadableStream({
+              async pull(c) {
+                await nap(4);
+                if (n++ >= 150) return c.close();
+                c.enqueue(new Uint8Array([65]));
+                return undefined;
+              },
+            }),
+          );
+        }
+        if (op === "upload") {
+          const name = "/" + u.searchParams.get("name")!;
+          const rd = (init?.body as ReadableStream).getReader();
+          for (;;) {
+            const r = await rd.read(); // a chunk only arrives while the job runs: pull passes its checkpoint first
+            if (r.done) break;
+            const now = Date.now();
+            stamp.set(name, now);
+            most = Math.max(most, [...stamp.values()].filter((at) => now - at < 25).length);
+          }
+          return Response.json({}, { status: 201 });
+        }
+        return Response.json({ ok: true });
+      },
+    };
+    const q = new OpQueue({ agents: new Map([["S", t], ["D", t]]), isSource: () => false, concurrency: conc });
+    const priv = q as unknown as { jobs: Map<string, { holdsSlot?: boolean; abort: AbortController }>; running: number };
+    const mk = (p: string) => q.create({ op: "copy", items: [{ node: "S", path: p }], dst: { node: "D", dir: "/in" }, conflict: "ask" }).id;
+    const over: string[] = [];
+    const watch = setInterval(() => {
+      const holders = [...priv.jobs.values()].filter((j) => j.holdsSlot && !j.abort.signal.aborted).length;
+      if (holders > conc) over.push(`holders ${holders}`);
+    }, 0);
+    try {
+      // B and C each run alone for a moment, are paused (which frees the slot) and parked
+      const parked: string[] = [];
+      for (const n of ["b", "c"]) {
+        const id = mk("/" + n);
+        await nap(40);
+        q.pause(id);
+        parked.push(id);
+        await nap(40);
+      }
+      const fillers = Array.from({ length: conc }, (_, i) => mk(`/f${i}`));
+      await nap(40);
+      for (const id of parked) q.resume(id); // both wait: the queue is full
+      await nap(30);
+      q.cancel(parked[0]!);
+      await nap(150);
+      assert.deepEqual(over, [], "holders never exceed the limit");
+      stamp.clear();
+      most = 0;
+      await nap(150);
+      assert.ok(most <= conc, `${most} jobs moved data at once, limit ${conc}`);
+      for (const id of [...fillers, parked[1]!]) q.cancel(id);
+      for (const id of [...fillers, ...parked]) await settle(q, id, 6000);
+      assert.equal(priv.running, 0, "no slot is left over");
+      assert.deepEqual(over, []);
+    } finally {
+      clearInterval(watch);
+    }
+  });
+}

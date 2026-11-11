@@ -582,33 +582,37 @@ export class OpQueue {
   // ---------------------------------------------------------------- concurrency slots
 
   /**
-   * Give the slot back (idempotent). A job waiting to resume gets it directly, without the count dropping, so no queued job
-   * can slip in between; with nobody waiting the next queued job starts.
+   * Give the slot back (idempotent). Waiting jobs that are resuming get it directly, in the same step, so no queued job can slip in
+   * between; the count never goes over the limit. With nobody to hand it to, the next queued job starts.
    */
   private release(j: Job) {
     if (!j.holdsSlot) return;
     j.holdsSlot = false;
-    for (let w = this.slotWaiters.shift(); w; w = this.slotWaiters.shift()) {
+    this.running--;
+    while (this.running < (this.d.concurrency ?? 2)) {
+      const w = this.slotWaiters.shift();
+      if (!w) break;
       if (w.job.holdsSlot || w.job.closed) {
         w.wake(); // nothing to hand over to this one
         continue;
       }
       w.job.holdsSlot = true;
+      this.running++;
       w.wake();
-      return;
     }
-    this.running--;
-    this.pump();
+    if (!this.slotWaiters.length) this.pump();
   }
 
   /**
-   * Take a slot again after a pause or a question; waits while the queue is full, and stops waiting when the job is canceled.
-   * Several checkpoints of one job may wait at once; the job still takes one slot.
+   * Take a slot again after a pause or a question; waits while the queue is full. A job that is canceled (or lost, or stopping)
+   * while it waits leaves without a slot: it only has to unwind. Several checkpoints of one job may wait at once; it takes one slot.
    */
   private async acquire(j: Job) {
     if (j.holdsSlot || j.closed) return;
     const sig = j.abort.signal;
-    if (this.running >= (this.d.concurrency ?? 2) && !sig.aborted && !j.lost && !this.stopping) {
+    const leaving = () => sig.aborted || !!j.lost || this.stopping;
+    if (this.running >= (this.d.concurrency ?? 2)) {
+      if (leaving()) return;
       j.slotWait ??= new Promise<void>((resolve) => {
         const w = {
           job: j,
@@ -627,8 +631,8 @@ export class OpQueue {
       }).finally(() => (j.slotWait = undefined));
       await j.slotWait;
     }
-    if (j.holdsSlot || j.closed) return; // handed over directly, or the job ended meanwhile
-    j.holdsSlot = true; // also when canceled: the job ends through exec's finally, which releases it
+    if (j.holdsSlot || j.closed || leaving()) return; // handed over directly, or the job ended or is leaving
+    j.holdsSlot = true;
     this.running++;
   }
 
