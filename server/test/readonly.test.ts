@@ -63,7 +63,7 @@ test("an ancestor of a read-only prefix cannot be removed, moved or changed recu
     fs.symlinkSync("srv", path.join(tmp, "lnk"));
     const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_READONLY: "/srv/backup" } as never));
     const post = (u: string, b: unknown) => app.request(u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
-    const denied = async (r: Promise<Response>) => {
+    const denied = async (r: Response | Promise<Response>) => {
       const x = await r;
       assert.equal(x.status, 403);
       assert.equal(((await x.json()) as { error: string }).error, "read-only volume");
