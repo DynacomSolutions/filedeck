@@ -173,7 +173,7 @@ ETA: 2026-11-12 16:00 ICT
 | 106 | Git reads ignore programs named in repository config and stay inside the root | in_review | claude-20261112-rv-search-git | rv-git-config | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/181 |
 | 107 | Search and glob patterns cannot block the agent | in_review | claude-20261112-rv-search-git | rv-search-patterns | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/190 |
 | 108 | Archive extraction stages and merges through pinned directory descriptors | in_review | claude-20261112-rv-archives | rv-extract-pinned | 14.114 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/192 |
-| 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | todo | | rv-pinned-walks | 14.113, 14.116 | | Found in review |
+| 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | in_review | claude-20261112-rv-fsops | rv-pinned-walks | 14.113, 14.116 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/199 |
 | 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_review | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/182 |
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | in_review | claude-20261112-rv-chart | rv-chart-workflows | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/184 |
 
