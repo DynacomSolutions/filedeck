@@ -22,7 +22,7 @@ test("a row or tile names what it is, so a folder and a file differ without the 
 });
 
 test("the list is a grid (a listbox in the thumbnail view) with aria-selected rows and an active descendant", () => {
-  assert.match(filePanel, /aria-multiselectable="true"\s+aria-activedescendant=\{activeRowId\}/);
+  assert.match(filePanel, /aria-multiselectable="true"\s+aria-busy=\{loading\}\s+aria-activedescendant=\{activeRowId\}/);
   assert.match(filePanel, /"aria-selected": sel\.has\(en\.path\)/);
   assert.match(filePanel, /id: rowId\(listId, index\)/);
   assert.match(filePanel, /<table className="ft cols" role="presentation"/);
@@ -31,9 +31,36 @@ test("the list is a grid (a listbox in the thumbnail view) with aria-selected ro
   assert.equal(rowId("p", 3), "p-r3");
 });
 
-test("Tab is not taken by the list: panels are reached in the page's own order", () => {
-  assert.doesNotMatch(filePanel, /return onSwitch\(/);
-  assert.doesNotMatch(filePanel, /onSwitch\(/);
+test("Tab is not taken by the list; Alt+PageDown / Alt+PageUp switch panels and F6 keeps moving files", () => {
+  assert.doesNotMatch(filePanel, /key === "Tab" && !mod/);
+  assert.match(filePanel, /\(key === "PageDown" \|\| key === "PageUp"\)\) return onSwitch\(key === "PageDown" \? 1 : -1\);/);
+  assert.match(filePanel, /if \(key === "F6"\) return toOther\("move"\), true;/);
+  const help = readFileSync(new URL("../src/Shortcuts.tsx", import.meta.url), "utf8");
+  assert.match(help, /\["Alt\+PageDown \/ Alt\+PageUp", "Next \/ previous panel's file list/);
+  assert.doesNotMatch(help, /F6 \/ Shift\+F6/);
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /\[data-fp="\$\{to\.id\}"\] \.fp-scroll/);
+});
+
+test("the list is never rebuilt when the side pane opens or closes, and a split returns focus to a list", () => {
+  assert.doesNotMatch(filePanel, /\) : pane \? \(\s+<Group/);
+  assert.match(filePanel, /\{first && pane && <Panel id="pv"/);
+  assert.match(filePanel, /<Panel id="list" minSize=\{narrow \? "30%" : "20%"\}>\{listing\}<\/Panel>/);
+  assert.match(filePanel, /onSelect: \(\) => split\("horizontal"\)/);
+  assert.match(filePanel, /onSplit\(dir\);\s+focusPanelList\(leaf\.id\);/);
+});
+
+test("each lazy editor is inside an error boundary with a retry, not left to unmount the panel", () => {
+  assert.match(filePanel, /<ErrorBoundary what="The editor"[\s\S]*?<Suspense[\s\S]*?<TextEditor/);
+  assert.match(filePanel, /<ErrorBoundary what="The diff viewer"[\s\S]*?<Suspense[\s\S]*?<DiffViewer/);
+});
+
+test("two panels never share a landmark name", () => {
+  assert.match(filePanel, /aria-label=\{`File and folder actions for \$\{panelName\}`\}/);
+  assert.match(filePanel, /<AddressBar label=\{`Breadcrumb for \$\{panelName\}`\}/);
+  assert.match(filePanel, /pr\.id < leaf\.id\)\.length;/);
+  const bar = readFileSync(new URL("../src/AddressBar.tsx", import.meta.url), "utf8");
+  assert.match(bar, /aria-label=\{label\} ref=\{navRef\}/);
 });
 
 test("a row at the top edge is scrolled clear of the sticky header", () => {

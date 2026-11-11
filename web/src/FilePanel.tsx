@@ -35,7 +35,8 @@ import { TransferDestination, type TransferKind } from "./TransferDestination";
 import { usePresentation } from "./presentation";
 import { changeHub } from "./eventStream";
 import { plainNameError } from "./editDrafts";
-import { entryKind, listAnnouncement, revealRow, rowId } from "./listFocus";
+import { entryKind, focusPanelList, listAnnouncement, revealRow, rowId } from "./listFocus";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { typeAheadMatch, type TypeAheadState } from "./letterNavigation";
 import * as Ic from "lucide-react";
 
@@ -95,7 +96,7 @@ interface Props {
   onTogglePanel: () => void;
   /** the panel F5/F6 copy and move to (the next panel in layout order), if any */
   next: { node: string; path: string; id: string } | null;
-  /** move to the neighbouring panel (false when there is none). Tab no longer calls it: Tab walks the page in its normal order. */
+  /** Alt+PageDown / Alt+PageUp: move to the next / previous panel's list (false when there is none). Tab walks the page in its normal order. */
   onSwitch: (dir: 1 | -1) => boolean;
   /** `?` opens the shortcut overlay */
   onHelp: () => void;
@@ -116,7 +117,7 @@ const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, onClickSelect, next, onHelp, onTrash, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, onClickSelect, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const presentation = usePresentation();
   const estimatedFileRowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 17));
@@ -779,13 +780,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       </div>
     ) : null; // no active item: no side panel at all (no placeholder, no folder fallback)
   const pane = cside ? null : editing ? (
-    <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
-      <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
-    </Suspense>
+    <ErrorBoundary what="The editor" resetKeys={[editing.node, editing.path]} onClose={() => setEditing(null)}>
+      <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
+        <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
+      </Suspense>
+    </ErrorBoundary>
   ) : gitDiff ? (
-    <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
-      <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inPane onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
-    </Suspense>
+    <ErrorBoundary what="The diff viewer" resetKeys={[gitDiff.node, gitDiff.path, gitDiff.rev]} onClose={() => setGitDiff(null)}>
+      <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
+        <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inPane onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
+      </Suspense>
+    </ErrorBoundary>
   ) : propsOpen ? (
     propsPane
   ) : previewEntry ? (
@@ -1154,7 +1159,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     const handled = (() => {
       if (e.altKey && e.shiftKey && !mod && key.startsWith("Arrow") && onDock) return onDock(key);
       // While the search results are open the panel's own selection is hidden: no file operations by key.
-      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "nurcpNURCP".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
+      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "nurcpNURCP".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f") || (e.altKey && !mod && (key === "PageDown" || key === "PageUp")))) return false;
       if (!mod && !e.altKey) {
         const r = typeAheadMatch(visible, cursor, key, typeAhead.current, Date.now());
         if (r) {
@@ -1171,6 +1176,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "c") return void copyPaths([path]), true;
       // Keyboard alternative to Ctrl/Cmd+click: add this panel to (or remove it from) the selected panels.
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "p") return onTogglePanel(), true;
+      // Quick switch between the panels' lists; Tab keeps its normal order so every control stays reachable.
+      if (e.altKey && !mod && !e.shiftKey && (key === "PageDown" || key === "PageUp")) return onSwitch(key === "PageDown" ? 1 : -1);
       if (mod && e.shiftKey && key.toLowerCase() === "f") return setSearch(leaf.sr ?? EMPTY_SEARCH), true;
       if (mod && key.toLowerCase() === "f") {
         if (filterInput.current) {
@@ -1302,9 +1309,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     // The same column chooser as the column header's context menu, for those who cannot right-click.
     ...(view !== "grid" ? (["sep", ...columnMenu()] as MenuItem[]) : []),
   ];
+  /** The split rebuilds this panel inside a new group, so the control that had focus is gone: put focus back on this panel's list. */
+  const split = (dir: "horizontal" | "vertical") => {
+    onSplit(dir);
+    focusPanelList(leaf.id);
+  };
   const splitItems = (): MenuItem[] => [
-    { label: "Split right", icon: Columns2, onSelect: () => onSplit("horizontal") },
-    { label: "Split down", icon: Rows2, onSelect: () => onSplit("vertical") },
+    { label: "Split right", icon: Columns2, onSelect: () => split("horizontal") },
+    { label: "Split down", icon: Rows2, onSelect: () => split("vertical") },
   ];
   const moreItems = (): MenuItem[] => [
     { label: pasteLabel, hint: "Ctrl+V", icon: ClipboardPaste, disabled: !clip, onSelect: () => void paste(path) },
@@ -1343,6 +1355,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const canPreview = isPreviewableEntry(only);
 
   const first = dock === "left" || dock === "top";
+  /** landmark names must differ between panels: the location, and a number when another panel shows the same one */
+  const sameBefore = peers.filter((pr) => pr.node === node && pr.path === path && pr.id < leaf.id).length;
+  const panelName = `${node}:${path}${sameBefore ? ` (${sameBefore + 1})` : ""}`;
 
   return (
     <section
@@ -1386,7 +1401,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         <Tip label="Back" shortcut="Alt+Left"><button type="button" className="fp-up" aria-label="Back" disabled={!canBack} onClick={() => histGo(-1)}><ArrowLeft /></button></Tip>
         <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
         <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
-        <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
+        <AddressBar label={`Breadcrumb for ${panelName}`} node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         <Tip label="Refresh" shortcut="Alt+R"><button type="button" className="fp-up fp-refresh" aria-label="Refresh" onClick={refresh}><RefreshCw /></button></Tip>
         {git?.repo && !leaf.sr && <span className="git-chip"><GitPill s={git.repo.summary} /></span>}
         <div className="fp-actions">
@@ -1399,7 +1414,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           )}
         </div>
       </div>
-      <div className="fp-tools" role="toolbar" aria-label="File and folder actions">
+      <div className="fp-tools" role="toolbar" aria-label={`File and folder actions for ${panelName}`}>
         <div className="fp-tools-main" role="group" aria-label="Folder actions">
           <Tip label="New: file, folder, link or upload"><button type="button" className="fp-menubtn" aria-label="New" aria-haspopup="menu" onClick={(e) => menuAt(e, newItems())}><FilePlus />{!narrow && <span className="fp-menubtn-l">New</span>}<ChevronDown className="fp-caret" /></button></Tip>
           <Tip label="View: list or grid, sort order, hidden files"><button type="button" className="fp-menubtn" aria-label="View" aria-haspopup="menu" onClick={(e) => menuAt(e, viewItems())}>{view === "grid" ? <LayoutGrid /> : <List />}{!narrow && <span className="fp-menubtn-l">View</span>}<ChevronDown className="fp-caret" /></button></Tip>
@@ -1468,17 +1483,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       {pane && phone ? (
         // Phone: one view at a time. The side pane takes the whole panel; its close button returns to the list.
         <div className="fp-phonepane">{pane}</div>
-      ) : pane ? (
-        <Group key={dock + (narrow ? "-n" : "")} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
-          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock: savedDock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
-          {first && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
-          {first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
-          <Panel id="list" minSize={narrow ? "30%" : "20%"}>{listing}</Panel>
-          {!first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
-          {!first && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
-        </Group>
       ) : (
-        listing
+        // The list always sits in this group, at the same position, so opening or closing the side pane does not rebuild it
+        // (a rebuilt list drops keyboard focus and the row under the pointer).
+        <Group key={dock + (narrow ? "-n" : "")} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} {...(pane ? { defaultLayout: { list: 100 - pvSize, pv: pvSize } } : {})}
+          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock: savedDock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
+          {first && pane && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
+          {first && pane && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
+          <Panel id="list" minSize={narrow ? "30%" : "20%"}>{listing}</Panel>
+          {!first && pane && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
+          {!first && pane && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
+        </Group>
       )}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {modal?.k === "new" && (

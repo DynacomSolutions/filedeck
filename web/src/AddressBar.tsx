@@ -166,13 +166,15 @@ interface Props {
   /** navigate (pushes the panel history); `select` is a file to select in that folder */
   onGo: (node: string, path: string, select?: string) => void;
   onCrumbMenu: (e: React.MouseEvent, path: string) => void;
+  /** accessible name of the breadcrumb landmark; panels give theirs a distinguishing suffix */
+  label?: string;
 }
 
 /**
  * The panel's location as a URI (`node-a:/home/user`). Idle it shows clickable path segments; click, focus or
  * Ctrl+L turns it into a combobox input with suggestions (nodes, child folders, bookmarks, recents).
  */
-export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Props) {
+export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, label = "Breadcrumb" }: Props) {
   const here = fmtAddr(node, path);
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(here);
@@ -588,7 +590,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       }
     }}>
       {basePicker}
-      <nav className={"crumbs" + (tight ? " tight" : "")} aria-label="Breadcrumb" ref={navRef}>
+      <nav className={"crumbs" + (tight ? " tight" : "")} aria-label={label} ref={navRef}>
         {shownSegs.map(({ sg, i }) => (
           <span className={"crumb" + (i === segs.length - 1 ? " last" : "")} key={sg.path}>
             {i === folded + 1 && folded > 0 && (
