@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { findRepo, runGit } from "../src/git.ts";
+import { findRepo, repoAt, runGit } from "../src/git.ts";
 
 /**
  * work-item: a repository's own configuration must never make the agent run a command. Every repository here tries a
@@ -225,4 +225,66 @@ test("runGit overrides drivers whose names contain dots, and fails closed when i
   assert.deepEqual(marked(), []);
   const bad = await runGit(path.join(tmp, "marks"), ["--git-dir", path.join(tmp, "nonexistent"), "status"]);
   assert.notEqual(bad.code, 0);
+});
+
+test("signature and program settings in a repository's config never run a program (stash list, log, show)", async () => {
+  reset();
+  const d = path.join(root, "signed");
+  fs.mkdirSync(d);
+  git(d, "init", "-q");
+  write(path.join(d, "a.txt"), "alpha\n");
+  git(d, "add", "-A");
+  git(d, "commit", "-qm", "first");
+  const head = git(d, "rev-parse", "HEAD");
+  const tree = git(d, "rev-parse", "HEAD^{tree}");
+  // a commit that carries a (fake) signature header, so that showing signatures makes Git call the verifier
+  const raw = `tree ${tree}\nparent ${head}\nauthor t <t@example.test> 1700000000 +0000\ncommitter t <t@example.test> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n abcd\n -----END PGP SIGNATURE-----\n\nWIP on main\n`;
+  const sha = execFileSync("git", ["hash-object", "-t", "commit", "-w", "--stdin"], { cwd: d, env: ENV, input: raw, encoding: "utf8" }).trim();
+  git(d, "update-ref", "--create-reflog", "-m", "WIP on main", "refs/stash", sha);
+  const prog = path.join(tmp, "verifier.sh");
+  write(prog, `#!/bin/sh\ntouch ${marks}/verifier\n`);
+  fs.chmodSync(prog, 0o755);
+  cfg(d, "log.showSignature", "true", "gpg.program", prog, "gpg.openpgp.program", prog, "gpg.x509.program", prog, "gpg.ssh.program", prog, "core.sshCommand", prog, "core.editor", prog, "core.askPass", prog, "credential.helper", `!${prog}`);
+  git(d, "config", "gpg.format", "openpgp");
+  // the control: plain Git with this config does call the program
+  execFileSync("git", ["-c", "safe.directory=*", "stash", "list"], { cwd: d, env: ENV, stdio: "ignore" });
+  execFileSync("git", ["-c", "safe.directory=*", "log", "-1", "refs/stash"], { cwd: d, env: ENV, stdio: "ignore" });
+  assert.deepEqual(marked(), ["verifier"], "control: plain Git runs the verifier");
+  reset();
+  for (const url of ["/api/git/info?path=/signed&fresh=1", "/api/git/info?path=/signed/a.txt&fresh=1", "/api/git/status?path=/signed&fresh=1"]) {
+    const r = await app.request(url);
+    assert.equal(r.status, 200, url);
+  }
+  const r = await runGit(d, ["--git-dir", path.join(d, ".git"), "--work-tree", d, "stash", "list"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /WIP on main/);
+  await runGit(d, ["--git-dir", path.join(d, ".git"), "--work-tree", d, "log", "-1", "refs/stash"]);
+  await runGit(d, ["--git-dir", path.join(d, ".git"), "--work-tree", d, "show", "refs/stash"]);
+  assert.deepEqual(marked(), [], "a repository-configured program ran");
+});
+
+test("a relative gitdir or commondir that leaves the root is not a repository", async () => {
+  const outside = path.join(tmp, "outside-repo");
+  fs.mkdirSync(outside);
+  git(outside, "init", "-q");
+  // a work tree under the root whose `.git` file points, relatively, at a repository outside it
+  const a = path.join(root, "escape-gitdir");
+  fs.mkdirSync(a);
+  write(path.join(a, ".git"), `gitdir: ${path.relative(a, path.join(outside, ".git"))}\n`);
+  assert.equal(await repoAt(root, a), null);
+  // an admin directory inside the root whose commondir leaves it
+  const admin = path.join(root, "escape-admin");
+  fs.mkdirSync(admin, { recursive: true });
+  write(path.join(admin, "HEAD"), "ref: refs/heads/main\n");
+  write(path.join(admin, "commondir"), `${path.relative(admin, path.join(outside, ".git"))}\n`);
+  const b = path.join(root, "escape-commondir");
+  fs.mkdirSync(b);
+  write(path.join(b, ".git"), `gitdir: ${path.relative(b, admin)}\n`);
+  assert.equal(await repoAt(root, b), null);
+  // a relative gitdir that stays inside the root still works
+  const ok = path.join(root, "inside-ok");
+  fs.mkdirSync(ok);
+  git(ok, "init", "-q", "--separate-git-dir", path.join(root, "inside-ok-git"));
+  write(path.join(ok, ".git"), `gitdir: ../inside-ok-git\n`);
+  assert.equal((await repoAt(root, ok))?.gitDir, path.join(root, "inside-ok-git"));
 });

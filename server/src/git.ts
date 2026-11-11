@@ -40,6 +40,16 @@ export const BASE_ARGS = [
   // status asks each submodule's own `git status` for its dirty state, which would run the submodule's own filters:
   // only the recorded commit is compared
   "-c", "diff.ignoreSubmodules=dirty", "-c", "status.submoduleSummary=false",
+  // A repository's own config must not name a program to run. Signature checking is off for every command (`log`, `show`
+  // and `stash list` verify signatures when `log.showSignature` is set), and every key that names a signing, editor,
+  // credential, ssh, askpass or remote-refs program is pointed at a program that does nothing. `-c` outranks the
+  // repository's file, so no call site has to remember any of this.
+  "-c", "log.showSignature=false",
+  "-c", "gpg.program=false", "-c", "gpg.openpgp.program=false", "-c", "gpg.x509.program=false", "-c", "gpg.ssh.program=false",
+  "-c", "gpg.ssh.defaultKeyCommand=false",
+  "-c", "core.sshCommand=false", "-c", "core.askPass=false", "-c", "core.editor=false", "-c", "sequence.editor=false",
+  "-c", "core.alternateRefsCommand=false", "-c", "credential.helper=", "-c", "uploadpack.packObjectsHook=false",
+  "-c", "web.browser=false",
 ];
 
 /**
@@ -249,15 +259,35 @@ async function gitFileTarget(root: string, file: string): Promise<string | null>
   }
   const m = /^gitdir:\s*(.+?)\s*$/m.exec(text.slice(0, 4096));
   if (!m) return null;
-  const t = m[1]!;
-  if (path.isAbsolute(t)) {
+  return underRoot(root, path.dirname(file), m[1]!);
+}
+
+/**
+ * Where a `gitdir:` or `commondir` entry points, kept inside the root: an absolute host path is re-based onto the root
+ * through `paths.ts`, a relative one must resolve (symlinks followed) to somewhere under it. Anything else is not a
+ * repository here.
+ */
+async function underRoot(root: string, base: string, target: string): Promise<string | null> {
+  if (path.isAbsolute(target)) {
     try {
-      return resolveRead(root, t).real;
+      return resolveRead(root, target).real;
     } catch {
       return null;
     }
   }
-  return path.resolve(path.dirname(file), t);
+  try {
+    const [real, rootReal] = await Promise.all([fs.realpath(path.resolve(base, target)), fs.realpath(root)]);
+    const rel = path.relative(rootReal, real);
+    return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel) ? null : real;
+  } catch {
+    return null;
+  }
+}
+
+/** The common directory a git directory's `commondir` file names, confined to the root; null when it has none or leaves the root. */
+async function commonDirOf(root: string, gitDir: string): Promise<string | null> {
+  const t = await fs.readFile(path.join(gitDir, "commondir"), "utf8").then((x) => x.trim(), () => null);
+  return t ? underRoot(root, gitDir, t) : null;
 }
 
 async function looksBare(dir: string): Promise<boolean> {
@@ -266,10 +296,13 @@ async function looksBare(dir: string): Promise<boolean> {
 }
 
 /** Git's own test for a git directory: HEAD, objects and refs (a linked worktree's admin directory gets them from its commondir). */
-async function isGitDir(dir: string): Promise<boolean> {
+async function isGitDir(root: string, dir: string): Promise<boolean> {
   if (!(await exists(path.join(dir, "HEAD")))) return false;
-  const cd = await fs.readFile(path.join(dir, "commondir"), "utf8").then((t) => path.resolve(dir, t.trim()), () => null);
-  return looksBare(cd ?? dir);
+  if (await exists(path.join(dir, "commondir"))) {
+    const cd = await commonDirOf(root, dir);
+    return cd !== null && looksBare(cd);
+  }
+  return looksBare(dir);
 }
 
 /** Is `dir` itself a repository root (a `.git` entry in it, or a bare repository)? */
@@ -283,11 +316,11 @@ export async function repoAt(root: string, dir: string): Promise<Repo | null> {
     st = null;
   }
   // a `.git` that is not a valid repository is skipped, as Git does: the bare check still runs, then the search goes on above
-  if (st?.isDirectory() && (await isGitDir(dotgit))) return { kind: "worktree", workDir: dir, gitDir: dotgit, commonDir: dotgit, root };
+  if (st?.isDirectory() && (await isGitDir(root, dotgit))) return { kind: "worktree", workDir: dir, gitDir: dotgit, commonDir: dotgit, root };
   if (st?.isFile()) {
     const gd = await gitFileTarget(root, dotgit);
-    if (gd && (await isGitDir(gd))) {
-      const cd = await fs.readFile(path.join(gd, "commondir"), "utf8").then((t) => path.resolve(gd, t.trim()), () => null);
+    if (gd && (await isGitDir(root, gd))) {
+      const cd = await commonDirOf(root, gd);
       // a submodule's git directory sits inside the superproject's `.git/modules`, with no commondir: it is an ordinary work tree
       return { kind: cd ? "linked" : "worktree", workDir: dir, gitDir: gd, commonDir: cd ?? gd, root };
     }
