@@ -17,6 +17,7 @@ import {
   virtualJoin,
   type Resolved,
 } from "./paths.ts";
+import { copyTree, rmTree } from "./pinwalk.ts";
 
 export interface Entry {
   name: string;
@@ -407,26 +408,16 @@ export async function moveReal(from: string, to: string, overwrite: boolean) {
     // deleted once the copy is complete and in place.
     const tmp = path.join(path.dirname(to), tempName(path.basename(to), `.filedeck-part-${randomUUID()}`));
     try {
-      await fs.cp(from, tmp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, preserveTimestamps: true });
-      await copyMeta(from, tmp); // a move keeps owner and times of every entry, as rename(2) does
-      if (overwrite) await fs.rm(to, { recursive: true, force: true });
+      // A move keeps owner and times of every entry, as rename(2) does. `from` and `to` have pinned parents; the walks hold every folder they enter.
+      await copyTree(from, tmp, { times: true, owner: true });
+      if (overwrite) await rmTree(to, { force: true });
       await fs.rename(tmp, to);
     } catch (err) {
-      await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      await rmTree(tmp, { force: true }).catch(() => {});
       throw err;
     }
-    await fs.rm(from, { recursive: true, force: true });
+    await rmTree(from, { force: true });
   }
-}
-
-/** Give every entry of the copy at `to` the owner and times of the one at `from` (best effort: changing the owner needs privilege). */
-async function copyMeta(from: string, to: string): Promise<void> {
-  const st = await fs.lstat(from);
-  if (st.isDirectory()) {
-    for (const n of await fs.readdir(from)) await copyMeta(path.join(from, n), path.join(to, n));
-  }
-  await fs.lchown(to, st.uid, st.gid).catch(() => undefined);
-  await fs.lutimes(to, st.atime, st.mtime).catch(() => undefined);
 }
 
 export async function exists(real: string) {
@@ -484,37 +475,42 @@ export async function copy(root: string, from: string, toDir: string, opts: Copy
   assertNotTrash(d.virtual);
   if (a.virtual === "/") throw new FsError(400, "cannot copy root");
   if (d.virtual === a.virtual || d.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot copy into itself");
-  const cpOpts = { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, preserveTimestamps: opts.preserveTimes === true };
-  if (!opts.overwrite) {
-    // Copy beside the destination and put it in place whole: a failed copy leaves nothing under the real name.
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const name = await uniqueName(d.real, path.basename(a.real));
-      const tmp = path.join(d.real, tempName(name, `.filedeck-part-${randomUUID()}`));
-      try {
-        await fs.cp(a.real, tmp, cpOpts);
-        await placeNew(tmp, path.join(d.real, name));
-        return virtualJoin(d.virtual, name);
-      } catch (e) {
-        await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 4) throw e; // somebody took the name meanwhile: pick another
+  const tree = { times: opts.preserveTimes === true };
+  const name0 = path.basename(a.real);
+  if (opts.overwrite && path.join(d.real, name0) === a.real) throw new FsError(400, "source and destination are the same");
+  // Both folders are pinned and every folder the copy enters is held, so nothing below can be swapped for a link mid-copy.
+  return pinDir(root, d.real, (dstAt) =>
+    pinParent(root, a.real, async (srcPath) => {
+      if (!opts.overwrite) {
+        // Copy beside the destination and put it in place whole: a failed copy leaves nothing under the real name.
+        for (let attempt = 0; ; attempt++) {
+          const name = await uniqueName(dstAt, name0);
+          const tmp = path.join(dstAt, tempName(name, `.filedeck-part-${randomUUID()}`));
+          try {
+            await copyTree(srcPath, tmp, tree);
+            await placeNew(tmp, path.join(dstAt, name));
+            return virtualJoin(d.virtual, name);
+          } catch (e) {
+            await rmTree(tmp, { force: true }).catch(() => {});
+            if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 4) throw e; // somebody took the name meanwhile: pick another
+          }
+        }
       }
-    }
-  }
-  const name = path.basename(a.real);
-  const dest = path.join(d.real, name);
-  if (dest === a.real) throw new FsError(400, "source and destination are the same");
-  // Copy beside the destination, then swap in: a failed copy never damages the existing file.
-  const tmp = path.join(d.real, tempName(name, `.filedeck-part-${randomUUID()}`));
-  try {
-    await fs.cp(a.real, tmp, cpOpts);
-    const [src, cur] = [await fs.lstat(tmp), await fs.lstat(dest).catch(() => null)];
-    if (cur && !(src.isFile() && cur.isFile())) await fs.rm(dest, { recursive: true, force: true });
-    await fs.rename(tmp, dest);
-  } catch (e) {
-    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
-    throw e;
-  }
-  return virtualJoin(d.virtual, name);
+      const dest = path.join(dstAt, name0);
+      // Copy beside the destination, then swap in: a failed copy never damages the existing file.
+      const tmp = path.join(dstAt, tempName(name0, `.filedeck-part-${randomUUID()}`));
+      try {
+        await copyTree(srcPath, tmp, tree);
+        const [src, cur] = [await fs.lstat(tmp), await fs.lstat(dest).catch(() => null)];
+        if (cur && !(src.isFile() && cur.isFile())) await rmTree(dest, { force: true });
+        await fs.rename(tmp, dest);
+      } catch (e) {
+        await rmTree(tmp, { force: true }).catch(() => {});
+        throw e;
+      }
+      return virtualJoin(d.virtual, name0);
+    }),
+  );
 }
 
 export async function move(root: string, from: string, toDir: string) {
@@ -576,7 +572,7 @@ export async function permanentDelete(root: string, p: string) {
   const r = resolveWrite(root, p);
   assertNotTrash(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "cannot delete root");
-  await pinParent(root, r.real, (at) => fs.rm(at, { recursive: true }));
+  await pinParent(root, r.real, (at) => rmTree(at));
 }
 
 export async function upload(

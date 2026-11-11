@@ -1,11 +1,12 @@
-import fs from "node:fs/promises";
+import fs, { type FileHandle } from "node:fs/promises";
 import { constants as C } from "node:fs";
 import path from "node:path";
 import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
+import { TRASH_DIR, assertNotTrash, openChecked, pinParent, resolveRead, resolveWrite } from "./paths.ts";
+import { MAX_DEPTH, dirAt, openListedDir } from "./pinwalk.ts";
 import { hitsReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
@@ -200,7 +201,15 @@ export async function planPerms(cfg: Config, b: PermsRequest): Promise<PermsPlan
   };
 }
 
-/** Change one entry through an fd opened with O_NOFOLLOW, so a link swapped in at the last moment is never followed. */
+/** Change one open entry (a file or a folder held by a descriptor). */
+async function applyFd(fh: FileHandle, plan: PermsPlan): Promise<void> {
+  const s = await fh.stat();
+  if (!s.isFile() && !s.isDirectory()) return;
+  if (plan.uid !== undefined || plan.gid !== undefined) await fh.chown(plan.uid ?? -1, plan.gid ?? -1);
+  if (plan.mode !== undefined) await fh.chmod(plan.mode);
+}
+
+/** Change one entry through an fd opened with O_NOFOLLOW, so a link swapped in at the last moment is never followed. `real` must have a pinned parent. */
 async function applyOne(real: string, type: Props["type"], plan: PermsPlan): Promise<void> {
   if (type === "symlink") {
     if (plan.uid !== undefined || plan.gid !== undefined) await fs.lchown(real, plan.uid ?? -1, plan.gid ?? -1);
@@ -208,10 +217,7 @@ async function applyOne(real: string, type: Props["type"], plan: PermsPlan): Pro
   }
   const fh = await fs.open(real, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
   try {
-    const s = await fh.stat();
-    if (!s.isFile() && !s.isDirectory()) return;
-    if (plan.uid !== undefined || plan.gid !== undefined) await fh.chown(plan.uid ?? -1, plan.gid ?? -1);
-    if (plan.mode !== undefined) await fh.chmod(plan.mode);
+    await applyFd(fh, plan);
   } finally {
     await fh.close();
   }
@@ -220,65 +226,88 @@ async function applyOne(real: string, type: Props["type"], plan: PermsPlan): Pro
 export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise<PermsResult> {
   const res: PermsResult = { path: plan.virtual, changed: 0, skipped: 0, errors: 0 };
   if (!plan.recursive) {
-    await applyOne(plan.real, plan.type, plan);
+    if (plan.virtual === "/") await applyOne(plan.real, plan.type, plan); // the root has no parent inside the root to pin
+    else await pinParent(cfg.root, plan.real, (at) => applyOne(at, plan.type, plan));
     res.changed = 1;
     return res;
   }
-  const stat0 = await fs.lstat(plan.real);
-  const dev = stat0.dev;
-  const stack = [plan.real];
   let seen = 0;
   const wants = (t: Props["type"]) => plan.scope === "all" || (plan.scope === "files" ? t !== "dir" : t === "dir");
-  const doOne = async (real: string, t: Props["type"]) => {
+  // `target` is a path with a pinned parent for files and links, or the open folder itself.
+  const doOne = async (target: string | FileHandle, t: Props["type"]) => {
     if (!wants(t)) return void res.skipped++;
     // The mode of links and special files is not changed; ownership of links is (lchown).
     const mode = t === "symlink" || t === "other" ? undefined : plan.mode;
     if (t === "other" || (mode === undefined && plan.uid === undefined && plan.gid === undefined)) return void res.skipped++;
     if (mode !== undefined && t === "dir" && (mode & 0o500) !== 0o500) throw bad("a folder must keep owner read and execute, otherwise even its owner is locked out");
     try {
-      await applyOne(real, t, { ...plan, mode });
+      const p = { ...plan, mode };
+      if (typeof target === "string") await applyOne(target, t, p);
+      else await applyFd(target, p);
       res.changed++;
     } catch (e) {
       if ((e as Error).message.includes("locked out")) throw e;
       res.errors++;
     }
   };
-  await doOne(plan.real, "dir");
-  while (stack.length) {
-    if (ctl?.signal.aborted) throw bad("canceled");
-    const dir = stack.pop()!;
-    if (ctl) ctl.progress.current = dir.slice(cfg.root === "/" ? 0 : cfg.root.length) || "/";
-    for await (const batch of namesOf(dir, 256, undefined, () => res.errors++)) await visit(dir, batch);
+  // Every folder is entered through a descriptor opened without following links and checked to be the entry that was listed,
+  // and its children are reached through that descriptor: a folder swapped for a link mid-walk is never entered.
+  const top = await openChecked(cfg.root, plan.real, C.O_RDONLY | C.O_DIRECTORY);
+  try {
+    const dev = (await top.stat()).dev;
+    await doOne(top, "dir");
+    await walk(top, plan.real, dev, 0);
+  } finally {
+    await top.close().catch(() => undefined);
   }
   if (ctl) ctl.progress.entries = seen;
   return res;
 
-  async function visit(dir: string, names: string[]) {
-    for (const n of names) {
-      if (n === TRASH_DIR) continue;
-      if (ctl?.signal.aborted) throw bad("canceled");
-      if (seen >= cfg.walkMaxEntries) throw bad("too many entries for one recursive change");
-      seen++;
-      const real = path.join(dir, n);
-      let s;
-      try {
-        s = await fs.lstat(real);
-      } catch {
-        res.errors++;
-        continue;
-      }
-      const t = kindOf(s);
-      if (t === "dir") {
-        if (s.dev !== dev) {
-          res.skipped++;
+  async function walk(fh: FileHandle, real: string, dev: number, depth: number) {
+    if (depth > MAX_DEPTH) throw bad("folders nested too deeply for one recursive change");
+    if (ctl?.signal.aborted) throw bad("canceled");
+    if (ctl) ctl.progress.current = real.slice(cfg.root === "/" ? 0 : cfg.root.length) || "/";
+    const at = dirAt(fh, real);
+    for await (const batch of namesOf(at, 256, undefined, () => res.errors++)) {
+      for (const n of batch) {
+        if (n === TRASH_DIR) continue;
+        if (ctl?.signal.aborted) throw bad("canceled");
+        if (seen >= cfg.walkMaxEntries) throw bad("too many entries for one recursive change");
+        seen++;
+        const child = path.join(at, n);
+        let s;
+        try {
+          s = await fs.lstat(child);
+        } catch {
+          res.errors++;
           continue;
         }
-        stack.push(real);
-      }
-      await doOne(real, t);
-      if (ctl && seen % 64 === 0) {
-        ctl.progress.entries = seen;
-        await tick();
+        const t = kindOf(s);
+        if (t === "dir") {
+          if (s.dev !== dev) {
+            res.skipped++;
+            continue;
+          }
+          let sub: FileHandle;
+          try {
+            sub = await openListedDir(child, s);
+          } catch {
+            res.errors++; // swapped for something else since it was listed
+            continue;
+          }
+          try {
+            await doOne(sub, "dir");
+            await walk(sub, path.join(real, n), dev, depth + 1);
+          } finally {
+            await sub.close().catch(() => undefined);
+          }
+        } else {
+          await doOne(child, t);
+        }
+        if (ctl && seen % 64 === 0) {
+          ctl.progress.entries = seen;
+          await tick();
+        }
       }
     }
   }

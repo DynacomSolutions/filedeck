@@ -55,9 +55,9 @@ test("a cross-device move keeps the times of files and folders and asks for the 
 test("a failed copy never leaves anything under the final name", async () => {
   fs.mkdirSync(at("c1/dst"), { recursive: true });
   fs.writeFileSync(at("c1/a.bin"), "payload");
-  const real = fsp.cp.bind(fsp);
-  const c = mock.method(fsp, "cp", async (from: string, to: string, o: never) => {
-    await real(from, to, o);
+  const real = fsp.copyFile.bind(fsp);
+  const c = mock.method(fsp, "copyFile", async (from: string, to: string, mode?: number) => {
+    await real(from, to, mode);
     throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
   });
   try {

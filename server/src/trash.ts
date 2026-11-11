@@ -3,7 +3,8 @@ import path from "node:path";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
-import { TRASH_DIR, assertNotTrash, resolveWrite, virtualJoin } from "./paths.ts";
+import { TRASH_DIR, assertNotTrash, pinDir, resolveWrite, virtualJoin } from "./paths.ts";
+import { pinDirCreate } from "./pinwalk.ts";
 
 export interface TrashItem extends ops.TrashMeta {
   /** meta.json missing or unreadable: the item can still be deleted but not restored */
@@ -120,23 +121,21 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
       const dest = resolveWrite(root, target);
       assertNotTrash(dest.virtual);
       if (dest.virtual === "/") throw bad("cannot restore onto the root");
-      await fs.mkdir(path.dirname(dest.real), { recursive: true });
-      let finalReal = dest.real;
-      if (await ops.exists(dest.real)) {
-        if (policy === "fail") {
-          out.push({ id, ok: false, conflict: true, error: "destination exists" });
-          continue;
+      // The destination folder is created and held one component at a time, and the item is moved out of its own pinned
+      // folder, so neither side can be swapped for a link between the checks and the move.
+      const res = await pinDirCreate(root, path.dirname(dest.real), async (dstAt): Promise<TrashResult> => {
+        const base = path.basename(dest.real);
+        let final = base;
+        if (await ops.exists(path.join(dstAt, base))) {
+          if (policy === "fail") return { id, ok: false, conflict: true, error: "destination exists" };
+          if (policy === "rename") final = await ops.uniqueName(dstAt, base);
+          else await ops.trash(root, dest.virtual); // the replaced item stays recoverable
         }
-        if (policy === "rename") {
-          const name = await ops.uniqueName(path.dirname(dest.real), path.basename(dest.real));
-          finalReal = path.join(path.dirname(dest.real), name);
-        } else {
-          await ops.trash(root, dest.virtual); // the replaced item stays recoverable
-        }
-      }
-      await ops.moveReal(data, finalReal, false);
-      await fs.rm(path.join(dir, id), { recursive: true, force: true });
-      out.push({ id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), path.basename(finalReal)) });
+        await pinDir(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false));
+        await fs.rm(path.join(dir, id), { recursive: true, force: true });
+        return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final) };
+      });
+      out.push(res);
     } catch (e) {
       out.push({ id, ok: false, error: ops.mapError(e).message });
     }
