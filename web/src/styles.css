@@ -223,17 +223,14 @@ button.primary{border-color:var(--accent);color:var(--accent)}
 .fd-errs li{color:var(--fd-bad);overflow-wrap:anywhere}
 
 /* context menu */
-.ctx{position:fixed;z-index:80;min-width:13rem;max-width:20rem;padding:.3rem;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);box-shadow:var(--shadow);outline:none;font-size:.82rem}
+.ctx{position:fixed;z-index:80;min-width:13rem;max-width:20rem;max-height:calc(var(--vvh,100dvh) - 8px);overflow-y:auto;overscroll-behavior:contain;padding:.3rem;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);box-shadow:var(--shadow);outline:none;font-size:.82rem}
 .ctx-row{position:relative}
 .ctx button{display:flex;width:100%;justify-content:space-between;gap:1.5rem;align-items:center;text-align:left;border:0;border-radius:var(--radius-sm);background:transparent;padding:.35rem .6rem;min-height:0;font-size:.82rem;font-weight:500}
 .ctx button.cur:not(:disabled),.ctx button:hover:not(:disabled){background:var(--surface-3);border:0}
 .ctx button.danger{color:var(--danger-text)}.ctx button.danger.cur:not(:disabled),.ctx button.danger:hover:not(:disabled){background:var(--danger-tint)}
 .ctx .hint{color:var(--muted);font-size:.72rem;font-weight:500;white-space:nowrap}
 .ctx-sep{height:1px;background:var(--border);margin:.3rem .2rem}
-.ctx-subwrap{position:absolute;left:100%;top:-.3rem;padding-left:.15rem}
-.ctx-subwrap.flip{left:auto;right:100%;padding-left:0;padding-right:.15rem}
-.ctx-sub{position:static}
-.ctx-subwrap>.ctx{position:static}
+.ctx-sub{z-index:81}
 .modal p.pad0{margin:0;font-size:.88rem;overflow-wrap:anywhere}
 .modal-actions button.danger[type=submit]{background:var(--accent-fill);color:#fff}
 .props{margin:0;display:flex;flex-direction:column;gap:.45rem}
@@ -250,7 +247,7 @@ button.primary{border-color:var(--accent);color:var(--accent)}
 .fp-filter{padding:.4rem .65rem}
 .fp-filter input{width:100%}
 .kbd-help{outline:none;max-height:calc(100dvh - 48px);overflow:auto}
-.kbd-help h4{margin:.2rem 0 .4rem;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.kbd-help h3{margin:.2rem 0 .4rem;font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
 .kbd-help dl{margin:0;display:flex;flex-direction:column;gap:.3rem}
 .kbd-help dl>div{display:grid;grid-template-columns:minmax(9rem,12rem) 1fr;gap:.6rem;font-size:.82rem;align-items:baseline}
 .kbd-help dt{white-space:nowrap}.kbd-help dd{margin:0;color:var(--fg-soft)}

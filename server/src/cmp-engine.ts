@@ -612,10 +612,11 @@ export class CompareSession {
   /** Every row below (and including) the given folders, for sync planning on a selection. */
   *subtree(rels: string[]): Generator<ViewRow> {
     const q = this.db.prepare(`SELECT ${COLS} FROM rows WHERE id > 1 AND p >= ? AND p < ? ORDER BY p`);
+    const all = this.db.prepare(`SELECT ${COLS} FROM rows WHERE id > 1 ORDER BY p`); // no upper bound: names with characters beyond U+FFFF sort above any fixed one
     const one = this.q.byP!;
     for (const rel of rels) {
       if (rel === "") {
-        for (const x of q.iterate("", "￿") as Iterable<DbRow>) yield this.view(x);
+        for (const x of all.iterate() as Iterable<DbRow>) yield this.view(x);
         continue;
       }
       const self = one.get(rel) as unknown as DbRow | undefined;
