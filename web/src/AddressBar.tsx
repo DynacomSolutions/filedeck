@@ -200,7 +200,6 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     if (restore) requestAnimationFrame(() => popOpener.current?.focus({ preventScroll: true }));
   }, []);
   const navRef = useRef<HTMLElement>(null);
-  const skipFocus = useRef(false);
   const listId = useId();
   const marks = useBookmarks();
   const dirCache = useRef(new Map<string, { name: string; dir: boolean }[]>());
@@ -269,10 +268,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     setItems([]);
     setError("");
     setBusy(false);
-    if (refocus) {
-      skipFocus.current = true;
-      setTimeout(() => (editBtn.current?.focus(), (skipFocus.current = false)), 0);
-    }
+    if (refocus) setTimeout(() => editBtn.current?.focus(), 0);
   }, []);
 
   useLayoutEffect(() => {
@@ -613,7 +609,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
         ))}
       </nav>
       <Tip label="Edit the address" shortcut="Ctrl+L">
-        <span ref={editBtn} className="addr-fill" role="button" tabIndex={0} aria-label="Edit address" onFocus={() => !skipFocus.current && begin()} />
+        <span ref={editBtn} className="addr-fill" role="button" tabIndex={0} aria-label="Edit address" onClick={begin} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), begin())} />
       </Tip>
       <Tip label="Recent locations">
         <button type="button" className={"addr-recent" + (pop?.kind === "recent" ? " open" : "")} aria-label="Recent locations" aria-haspopup="menu" aria-expanded={pop?.kind === "recent"} onClick={(e) => openRecents(e.currentTarget)}>

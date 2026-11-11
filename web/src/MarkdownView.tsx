@@ -1,5 +1,5 @@
 import { SkeletonLines } from "./Skeleton";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { PlainOrCode } from "./PlainOrCode";
 
 const MAX_HIGHLIGHT = 256 * 1024;
@@ -58,7 +58,10 @@ function hook() {
         } catch {
           /* keep as is */
         }
-        el.setAttribute("src", fileUrl(ctx.node, resolveRef(ctx.dir, rel.split(/[?#]/)[0] ?? "")));
+        const target = resolveRef(ctx.dir, rel.split(/[?#]/)[0] ?? "");
+        el.setAttribute("src", fileUrl(ctx.node, target));
+        // an image written without an alt attribute still needs a name: the file's own
+        if (!el.hasAttribute("alt")) el.setAttribute("alt", target.slice(target.lastIndexOf("/") + 1));
         el.setAttribute("loading", "lazy");
       }
     }
@@ -98,6 +101,7 @@ export function MarkdownView({ node, path }: { node: string; path: string }) {
   }, [node, path]);
   const html = useMemo(() => (text === null ? "" : renderMarkdown(text, node, path.slice(0, path.lastIndexOf("/")) || "/")), [text, node, path]);
   const article = useRef<HTMLElement>(null);
+  const tabs = useId();
   useEffect(() => {
     const el = article.current;
     if (raw || !el) return;
@@ -123,23 +127,25 @@ export function MarkdownView({ node, path }: { node: string; path: string }) {
   return (
     <div className="pv-mdwrap">
       <div className="pv-tabs" role="tablist" aria-label="Markdown view">
-        <button role="tab" aria-selected={!raw} className={!raw ? "on" : ""} onClick={() => setRaw(false)}><Ic.Eye /> Rendered</button>
-        <button role="tab" aria-selected={raw} className={raw ? "on" : ""} onClick={() => setRaw(true)}><Ic.FileCode /> Source</button>
+        <button role="tab" id={`${tabs}-rendered`} aria-controls={`${tabs}-panel`} aria-selected={!raw} className={!raw ? "on" : ""} onClick={() => setRaw(false)}><Ic.Eye /> Rendered</button>
+        <button role="tab" id={`${tabs}-source`} aria-controls={`${tabs}-panel`} aria-selected={raw} className={raw ? "on" : ""} onClick={() => setRaw(true)}><Ic.FileCode /> Source</button>
         {trunc && <span className="muted">first 1 MiB shown</span>}
       </div>
-      {raw ? (
-        <PlainOrCode id={fileUrl(node, path)} name="source.md" text={text} />
-      ) : (
-        <article
-          ref={article}
-          className="pv-md"
-          onClick={(e) => {
-            const a = (e.target as HTMLElement).closest("a");
-            if (a && !a.getAttribute("href")) e.preventDefault();
-          }}
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
-      )}
+      <div id={`${tabs}-panel`} role="tabpanel" aria-labelledby={`${tabs}-${raw ? "source" : "rendered"}`} className="pv-mdpanel">
+        {raw ? (
+          <PlainOrCode id={fileUrl(node, path)} name="source.md" text={text} />
+        ) : (
+          <article
+            ref={article}
+            className="pv-md"
+            onClick={(e) => {
+              const a = (e.target as HTMLElement).closest("a");
+              if (a && !a.getAttribute("href")) e.preventDefault();
+            }}
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        )}
+      </div>
     </div>
   );
 }

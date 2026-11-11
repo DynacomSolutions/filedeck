@@ -1,8 +1,42 @@
 import { SkeletonLines } from "./Skeleton";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { fileUrl } from "./api";
-import { MAX_ZIP, isEncryptedOffice, parseOffice, type OfficeDoc } from "./officeParse";
+import { MAX_ZIP, isEncryptedOffice, parseOffice, type Block, type OfficeDoc } from "./officeParse";
 import * as Ic from "lucide-react";
+
+/** One block as an element; a paragraph that is a list item is rendered by `blocksOf` inside its list. */
+function BlockView({ b }: { b: Block }) {
+  const text = b.t === "p" ? b.spans.map((s) => s.text).join("") : "";
+  if (b.t === "table") {
+    return (
+      <table>
+        <tbody>{b.rows.map((r, y) => <tr key={y}>{r.map((c, x) => <td key={x}>{c}</td>)}</tr>)}</tbody>
+      </table>
+    );
+  }
+  if (b.h) return b.h === 1 ? <h1>{text}</h1> : b.h === 2 ? <h2>{text}</h2> : <h3>{text}</h3>;
+  return <>{b.spans.length ? b.spans.map((s, k) => (s.b || s.i ? <span key={k} className={(s.b ? "sp-b " : "") + (s.i ? "sp-i" : "")}>{s.text}</span> : s.text)) : " "}</>;
+}
+
+/** Document blocks as elements: runs of bullet paragraphs become one real list. */
+export function blocksOf(blocks: Block[]) {
+  const out: React.ReactNode[] = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i]!;
+    if (b.t === "p" && !b.h && b.bullet) {
+      const items: React.ReactNode[] = [];
+      for (; i < blocks.length; i++) {
+        const x = blocks[i]!;
+        if (!(x.t === "p" && !x.h && x.bullet)) break;
+        items.push(<li key={i}><BlockView b={x} /></li>);
+      }
+      i--;
+      out.push(<ul key={`l${i}`} className="pv-ul" style={{ listStyle: "disc", paddingLeft: "1.4rem" }}>{items}</ul>);
+    } else if (b.t === "p" && !b.h) out.push(<p key={i}><BlockView b={b} /></p>);
+    else out.push(<BlockView key={i} b={b} />);
+  }
+  return out;
+}
 
 /** Read-only text rendering of Word, Excel, PowerPoint, OpenDocument and CSV files, parsed in the browser. */
 export function OfficeView({ node, path, ext, size }: { node: string; path: string; ext: string; size: number }) {
@@ -10,6 +44,7 @@ export function OfficeView({ node, path, ext, size }: { node: string; path: stri
   const [err, setErr] = useState("");
   const [sheet, setSheet] = useState(0);
   const [locked, setLocked] = useState(false);
+  const tabs = useId();
   useEffect(() => {
     let live = true;
     setDoc(null);
@@ -42,19 +77,7 @@ export function OfficeView({ node, path, ext, size }: { node: string; path: stri
     return (
       <article className="pv-md pv-office" aria-label="Document text">
         {doc.note && <p className="muted">{doc.note}</p>}
-        {doc.blocks.map((b, i) =>
-          b.t === "table" ? (
-            <table key={i}>
-              <tbody>{b.rows.map((r, y) => <tr key={y}>{r.map((c, x) => <td key={x}>{c}</td>)}</tr>)}</tbody>
-            </table>
-          ) : b.h ? (
-            b.h === 1 ? <h1 key={i}>{b.spans.map((s) => s.text).join("")}</h1> : b.h === 2 ? <h2 key={i}>{b.spans.map((s) => s.text).join("")}</h2> : <h3 key={i}>{b.spans.map((s) => s.text).join("")}</h3>
-          ) : (
-            <p key={i} className={b.bullet ? "pv-li" : undefined}>
-              {b.spans.length ? b.spans.map((s, k) => (s.b || s.i ? <span key={k} className={(s.b ? "sp-b " : "") + (s.i ? "sp-i" : "")}>{s.text}</span> : s.text)) : " "}
-            </p>
-          ),
-        )}
+        {blocksOf(doc.blocks)}
       </article>
     );
   }
@@ -76,12 +99,12 @@ export function OfficeView({ node, path, ext, size }: { node: string; path: stri
       {doc.sheets.length > 1 && (
         <div className="pv-tabs" role="tablist" aria-label="Sheets">
           {doc.sheets.map((s, i) => (
-            <button key={i} role="tab" aria-selected={i === sheet} className={i === sheet ? "on" : ""} onClick={() => setSheet(i)}><Ic.Table2 /> {s.name}</button>
+            <button key={i} role="tab" id={`${tabs}-t${i}`} aria-controls={`${tabs}-panel`} aria-selected={i === sheet} className={i === sheet ? "on" : ""} onClick={() => setSheet(i)}><Ic.Table2 /> {s.name}</button>
           ))}
         </div>
       )}
       {sh && (
-        <div className="pv-sheetwrap">
+        <div className="pv-sheetwrap" id={`${tabs}-panel`} role={doc.sheets.length > 1 ? "tabpanel" : "region"} aria-labelledby={doc.sheets.length > 1 ? `${tabs}-t${Math.min(sheet, doc.sheets.length - 1)}` : undefined} aria-label={doc.sheets.length > 1 ? undefined : sh.name} tabIndex={0}>
           <table>
             <tbody>
               {sh.rows.map((r, y) => (

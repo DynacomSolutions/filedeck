@@ -164,7 +164,7 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
 
 /** Password row for a locked archive; `state` says why it is shown. */
 export type LockState = "none" | "required" | "incorrect" | "saved";
-export function PasswordInput({ value, onChange, state, disabled, label = "Password" }: { value: string; onChange: (v: string) => void; state: LockState; disabled?: boolean; label?: string }) {
+export function PasswordInput({ value, onChange, state, disabled, label = "Password", errorId }: { value: string; onChange: (v: string) => void; state: LockState; disabled?: boolean; label?: string; /** id of the element that shows this field's error: the field points at it and is marked invalid when the password was wrong */ errorId?: string }) {
   return (
     <label className="ad-pw">
       {label}
@@ -174,6 +174,8 @@ export function PasswordInput({ value, onChange, state, disabled, label = "Passw
           type="password"
           autoComplete="off"
           value={value}
+          aria-invalid={state === "incorrect" || undefined}
+          aria-describedby={errorId}
           disabled={disabled ?? (state === "none" || state === "saved")}
           placeholder={state === "none" ? "Not password protected" : state === "saved" ? "Using the saved password" : state === "incorrect" ? "Wrong password, try again" : "This archive is password protected"}
           onChange={(e) => onChange(e.target.value)}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star, Trash2 } from "lucide-react";
 import { fmtSize, onFsChanged, type Entry, type Mount, type NodeInfo } from "./api";
@@ -275,6 +275,9 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
     walk(shown);
     return m;
   }, [shown]);
+  // each expanded row owns its group of children (ids are numbered: a path may hold spaces)
+  const groupBase = useId();
+  const groupIds = useMemo(() => new Map([...byId.keys()].map((k, i) => [k, `${groupBase}-g${i}`])), [byId, groupBase]);
   const rows = useMemo(() => flatten(shown, (n) => openNow(n as TNode)), [shown, expanded, heldNow]);
   const tabId = rovingId(rows, focusId);
   // The first visible row for the current folder (a bookmark of it is not "the" current row).
@@ -393,6 +396,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
         data-tid={t.id}
         aria-level={level}
         aria-expanded={t.expandable ? isExp : undefined}
+        aria-owns={isExp && (t.children?.length || t.note) ? groupIds.get(t.id) : undefined}
         aria-disabled={t.offline || undefined}
         aria-current={t.id === currentId ? "page" : undefined}
         aria-keyshortcuts={hasMenu ? "Shift+F10" : undefined}
@@ -426,6 +430,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
           <span className="st-icon" aria-hidden="true">{t.icon}</span>
           <span className="st-label">{t.label}</span>
           {t.extra}
+          {t.offline && <span className="muted st-sub">offline</span>}
           {known(t.size) && <span className="muted st-sub">{fmtSize(known(t.size)!.used)}</span>}
         </span>
         {(t.usage ?? known(t.size)) && <UsageBar usage={(t.usage ?? known(t.size))!} />}
@@ -442,7 +447,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
           )}
         </div>
         {isExp && (t.children?.length || t.note) ? (
-          <ul role="group" className="st-group">
+          <ul role="group" id={groupIds.get(t.id)} className="st-group">
             {t.children?.map((c) => renderRow(c, level + 1))}
             {t.note?.kind === "skeleton" && <SkeletonTreeRows level={level + 1} />}
             {t.note && t.note.kind !== "skeleton" && (
