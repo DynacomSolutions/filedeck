@@ -12,7 +12,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["Page Up / Page Down", "Move by ten entries"],
       ["Enter", "Open folder or file"],
       ["Backspace / Alt+Up", "Go to the parent folder"],
-      ["F6 / Shift+F6", "Next / previous panel (Tab and Shift+Tab move through the controls as usual)"],
+      ["Alt+PageDown / Alt+PageUp", "Next / previous panel's file list (Tab and Shift+Tab move through the controls as usual)"],
       ["Ctrl+F", "Filter this folder by name"],
       ["Alt+P", "Add this panel to / remove it from the selected panels (Ctrl/Cmd+click on items in another panel does the same)"],
       ["Alt+Shift+Arrows", "Dock this panel beside the previous / next panel (or drag the grip at the top left of the panel: edge splits, centre swaps places)"],

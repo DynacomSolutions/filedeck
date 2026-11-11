@@ -20,7 +20,7 @@ import { wheelX } from "./scrollx";
 import { AddressBar } from "./AddressBar";
 import { CompareBar, CompareBody, ROW_H, compareKey, useCompareCtl } from "./Compare";
 import { Thumb } from "./Thumb";
-import { ColGroup, FillCell, HeaderRow, cellCount, dataCell, tableStyle, useColumns } from "./Columns";
+import { ColGroup, FillCell, HeaderRow, cellCount, columnMenu, dataCell, tableStyle, useColumns } from "./Columns";
 import { gitApi, type GitListing } from "./git";
 import { GitBadge, GitPill } from "./GitUi";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
@@ -35,6 +35,8 @@ import { TransferDestination, type TransferKind } from "./TransferDestination";
 import { usePresentation } from "./presentation";
 import { changeHub } from "./eventStream";
 import { plainNameError } from "./editDrafts";
+import { entryKind, focusPanelList, listAnnouncement, revealRow, rowId } from "./listFocus";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { typeAheadMatch, type TypeAheadState } from "./letterNavigation";
 import * as Ic from "lucide-react";
 
@@ -94,8 +96,7 @@ interface Props {
   onTogglePanel: () => void;
   /** the panel F5/F6 copy and move to (the next panel in layout order), if any */
   next: { node: string; path: string; id: string } | null;
-  /** Tab / Shift+Tab: move focus to the next / previous panel */
-  /** move to the neighbouring panel; false when there is none in that direction (Tab then leaves the panels normally) */
+  /** Alt+PageDown / Alt+PageUp: move to the next / previous panel's list (false when there is none). Tab walks the page in its normal order. */
   onSwitch: (dir: 1 | -1) => boolean;
   /** `?` opens the shortcut overlay */
   onHelp: () => void;
@@ -152,6 +153,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   /** the panel's ACTIVE item: drives its preview/properties and is never touched by actions in other panels (the action selection is `sel`) */
   const [cursor, setCursor] = useState<string | null>(leaf.sel ?? null);
   const createErrorId = useId();
+  /** prefix of this panel's row ids, which the list's aria-activedescendant points at */
+  const listId = useId();
   const cursorRef = useRef(cursor);
   cursorRef.current = cursor;
   const selRef = useRef(sel);
@@ -186,6 +189,15 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const secRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLElement>(null);
+  /** Put focus back on the list after a rename or inline create ends (the input that had it is gone). It must not count as the keyboard arriving, which selects the first row. */
+  const skipFocusSelect = useRef(false);
+  /** the list had focus when it last had any (cleared when focus goes to another control) */
+  const listHadFocus = useRef(false);
+  const focusList = () => {
+    skipFocusSelect.current = true;
+    (listRef.current ?? secRef.current)?.focus({ preventScroll: true });
+    skipFocusSelect.current = false;
+  };
   const focusAfterNavigation = useRef<{ node: string; path: string } | null>(null);
   const locationRef = useRef({ node, path });
   const typeAhead = useRef<TypeAheadState | null>(null);
@@ -768,13 +780,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       </div>
     ) : null; // no active item: no side panel at all (no placeholder, no folder fallback)
   const pane = cside ? null : editing ? (
-    <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
-      <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
-    </Suspense>
+    <ErrorBoundary what="The editor" resetKeys={[editing.node, editing.path]} onClose={() => setEditing(null)}>
+      <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
+        <TextEditor key={editing.node + editing.path} file={editing} inline onClose={() => setEditing(null)} onStatus={onStatus} extra={paneExtra} />
+      </Suspense>
+    </ErrorBoundary>
   ) : gitDiff ? (
-    <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
-      <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inPane onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
-    </Suspense>
+    <ErrorBoundary what="The diff viewer" resetKeys={[gitDiff.node, gitDiff.path, gitDiff.rev]} onClose={() => setGitDiff(null)}>
+      <Suspense fallback={<div className="pad muted">Loading editor...</div>}>
+        <DiffViewer left={gitDiff} right={{ node: gitDiff.node, path: gitDiff.path }} inPane onClose={() => setGitDiff(null)} onStatus={onStatus} extra={paneExtra} />
+      </Suspense>
+    </ErrorBoundary>
   ) : propsOpen ? (
     propsPane
   ) : previewEntry ? (
@@ -797,7 +813,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
 
   // Shared by the list rows and the grid tiles: selection, open, context menu, drag and drop.
-  const itemProps = (en: Entry, isDir: boolean, cls: string) => ({
+  const itemProps = (en: Entry, isDir: boolean, cls: string, index: number, role: "row" | "option") => ({
+    id: rowId(listId, index),
+    role,
+    "aria-selected": sel.has(en.path),
     "data-path": en.path,
     className: cls + (sel.has(en.path) ? "sel " : "") + (cursor === en.path ? (sel.has(en.path) ? "cur " : "cur act ") : "") + (over === en.path ? "drop" : ""),
     draggable: true,
@@ -858,7 +877,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }}
         onBlur={() => setRenaming(null)}
         onKeyDown={(e) => {
-          if (e.key === "Escape") setRenaming(null);
+          if (e.key === "Escape") (setRenaming(null), focusList());
           if (e.key === "Enter") {
             e.preventDefault();
             const v = e.currentTarget.value.trim();
@@ -867,6 +886,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               if (bad) return onStatus(`Rename failed: ${bad}`); // stay in the editor so the name can be corrected
             }
             setRenaming(null);
+            focusList();
             if (v && v !== en.name) void run("Rename", () => api.rename(node, en.path, join(parent(en.path), v)));
           }
         }}
@@ -886,13 +906,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       onBlur={() => setCreating(null)}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Escape") return setCreating(null);
+        if (e.key === "Escape") return (setCreating(null), focusList());
         if (e.key !== "Enter") return;
         const v = e.currentTarget.value.trim();
         if (plainNameError(v)) return setErr(plainNameError(v));
         const target = join(path, v);
         const kind = creating;
         setCreating(null);
+        focusList();
         void run(`Create ${kind}`, () => (kind === "file" ? createFile(node, target) : api.mkdir(node, target))).then(() => scrollTo.current = target);
       }}
     />
@@ -925,6 +946,15 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     const i = visible.findIndex((x) => x.path === cursor);
     if (i >= limit) setLimit(i + RENDER_STEP);
   }, [cursor, visible, limit]);
+  const cursorAt = cursor ? rowsShown.findIndex((x) => x.path === cursor) : -1;
+  const activeRowId = cursorAt >= 0 ? rowId(listId, cursorAt) : undefined;
+  const announced = listAnnouncement({ loading, streaming, total: entries.length, shown: visible.length, filtered: !!filter.trim(), error: !!err });
+  // Counts change while a filter is typed: settle for a moment so a screen reader says the last one, not each.
+  const [listSays, setListSays] = useState("");
+  useEffect(() => {
+    const t = window.setTimeout(() => setListSays(announced), announced ? 500 : 0);
+    return () => window.clearTimeout(t);
+  }, [announced]);
   const searchView = leaf.sr ? (
     <SearchView node={node} dir={path} hidden={hidden} form={leaf.sr} onForm={setSearch} onClose={() => (setSearch(undefined), setTimeout(() => secRef.current?.focus(), 0))} onReveal={revealHit} onOpen={openHit} onStatus={onStatus} />
   ) : null;
@@ -933,17 +963,24 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         ref={listRef}
         className="fp-scroll"
         tabIndex={0}
-        role="group"
+        role={view === "grid" ? "listbox" : "grid"}
+        aria-multiselectable="true"
+        aria-busy={loading}
+        aria-activedescendant={activeRowId}
         aria-label={`Files in ${path} on ${node}. Arrow keys select, Enter opens.`}
         onFocus={(e) => {
+          listHadFocus.current = true;
           // Tabbing into the list selects the first entry so the arrow keys have somewhere to start. A mouse click
           // also focuses the list but must not: selecting (and scrolling to) the first row between mousedown and
           // mouseup made clicks on rows further down land elsewhere. :focus-visible is true for keyboard focus only.
-          if (e.target === e.currentTarget && sel.size === 0 && e.currentTarget.matches(":focus-visible")) {
+          if (e.target === e.currentTarget && !skipFocusSelect.current && sel.size === 0 && e.currentTarget.matches(":focus-visible")) {
             const keep = cursor ? visible.find((x) => x.path === cursor) : undefined;
             const go = keep ?? visible[0];
             if (go) selectOnly(go.path);
           }
+        }}
+        onBlur={(e) => {
+          if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget as Node)) listHadFocus.current = false;
         }}
         onClick={(e) => e.target === e.currentTarget && (onClearOthers(), setSel(new Set()), setCursor(null))}
         onContextMenu={(e) => {
@@ -954,11 +991,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }}
       >
         {view === "grid" ? (
-          <div className="fp-grid" role="group" aria-label="Files" aria-busy={loading}>
+          <div className="fp-grid" role="presentation">
             {showUp && (
-              <div className={"tile up" + (over === UP_DROP ? " drop" : "")} onClick={goUp} {...upDrop}>
+              // Not an option of the list (it is not a file): Backspace and Alt+Up do the same from the keyboard.
+              <div className={"tile up" + (over === UP_DROP ? " drop" : "")} aria-hidden="true" onClick={goUp} {...upDrop}>
                 <div className="tile-img"><span className="tile-ico"><CornerLeftUp /></span></div>
-                <div className="tile-name"><button type="button" className="up-btn" aria-label={`Up one folder to ${parentPath}`}>{upLabel}</button></div>
+                <div className="tile-name"><button type="button" className="up-btn" tabIndex={-1} aria-label={`Up one folder to ${parentPath}`}>{upLabel}</button></div>
               </div>
             )}
             {loading && <SkeletonTiles />}
@@ -968,10 +1006,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 <div className="tile-name">{createInput}</div>
               </div>
             )}
-            {rowsShown.map((en) => {
+            {rowsShown.map((en, i) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
-                <div key={en.path} role="group" aria-label={`${en.name}${sel.has(en.path) ? ", selected" : ""}`} {...itemProps(en, isDir, "tile ")}>
+                <div key={en.path} aria-label={`${entryKind(en)} ${en.name}`} {...itemProps(en, isDir, "tile ", i, "option")}>
                   <Thumb node={node} entry={en} isDir={isDir} />
                   {renaming === en.path ? (
                     // no Tip here: its wrapper clips overflow and its bubble would cover the editor
@@ -986,9 +1024,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
             {remaining > 0 && <div ref={(el) => void (moreEl.current = el)} className="more-tiles" aria-hidden="true" />}
           </div>
         ) : (
-        <table className="ft cols" aria-busy={loading} style={tableStyle(columns.state, gitCol)}>
+        <table className="ft cols" role="presentation" style={tableStyle(columns.state, gitCol)}>
           <ColGroup state={columns.state} cols={columns.cols} git={gitCol} />
           <thead
+            role="rowgroup"
             onPointerUp={(e) => {
               // A header click (sort, resize handle) leaves focus on the header or the body; hand it back to the list
               // so keyboard navigation shows as focused. Right click opens the column menu, which owns focus.
@@ -997,34 +1036,35 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           >
             <HeaderRow s={columns.state} cols={columns.cols} git={gitCol} sort={sort} onSort={sortBy} onMenu={(x, y, items) => setMenu({ x, y, items })} />
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {showUp && (
-              <tr className={"up" + (over === UP_DROP ? " drop" : "")} onClick={goUp} {...upDrop}>
-                <td className="name">
+              <tr role="row" className={"up" + (over === UP_DROP ? " drop" : "")} onClick={goUp} {...upDrop}>
+                <td role="gridcell" className="name">
                   <div className="fl">
                     <CornerLeftUp className="ico" />
                     <button type="button" className="up-btn" aria-label={`Up one folder to ${parentPath}`}>{upLabel}</button>
                   </div>
                 </td>
-                {gitCol && <td />}
-                {columns.cols.slice(1).map((c) => <td key={c.id} className={c.align ? "num" : "txt"} />)}
+                {gitCol && <td role="gridcell" />}
+                {columns.cols.slice(1).map((c) => <td key={c.id} role="gridcell" className={c.align ? "num" : "txt"} />)}
                 <FillCell />
               </tr>
             )}
             {loading && <SkeletonRows />}
             {createInput && (
-              <tr className="creating">
-                <td className="name" colSpan={cellCount(columns.cols, gitCol)}>
+              <tr role="row" className="creating">
+                <td role="gridcell" className="name" colSpan={cellCount(columns.cols, gitCol)}>
                   <div className="cr">{creating === "file" ? <Ic.FilePlus className="ico" /> : <Ic.FolderPlus className="ico" />}{createInput}</div>
                 </td>
               </tr>
             )}
-            {rowsShown.map((en) => {
+            {rowsShown.map((en, i) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
-                <tr key={en.path} {...itemProps(en, isDir, "")}>
-                  <td className={"name" + (renaming === en.path ? " renaming" : "")}>
+                <tr key={en.path} {...itemProps(en, isDir, "", i, "row")}>
+                  <td role="gridcell" className={"name" + (renaming === en.path ? " renaming" : "")}>
                     <FileIcon className="ico" dir={isDir} type={en.type} />
+                    <span className="visually-hidden">{entryKind(en)}, </span>
                     {nameEditor(en)}
                     {gitCol && <div className="git-inline">{gitMark(en, isDir)}</div>}
                     {en.type === "symlink" && (
@@ -1036,23 +1076,24 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                       </Tip>
                     )}
                   </td>
-                  {gitCol && <td className="git-td">{gitMark(en, isDir)}</td>}
+                  {gitCol && <td role="gridcell" className="git-td">{gitMark(en, isDir)}</td>}
                   {columns.cols.slice(1).map((c) => dataCell(c, en, isDir))}
                   <FillCell />
                 </tr>
               );
             })}
             {remaining > 0 && (
-              <tr ref={(el) => void (moreEl.current = el)} className="more" aria-hidden="true" style={{ height: remaining * estimatedFileRowHeight }}>
+              <tr ref={(el) => void (moreEl.current = el)} role="row" className="more" aria-hidden="true" style={{ height: remaining * estimatedFileRowHeight }}>
                 <td colSpan={cellCount(columns.cols, gitCol)} />
               </tr>
             )}
           </tbody>
         </table>
         )}
-        {streaming && <div className="muted pad fp-streaming" role="status">Loading entries... {entries.length.toLocaleString()} so far</div>}
-        {!loading && !entries.length && !err && !creating && <div className="muted pad">Empty folder. Drop files here to upload.</div>}
-        {entries.length > 0 && !visible.length && <div className="muted pad">No entries match the filter.</div>}
+        {/* Shown text only: it is not a row of the list, and the live region below says the same once the list has settled. */}
+        {streaming && <div className="muted pad fp-streaming" aria-hidden="true">Loading entries... {entries.length.toLocaleString()} so far</div>}
+        {!loading && !entries.length && !err && !creating && <div className="muted pad" aria-hidden="true">Empty folder. Drop files here to upload.</div>}
+        {entries.length > 0 && !visible.length && <div className="muted pad" aria-hidden="true">No entries match the filter.</div>}
       </div>
   );
   // ---- keyboard ----
@@ -1064,7 +1105,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   useEffect(() => {
     if (!cursor) return;
-    secRef.current?.querySelector(`[data-path="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
+    const row = secRef.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(cursor)}"]`);
+    if (!row) return;
+    // A table row at the top edge would sit under the sticky header: scroll by the header's height as well.
+    const scroller = row.closest<HTMLElement>(".fp-scroll");
+    if (scroller && row.tagName === "TR") revealRow(scroller, row);
+    else row.scrollIntoView({ block: "nearest" });
   }, [cursor]);
   useEffect(() => {
     const p = scrollTo.current;
@@ -1113,7 +1159,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     const handled = (() => {
       if (e.altKey && e.shiftKey && !mod && key.startsWith("Arrow") && onDock) return onDock(key);
       // While the search results are open the panel's own selection is hidden: no file operations by key.
-      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "nurcpNURCP".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f"))) return false;
+      if (leaf.sr && !(key === "Tab" || key === "?" || (e.altKey && !mod && "nurcpNURCP".includes(key)) || (mod && e.shiftKey && key.toLowerCase() === "f") || (e.altKey && !mod && (key === "PageDown" || key === "PageUp")))) return false;
       if (!mod && !e.altKey) {
         const r = typeAheadMatch(visible, cursor, key, typeAhead.current, Date.now());
         if (r) {
@@ -1130,8 +1176,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "c") return void copyPaths([path]), true;
       // Keyboard alternative to Ctrl/Cmd+click: add this panel to (or remove it from) the selected panels.
       if (e.altKey && !mod && !e.shiftKey && key.toLowerCase() === "p") return onTogglePanel(), true;
-      // Tab hops between panels only from the list itself, and never wraps: otherwise it would be a keyboard trap.
-      if (key === "Tab" && !mod && !e.altKey && (e.target === e.currentTarget || !!(e.target as HTMLElement).closest(".fp-scroll"))) return onSwitch(e.shiftKey ? -1 : 1);
+      // Quick switch between the panels' lists; Tab keeps its normal order so every control stays reachable.
+      if (e.altKey && !mod && !e.shiftKey && (key === "PageDown" || key === "PageUp")) return onSwitch(key === "PageDown" ? 1 : -1);
       if (mod && e.shiftKey && key.toLowerCase() === "f") return setSearch(leaf.sr ?? EMPTY_SEARCH), true;
       if (mod && key.toLowerCase() === "f") {
         if (filterInput.current) {
@@ -1199,6 +1245,16 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     }
   }
   const horizontal = dock === "left" || dock === "right";
+  // The list is mounted again when the side pane opens or closes, or changes dock or layout (it moves into or out of the resizable
+  // group), and a focused element that is removed leaves focus on the page body. Put it back on the new list.
+  const paneLayout = pane ? (phone ? "phone" : dock + (narrow ? "-n" : "")) : "none";
+  const lastLayout = useRef(paneLayout);
+  useLayoutEffect(() => {
+    if (lastLayout.current === paneLayout) return;
+    lastLayout.current = paneLayout;
+    const a = document.activeElement;
+    if (listHadFocus.current && (!a || a === document.body) && listRef.current?.isConnected) focusList();
+  }, [paneLayout]); // eslint-disable-line react-hooks/exhaustive-deps
   // ---- panel toolbar: frequent actions stay visible, the rest live in grouped menus (New, View, More) ----
   const marked = isBookmarked(marks, here);
   // per-pane back/forward history of the folders this panel showed
@@ -1250,10 +1306,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     }),
     "sep",
     { label: hidden ? "Hide hidden files" : "Show hidden files", icon: hidden ? EyeOff : Eye, checked: hidden, onSelect: () => setHidden(!hidden) },
+    // The same column chooser as the column header's context menu, for those who cannot right-click.
+    ...(view !== "grid" ? (["sep", ...columnMenu()] as MenuItem[]) : []),
   ];
+  /** The split rebuilds this panel inside a new group, so the control that had focus is gone: put focus back on this panel's list. */
+  const split = (dir: "horizontal" | "vertical") => {
+    onSplit(dir);
+    focusPanelList(leaf.id);
+  };
   const splitItems = (): MenuItem[] => [
-    { label: "Split right", icon: Columns2, onSelect: () => onSplit("horizontal") },
-    { label: "Split down", icon: Rows2, onSelect: () => onSplit("vertical") },
+    { label: "Split right", icon: Columns2, onSelect: () => split("horizontal") },
+    { label: "Split down", icon: Rows2, onSelect: () => split("vertical") },
   ];
   const moreItems = (): MenuItem[] => [
     { label: pasteLabel, hint: "Ctrl+V", icon: ClipboardPaste, disabled: !clip, onSelect: () => void paste(path) },
@@ -1292,6 +1355,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const canPreview = isPreviewableEntry(only);
 
   const first = dock === "left" || dock === "top";
+  /** landmark names must differ between panels: the location, and a number when another panel shows the same one */
+  const sameBefore = peers.filter((pr) => pr.node === node && pr.path === path && pr.id < leaf.id).length;
+  const panelName = `${node}:${path}${sameBefore ? ` (${sameBefore + 1})` : ""}`;
 
   return (
     <section
@@ -1335,7 +1401,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         <Tip label="Back" shortcut="Alt+Left"><button type="button" className="fp-up" aria-label="Back" disabled={!canBack} onClick={() => histGo(-1)}><ArrowLeft /></button></Tip>
         <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
         <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
-        <AddressBar node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
+        <AddressBar label={`Breadcrumb for ${panelName}`} node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         <Tip label="Refresh" shortcut="Alt+R"><button type="button" className="fp-up fp-refresh" aria-label="Refresh" onClick={refresh}><RefreshCw /></button></Tip>
         {git?.repo && !leaf.sr && <span className="git-chip"><GitPill s={git.repo.summary} /></span>}
         <div className="fp-actions">
@@ -1348,7 +1414,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           )}
         </div>
       </div>
-      <div className="fp-tools" role="toolbar" aria-label="File and folder actions">
+      <div className="fp-tools" role="toolbar" aria-label={`File and folder actions for ${panelName}`}>
         <div className="fp-tools-main" role="group" aria-label="Folder actions">
           <Tip label="New: file, folder, link or upload"><button type="button" className="fp-menubtn" aria-label="New" aria-haspopup="menu" onClick={(e) => menuAt(e, newItems())}><FilePlus />{!narrow && <span className="fp-menubtn-l">New</span>}<ChevronDown className="fp-caret" /></button></Tip>
           <Tip label="View: list or grid, sort order, hidden files"><button type="button" className="fp-menubtn" aria-label="View" aria-haspopup="menu" onClick={(e) => menuAt(e, viewItems())}>{view === "grid" ? <LayoutGrid /> : <List />}{!narrow && <span className="fp-menubtn-l">View</span>}<ChevronDown className="fp-caret" /></button></Tip>
@@ -1412,21 +1478,22 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           />
         </div>
       )}
+      <div className="visually-hidden" role="status" aria-live="polite">{!cside && !leaf.sr ? listSays : ""}</div>
       {err && <div id={createErrorId} className="fp-err" role="alert">{err}</div>}
       {pane && phone ? (
         // Phone: one view at a time. The side pane takes the whole panel; its close button returns to the list.
         <div className="fp-phonepane">{pane}</div>
-      ) : pane ? (
-        <Group key={dock + (narrow ? "-n" : "")} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} defaultLayout={{ list: 100 - pvSize, pv: pvSize }}
-          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock: savedDock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
-          {first && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
-          {first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
-          <Panel id="list" minSize={narrow ? "30%" : "20%"}>{listing}</Panel>
-          {!first && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
-          {!first && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
-        </Group>
       ) : (
-        listing
+        // The list always sits in this group, at the same position, so opening or closing the side pane does not rebuild it
+        // (a rebuilt list drops keyboard focus and the row under the pointer).
+        <Group key={dock + (narrow ? "-n" : "")} orientation={horizontal ? "horizontal" : "vertical"} id={`${leaf.id}-pv`} {...(pane ? { defaultLayout: { list: 100 - pvSize, pv: pvSize } } : {})}
+          onLayoutChanged={(l) => { const v = l.pv; if (typeof v === "number" && v >= 10 && v <= 90 && Math.abs(v - pvSize) > 0.5) onPatch({ pv: { dock: savedDock, size: v, ...(pvTab ? { tab: pvTab } : {}) } }); }}>
+          {first && pane && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
+          {first && pane && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
+          <Panel id="list" minSize={narrow ? "30%" : "20%"}>{listing}</Panel>
+          {!first && pane && <Separator className={"sep " + (horizontal ? "horizontal" : "vertical")} />}
+          {!first && pane && <Panel id="pv" minSize={narrow ? "40%" : "15%"}>{pane}</Panel>}
+        </Group>
       )}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {modal?.k === "new" && (
