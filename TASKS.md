@@ -206,7 +206,7 @@ Findings from the 12 November 2026 review: very large folders freeze the list, a
 ETA: 2026-11-12 15:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 122 | File list renders only the visible rows | in_review | claude-20261112-rv-panel | rv-list-window | 17.124 | 2026-11-12 09:30 ICT | Found in review: 30,000 files froze scrolling<br>https://github.com/DynacomSolutions/filedeck/pull/205 |
+| 122 | File list renders only the visible rows | done | claude-20261112-rv-panel | rv-list-window | 17.124 | | Merged https://github.com/DynacomSolutions/filedeck/pull/205, CI green<br>30,000-file folder: scroll freeze 12.7 s to 0, row click 1,828 ms to 35 ms<br>Chromium only |
 | 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | done | claude-20261112-rv-shell | rv-narrow-layout | 15.120 | | Merged https://github.com/DynacomSolutions/filedeck/pull/198, CI green<br>Full rows: 844x390 6, 320x256 3<br>Pinch zoom covered by a unit test only |
 
 ## 17. Keyboard and screen reader access
