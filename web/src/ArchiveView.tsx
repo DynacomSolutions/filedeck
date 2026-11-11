@@ -81,9 +81,9 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
               if (draft) setPw({ password: draft, remember, folder });
             }}
           >
-            <PasswordInput value={draft} onChange={setDraft} state={lock} />
+            <PasswordInput value={draft} onChange={setDraft} state={lock} errorId={lock === "incorrect" ? "av-pw-err" : undefined} />
             <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} />
-            <div className="ad-err" role="alert">{lock === "incorrect" ? "Wrong password." : ""}</div>
+            <div className="ad-err" id="av-pw-err" role="alert">{lock === "incorrect" ? "Wrong password." : ""}</div>
             <button type="submit" disabled={!draft}><Ic.LockOpen /> Unlock</button>
           </form>
         </div>
@@ -101,13 +101,13 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
             <Ic.ListChecks /> Extract selected{picked.size ? ` (${picked.size})` : ""}
           </button>
         </Tip>
-        <span className="muted">
+        <span className="muted" role="status">
           {data ? `${data.entries.length}${data.truncated ? "+" : ""} entries, ${fmtSize(data.bytes)} uncompressed` : err ? "" : "reading archive..."}
         </span>
         {data?.encrypted && <span className="muted"><Ic.Lock /> encrypted</span>}
-        {msg && <span className="muted">{msg}</span>}
+        <span className="muted" role="status">{msg}</span>
       </div>
-      {err && <div className="fp-err">{err}</div>}
+      {err && <div className="fp-err" role="alert">{err}</div>}
       {data && (
         <table className="ft av-table">
           <thead>
