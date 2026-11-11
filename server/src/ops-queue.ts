@@ -2,6 +2,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Target } from "./hub.ts";
 import type { JobRow, JobStore } from "./job-store.ts";
+import { listChildren } from "./child-list.ts";
 
 /**
  * Hub-side queue for bulk file operations (copy, move, trash, delete, folder-diff sync).
@@ -89,6 +90,9 @@ interface StatLite {
   type: string;
   size?: number;
   mtime?: number;
+  /** a link: whether it points at a folder, and whether it points at nothing */
+  linkDir?: boolean;
+  broken?: boolean;
 }
 
 interface Job {
@@ -116,6 +120,8 @@ interface Job {
   /** the last write was skipped or coalesced; the tick writes it */
   dirty?: boolean;
   savedAt: number;
+  /** this job counts against the concurrency limit */
+  holdsSlot?: boolean;
   /** copy/move totals are known (a resumed job must not count them twice) */
   scanned?: boolean;
   /** items taken over mid-flight and retried: a 404 then means the earlier attempt succeeded */
@@ -196,7 +202,9 @@ export interface OpQueueDeps {
 
 export class OpQueue {
   private jobs = new Map<string, Job>();
+  /** jobs that hold a slot: running and moving, not paused and not waiting for an answer */
   private running = 0;
+  private slotWaiters: (() => void)[] = [];
   private readonly me = randomUUID();
   private stopping = false;
   constructor(private d: OpQueueDeps) {
@@ -341,6 +349,7 @@ export class OpQueue {
       j.gate?.open();
       j.gate = undefined;
       this.save(j);
+      this.pump();
     }
     return this.view(j, false);
   }
@@ -536,8 +545,9 @@ export class OpQueue {
   private pump() {
     if (this.stopping) return;
     for (const j of this.jobs.values()) {
-      if (this.running >= (this.d.concurrency ?? 2)) return;
-      if (j.state !== "queued") continue;
+      if (this.running >= (this.d.concurrency ?? 2) || this.slotWaiters.length) return; // a resumed job goes first
+      if (j.state !== "queued" || j.paused) continue; // a job paused before it started waits without a slot
+      j.holdsSlot = true;
       this.running++;
       j.state = "running";
       j.startedAt ??= Date.now();
@@ -548,11 +558,11 @@ export class OpQueue {
           if (j.abort.signal.aborted || e instanceof Aborted) j.state = "canceled";
           else {
             j.state = "failed";
-            j.error = e instanceof OpError ? e.message : "operation failed";
+            j.error = e instanceof OpError ? e.message : reachFailure(e) ? "a node could not be reached" : "operation failed";
           }
         })
         .finally(() => {
-          this.running--;
+          this.release(j);
           if ((this.stopping || j.lost) && live(j.state)) return;
           j.finishedAt = Date.now();
           j.progress.current = "";
@@ -561,6 +571,38 @@ export class OpQueue {
           this.pump();
         });
     }
+  }
+
+  // ---------------------------------------------------------------- concurrency slots
+
+  /** Give the slot back (idempotent) and let a resumed job, then a queued one, take it. */
+  private release(j: Job) {
+    if (!j.holdsSlot) return;
+    j.holdsSlot = false;
+    this.running--;
+    const next = this.slotWaiters.shift();
+    if (next) next();
+    else this.pump();
+  }
+
+  /** Take a slot again after a pause or a question; waits while the queue is full, and gives up waiting when the job is canceled. */
+  private async acquire(j: Job) {
+    if (j.holdsSlot) return;
+    const sig = j.abort.signal;
+    while (this.running >= (this.d.concurrency ?? 2) && !sig.aborted && !j.lost && !this.stopping) {
+      await new Promise<void>((resolve) => {
+        const wake = () => {
+          sig.removeEventListener("abort", wake);
+          const at = this.slotWaiters.indexOf(wake);
+          if (at >= 0) this.slotWaiters.splice(at, 1);
+          resolve();
+        };
+        this.slotWaiters.push(wake);
+        sig.addEventListener("abort", wake, { once: true });
+      });
+    }
+    j.holdsSlot = true; // also when canceled: the job ends through exec's finally, which releases it
+    this.running++;
   }
 
   // ---------------------------------------------------------------- execution
@@ -601,8 +643,16 @@ export class OpQueue {
     const sig = j.abort.signal;
     const checkpoint = async () => {
       if (sig.aborted || j.lost) throw new Aborted();
-      while (j.paused && j.gate) {
-        await j.gate.promise;
+      if (j.paused && j.gate) {
+        this.release(j); // a paused job does not keep other jobs from running
+        try {
+          while (j.paused && j.gate) {
+            await j.gate.promise;
+            if (sig.aborted || j.lost) throw new Aborted();
+          }
+        } finally {
+          await this.acquire(j);
+        }
         if (sig.aborted || j.lost) throw new Aborted();
       }
     };
@@ -614,12 +664,14 @@ export class OpQueue {
     const ask = async (c: PendingConflict): Promise<Choice> => {
       if (j.policy !== "ask") return j.policy as Choice;
       await checkpoint();
+      this.release(j); // waiting for the user: the slot is free for other jobs
       const answer = await new Promise<{ action: Choice; all: boolean }>((resolve, reject) => {
         j.waiting = { conflict: c, resolve };
         this.save(j);
         sig.addEventListener("abort", () => reject(new Aborted()), { once: true });
-      }).finally(() => {
+      }).finally(async () => {
         j.waiting = undefined;
+        await this.acquire(j);
       });
       if (answer.all) j.policy = answer.action;
       return answer.action;
@@ -650,10 +702,11 @@ export class OpQueue {
     return r;
   }
 
+  /** Every child of a folder (not a page: a folder of any size is listed completely, or the job says it could not). */
   private async listDir(t: Target, p: string, signal: AbortSignal, what: string) {
-    const r = await t.fetch(`/api/fs/list?path=${q(p)}&hidden=1`, { signal });
-    if (!r.ok) throw await this.failed(r, what);
-    return ((await r.json()) as { entries: { name: string; path: string; type: string; size: number; mtime: number }[] }).entries;
+    const got = await listChildren((rest, init) => t.fetch(rest, init), p, signal, (r) => this.failed(r, what));
+    if (got.truncated) throw new OpError(502, `${what}: ${p} has more entries than the node lists in one walk; copy it in parts`);
+    return got.entries;
   }
 
   /** Remove one path: node trash, or permanent on a network source (which has no trash). */
@@ -783,9 +836,10 @@ export class OpQueue {
         await ctx.boundary();
         const it = spec.items[i]!;
         const t = this.target(it.node);
+        // an item that cannot be read now is not counted; its own turn reports the cause and the other items still run
         const st = await this.statOf(t, it.path, ctx.sig).catch((e) => {
           if (ctx.sig.aborted) throw new Aborted();
-          throw e;
+          return null;
         });
         if (st) {
           const m = await this.measure(t, it.path, st, ctx.sig);
@@ -838,7 +892,14 @@ export class OpQueue {
     const srcT = this.target(src.node);
     const dstT = this.target(dst.node);
     const st = await this.statOf(srcT, src.path, ctx.sig);
+    let isLink = false;
     if (!st) throw new OpError(404, "source not found");
+    if (st.type === "symlink") {
+      // A link chosen by name is followed to what it points at (the node keeps that inside its root); nested links are not.
+      if (st.broken) throw new OpError(400, "the link points at nothing");
+      st.type = st.linkDir ? "dir" : "file";
+      isLink = true;
+    }
     if (st.type !== "file" && st.type !== "dir") throw new OpError(400, "only files and folders can be copied");
     const name = path.posix.basename(src.path);
     const same = src.node === dst.node;
@@ -884,7 +945,7 @@ export class OpQueue {
     }
 
     // Fast native path: same node and nothing in the way (or an in-place file replace by move).
-    if (same && (free || (replaceFile && o.move))) {
+    if (same && (free || (replaceFile && o.move)) && !(isLink && !o.move)) {
       const m = await this.measure(srcT, src.path, st, ctx.sig).catch(() => ({ files: 0, bytes: 0 }));
       const finalTarget = joinP(dst.dir, useName);
       if (o.move) await this.json(srcT, "/api/fs/rename", { from: src.path, to: finalTarget, overwrite: replaceFile }, ctx.sig, "move");
@@ -959,7 +1020,10 @@ export class OpQueue {
     }
     const entries = await this.listDir(src, sp, ctx.sig, "source list");
     for (const e of entries) {
-      if (e.type === "symlink" || e.type === "other") continue; // links and special files are not transferred
+      if (e.type === "symlink" || e.type === "other") {
+        res.skipped++; // links and special files are not transferred; counted so a move keeps its source
+        continue;
+      }
       await ctx.checkpoint();
       const hit = existing.get(e.name);
       let childName = e.name;
@@ -1067,6 +1131,11 @@ export class OpQueue {
     }
     j.progress.entries++;
   }
+}
+
+/** A failed connection (fetch throws a TypeError whose cause carries the code), as opposed to a bug. */
+function reachFailure(e: unknown): boolean {
+  return e instanceof TypeError || typeof (e as { cause?: { code?: unknown } })?.cause?.code === "string";
 }
 
 function titleOf(s: OpSpec): string {

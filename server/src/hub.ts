@@ -14,6 +14,8 @@ import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
+import { agentFetch } from "./agent-fetch.ts";
+import { listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { audit, type AuditSink } from "./audit.ts";
@@ -48,7 +50,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     vault.close();
     await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined)));
   };
-  const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => fetch(n.url + rest, withAgentToken(init, cfg.agentToken)) }]));
+  const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken)) }]));
   const sources = buildSources(cfg);
   for (const [name, backend] of Object.entries(injected ?? {})) {
     sources.set(name, { config: { name, type: backend.type, host: "test", root: "/" }, backend });
@@ -144,6 +146,12 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   interface StatLite {
     type: string;
     mtime?: number;
+    linkDir?: boolean;
+    broken?: boolean;
+  }
+  /** Links and special files met inside folders: not transferred, counted so a move keeps its source. */
+  interface Tally {
+    skipped: number;
   }
   const statOf = async (t: Target, p: string): Promise<StatLite | null> => {
     const r = await t.fetch(`/api/fs/stat?path=${q(p)}`);
@@ -172,9 +180,14 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     }
     return (await up.json()) as { path: string };
   }
-  async function transferTree(src: Target, sp: string, dst: Target, dir: string, o: TOpts, depth = 0): Promise<{ path: string }> {
+  async function transferTree(src: Target, sp: string, dst: Target, dir: string, o: TOpts, tally: Tally, depth = 0): Promise<{ path: string }> {
     const st = await statOf(src, sp);
     if (!st) throw new TransferError(404, "source not found");
+    if (st.type === "symlink" && depth === 0) {
+      // a link chosen by name is followed to what it points at; links inside folders are not
+      if (st.broken) throw new TransferError(400, "the link points at nothing");
+      st.type = st.linkDir ? "dir" : "file";
+    }
     const name = path.posix.basename(sp);
     if (st.type === "file") return transferFile(src, sp, st, dst, dir, name, o);
     if (st.type !== "dir") throw new TransferError(400, "only files and folders can be transferred");
@@ -186,12 +199,15 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       const mk = await dst.fetch("/api/fs/mkdir", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: dp }) });
       if (!mk.ok) throw await failed(mk, "destination mkdir");
     }
-    const ls = await src.fetch(`/api/fs/list?path=${q(sp)}&hidden=1`);
-    if (!ls.ok) throw await failed(ls, "source list");
-    const { entries } = (await ls.json()) as { entries: { path: string; type: string }[] };
-    for (const e of entries) {
-      if (e.type === "symlink" || e.type === "other") continue; // links and special files are not transferred
-      await transferTree(src, e.path, dst, dp, o, depth + 1);
+    // every child, not the page the browser gets (that one stops at 20 000 entries)
+    const ls = await listChildren((rest, init) => src.fetch(rest, init), sp, undefined, (r) => failed(r, "source list"));
+    if (ls.truncated) throw new TransferError(502, `source list: ${sp} has more entries than the node lists in one walk`);
+    for (const e of ls.entries) {
+      if (e.type === "symlink" || e.type === "other") {
+        tally.skipped++;
+        continue;
+      }
+      await transferTree(src, e.path, dst, dp, o, tally, depth + 1);
     }
     return { path: dp };
   }
@@ -213,7 +229,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       return c.json({ error: "invalid path" }, 400);
     }
     try {
-      const res = await transferTree(src, b.src.path, dst, b.dst.dir, { overwrite: b.overwrite === true, preserveTimes: b.preserveTimes === true });
+      const tally: Tally = { skipped: 0 };
+      const res = await transferTree(src, b.src.path, dst, b.dst.dir, { overwrite: b.overwrite === true, preserveTimes: b.preserveTimes === true }, tally);
+      if (b.op === "move" && tally.skipped > 0) {
+        throw new TransferError(409, `copied, but ${tally.skipped} link${tally.skipped === 1 ? "" : "s"} or special file${tally.skipped === 1 ? " was" : "s were"} not transferred; the source was kept`);
+      }
       if (b.op === "move") {
         const isSource = sources.has(b.src.node);
         const rm = await src.fetch(isSource ? "/api/fs/delete" : "/api/fs/trash", {
@@ -223,7 +243,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
         });
         if (!rm.ok) throw await failed(rm, "copied, but removing the source failed");
       }
-      return c.json(res, 201);
+      return c.json(tally.skipped > 0 ? { ...res, skipped: tally.skipped } : res, 201);
     } catch (e) {
       if (e instanceof TransferError) return c.json({ error: e.message }, e.status as 400);
       if ((e as Error)?.name === "AbortError") return new Response(null, { status: 499 });
