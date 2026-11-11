@@ -1,3 +1,4 @@
+import vm from "node:vm";
 import type { Readable } from "node:stream";
 import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
@@ -71,16 +72,62 @@ export function safeRegex(src: string, flags: string): RegExp {
   }
 }
 
+/** How long one batch of matches may run before the pattern is cut off. A sane pattern needs a few milliseconds. */
+export const REGEX_BUDGET_MS = 500;
+
+/** Matches many strings in one call, so a user regular expression can be run under a time limit. */
+export interface Tester {
+  testMany(items: string[]): boolean[];
+}
+
+/** A pattern the program built itself (escaped text): it cannot backtrack badly, so it runs directly. */
+function plainTester(re: RegExp): Tester {
+  return { testMany: (items) => items.map((s) => re.test(s)) };
+}
+
+/**
+ * A user's regular expression, run in its own V8 context with an execution time limit: a pattern the heuristics in
+ * `safeRegex` let through (such as `(a|a)*b`) is cut off after `REGEX_BUDGET_MS` and answered with a 400 instead of
+ * stalling the event loop. The whole batch is matched in one call, which keeps the cost of the time limit per batch,
+ * not per string.
+ */
+function guardedTester(src: string, flags: string, budgetMs = REGEX_BUDGET_MS): Tester {
+  safeRegex(src, flags); // length, heuristics and syntax, with the 400 messages
+  const ctx = vm.createContext({ src, flags, items: [] as string[] }, { codeGeneration: { strings: false, wasm: false } });
+  new vm.Script("globalThis.re = new RegExp(src, flags);").runInContext(ctx);
+  const run = new vm.Script("(() => { const o = new Array(items.length); for (let i = 0; i < items.length; i++) o[i] = re.test(items[i]); return o; })()");
+  return {
+    testMany(items) {
+      ctx.items = items;
+      try {
+        return Array.from(run.runInContext(ctx, { timeout: budgetMs }) as boolean[]);
+      } catch (e) {
+        if ((e as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") throw new FsError(400, "pattern took too long to run: simplify the regular expression");
+        throw e;
+      } finally {
+        ctx.items = [];
+      }
+    },
+  };
+}
+
+/** `userRegex`: the text is a regular expression written by the user; otherwise it is literal text and is escaped. */
+export function makeTester(text: string, userRegex: boolean, ignoreCase: boolean, budgetMs = REGEX_BUDGET_MS): Tester {
+  const flags = ignoreCase ? "i" : "";
+  return userRegex ? guardedTester(text, flags, budgetMs) : plainTester(safeRegex(esc(text), flags));
+}
+
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-function nameMatcher(o: SearchOpts): (rel: string, isDir: boolean) => boolean {
-  if (!o.q) return () => true;
+/** Which of `rels` match the name query. Names are matched in batches so a regular expression can be time-limited. */
+function nameMatcher(o: SearchOpts): (rels: WalkEntry[]) => boolean[] {
+  if (!o.q) return (es) => es.map(() => true);
   if (o.mode === "glob") {
     const m = compileGlobs([o.q], o.ignoreCase);
-    return (rel, isDir) => m.test(rel, isDir);
+    return (es) => es.map((e) => m.test(e.p, e.t === "dir"));
   }
-  const re = safeRegex(o.mode === "regex" ? o.q : esc(o.q), o.ignoreCase ? "i" : "");
-  return (rel) => re.test(rel.slice(rel.lastIndexOf("/") + 1));
+  const t = makeTester(o.q, o.mode === "regex", o.ignoreCase);
+  return (es) => t.testMany(es.map((e) => e.p.slice(e.p.lastIndexOf("/") + 1)));
 }
 
 /** Binary heuristic: a NUL byte in the first chunk. */
@@ -99,7 +146,7 @@ export async function* searchTree(
   signal?: AbortSignal,
 ): AsyncGenerator<SearchBatch, SearchSummary> {
   const nameOk = nameMatcher(o);
-  const grep = o.content ? safeRegex(o.contentRegex ? o.content : esc(o.content), o.contentIgnoreCase ? "i" : "") : null;
+  const grep = o.content ? makeTester(o.content, o.contentRegex, o.contentIgnoreCase) : null;
   if (!o.q && !grep && o.types === "all") throw new FsError(400, "empty search");
   const sum: SearchSummary = { truncated: false, depthLimited: false, errors: 0, scanned: 0, grepped: 0, skipped: 0, capped: false };
   let bytes = 0;
@@ -138,12 +185,15 @@ export async function* searchTree(
     let carry = "";
     let checked = false;
     let read_ = 0;
-    const scan = (line: string) => {
-      lineNo++;
-      const t = line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line;
-      if (grep!.test(t)) {
-        n++;
-        if (!first) first = { l: lineNo, x: t.trim().slice(0, SNIPPET) };
+    const scan = (lines: string[]) => {
+      const ts = lines.map((line) => (line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line));
+      const hit = grep!.testMany(ts);
+      for (let i = 0; i < ts.length; i++) {
+        lineNo++;
+        if (hit[i]) {
+          n++;
+          if (!first) first = { l: lineNo, x: ts[i]!.trim().slice(0, SNIPPET) };
+        }
       }
     };
     try {
@@ -162,15 +212,15 @@ export async function* searchTree(
         if (read_ > o.maxFileBytes) break;
         const parts = (carry + chunk.toString("utf8")).split("\n");
         carry = (parts.pop() as string).slice(-MAX_LINE * 2);
-        for (const p of parts) scan(p.endsWith("\r") ? p.slice(0, -1) : p);
+        scan(parts.map((p) => (p.endsWith("\r") ? p.slice(0, -1) : p)));
         if (bytes > o.maxTotalBytes) {
           sum.capped = true;
           break;
         }
       }
-      if (carry) scan(carry);
+      if (carry) scan([carry]);
     } catch (err) {
-      if (signal?.aborted) throw err;
+      if (signal?.aborted || err instanceof FsError) throw err;
       sum.skipped++;
       return null;
     } finally {
@@ -192,13 +242,14 @@ export async function* searchTree(
         sum.errors = r.value.errors;
         break;
       }
-      for (const e of r.value) {
+      const nameHit = nameOk(r.value);
+      for (const [idx, e] of r.value.entries()) {
         sum.scanned++;
         if (signal?.aborted) throw new FsError(400, "canceled");
         const isDir = e.t === "dir";
         if (o.types === "file" && isDir) continue;
         if (o.types === "dir" && !isDir) continue;
-        if (!nameOk(e.p, isDir)) continue;
+        if (!nameHit[idx]) continue;
         if (grep) {
           if (e.t !== "file") continue;
           const g = await grepFile(e);

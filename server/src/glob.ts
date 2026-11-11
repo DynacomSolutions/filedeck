@@ -4,8 +4,8 @@
  *  - `[abc]` / `[a-z]` / `[!abc]` classes, `{a,b}` alternatives
  *  - no "/" in the pattern: match the base name at any depth; with "/": match the whole relative path
  *  - leading "/" anchors at the compared root; trailing "/" matches directories only
- * Patterns are compiled to anchored RegExps without nested quantifiers on
- * unbounded input, and length-capped, so a hostile pattern cannot stall a job.
+ * Patterns are matched by a linear-time automaton simulation (no regular expressions, no backtracking) and are
+ * length-capped, so a hostile pattern cannot stall the process.
  */
 export interface Matcher {
   test(rel: string, isDir: boolean): boolean;
@@ -44,8 +44,15 @@ function expandBraces(p: string, depth = 0): string[] {
   return out.slice(0, 64);
 }
 
-function toRegex(g: string): string {
-  let re = "";
+/**
+ * One element of a compiled glob. `star` is `*`, `dstar` is `**`. `**` followed by "/" (which also matches zero
+ * directories) is two elements: `dsa` (skippable, entered before the first character) and `dsb` (inside the run, ends at a "/").
+ */
+type Tok = { k: "lit"; c: string } | { k: "one" } | { k: "cls"; neg: boolean; items: [string, string][] } | { k: "star" } | { k: "dstar" } | { k: "dsa" } | { k: "dsb" };
+
+/** Glob text to tokens; null when it is not a valid glob (an inverted range in a class), as a bad pattern is ignored. */
+function tokenise(g: string): Tok[] | null {
+  const out: Tok[] = [];
   for (let i = 0; i < g.length; i++) {
     const c = g[i] as string;
     if (c === "*") {
@@ -53,27 +60,98 @@ function toRegex(g: string): string {
         while (g[i + 1] === "*") i++;
         if (g[i + 1] === "/") {
           i++;
-          re += "(?:.*/)?"; // "**/" also matches zero directories
-        } else re += ".*";
-      } else re += "[^/]*";
-    } else if (c === "?") re += "[^/]";
-    else if (c === "[") {
+          out.push({ k: "dsa" }, { k: "dsb" }); // "**/" also matches zero directories
+        } else out.push({ k: "dstar" });
+      } else out.push({ k: "star" });
+    } else if (c === "?") out.push({ k: "one" });
+    else if (c === "[" && g.indexOf("]", i + 2) >= 0) {
       const end = g.indexOf("]", i + 2);
-      if (end < 0) re += "\\[";
-      else {
-        let body = g.slice(i + 1, end);
-        const neg = body[0] === "!" || body[0] === "^";
-        if (neg) body = body.slice(1);
-        re += "[" + (neg ? "^" : "") + body.replace(/[\\\]^]/g, "\\$&") + "]";
-        i = end;
+      let body = g.slice(i + 1, end);
+      const neg = body[0] === "!" || body[0] === "^";
+      if (neg) body = body.slice(1);
+      const items: [string, string][] = [];
+      for (let j = 0; j < body.length; j++) {
+        if (body[j + 1] === "-" && j + 2 < body.length) {
+          if (body[j]! > body[j + 2]!) return null;
+          items.push([body[j]!, body[j + 2]!]);
+          j += 2;
+        } else items.push([body[j]!, body[j]!]);
       }
-    } else re += c.replace(/[.+^${}()|\\/]/g, "\\$&");
+      out.push({ k: "cls", neg, items });
+      i = end;
+    } else out.push({ k: "lit", c });
   }
-  return re;
+  return out;
+}
+
+const fold = (s: string, ic: boolean) => (ic ? s.toLowerCase() : s);
+
+/**
+ * Match `text` against the tokens by simulating the automaton one character at a time: the set of live positions is
+ * advanced for every character, so the work is at most (text length x token count) whatever the pattern looks like.
+ * (A backtracking matcher can take exponential or high-polynomial time on patterns such as `*a*a*a*b`.)
+ */
+function matchTokens(toks: Tok[], text: string, ic: boolean): boolean {
+  const m = toks.length;
+  let cur = new Uint8Array(m + 1);
+  let next = new Uint8Array(m + 1);
+  const close = (set: Uint8Array) => {
+    for (let i = 0; i < m; i++) {
+      if (!set[i]) continue;
+      const k = toks[i]!.k;
+      if (k === "star" || k === "dstar") set[i + 1] = 1;
+      else if (k === "dsa") set[i + 2] = 1; // "**/" matching nothing skips both of its elements
+    }
+  };
+  cur[0] = 1;
+  close(cur);
+  for (let n = 0; n < text.length; n++) {
+    const ch = text[n] as string;
+    const lc = ic ? ch.toLowerCase() : ch;
+    next.fill(0);
+    let live = false;
+    for (let i = 0; i < m; i++) {
+      if (!cur[i]) continue;
+      const t = toks[i]!;
+      switch (t.k) {
+        case "lit":
+          if (fold(t.c, ic) === lc) next[i + 1] = 1;
+          break;
+        case "one":
+          if (ch !== "/") next[i + 1] = 1;
+          break;
+        case "cls": {
+          const forms = ic ? [ch, ch.toLowerCase(), ch.toUpperCase()] : [ch];
+          const inSet = t.items.some(([lo, hi]) => forms.some((f) => f >= lo && f <= hi));
+          if (inSet !== t.neg) next[i + 1] = 1;
+          break;
+        }
+        case "star":
+          if (ch !== "/") next[i] = 1;
+          break;
+        case "dstar":
+          next[i] = 1;
+          break;
+        case "dsa": // first character of the run: enter it
+          next[i + 1] = 1;
+          if (ch === "/") next[i + 2] = 1;
+          break;
+        case "dsb":
+          next[i] = 1;
+          if (ch === "/") next[i + 1] = 1;
+          break;
+      }
+    }
+    close(next);
+    for (let i = 0; i <= m; i++) if (next[i]) live = true;
+    if (!live) return false;
+    [cur, next] = [next, cur];
+  }
+  return cur[m] === 1;
 }
 
 interface Rule {
-  re: RegExp;
+  toks: Tok[];
   base: boolean;
   dirOnly: boolean;
 }
@@ -90,11 +168,8 @@ export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
     if (!raw) continue;
     const base = !anchored && !raw.includes("/");
     for (const g of expandBraces(raw)) {
-      try {
-        rules.push({ re: new RegExp("^" + toRegex(g) + "$", ignoreCase ? "i" : ""), base, dirOnly });
-      } catch {
-        /* invalid class: ignore the pattern */
-      }
+      const toks = tokenise(g);
+      if (toks) rules.push({ toks, base, dirOnly });
     }
   }
   return {
@@ -103,7 +178,7 @@ export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
       const name = rel.slice(rel.lastIndexOf("/") + 1);
       for (const r of rules) {
         if (r.dirOnly && !isDir) continue;
-        if (r.re.test(r.base ? name : rel)) return true;
+        if (matchTokens(r.toks, r.base ? name : rel, ignoreCase)) return true;
       }
       return false;
     },

@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { safeRegex } from "../src/search.ts";
+import { compileGlobs } from "../src/glob.ts";
+import { makeTester, safeRegex } from "../src/search.ts";
 
 let tmp: string, outside: string, agent: ReturnType<typeof createAgent>;
 const write = (rel: string, data: string | Buffer) => {
@@ -132,4 +133,80 @@ test("concurrency gate answers 429 beyond the limit", async () => {
   const second = await one.request("/api/fs/search?path=/many&q=f");
   assert.equal(second.status, 429);
   await rd.cancel();
+});
+
+test("a glob that would backtrack badly is answered at once and does not hold up the agent", async () => {
+  write("slow/" + "a".repeat(44), "x");
+  const t0 = Date.now();
+  const [r, health] = await Promise.all([search("path=/slow&q=" + encodeURIComponent("*a*a*a*a*a*a*a*a*b") + "&mode=glob"), agent.request("/healthz")]);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.hits, []);
+  assert.equal(health.status, 200);
+  assert.ok(Date.now() - t0 < 2500, `took ${Date.now() - t0} ms`);
+  assert.equal(compileGlobs(["*a".repeat(30) + "*b"], false).test("a".repeat(200), false), false);
+});
+
+test("a regular expression the heuristics let through is cut off with a 400 instead of stalling the agent", async () => {
+  write("slowre/" + "a".repeat(27), "x");
+  const t0 = Date.now();
+  const [r, health] = await Promise.all([search("path=/slowre&q=" + encodeURIComponent("^(a|a)*b$") + "&mode=regex"), Promise.resolve(null)]);
+  void health;
+  const failed = r.status === 400 || (r.lines ?? []).some((l) => /too long/.test(l.error ?? ""));
+  assert.ok(failed, `status ${r.status}`);
+  assert.ok(Date.now() - t0 < 6000, `took ${Date.now() - t0} ms`);
+  // content search: same limit, and a fast pattern still works on the same data
+  write("slowre/c.txt", "a".repeat(27) + "\nneedle\n");
+  const c = await search("path=/slowre&q=c.txt&content=" + encodeURIComponent("^(a|a)*b$") + "&cre=1");
+  assert.ok(c.status === 400 || (c.lines ?? []).some((l) => /too long/.test(l.error ?? "")), `content status ${c.status}`);
+  const ok = await search("path=/slowre&q=c.txt&content=" + encodeURIComponent("^nee+dle$") + "&cre=1");
+  assert.deepEqual(names(ok.hits), ["c.txt"]);
+  assert.throws(() => makeTester("^(a|a)*b$", true, false, 100).testMany(["a".repeat(60)]), /too long/);
+  assert.deepEqual(makeTester("^(x|y)+$", true, false).testMany(["xyxy", "xz"]), [true, false]);
+});
+
+/** The previous implementation (a regular expression per glob), kept here as the reference for the semantics. */
+function refGlob(g: string, ic: boolean): RegExp {
+  let re = "";
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i] as string;
+    if (c === "*") {
+      if (g[i + 1] === "*") {
+        while (g[i + 1] === "*") i++;
+        if (g[i + 1] === "/") (i++, (re += "(?:.*/)?"));
+        else re += ".*";
+      } else re += "[^/]*";
+    } else if (c === "?") re += "[^/]";
+    else if (c === "[") {
+      const end = g.indexOf("]", i + 2);
+      if (end < 0) re += "\\[";
+      else {
+        let body = g.slice(i + 1, end);
+        const neg = body[0] === "!" || body[0] === "^";
+        if (neg) body = body.slice(1);
+        re += "[" + (neg ? "^" : "") + body.replace(/[\\\]^]/g, "\\$&") + "]";
+        i = end;
+      }
+    } else re += c.replace(/[.+^${}()|\\/]/g, "\\$&");
+  }
+  return new RegExp("^" + re + "$", ic ? "i" : "");
+}
+
+test("linear-time glob matcher agrees with the regular-expression semantics it replaced", () => {
+  let seed = 12345;
+  const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff), seed % n);
+  const pat = ["a", "b", "A", "/", ".", "*", "**", "?", "[ab]", "[!a]", "[a-c]", "[^b]", "**/", "-"];
+  const txt = ["a", "b", "A", "B", "c", "/", ".", "-"];
+  for (let n = 0; n < 4000; n++) {
+    const g = Array.from({ length: 1 + rnd(6) }, () => pat[rnd(pat.length)]).join("");
+    const text = Array.from({ length: rnd(9) }, () => txt[rnd(txt.length)]).join("");
+    for (const ic of [false, true]) {
+      // a leading "/" or a trailing "/" has a meaning of its own (anchoring, directories only): compare full-path rules only
+      if (g.startsWith("/") || g.endsWith("/") || !g.includes("/")) continue;
+      assert.equal(compileGlobs([g], ic).test(text, true), refGlob(g, ic).test(text), `${g} vs ${text} (ic=${ic})`);
+    }
+    if (!g.includes("/")) {
+      const base = text.slice(text.lastIndexOf("/") + 1);
+      assert.equal(compileGlobs([g], false).test(text, true), refGlob(g, false).test(base), `${g} vs ${text}`);
+    }
+  }
 });
