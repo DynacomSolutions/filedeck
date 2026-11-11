@@ -214,7 +214,7 @@ Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and A
 ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | in_review | claude-20261112-rv-panel | rv-list-access | 15.118 | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/203 |
+| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | done | claude-20261112-rv-panel | rv-list-access | 15.118 | | Merged https://github.com/DynacomSolutions/filedeck/pull/203, CI green<br>Panels switch with Alt+PageDown and Alt+PageUp; F6 unchanged<br>Not checked with a screen reader |
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | done | claude-20261112-rv-menus | rv-menus-dialogs | | | Merged https://github.com/DynacomSolutions/filedeck/pull/200, CI green<br>Checked at 1366x768 and 390 px |
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
 | 127 | Component roles, names and announcements | done | claude-20261112-rv-components | rv-aria-announce | 15.121 | | Merged https://github.com/DynacomSolutions/filedeck/pull/202, CI green<br>Long selections download through a one-use ticket<br>axe clean at 1440 and 390 px |
