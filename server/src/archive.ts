@@ -5,10 +5,11 @@ import path from "node:path";
 import os from "node:os";
 import { createInterface } from "node:readline";
 import { PassThrough, type Readable } from "node:stream";
-import { FsError } from "./fsops.ts";
+import { FsError, volumeRoot } from "./fsops.ts";
+import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
 import { direntsOf } from "./dirnames.ts";
 import type { JobCtl } from "./jobs.ts";
-import { TRASH_DIR, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
+import { WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, haveSevenZip, listSz, runSz, szFailure, validPassword, verifyPassword } from "./sevenzip.ts";
 
@@ -74,7 +75,7 @@ export function archiveBase(n: string): string {
   const e = EXTRACT_EXT.find((x) => low.endsWith(x));
   const b = e ? n.slice(0, n.length - e.length) : n;
   // "..tar" would give "." (the destination itself): such a name, or the reserved trash name, falls back to a plain one
-  return !b || b === "." || b === ".." || b === TRASH_DIR || /[\\/\0]/.test(b) ? "extracted" : b;
+  return !b || b === "." || b === ".." || isReservedName(b) || /[\\/\0]/.test(b) ? "extracted" : b;
 }
 
 function tool(args: string[], opts: { cwd?: string; stdin?: boolean } = {}): ChildProcess {
@@ -183,7 +184,7 @@ export async function extractTar(
         await skipBody();
         continue;
       }
-      if (segs.includes(TRASH_DIR)) throw new ArchiveError(400, "unsafe archive entry: reserved name");
+      if (segs.some(isReservedName)) throw new ArchiveError(400, "unsafe archive entry: reserved name");
       if (filter && !filter(segs.join("/"))) {
         await skipBody(); // not selected (names were validated above, so a hostile entry still aborts)
         continue;
@@ -434,45 +435,80 @@ async function pinned<T>(root: string, real: string, fn: (at: string) => Promise
 /* ------------------------------------------------------- private work area */
 
 /**
- * Staging for extraction and compression lives here, never in a folder the user serves: a
- * directory that is private to this agent and whose ancestors are owned by root or by this user
- * and cannot be renamed into by anyone else. Nothing in it can be swapped by an unprivileged user,
- * whatever 7-Zip or bsdtar do with the path of their working directory.
- * `FILEDECK_WORK_DIR` chooses the place (default: a per-user folder under the temp directory); results
- * are moved into the destination through pinned descriptors, copying when it is another filesystem.
+ * Staging for extraction, and the file being written by compression, live in a private work folder that
+ * is never in a folder the user serves. It is chosen per volume, like the trash store: `.filedeck-work` at
+ * the root of the destination's volume, so results are moved into place with a rename and nothing is copied
+ * across filesystems. A folder is accepted only if it is a real directory owned by this agent with mode 0700,
+ * and every ancestor is owned by root or this user and cannot be renamed into by anyone else (a sticky folder
+ * is fine). Nobody who can write below the volume root can then swap it, whatever 7-Zip or bsdtar do with
+ * the path of their working directory.
+ *
+ * Only when no such folder can be made (a volume root others can write to, a read-only volume) does the job
+ * stage in the temp work folder (`FILEDECK_WORK_DIR`, default a per-user folder under the temp directory),
+ * after checking that the known size fits there.
  */
-let workRootP: Promise<string> | undefined;
-let workRootKey = "";
-function workRoot(): Promise<string> {
-  const want = process.env.FILEDECK_WORK_DIR || path.join(os.tmpdir(), `filedeck-work-${process.getuid?.() ?? "u"}`);
-  if (!workRootP || workRootKey !== want) {
-    workRootKey = want;
-    workRootP = prepareWorkRoot(want);
-    workRootP.catch(() => undefined);
-  }
-  return workRootP;
-}
-
-async function prepareWorkRoot(dir: string): Promise<string> {
+const ownedByMe = (uid: number) => {
   const me = process.getuid?.();
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  return uid === 0 || uid === me;
+};
+
+/** The real path of `dir` when it is an acceptable private folder; throws otherwise. With `create` it is made (mode 0700) when missing. */
+async function privateDir(dir: string, create: boolean): Promise<string> {
+  const me = process.getuid?.();
+  if (create) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const st = await fs.lstat(dir);
   if (!st.isDirectory() || (me !== undefined && st.uid !== me) || (st.mode & 0o077) !== 0) throw new ArchiveError(500, "the work folder for archives is not private to this agent");
   const real = await fs.realpath(dir);
   for (let d = path.dirname(real); ; d = path.dirname(d)) {
     const a = await fs.stat(d);
-    if ((a.uid !== 0 && a.uid !== me) || ((a.mode & 0o022) !== 0 && (a.mode & 0o1000) === 0)) throw new ArchiveError(500, "the work folder for archives sits below a folder others can change");
+    if (!ownedByMe(a.uid) || ((a.mode & 0o022) !== 0 && (a.mode & 0o1000) === 0)) throw new ArchiveError(500, "the work folder for archives sits below a folder others can change");
     if (d === path.dirname(d)) break;
   }
-  await sweepWork(real);
   return real;
 }
 
-let swept = false;
-/** Remove staging left by a process that no longer exists (or by an earlier run of this one). Only ever looks inside the private work folder. */
-async function sweepWork(real: string) {
-  if (swept) return;
-  swept = true;
+let workRootP: Promise<string> | undefined;
+let workRootKey = "";
+/** The temp work folder: the fallback. */
+function workRoot(): Promise<string> {
+  const want = process.env.FILEDECK_WORK_DIR || path.join(os.tmpdir(), `filedeck-work-${process.getuid?.() ?? "u"}`);
+  if (!workRootP || workRootKey !== want) {
+    workRootKey = want;
+    workRootP = privateDir(want, true).then(async (real) => (await sweepDir(real), real));
+    workRootP.catch(() => undefined);
+  }
+  return workRootP;
+}
+
+/** The per-volume work folder for a destination, or null when the volume cannot have an acceptable one. */
+const volumeWorks = new Map<string, string>();
+async function volumeWork(root: string, destReal: string): Promise<string | null> {
+  let made: string | undefined;
+  try {
+    const vol = await volumeRoot(destReal, root);
+    const hit = volumeWorks.get(vol);
+    if (hit) {
+      await privateDir(hit, false); // still acceptable?
+      return hit;
+    }
+    const dir = path.join(vol, WORK_DIR);
+    if (!(await fs.lstat(dir).then(() => true, () => false))) made = dir;
+    const real = await privateDir(dir, true);
+    made = undefined;
+    await sweepDir(real);
+    volumeWorks.set(vol, real);
+    return real;
+  } catch {
+    if (made) await fs.rmdir(made).catch(() => undefined); // a folder we just made and then refused
+    return null;
+  }
+}
+
+const swept = new Set<string>();
+/** Remove staging left by a process that no longer exists (or by an earlier run of this one). Only ever looks inside an accepted work folder. */
+async function sweepDir(real: string) {
+  if (swept.has(real)) return;
+  swept.add(real);
   for (const n of await fs.readdir(real).catch(() => [] as string[])) {
     const m = /^(\d+)-/.exec(n);
     if (!m) continue;
@@ -488,12 +524,28 @@ async function sweepWork(real: string) {
     if (!alive) await fs.rm(path.join(real, n), { recursive: true, force: true }).catch(() => undefined);
   }
 }
-/** Start-up sweep of the private work folder (also done before the first job). */
-export async function sweepWorkArea(): Promise<void> {
+
+/** Start-up sweep: the temp work folder and the `.filedeck-work` of the root and of every local mount; nothing else is looked at. */
+export async function sweepWorkArea(root: string, procMounts: string): Promise<void> {
   try {
     await workRoot();
   } catch (e) {
     console.error("archive work folder:", (e as Error).message);
+  }
+  try {
+    const text = await readMountTable(root, procMounts);
+    const vols = new Set<string>(["/"]);
+    for (const m of parseMounts(text, { all: true })) if (!networkKind(m.fstype)) vols.add(m.mountpoint);
+    for (const v of vols) {
+      try {
+        const dir = path.join(resolveWrite(root, v).real, WORK_DIR);
+        if (await fs.lstat(dir).then((st) => st.isDirectory(), () => false)) await sweepDir(await privateDir(dir, false));
+      } catch {
+        /* not accessible or not acceptable: left alone */
+      }
+    }
+  } catch (e) {
+    console.error("archive work folders:", (e as Error).message);
   }
 }
 
@@ -502,12 +554,32 @@ interface Work {
   dir: string;
   /** the folder through a held descriptor */
   at: string;
+  /** true when this is the temp fallback (data will be copied into the destination) */
+  fallback: boolean;
+  /** free bytes in the fallback folder; undefined for a per-volume folder */
+  free?: number;
   /** remove it; never throws */
   done: () => Promise<void>;
 }
-async function makeWork(tag: string): Promise<Work> {
-  const root = await workRoot();
-  const dir = await fs.mkdtemp(path.join(root, `${process.pid}-${tag}-`));
+/**
+ * A private work folder for a job that writes into `destReal`. `need` is the number of bytes the job is known to
+ * need (compress: the size of the selection); when staging falls back to the temp volume and it cannot hold that,
+ * the job fails at once.
+ */
+async function makeWork(tag: string, root: string, destReal: string, need?: number): Promise<Work> {
+  let base = await volumeWork(root, destReal);
+  let fallback = false;
+  let free: number | undefined;
+  if (!base) {
+    base = await workRoot();
+    fallback = true;
+    const sf = await fs.statfs(base).catch(() => null);
+    if (sf) free = sf.bavail * sf.bsize;
+    if (need !== undefined && free !== undefined && need > free) {
+      throw new ArchiveError(507, `not enough room to stage this job: it needs ${need} bytes free in the work folder (${base}) and has ${free}; set FILEDECK_WORK_DIR to a larger volume`);
+    }
+  }
+  const dir = await fs.mkdtemp(path.join(base, `${process.pid}-${tag}-`));
   let fh: import("node:fs/promises").FileHandle | undefined;
   const done = async () => {
     await fh?.close().catch(() => undefined);
@@ -520,7 +592,7 @@ async function makeWork(tag: string): Promise<Work> {
       fh = await fs.open(dir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
       at = `/proc/self/fd/${fh.fd}`;
     }
-    return { dir, at, done };
+    return { dir, at, fallback, free, done };
   } catch (e) {
     await done();
     throw e;
@@ -670,20 +742,21 @@ async function sanitizeTree(base: string, limits: ArchiveLimits, filter: ((n: st
 }
 
 /** Extract an encrypted zip/7z with 7-Zip into `staging`; names and links are vetted from the listing first. */
-async function extractViaSz(plan: ExtractPlan, staging: string, limits: ArchiveLimits, ctl: JobCtl, signal: AbortSignal): Promise<ExtractResult> {
+async function extractViaSz(plan: ExtractPlan, staging: string, limits: ArchiveLimits, ctl: JobCtl, signal: AbortSignal, free?: number): Promise<ExtractResult> {
   const l = await listSz(plan.archiveReal, plan.password, signal);
   const sizes = new Map<string, number>();
   const skip: string[] = [];
   let bytes = 0;
   for (const e of l.entries) {
     const segs = safeSegments(e.name); // the whole archive is refused if any name is hostile
-    if (segs.includes(TRASH_DIR)) throw new ArchiveError(400, "unsafe archive entry: reserved name");
+    if (segs.some(isReservedName)) throw new ArchiveError(400, "unsafe archive entry: reserved name");
     if (e.type === "symlink" || e.type === "other") skip.push(e.name);
     if (e.type === "file") bytes += e.size;
     sizes.set(segs.join("/"), e.size);
     if (sizes.size > limits.maxEntries) throw new ArchiveError(413, "archive exceeds the configured limits");
     if (bytes > limits.maxBytes) throw new ArchiveError(413, "archive exceeds the configured limits");
   }
+  if (free !== undefined && bytes > free) throw new ArchiveError(507, `not enough room to stage this archive: it needs ${bytes} bytes free in the work folder and has ${free}; set FILEDECK_WORK_DIR to a larger volume`);
   ctl.progress.totalEntries = sizes.size;
   ctl.progress.totalBytes = bytes;
   const args = ["x", "-aoa", "-spd", "-bb1", "-bso1", "-bsp0", ...skip.map((n) => `-x!${n}`), "--", plan.archiveReal];
@@ -713,7 +786,7 @@ export async function runExtract(plan: ExtractPlan, limits: ArchiveLimits, ctl: 
 
 async function extractInto(dest: string, plan: ExtractPlan, limits: ArchiveLimits, ctl: JobCtl) {
   // Staging is in the private work folder, held by descriptor, so nobody who can write to the destination can reach it.
-  const work = await makeWork("x");
+  const work = await makeWork("x", plan.root, plan.destReal);
   const staging = work.at;
   const ac = new AbortController();
   const stop = () => ac.abort();
@@ -721,7 +794,7 @@ async function extractInto(dest: string, plan: ExtractPlan, limits: ArchiveLimit
   try {
     let result: ExtractResult;
     if (plan.viaSz) {
-      result = await extractViaSz(plan, staging, limits, ctl, ac.signal);
+      result = await extractViaSz(plan, staging, limits, ctl, ac.signal, work.free);
     } else {
       // Totals for the progress bar come from a parallel listing; extraction
       // itself never trusts them.
@@ -730,6 +803,10 @@ async function extractInto(dest: string, plan: ExtractPlan, limits: ArchiveLimit
         if (e.type === "file") ctl.progress.totalBytes += e.size;
         if (ctl.progress.totalBytes > limits.maxBytes || ctl.progress.totalEntries > limits.maxEntries) {
           ac.abort(new ArchiveError(413, "archive exceeds the configured limits"));
+          return false;
+        }
+        if (work.free !== undefined && ctl.progress.totalBytes > work.free) {
+          ac.abort(new ArchiveError(507, `not enough room to stage this archive: it needs ${ctl.progress.totalBytes} bytes free in the work folder and has ${work.free}; set FILEDECK_WORK_DIR to a larger volume`));
           return false;
         }
       }).catch(() => undefined);
@@ -903,9 +980,10 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
   const sizes = new Map<string, number>();
   for (const n of plan.names) await walkSizes(srcAt, n, sizes, limits, ctl.signal);
   ctl.progress.totalEntries = sizes.size;
-  ctl.progress.totalBytes = [...sizes.values()].reduce((a, b) => a + b, 0);
+  const totalBytes = [...sizes.values()].reduce((a, b) => a + b, 0);
+  ctl.progress.totalBytes = totalBytes;
   // Written into the private work folder and moved into place when complete.
-  const work = await makeWork("c");
+  const work = await makeWork("c", plan.root, plan.outReal, totalBytes);
   const tmp = path.join(work.dir, plan.outName);
   const note = (rel: string) => {
     ctl.progress.entries++;

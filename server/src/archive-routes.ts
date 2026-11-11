@@ -36,7 +36,7 @@ function dispo(name: string) {
 
 export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   const root = cfg.root;
-  void ar.sweepWorkArea(); // leftovers of a crashed run are removed from the private work folder, nowhere else
+  void ar.sweepWorkArea(root, cfg.procMounts); // leftovers of a crashed run are removed from the private work folder, nowhere else
   const limits: ar.ArchiveLimits = { maxEntries: cfg.archiveMaxEntries, maxBytes: cfg.archiveMaxBytes };
   const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
   const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);

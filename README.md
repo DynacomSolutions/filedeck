@@ -74,7 +74,7 @@ Agents run as root with the node's `/` mounted read-write, and there are no user
 
 ## Configuration (environment)
 
-Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDECK_MAX_EDIT`, `FILEDECK_READONLY` (comma separated virtual prefixes), `FILEDECK_AGENT_TOKEN`, `FILEDECK_TRANSCODE_CONCURRENCY`, `FILEDECK_THUMB_DIR`, archive, search and hash limits (see `server/src/config.ts`).
+Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDECK_MAX_EDIT`, `FILEDECK_READONLY` (comma separated virtual prefixes), `FILEDECK_AGENT_TOKEN`, `FILEDECK_TRANSCODE_CONCURRENCY`, `FILEDECK_THUMB_DIR`, `FILEDECK_WORK_DIR` (see "Archives and passwords"), archive, search and hash limits (see `server/src/config.ts`).
 
 Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_API_TOKEN` or `FILEDECK_API_TOKEN_FILE` (read-only `filedeck du` token, see below), `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
@@ -116,6 +116,8 @@ An agent keeps its stored folder sizes in a SQLite file. If only an index of tha
 ## Archives and passwords
 
 Compress offers zip, 7z, tar.gz, tar.zst and tar.xz with a compression level (store to ultra), exclude patterns (one glob per line), an archive name and a destination folder. Zip and 7z can also be password protected (zip uses AES-256; a 7z can additionally encrypt its file names) and split into volumes (`name.7z.001`, `.002`, ...; open the first part to browse or extract the set). Extract takes a destination, a subfolder switch, an overwrite policy (keep both, replace, skip) and, for password-protected archives, a password; the archive browser can extract just the ticked entries.
+
+Extraction and compression stage their data in a private `.filedeck-work` folder at the root of the destination's volume (like `.filedeck-trash`, it is Filedeck's own: hidden from listings and scans, and its name cannot be created, uploaded, renamed to or extracted). The result is then moved into the destination with a rename, so large jobs need no extra space and copy nothing. The folder is used only if it is a real directory owned by the agent with mode 0700 and every folder above it belongs to root or the agent and cannot be changed by others (a sticky folder such as `/tmp` is fine); this is what keeps users who can write to a served folder from redirecting 7-Zip or `bsdtar` while they work. When a volume cannot have such a folder (its root is writable by others, or it is read-only) the job stages in `FILEDECK_WORK_DIR` instead (default: a per-user folder under the temp directory) and the data is copied into place, so that folder needs room for the job: where the size is known the job fails at once, saying how much it needs, if the folder is too small. Point `FILEDECK_WORK_DIR` at a large volume if your volume roots cannot hold the work folder. At start-up the agent removes staging left by a crashed run, only inside these folders.
 
 Password-protected PDFs ask for the password in the preview. The password is checked on the server and the PDF viewer is given a copy decrypted by `qpdf` (the password is never sent to the page, which is why pdf.js's in-browser password callback is not used); an owner-password-only PDF just opens. Password-protected Word, Excel and PowerPoint files, and encrypted OpenDocument files, are recognised and reported as protected: the in-browser preview cannot decrypt Office encryption, so download them instead.
 

@@ -5,7 +5,7 @@ import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
+import { isReservedName, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
 import { hitsReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
@@ -255,7 +255,7 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
 
   async function visit(dir: string, names: string[]) {
     for (const n of names) {
-      if (n === TRASH_DIR) continue;
+      if (isReservedName(n)) continue;
       if (ctl?.signal.aborted) throw bad("canceled");
       if (seen >= cfg.walkMaxEntries) throw bad("too many entries for one recursive change");
       seen++;

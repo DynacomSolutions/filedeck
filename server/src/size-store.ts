@@ -6,7 +6,7 @@ import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { openDb } from "./index-cache.ts";
 import { FsError } from "./fsops.ts";
-import { TRASH_DIR, resolveRead, virtualJoin } from "./paths.ts";
+import { isReservedName, resolveRead, virtualJoin } from "./paths.ts";
 import type { JobCtl } from "./jobs.ts";
 import type { SizeResult } from "./props.ts";
 
@@ -1183,7 +1183,7 @@ export class SizeStore {
             // each entry is lstat-ed as soon as it is read, so the read that finds the end and the close overlap with the lstats
             const pend: Promise<{ n: string; r: string; s: Stats } | null>[] = [];
             const stat1 = async (n: string) => {
-              if (n === TRASH_DIR) return null;
+              if (isReservedName(n)) return null;
               const r = path.join(rpath, n);
               try {
                 return { n, r, s: await fs.lstat(r) };
@@ -2016,7 +2016,7 @@ export class SizeStore {
     try {
       for (let e = await dir.read().catch(() => null); e; e = await dir.read().catch(() => null)) {
         const n = e.name;
-        if (n === TRASH_DIR) continue;
+        if (isReservedName(n)) continue;
         let s;
         try {
           s = await fs.lstat(path.join(real, n));

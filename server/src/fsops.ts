@@ -8,6 +8,7 @@ import type { Readable } from "node:stream";
 import {
   PathError,
   TRASH_DIR,
+  isReservedName,
   assertNotTrash,
   openChecked,
   pinDir,
@@ -126,7 +127,7 @@ export async function list(root: string, p: string, hidden: boolean) {
   let truncated = false;
   const slice: string[] = [];
   for await (const n of direntsOf(r.real)) {
-    if (n.name === TRASH_DIR || (!hidden && n.name.startsWith("."))) continue;
+    if (isReservedName(n.name) || (!hidden && n.name.startsWith("."))) continue;
     if (slice.length >= MAX_LIST) {
       truncated = true;
       break;
@@ -215,7 +216,7 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
   };
   let chunk: Dirent[] = [];
   for await (const d of direntsOf(r.real)) {
-    if (d.name === TRASH_DIR || (!hidden && d.name.startsWith("."))) continue;
+    if (isReservedName(d.name) || (!hidden && d.name.startsWith("."))) continue;
     chunk.push(d);
     if (chunk.length >= 4096) {
       await flush(chunk);

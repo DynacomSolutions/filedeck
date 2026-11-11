@@ -121,10 +121,16 @@ export function virtualJoin(dir: string, name: string): string {
 }
 
 export const TRASH_DIR = ".filedeck-trash";
+/** Per-volume private staging for extraction and compression (see archive.ts); like the trash store it is Filedeck's own. */
+export const WORK_DIR = ".filedeck-work";
+/** Names that belong to Filedeck: hidden from listings and scans, never a target of a user's create, upload, rename or extract. */
+export const isReservedName = (n: string): boolean => n === TRASH_DIR || n === WORK_DIR;
 
-/** Mutations may never target the trash store directly (use the trash API). */
+/** Mutations may never target the trash store or the work folder directly (use the trash API). */
 export function assertNotTrash(virtual: string): void {
-  if (virtual.split("/").includes(TRASH_DIR)) throw new PathError(403, "trash is managed via the trash API");
+  const v = virtual.split("/");
+  if (v.includes(TRASH_DIR)) throw new PathError(403, "trash is managed via the trash API");
+  if (v.includes(WORK_DIR)) throw new PathError(403, "the work folder is managed by Filedeck");
 }
 
 const LINUX = process.platform === "linux";

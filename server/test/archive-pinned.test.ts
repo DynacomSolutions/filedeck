@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveBase, prepareCompress, prepareExtract, runCompress, runExtract, sweepWorkArea } from "../src/archive.ts";
+import { archiveBase, extractTar, prepareCompress, prepareExtract, runCompress, runExtract, sweepWorkArea } from "../src/archive.ts";
+import { assertNotTrash } from "../src/paths.ts";
+import * as ops from "../src/fsops.ts";
+import { Readable } from "node:stream";
 import type { JobCtl } from "../src/jobs.ts";
 
 /**
@@ -110,7 +113,7 @@ esac
   );
   process.env.FILEDECK_BSDTAR = tar;
   process.env.FILEDECK_7Z = sz;
-  return { dir, root, outside, go, dest: path.join(root, "out") };
+  return { dir, root, outside, go, dest: path.join(root, "out"), wd: path.join(root, ".filedeck-work") };
 }
 
 const mkCtl = () => {
@@ -121,19 +124,27 @@ const mkCtl = () => {
 const LIM = { maxEntries: 100, maxBytes: 1 << 20 };
 const tree = (d: string): string[] => fs.readdirSync(d, { recursive: true }).map(String).sort();
 /** the job's staging folder in the private work area that already holds `file` */
-const stagingWith = (file: string) => fs.readdirSync(work).find((n) => fs.existsSync(path.join(work, n, file)));
-const leftovers = () => fs.readdirSync(work).filter((n) => /^\d+-/.test(n));
+const stagingWith = (wd: string, file: string) => (fs.existsSync(wd) ? fs.readdirSync(wd) : []).find((n) => fs.existsSync(path.join(wd, n, file)));
+const leftovers = (wd: string) => (fs.existsSync(wd) ? fs.readdirSync(wd) : []).filter((n) => /^\d+-/.test(n));
 
-test("the start-up sweep removes dead runs' staging in the work folder and nothing else", async () => {
-  fs.mkdirSync(path.join(work, "99999999-x-stale"));
-  fs.writeFileSync(path.join(work, "99999999-x-stale", "f"), "x");
-  fs.mkdirSync(path.join(work, `${process.pid}-x-mine`));
-  fs.mkdirSync(path.join(work, "1-x-live"));
-  fs.mkdirSync(path.join(work, "unrelated"));
-  await sweepWorkArea();
-  assert.deepEqual(fs.readdirSync(work).sort(), ["1-x-live", "unrelated"]);
-  fs.rmdirSync(path.join(work, "1-x-live"));
-  fs.rmdirSync(path.join(work, "unrelated"));
+test("the start-up sweep removes dead runs' staging in the work folders and nothing else", async () => {
+  const s = scene("sweep");
+  fs.mkdirSync(s.wd, { mode: 0o700 });
+  for (const w of [work, s.wd]) {
+    fs.mkdirSync(path.join(w, "99999999-x-stale"));
+    fs.writeFileSync(path.join(w, "99999999-x-stale", "f"), "x");
+    fs.mkdirSync(path.join(w, `${process.pid}-x-mine`));
+    fs.mkdirSync(path.join(w, "1-x-live"));
+    fs.mkdirSync(path.join(w, "unrelated"));
+  }
+  fs.mkdirSync(path.join(s.root, "99999999-not-in-a-work-folder"));
+  await sweepWorkArea(s.root, path.join(s.dir, "no-such-mounts"));
+  for (const w of [work, s.wd]) {
+    assert.deepEqual(fs.readdirSync(w).sort(), ["1-x-live", "unrelated"]);
+    fs.rmdirSync(path.join(w, "1-x-live"));
+    fs.rmdirSync(path.join(w, "unrelated"));
+  }
+  assert.ok(fs.existsSync(path.join(s.root, "99999999-not-in-a-work-folder")));
 });
 
 for (const policy of ["rename", "overwrite", "skip"] as const) {
@@ -145,12 +156,12 @@ for (const policy of ["rename", "overwrite", "skip"] as const) {
       const plan = await prepareExtract(s.root, "/a.tar", "/out", true, { overwrite: policy });
       const { ctl } = mkCtl();
       const job = runExtract(plan, LIM, ctl);
-      const staging = await until(() => stagingWith("first.txt"), "the first file");
+      const staging = await until(() => stagingWith(s.wd, "first.txt"), "the first file");
       assert.deepEqual(fs.readdirSync(s.dest).filter((n) => n.startsWith(".filedeck-")), [], "no staging in the served folder");
       let moved = s.dest;
       if (swap === "staging") {
-        fs.renameSync(path.join(work, staging), path.join(work, staging + "-moved"));
-        fs.symlinkSync(s.outside, path.join(work, staging));
+        fs.renameSync(path.join(s.wd, staging), path.join(s.wd, staging + "-moved"));
+        fs.symlinkSync(s.outside, path.join(s.wd, staging));
       } else {
         moved = path.join(s.root, "out-moved");
         fs.renameSync(s.dest, moved);
@@ -164,8 +175,8 @@ for (const policy of ["rename", "overwrite", "skip"] as const) {
       assert.equal(fs.readFileSync(path.join(moved, folder, "sub/third.txt"), "utf8"), "three");
       assert.equal(fs.readFileSync(path.join(moved, "a/first.txt"), "utf8"), policy === "overwrite" ? "one" : policy === "skip" ? "old" : "old");
       if (swap === "staging") {
-        fs.rmSync(path.join(work, staging), { force: true });
-        fs.rmSync(path.join(work, staging + "-moved"), { recursive: true, force: true });
+        fs.rmSync(path.join(s.wd, staging), { force: true });
+        fs.rmSync(path.join(s.wd, staging + "-moved"), { recursive: true, force: true });
       }
     });
   }
@@ -177,7 +188,7 @@ test("a 7-Zip extraction runs in the private work folder; swapping the destinati
   assert.equal(plan.viaSz, true);
   const { ctl } = mkCtl();
   const job = runExtract(plan, LIM, ctl);
-  await until(() => stagingWith("first.txt"), "7-Zip's first file in the work folder");
+  await until(() => stagingWith(s.wd, "first.txt"), "7-Zip's first file in the work folder");
   assert.deepEqual(fs.readdirSync(s.dest), [], "7-Zip must not work inside the served folder");
   const moved = path.join(s.root, "out-moved");
   fs.renameSync(s.dest, moved);
@@ -193,7 +204,7 @@ test("keep-both never replaces an entry that is already there", async () => {
   const plan = await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" });
   const { ctl } = mkCtl();
   const job = runExtract(plan, LIM, ctl);
-  await until(() => stagingWith("first.txt"), "the first file");
+  await until(() => stagingWith(s.wd, "first.txt"), "the first file");
   fs.writeFileSync(path.join(s.dest, "second.txt"), "mine");
   fs.writeFileSync(s.go, "");
   await job;
@@ -206,10 +217,10 @@ test("cancelling an extraction leaves no staging behind and nothing in the desti
   const plan = await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "overwrite" });
   const { ctl, ac } = mkCtl();
   const job = runExtract(plan, LIM, ctl);
-  await until(() => stagingWith("first.txt"), "the first file");
+  await until(() => stagingWith(s.wd, "first.txt"), "the first file");
   ac.abort();
   await assert.rejects(job);
-  assert.deepEqual(leftovers(), []);
+  assert.deepEqual(leftovers(s.wd), []);
   assert.deepEqual(fs.readdirSync(s.dest), []);
   assert.deepEqual(fs.readdirSync(s.outside), []);
 });
@@ -221,7 +232,7 @@ test("compress: swapping the output folder for an outside link mid-job writes no
   const plan = await prepareCompress(s.root, "/src", ["f.txt"], "tar.gz", "result", { destDir: "/out" });
   const { ctl } = mkCtl();
   const job = runCompress(plan, LIM, ctl);
-  await until(() => fs.readdirSync(work).some((n) => /^\d+-c-/.test(n)), "the work folder");
+  await until(() => fs.existsSync(s.wd) && fs.readdirSync(s.wd).some((n) => /^\d+-c-/.test(n)), "the work folder");
   assert.deepEqual(fs.readdirSync(s.dest), [], "the archive is not written inside the served folder");
   const moved = path.join(s.root, "out-moved");
   fs.renameSync(s.dest, moved);
@@ -231,7 +242,7 @@ test("compress: swapping the output folder for an outside link mid-job writes no
   assert.deepEqual(fs.readdirSync(s.outside), []);
   assert.equal(r.path, "/out/result.tar.gz");
   assert.equal(fs.readFileSync(path.join(moved, "result.tar.gz"), "utf8"), "ARCHIVE");
-  assert.deepEqual(leftovers(), []);
+  assert.deepEqual(leftovers(s.wd), []);
 });
 
 test("archive names that would give the destination itself or the trash name fall back to a plain folder name", () => {
@@ -239,4 +250,70 @@ test("archive names that would give the destination itself or the trash name fal
   assert.equal(archiveBase("...zip"), "extracted");
   assert.equal(archiveBase(".filedeck-trash.zip"), "extracted");
   assert.equal(archiveBase("photos.tar.gz"), "photos");
+});
+
+test("jobs stage on the destination's volume and finish with renames: no copy, the inode is kept", async () => {
+  const s = scene("volume");
+  const plan = await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" });
+  const { ctl } = mkCtl();
+  const job = runExtract(plan, LIM, ctl);
+  const staging = await until(() => fs.existsSync(s.wd) && stagingWith(s.wd, "first.txt"), "the first file");
+  assert.equal(fs.readdirSync(work).filter((n) => /^\d+-/.test(n)).length, 0, "the temp work folder is not used");
+  assert.equal(fs.statSync(s.wd).mode & 0o777, 0o700);
+  const ino = fs.statSync(path.join(s.wd, staging, "first.txt")).ino;
+  fs.writeFileSync(s.go, "");
+  await job;
+  assert.equal(fs.statSync(path.join(s.dest, "first.txt")).ino, ino, "the file was moved, not copied");
+  assert.deepEqual(leftovers(s.wd), []);
+});
+
+test("the temp work folder is the fallback when the volume root cannot hold a private folder", async () => {
+  const s = scene("fallback");
+  fs.chmodSync(s.root, 0o777); // others could rename entries in the volume root
+  const plan = await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" });
+  const { ctl } = mkCtl();
+  const job = runExtract(plan, LIM, ctl);
+  await until(() => stagingWith(work, "first.txt"), "the first file in the temp work folder");
+  assert.equal(fs.existsSync(s.wd), false, "no work folder was left on the volume");
+  fs.writeFileSync(s.go, "");
+  await job;
+  assert.deepEqual(tree(s.dest), ["first.txt", "second.txt", "sub", "sub/third.txt"]);
+  assert.deepEqual(fs.readdirSync(work).filter((n) => /^\d+-/.test(n)), []);
+  fs.chmodSync(s.root, 0o755);
+});
+
+test("on the fallback, a job that cannot fit fails at once and says what it needs", async () => {
+  const s = scene("nofit");
+  fs.chmodSync(s.root, 0o777);
+  fs.mkdirSync(path.join(s.root, "src"));
+  const big = path.join(s.root, "src/huge.bin");
+  try {
+    fs.closeSync(fs.openSync(big, "w"));
+    fs.truncateSync(big, 2 ** 42);
+  } catch {
+    fs.chmodSync(s.root, 0o755);
+    return; // this filesystem cannot make a sparse file that large
+  }
+  const plan = await prepareCompress(s.root, "/src", ["huge.bin"], "tar.gz", "huge", { destDir: "/out" });
+  const { ctl } = mkCtl();
+  await assert.rejects(runCompress(plan, { maxEntries: 10, maxBytes: 2 ** 50 }, ctl), (e: { status?: number; message?: string }) => e.status === 507 && /needs \d+ bytes free/.test(e.message ?? ""));
+  assert.deepEqual(fs.readdirSync(work).filter((n) => /^\d+-/.test(n)), []);
+  fs.chmodSync(s.root, 0o755);
+});
+
+test("the work folder name is Filedeck's own: refused as a target, hidden from listings, never extracted", async () => {
+  const s = scene("reserved");
+  fs.mkdirSync(s.wd, { mode: 0o700 });
+  fs.writeFileSync(path.join(s.root, "visible.txt"), "v");
+  assert.throws(() => assertNotTrash("/out/.filedeck-work"), (e: { status?: number }) => e.status === 403);
+  assert.throws(() => assertNotTrash("/.filedeck-work/x.txt"), (e: { status?: number }) => e.status === 403);
+  for (const hidden of [true, false]) {
+    const l = (await ops.list(s.root, "/", hidden)) as unknown as { entries: { name: string }[] };
+    assert.ok(l.entries.some((e) => e.name === "visible.txt"));
+    assert.ok(!l.entries.some((e) => e.name === ".filedeck-work"), `listed with hidden=${hidden}`);
+  }
+  await assert.rejects(
+    extractTar(Readable.from([Buffer.concat([entry(".filedeck-work/x", "x"), Buffer.alloc(1024)])]), fs.mkdtempSync(path.join(s.dir, "st-")), LIM, mkCtl().ctl),
+    /reserved name/,
+  );
 });

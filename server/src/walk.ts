@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
-import { TRASH_DIR, resolveRead } from "./paths.ts";
+import { isReservedName, resolveRead } from "./paths.ts";
 import { compileGlobs } from "./glob.ts";
 import { namesOf } from "./dirnames.ts";
 
@@ -66,7 +66,7 @@ export async function* walkTree(
     const out: WalkEntry[] = [];
     const subdirs: typeof stack = [];
     // unreadable folder: counted, what was found so far is kept
-    for await (const batch of namesOf(dir.real, SORT_BATCH, (n) => n !== TRASH_DIR && (o.hidden || !n.startsWith(".")), () => summary.errors++)) {
+    for await (const batch of namesOf(dir.real, SORT_BATCH, (n) => !isReservedName(n) && (o.hidden || !n.startsWith(".")), () => summary.errors++)) {
       batch.sort();
       await scan(dir, batch, out, subdirs);
       if (summary.truncated) break; // the generator's finally closes the Dir
