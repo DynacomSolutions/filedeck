@@ -50,6 +50,8 @@ interface Internal extends UpBatch {
   workers: number;
   /** chunked files with a part file on the server, dropped on cancel */
   parts: Map<UpFile, { dir: string; name: string; id: string }>;
+  /** files that were still waiting when the batch was cancelled: a later "retry failed" leaves them alone */
+  held: Set<UpFile>;
 }
 
 const enc = encodeURIComponent;
@@ -60,7 +62,24 @@ let seq = 0;
 const publish = () => {
   snapshot = [...batches];
   subs.forEach((f) => f());
+  syncLeaveGuard();
 };
+/** Whether leaving the page would cut an upload short. */
+export const uploadsActive = () => batches.some((b) => b.state === "running");
+let guarded = false;
+const leaveGuard = (e: BeforeUnloadEvent) => {
+  if (!uploadsActive()) return;
+  e.preventDefault();
+  e.returnValue = "";
+};
+function syncLeaveGuard() {
+  if (typeof window === "undefined") return;
+  const want = uploadsActive();
+  if (want === guarded) return;
+  guarded = want;
+  if (want) window.addEventListener("beforeunload", leaveGuard);
+  else window.removeEventListener("beforeunload", leaveGuard);
+}
 export const useUploads = () => useSyncExternalStore((f) => (subs.add(f), () => void subs.delete(f)), () => snapshot);
 
 const dirname = (rel: string) => (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
@@ -81,6 +100,9 @@ export async function fileId(node: string, dir: string, name: string, f: File): 
   }
   return (a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0")).repeat(2);
 }
+
+/** The request that failed carried the last chunk, and the server now has no part file but the finished file. */
+export const lostFinal = (end: number, size: number, s: { offset?: number; exists?: boolean }) => end >= size && s.exists === true && s.offset === 0;
 
 interface Res {
   status: number;
@@ -202,7 +224,13 @@ async function putChunked(b: Internal, f: UpFile, dir: string, name: string, sig
       if (++fails > RETRIES) throw e;
       await sleep(Math.min(8000, 500 * 2 ** fails), signal);
       // resync with the server before the next try
-      const s = await fetch(`${base}/status?dir=${enc(dir)}&name=${enc(cur)}&id=${id}`, { signal }).then((x) => x.json() as Promise<{ offset?: number }>).catch(() => ({}) as { offset?: number });
+      const s = await fetch(`${base}/status?dir=${enc(dir)}&name=${enc(cur)}&id=${id}`, { signal }).then((x) => x.json() as Promise<{ offset?: number; exists?: boolean }>).catch(() => ({}) as { offset?: number; exists?: boolean });
+      if (lostFinal(end, size, s)) {
+        // the last chunk arrived and the file was put in place, only the reply was lost
+        f.sent = size;
+        b.parts.delete(f);
+        return cur;
+      }
       if (typeof s.offset === "number") offset = s.offset;
       f.sent = offset;
     }
@@ -238,7 +266,7 @@ async function work(b: Internal, gen: number) {
   try {
     for (;;) {
       if (b.gen !== gen || b.state !== "running") return;
-      const f = b.files.find((x) => x.state === "pending");
+      const f = b.files.find((x) => x.state === "pending" && !b.held.has(x));
       if (!f) return;
       f.state = "running";
       const ctrl = new AbortController();
@@ -269,7 +297,7 @@ async function work(b: Internal, gen: number) {
 
 function settle(b: Internal) {
   if (b.state !== "running") return publish();
-  if (b.files.some((f) => f.state === "pending" || f.state === "running")) return;
+  if (b.files.some((f) => (f.state === "pending" && !b.held.has(f)) || f.state === "running")) return;
   const c = counts(b);
   b.state = c.failed > 0 && c.failed === c.total ? "failed" : "done";
   b.finishedAt = Date.now();
@@ -321,6 +349,7 @@ export function enqueueUpload(node: string, dir: string, picked: Picked[], empty
     gen: 0,
     workers: 0,
     parts: new Map(),
+    held: new Set(),
   };
   batches = [b, ...batches];
   publish();
@@ -340,7 +369,10 @@ export function pauseUpload(id: string) {
 }
 export function resumeUpload(id: string) {
   const b = batches.find((x) => x.id === id);
-  if (b && b.state === "paused") void start(b);
+  if (b && b.state === "paused") {
+    void start(b);
+    ensureTicker();
+  }
 }
 export function cancelUpload(id: string) {
   const b = batches.find((x) => x.id === id);
@@ -350,11 +382,31 @@ export function cancelUpload(id: string) {
   b.finishedAt = Date.now();
   b.gen++;
   for (const c of b.ctrls) c.abort();
-  for (const f of b.files) if (f.state === "pending" || f.state === "running") f.state = "pending";
+  for (const f of b.files)
+    if (f.state === "pending" || f.state === "running") {
+      f.state = "pending";
+      b.held.add(f);
+    }
   // drop the server-side part files of big files that were cut short
-  for (const [, p] of b.parts) void fetch(`${nodeBase(b.node)}/api/upload?dir=${enc(p.dir)}&name=${enc(p.name)}&id=${p.id}`, { method: "DELETE" }).catch(() => undefined);
+  const parts = [...b.parts.values()];
   b.parts.clear();
+  for (const p of parts) void dropPart(b.node, p);
   publish();
+}
+/**
+ * Delete a part file on the server. The request that was cut short may still be winding down there
+ * (the server answers 409 while a chunk is in progress), so a refusal is tried again a few times.
+ */
+export async function dropPart(node: string, p: { dir: string; name: string; id: string }, delayMs = 400) {
+  for (let i = 0; i < 8; i++) {
+    try {
+      const r = await fetch(`${nodeBase(node)}/api/upload?dir=${enc(p.dir)}&name=${enc(p.name)}&id=${p.id}`, { method: "DELETE" });
+      if (r.status !== 409) return;
+    } catch {
+      return;
+    }
+    await new Promise((res) => setTimeout(res, delayMs));
+  }
 }
 export function retryFailed(id: string) {
   const b = batches.find((x) => x.id === id);

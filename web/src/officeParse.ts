@@ -102,6 +102,18 @@ function colIndex(ref: string): number {
   return n - 1;
 }
 
+/** A repeat count from a document attribute: a missing, negative or non-numeric value counts as 1, and nothing exceeds `max`. */
+export function repeatCount(v: string | null | undefined, max: number): number {
+  const n = Math.floor(Number(v ?? 1));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : n === Infinity ? max : 1;
+}
+
+/** Zero-based row of a sheet row from its `r` attribute, or `next` when the attribute is missing or not a number. */
+export function rowIndex(v: string | null | undefined, next: number): number {
+  const n = Number(v);
+  return v !== null && v !== undefined && Number.isFinite(n) && n >= 1 ? Math.floor(n) - 1 : next;
+}
+
 export function parseXlsx(buf: ArrayBuffer): OfficeDoc {
   const files = readZip(buf);
   const wb = entry(files, "xl/workbook.xml");
@@ -124,11 +136,18 @@ export function parseXlsx(buf: ArrayBuffer): OfficeDoc {
           truncated = true;
           break;
         }
-        const r = Number(attr(row, "r") ?? rows.length + 1) - 1;
+        const r = rowIndex(attr(row, "r"), rows.length);
+        if (r >= MAX_ROWS) {
+          // a row number far past the limit would make the sheet array enormous
+          truncated = true;
+          break;
+        }
         while (rows.length < r && rows.length < MAX_ROWS) rows.push([]);
         const cells: string[] = [];
         for (const c of kids(row).filter((x) => x.localName === "c")) {
-          const ci = colIndex(attr(c, "r") ?? "");
+          const ref = attr(c, "r");
+          const named = ref ? colIndex(ref) : -1;
+          const ci = named < 0 ? cells.length : named;
           if (ci >= MAX_COLS) {
             truncated = true;
             continue;
@@ -167,7 +186,7 @@ function odfText(e: Element): string {
     if (n.nodeType === 3) s += n.textContent ?? "";
     else if (n.nodeType === 1) {
       const el = n as Element;
-      if (el.localName === "s") s += " ".repeat(Number(attr(el, "c") ?? 1));
+      if (el.localName === "s") s += " ".repeat(repeatCount(attr(el, "c"), 200));
       else if (el.localName === "tab") s += "\t";
       else if (el.localName === "line-break") s += "\n";
       else s += odfText(el);
@@ -188,10 +207,10 @@ export function parseOdf(buf: ArrayBuffer, ext: string): OfficeDoc {
         const rows: string[][] = [];
         let truncated = false;
         for (const row of kids(t).filter((r) => r.localName === "table-row")) {
-          const repeat = Math.min(Number(attr(row, "number-rows-repeated") ?? 1), 5);
+          const repeat = repeatCount(attr(row, "number-rows-repeated"), 5);
           const cells: string[] = [];
           for (const c of kids(row).filter((x) => x.localName === "table-cell" || x.localName === "covered-table-cell")) {
-            const rep = Math.min(Number(attr(c, "number-columns-repeated") ?? 1), 10);
+            const rep = repeatCount(attr(c, "number-columns-repeated"), 10);
             const v = odfText(c).trim();
             for (let k = 0; k < rep && cells.length < MAX_COLS; k++) cells.push(v);
           }
