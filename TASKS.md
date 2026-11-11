@@ -205,7 +205,7 @@ ETA: 2026-11-12 15:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 122 | File list renders only the visible rows | todo | | rv-list-window | 17.124 | | Found in review: 30,000 files froze scrolling |
-| 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | in_review | claude-20261112-rv-shell | rv-narrow-layout | 15.120 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/198 |
+| 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | done | claude-20261112-rv-shell | rv-narrow-layout | 15.120 | | Merged https://github.com/DynacomSolutions/filedeck/pull/198, CI green<br>Full rows: 844x390 6, 320x256 3<br>Pinch zoom covered by a unit test only |
 
 ## 17. Keyboard and screen reader access
 Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and AA.
