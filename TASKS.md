@@ -176,7 +176,7 @@ ETA: 2026-11-12 16:00 ICT
 | 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | in_review | claude-20261112-rv-fsops | rv-pinned-walks | 14.113, 14.116 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/199 |
 | 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | done | claude-20261112-rv-sources | rv-smb-source | | | Merged https://github.com/DynacomSolutions/filedeck/pull/182, CI green, independent review clean on second pass<br>Not tried against a real SMB server |
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
-| 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | in_progress | claude-20261112-rv-sources | rv-smb-followup | 13.110 | 2026-11-12 09:00 ICT | From the second review of 13.110 |
+| 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | in_review | claude-20261112-rv-sources | rv-smb-followup | 13.110 | 2026-11-12 09:00 ICT | From the second review of 13.110<br>https://github.com/DynacomSolutions/filedeck/pull/204 |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
@@ -213,7 +213,7 @@ Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and A
 ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | todo | | rv-list-access | 15.118 | | Found in review |
+| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | in_review | claude-20261112-rv-panel | rv-list-access | 15.118 | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/203 |
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | done | claude-20261112-rv-menus | rv-menus-dialogs | | | Merged https://github.com/DynacomSolutions/filedeck/pull/200, CI green<br>Checked at 1366x768 and 390 px |
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
 | 127 | Component roles, names and announcements | in_review | claude-20261112-rv-components | rv-aria-announce | 15.121 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/202 |
