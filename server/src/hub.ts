@@ -16,6 +16,7 @@ import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
 import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
+import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
@@ -38,6 +39,18 @@ function clean(h: Headers, keepLength: boolean): Headers {
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault };
+  // Optional allowlist of Host values (DNS-rebinding guard); /healthz stays open for probes that use the pod address.
+  if (cfg.allowedHosts.length) {
+    const allowed = new Set(cfg.allowedHosts);
+    app.use("*", async (c, next) => {
+      if (c.req.path === "/healthz") return next();
+      const host = (c.req.header("host") ?? "").toLowerCase();
+      if (allowed.has(host) || allowed.has(host.replace(/:\d+$/, ""))) return next();
+      return c.json({ error: "unknown host" }, 421);
+    });
+  }
+  app.use("*", webHeaders());
+  app.use("*", textCompression());
   app.use("*", audit("hub", auditSink));
   app.use("*", apiTokenAuth(cfg.apiToken));
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
@@ -238,7 +251,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const target = agents.get(c.req.param("node"));
     if (!target) return c.json({ error: "unknown node" }, 404);
     const url = new URL(c.req.url);
-    const rest = url.pathname.slice(`/api/nodes/${c.req.param("node")}`.length);
+    // the node segment is matched as sent: its decoded form can have another length
+    const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
     const hasBody = !["GET", "HEAD"].includes(c.req.method);
     const init: RequestInit & { duplex?: string } = {
       method: c.req.method,
@@ -270,14 +284,26 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const index = path.join(cfg.staticDir, "index.html");
   const page = async (c: import("hono").Context) => {
     try {
-      return c.html(renderIndex(await readFile(index, "utf8"), cfg.brand), 200, { "Cache-Control": "no-cache" });
+      const html = renderIndex(await readFile(index, "utf8"), cfg.brand);
+      return c.html(html, 200, { "Cache-Control": "no-cache", "Content-Security-Policy": shellCsp(html, cfg.brand), "X-Frame-Options": "DENY" });
     } catch {
       return c.text("web UI not built", 503);
     }
   };
   app.get("/", page);
   app.get("/index.html", page);
-  app.use("/*", serveStatic({ root: path.relative(process.cwd(), cfg.staticDir) || "." }));
+  app.use(
+    "/*",
+    serveStatic({
+      root: path.relative(process.cwd(), cfg.staticDir) || ".",
+      onFound: (_p, c) => {
+        const cc = staticCacheControl(c.req.path);
+        if (cc) c.header("Cache-Control", cc);
+      },
+    }),
+  );
+  // a missing build file is a 404, never the app shell (an old tab asking for a chunk of a previous build must see the failure)
+  app.all("/assets/*", (c) => c.text("not found", 404));
   app.get("*", page);
   return app;
 }

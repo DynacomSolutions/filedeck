@@ -75,7 +75,7 @@ Agents run as root with the node's `/` mounted read-write, and there are no user
 
 Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDECK_MAX_EDIT`, `FILEDECK_READONLY` (comma separated virtual prefixes), `FILEDECK_AGENT_TOKEN`, `FILEDECK_TRANSCODE_CONCURRENCY`, `FILEDECK_THUMB_DIR`, archive, search and hash limits (see `server/src/config.ts`).
 
-Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_API_TOKEN` or `FILEDECK_API_TOKEN_FILE` (read-only `filedeck du` token, see below), `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
+Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_ALLOWED_HOSTS` (comma separated `host` or `host:port` values the hub answers to; any other `Host` gets 421; unset accepts any), `FILEDECK_API_TOKEN` or `FILEDECK_API_TOKEN_FILE` (read-only `filedeck du` token, see below), `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
 `FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help).
 

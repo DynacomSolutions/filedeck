@@ -75,6 +75,9 @@ hub:
   cacheVolume: 8Gi
   # V8 heap ceiling; the default follows the memory limit (524 MB under 1Gi).
   nodeOptions: "--max-old-space-size=1280"
+  # Host names (host or host:port) the hub answers to; any other Host header gets 421. Empty (the default) accepts any.
+  # Set it to the names of the ingress rule to close DNS rebinding.
+  allowedHosts: []
 
 agent:
   resources:

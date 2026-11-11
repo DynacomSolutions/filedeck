@@ -1,9 +1,10 @@
 import type { MiddlewareHandler } from "hono";
+import { getConnInfo } from "@hono/node-server/conninfo";
 
 /**
  * Write audit log: one JSON line on stdout per state-changing request
  * (`"audit":true`), written after the response so the status is known.
- * It records who asked (client address as forwarded by the ingress), what
+ * It records who asked (`ip`: the last X-Forwarded-For entry, else the socket peer; `forwardedFor` keeps the whole chain, which the caller can write), what
  * (method, route, the paths named in the query or a small JSON body) and the
  * outcome. File contents, upload bodies and credentials are never read.
  */
@@ -49,13 +50,23 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
       const v = c.req.query(k);
       if (v !== undefined) q[k] = clip(v);
     }
-    const fwd = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+    // The first X-Forwarded-For entry is whatever the caller wrote; the last one is what the nearest proxy saw.
+    const chain = c.req.header("x-forwarded-for");
+    const fwd = chain?.split(",").pop()?.trim();
+    let peer: string | undefined;
+    try {
+      peer = getConnInfo(c).remote.address;
+    } catch {
+      peer = undefined; // not served over a socket (tests)
+    }
     sink(
       JSON.stringify({
         audit: true,
         ts: new Date(t0).toISOString(),
         who,
-        ip: fwd || undefined,
+        ip: fwd || peer,
+        ...(chain && chain.includes(",") ? { forwardedFor: clip(chain) } : {}),
+        ...(peer && fwd && fwd !== peer ? { peer } : {}),
         method: m,
         route: clip(p),
         query: Object.keys(q).length ? q : undefined,
