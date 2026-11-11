@@ -32,6 +32,7 @@ function locate(root: string, dir: string, name: string, id: string): Loc {
   const d = resolveRead(root, dir);
   assertNotTrash(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name)); // validates the name too
+  assertNotTrash(target.virtual); // a file may not take the name of the trash store
   const part = path.join(d.real, `.${name}.filedeck-up-${id}.part`);
   return { dirReal: d.real, target: target.real, part };
 }
