@@ -3,8 +3,8 @@ import path from "node:path";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
-import { TRASH_DIR, assertNotTrash, pinDir, resolveWrite, virtualJoin } from "./paths.ts";
-import { pinDirCreate } from "./pinwalk.ts";
+import { TRASH_DIR, assertNotTrash, resolveWrite, virtualJoin } from "./paths.ts";
+import { pinDirCreate, pinDirW, rmTree, walkGuard } from "./pinwalk.ts";
 
 export interface TrashItem extends ops.TrashMeta {
   /** meta.json missing or unreadable: the item can still be deleted but not restored */
@@ -107,6 +107,9 @@ export interface TrashResult {
   conflict?: boolean;
 }
 
+/** Remove one item folder of the trash store, entering it through descriptors (nothing inside is followed). */
+const removeItem = (root: string, dir: string, id: string) => pinDirW(root, dir, (at) => rmTree(path.join(at, id), { force: true, guard: walkGuard(root) }));
+
 export async function restoreItems(root: string, volume: string, ids: unknown, opts: RestoreOpts = {}): Promise<TrashResult[]> {
   const dir = await trashDir(root, volume);
   const policy = opts.conflict ?? "fail";
@@ -131,8 +134,8 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
           if (policy === "rename") final = await ops.uniqueName(dstAt, base);
           else await ops.trash(root, dest.virtual); // the replaced item stays recoverable
         }
-        await pinDir(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false));
-        await fs.rm(path.join(dir, id), { recursive: true, force: true });
+        await pinDirW(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false));
+        await removeItem(root, dir, id);
         return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final) };
       });
       out.push(res);
@@ -148,7 +151,7 @@ export async function deleteItems(root: string, volume: string, ids: unknown): P
   const out: TrashResult[] = [];
   for (const id of checkIds(ids)) {
     try {
-      await fs.rm(path.join(dir, id), { recursive: true, force: true });
+      await removeItem(root, dir, id);
       out.push({ id, ok: true });
     } catch (e) {
       out.push({ id, ok: false, error: ops.mapError(e).message });
@@ -170,7 +173,7 @@ export async function emptyTrash(root: string, volume: string, olderThanDays?: n
     for (const [k, id] of names.entries()) {
       if (ages && (ages[k] as TrashItem).deletedAt > cutoff) continue;
       try {
-        await fs.rm(path.join(dir, id), { recursive: true, force: true });
+        await removeItem(root, dir, id);
         removed++;
       } catch {
         failed++;

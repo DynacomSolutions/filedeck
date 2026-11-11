@@ -1,4 +1,4 @@
-import { test, mock, before, after } from "node:test";
+import { test, mock, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -13,6 +13,7 @@ before(() => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-mcn-")));
 });
 after(() => fs.rmSync(root, { recursive: true, force: true }));
+afterEach(() => mock.restoreAll());
 const at = (...p: string[]) => path.join(root, ...p);
 const OLD = new Date("2001-02-03T04:05:06Z");
 
@@ -35,10 +36,13 @@ test("a cross-device move keeps the times of files and folders and asks for the 
   for (const p of ["m1/tree/sub/b.txt", "m1/tree/sub", "m1/tree"]) fs.utimesSync(at(p), OLD, OLD);
   const src = fs.lstatSync(at("m1/tree/sub/b.txt"));
   const owners: string[] = [];
-  const realChown = fsp.lchown.bind(fsp);
-  const c = mock.method(fsp, "lchown", async (p: string, u: number, g: number) => {
-    owners.push(`${path.basename(p)}:${u}:${g}`);
-    return realChown(p, u, g);
+  const probe = await fsp.open(at("m1/tree/sub/b.txt"));
+  const proto = Object.getPrototypeOf(probe) as { chown: (u: number, g: number) => Promise<void> };
+  await probe.close();
+  const realChown = proto.chown;
+  const c = mock.method(proto, "chown", async function (this: { stat(): Promise<{ isFile(): boolean }> }, u: number, g: number) {
+    owners.push(`${(await this.stat()).isFile() ? "file" : "dir"}:${u}:${g}`);
+    return realChown.call(this, u, g);
   });
   const m = forceExdevOnce();
   try {
@@ -48,7 +52,7 @@ test("a cross-device move keeps the times of files and folders and asks for the 
     c.mock.restore();
   }
   for (const p of ["m1/dst/tree/sub/b.txt", "m1/dst/tree/sub", "m1/dst/tree"]) assert.equal(fs.lstatSync(at(p)).mtimeMs, OLD.getTime(), p);
-  assert.ok(owners.includes(`b.txt:${src.uid}:${src.gid}`) && owners.some((o) => o.startsWith("sub:")) && owners.some((o) => o.startsWith(".tree.filedeck-part-")), owners.join(","));
+  assert.ok(owners.includes(`file:${src.uid}:${src.gid}`) && owners.filter((o) => o.startsWith("dir:")).length === 2, owners.join(","));
   assert.equal(fs.existsSync(at("m1/tree")), false);
 });
 

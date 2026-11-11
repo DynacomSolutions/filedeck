@@ -1,33 +1,47 @@
-import { constants as C } from "node:fs";
+import { constants as C, type Dirent } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { namesOf } from "./dirnames.ts";
-import { PathError, openChecked } from "./paths.ts";
+import { randomUUID } from "node:crypto";
+import { direntsOf } from "./dirnames.ts";
+import { PathError, openChecked, pinDir } from "./paths.ts";
+import { hitsReadOnly } from "./readonly.ts";
 
 /**
  * Walks that hold a descriptor for every folder they enter. The path handed to the next step names the folder through
  * that descriptor, so a folder swapped for a link (or for another folder) after it was listed is never entered: each
- * child is opened with O_NOFOLLOW and must be the very entry that was listed (same device and inode).
- * The callers pin the starting folder with `pinDir` / `pinParent` from paths.ts.
+ * child is opened with O_NOFOLLOW and must be of the kind that was listed.
+ * The callers pin the starting folder with `pinDir` / `pinParent` from paths.ts (or the checked variants below).
  */
 
 const LINUX = process.platform === "linux";
 
-/** Deepest folder nesting a pinned walk follows (one descriptor per level). */
-export const MAX_DEPTH = 512;
+/**
+ * Deepest folder nesting a pinned walk follows. Each level holds one descriptor (at most 4096 at a time); a path of that
+ * depth is already longer than the 4096 bytes most tools accept, so real trees stay far below it. Running out of
+ * descriptors earlier is reported as "nested too deeply", never as an internal error.
+ */
+export const MAX_DEPTH = 4096;
 
-const changed = () => new PathError(400, "a folder changed while it was being processed");
-const tooDeep = () => new PathError(400, "folder nesting too deep");
+const tooDeep = () => new PathError(400, "folders nested too deeply to process");
 
 /** The path that names the open folder `fh` (`real` where descriptors cannot be named). */
 export const dirAt = (fh: FileHandle, real: string): string => (LINUX ? `/proc/self/fd/${fh.fd}` : real);
 
+async function openDir(p: string): Promise<FileHandle> {
+  try {
+    return await fs.open(p, C.O_RDONLY | C.O_NOFOLLOW | C.O_DIRECTORY);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EMFILE") throw tooDeep();
+    throw e;
+  }
+}
+
 /** Open the folder at `p` without following a link, and prove it is the entry that was listed. */
 export async function openListedDir(p: string, listed: { dev: number; ino: number }): Promise<FileHandle> {
-  const fh = await fs.open(p, C.O_RDONLY | C.O_NOFOLLOW | C.O_DIRECTORY);
+  const fh = await openDir(p);
   try {
     const s = await fh.stat();
-    if (s.dev !== listed.dev || s.ino !== listed.ino) throw changed();
+    if (s.dev !== listed.dev || s.ino !== listed.ino) throw new PathError(400, "a folder changed while it was being processed");
     return fh;
   } catch (e) {
     await fh.close().catch(() => undefined);
@@ -35,9 +49,49 @@ export async function openListedDir(p: string, listed: { dev: number; ino: numbe
   }
 }
 
+/* ---- read-only prefixes, checked on where a descriptor really points ---- */
+
+const READ_ONLY = new Map<string, string[]>();
+
+/** The agent tells the pinned helpers which prefixes of `root` are read-only (FILEDECK_READONLY). */
+export function registerReadOnly(root: string, prefixes: string[]): void {
+  if (prefixes.length) READ_ONLY.set(root, prefixes);
+  else READ_ONLY.delete(root);
+}
+
+/** Refuse when the folder `at` (a `/proc/self/fd` path), or its entry `name`, lies in a read-only prefix. Looks at the location the descriptor resolves to now, after any link in an ancestor was followed. */
+export async function assertWritableAt(root: string, at: string, name?: string): Promise<void> {
+  const prefixes = READ_ONLY.get(root);
+  if (!prefixes || !LINUX) return;
+  const loc = await fs.readlink(at);
+  const virtual = loc === root ? "/" : root === "/" ? loc : loc.startsWith(root + "/") ? loc.slice(root.length) : "/";
+  const target = name ? (virtual === "/" ? "/" + name : virtual + "/" + name) : virtual;
+  if (hitsReadOnly(root, prefixes, target)) throw new PathError(403, "read-only volume");
+}
+
+/** `pinDir` for a folder that is about to be changed: refused when it resolves into a read-only prefix. */
+export function pinDirW<T>(root: string, real: string, fn: (at: string) => Promise<T>): Promise<T> {
+  return pinDir(root, real, async (at) => {
+    await assertWritableAt(root, at);
+    return fn(at);
+  });
+}
+
+/** `pinParent` for an entry that is about to be changed: the entry itself must not lie in a read-only prefix. */
+export function pinParentW<T>(root: string, real: string, fn: (at: string) => Promise<T>): Promise<T> {
+  const name = path.basename(real);
+  return pinDir(root, path.dirname(real), async (dir) => {
+    await assertWritableAt(root, dir, name);
+    return fn(path.join(dir, name));
+  });
+}
+
+/** Check for each folder a recursive walk enters (the `at` path of its descriptor). */
+export const walkGuard = (root: string) => (at: string) => assertWritableAt(root, at);
+
 /**
  * `pinDir` that creates the missing folders on the way, one component at a time through the folder above, never
- * following a link. `real` must be inside `root`.
+ * following a link. `real` must be inside `root`. The folder it ends in must not be read-only.
  */
 export async function pinDirCreate<T>(root: string, real: string, fn: (at: string) => Promise<T>): Promise<T> {
   if (!LINUX) {
@@ -50,6 +104,7 @@ export async function pinDirCreate<T>(root: string, real: string, fn: (at: strin
   try {
     for (const comp of rel.split("/").filter(Boolean)) {
       const p = `/proc/self/fd/${cur.fd}/${comp}`;
+      await assertWritableAt(root, `/proc/self/fd/${cur.fd}`, comp); // never create a folder inside a read-only prefix
       await fs.mkdir(p).catch((e: NodeJS.ErrnoException) => {
         if (e.code !== "EEXIST") throw e;
       });
@@ -57,72 +112,230 @@ export async function pinDirCreate<T>(root: string, real: string, fn: (at: strin
       await cur.close().catch(() => undefined);
       cur = next;
     }
+    await assertWritableAt(root, `/proc/self/fd/${cur.fd}`);
     return await fn(`/proc/self/fd/${cur.fd}`);
   } finally {
     await cur.close().catch(() => undefined);
   }
 }
 
+/* ---- a private staging folder for building a copy ---- */
+
+/**
+ * Build things in a private folder (`.filedeck-work-<id>`, mode 0700, owned by this process) created inside the folder `parentAt`
+ * (a pinned path), so the finished entry can be moved into place with one rename on the same filesystem. The folder is
+ * opened without following links and checked (ours, private, the one that was just made) and then used only through its
+ * descriptor: whoever may write to `parentAt` can neither enter it nor swap it for something else. It is removed afterwards.
+ * Inside it the entry to build is named `staged` (see `stagedEntry`).
+ */
+export async function withStaging<T>(parentAt: string, fn: (stage: string) => Promise<T>): Promise<T> {
+  const p = path.join(parentAt, `.filedeck-work-${randomUUID()}`);
+  await fs.mkdir(p, { mode: 0o700 });
+  let fh: FileHandle | undefined;
+  try {
+    fh = await openDir(p);
+    const [s, l] = [await fh.stat(), await fs.lstat(p)];
+    const uid = process.getuid?.();
+    if (s.dev !== l.dev || s.ino !== l.ino || (uid !== undefined && s.uid !== uid) || (s.mode & 0o077) !== 0) {
+      throw new PathError(403, "cannot make a private work folder here");
+    }
+    return await fn(dirAt(fh, p));
+  } finally {
+    if (fh) await emptyDir(dirAt(fh, p)).catch(() => undefined);
+    await fs.rmdir(p).catch(() => undefined);
+    await fh?.close().catch(() => undefined);
+  }
+}
+
+/** The entry built inside a staging folder. */
+export const stagedEntry = (stage: string): string => path.join(stage, "staged");
+
+/* ---- copy ---- */
+
 export interface CopyTreeOpts {
   /** give every entry the modification time of its source */
   times?: boolean;
-  /** give every entry the owner and group of its source (needs privilege; refused changes are ignored) */
+  /** give every entry the owner and group of its source (needs privilege; where it is refused the set-id bits are dropped) */
   owner?: boolean;
 }
 
 /**
- * Copy the entry at `src` to the new name `dst` (which must not exist). Both paths must have a pinned parent. Folders are
- * entered through descriptors, files are copied from the descriptor that was checked, links are copied as links.
+ * Owner, then mode, then times, all through the descriptor of the new entry. The set-user-id and set-group-id bits are
+ * kept only when the owner could be given to the entry as well: a copy owned by someone else than the source's owner
+ * never carries them.
+ */
+async function finish(h: FileHandle, st: { mode: number; uid: number; gid: number; atime: Date; mtime: Date }, o: CopyTreeOpts): Promise<void> {
+  let owned = false;
+  if (o.owner) {
+    try {
+      await h.chown(st.uid, st.gid);
+      owned = true;
+    } catch {
+      /* not allowed to give the entry away */
+    }
+  }
+  await h.chmod(owned ? st.mode & 0o7777 : st.mode & 0o1777);
+  if (o.times) await h.utimes(st.atime, st.mtime).catch(() => undefined);
+}
+
+/**
+ * Copy the entry at `src` to the new name `dst` (which must not exist) inside a staging folder. `src` must have a pinned
+ * parent. Folders are entered through descriptors, files are copied from the descriptor that was checked into a file this
+ * function created exclusively (0600) and finished through its own descriptor, links are copied as links.
  */
 export async function copyTree(src: string, dst: string, o: CopyTreeOpts = {}, depth = 0): Promise<void> {
   if (depth > MAX_DEPTH) throw tooDeep();
   const st = await fs.lstat(src);
   if (st.isSymbolicLink()) {
     await fs.symlink(await fs.readlink(src), dst);
+    if (o.owner) await fs.lchown(dst, st.uid, st.gid).catch(() => undefined);
+    if (o.times) await fs.lutimes(dst, st.atime, st.mtime).catch(() => undefined);
   } else if (st.isDirectory()) {
     const sfh = await openListedDir(src, st);
     try {
       await fs.mkdir(dst, { mode: 0o700 }); // opened up to the source's mode once it is filled
-      const dfh = await fs.open(dst, C.O_RDONLY | C.O_NOFOLLOW | C.O_DIRECTORY);
+      const dfh = await openDir(dst);
       try {
+        if (!(await dfh.stat()).isDirectory()) throw new PathError(400, "a folder changed while it was being processed");
         const [s, d] = [dirAt(sfh, src), dirAt(dfh, dst)];
-        for await (const names of namesOf(s, 256)) for (const n of names) await copyTree(path.join(s, n), path.join(d, n), o, depth + 1);
-        if (o.owner) await fs.lchown(dst, st.uid, st.gid).catch(() => undefined);
-        await dfh.chmod(st.mode & 0o7777);
+        // files and links of one folder are copied a few at a time, sub-folders one after the other (each holds a descriptor)
+        let batch: Promise<void>[] = [];
+        try {
+          for await (const e of direntsOf(s)) {
+            const [from, to] = [path.join(s, e.name), path.join(d, e.name)];
+            if (e.isDirectory()) {
+              await Promise.all(batch);
+              batch = [];
+              await copyTree(from, to, o, depth + 1);
+            } else {
+              batch.push(copyTree(from, to, o, depth + 1));
+              if (batch.length >= 16) {
+                await Promise.all(batch);
+                batch = [];
+              }
+            }
+          }
+          await Promise.all(batch);
+        } finally {
+          await Promise.allSettled(batch); // none still running when the descriptors are closed
+        }
+        await finish(dfh, st, o);
       } finally {
         await dfh.close().catch(() => undefined);
       }
     } finally {
       await sfh.close().catch(() => undefined);
     }
-    if (o.times) await fs.lutimes(dst, st.atime, st.mtime).catch(() => undefined);
-    return;
   } else if (st.isFile()) {
-    const fh = await fs.open(src, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+    const sfh = await fs.open(src, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
     try {
-      const s = await fh.stat();
-      if (!s.isFile() || s.dev !== st.dev || s.ino !== st.ino) throw changed();
-      await fs.copyFile(LINUX ? `/proc/self/fd/${fh.fd}` : src, dst, C.COPYFILE_EXCL);
+      const s = await sfh.stat();
+      if (!s.isFile() || s.dev !== st.dev || s.ino !== st.ino) throw new PathError(400, "a file changed while it was being processed");
+      const dfh = await fs.open(dst, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o600);
+      try {
+        if (s.size > 0) await fs.copyFile(LINUX ? `/proc/self/fd/${sfh.fd}` : src, LINUX ? `/proc/self/fd/${dfh.fd}` : dst);
+        await finish(dfh, st, o);
+      } catch (e) {
+        await fs.unlink(dst).catch(() => undefined);
+        throw e;
+      } finally {
+        await dfh.close().catch(() => undefined);
+      }
     } finally {
-      await fh.close().catch(() => undefined);
+      await sfh.close().catch(() => undefined);
     }
   } else {
     throw new PathError(400, "cannot copy a special file");
   }
-  if (o.owner) await fs.lchown(dst, st.uid, st.gid).catch(() => undefined);
-  if (o.times) await fs.lutimes(dst, st.atime, st.mtime).catch(() => undefined);
 }
 
-/** Remove the entry at `p` (parent pinned) and everything below it, entering folders through descriptors; links are removed, never followed. */
-export async function rmTree(p: string, o: { force?: boolean } = {}, depth = 0): Promise<void> {
+/* ---- delete ---- */
+
+/** Up to `max` entries of the folder `at` (with their kinds from the listing), and whether that was all of them. */
+async function readEntries(at: string, max: number): Promise<{ entries: Dirent[]; done: boolean }> {
+  const d = await fs.opendir(at, { bufferSize: Math.min(max, 4096) });
+  const entries: Dirent[] = [];
+  let done = true;
+  try {
+    for await (const e of d) {
+      entries.push(e);
+      if (entries.length >= max) {
+        done = false;
+        break;
+      }
+    }
+  } finally {
+    await d.close().catch(() => undefined);
+  }
+  return { entries, done };
+}
+
+type Guard = (at: string) => Promise<void>;
+const kindOf = async (e: Dirent, at: string): Promise<"dir" | "other"> => {
+  if (e.isDirectory()) return "dir";
+  if (e.isFile() || e.isSymbolicLink() || e.isFIFO() || e.isSocket() || e.isBlockDevice() || e.isCharacterDevice()) return "other";
+  return (await fs.lstat(path.join(at, e.name))).isDirectory() ? "dir" : "other"; // the filesystem did not say
+};
+
+/** Remove everything inside the folder `at` (a descriptor path); nothing is followed. */
+async function emptyDir(at: string, guard?: Guard, depth = 0): Promise<void> {
   if (depth > MAX_DEPTH) throw tooDeep();
+  for (;;) {
+    const { entries } = await readEntries(at, 32768);
+    if (!entries.length) return;
+    const dirs: string[] = [];
+    const files: string[] = [];
+    for (const e of entries) ((await kindOf(e, at)) === "dir" ? dirs : files).push(e.name);
+    for (let i = 0; i < files.length; i += 64) {
+      await Promise.all(
+        files.slice(i, i + 64).map((n) =>
+          fs.unlink(path.join(at, n)).catch((err: NodeJS.ErrnoException) => {
+            if (err.code !== "ENOENT") throw err;
+          }),
+        ),
+      );
+    }
+    for (const n of dirs) {
+      const child = path.join(at, n);
+      let fh: FileHandle;
+      try {
+        fh = await openDir(child);
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") continue;
+        if (code === "ELOOP" || code === "ENOTDIR") {
+          await fs.unlink(child); // swapped for a link or a file since it was listed: remove that, never enter it
+          continue;
+        }
+        throw e;
+      }
+      try {
+        const sub = dirAt(fh, child);
+        await guard?.(sub);
+        await emptyDir(sub, guard, depth + 1);
+      } finally {
+        await fh.close().catch(() => undefined);
+      }
+      await fs.rmdir(child).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== "ENOENT") throw err;
+      });
+    }
+  }
+}
+
+/**
+ * Remove the entry at `p` (parent pinned) and everything below it, entering folders through descriptors; links are
+ * removed, never followed. Folders on other filesystems are entered like any other (as `rm -r` does).
+ */
+export async function rmTree(p: string, o: { force?: boolean; guard?: Guard } = {}): Promise<void> {
   try {
     const st = await fs.lstat(p);
     if (!st.isDirectory()) return await fs.unlink(p);
     const fh = await openListedDir(p, st);
     try {
-      const d = dirAt(fh, p);
-      for await (const names of namesOf(d, 256)) for (const n of names) await rmTree(path.join(d, n), { force: true }, depth + 1);
+      const at = dirAt(fh, p);
+      await o.guard?.(at);
+      await emptyDir(at, o.guard);
     } finally {
       await fh.close().catch(() => undefined);
     }

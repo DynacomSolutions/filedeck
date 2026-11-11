@@ -4,7 +4,8 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
 import { FsError, exists, tempName } from "./fsops.ts";
-import { assertNotTrash, pinDir, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
+import { assertNotTrash, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
+import { pinDirW } from "./pinwalk.ts";
 
 /**
  * Resumable chunked uploads. The client picks an id (a stable hash of the file's identity) and sends
@@ -32,7 +33,7 @@ interface Loc {
 
 /** Run `fn` with the destination folder held open: the part file and the final name are reached through it, so the folder cannot be swapped for a link mid-upload. */
 const inDir = <T,>(root: string, l: Loc, fn: (at: string, part: string, target: string) => Promise<T>): Promise<T> =>
-  pinDir(root, l.dirReal, (at) => fn(at, path.join(at, l.partName), path.join(at, l.targetName)));
+  pinDirW(root, l.dirReal, (at) => fn(at, path.join(at, l.partName), path.join(at, l.targetName)));
 
 function locate(root: string, dir: string, name: string, id: string): Loc {
   if (!ID_RE.test(id)) throw new FsError(400, "invalid upload id");
@@ -51,6 +52,31 @@ async function partSize(part: string): Promise<number> {
     return st.size;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw e;
+  }
+}
+
+/**
+ * Open the part file for appending. A new one is created exclusively; an existing one (including an empty one left by an
+ * earlier call) must be a plain file with a single name and exactly the size the client resumes from, otherwise it is not ours.
+ */
+async function openPart(part: string, cur: number) {
+  const flags = C.O_WRONLY | C.O_APPEND | C.O_NOFOLLOW;
+  let fh;
+  try {
+    fh = await fs.open(part, flags | C.O_CREAT | C.O_EXCL, 0o644);
+    return fh;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+  }
+  fh = await fs.open(part, flags | C.O_NONBLOCK);
+  try {
+    const st = await fh.stat();
+    if (!st.isFile() || st.nlink > 1) throw new FsError(409, "upload slot is not a plain file");
+    if (st.size !== cur) throw new FsError(409, "offset mismatch", { offset: st.size });
+    return fh;
+  } catch (e) {
+    await fh.close().catch(() => undefined);
     throw e;
   }
 }
@@ -129,7 +155,7 @@ export async function uploadChunk(root: string, dir: string, name: string, id: s
         body.resume();
         throw new FsError(409, "destination exists");
       }
-      const fh = await fs.open(part, C.O_WRONLY | C.O_APPEND | C.O_CREAT | C.O_NOFOLLOW, 0o644);
+      const fh = await openPart(part, cur);
       let n = 0;
       try {
         body.on("data", (c: Buffer) => {

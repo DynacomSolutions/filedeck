@@ -23,6 +23,7 @@ import { agentAuth } from "./agent-auth.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, isReadOnly } from "./readonly.ts";
+import { registerReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -40,6 +41,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.use("*", agentAuth(cfg.agentToken));
   app.use("*", requestGuard({ maxEdit: cfg.maxEdit, audit: { who: `agent:${cfg.node}`, sink: auditSink } }));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
+  registerReadOnly(cfg.root, cfg.readOnly); // the pinned operations re-check where their descriptors really point
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   const watches = new Watches();
   const root = cfg.root;
