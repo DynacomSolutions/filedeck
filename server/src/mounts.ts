@@ -51,7 +51,14 @@ export function unescapeMount(s: string): string {
   return s.replace(/\\([0-7]{3})/g, (_, o: string) => String.fromCharCode(parseInt(o, 8)));
 }
 
-export function parseMounts(text: string) {
+/** Mount points under these never hold user files, even when trash discovery looks at every real filesystem. */
+const RUNTIME_PREFIXES = ["/proc", "/sys", "/dev", "/run/user", "/run/k3s", "/run/netns", "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker"];
+
+/**
+ * `all` keeps every real filesystem the trash can live on (a tmpfs outside /tmp, a snap or similar mount): the file
+ * manager hides those from the drive list, but a trashed item there is stored on that volume and must still be found.
+ */
+export function parseMounts(text: string, opts: { all?: boolean } = {}) {
   const seen = new Set<string>();
   const out: { device: string; mountpoint: string; fstype: string }[] = [];
   for (const line of text.split("\n")) {
@@ -61,8 +68,10 @@ export function parseMounts(text: string) {
     const mountpoint = unescapeMount(f[1] as string);
     const fstype = f[2] as string;
     if (PSEUDO.has(fstype)) continue;
-    if (fstype === "tmpfs" && !mountpoint.startsWith("/tmp") && mountpoint !== "/dev/shm") continue;
-    if (HIDDEN_PREFIXES.some((p) => mountpoint === p || mountpoint.startsWith(p + "/"))) continue;
+    if (opts.all) {
+      if (RUNTIME_PREFIXES.some((p) => mountpoint === p || mountpoint.startsWith(p + "/"))) continue;
+    } else if (fstype === "tmpfs" && !mountpoint.startsWith("/tmp") && mountpoint !== "/dev/shm") continue;
+    else if (HIDDEN_PREFIXES.some((p) => mountpoint === p || mountpoint.startsWith(p + "/"))) continue;
     if (seen.has(mountpoint)) continue;
     seen.add(mountpoint);
     out.push({ device, mountpoint, fstype });

@@ -563,7 +563,12 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   };
   await fs.mkdir(path.join(dir, id));
   await fs.writeFile(path.join(dir, id, "meta.json"), JSON.stringify(meta));
-  await pinParent(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
+  try {
+    await pinParent(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
+  } catch (e) {
+    await fs.rm(path.join(dir, id), { recursive: true, force: true }).catch(() => undefined); // no ghost item without data
+    throw e;
+  }
   return meta;
 }
 
@@ -586,6 +591,7 @@ export async function upload(
   const d = resolveRead(root, dir);
   assertNotTrash(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name));
+  assertNotTrash(target.virtual); // a file may not take the name of the trash store
   // Work through the pinned destination folder so it cannot be swapped for a link mid-upload.
   return pinDir(root, d.real, async (at) => {
     const dest = path.join(at, path.basename(target.real));
