@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HISTORY_MAX, LINGER_ATTENTION_MS, LINGER_MS, addToHistory, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry } from "../src/jobHistory.ts";
+import { HISTORY_MAX, LINGER_ATTENTION_MS, LINGER_MS, addToHistory, announceEnded, endTime, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry } from "../src/jobHistory.ts";
 
 const e = (key: string, at: number, extra: Partial<HistoryEntry> = {}): HistoryEntry => ({ key, title: key, outcome: "done", at, ...extra });
 
@@ -42,4 +42,19 @@ test("parseHistory drops malformed entries", () => {
   const p = parseHistory(raw);
   assert.equal(p.length, 1);
   assert.equal(p[0]!.where, "n1");
+});
+
+test("a job already finished when its source first answers does not look freshly ended", () => {
+  const now = 1_000_000;
+  const created = now - 3_600_000;
+  assert.equal(endTime(undefined, created, true, now), created);
+  assert.equal(stillLingering(endTime(undefined, created, true, now), now, false), false);
+  // a source that answers later while the page is open: a job it reports finishing now is new
+  assert.equal(endTime(undefined, created, false, now), now);
+  assert.equal(endTime(now - 5, created, true, now), now - 5);
+});
+
+test("ended jobs are announced with their outcome", () => {
+  assert.equal(announceEnded([e("Copy", 1), e("Move", 2, { outcome: "failed", detail: "disk full" }), e("Zip", 3, { outcome: "canceled" })]), "Copy finished. Move failed: disk full. Zip canceled.");
+  assert.equal(announceEnded([]), "");
 });
