@@ -6,7 +6,8 @@ import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { compileGlobs } from "../src/glob.ts";
-import { makeTester, safeRegex } from "../src/search.ts";
+import * as searchMod from "../src/search.ts";
+const { safeRegex } = searchMod;
 
 let tmp: string, outside: string, agent: ReturnType<typeof createAgent>;
 const write = (rel: string, data: string | Buffer) => {
@@ -149,8 +150,7 @@ test("a glob that would backtrack badly is answered at once and does not hold up
 test("a regular expression the heuristics let through is cut off with a 400 instead of stalling the agent", async () => {
   write("slowre/" + "a".repeat(27), "x");
   const t0 = Date.now();
-  const [r, health] = await Promise.all([search("path=/slowre&q=" + encodeURIComponent("^(a|a)*b$") + "&mode=regex"), Promise.resolve(null)]);
-  void health;
+  const r = await search("path=/slowre&q=" + encodeURIComponent("^(a|a)*b$") + "&mode=regex");
   const failed = r.status === 400 || (r.lines ?? []).some((l) => /too long/.test(l.error ?? ""));
   assert.ok(failed, `status ${r.status}`);
   assert.ok(Date.now() - t0 < 6000, `took ${Date.now() - t0} ms`);
@@ -160,8 +160,32 @@ test("a regular expression the heuristics let through is cut off with a 400 inst
   assert.ok(c.status === 400 || (c.lines ?? []).some((l) => /too long/.test(l.error ?? "")), `content status ${c.status}`);
   const ok = await search("path=/slowre&q=c.txt&content=" + encodeURIComponent("^nee+dle$") + "&cre=1");
   assert.deepEqual(names(ok.hits), ["c.txt"]);
-  assert.throws(() => makeTester("^(a|a)*b$", true, false, 100).testMany(["a".repeat(60)]), /too long/);
-  assert.deepEqual(makeTester("^(x|y)+$", true, false).testMany(["xyxy", "xz"]), [true, false]);
+});
+
+test("makeTester cuts off a slow pattern and still matches fast ones", () => {
+  assert.throws(() => searchMod.makeTester("^(a|a)*b$", true, false, 100).testMany(["a".repeat(60)]), /too long/);
+  assert.deepEqual(searchMod.makeTester("^(x|y)+$", true, false).testMany(["xyxy", "xz"]), [true, false]);
+});
+
+test("content search reads across 64 KiB chunk boundaries: split characters and split words are found", async () => {
+  const big = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+  const head = "a".repeat(99) + "\n";
+  const lead = head.repeat(655); // 65500 bytes
+  // bytes 65535 and 65536 are the two bytes of the "\u00e9": the first read ends in the middle of the character
+  write("chunk/split-char.txt", lead + "b".repeat(35) + "\u00e9 marker\nend\n");
+  // "needle" starts 3 bytes before the boundary
+  write("chunk/split-word.txt", lead + "b".repeat(33) + "needle tail\nend\n");
+  const run = async (q: string) => {
+    const r = await big.request("/api/fs/search?path=/chunk&" + q);
+    const lines = (await r.text()).trim().split("\n").map((l) => JSON.parse(l) as Line);
+    return lines.flatMap((l) => l.e?.h ?? []);
+  };
+  const c = await run("content=" + encodeURIComponent("\u00e9 marker"));
+  assert.deepEqual(names(c), ["split-char.txt"]);
+  assert.equal(c[0]!.l, 656);
+  assert.deepEqual(names(await run("content=needle")), ["split-word.txt"]);
+  assert.deepEqual(names(await run("content=" + encodeURIComponent("b+needle") + "&cre=1")), ["split-word.txt"]);
+  assert.ok(!(c[0]!.x ?? "").includes("\ufffd"));
 });
 
 /** The previous implementation (a regular expression per glob), kept here as the reference for the semantics. */

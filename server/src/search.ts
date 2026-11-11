@@ -1,3 +1,4 @@
+import { StringDecoder } from "node:string_decoder";
 import vm from "node:vm";
 import type { Readable } from "node:stream";
 import type { Hono } from "hono";
@@ -183,6 +184,8 @@ export async function* searchTree(
     let n = 0;
     let lineNo = 0;
     let carry = "";
+    // a multi-byte character cut by the chunk boundary is held back until its remaining bytes arrive
+    const decoder = new StringDecoder("utf8");
     let checked = false;
     let read_ = 0;
     const scan = (lines: string[]) => {
@@ -210,14 +213,16 @@ export async function* searchTree(
           }
         }
         if (read_ > o.maxFileBytes) break;
-        const parts = (carry + chunk.toString("utf8")).split("\n");
-        carry = (parts.pop() as string).slice(-MAX_LINE * 2);
+        const parts = (carry + decoder.write(chunk)).split("\n");
+        // the unfinished last line goes on into the next chunk; only its first MAX_LINE characters are ever matched
+        carry = (parts.pop() as string).slice(0, MAX_LINE);
         scan(parts.map((p) => (p.endsWith("\r") ? p.slice(0, -1) : p)));
         if (bytes > o.maxTotalBytes) {
           sum.capped = true;
           break;
         }
       }
+      carry += decoder.end();
       if (carry) scan([carry]);
     } catch (err) {
       if (signal?.aborted || err instanceof FsError) throw err;
