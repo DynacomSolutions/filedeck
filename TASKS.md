@@ -168,7 +168,7 @@ ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | in_review | claude-20261112-rv-hub | rv-request-guard | | 2026-11-12 09:00 ICT | Found in review; includes request body size limits<br>https://github.com/DynacomSolutions/filedeck/pull/188 |
-| 104 | Read-only prefixes also protect their parent folders and trash restore targets | todo | | rv-readonly-cover | 13.103 | | Found in review |
+| 104 | Read-only prefixes also protect their parent folders and trash restore targets | in_review | claude-20261112-rv-hub | rv-readonly-cover | 13.103 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/195 |
 | 105 | Hub sends security headers, optional host allowlist, compressed and cacheable static assets | todo | | rv-hub-headers-static | 13.104 | | Found in review; missing assets answer 404 |
 | 106 | Git reads ignore programs named in repository config and stay inside the root | in_review | claude-20261112-rv-search-git | rv-git-config | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/181 |
 | 107 | Search and glob patterns cannot block the agent | in_review | claude-20261112-rv-search-git | rv-search-patterns | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/190 |
@@ -187,7 +187,7 @@ ETA: 2026-11-12 14:00 ICT
 | 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | done | claude-20261112-rv-archives | rv-archives | | | Merged https://github.com/DynacomSolutions/filedeck/pull/183, CI green<br>Split sets without 7-Zip answer 501 |
 | 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | in_review | claude-20261112-rv-sources | rv-sources-streams | 13.110 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/194 |
 | 116 | Cross-filesystem moves keep times and owners; copies use a temporary name; long names | in_review | claude-20261112-rv-fsops | rv-move-copy-names | 14.113 | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/187 |
-| 117 | Compare cache and hash queue recover after a folder is recreated or a compare is cancelled | todo | | rv-compare-cache | 14.112 | | Found in review |
+| 117 | Compare cache and hash queue recover after a folder is recreated or a compare is cancelled | in_review | claude-20261112-rv-transfers | rv-compare-cache | 14.112 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/196 |
 
 ## 15. Web app correctness
 Findings from the 12 November 2026 review in the web app: selection, editor, compare, trash, uploads and navigation behaviour.
@@ -195,9 +195,9 @@ ETA: 2026-11-12 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 118 | File panel: filtered select all, rename validation, filter bar state, editor keeps unsaved edits | in_review | claude-20261112-rv-panel | rv-panel-editor | | 2026-11-12 10:00 ICT | Found in review; one event stream per tab<br>https://github.com/DynacomSolutions/filedeck/pull/193 |
-| 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | in_review | claude-20261112-rv-compare | rv-compare-trash-views | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/189 |
+| 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | done | claude-20261112-rv-compare | rv-compare-trash-views | | | Merged https://github.com/DynacomSolutions/filedeck/pull/189, CI green<br>Checked in a browser at 1440 and 390 px |
 | 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | in_review | claude-20261112-rv-shell | rv-app-shell | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/185 |
-| 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | in_progress | claude-20261112-rv-components | rv-uploads-tree | | 2026-11-12 09:30 ICT | Found in review |
+| 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | in_review | claude-20261112-rv-components | rv-uploads-tree | | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/197 |
 
 ## 16. Large folders and narrow screens
 Findings from the 12 November 2026 review: very large folders freeze the list, and narrow, landscape and zoomed layouts hide content.
@@ -205,7 +205,7 @@ ETA: 2026-11-12 15:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 122 | File list renders only the visible rows | todo | | rv-list-window | 17.124 | | Found in review: 30,000 files froze scrolling |
-| 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | todo | | rv-narrow-layout | 15.120 | | Found in review |
+| 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | in_review | claude-20261112-rv-shell | rv-narrow-layout | 15.120 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/198 |
 
 ## 17. Keyboard and screen reader access
 Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and AA.
@@ -214,7 +214,7 @@ ETA: 2026-11-12 16:00 ICT
 |---|---|---|---|---|---|---|---|
 | 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | todo | | rv-list-access | 15.118 | | Found in review |
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | in_progress | claude-20261112-rv-menus | rv-menus-dialogs | | 2026-11-12 09:30 ICT | Found in review |
-| 126 | Contrast, focus rings, selected marks, target sizes and forced colours | in_review | claude-20261112-rv-css | rv-contrast-targets | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/186 |
+| 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
 | 127 | Component roles, names and announcements | todo | | rv-aria-announce | 15.121 | | Found in review |
 | 128 | Browser acceptance checks repaired and run in CI; audit document updated | todo | | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Found in review: two of three scopes fail on main |
 | 129 | Release v0.3.36 with the review fixes | todo | | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | After every row above is merged |
