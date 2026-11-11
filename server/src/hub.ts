@@ -17,6 +17,7 @@ import { withAgentToken } from "./agent-auth.ts";
 import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
+import { matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
@@ -41,16 +42,17 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault };
   // Optional allowlist of Host values (DNS-rebinding guard); /healthz stays open for probes that use the pod address.
   if (cfg.allowedHosts.length) {
-    const allowed = new Set(cfg.allowedHosts);
     app.use("*", async (c, next) => {
       if (c.req.path === "/healthz") return next();
       const host = (c.req.header("host") ?? "").toLowerCase();
-      if (allowed.has(host) || allowed.has(host.replace(/:\d+$/, ""))) return next();
+      if (matchesHostList(host, cfg.allowedHosts)) return next();
       return c.json({ error: "unknown host" }, 421);
     });
   }
   app.use("*", webHeaders());
   app.use("*", textCompression());
+  // editor saves are limited by the agent that takes them (its own maxEdit), not here
+  app.use("*", requestGuard({ allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
   app.use("*", apiTokenAuth(cfg.apiToken));
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
@@ -260,6 +262,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       signal: c.req.raw.signal,
       redirect: "manual",
     };
+    stripBrowserContext(init.headers as Headers); // judged above; the agent sees a hub call
     if (hasBody) {
       init.body = c.req.raw.body;
       init.duplex = "half";

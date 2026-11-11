@@ -142,3 +142,18 @@ test("the hub proxy takes the rest of the path as sent, whatever form the node n
   assert.equal(r.status, 200);
   assert.equal((JSON.parse(r.body.toString()) as { entries: unknown[] }).entries.length, 81);
 });
+
+test("a listed host is also accepted as the Origin of a state change on that hub", async () => {
+  const post = (origin: string) =>
+    new Promise<number>((resolve, reject) => {
+      const body = JSON.stringify({ paths: ["/nothing"] });
+      const req = http.request({ method: "POST", host: "127.0.0.1", port: guardedPort, path: "/api/nodes/t/api/fs/delete", agent: false, headers: { host: "files.example.test", origin, "content-type": "application/json", "content-length": String(body.length) } }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode ?? 0));
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+  assert.equal(await post("https://files.example.test"), 404, "passes the guard; the agent has no such file");
+  assert.equal(await post("https://evil.example"), 403);
+});
