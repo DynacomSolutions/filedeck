@@ -2,13 +2,13 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { constants as C } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import os from "node:os";
 import { createInterface } from "node:readline";
 import { PassThrough, type Readable } from "node:stream";
 import { FsError } from "./fsops.ts";
 import { direntsOf } from "./dirnames.ts";
 import type { JobCtl } from "./jobs.ts";
-import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
+import { TRASH_DIR, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, haveSevenZip, listSz, runSz, szFailure, validPassword, verifyPassword } from "./sevenzip.ts";
 
@@ -73,7 +73,8 @@ export function archiveBase(n: string): string {
   const low = n.toLowerCase();
   const e = EXTRACT_EXT.find((x) => low.endsWith(x));
   const b = e ? n.slice(0, n.length - e.length) : n;
-  return b || "extracted";
+  // "..tar" would give "." (the destination itself): such a name, or the reserved trash name, falls back to a plain one
+  return !b || b === "." || b === ".." || b === TRASH_DIR || /[\\/\0]/.test(b) ? "extracted" : b;
 }
 
 function tool(args: string[], opts: { cwd?: string; stdin?: boolean } = {}): ChildProcess {
@@ -348,6 +349,8 @@ export interface ExtractOptions {
 }
 
 export interface ExtractPlan {
+  /** the served root: every destination is pinned and checked against it */
+  root: string;
   archiveReal: string;
   archiveName: string;
   destReal: string;
@@ -405,62 +408,213 @@ export async function prepareExtract(root: string, archive: string, destDir: str
     }
   }
   const usePassword = viaSz && !!o.password;
-  return { archiveReal: a.real, archiveName: path.basename(a.real), destReal: d.real, destVirtual: d.virtual, subfolder, overwrite, entries: o.entries ?? [], password: usePassword ? o.password : undefined, viaSz };
+  return { root, archiveReal: a.real, archiveName: path.basename(a.real), destReal: d.real, destVirtual: d.virtual, subfolder, overwrite, entries: o.entries ?? [], password: usePassword ? o.password : undefined, viaSz };
 }
 
 async function exists(p: string) {
   return fs.lstat(p).then(() => true, () => false);
 }
-async function freeName(dir: string, name: string): Promise<string> {
-  if (!(await exists(path.join(dir, name)))) return name;
+const LINUX = process.platform === "linux";
+
+/**
+ * Run `fn` with a path that names the directory `real` through a held descriptor, so the name
+ * cannot be swapped for something else while `fn` works. The entry must be a real directory (a
+ * final link is refused) that lives inside the root.
+ */
+async function pinned<T>(root: string, real: string, fn: (at: string) => Promise<T>): Promise<T> {
+  if (!LINUX) return fn(real);
+  const fh = await openChecked(root, real, C.O_RDONLY | C.O_DIRECTORY);
+  try {
+    return await fn(`/proc/self/fd/${fh.fd}`);
+  } finally {
+    await fh.close().catch(() => undefined);
+  }
+}
+
+/* ------------------------------------------------------- private work area */
+
+/**
+ * Staging for extraction and compression lives here, never in a folder the user serves: a
+ * directory that is private to this agent and whose ancestors are owned by root or by this user
+ * and cannot be renamed into by anyone else. Nothing in it can be swapped by an unprivileged user,
+ * whatever 7-Zip or bsdtar do with the path of their working directory.
+ * `FILEDECK_WORK_DIR` chooses the place (default: a per-user folder under the temp directory); results
+ * are moved into the destination through pinned descriptors, copying when it is another filesystem.
+ */
+let workRootP: Promise<string> | undefined;
+let workRootKey = "";
+function workRoot(): Promise<string> {
+  const want = process.env.FILEDECK_WORK_DIR || path.join(os.tmpdir(), `filedeck-work-${process.getuid?.() ?? "u"}`);
+  if (!workRootP || workRootKey !== want) {
+    workRootKey = want;
+    workRootP = prepareWorkRoot(want);
+    workRootP.catch(() => undefined);
+  }
+  return workRootP;
+}
+
+async function prepareWorkRoot(dir: string): Promise<string> {
+  const me = process.getuid?.();
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  const st = await fs.lstat(dir);
+  if (!st.isDirectory() || (me !== undefined && st.uid !== me) || (st.mode & 0o077) !== 0) throw new ArchiveError(500, "the work folder for archives is not private to this agent");
+  const real = await fs.realpath(dir);
+  for (let d = path.dirname(real); ; d = path.dirname(d)) {
+    const a = await fs.stat(d);
+    if ((a.uid !== 0 && a.uid !== me) || ((a.mode & 0o022) !== 0 && (a.mode & 0o1000) === 0)) throw new ArchiveError(500, "the work folder for archives sits below a folder others can change");
+    if (d === path.dirname(d)) break;
+  }
+  await sweepWork(real);
+  return real;
+}
+
+let swept = false;
+/** Remove staging left by a process that no longer exists (or by an earlier run of this one). Only ever looks inside the private work folder. */
+async function sweepWork(real: string) {
+  if (swept) return;
+  swept = true;
+  for (const n of await fs.readdir(real).catch(() => [] as string[])) {
+    const m = /^(\d+)-/.exec(n);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    let alive = pid !== process.pid;
+    if (alive) {
+      try {
+        process.kill(pid, 0);
+      } catch (e) {
+        alive = (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    }
+    if (!alive) await fs.rm(path.join(real, n), { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+/** Start-up sweep of the private work folder (also done before the first job). */
+export async function sweepWorkArea(): Promise<void> {
+  try {
+    await workRoot();
+  } catch (e) {
+    console.error("archive work folder:", (e as Error).message);
+  }
+}
+
+interface Work {
+  /** the folder by name (private: nobody else can reach it) */
+  dir: string;
+  /** the folder through a held descriptor */
+  at: string;
+  /** remove it; never throws */
+  done: () => Promise<void>;
+}
+async function makeWork(tag: string): Promise<Work> {
+  const root = await workRoot();
+  const dir = await fs.mkdtemp(path.join(root, `${process.pid}-${tag}-`));
+  let fh: import("node:fs/promises").FileHandle | undefined;
+  const done = async () => {
+    await fh?.close().catch(() => undefined);
+    fh = undefined;
+    await fs.rm(dir, { recursive: true, force: true }).catch((e) => console.error("archive work folder cleanup:", (e as Error).message));
+  };
+  try {
+    let at = dir;
+    if (LINUX) {
+      fh = await fs.open(dir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
+      at = `/proc/self/fd/${fh.fd}`;
+    }
+    return { dir, at, done };
+  } catch (e) {
+    await done();
+    throw e;
+  }
+}
+
+/** Create the first free `name`, `name (2)`, ... as a new directory in `dirAt`; mkdir fails on an existing name, so two writers never share one. */
+async function makeFreeDir(dirAt: string, name: string): Promise<string> {
   const dot = name.lastIndexOf(".");
   const [b, e] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
-  for (let i = 2; i < 10000; i++) {
-    const c = `${b} (${i})${e}`;
-    if (!(await exists(path.join(dir, c)))) return c;
+  for (let i = 1; i < 10000; i++) {
+    const c = i === 1 ? name : `${b} (${i})${e}`;
+    try {
+      await fs.mkdir(path.join(dirAt, c), { mode: 0o755 });
+      return c;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
   }
   throw new ArchiveError(409, "cannot find a free name");
 }
 
-/** rename(2), falling back to copy+unlink when the destination is another filesystem (a mount inside the target folder). */
-async function moveInto(from: string, to: string) {
+/**
+ * Move `from` (trusted, private staging) to `to` (a child of a pinned directory) without ever replacing
+ * something that is already there: EEXIST is raised instead. A file is hard-linked into place and the
+ * source removed (copied exclusively when the destination is another filesystem); a folder is created
+ * with mkdir, pinned, and filled the same way.
+ */
+async function moveExcl(root: string, from: string, to: string): Promise<void> {
+  const st = await fs.lstat(from);
+  if (st.isDirectory()) {
+    await fs.mkdir(to, { mode: 0o755 });
+    await pinned(root, to, async (toAt) => {
+      for (const n of await fs.readdir(from)) await moveExcl(root, path.join(from, n), path.join(toAt, n));
+    });
+    await fs.rmdir(from);
+    return;
+  }
   try {
-    await fs.rename(from, to);
+    await fs.link(from, to);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
-    const st = await fs.lstat(from);
-    if (st.isDirectory()) {
-      await fs.mkdir(to, { mode: 0o755 });
-      for (const n of await fs.readdir(from)) await moveInto(path.join(from, n), path.join(to, n));
-      await fs.rmdir(from);
-    } else {
-      await fs.copyFile(from, to, C.COPYFILE_EXCL);
-      await fs.unlink(from);
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw e;
+    await fs.copyFile(from, to, C.COPYFILE_EXCL);
+    await fs.utimes(to, st.atime, st.mtime).catch(() => undefined);
+  }
+  await fs.unlink(from);
+}
+
+/** `moveExcl` to the first free `name`, `name (2)`, ... in `destAt`; a name taken in the meantime just moves on to the next. */
+async function moveFree(root: string, from: string, destAt: string, name: string): Promise<string> {
+  const dot = name.lastIndexOf(".");
+  const [b, e] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  for (let i = 1; i < 10000; i++) {
+    const c = i === 1 ? name : `${b} (${i})${e}`;
+    try {
+      await moveExcl(root, from, path.join(destAt, c));
+      return c;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
   }
+  throw new ArchiveError(409, "cannot find a free name");
 }
 
 interface MergeStats {
   replaced: number;
   skippedExisting: number;
 }
-/** Merge `src` (staging, trusted) into the existing folder `dst` under the overwrite/skip policy. Never follows a link in `dst`. */
-async function mergeInto(src: string, dst: string, policy: "overwrite" | "skip", stats: MergeStats): Promise<void> {
+/**
+ * Merge `src` (staging, trusted) into the existing folder `dst` under the overwrite/skip policy. Never follows a link in `dst`:
+ * `dst` is a pinned directory path, and each existing folder is pinned before it is entered. Nothing is created over an entry
+ * that appeared after it was looked at: that entry is kept and counted as skipped.
+ */
+async function mergeInto(root: string, src: string, dst: string, policy: "overwrite" | "skip", stats: MergeStats): Promise<void> {
   for (const n of await fs.readdir(src)) {
     const s = path.join(src, n);
     const t = path.join(dst, n);
     const ss = await fs.lstat(s);
     const ts = await fs.lstat(t).catch(() => null);
-    if (!ts) {
-      await moveInto(s, t);
-    } else if (ss.isDirectory() && ts.isDirectory()) {
-      await mergeInto(s, t, policy, stats);
-    } else if (policy === "skip" || ts.isDirectory() || ss.isDirectory()) {
-      stats.skippedExisting++; // a file never replaces a folder (or the reverse): that would delete data
-    } else {
-      await fs.unlink(t); // a symlink here is replaced itself, not followed
-      await moveInto(s, t);
-      stats.replaced++;
+    try {
+      if (!ts) {
+        await moveExcl(root, s, t);
+      } else if (ss.isDirectory() && ts.isDirectory()) {
+        await pinned(root, t, (tAt) => mergeInto(root, s, tAt, policy, stats));
+      } else if (policy === "skip" || ts.isDirectory() || ss.isDirectory()) {
+        stats.skippedExisting++; // a file never replaces a folder (or the reverse): that would delete data
+      } else {
+        await fs.unlink(t); // a symlink here is replaced itself, not followed
+        await moveExcl(root, s, t);
+        stats.replaced++;
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      stats.skippedExisting++;
     }
   }
 }
@@ -532,8 +686,10 @@ async function extractViaSz(plan: ExtractPlan, staging: string, limits: ArchiveL
   }
   ctl.progress.totalEntries = sizes.size;
   ctl.progress.totalBytes = bytes;
-  const args = ["x", `-o${staging}`, "-aoa", "-spd", "-bb1", "-bso1", "-bsp0", ...skip.map((n) => `-x!${n}`), "--", plan.archiveReal];
+  const args = ["x", "-aoa", "-spd", "-bb1", "-bso1", "-bsp0", ...skip.map((n) => `-x!${n}`), "--", plan.archiveReal];
+  // 7-Zip writes into its working directory, which is the pinned staging folder (a held descriptor path cannot be passed as -o: the child has no such descriptor)
   const proc = runSz(args, {
+    cwd: staging,
     password: plan.password,
     signal,
     onLine: (line) => {
@@ -551,8 +707,14 @@ async function extractViaSz(plan: ExtractPlan, staging: string, limits: ArchiveL
 }
 
 export async function runExtract(plan: ExtractPlan, limits: ArchiveLimits, ctl: JobCtl) {
-  const staging = await fs.mkdtemp(path.join(plan.destReal, `.filedeck-extract-`));
-  await fs.chmod(staging, 0o755);
+  // The destination is pinned for the whole job: later renames of the folder, or of anything above it, change nothing here.
+  return pinned(plan.root, plan.destReal, (dest) => extractInto(dest, plan, limits, ctl));
+}
+
+async function extractInto(dest: string, plan: ExtractPlan, limits: ArchiveLimits, ctl: JobCtl) {
+  // Staging is in the private work folder, held by descriptor, so nobody who can write to the destination can reach it.
+  const work = await makeWork("x");
+  const staging = work.at;
   const ac = new AbortController();
   const stop = () => ac.abort();
   ctl.signal.addEventListener("abort", stop, { once: true });
@@ -592,35 +754,33 @@ export async function runExtract(plan: ExtractPlan, limits: ArchiveLimits, ctl: 
     if (plan.entries.length && result.files + result.dirs === 0) throw new ArchiveError(400, "none of the selected entries were found in the archive");
     const stats: MergeStats = { replaced: 0, skippedExisting: 0 };
     let finalVirtual: string;
+    const root = plan.root;
     if (plan.subfolder) {
       const base = archiveBase(plan.archiveName);
-      if (plan.overwrite !== "rename" && (await exists(path.join(plan.destReal, base))) && (await fs.lstat(path.join(plan.destReal, base))).isDirectory()) {
-        await mergeInto(staging, path.join(plan.destReal, base), plan.overwrite, stats);
-        await fs.rm(staging, { recursive: true, force: true });
+      const existing = plan.overwrite !== "rename" ? await fs.lstat(path.join(dest, base)).catch(() => null) : null;
+      if (existing?.isDirectory()) {
+        await pinned(root, path.join(dest, base), (at) => mergeInto(root, staging, at, plan.overwrite as "overwrite" | "skip", stats));
         finalVirtual = virtualJoin(plan.destVirtual, base);
       } else {
-        const name = await freeName(plan.destReal, base);
-        await moveInto(staging, path.join(plan.destReal, name));
+        // a new folder made through the pinned destination, then filled from the pinned staging folder
+        const name = await makeFreeDir(dest, base);
+        await pinned(root, path.join(dest, name), async (at) => {
+          for (const n of await fs.readdir(staging)) await moveExcl(root, path.join(staging, n), path.join(at, n));
+        });
         finalVirtual = virtualJoin(plan.destVirtual, name);
       }
     } else if (plan.overwrite === "rename") {
-      for (const n of await fs.readdir(staging)) {
-        await moveInto(path.join(staging, n), path.join(plan.destReal, await freeName(plan.destReal, n)));
-      }
-      await fs.rmdir(staging);
+      for (const n of await fs.readdir(staging)) await moveFree(root, path.join(staging, n), dest, n);
       finalVirtual = plan.destVirtual;
     } else {
-      await mergeInto(staging, plan.destReal, plan.overwrite, stats);
-      await fs.rm(staging, { recursive: true, force: true });
+      await mergeInto(root, staging, dest, plan.overwrite, stats);
       finalVirtual = plan.destVirtual;
     }
     ctl.progress.bytes = result.bytes;
     return { ...result, ...stats, path: finalVirtual };
-  } catch (e) {
-    await fs.rm(staging, { recursive: true, force: true });
-    throw e;
   } finally {
     ctl.signal.removeEventListener("abort", stop);
+    await work.done(); // a cleanup problem is logged there; it never turns a finished job into a failed one
   }
 }
 
@@ -642,6 +802,7 @@ export interface CompressOptions {
 }
 
 export interface CompressPlan {
+  root: string;
   dirReal: string;
   dirVirtual: string;
   names: string[];
@@ -706,6 +867,7 @@ export async function prepareCompress(root: string, dir: string, names: string[]
   if (!base.toLowerCase().endsWith(ext)) base += ext;
   virtualJoin(out.virtual, base);
   return {
+    root,
     dirReal: d.real,
     dirVirtual: d.virtual,
     names: uniq,
@@ -733,13 +895,18 @@ async function walkSizes(dirReal: string, rel: string, sizes: Map<string, number
 }
 
 export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl) {
+  // Both the folder being read and the folder the archive lands in are pinned for the whole job.
+  return pinned(plan.root, plan.dirReal, (srcAt) => pinned(plan.root, plan.outReal, (outAt) => compressInto(srcAt, outAt, plan, limits, ctl)));
+}
+
+async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl) {
   const sizes = new Map<string, number>();
-  for (const n of plan.names) await walkSizes(plan.dirReal, n, sizes, limits, ctl.signal);
+  for (const n of plan.names) await walkSizes(srcAt, n, sizes, limits, ctl.signal);
   ctl.progress.totalEntries = sizes.size;
   ctl.progress.totalBytes = [...sizes.values()].reduce((a, b) => a + b, 0);
-  // Written into a private folder next to the destination and moved into place when complete.
-  const work = await fs.mkdtemp(path.join(plan.outReal, `.filedeck-archive-`));
-  const tmp = path.join(work, plan.outName);
+  // Written into the private work folder and moved into place when complete.
+  const work = await makeWork("c");
+  const tmp = path.join(work.dir, plan.outName);
   const note = (rel: string) => {
     ctl.progress.entries++;
     ctl.progress.bytes += sizes.get(rel) ?? 0;
@@ -761,7 +928,7 @@ export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl
       for (const x of plan.exclude) args.push(`-xr!${x}`);
       args.push("--", tmp, ...plan.names.map((n) => "./" + n));
       const proc = runSz(args, {
-        cwd: plan.dirReal,
+        cwd: srcAt,
         password: plan.password,
         signal: ctl.signal,
         onLine: (l) => {
@@ -775,7 +942,7 @@ export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl
       const opt = levelOptions(plan.format, plan.level);
       // -T lists are not subject to the "@archive" syntax, so literal names are safe.
       const args = ["--null", "-v", ...FORMATS[plan.format].args, ...(opt ? ["--options", opt] : []), ...plan.exclude.map((x) => `--exclude=${x}`), "-cf", tmp, "-T", "-"];
-      const child = tool(args, { cwd: plan.dirReal, stdin: true });
+      const child = tool(args, { cwd: srcAt, stdin: true });
       killOnAbort(child, ctl.signal);
       const done = watch(child, (l) => {
         if (l.startsWith("a ")) note(l.slice(2).replace(/^\.\//, "").replace(/\/$/, ""));
@@ -787,21 +954,24 @@ export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl
       if (code !== 0) throw new ArchiveError(500, `compression failed: ${err.split("\n").pop() || "unknown error"}`);
     }
     // Volumes are name.7z.001, .002 ...: pick a base that is free for the whole set.
-    const produced = (await fs.readdir(work)).filter((n) => n === plan.outName || n.startsWith(plan.outName + "."));
+    const produced = (await fs.readdir(work.dir)).filter((n) => n === plan.outName || n.startsWith(plan.outName + "."));
     if (!produced.length) throw new ArchiveError(500, "compression produced no archive");
-    const out = await freeSetName(plan.outReal, plan.outName, produced.map((n) => n.slice(plan.outName.length)));
+    const out = await freeSetName(outAt, plan.outName, produced.map((n) => n.slice(plan.outName.length)));
     let size = 0;
     for (const n of produced) {
-      const to = path.join(plan.outReal, out + n.slice(plan.outName.length));
-      await moveInto(path.join(work, n), to);
+      const to = path.join(outAt, out + n.slice(plan.outName.length));
+      try {
+        await moveExcl(plan.root, path.join(work.dir, n), to); // never replaces a file that appeared meanwhile
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new ArchiveError(409, "the archive name was taken while it was being written");
+        throw e;
+      }
       size += (await fs.stat(to)).size;
     }
-    await fs.rm(work, { recursive: true, force: true });
     // for volumes the path is the first part (name.7z.001), which 7-Zip opens together with its siblings
     return { path: virtualJoin(plan.outVirtual, out + (plan.splitBytes ? ".001" : "")), size, volumes: plan.splitBytes ? produced.length : undefined };
-  } catch (e) {
-    await fs.rm(work, { recursive: true, force: true });
-    throw e;
+  } finally {
+    await work.done();
   }
 }
 
