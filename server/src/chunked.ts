@@ -3,7 +3,7 @@ import { constants as C } from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
-import { FsError, exists } from "./fsops.ts";
+import { FsError, exists, tempName } from "./fsops.ts";
 import { assertNotTrash, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 
 /**
@@ -32,7 +32,7 @@ function locate(root: string, dir: string, name: string, id: string): Loc {
   const d = resolveRead(root, dir);
   assertNotTrash(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name)); // validates the name too
-  const part = path.join(d.real, `.${name}.filedeck-up-${id}.part`);
+  const part = path.join(d.real, tempName(name, `.filedeck-up-${id}.part`));
   return { dirReal: d.real, target: target.real, part };
 }
 
