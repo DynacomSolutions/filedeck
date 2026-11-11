@@ -36,6 +36,7 @@ import { usePresentation } from "./presentation";
 import { changeHub } from "./eventStream";
 import { plainNameError } from "./editDrafts";
 import { entryKind, focusPanelList, listAnnouncement, revealRow, rowId } from "./listFocus";
+import { CHUNK_ROWS, CHUNK_TILE_ROWS, OVERSCAN_ROWS, OVERSCAN_TILE_ROWS, scrollTopFor, spacerHeight, windowFor, type Geometry, type Win } from "./listWindow";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { typeAheadMatch, type TypeAheadState } from "./letterNavigation";
 import * as Ic from "lucide-react";
@@ -44,8 +45,8 @@ import * as Ic from "lucide-react";
 const TextEditor = lazy(() => import("./EditorViews").then((m) => ({ default: m.TextEditor })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 
-/** Rows put in the DOM at first and added per step while scrolling. */
-const RENDER_STEP = 400;
+/** Items rendered before the first measurement (about two screens of rows); after that only those near the viewport are. */
+const FIRST_WINDOW = 60;
 const selectionEchoKey = (node: string, path: string, sel: string | null | undefined, ns: boolean | undefined, sels: readonly string[] | undefined) =>
   JSON.stringify([node, path, sel ?? null, !!ns, sels ? [...sels].sort() : []]);
 const DOCKS: { dock: Dock; icon: LucideIcon; label: string }[] = [
@@ -134,8 +135,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   /** more entries of the open folder are still arriving */
   const [streaming, setStreaming] = useState(false);
   const sortRef = useRef<{ key: SortKey; asc: boolean }>({ key: "name", asc: true });
-  /** rows rendered so far: a folder with tens of thousands of entries fills the DOM in steps as it is scrolled */
-  const [limit, setLimit] = useState(RENDER_STEP);
+  /** the items rendered: only those near the viewport (see listWindow.ts), spacers stand for the rest */
+  const [win, setWin] = useState<Win>({ first: 0, last: FIRST_WINDOW });
+  /** measured from the rows on screen: row pitch (height plus gap) and items per row */
+  const [pitch, setPitch] = useState(estimatedFileRowHeight);
+  const [perRow, setPerRow] = useState(1);
+  const geoRef = useRef<Geometry & { edge: number; gap: number }>({ offset: 0, pitch: estimatedFileRowHeight, perRow: 1, edge: 0, gap: 0 });
+  /** grid view: tiles differ in height (one or two lines of name), so every tile gets the tallest height seen at this tile width and rows are uniform */
+  const tileBox = useRef({ width: 0, height: 0 });
   const hidden = preferences.hidden;
   const sort = preferences.sort;
   const [sel, setSel] = useState<Set<string>>(() => new Set(leaf.sels ?? (leaf.sel && !leaf.ns ? [leaf.sel] : [])));
@@ -305,7 +312,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       setEntries([]);
       setGit(null);
       setLoading(true);
-      setLimit(RENDER_STEP);
+      setWin({ first: 0, last: FIRST_WINDOW });
     }
     // A folder just opened in the default order shows its rows as they stream in (they arrive in that order, so nothing moves);
     // a refresh, or another sort order, waits for the whole listing and swaps it in at once.
@@ -816,6 +823,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const itemProps = (en: Entry, isDir: boolean, cls: string, index: number, role: "row" | "option") => ({
     id: rowId(listId, index),
     role,
+    ...(role === "option" && tileBox.current.height ? { style: { height: Math.ceil(tileBox.current.height) } } : {}),
+    ...(role === "row" ? { "aria-rowindex": index + 2 } : { "aria-setsize": visible.length, "aria-posinset": index + 1 }),
     "aria-selected": sel.has(en.path),
     "data-path": en.path,
     className: cls + (sel.has(en.path) ? "sel " : "") + (cursor === en.path ? (sel.has(en.path) ? "cur " : "cur act ") : "") + (over === en.path ? "drop" : ""),
@@ -930,24 +939,86 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     onFocus();
     if (parentPath !== null) navigate(node, parentPath);
   };
-  const rowsShown = visible.length > limit ? visible.slice(0, limit) : visible;
-  const remaining = visible.length - rowsShown.length;
-  const moreEl = useRef<HTMLElement | null>(null);
+  // ---- windowed rendering: only the rows near the viewport are in the DOM ----
+  const grid = view === "grid";
+  /** grid view: the "up" tile and the new-item tile sit in the first cells, in front of the entries */
+  const leadCells = grid ? (showUp ? 1 : 0) + (createInput ? 1 : 0) : 0;
+  const totalCells = visible.length + leadCells;
+  const windowOpts = grid ? { overscan: OVERSCAN_TILE_ROWS, chunk: CHUNK_TILE_ROWS } : { overscan: OVERSCAN_ROWS, chunk: CHUNK_ROWS };
+  const totalRef = useRef(0);
+  totalRef.current = totalCells;
+  const updateWin = useCallback(() => {
+    const sc = listRef.current;
+    if (!sc) return;
+    const g = geoRef.current;
+    const next = windowFor(totalRef.current, sc.scrollTop, sc.clientHeight, g, windowOpts);
+    setWin((w) => (w.first === next.first && w.last === next.last ? w : next));
+  }, [grid]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Measure what is on screen after every render: the row pitch follows the presentation settings and the column widths without any
+  // fixed number here. State changes only when a measurement changes, so this settles in one more pass.
+  useLayoutEffect(() => {
+    const sc = listRef.current;
+    if (!sc) return;
+    // Window bounds first: an empty window has no rows to measure, and would otherwise never grow when the entries arrive.
+    const top = sc.getBoundingClientRect().top - sc.scrollTop;
+    const g = geoRef.current;
+    if (grid) {
+      const box = sc.querySelector<HTMLElement>(".fp-grid");
+      const tiles = Array.from(sc.querySelectorAll<HTMLElement>(".fp-grid > .tile:not(.skel)"));
+      if (!box || !tiles.length) return updateWin(); // nothing to measure yet: keep the last geometry, but the window still follows the item count
+      const cs = getComputedStyle(box);
+      const gap = parseFloat(cs.rowGap) || 0;
+      const t0 = tiles[0]!.getBoundingClientRect();
+      const across = Math.max(1, tiles.findIndex((t) => t.getBoundingClientRect().top - t0.top > 1) < 0 ? tiles.length : tiles.findIndex((t) => t.getBoundingClientRect().top - t0.top > 1));
+      g.offset = box.getBoundingClientRect().top - top + (parseFloat(cs.paddingTop) || 0);
+      const w = Math.round(t0.width);
+      if (tileBox.current.width !== w) tileBox.current = { width: w, height: 0 };
+      tileBox.current.height = Math.max(tileBox.current.height, ...tiles.map((t) => Math.max(t.scrollHeight, t.getBoundingClientRect().height)));
+      g.pitch = Math.max(1, Math.ceil(tileBox.current.height) + gap);
+      g.perRow = across;
+      g.gap = gap;
+      g.edge = 0;
+    } else {
+      const rows = Array.from(sc.querySelectorAll<HTMLElement>("tbody > tr[data-path]"));
+      const spacer = sc.querySelector<HTMLElement>("tr[data-wtop]");
+      if (!rows.length || !spacer) return updateWin();
+      const r0 = rows[0]!.getBoundingClientRect();
+      g.pitch = Math.max(1, rows.length > 1 ? rows[1]!.getBoundingClientRect().top - r0.top : r0.height);
+      g.offset = spacer.getBoundingClientRect().top - top;
+      g.perRow = 1;
+      g.gap = 0;
+      g.edge = sc.querySelector("thead")?.getBoundingClientRect().height ?? 0;
+    }
+    setPitch((p) => (Math.abs(p - g.pitch) < 0.01 ? p : g.pitch));
+    setPerRow((n) => (n === g.perRow ? n : g.perRow));
+    updateWin();
+  });
+  // The viewport can change size (window, splitter, side pane) without a scroll.
   useEffect(() => {
-    const el = moreEl.current;
-    if (!el || remaining <= 0 || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver((ents) => ents.some((x) => x.isIntersecting) && setLimit((l) => l + RENDER_STEP * 2), { root: el.closest(".fp-scroll"), rootMargin: "800px" });
-    io.observe(el);
-    return () => io.disconnect();
-  }, [remaining > 0, limit, view]); // eslint-disable-line react-hooks/exhaustive-deps
-  // The cursor (keyboard End/PageDown, a revealed hit) may be past the rows rendered so far.
-  useEffect(() => {
-    if (!cursor) return;
-    const i = visible.findIndex((x) => x.path === cursor);
-    if (i >= limit) setLimit(i + RENDER_STEP);
-  }, [cursor, visible, limit]);
+    const sc = listRef.current;
+    if (!sc || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => updateWin());
+    ro.observe(sc);
+    return () => ro.disconnect();
+  }, [updateWin, listRef.current]); // eslint-disable-line react-hooks/exhaustive-deps
+  const scrollFrame = useRef(0);
+  const onListScroll = () => {
+    if (scrollFrame.current) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = 0;
+      updateWin();
+    });
+  };
+  useEffect(() => () => cancelAnimationFrame(scrollFrame.current), []);
+  /** entries rendered: cells [first, last) of the grid, minus the leading tiles, or items [first, last) of the list */
+  const dataFrom = Math.max(0, win.first - leadCells);
+  const dataTo = Math.min(visible.length, Math.max(0, win.last - leadCells));
+  const rowsShown = dataTo > dataFrom ? visible.slice(dataFrom, dataTo) : [];
+  const leadShown = win.first === 0;
+  const aboveRows = Math.floor(win.first / perRow);
+  const belowRows = Math.max(0, Math.ceil(totalCells / perRow) - Math.ceil(win.last / perRow));
   const cursorAt = cursor ? rowsShown.findIndex((x) => x.path === cursor) : -1;
-  const activeRowId = cursorAt >= 0 ? rowId(listId, cursorAt) : undefined;
+  const activeRowId = cursorAt >= 0 ? rowId(listId, dataFrom + cursorAt) : undefined;
   const announced = listAnnouncement({ loading, streaming, total: entries.length, shown: visible.length, filtered: !!filter.trim(), error: !!err });
   // Counts change while a filter is typed: settle for a moment so a screen reader says the last one, not each.
   const [listSays, setListSays] = useState("");
@@ -968,6 +1039,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         aria-busy={loading}
         aria-activedescendant={activeRowId}
         aria-label={`Files in ${path} on ${node}. Arrow keys select, Enter opens.`}
+        onScroll={onListScroll}
+        {...(view !== "grid" ? { "aria-rowcount": visible.length + 1 } : {})}
         onFocus={(e) => {
           listHadFocus.current = true;
           // Tabbing into the list selects the first entry so the arrow keys have somewhere to start. A mouse click
@@ -992,7 +1065,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       >
         {view === "grid" ? (
           <div className="fp-grid" role="presentation">
-            {showUp && (
+            {showUp && leadShown && (
               // Not an option of the list (it is not a file): Backspace and Alt+Up do the same from the keyboard.
               <div className={"tile up" + (over === UP_DROP ? " drop" : "")} aria-hidden="true" onClick={goUp} {...upDrop}>
                 <div className="tile-img"><span className="tile-ico"><CornerLeftUp /></span></div>
@@ -1000,16 +1073,17 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
               </div>
             )}
             {loading && <SkeletonTiles />}
-            {createInput && (
+            {createInput && leadShown && (
               <div className="tile creating">
                 <div className="tile-img"><span className="tile-ico">{creating === "file" ? <Ic.FilePlus /> : <Ic.FolderPlus />}</span></div>
                 <div className="tile-name">{createInput}</div>
               </div>
             )}
+            {aboveRows > 0 && <div data-wtop aria-hidden="true" className="wspace" style={{ gridColumn: "1 / -1", pointerEvents: "none", height: spacerHeight(aboveRows, pitch, geoRef.current.gap) }} />}
             {rowsShown.map((en, i) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
-                <div key={en.path} aria-label={`${entryKind(en)} ${en.name}`} {...itemProps(en, isDir, "tile ", i, "option")}>
+                <div key={en.path} aria-label={`${entryKind(en)} ${en.name}`} {...itemProps(en, isDir, "tile ", dataFrom + i, "option")}>
                   <Thumb node={node} entry={en} isDir={isDir} />
                   {renaming === en.path ? (
                     // no Tip here: its wrapper clips overflow and its bubble would cover the editor
@@ -1021,7 +1095,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 </div>
               );
             })}
-            {remaining > 0 && <div ref={(el) => void (moreEl.current = el)} className="more-tiles" aria-hidden="true" />}
+            {belowRows > 0 && <div aria-hidden="true" className="wspace" style={{ gridColumn: "1 / -1", pointerEvents: "none", height: spacerHeight(belowRows, pitch, geoRef.current.gap) }} />}
           </div>
         ) : (
         <table className="ft cols" role="presentation" style={tableStyle(columns.state, gitCol)}>
@@ -1058,10 +1132,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 </td>
               </tr>
             )}
+            <tr data-wtop role="row" aria-hidden="true" className="wspace" style={{ height: spacerHeight(aboveRows, pitch), pointerEvents: "none" }}>
+              <td role="gridcell" colSpan={cellCount(columns.cols, gitCol)} style={{ height: spacerHeight(aboveRows, pitch), padding: 0, border: 0, lineHeight: 0 }} />
+            </tr>
             {rowsShown.map((en, i) => {
               const isDir = !!(en.type === "dir" || en.linkDir);
               return (
-                <tr key={en.path} {...itemProps(en, isDir, "", i, "row")}>
+                <tr key={en.path} {...itemProps(en, isDir, "", dataFrom + i, "row")}>
                   <td role="gridcell" className={"name" + (renaming === en.path ? " renaming" : "")}>
                     <FileIcon className="ico" dir={isDir} type={en.type} />
                     <span className="visually-hidden">{entryKind(en)}, </span>
@@ -1082,9 +1159,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
                 </tr>
               );
             })}
-            {remaining > 0 && (
-              <tr ref={(el) => void (moreEl.current = el)} role="row" className="more" aria-hidden="true" style={{ height: remaining * estimatedFileRowHeight }}>
-                <td colSpan={cellCount(columns.cols, gitCol)} />
+            {belowRows > 0 && (
+              <tr role="row" aria-hidden="true" className="wspace" style={{ height: spacerHeight(belowRows, pitch), pointerEvents: "none" }}>
+                <td role="gridcell" colSpan={cellCount(columns.cols, gitCol)} style={{ height: spacerHeight(belowRows, pitch), padding: 0, border: 0, lineHeight: 0 }} />
               </tr>
             )}
           </tbody>
@@ -1103,23 +1180,41 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     setAnchor(p);
     setCursor(p);
   };
+  /** Scroll so entry `at` (index in the filtered listing) is in view: from the rendered row when there is one, else from the measured geometry. */
+  const scrollEntryIntoView = (at: number, block: "nearest" | "center") => {
+    const sc = listRef.current;
+    if (!sc || at < 0) return;
+    const g = geoRef.current;
+    const row = sc.querySelector<HTMLElement>(`[data-path="${CSS.escape(visible[at]?.path ?? "")}"]`);
+    // A table row at the top edge would sit under the sticky header: the geometry below accounts for the header too.
+    if (row && block === "nearest" && at > 0) {
+      if (row.tagName === "TR") revealRow(sc, row);
+      else row.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    // the first entry: show everything above it too (the "up" row)
+    const target = at === 0 && block === "nearest" ? 0 : scrollTopFor(at + leadCells, sc.scrollTop, sc.clientHeight, g, g.edge, block);
+    if (target !== null) sc.scrollTop = target;
+  };
   useEffect(() => {
     if (!cursor) return;
-    const row = secRef.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(cursor)}"]`);
-    if (!row) return;
-    // A table row at the top edge would sit under the sticky header: scroll by the header's height as well.
-    const scroller = row.closest<HTMLElement>(".fp-scroll");
-    if (scroller && row.tagName === "TR") revealRow(scroller, row);
-    else row.scrollIntoView({ block: "nearest" });
-  }, [cursor]);
+    scrollEntryIntoView(visible.findIndex((x) => x.path === cursor), "nearest");
+  }, [cursor]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The row pitch is measured from what is on screen and can change as tiles load: keep the active entry where the user put it.
+  const pitchSeen = useRef(pitch);
+  useEffect(() => {
+    if (pitchSeen.current === pitch) return;
+    pitchSeen.current = pitch;
+    if (cursor && listHadFocus.current) scrollEntryIntoView(visible.findIndex((x) => x.path === cursor), "nearest");
+  }, [pitch]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const p = scrollTo.current;
     if (!p || !entries.some((e) => e.path === p)) return;
     const at = visible.findIndex((e) => e.path === p);
-    if (at >= limit) return setLimit(at + RENDER_STEP); // render the target first; this effect runs again
+    if (at < 0) return;
     scrollTo.current = null;
-    setTimeout(() => secRef.current?.querySelector(`[data-path="${CSS.escape(p)}"]`)?.scrollIntoView({ block: "center" }), 0);
-  }, [entries, limit]); // eslint-disable-line react-hooks/exhaustive-deps
+    setTimeout(() => scrollEntryIntoView(at, "center"), 0);
+  }, [entries, visible]); // eslint-disable-line react-hooks/exhaustive-deps
   const toOther = (op: "copy" | "move") => {
     if (!next) return onStatus("Open a second panel first (split button)");
     const refs = combine(selEntries);
