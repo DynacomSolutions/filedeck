@@ -177,12 +177,12 @@ interface Wire {
   g?: { l: [string, string]; r: [string, string]; a: string; b: string; u?: string; f?: string; m?: string; t?: number; c?: 1; h?: 1; i?: string; x?: string; d?: number; n?: number; p?: string };
 }
 
-const toWire = (t: Tree): WTree => {
-  if (t.kind === "split") return { i: t.id, d: t.dir === "horizontal" ? "h" : "v", k: t.children.map(toWire), ...(t.sizes ? { z: t.sizes.map((x) => Math.round(x * 10) / 10) } : {}) };
+const toWire = (t: Tree, withSels = true): WTree => {
+  if (t.kind === "split") return { i: t.id, d: t.dir === "horizontal" ? "h" : "v", k: t.children.map((c) => toWire(c, withSels)), ...(t.sizes ? { z: t.sizes.map((x) => Math.round(x * 10) / 10) } : {}) };
   const w: WLeaf = { i: t.id, n: t.node, p: t.path };
   if (t.sel) w.s = t.sel;
   if (t.ns) w.x = 1;
-  if (t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
+  if (withSels && t.sels && t.sels.length > 1) w.m = t.sels.slice(0, MAX_SELS);
   if (t.sort) w.o = `${t.sort.key}:${t.sort.asc ? "a" : "d"}`;
   if (typeof t.hidden === "boolean") w.h = t.hidden ? 1 : 0;
   if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
@@ -208,13 +208,40 @@ const toWire = (t: Tree): WTree => {
   return w;
 };
 
+/**
+ * Longest query string the address keeps. A reload sends the whole URL to the hub,
+ * and a request line past the server's header limit is refused (431), so a long
+ * selection or sync plan must not make the page unreloadable.
+ */
+export const MAX_URL_LENGTH = 6000;
+
+/**
+ * The URL for a state. When it would be too long, the bulkiest optional parts are
+ * left out in turn (sync plan paths, then multi-row selections, then whole-panel
+ * selection); the rest of the layout always stays.
+ */
 export function encodeState(s: AppState): string {
-  const w: Wire = { t: toWire(s.tree), a: s.active };
+  const stages: { sync: boolean; sels: boolean; panels: boolean }[] = [
+    { sync: true, sels: true, panels: true },
+    { sync: false, sels: true, panels: true },
+    { sync: false, sels: false, panels: true },
+    { sync: false, sels: false, panels: false },
+  ];
+  let url = "";
+  for (const st of stages) {
+    url = encodeWith(s, st);
+    if (url.length <= MAX_URL_LENGTH) break;
+  }
+  return url;
+}
+
+function encodeWith(s: AppState, keep: { sync: boolean; sels: boolean; panels: boolean }): string {
+  const w: Wire = { t: toWire(s.tree, keep.sels), a: s.active };
   if (s.trash) w.r = [s.trash.node, s.trash.volume];
-  if (s.panelSel?.length) w.ps = s.panelSel;
+  if (keep.panels && s.panelSel?.length) w.ps = s.panelSel;
   if (s.settings) w.se = 1;
   if (s.help) w.sh = 1;
-  if (s.folder && s.sync?.paths.length) w.sy = [s.sync.action, s.sync.paths];
+  if (keep.sync && s.folder && s.sync?.paths.length) w.sy = [s.sync.action, s.sync.paths];
   if (s.diff) w.f = [s.diff.left.rev ? [s.diff.left.node, s.diff.left.path, s.diff.left.rev] : [s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
   if (s.folder) {
     const { left, right, opts: o, preset, lp, rp, rel, hide } = s.folder;

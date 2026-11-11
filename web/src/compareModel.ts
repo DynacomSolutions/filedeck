@@ -147,3 +147,33 @@ export function flattenFolders(folders: ReadonlyMap<string, FolderData>, rel: st
   walk(rel, 0);
   return out;
 }
+
+/* ---------- range selection and double-submit guard ---------- */
+
+/**
+ * The paths from `anchor` to `to` inclusive (either order) in the visible row order; null when
+ * either end is not a visible row. The anchor stays where the selection started, so repeated
+ * Shift+Arrow presses keep growing the same range.
+ */
+export function rangeBetween(order: readonly string[], anchor: string | null, to: string): string[] | null {
+  if (anchor === null) return null;
+  const a = order.indexOf(anchor);
+  const b = order.indexOf(to);
+  if (a < 0 || b < 0) return null;
+  return order.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+
+/**
+ * Runs one job at a time: a call made while the previous one is still pending is ignored
+ * (returns undefined). Used so a second click on "Run" cannot start the same sync twice.
+ */
+export function singleFlight(): <T>(job: () => Promise<T>) => Promise<T> | undefined {
+  let busy = false;
+  return (job) => {
+    if (busy) return undefined;
+    busy = true;
+    return job().finally(() => {
+      busy = false;
+    });
+  };
+}
