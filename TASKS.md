@@ -170,12 +170,12 @@ ETA: 2026-11-12 16:00 ICT
 | 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | in_progress | claude-20261112-rv-hub | rv-request-guard | | 2026-11-12 09:00 ICT | Found in review; includes request body size limits |
 | 104 | Read-only prefixes also protect their parent folders and trash restore targets | todo | | rv-readonly-cover | 13.103 | | Found in review |
 | 105 | Hub sends security headers, optional host allowlist, compressed and cacheable static assets | todo | | rv-hub-headers-static | 13.104 | | Found in review; missing assets answer 404 |
-| 106 | Git reads ignore programs named in repository config and stay inside the root | in_progress | claude-20261112-rv-search-git | rv-git-config | | 2026-11-12 08:30 ICT | Found in review |
+| 106 | Git reads ignore programs named in repository config and stay inside the root | in_review | claude-20261112-rv-search-git | rv-git-config | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/181 |
 | 107 | Search and glob patterns cannot block the agent | todo | | rv-search-patterns | | | Found in review; also multi-byte matches on chunk boundaries |
 | 108 | Archive extraction stages and merges through pinned directory descriptors | todo | | rv-extract-pinned | 14.114 | | Found in review |
 | 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | todo | | rv-pinned-walks | 14.113, 14.116 | | Found in review |
-| 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_progress | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 09:00 ICT | Found in review |
-| 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | in_progress | claude-20261112-rv-chart | rv-chart-workflows | | 2026-11-12 09:00 ICT | Found in review |
+| 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_review | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/182 |
+| 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | in_review | claude-20261112-rv-chart | rv-chart-workflows | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/184 |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
@@ -183,8 +183,8 @@ ETA: 2026-11-12 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 112 | Transfers page through large folders and keep the source when anything was skipped | in_progress | claude-20261112-rv-transfers | rv-transfer-paging | | 2026-11-12 09:00 ICT | Found in review; also long agent calls, paused jobs, links |
-| 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | in_progress | claude-20261112-rv-fsops | rv-trash | | 2026-11-12 09:00 ICT | Found in review |
-| 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | in_progress | claude-20261112-rv-archives | rv-archives | | 2026-11-12 09:00 ICT | Found in review |
+| 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | in_review | claude-20261112-rv-fsops | rv-trash | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/180 |
+| 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | in_review | claude-20261112-rv-archives | rv-archives | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/183 |
 | 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | todo | | rv-sources-streams | 13.110 | | Found in review |
 | 116 | Cross-filesystem moves keep times and owners; copies use a temporary name; long names | todo | | rv-move-copy-names | 14.113 | | Found in review |
 | 117 | Compare cache and hash queue recover after a folder is recreated or a compare is cancelled | todo | | rv-compare-cache | 14.112 | | Found in review |
