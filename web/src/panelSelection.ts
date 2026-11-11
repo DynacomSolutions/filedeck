@@ -42,3 +42,9 @@ export function comparePairs(selected: readonly string[], layoutOrder: readonly 
 }
 
 const unique = (xs: string[]): string[] => [...new Set(xs)];
+
+/**
+ * "Select all" selects what the panel shows: the rows left after the name filter, never the files it hides.
+ * (A bulk action on a selection the user cannot see is how the wrong files get trashed.)
+ */
+export const selectAllPaths = (shown: readonly { path: string }[]): string[] => shown.map((e) => e.path);

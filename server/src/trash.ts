@@ -54,34 +54,32 @@ async function readItems(dir: string): Promise<{ items: TrashItem[]; truncated: 
     }
   }
   const items: TrashItem[] = [];
-  for (let i = 0; i < slice.length; i += 32) {
-    const got = await Promise.all(
-      slice.slice(i, i + 32).map(async (id): Promise<TrashItem> => {
-        try {
-          const m = JSON.parse(await fs.readFile(path.join(dir, id, "meta.json"), "utf8")) as ops.TrashMeta;
-          if (typeof m.name !== "string" || typeof m.originalPath !== "string") throw new Error("bad meta");
-          return { id, name: m.name, originalPath: m.originalPath, deletedAt: Number(m.deletedAt) || 0, type: m.type, size: Number(m.size) || 0 };
-        } catch {
-          const st = await fs.lstat(path.join(dir, id)).catch(() => null);
-          return { id, name: id, originalPath: "", deletedAt: st?.mtimeMs ?? 0, type: "other", size: 0, orphan: true };
-        }
-      }),
-    );
-    items.push(...got);
-  }
+  for (let i = 0; i < slice.length; i += 32) items.push(...(await Promise.all(slice.slice(i, i + 32).map((id) => readItem(dir, id)))));
   return { items, truncated };
+}
+
+async function readItem(dir: string, id: string): Promise<TrashItem> {
+  try {
+    const m = JSON.parse(await fs.readFile(path.join(dir, id, "meta.json"), "utf8")) as ops.TrashMeta;
+    if (typeof m.name !== "string" || typeof m.originalPath !== "string") throw new Error("bad meta");
+    return { id, name: m.name, originalPath: m.originalPath, deletedAt: Number(m.deletedAt) || 0, type: m.type, size: Number(m.size) || 0 };
+  } catch {
+    const st = await fs.lstat(path.join(dir, id)).catch(() => null);
+    return { id, name: id, originalPath: "", deletedAt: st?.mtimeMs ?? 0, type: "other", size: 0, orphan: true };
+  }
 }
 
 /** Every volume of this node that has a trash store: the root plus each real mount point. */
 export async function listTrash(root: string, procMounts: string): Promise<TrashVolume[]> {
   const text = await readMountTable(root, procMounts); // "" when unreadable: root only
   const cands = new Set<string>(["/"]);
-  for (const m of parseMounts(text)) cands.add(m.mountpoint);
+  // Every real filesystem, not only the ones the drive list shows: an item trashed on a hidden volume lives there.
+  for (const m of parseMounts(text, { all: true })) cands.add(m.mountpoint);
   const out: TrashVolume[] = [];
   for (const volume of [...cands].sort()) {
     try {
       const v = resolveWrite(root, volume);
-      const net = [...parseMounts(text)].find((m) => m.mountpoint === volume);
+      const net = [...parseMounts(text, { all: true })].find((m) => m.mountpoint === volume);
       const dir = path.join(v.real, TRASH_DIR);
       const st = await (net && networkKind(net.fstype) ? withTimeout(fs.lstat(dir), 2000) : fs.lstat(dir));
       if (!st.isDirectory()) continue;
@@ -170,11 +168,11 @@ export async function emptyTrash(root: string, volume: string, olderThanDays?: n
   if (olderThanDays !== undefined && !(olderThanDays >= 0)) throw bad("olderThanDays must be >= 0");
   let removed = 0;
   let failed = 0;
-  const { items } = await readItems(dir);
-  const keep = new Set(items.filter((i) => i.deletedAt > cutoff).map((i) => i.id));
+  // Every item is judged on its own age, however many there are (the listing is capped, the sweep is not).
   for await (const names of namesOf(dir, 256, (n) => ID.test(n))) {
-    for (const id of names) {
-      if (keep.has(id)) continue;
+    const ages = cutoff === Infinity ? null : await Promise.all(names.map((id) => readItem(dir, id)));
+    for (const [k, id] of names.entries()) {
+      if (ages && (ages[k] as TrashItem).deletedAt > cutoff) continue;
       try {
         await fs.rm(path.join(dir, id), { recursive: true, force: true });
         removed++;

@@ -152,3 +152,17 @@ export function planSync(rows: PlanRow[], selected: ReadonlySet<string>, action:
 }
 
 export const joinRel = (base: string, rel: string) => (base === "/" ? "" : base.replace(/\/+$/, "")) + "/" + rel;
+
+/**
+ * Which rows a sync acts on. A hand-made selection of a folder means everything under it, so the
+ * rows below each selected top folder join in. An exact selection (every differing row of the
+ * whole tree, from "Select differing") is already complete: nothing below it is added, so identical
+ * files inside a differing folder are left alone.
+ */
+export function pickedForPlan(rows: readonly PlanRow[], chosen: readonly string[], exact: boolean): Set<string> {
+  const picked = new Set(chosen);
+  if (exact) return picked;
+  const tops = chosen.filter((p) => !chosen.some((q) => q !== p && p.startsWith(q + "/")));
+  for (const r of rows) if (tops.some((t) => r.p === t || r.p.startsWith(t + "/"))) picked.add(r.p);
+  return picked;
+}

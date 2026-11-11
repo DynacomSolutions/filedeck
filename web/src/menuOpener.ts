@@ -54,3 +54,29 @@ export function swallowNextClick(opener: Element, win: Window = window, ttlMs = 
   const timer = setTimeout(off, ttlMs);
   win.addEventListener("click", on, true);
 }
+
+/** Pure: where focus goes when a menu closes. The trigger if there is one, else whatever held focus when the menu opened (the file list after Shift+F10 or a right-click); nothing if that was the page body. */
+export function resolveReturnFocus(opener: Element | null, active: Element | null, body: Element | null, pressed: Element | null = null): Element | null {
+  if (opener) return opener;
+  if (active && active !== body) return active;
+  return pressed; // a right-click on content that does not take focus: the focusable container it happened in
+}
+
+/** Pure: the nearest focusable ancestor of a fresh secondary-button press, if there is one. */
+export function pressedFocusable(press: LastPress | null, now: number, maxAgeMs = 1000): Element | null {
+  if (!press || now - press.time > maxAgeMs || press.button !== 2) return null;
+  return press.target?.closest?.("[tabindex],button,a[href],input,select,textarea") ?? null;
+}
+
+/**
+ * Pure: the element to focus on closing a menu. The one captured at open time when it is still in the page; when the view re-rendered
+ * meanwhile (the file list is rebuilt after a right-click) the connected element carrying the same label and role.
+ */
+export function liveReturnTarget(el: Element | null, all: () => Iterable<Element>): Element | null {
+  if (!el) return null;
+  if (el.isConnected) return el;
+  const label = el.getAttribute("aria-label");
+  if (!label) return null;
+  for (const c of all()) if (c.getAttribute("aria-label") === label && c.getAttribute("role") === el.getAttribute("role")) return c;
+  return null;
+}

@@ -119,7 +119,27 @@ const post = <T,>(node: string, op: string, body: unknown) =>
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-  }).then((r) => j<T>(r));
+  })
+    .then((r) => j<T>(r))
+    .then((v) => (fsChanged(node), v));
+
+/** Node names that are network sources (they push no change events, so other panels are told by hand). */
+const sourceNames = new Set<string>();
+export const noteSources = (nodes: { name: string; kind?: string }[]) => {
+  sourceNames.clear();
+  for (const n of nodes) if (n.kind === "source") sourceNames.add(n.name);
+};
+const fsListeners = new Set<(node?: string) => void>();
+/** Fires after a change this tab made to a folder tree (create, rename, delete, upload, job end); `node` is absent when unknown. */
+export const onFsChanged = (fn: (node?: string) => void) => {
+  fsListeners.add(fn);
+  return () => void fsListeners.delete(fn);
+};
+/** A change was made on `node`: refresh listings that would otherwise stay stale (the sidebar tree; every panel for a network source). */
+export function fsChanged(node?: string) {
+  fsListeners.forEach((f) => f(node));
+  if (node !== undefined && sourceNames.has(node)) emitOpFinished();
+}
 
 export class ConflictError extends Error {
   constructor(
@@ -184,6 +204,19 @@ export const pdfDecryptedUrl = (node: string, path: string) => `${nodeBase(node)
 /** Streamed zip of several direct children of `dir` (files and folders). */
 export const zipUrl = (node: string, dir: string, names: string[]) =>
   `${nodeBase(node)}/api/fs/zip?dir=${enc(dir)}${names.map((n) => `&name=${enc(n)}`).join("")}`;
+
+/** Longest zip download URL (query form) that proxies and servers accept everywhere; longer selections are sent in a POST body. */
+export const ZIP_URL_LIMIT = 4000;
+export const zipFitsInUrl = (node: string, dir: string, names: string[]) => zipUrl(node, dir, names).length <= ZIP_URL_LIMIT;
+/**
+ * A zip of several items for a selection too long for a URL: the name list is posted for a one-use,
+ * short-lived ticket, and the returned URL is a plain GET the browser's download manager streams to disk.
+ */
+export async function zipTicketUrl(node: string, dir: string, names: string[]): Promise<string> {
+  const r = await fetch(`${nodeBase(node)}/api/fs/zip-ticket`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir, names }) });
+  const { id } = await j<{ id: string }>(r);
+  return `${nodeBase(node)}/api/fs/zip?ticket=${enc(id)}`;
+}
 
 const postJob = (node: string, kind: string, body: unknown, password?: Pw) =>
   fetch(`${nodeBase(node)}/api/jobs/${kind}`, {
@@ -255,7 +288,10 @@ export const onOpFinished = (fn: (j?: OpJob) => void) => {
 };
 /** Jobs this tab started: if one finishes between two polls the panels still refresh. */
 export const startedOps = new Set<string>();
-export const emitOpFinished = (j?: OpJob) => opFinishListeners.forEach((f) => f(j));
+export const emitOpFinished = (j?: OpJob) => {
+  opFinishListeners.forEach((f) => f(j));
+  fsListeners.forEach((f) => f());
+};
 const opReq = (path: string, method = "GET", body?: unknown) =>
   fetch(`/api/ops/jobs${path}`, { method, ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}) });
 
@@ -403,7 +439,9 @@ export interface TrashResult {
 }
 export type TrashConflict = "fail" | "rename" | "replace";
 const trashPost = <T,>(node: string, op: string, body: unknown) =>
-  fetch(`${nodeBase(node)}/api/trash/${op}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => j<T>(r));
+  fetch(`${nodeBase(node)}/api/trash/${op}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+    .then((r) => j<T>(r))
+    .then((v) => (fsChanged(node), v));
 
 export interface Props {
   name: string;
@@ -520,13 +558,16 @@ export const api = {
       const b = (await r.json().catch(() => ({}))) as { error?: string; etag?: string };
       throw new ConflictError(b.error ?? "conflict", b.etag ?? "");
     }
-    return j<WriteResult>(r);
+    const out = await j<WriteResult>(r);
+    fsChanged(node);
+    return out;
   },
   /** Cluster nodes first, then the network sources (marked kind: "source"). */
   nodes: () =>
     fetch("/api/nodes")
       .then((r) => j<{ nodes: NodeInfo[]; sources?: NodeInfo[] }>(r))
-      .then((r) => ({ nodes: [...r.nodes.map((n) => ({ ...n, kind: "node" as const })), ...(r.sources ?? []).map((s) => ({ ...s, kind: "source" as const }))] })),
+      .then((r) => ({ nodes: [...r.nodes.map((n) => ({ ...n, kind: "node" as const })), ...(r.sources ?? []).map((s) => ({ ...s, kind: "source" as const }))] }))
+      .then((r) => (noteSources(r.nodes), r)),
   mounts: (node: string) => fetch(`${nodeBase(node)}/api/mounts`).then((r) => j<{ mounts: Mount[] }>(r)),
   /** Stored sizes of a folder and its sub-folders; null (204) when the store has nothing. Never starts a scan. */
   duCached: (node: string, path: string) =>

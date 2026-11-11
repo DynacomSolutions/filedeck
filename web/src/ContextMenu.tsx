@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Tip } from "./Tooltip";
-import { isOpenerPress, lastPress, resolveOpener, swallowNextClick, trackPresses } from "./menuOpener";
+import { isOpenerPress, lastPress, liveReturnTarget, pressedFocusable, resolveOpener, resolveReturnFocus, swallowNextClick, trackPresses } from "./menuOpener";
 import { Check, Eraser, Archive, ChevronRight, CircleX, ClipboardPaste, Copy, CopyPlus, Diff, Download, FilePen, FilePlus, FolderInput, FolderOpen, FolderPlus, GitCompareArrows, GitPullRequest, Info, Link, LogOut, MousePointer2, PackageOpen, Pencil, Eye, RefreshCw, Scissors, SquareCheck, Star, StarOff, KeyRound, Trash2, Upload, X, ArrowLeft, ArrowRight, Columns2, type LucideIcon } from "lucide-react";
 
 export type MenuItem =
@@ -37,7 +37,7 @@ const ICONS: [RegExp, LucideIcon][] = [
 const iconFor = (label: string): LucideIcon => ICONS.find(([re]) => re.test(label))?.[1] ?? MousePointer2;
 const actionable = (items: MenuItem[]) => items.map((it, i) => [it, i] as const).filter((p): p is readonly [Item, number] => p[0] !== "sep" && !p[0].disabled).map((p) => p[1]);
 
-function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: MenuItem[]; x: number; y: number; onClose: () => void; depth?: number; onLeft?: () => void; onEscape?: () => void }) {
+function Menu({ items, x, y, onClose, depth = 0, onLeft, onRestore, anchor, label }: { items: MenuItem[]; x: number; y: number; onClose: () => void; depth?: number; onLeft?: () => void; /** put focus back where the user was, before the menu unmounts */ onRestore?: () => void; /** submenus: the row that opened it */ anchor?: DOMRect; label?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
   const [cur, setCur] = useState<number>(() => actionable(items)[0] ?? -1);
@@ -45,22 +45,23 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
 
   useLayoutEffect(() => {
     const el = ref.current;
-    if (!el || depth > 0) return;
+    if (!el) return;
     const r = el.getBoundingClientRect();
-    setPos({ x: Math.max(4, Math.min(x, window.innerWidth - r.width - 4)), y: Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) });
-  }, [x, y, items]);
+    const top = anchor ? anchor.top - 5 : y;
+    // a submenu opens to the right of its row, or to the left when that does not fit
+    const left = !anchor ? x : anchor.right - 2 + r.width + 4 <= window.innerWidth ? anchor.right - 2 : anchor.left - r.width + 2;
+    setPos({ x: Math.max(4, Math.min(left, window.innerWidth - r.width - 4)), y: Math.max(4, Math.min(top, window.innerHeight - r.height - 4)) });
+  }, [x, y, items, anchor]);
   useLayoutEffect(() => {
     if (cur < 0) ref.current?.focus();
     else ref.current?.querySelector<HTMLElement>(`[data-menu-index="${cur}"]`)?.focus();
   }, [cur]);
 
-  const flip = () => {
-    const r = ref.current?.getBoundingClientRect();
-    return r ? r.right + 260 > window.innerWidth : false;
-  };
   const run = (it: Item) => {
     if (it.disabled) return;
     if (it.sub) return setOpenSub(items.indexOf(it));
+    // focus goes back first, so a dialog the item opens remembers the list and not the vanishing menu item
+    onRestore?.();
     onClose();
     it.onSelect?.();
   };
@@ -82,8 +83,8 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
     else if (e.key === "ArrowRight") item?.sub && setOpenSub(cur);
     else if (e.key === "ArrowLeft") (depth > 0 ? onLeft?.() : undefined);
     else if (e.key === "Escape" || e.key === "Tab") {
+      onRestore?.();
       onClose();
-      if (e.key === "Escape") onEscape?.();
     }
     else if (e.key.length === 1) {
       const k = e.key.toLowerCase();
@@ -95,7 +96,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
   };
 
   const body = (
-    <div ref={ref} className={"ctx" + (depth ? " ctx-sub" : "")} role="menu" tabIndex={-1} style={depth ? undefined : { left: pos.x, top: pos.y }} onKeyDown={onKey} onContextMenu={(e) => e.preventDefault()} onMouseDown={(e) => e.stopPropagation()}>
+    <div ref={ref} className={"ctx" + (depth ? " ctx-sub" : "")} role="menu" tabIndex={-1} aria-label={label} style={{ left: pos.x, top: pos.y }} onKeyDown={onKey} onContextMenu={(e) => e.preventDefault()} onMouseDown={(e) => e.stopPropagation()}>
       {items.map((it, i) =>
         it === "sep" ? (
           <div key={i} className="ctx-sep" role="separator" />
@@ -127,26 +128,39 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onEscape }: { items: Me
             </button>
             </Tip>
             {it.sub && openSub === i && (
-              <div className={"ctx-subwrap" + (flip() ? " flip" : "")}>
-                <Menu items={it.sub} x={0} y={0} onClose={onClose} depth={1} onEscape={onEscape} onLeft={() => {
-                  setOpenSub(null);
-                  requestAnimationFrame(() => ref.current?.querySelector<HTMLElement>(`[data-menu-index="${i}"]`)?.focus());
-                }} />
-              </div>
+              <Menu items={it.sub} x={0} y={0} onClose={onClose} depth={1} onRestore={onRestore} label={it.label} anchor={ref.current?.querySelector<HTMLElement>(`[data-menu-index="${i}"]`)?.getBoundingClientRect()} onLeft={() => {
+                setOpenSub(null);
+                requestAnimationFrame(() => ref.current?.querySelector<HTMLElement>(`[data-menu-index="${i}"]`)?.focus());
+              }} />
             )}
           </div>
         ),
       )}
     </div>
   );
-  return depth === 0 ? createPortal(<div role="region" aria-label="Context menu">{body}</div>, document.body) : body;
+  // submenus are portalled too: the menu scrolls when it is taller than the window, and a scroll box would clip a nested one
+  return depth === 0 ? createPortal(<div role="region" aria-label="Context menu">{body}</div>, document.body) : createPortal(body, document.body);
 }
+
+// listen from the start: the press that opens the first menu happens before any menu has rendered
+trackPresses();
 
 /** Context menu at viewport coordinates; closes on outside click, Escape, scroll or resize. */
 export function ContextMenu({ x, y, items, onClose, opener: openerProp }: { x: number; y: number; items: MenuItem[]; onClose: () => void; /** the trigger element, when the caller knows it (otherwise inferred from the last press / focus) */ opener?: HTMLElement | null }) {
   trackPresses();
   const opener = useRef<Element | null>(null);
-  if (opener.current === null) opener.current = openerProp ?? resolveOpener(lastPress(), document.activeElement, Date.now());
+  const returnTo = useRef<Element | null>(null);
+  const first = useRef(true);
+  if (first.current) {
+    first.current = false;
+    opener.current = openerProp ?? resolveOpener(lastPress(), document.activeElement, Date.now());
+    // captured while rendering, before the menu moves focus to its first item
+    returnTo.current = resolveReturnFocus(opener.current, document.activeElement, document.body, pressedFocusable(lastPress(), Date.now()));
+  }
+  const restore = () => {
+    const el = liveReturnTarget(returnTo.current, () => document.querySelectorAll("[aria-label]"));
+    if (el instanceof HTMLElement) el.focus({ preventScroll: true });
+  };
   useEffect(() => {
     const el = opener.current;
     if (!el || !el.hasAttribute("aria-expanded")) return;
@@ -165,13 +179,15 @@ export function ContextMenu({ x, y, items, onClose, opener: openerProp }: { x: n
     window.addEventListener("mousedown", down, true);
     window.addEventListener("blur", onClose);
     window.addEventListener("resize", onClose);
-    window.addEventListener("scroll", onClose, true);
+    // scrolling the menu itself (it scrolls when taller than the window) must not close it
+    const scroll = (e: Event) => { if (!(e.target instanceof Element && e.target.closest(".ctx"))) onClose(); };
+    window.addEventListener("scroll", scroll, true);
     return () => {
       window.removeEventListener("mousedown", down, true);
       window.removeEventListener("blur", onClose);
       window.removeEventListener("resize", onClose);
-      window.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("scroll", scroll, true);
     };
   }, [onClose]);
-  return <Menu items={items} x={x} y={y} onClose={onClose} onEscape={() => requestAnimationFrame(() => (opener.current as HTMLElement | null)?.focus({ preventScroll: true }))} />;
+  return <Menu items={items} x={x} y={y} onClose={onClose} onRestore={restore} />;
 }

@@ -17,6 +17,7 @@ if (user !== process.env.FAKE_SMB_USER || process.env.PASSWD !== process.env.FAK
   process.exit(1);
 }
 const cmds = String(opt("-c") ?? "");
+if (process.env.FAKE_SMB_LOG) fs.appendFileSync(process.env.FAKE_SMB_LOG, JSON.stringify({ argv, cmds }) + "\n"); // lets a test see what was run
 const split = (s) => [...s.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
 const [verb, ...args] = split(cmds);
 const real = (p) => {
@@ -93,12 +94,19 @@ try {
   } else if (verb === "del") {
     const p = real(args[0]);
     if (!fs.existsSync(p)) fail("NT_STATUS_NO_SUCH_FILE", `listing \\${args[0]}`);
+    if (process.env.FAKE_SMB_FAIL_DEL_OLD && args[0].endsWith(".old")) fail("NT_STATUS_ACCESS_DENIED", `deleting remote file \\${args[0]}`, 0);
     fs.unlinkSync(p);
   } else if (verb === "rename") {
-    const [a, b] = [real(args[0]), real(args[1])];
-    if (!fs.existsSync(a)) fail("NT_STATUS_OBJECT_NAME_NOT_FOUND", `renaming files \\${args[0]} -> \\${args[1]} `);
-    if (fs.existsSync(b)) fail("NT_STATUS_OBJECT_NAME_COLLISION", `renaming files \\${args[0]} -> \\${args[1]} `);
+    const force = args[2] === "-f";
+    const dest = args[1];
+    if (force && process.env.FAKE_SMB_NO_F) fail("NT_STATUS_INVALID_PARAMETER", `renaming files \\${args[0]} -> \\${dest} `, 0); // a server that refuses supersede
+    const hitFail = process.env.FAKE_SMB_FAIL_RENAME_TO && dest.endsWith(process.env.FAKE_SMB_FAIL_RENAME_TO) && (process.env.FAKE_SMB_FAIL_RESTORE || !args[0].endsWith(".old"));
+    if (hitFail) fail(process.env.FAKE_SMB_RENAME_STATUS || "NT_STATUS_ACCESS_DENIED", `renaming files \\${args[0]} -> \\${dest} `, 0);
+    const [a, b] = [real(args[0]), real(dest)];
+    if (!fs.existsSync(a)) fail("NT_STATUS_OBJECT_NAME_NOT_FOUND", `renaming files \\${args[0]} -> \\${dest} `);
+    if (fs.existsSync(b) && !force) fail("NT_STATUS_OBJECT_NAME_COLLISION", `renaming files \\${args[0]} -> \\${dest} `);
     fs.renameSync(a, b);
+    if (process.env.FAKE_SMB_APPLY_THEN_FAIL && dest.endsWith(process.env.FAKE_SMB_APPLY_THEN_FAIL)) fail("NT_STATUS_CONNECTION_RESET", "", 1); // applied, then the connection drops
   } else {
     fail("NT_STATUS_NOT_SUPPORTED", verb);
   }

@@ -10,6 +10,7 @@ import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
 import { hitsReadOnly } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
+import { ZipTickets } from "./zip-tickets.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -61,18 +62,26 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     return c.json(res, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
   });
 
-  // Inode+size identity of a file, so the hub's vault can find a saved password after a rename or move.
+  // Device, inode and size identity of a file (the device keeps two volumes' equal inode numbers apart), so the hub's vault can find a saved password after a rename or move.
   app.get("/api/fs/fid", async (c) => {
     const r = resolveRead(root, c.req.query("path") ?? "");
     const st = await fs.stat(r.real);
     if (!st.isFile()) throw bad("not a regular file");
-    return c.json({ fid: `${st.ino}:${st.size}` });
+    return c.json({ fid: `${st.dev}:${st.ino}:${st.size}` });
   });
 
-  // Multi-select / folder download: a zip streamed straight to the client.
+  // Multi-select / folder download: a zip streamed straight to the client. Short selections name the
+  // items in the query; a long list is posted for a one-use ticket (about a minute) that the GET then redeems.
+  const tickets = new ZipTickets();
   app.on(["GET", "HEAD"], "/api/fs/zip", async (c) => {
-    const dir = c.req.query("dir") ?? "/";
-    const names = c.req.queries("name") ?? [];
+    const id = c.req.query("ticket");
+    let dir = c.req.query("dir") ?? "/";
+    let names = c.req.queries("name") ?? [];
+    if (id !== undefined) {
+      const sel = c.req.method === "GET" ? tickets.take(id) : tickets.peek(id);
+      if (!sel) return c.json({ error: "download link expired or already used" }, 410);
+      ({ dir, names } = sel);
+    }
     const sel = await ar.prepareSelection(root, dir, names);
     const base = sel.names.length === 1 ? sel.names[0]! : path.posix.basename(sel.d.virtual) || "files";
     const headers = {
@@ -83,6 +92,15 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     if (c.req.method === "HEAD") return new Response(null, { headers });
     const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal);
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
+  });
+  app.post("/api/fs/zip-ticket", async (c) => {
+    const b = await body<{ dir?: string; names?: string[] }>(c);
+    const dir = b.dir === undefined ? "/" : str(b.dir, "dir");
+    const names = strs(b.names, "names");
+    await ar.prepareSelection(root, dir, names); // refuse a bad selection now, not at download time
+    const id = tickets.issue({ dir, names });
+    if (!id) return c.json({ error: "too many pending downloads" }, 429);
+    return c.json({ id }, 201);
   });
 
   app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtSize, parent, passwordState, type ArchiveEntry, type Entry, type Pw } from "./api";
 import { ExtractDialog, PasswordInput, RememberOptions } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
+import { singleFlight } from "./singleFlight";
 import * as Ic from "lucide-react";
 
 type Listing = { entries: ArchiveEntry[]; truncated: boolean; bytes: number; encrypted?: boolean };
@@ -19,6 +20,15 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
   const [lock, setLock] = useState<"required" | "incorrect" | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<string[] | null>(null);
+  const [starting, setStarting] = useState(false);
+  const startHere = useRef<() => Promise<unknown>>(async () => undefined);
+  startHere.current = () =>
+    api
+      .startExtract(node, entry.path, parent(entry.path), true, {}, pw)
+      .then((j) => setMsg(`Started: ${j.title}`))
+      .catch((e: Error) => (passwordState(e) ? setDialog([]) : setMsg(e.message)));
+  // one wrapper for the life of the view, so a double click starts one job
+  const extractHere = useRef(singleFlight(() => startHere.current(), setStarting)).current;
   useEffect(() => {
     setData(null);
     setErr("");
@@ -71,9 +81,9 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
               if (draft) setPw({ password: draft, remember, folder });
             }}
           >
-            <PasswordInput value={draft} onChange={setDraft} state={lock} />
+            <PasswordInput value={draft} onChange={setDraft} state={lock} errorId={lock === "incorrect" ? "av-pw-err" : undefined} />
             <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} />
-            <div className="ad-err" role="alert">{lock === "incorrect" ? "Wrong password." : ""}</div>
+            <div className="ad-err" id="av-pw-err" role="alert">{lock === "incorrect" ? "Wrong password." : ""}</div>
             <button type="submit" disabled={!draft}><Ic.LockOpen /> Unlock</button>
           </form>
         </div>
@@ -83,14 +93,7 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
   return (
     <div className="av">
       <div className="av-bar">
-        <button
-          onClick={() =>
-            api
-              .startExtract(node, entry.path, parent(entry.path), true, {}, pw)
-              .then((j) => setMsg(`Started: ${j.title}`))
-              .catch((e: Error) => (passwordState(e) ? setDialog([]) : setMsg(e.message)))
-          }
-        >
+        <button disabled={starting} onClick={() => void extractHere()}>
           <Ic.PackageOpen /> Extract here
         </button>
         <Tip label="Choose a destination, overwrite policy and password for the ticked entries">
@@ -98,13 +101,13 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
             <Ic.ListChecks /> Extract selected{picked.size ? ` (${picked.size})` : ""}
           </button>
         </Tip>
-        <span className="muted">
+        <span className="muted" role="status">
           {data ? `${data.entries.length}${data.truncated ? "+" : ""} entries, ${fmtSize(data.bytes)} uncompressed` : err ? "" : "reading archive..."}
         </span>
         {data?.encrypted && <span className="muted"><Ic.Lock /> encrypted</span>}
-        {msg && <span className="muted">{msg}</span>}
+        <span className="muted" role="status">{msg}</span>
       </div>
-      {err && <div className="fp-err">{err}</div>}
+      {err && <div className="fp-err" role="alert">{err}</div>}
       {data && (
         <table className="ft av-table">
           <thead>
