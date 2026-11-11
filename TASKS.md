@@ -174,7 +174,7 @@ ETA: 2026-11-12 16:00 ICT
 | 107 | Search and glob patterns cannot block the agent | in_review | claude-20261112-rv-search-git | rv-search-patterns | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/190 |
 | 108 | Archive extraction stages and merges through pinned directory descriptors | in_review | claude-20261112-rv-archives | rv-extract-pinned | 14.114 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/192 |
 | 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | in_review | claude-20261112-rv-fsops | rv-pinned-walks | 14.113, 14.116 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/199 |
-| 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_review | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/182 |
+| 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | done | claude-20261112-rv-sources | rv-smb-source | | | Merged https://github.com/DynacomSolutions/filedeck/pull/182, CI green, independent review clean on second pass<br>Not tried against a real SMB server |
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
 
 ## 14. Data-safe file operations
