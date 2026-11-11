@@ -126,7 +126,17 @@ export class Semaphore {
   constructor(private n: number) {}
   async run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     while (this.used >= this.n) {
-      await new Promise<void>((res) => this.waiting.push(res));
+      if (signal?.aborted) throw new FsError(400, "canceled");
+      let wake!: () => void;
+      const woken = new Promise<void>((res) => (wake = res));
+      this.waiting.push(wake);
+      const onAbort = () => wake();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      await woken;
+      signal?.removeEventListener("abort", onAbort);
+      const at = this.waiting.indexOf(wake);
+      if (at >= 0) this.waiting.splice(at, 1); // woken by the abort, not by a free slot
+      else if (signal?.aborted) this.waiting.shift()?.(); // woken by a free slot that this caller will not use: pass it on
       if (signal?.aborted) throw new FsError(400, "canceled");
     }
     this.used++;

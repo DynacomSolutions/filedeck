@@ -64,7 +64,7 @@ export function PdfView({ node, path, name }: { node: string; path: string; name
           void check({ password: draft, remember, folder }).finally(() => setBusy(false));
         }}
       >
-        <PasswordInput value={draft} onChange={setDraft} state={lock} errorId="pdf-pw-err" />
+        <PasswordInput value={draft} onChange={setDraft} state={lock} errorId={err ? "pdf-pw-err" : undefined} />
         <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} />
         <div className="ad-err" id="pdf-pw-err" role="alert">{err}</div>
         <button type="submit" disabled={!draft || busy}><Ic.LockOpen /> Unlock</button>

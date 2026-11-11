@@ -26,13 +26,18 @@ metrics:
 # existing Secret in the release namespace (created out of band, never in Git) is mounted as FILEDECK_AGENT_TOKEN
 # into the hub and every agent; agents then answer 401 to anything without it (except /healthz). Create it with a long
 # random value under `key`. Empty (the default) means no token.
+# Easiest way to switch it on: `generate: true`. A pre-install/pre-upgrade hook Job (templates/agent-token-job.yaml, the
+# same pattern as the vault key Job) creates a random Secret named `<fullname>-agent-token` only when it does not exist
+# yet, and never rotates it; `secretName` then defaults to that name. To rotate, delete the Secret and sync again, then
+# restart the hub and the agents. `keyJob.image` is shared with the vault key Job (`vault.keyJob.image`).
 agentToken:
   secretName: ""
   key: token
+  generate: false
 
 # Optional read-only token for the `filedeck du` CLI (hub). Name an existing Secret (created out of band, never in Git)
-# that holds a long random value under `key`; the hub then lets `Authorization: Bearer <token>` call only GET /api/du and
-# the du jobs it starts. Empty (the default) switches the feature off.
+# that holds a long random value under `key`; the hub then lets a request with the header `X-Filedeck-Token: <token>` call only GET /api/du and
+# the du jobs it starts (`Authorization` is never read, so an ingress login in front of the hub keeps working). Empty (the default) switches the feature off.
 apiToken:
   secretName: ""
   key: token
@@ -58,6 +63,16 @@ vault:
   maxHours: 24
 
 hub:
+  # Optional NetworkPolicy for the hub pods. Off by default so a plain install keeps working behind any ingress. Anything
+  # that can reach the hub has root-level access to every node's files, so for a shared cluster turn it on and list the
+  # peers that may connect (your ingress controller, for example). `from` takes standard NetworkPolicy peers; with
+  # `enabled: true` and an empty list nothing can reach the hub. The hub's own port is the only one opened.
+  networkPolicy:
+    enabled: false
+    from: []
+    # for example:
+    # from:
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress}}
   # Pin the hub to a node (the vault volume is ReadWriteOnce); empty means any node.
   nodeSelector: {}
   # Rollout: the new hub starts beside the old one on the same node (see the pod affinity in templates/hub.yaml).

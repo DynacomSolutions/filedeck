@@ -231,8 +231,18 @@ export class IndexCache {
     const row = this.q.dirGet.get(dir) as { ino: number; mtime: number; listed_at: number } | undefined;
     if (row) {
       let fresh = false;
-      if (this.watched.has(dir) && !this.dirty.has(dir)) fresh = true;
-      else if (this.o.ttlMs && !this.dirty.has(dir) && now - row.listed_at < this.o.ttlMs) {
+      if (this.watched.has(dir) && !this.dirty.has(dir)) {
+        // A watch follows an inode, not a path: a folder removed and created again under the same name leaves it watching nothing and
+        // silent for good (and the new folder may even reuse the inode number). One stat tells by inode and modification time;
+        // when it does not match, drop the dead watch and read the folder again.
+        const now2 = await this.reader.statDir(dir).catch(() => null);
+        const same = (x: number, y: number) => x === y || x === 0 || y === 0; // 0: the backend does not know
+        if (now2 && same(now2.ino, row.ino) && same(now2.mtime, row.mtime)) fresh = true;
+        else {
+          this.unwatch(dir);
+          this.fire(dir); // live compares showing it are told
+        }
+      } else if (this.o.ttlMs && !this.dirty.has(dir) && now - row.listed_at < this.o.ttlMs) {
         const st = await this.reader.statDir(dir);
         fresh = st.mtime === row.mtime && st.ino === row.ino && st.mtime > 0;
       }
@@ -247,8 +257,11 @@ export class IndexCache {
     this.stats.misses++;
     // Watch before reading so a change during the read marks the fresh listing dirty again.
     this.dirty.delete(dir);
-    this.ensureWatch(dir);
     const st = await this.reader.statDir(dir);
+    // The watch follows an inode and the folder under this name may be another one by now (removed, created again), so every
+    // re-read starts a fresh watch: a few syscalls next to listing the folder, and never a listing trusted on a dead watch.
+    this.unwatch(dir);
+    this.ensureWatch(dir);
     let entries: IdxEntry[];
     try {
       entries = await this.reader.readDir(dir);

@@ -81,7 +81,7 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
               if (draft) setPw({ password: draft, remember, folder });
             }}
           >
-            <PasswordInput value={draft} onChange={setDraft} state={lock} errorId="av-pw-err" />
+            <PasswordInput value={draft} onChange={setDraft} state={lock} errorId={lock === "incorrect" ? "av-pw-err" : undefined} />
             <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} />
             <div className="ad-err" id="av-pw-err" role="alert">{lock === "incorrect" ? "Wrong password." : ""}</div>
             <button type="submit" disabled={!draft}><Ic.LockOpen /> Unlock</button>

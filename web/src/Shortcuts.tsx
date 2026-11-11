@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as Ic from "lucide-react";
 import { TechnicalGlossary } from "./TechnicalGlossary";
+import { backdropClose } from "./dialogFocus";
 
 const GROUPS: { title: string; rows: [string, string][] }[] = [
   {
@@ -11,7 +12,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ["Page Up / Page Down", "Move by ten entries"],
       ["Enter", "Open folder or file"],
       ["Backspace / Alt+Up", "Go to the parent folder"],
-      ["Tab / Shift+Tab", "Next / previous panel from the file list (after the last panel Tab moves on to the rest of the page)"],
+      ["F6 / Shift+F6", "Next / previous panel (Tab and Shift+Tab move through the controls as usual)"],
       ["Ctrl+F", "Filter this folder by name"],
       ["Alt+P", "Add this panel to / remove it from the selected panels (Ctrl/Cmd+click on items in another panel does the same)"],
       ["Alt+Shift+Arrows", "Dock this panel beside the previous / next panel (or drag the grip at the top left of the panel: edge splits, centre swaps places)"],
@@ -61,6 +62,9 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
       opener.current?.focus({ preventScroll: true });
     };
   }, []);
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  const backdrop = useMemo(() => backdropClose(() => latest.current()), []);
   const trap = (e: React.KeyboardEvent) => {
     if (e.key === "Escape" || (e.key === "?" && e.target === ref.current)) {
       e.preventDefault();
@@ -76,7 +80,7 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
     else if (!e.shiftKey && document.activeElement === last) (e.preventDefault(), first.focus());
   };
   return (
-    <div className="modal-back" onMouseDown={onClose}>
+    <div className="modal-back" {...backdrop}>
       <div
         ref={ref}
         className="modal wide kbd-help"
@@ -84,13 +88,12 @@ export function ShortcutHelp({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         aria-label="Keyboard shortcuts"
         tabIndex={-1}
-        onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={trap}
       >
         <h2>Keyboard shortcuts</h2>
         {GROUPS.map((g) => (
           <section key={g.title}>
-            <h4>{g.title}</h4>
+            <h3>{g.title}</h3>
             <dl>
               {g.rows.map(([k, d]) => (
                 <div key={k}>

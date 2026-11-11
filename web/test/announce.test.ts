@@ -47,9 +47,9 @@ test("saved passwords: the table's scroll area is a focusable named region, and 
 
 test("password fields point at their error and are marked invalid after a wrong password", () => {
   const read = (f: string) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
-  assert.match(read("ArchiveDialog.tsx"), /aria-invalid=\{state === "incorrect" \|\| undefined\}\s+aria-describedby=\{errorId\}/);
-  assert.match(read("PdfView.tsx"), /errorId="pdf-pw-err"[\s\S]*id="pdf-pw-err"/);
-  assert.match(read("ArchiveView.tsx"), /errorId="av-pw-err"[\s\S]*id="av-pw-err"/);
+  assert.match(read("ArchiveDialog.tsx"), /aria-invalid=\{errorId \? true : undefined\}\s+aria-describedby=\{errorId\}/);
+  assert.match(read("PdfView.tsx"), /errorId=\{err \? "pdf-pw-err" : undefined\}[\s\S]*id="pdf-pw-err"/);
+  assert.match(read("ArchiveView.tsx"), /errorId=\{lock === "incorrect" \? "av-pw-err" : undefined\}[\s\S]*id="av-pw-err"/);
 });
 
 test("the address bar enters edit mode on Enter, Space or click, not on focus", () => {
