@@ -16,7 +16,7 @@
 .st-row:hover .st-main,.st-row:focus-within .st-main{color:var(--fg)}
 .st-row.off .st-main{opacity:.6}
 .st-guide{flex:none;align-self:stretch;width:14px;margin-left:2px;margin-right:-2px;background:linear-gradient(var(--surface-3),var(--surface-3)) 6px 0/1px 100% no-repeat}
-.st-chev{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;color:var(--muted);transition:transform var(--fast) var(--ease),background var(--fast) var(--ease)}
+.st-chev{flex:none;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:4px;color:var(--muted);transition:transform var(--fast) var(--ease),background var(--fast) var(--ease)}
 .st-chev:hover{background:var(--surface-3);color:var(--fg)}
 .st-chev.none{visibility:hidden}
 .st-chev.open{transform:rotate(90deg)}
