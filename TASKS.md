@@ -167,11 +167,11 @@ Findings from the 12 November 2026 review: request handling, read-only volumes, 
 ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | in_progress | claude-20261112-rv-hub | rv-request-guard | | 2026-11-12 09:00 ICT | Found in review; includes request body size limits |
+| 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | in_review | claude-20261112-rv-hub | rv-request-guard | | 2026-11-12 09:00 ICT | Found in review; includes request body size limits<br>https://github.com/DynacomSolutions/filedeck/pull/188 |
 | 104 | Read-only prefixes also protect their parent folders and trash restore targets | todo | | rv-readonly-cover | 13.103 | | Found in review |
 | 105 | Hub sends security headers, optional host allowlist, compressed and cacheable static assets | todo | | rv-hub-headers-static | 13.104 | | Found in review; missing assets answer 404 |
 | 106 | Git reads ignore programs named in repository config and stay inside the root | in_review | claude-20261112-rv-search-git | rv-git-config | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/181 |
-| 107 | Search and glob patterns cannot block the agent | todo | | rv-search-patterns | | | Found in review; also multi-byte matches on chunk boundaries |
+| 107 | Search and glob patterns cannot block the agent | in_review | claude-20261112-rv-search-git | rv-search-patterns | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/190 |
 | 108 | Archive extraction stages and merges through pinned directory descriptors | todo | | rv-extract-pinned | 14.114 | | Found in review |
 | 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | todo | | rv-pinned-walks | 14.113, 14.116 | | Found in review |
 | 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_review | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/182 |
@@ -182,7 +182,7 @@ Findings from the 12 November 2026 review where an operation could lose, skip or
 ETA: 2026-11-12 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 112 | Transfers page through large folders and keep the source when anything was skipped | in_progress | claude-20261112-rv-transfers | rv-transfer-paging | | 2026-11-12 09:00 ICT | Found in review; also long agent calls, paused jobs, links |
+| 112 | Transfers page through large folders and keep the source when anything was skipped | in_review | claude-20261112-rv-transfers | rv-transfer-paging | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/191 |
 | 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | in_review | claude-20261112-rv-fsops | rv-trash | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/180 |
 | 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | in_review | claude-20261112-rv-archives | rv-archives | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/183 |
 | 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | todo | | rv-sources-streams | 13.110 | | Found in review |
@@ -195,7 +195,7 @@ ETA: 2026-11-12 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 118 | File panel: filtered select all, rename validation, filter bar state, editor keeps unsaved edits | in_progress | claude-20261112-rv-panel | rv-panel-editor | | 2026-11-12 09:30 ICT | Found in review; one event stream per tab |
-| 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | in_progress | claude-20261112-rv-compare | rv-compare-trash-views | | 2026-11-12 09:30 ICT | Found in review |
+| 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | in_review | claude-20261112-rv-compare | rv-compare-trash-views | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/189 |
 | 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | in_review | claude-20261112-rv-shell | rv-app-shell | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/185 |
 | 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | in_progress | claude-20261112-rv-components | rv-uploads-tree | | 2026-11-12 09:30 ICT | Found in review |
 
