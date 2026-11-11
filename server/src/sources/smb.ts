@@ -8,6 +8,8 @@ import type { Credentials, SourceBackend, SourceConfig, SourceEntry, SourceStat 
 const META_TIMEOUT_MS = 60_000;
 const MAX_PROCS = 6;
 const ERR_CAP = 64 * 1024;
+/** Upper bound for the output of one command (a listing of several hundred thousand entries); beyond it the call fails instead of returning a cut-off list. */
+const OUT_CAP = 64 * 1024 * 1024;
 
 export interface SmbOptions {
   /** share name on the server (required) */
@@ -42,7 +44,11 @@ export function smbError(text: string, what = "request"): FsError | null {
   return null;
 }
 
-const BAD_NAME = /["\\*?<>|:\x00-\x1f]/;
+/**
+ * Characters that may not appear in a name, the share or the root. `;` matters most: smbclient splits its `-c`
+ * string on it before reading the quotes, so a name containing one would run as a second command.
+ */
+export const BAD_NAME = /[";\\*?<>|:\x00-\x1f]/;
 const LS_LINE = /^ {2}(.+?)\s+([ADHSRN]*)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4})\s*$/;
 
 /** Parse the entry lines of `ls` output (header/summary lines are skipped). */
@@ -81,7 +87,7 @@ class Slots {
  * the image), one short-lived process per operation. Credentials (`username`,
  * `password`, optional `domain`) come from the Secret and reach smbclient
  * through its environment, never its command line. Limits: modification times
- * of uploads are not preserved, names may not contain `" \ * ? < > | :`, and a
+ * of uploads are not preserved, names may not contain `" ; \ * ? < > | :`, and a
  * ranged read streams from the start and discards the head.
  */
 export class SmbBackend implements SourceBackend {
@@ -127,6 +133,8 @@ export class SmbBackend implements SourceBackend {
     // smbclient wants writable state dirs; the hub's root filesystem is read-only, /tmp is an emptyDir.
     for (const o of ["lock directory", "cache directory", "state directory", "private dir"]) args.push(`--option=${o}=/tmp`);
     args.push(`--option=client min protocol=${this.opts.minProtocol ?? "SMB2"}`);
+    // names are UTF-8 on both sides whatever locale the container has
+    for (const o of ["unix charset=UTF-8", "display charset=UTF-8"]) args.push(`--option=${o}`);
     if (this.port) args.push("-p", this.port);
     const domain = c.domain ?? this.opts.domain;
     if (domain) args.push("-W", domain);
@@ -152,13 +160,19 @@ export class SmbBackend implements SourceBackend {
         /* already gone */
       }
     };
-    let out = "";
+    const outChunks: Buffer[] = [];
+    let outLen = 0;
+    let tooBig = false;
     let err = "";
     child.stdout?.on("data", (d: Buffer) => {
-      if (out.length < ERR_CAP * 16) out += d.toString("latin1");
+      outLen += d.length;
+      if (outLen > OUT_CAP) {
+        tooBig = true;
+        kill();
+      } else outChunks.push(d);
     });
     child.stderr?.on("data", (d: Buffer) => {
-      if (err.length < ERR_CAP) err += d.toString("latin1");
+      if (err.length < ERR_CAP) err += d.toString("utf8");
     });
     child.stdin?.on("error", () => undefined);
     if (stdin) {
@@ -171,6 +185,8 @@ export class SmbBackend implements SourceBackend {
         child.on("error", () => reject(new FsError(502, "smbclient is not available")));
         child.on("close", (c, sig) => resolve(sig ? null : c));
       });
+      if (tooBig) throw new FsError(502, "remote answer too large");
+      const out = Buffer.concat(outChunks).toString("utf8"); // decoded once, so a multi-byte name split across reads stays whole
       // entry lines of a listing are data (a file may be called NT_STATUS_x); everything else can carry an error
       const text = out.split("\n").filter((l) => !LS_LINE.test(l.replace(/\r$/, ""))).join("\n") + "\n" + err;
       const e = smbError(text, what);
@@ -214,7 +230,7 @@ export class SmbBackend implements SourceBackend {
     child.stdin?.end();
     let err = "";
     child.stderr?.on("data", (d: Buffer) => {
-      if (err.length < ERR_CAP) err += d.toString("latin1");
+      if (err.length < ERR_CAP) err += d.toString("utf8");
     });
     const out = new PassThrough();
     let finished = false;
@@ -282,9 +298,7 @@ export class SmbBackend implements SourceBackend {
       body.resume();
       throw new FsError(409, "destination is a directory");
     }
-    const dir = target.includes("\\") ? target.slice(0, target.lastIndexOf("\\") + 1) : "";
-    const tmpName = `.${target.slice(dir.length)}.filedeck-${randomUUID().slice(0, 8)}.part`;
-    const tmp = dir + tmpName;
+    const tmp = this.sibling(target, "part");
     let n = 0;
     const count = new Transform({
       transform(chunk: Buffer, _e, cb) {
@@ -295,13 +309,53 @@ export class SmbBackend implements SourceBackend {
     body.on("error", (e) => count.destroy(e));
     try {
       await this.run(`put /dev/stdin ${this.q(tmp)}`, body.pipe(count), "upload");
-      if (existing) await this.run(`del ${this.q(target)}`, undefined, "replace");
-      await this.run(`rename ${this.q(tmp)} ${this.q(target)}`, undefined, "upload");
     } catch (e) {
       await this.run(`del ${this.q(tmp)}`, undefined, "cleanup").catch(() => undefined);
       throw e;
     }
+    await this.moveOver(tmp, target, existing !== null, "upload", true);
     return n;
+  }
+
+  /** hidden sibling of a backslash path, used for upload and backup copies */
+  private sibling(target: string, kind: "part" | "old"): string {
+    const dir = target.includes("\\") ? target.slice(0, target.lastIndexOf("\\") + 1) : "";
+    return `${dir}.${target.slice(dir.length)}.filedeck-${randomUUID().slice(0, 8)}.${kind}`;
+  }
+
+  /**
+   * Rename `from` to `target`. smbclient's rename never replaces, so an existing file is first moved aside and only
+   * deleted once the new one is in place; if the move fails the old file is put back, so a failure never loses it.
+   * `dropFrom`: delete `from` when the move fails and the old file is back (an upload's temporary copy).
+   */
+  private async moveOver(from: string, target: string, replace: boolean, what: string, dropFrom = false): Promise<void> {
+    if (!replace) {
+      try {
+        await this.run(`rename ${this.q(from)} ${this.q(target)}`, undefined, what);
+      } catch (e) {
+        if (dropFrom) await this.run(`del ${this.q(from)}`, undefined, "cleanup").catch(() => undefined);
+        throw e;
+      }
+      return;
+    }
+    const bak = this.sibling(target, "old");
+    await this.run(`rename ${this.q(target)} ${this.q(bak)}`, undefined, "replace").catch(async (e) => {
+      if (dropFrom) await this.run(`del ${this.q(from)}`, undefined, "cleanup").catch(() => undefined);
+      throw e;
+    });
+    try {
+      await this.run(`rename ${this.q(from)} ${this.q(target)}`, undefined, what);
+    } catch (e) {
+      try {
+        await this.run(`rename ${this.q(bak)} ${this.q(target)}`, undefined, "restore");
+      } catch {
+        // nothing more can be done safely: both copies stay on the share
+        throw new FsError(502, "replace failed; the previous version was kept under a hidden .old name");
+      }
+      if (dropFrom) await this.run(`del ${this.q(from)}`, undefined, "cleanup").catch(() => undefined);
+      throw e;
+    }
+    await this.run(`del ${this.q(bak)}`, undefined, "cleanup").catch(() => undefined);
   }
 
   async mkdir(p: string): Promise<void> {
@@ -312,8 +366,7 @@ export class SmbBackend implements SourceBackend {
     const dst = await this.stat(to);
     if (dst && !overwrite) throw new FsError(409, "destination exists");
     if (dst?.type === "dir") throw new FsError(409, "destination exists");
-    if (dst) await this.run(`del ${this.q(this.win(to))}`, undefined, "replace");
-    await this.run(`rename ${this.q(this.win(from))} ${this.q(this.win(to))}`, undefined, "rename");
+    await this.moveOver(this.win(from), this.win(to), dst !== null, "rename");
   }
 
   async remove(p: string, isDir: boolean): Promise<void> {

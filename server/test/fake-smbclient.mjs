@@ -17,6 +17,7 @@ if (user !== process.env.FAKE_SMB_USER || process.env.PASSWD !== process.env.FAK
   process.exit(1);
 }
 const cmds = String(opt("-c") ?? "");
+if (process.env.FAKE_SMB_LOG) fs.appendFileSync(process.env.FAKE_SMB_LOG, JSON.stringify({ argv, cmds }) + "\n"); // lets a test see what was run
 const split = (s) => [...s.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => m[1] ?? m[2]);
 const [verb, ...args] = split(cmds);
 const real = (p) => {
@@ -95,6 +96,7 @@ try {
     if (!fs.existsSync(p)) fail("NT_STATUS_NO_SUCH_FILE", `listing \\${args[0]}`);
     fs.unlinkSync(p);
   } else if (verb === "rename") {
+    if (process.env.FAKE_SMB_FAIL_RENAME_TO && !args[0].endsWith(".old") && args[1].endsWith(process.env.FAKE_SMB_FAIL_RENAME_TO)) fail("NT_STATUS_ACCESS_DENIED", `renaming files \\${args[0]} -> \\${args[1]} `, 0);
     const [a, b] = [real(args[0]), real(args[1])];
     if (!fs.existsSync(a)) fail("NT_STATUS_OBJECT_NAME_NOT_FOUND", `renaming files \\${args[0]} -> \\${args[1]} `);
     if (fs.existsSync(b)) fail("NT_STATUS_OBJECT_NAME_COLLISION", `renaming files \\${args[0]} -> \\${args[1]} `);
