@@ -420,6 +420,16 @@ export async function moveReal(from: string, to: string, overwrite: boolean) {
   }
 }
 
+/** Give every entry of the copy at `to` the owner and times of the one at `from` (best effort: changing the owner needs privilege). */
+async function copyMeta(from: string, to: string): Promise<void> {
+  const st = await fs.lstat(from);
+  if (st.isDirectory()) {
+    for (const n of await fs.readdir(from)) await copyMeta(path.join(from, n), path.join(to, n));
+  }
+  await fs.lchown(to, st.uid, st.gid).catch(() => undefined);
+  await fs.lutimes(to, st.atime, st.mtime).catch(() => undefined);
+}
+
 export async function exists(real: string) {
   try {
     await fs.lstat(real);

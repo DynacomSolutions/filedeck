@@ -1,0 +1,28 @@
+{{- if .Values.hub.networkPolicy.enabled }}
+# Optional (hub.networkPolicy.enabled): only the listed peers may reach the hub, and only on its own port. Anything that
+# can reach the hub can browse and change every node's files, so on a shared cluster list just the ingress or proxy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "filedeck.name" . }}-hub
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "filedeck.name" . }}
+      app.kubernetes.io/component: hub
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- with .Values.hub.networkPolicy.from }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- else }}
+    []
+    {{- end }}
+{{- end }}

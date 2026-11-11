@@ -208,23 +208,14 @@ export const zipUrl = (node: string, dir: string, names: string[]) =>
 /** Longest zip download URL (query form) that proxies and servers accept everywhere; longer selections are sent in a POST body. */
 export const ZIP_URL_LIMIT = 4000;
 export const zipFitsInUrl = (node: string, dir: string, names: string[]) => zipUrl(node, dir, names).length <= ZIP_URL_LIMIT;
-/** The file name from a Content-Disposition header (`filename*` first), or `fallback`. */
-export function dispositionName(h: string | null, fallback: string): string {
-  const star = /filename\*=UTF-8''([^;]+)/i.exec(h ?? "");
-  if (star) {
-    try {
-      return decodeURIComponent(star[1]!.trim());
-    } catch {
-      /* fall through to the plain form */
-    }
-  }
-  return /filename="([^"]*)"/i.exec(h ?? "")?.[1] || fallback;
-}
-/** A zip of several items, requested with a JSON body (a long name list does not fit in a URL). The zip is held in memory. */
-export async function zipPost(node: string, dir: string, names: string[]): Promise<{ blob: Blob; name: string }> {
-  const r = await fetch(`${nodeBase(node)}/api/fs/zip`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir, names }) });
-  if (!r.ok) await j<unknown>(r);
-  return { blob: await r.blob(), name: dispositionName(r.headers.get("content-disposition"), "files.zip") };
+/**
+ * A zip of several items for a selection too long for a URL: the name list is posted for a one-use,
+ * short-lived ticket, and the returned URL is a plain GET the browser's download manager streams to disk.
+ */
+export async function zipTicketUrl(node: string, dir: string, names: string[]): Promise<string> {
+  const r = await fetch(`${nodeBase(node)}/api/fs/zip-ticket`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir, names }) });
+  const { id } = await j<{ id: string }>(r);
+  return `${nodeBase(node)}/api/fs/zip?ticket=${enc(id)}`;
 }
 
 const postJob = (node: string, kind: string, body: unknown, password?: Pw) =>

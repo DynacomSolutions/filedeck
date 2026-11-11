@@ -23,7 +23,8 @@ interface Props {
 /**
  * Themed tooltip for icon-only controls, truncated text and info badges. Opens on hover (after a short
  * delay) and on keyboard focus, closes on leave, blur and Esc, stays inside the viewport and is linked to
- * its control with aria-describedby. Replaces the native `title` attribute.
+ * its control with aria-describedby (which also works for the hidden bubble, so it is not read as stray page content).
+ * Replaces the native `title` attribute.
  */
 export function Tip({ label, shortcut, fill, forceOpen, when, besideOf, children }: Props) {
   const id = useId();
@@ -101,7 +102,7 @@ export function Tip({ label, shortcut, fill, forceOpen, when, besideOf, children
       {child}
       {shown &&
         createPortal(
-          <div ref={bubble} id={id} role="tooltip" className="tip-bubble" onMouseEnter={() => { window.clearTimeout(timer.current); window.clearTimeout(hideTimer.current); setOpen(true); }} onMouseLeave={(e) => {
+          <div ref={bubble} id={id} role="tooltip" aria-hidden="true" className="tip-bubble" onMouseEnter={() => { window.clearTimeout(timer.current); window.clearTimeout(hideTimer.current); setOpen(true); }} onMouseLeave={(e) => {
             if (wrap.current?.contains(e.relatedTarget as Node | null)) return;
             window.clearTimeout(hideTimer.current);
             hideTimer.current = window.setTimeout(() => {

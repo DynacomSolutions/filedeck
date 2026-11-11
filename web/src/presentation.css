@@ -37,7 +37,7 @@ body { font-family: var(--presentation-font); font-size: var(--presentation-size
 
 /* Reflow the compact Properties controls and sidebar at narrow viewports. The
    breakpoint also catches desktop zoom when it reduces the CSS viewport. */
-@media (max-width: 700px) {
+@media (max-width: 700px), (max-height: 500px) and (max-width: 1000px) {
   .side { max-height: 45dvh; overflow-y: auto; }
   .side-scroll { flex: 1 1 auto; min-height: 3rem; }
   .jobs { max-height: 30%; }
