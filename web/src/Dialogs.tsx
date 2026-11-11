@@ -77,9 +77,10 @@ export function LinkDialog({ existing, onSubmit, onClose }: { existing?: { name:
 }
 
 export function ConfirmDialog({ title, message, action, danger, onConfirm, onClose }: { title: string; message: string; action: string; danger?: boolean; onConfirm: () => void; onClose: () => void }) {
+  const messageId = useId();
   return (
-    <Modal title={title} onClose={onClose}>
-      <p className="pad0">{message}</p>
+    <Modal title={title} onClose={onClose} describedBy={messageId}>
+      <p id={messageId} className="pad0">{message}</p>
       <div className="modal-actions">
         <button type="button" autoFocus onClick={onClose}><Ic.X /> Cancel</button>
         <button
