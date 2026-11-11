@@ -175,7 +175,7 @@ ETA: 2026-11-12 16:00 ICT
 | 108 | Archive extraction stages and merges through pinned directory descriptors | in_review | claude-20261112-rv-archives | rv-extract-pinned | 14.114 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/192 |
 | 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | in_review | claude-20261112-rv-fsops | rv-pinned-walks | 14.113, 14.116 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/199 |
 | 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_review | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/182 |
-| 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | in_review | claude-20261112-rv-chart | rv-chart-workflows | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/184 |
+| 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
@@ -205,7 +205,7 @@ ETA: 2026-11-12 15:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 122 | File list renders only the visible rows | todo | | rv-list-window | 17.124 | | Found in review: 30,000 files froze scrolling |
-| 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | in_review | claude-20261112-rv-shell | rv-narrow-layout | 15.120 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/198 |
+| 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | done | claude-20261112-rv-shell | rv-narrow-layout | 15.120 | | Merged https://github.com/DynacomSolutions/filedeck/pull/198, CI green<br>Full rows: 844x390 6, 320x256 3<br>Pinch zoom covered by a unit test only |
 
 ## 17. Keyboard and screen reader access
 Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and AA.
@@ -215,6 +215,6 @@ ETA: 2026-11-12 16:00 ICT
 | 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | todo | | rv-list-access | 15.118 | | Found in review |
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | done | claude-20261112-rv-menus | rv-menus-dialogs | | | Merged https://github.com/DynacomSolutions/filedeck/pull/200, CI green<br>Checked at 1366x768 and 390 px |
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
-| 127 | Component roles, names and announcements | todo | | rv-aria-announce | 15.121 | | Found in review |
+| 127 | Component roles, names and announcements | in_review | claude-20261112-rv-components | rv-aria-announce | 15.121 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/202 |
 | 128 | Browser acceptance checks repaired and run in CI; audit document updated | todo | | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Found in review: two of three scopes fail on main |
 | 129 | Release v0.3.36 with the review fixes | todo | | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | After every row above is merged |

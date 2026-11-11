@@ -4,19 +4,26 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
-  packages: write
+# No default token rights; each job asks for what it needs.
+permissions: {}
 
 jobs:
-  release:
+  # Tests, build and chart packaging: read-only token.
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
         timeout-minutes: 5
 
       - name: Validate stable release tag and chart versions
+        id: meta
         shell: bash
         run: |
           set -euo pipefail
@@ -31,10 +38,11 @@ jobs:
           test "$chart_version" = "$version"
           test "$app_version" = "$version"
           image="ghcr.io/${GITHUB_REPOSITORY,,}:$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           printf 'FILEDECK_RELEASE_TAG=%s\nFILEDECK_RELEASE_VERSION=%s\nFILEDECK_IMAGE=%s\n' "$tag" "$version" "$image" >> "$GITHUB_ENV"
         timeout-minutes: 5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -67,7 +75,7 @@ jobs:
           npm run check:neutral
         timeout-minutes: 20
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v3.17.3
         timeout-minutes: 5
@@ -79,21 +87,54 @@ jobs:
           test -f "dist/filedeck-${FILEDECK_RELEASE_VERSION}.tgz"
         timeout-minutes: 5
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chart
+          path: dist/filedeck-${{ steps.meta.outputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 1
+        timeout-minutes: 5
+
+  # Builds, scans and publishes the image and the GitHub release: the only job with write rights.
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    env:
+      FILEDECK_RELEASE_TAG: ${{ github.ref_name }}
+      FILEDECK_RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+        timeout-minutes: 5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: chart
+          path: dist
+        timeout-minutes: 5
+      - name: Image name
+        run: echo "FILEDECK_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:$FILEDECK_RELEASE_VERSION" >> "$GITHUB_ENV"
+        timeout-minutes: 5
+
       # Docker Hub rate limits and times out on hosted runners; pull buildkit and base images via mirror.gcr.io.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
         timeout-minutes: 5
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
         timeout-minutes: 5
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           load: true
@@ -107,7 +148,7 @@ jobs:
             org.opencontainers.image.description=Web file manager with per-node agents and a hub
         timeout-minutes: 15
       - name: Scan release image for high and critical vulnerabilities
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: ${{ env.FILEDECK_IMAGE }}
           format: table
@@ -124,8 +165,14 @@ jobs:
         run: gh release create "$FILEDECK_RELEASE_TAG" "dist/filedeck-${FILEDECK_RELEASE_VERSION}.tgz" --repo "$GITHUB_REPOSITORY" --title "Filedeck $FILEDECK_RELEASE_TAG" --generate-notes
         timeout-minutes: 5
       - name: Move stable tag to this release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git tag -f stable "$GITHUB_SHA"
-          git push -f origin refs/tags/stable
+          # Through the API, so the checkout does not have to keep the token in its git config.
+          if gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/stable" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>&1; then
+            echo "stable moved to $GITHUB_SHA"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/stable -f sha="$GITHUB_SHA" >/dev/null
+          fi
         timeout-minutes: 5

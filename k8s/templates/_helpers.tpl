@@ -36,3 +36,12 @@ helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version | replace 
 {{- define "filedeck.agentInstance" -}}
 {{- printf "%s-agent-%s" .root.Release.Name .node.name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+
+{{- /* Name of the shared hub-to-agent Secret: the configured one, else the generated one, else empty (no token). */}}
+{{- define "filedeck.agentTokenSecret" -}}
+{{- if .Values.agentToken.secretName -}}
+{{- .Values.agentToken.secretName -}}
+{{- else if .Values.agentToken.generate -}}
+{{- printf "%s-agent-token" (include "filedeck.name" .) -}}
+{{- end -}}
+{{- end -}}

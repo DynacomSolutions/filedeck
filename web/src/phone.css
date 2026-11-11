@@ -1,0 +1,15 @@
+/* Phone layout extras: notices under the file list, and compact chrome when the window is short. */
+.phone-foot{flex:none;display:flex;flex-direction:column;min-height:0;max-height:40%;overflow:auto}
+.phone-foot .side-status:has(span:empty){height:0}
+
+/* A short window (a phone held sideways, or a page zoomed to 400%): the file list must keep several rows, so the two toolbar rows share one horizontally scrolling row and the top bar is tighter. */
+@media(max-height:500px) and (max-width:1000px){
+  .fp>.fp-bar{height:44px;flex-direction:row;align-items:center;overflow-x:auto;overflow-y:hidden}
+  .fp>.fp-bar>.fp-row{flex:0 0 auto;height:44px;flex-wrap:nowrap;align-content:center;row-gap:0}
+  .fp>.fp-bar .fp-row .addr{order:0;flex:0 0 14rem;min-width:8rem}
+}
+@media(max-height:500px) and (max-width:1000px){
+  .site-header__inner{height:36px}
+  .site-header .drawer-btn{min-height:32px;height:32px}
+  .main{padding:.15rem}
+}
