@@ -58,7 +58,8 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `nodes[]` | One agent each: `name` (shown in the UI) and `nodeName` (Kubernetes node; empty = any) |
 | `agent.stagger` | Under Argo CD, roll agents one at a time (agent N in sync wave N+1, in `nodes` order); default on, ignored by plain Helm |
 | `agent.readOnlyPaths` | Virtual paths no agent may change (default `/proc`, `/sys`) |
-| `agentToken.secretName` | Existing Secret holding a shared hub-to-agent token (empty = none) |
+| `agentToken.secretName`, `agentToken.generate` | Shared hub-to-agent token: name an existing Secret, or set `generate: true` and a hook Job creates a random one (never rotated); empty and off = none |
+| `hub.networkPolicy.enabled`, `hub.networkPolicy.from` | Optional NetworkPolicy for the hub: only the listed peers (for example your ingress controller) may connect; off by default |
 | `apiToken.secretName` | Existing Secret holding the read-only token for `filedeck du` (empty = feature off) |
 | `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key before the hub starts; check vault health after installation |
 | `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
@@ -69,13 +70,13 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `mapping.enabled`, `mapping.host` | Optional Emissary / Ambassador Mapping to the hub; with another ingress route to the `filedeck` Service yourself |
 | `testSources.*` | Scratch SFTP, WebDAV, S3 and SMB servers for trying the sources (off; needs SealedSecret ciphertext in `testSources.sealed`) |
 
-Agents run as root with the node's `/` mounted read-write, and there are no user accounts: keep the hub on a trusted network and leave the NetworkPolicy and `agentToken` in place. Each agent is selected by the label `app.kubernetes.io/instance: <release>-agent-<name>`.
+Agents run as root with the node's `/` mounted read-write, and there are no user accounts: keep the hub on a trusted network and leave the agent NetworkPolicy in place. Anything that can reach the hub can use it, so on a shared cluster also set `agentToken.generate: true` and `hub.networkPolicy` (the chart default allows any pod to reach the hub, so that a plain install works behind any ingress). Each agent is selected by the label `app.kubernetes.io/instance: <release>-agent-<name>`.
 
 ## Configuration (environment)
 
 Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDECK_MAX_EDIT`, `FILEDECK_READONLY` (comma separated virtual prefixes), `FILEDECK_AGENT_TOKEN`, `FILEDECK_TRANSCODE_CONCURRENCY`, `FILEDECK_THUMB_DIR`, archive, search and hash limits (see `server/src/config.ts`).
 
-Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_ALLOWED_HOSTS` (comma separated `host` or `host:port` values the hub answers to; any other `Host` gets 421; unset accepts any), `FILEDECK_API_TOKEN` or `FILEDECK_API_TOKEN_FILE` (read-only `filedeck du` token, see below), `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
+Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_ALLOWED_HOSTS` (comma separated host names the hub answers to; any other `Host` gets 421; unset accepts any. Write the bare name, such as `files.example`, to accept every port, or `files.example:8443` to accept that port only; a name with `:80` or `:443` also matches a `Host` header without a port. The same list names the sites whose `Origin` may change state when the browser sends no `Sec-Fetch-Site`, on the request's own scheme and port), `FILEDECK_API_TOKEN` or `FILEDECK_API_TOKEN_FILE` (read-only `filedeck du` token, see below), `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
 `FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help).
 
@@ -98,7 +99,7 @@ filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached] [--json
 | `--json` | Print the hub's answer as JSON (one object per argument) |
 | `--timeout SECONDS` | Give up on an argument after this long in total (default: 600; `0` follows a live job with no cap; Ctrl-C or the timeout leaves the job running, rerun to rejoin) and exit 1 |
 
-Without `-h` the unit is 1 KiB blocks, as in `du`. Children are printed before their parent. Paths are `node:/path`, where `node` is a node name from the sidebar. A long scan answers with a job; the CLI polls it and prints progress on stderr. When the answer comes from stored sizes it says so on stderr (with the age of the oldest folder), because changes since the last scan may be missing; `--fresh` avoids that. Exit status is 0 on success, 1 if any argument failed, 2 for a usage or configuration error.
+Without `-h` the unit is 1 KiB blocks, as in `du`. Children are printed before their parent. Paths are `node:/path`, where `node` is a node name from the sidebar. A long scan answers with a job; the CLI polls it and prints progress on stderr. When the answer comes from stored sizes it says so on stderr (with the age of the oldest folder), because changes since the last scan may be missing; `--fresh` avoids that. Exit status is 0 on success, 1 if any argument failed, 2 for a usage or configuration error, 130 when interrupted with Ctrl-C (the job keeps running on the server).
 
 Environment: `FILEDECK_URL` (hub base URL, for example `https://filedeck.example.org`) and `FILEDECK_TOKEN` (the read-only token).
 

@@ -64,12 +64,12 @@ spec:
             - name: NODE_OPTIONS
               value: {{ . | quote }}
             {{- end }}
-            {{- if .Values.agentToken.secretName }}
+            {{- if include "filedeck.agentTokenSecret" . }}
             # Shared hub-to-agent secret (Secret created out of band, never in Git).
             - name: FILEDECK_AGENT_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.agentToken.secretName }}
+                  name: {{ include "filedeck.agentTokenSecret" . }}
                   key: {{ .Values.agentToken.key }}
             {{- end }}
             {{- if .Values.apiToken.secretName }}

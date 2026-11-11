@@ -12,7 +12,7 @@ import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 import { readOnlyGuard } from "../src/readonly.ts";
 import { audit } from "../src/audit.ts";
-import { MAX_JSON_BODY, requestGuard } from "../src/request-guard.ts";
+import { MAX_JSON_BODY, matchesHostList, requestGuard } from "../src/request-guard.ts";
 
 const listen = (app: { fetch: never }) =>
   new Promise<ReturnType<typeof serve>>((res) => {
@@ -145,11 +145,68 @@ test("the audit log records the paths whatever the content type, and never reads
   app.use("*", audit("t", (l) => lines.push(l)));
   app.post("/api/fs/delete", (c) => c.json({ ok: true }));
   app.put("/api/fs/upload", (c) => c.json({ ok: true }));
-  await app.request("/api/fs/delete", { method: "POST", headers: { "content-type": "text/plain" }, body: JSON.stringify({ paths: ["/gone"] }) });
+  const one = JSON.stringify({ paths: ["/gone"] });
+  await app.request("/api/fs/delete", { method: "POST", headers: { "content-type": "text/plain", "content-length": String(one.length) }, body: one });
   await app.request("/api/fs/upload?dir=/&name=a", { method: "PUT", headers: J, body: JSON.stringify({ paths: ["/not-a-path"] }) });
   const [d, u] = lines.map((l) => JSON.parse(l));
   assert.deepEqual(d.body, { paths: ["/gone"] });
   assert.equal(u.body, undefined);
+});
+
+test("the audit log never parses a body of unknown or large size, whatever the transfer encoding", async () => {
+  const lines: string[] = [];
+  const app = new Hono();
+  app.use("*", audit("t", (l) => lines.push(l)));
+  app.post("/api/fs/delete", (c) => c.json({ ok: true }));
+  const real = JSON.parse;
+  let big = 0;
+  JSON.parse = ((t: string, r?: never) => ((big += t.length > 100_000 ? 1 : 0), real(t, r))) as typeof JSON.parse;
+  try {
+    const pad = '{"paths":["/a"],"pad":"' + "x".repeat(300_000) + '"}';
+    await app.request("/api/fs/delete", { method: "POST", headers: { ...J, "transfer-encoding": "chunked" }, body: pad });
+    await app.request("/api/fs/delete", { method: "POST", headers: { ...J, "content-length": String(pad.length) }, body: pad });
+  } finally {
+    JSON.parse = real;
+  }
+  assert.equal(big, 0);
+  assert.ok(lines.every((l) => JSON.parse(l).body === undefined));
+});
+
+test("a body is parsed once per process and shared by guard, read-only guard, audit and route", async () => {
+  const lines: string[] = [];
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "p", FILEDECK_READONLY: "/ro" } as never), (l) => lines.push(l));
+  const real = JSON.parse;
+  let big = 0;
+  JSON.parse = ((t: string, r?: never) => { if (t.length > 100_000) big++; return real(t, r); }) as typeof JSON.parse;
+  let heap = 0;
+  try {
+    const body = JSON.stringify({ paths: Array.from({ length: 10_000 }, (_, i) => `/nothing/${"d".repeat(60)}/${i}`) });
+    assert.ok(body.length > 500_000 && body.length < 1024 * 1024);
+    const before = process.memoryUsage().heapUsed;
+    const r = await app.request("/api/fs/delete", { method: "POST", headers: J, body });
+    heap = process.memoryUsage().heapUsed - before;
+    assert.equal(r.status, 404, "the route got the parsed body and looked at the first path");
+  } finally {
+    JSON.parse = real;
+  }
+  assert.equal(big, 1, "one parse of the large body");
+  assert.deepEqual((JSON.parse(lines[0]!) as { body: { paths: string[] } }).body.paths.length, 21, "audit keeps 20 paths and a count");
+  assert.ok(heap < 64 * 1024 * 1024, `heap grew by ${heap}`);
+});
+
+test("a chunked 16 MiB body to a small-body route is refused without being parsed", async () => {
+  const aport = (agentSrv.address() as AddressInfo).port;
+  const real = JSON.parse;
+  let big = 0;
+  JSON.parse = ((t: string, r?: never) => ((big += t.length > 100_000 ? 1 : 0), real(t, r))) as typeof JSON.parse;
+  try {
+    assert.equal(await chunked(aport, "/api/fs/mkdir", J, MAX_JSON_BODY, '{"path":"/x","pad":"'), 413);
+    assert.equal(await chunked((hubSrv.address() as AddressInfo).port, "/api/nodes/t/api/fs/mkdir", J, MAX_JSON_BODY, '{"path":"/x","pad":"'), 413);
+    assert.equal(await chunked((hubSrv.address() as AddressInfo).port, "/api/ops/jobs/x/pause", J, MAX_JSON_BODY, '{"pad":"'), 413);
+  } finally {
+    JSON.parse = real;
+  }
+  assert.equal(big, 0);
 });
 
 /** A request sent with chunked transfer encoding (no Content-Length), `size` bytes of body in 1 MiB pieces. */
@@ -232,7 +289,11 @@ test("without Sec-Fetch-Site an Origin is accepted for Host, X-Forwarded-Host or
   const post = async (headers: Record<string, string>) => (await app.request("http://internal.local:8080/x", { method: "POST", headers: { ...J, ...headers }, body: "{}" })).status;
   assert.equal(await post({ origin: "http://internal.local:8080" }), 200, "Origin equals Host");
   assert.equal(await post({ origin: "https://files.example.test", host: "internal.local:8080", "x-forwarded-host": "files.example.test" }), 200, "the proxy rewrote Host");
-  assert.equal(await post({ origin: "https://files.example.test", host: "internal.local:8080" }), 200, "listed host (name only: any port)");
+  assert.equal(await post({ origin: "https://files.example.test", host: "internal.local:8080" }), 403, "a listed name without a port: the request's own port is 8080, not 443");
+  assert.equal(await post({ origin: "https://files.example.test", host: "internal.local:8080", "x-forwarded-proto": "https" }), 200, "listed name, the proxy says https");
+  assert.equal(await post({ origin: "https://files.example.test", host: "internal.local:8080", "x-forwarded-proto": "http" }), 403, "scheme differs from the request's own");
+  assert.equal(await post({ origin: "https://files.example.test:9443", host: "files.example.test:9443" }), 200, "Origin equals Host");
+  assert.equal(await post({ origin: "https://files.example.test:9443", host: "internal.local:8080", "x-forwarded-proto": "https" }), 403, "a listed name on a port nobody named");
   assert.equal(await post({ origin: "https://other.example.test:8443", host: "internal.local:8080" }), 200, "listed host:port");
   assert.equal(await post({ origin: "https://other.example.test:9", host: "internal.local:8080" }), 403, "a listed host:port is exact");
   assert.equal(await post({ origin: "https://evil.example", host: "internal.local:8080" }), 403);
@@ -252,4 +313,26 @@ test("refused requests are audited with their status and claimed origin, without
   assert.ok(rows.every((r) => r.audit === true && r.refused === true && r.method === "POST" && r.route === "/api/fs/delete" && r.who === "agent:a"));
   assert.equal(rows[0].origin, "https://evil.example");
   assert.ok(!lines.join("\n").includes("SECRET-BODY-PATH"));
+});
+
+test("an allowed-hosts entry compares names, and ports only when the entry names one", () => {
+  assert.equal(matchesHostList("files.example", ["files.example:443"]), true, "no port in Host = default port");
+  assert.equal(matchesHostList("files.example", ["files.example:80"]), true);
+  assert.equal(matchesHostList("files.example", ["files.example:8443"]), false);
+  assert.equal(matchesHostList("files.example:443", ["files.example"]), true, "bare entry: any port");
+  assert.equal(matchesHostList("files.example:8080", ["files.example"]), true);
+  assert.equal(matchesHostList("files.example:8080", ["files.example:443"]), false);
+  assert.equal(matchesHostList("FILES.example:8443", ["files.example:8443"]), true);
+  assert.equal(matchesHostList("other.example", ["files.example"]), false);
+  assert.equal(matchesHostList("[::1]:8080", ["[::1]"]), true);
+});
+
+test("refusal audit lines carry the client address like any other line", async () => {
+  const lines: string[] = [];
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "a" } as never), (l) => lines.push(l));
+  await app.request("/api/fs/delete", { method: "POST", headers: { ...J, "sec-fetch-site": "cross-site", "x-forwarded-for": "198.51.100.9, 10.1.2.3" }, body: "{}" });
+  const r = JSON.parse(lines[0]!) as { ip: string; forwardedFor: string; status: number };
+  assert.equal(r.status, 403);
+  assert.equal(r.ip, "10.1.2.3");
+  assert.equal(r.forwardedFor, "198.51.100.9, 10.1.2.3");
 });

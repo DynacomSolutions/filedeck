@@ -7,6 +7,7 @@ import { ConflictError, api, fmtSize, type TextFile } from "./api";
 import { gitApi } from "./git";
 import { selectAllGoesToEditor, selectAllInEditor } from "./editorKeys";
 import { languageForPath, modelUri, monacoTheme } from "./monacoSetup";
+import { clearDraft, getDraft, joinBom, splitBom, syncDraft } from "./editDrafts";
 import { ArrowLeftRight } from "lucide-react";
 import * as Ic from "lucide-react";
 
@@ -81,6 +82,13 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
   const { node, path } = file;
   const [loaded, setLoaded] = useState<TextFile | null>(null);
   const [text, setText] = useState("");
+  /** what the editor widget was last given: it changes only when a file is loaded, never when one is saved, so text typed during a save is not overwritten */
+  const [editorValue, setEditorValue] = useState("");
+  /** bumped by every load so a reload replaces the widget's text even when the file is unchanged */
+  const [epoch, setEpoch] = useState(0);
+  const bomRef = useRef(false);
+  const onStatusRef = useRef(onStatus);
+  onStatusRef.current = onStatus;
   const [err, setErr] = useState("");
   const [conflict, setConflict] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -89,18 +97,40 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
   const dirty = loaded !== null && text !== loaded.content;
   useLeaveGuard(dirty);
 
-  const load = useCallback(() => {
-    setErr("");
-    setConflict(null);
-    api
-      .readText(node, path)
-      .then((f) => {
-        setLoaded(f);
-        setText(f.content);
-      })
-      .catch((e: Error) => setErr(e.message));
-  }, [node, path]);
-  useEffect(load, [load]);
+  /** `discard` drops any unsaved text kept from an earlier mount of this editor; otherwise it is taken back */
+  const load = useCallback(
+    (discard: boolean) => {
+      setErr("");
+      setConflict(null);
+      if (discard) clearDraft(node, path);
+      api
+        .readText(node, path)
+        .then((f) => {
+          const { bom, text: body } = splitBom(f.content);
+          bomRef.current = bom;
+          setLoaded({ ...f, content: body });
+          setEpoch((n) => n + 1);
+          const kept = discard ? undefined : getDraft(node, path);
+          if (kept) {
+            setText(kept.text);
+            setEditorValue(kept.text);
+            // typed against an older version than the one on disk now: saving needs the usual overwrite decision
+            if (kept.etag !== f.etag) setConflict(f.etag);
+            onStatusRef.current(`Restored unsaved changes to ${base(path)}`);
+          } else {
+            setText(body);
+            setEditorValue(body);
+          }
+        })
+        .catch((e: Error) => setErr(e.message));
+    },
+    [node, path],
+  );
+  useEffect(() => load(false), [load]);
+  // Keep the unsaved text where a remount of this editor (layout change, another file, browser history) finds it again.
+  useEffect(() => {
+    if (loaded) syncDraft(node, path, text, loaded.content, loaded.etag);
+  }, [loaded, text, node, path]);
 
   const save = useCallback(
     async (force = false) => {
@@ -108,8 +138,9 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
       setSaving(true);
       try {
         const etag = force && conflict ? conflict : loaded.etag;
-        const r = await api.writeText(node, path, text, etag);
-        setLoaded({ ...loaded, content: text, etag: r.etag, size: r.size, mtime: r.mtime });
+        const sent = text;
+        const r = await api.writeText(node, path, joinBom(bomRef.current, sent), etag);
+        setLoaded({ ...loaded, content: sent, etag: r.etag, size: r.size, mtime: r.mtime });
         setConflict(null);
         setErr("");
         onStatus(`Saved ${base(path)}`);
@@ -126,6 +157,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
 
   const close = () => {
     if (dirty && !confirm("Discard unsaved changes?")) return;
+    clearDraft(node, path);
     onClose();
   };
 
@@ -154,14 +186,15 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
         <Tip label="Close"><button aria-label="Close" onClick={close}><Ic.X /><span className="ed-lbl"> Close</span></button></Tip>
         {extra}
       </div>
-      {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
+      {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={() => load(true)} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
       <div className="ed-body">
         {loaded && (
           <Editor
+            key={epoch}
             path={modelUri(node, path)}
             language={languageForPath(path)}
-            value={loaded.content}
+            value={editorValue}
             theme={theme}
             options={OPTS}
             onChange={(v) => setText(v ?? "")}
@@ -181,6 +214,12 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
   const [l, setL] = useState<TextFile | null>(null);
   const [r, setR] = useState<TextFile | null>(null);
   const [rText, setRText] = useState("");
+  /** what the modified side of the widget was last given (see TextEditor: a save must not reset it) */
+  const [modValue, setModValue] = useState("");
+  const bomRef = useRef(false);
+  const rKey = useRef({ node: right.node, path: right.path });
+  const onStatusRef = useRef(onStatus);
+  onStatusRef.current = onStatus;
   const [err, setErr] = useState("");
   const [conflict, setConflict] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -209,18 +248,38 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
     [],
   );
 
-  const load = useCallback(() => {
-    setErr("");
-    setConflict(null);
-    Promise.all([left.rev ? gitApi.show(left.node, left.path, left.rev) : api.readText(left.node, left.path), api.readText(right.node, right.path)])
-      .then(([a, b]) => {
-        setL(a);
-        setR(b);
-        setRText(b.content);
-      })
-      .catch((e: Error) => setErr(e.message));
-  }, [left.node, left.path, left.rev, right.node, right.path]);
-  useEffect(load, [load]);
+  const load = useCallback(
+    (discard: boolean) => {
+      setErr("");
+      setConflict(null);
+      if (discard) clearDraft(right.node, right.path);
+      Promise.all([left.rev ? gitApi.show(left.node, left.path, left.rev) : api.readText(left.node, left.path), api.readText(right.node, right.path)])
+        .then(([a, b]) => {
+          const bodyB = splitBom(b.content);
+          bomRef.current = bodyB.bom;
+          rKey.current = { node: right.node, path: right.path };
+          setL({ ...a, content: splitBom(a.content).text });
+          setR({ ...b, content: bodyB.text });
+          const kept = discard ? undefined : getDraft(right.node, right.path);
+          const text = kept ? kept.text : bodyB.text;
+          setRText(text);
+          setModValue(text);
+          // the widget keeps its model across a reload, and the value above may equal the one it was already given
+          const model = ed.current?.getModifiedEditor().getModel();
+          if (model && model.getValue() !== text) model.setValue(text);
+          if (kept) {
+            if (kept.etag !== b.etag) setConflict(b.etag);
+            onStatusRef.current(`Restored unsaved changes to ${base(right.path)}`);
+          }
+        })
+        .catch((e: Error) => setErr(e.message));
+    },
+    [left.node, left.path, left.rev, right.node, right.path],
+  );
+  useEffect(() => load(false), [load]);
+  useEffect(() => {
+    if (r) syncDraft(rKey.current.node, rKey.current.path, rText, r.content, r.etag);
+  }, [r, rText]);
 
   const save = useCallback(
     async (force = false) => {
@@ -229,9 +288,8 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
       setSaving(true);
       try {
         const etag = force && conflict ? conflict : r.etag;
-        const res = await api.writeText(right.node, right.path, text, etag);
+        const res = await api.writeText(right.node, right.path, joinBom(bomRef.current, text), etag);
         setR({ ...r, content: text, etag: res.etag, size: res.size, mtime: res.mtime });
-        setRText(text);
         setConflict(null);
         setErr("");
         onStatus(`Saved ${base(right.path)}`);
@@ -248,6 +306,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
 
   const close = () => {
     if (dirty && !confirm("Discard unsaved changes?")) return;
+    clearDraft(rKey.current.node, rKey.current.path);
     onClose();
   };
   const same = l && r && l.content === r.content;
@@ -274,7 +333,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
         <Tip label="Close"><button aria-label="Close" onClick={close}><Ic.X /><span className="ed-lbl"> Close</span></button></Tip>
         {extra}
       </div>
-      {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={load} />}
+      {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={() => load(true)} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
       <div className="ed-body">
         {l && r && (
@@ -286,7 +345,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
             keepCurrentOriginalModel
             keepCurrentModifiedModel
             original={l.content}
-            modified={r.content}
+            modified={modValue}
             theme={theme}
             options={{ ...OPTS, renderSideBySide: !inline, originalEditable: false, readOnly: false, useInlineViewWhenSpaceIsLimited: false }}
             onMount={(e) => {

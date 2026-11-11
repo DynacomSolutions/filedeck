@@ -143,10 +143,10 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
           { value: "glob", label: "glob" },
           { value: "regex", label: "regex" },
         ]} />
-        <Tip label="Match name case-sensitively"><label className="chk"><input type="checkbox" checked={!form.ic} onChange={(e) => set({ ic: !e.target.checked })} /> Aa</label></Tip>
+        <Tip label="Match name case-sensitively"><label className="chk"><input type="checkbox" aria-label="Aa, match name case-sensitively" checked={!form.ic} onChange={(e) => set({ ic: !e.target.checked })} /> Aa</label></Tip>
         <input type="search" placeholder="Text inside files (optional)" aria-label="Content" value={form.content} onChange={(e) => set({ content: e.target.value })} />
-        <Tip label="Treat the content text as a regular expression"><label className="chk"><input type="checkbox" checked={form.cre} onChange={(e) => set({ cre: e.target.checked })} /> regex</label></Tip>
-        <Tip label="Match content case-sensitively"><label className="chk"><input type="checkbox" checked={!form.cic} onChange={(e) => set({ cic: !e.target.checked })} /> Aa</label></Tip>
+        <Tip label="Treat the content text as a regular expression"><label className="chk"><input type="checkbox" aria-label="regex, content text is a regular expression" checked={form.cre} onChange={(e) => set({ cre: e.target.checked })} /> regex</label></Tip>
+        <Tip label="Match content case-sensitively"><label className="chk"><input type="checkbox" aria-label="Aa, match content case-sensitively" checked={!form.cic} onChange={(e) => set({ cic: !e.target.checked })} /> Aa</label></Tip>
         <Dropdown label="Type" value={form.types} onChange={(v) => set({ types: v as SearchTypes })} options={[
           { value: "all", label: "files and folders" },
           { value: "file", label: "files" },
@@ -159,13 +159,15 @@ export function SearchView({ node, dir, hidden, form, onForm, onClose, onReveal,
         )}
         <Tip label="Close search" shortcut="Esc"><button type="button" aria-label="Close search" onClick={() => (onForm(EMPTY_SEARCH), onClose())}><X /></button></Tip>
       </form>
-      <div className="sr-sum muted" role="status">
-        <Tip label={`${node}:${dir}`}><span>In {dir}</span></Tip> · {summary()}
+      <div className="sr-sum muted">
+        <Tip label={`${node}:${dir}`}><span>In {dir}</span></Tip> · <span aria-hidden="true">{summary()}</span>
+        {/* the figures change several times a second while searching: only the start and the outcome are announced */}
+        <span className="sr-only" role="status">{running ? "Searching..." : summary()}</span>
       </div>
       <div className="sr-list fp-scroll" ref={listRef} tabIndex={0}>
         <table className="ft">
           <thead>
-            <tr><th>Name</th><th>Folder</th><th className="size">Size</th><th className="mtime">Modified</th><th /></tr>
+            <tr><th>Name</th><th>Folder</th><th className="size">Size</th><th className="mtime">Modified</th><th><span className="sr-only">Actions</span></th></tr>
           </thead>
           <tbody>
             {running && !hits.length && <SkeletonRows rows={8} search />}

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
@@ -36,6 +37,23 @@ export interface SftpOptions {
 }
 
 /**
+ * Where first-seen host keys are kept so they survive a restart (trust on first use). The file is only used when
+ * its folder already exists (the hub's vault volume), so nothing is created on a machine without that volume.
+ */
+export interface SftpState {
+  hostKeyFile: string;
+}
+
+function readKnown(file: string): Record<string, string> {
+  try {
+    const v = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * SFTP source on ssh2. One lazily opened connection is shared by all requests
  * and reopened after it drops. Credentials come from the mounted Secret
  * (`username`, then `password` or `privateKey` + optional `passphrase`) and are
@@ -51,11 +69,14 @@ export class SftpBackend implements SourceBackend {
   private readonly port: number;
   private readonly root: string;
   private readonly opts: SftpOptions;
+  private readonly known: string;
 
   constructor(
     cfg: SourceConfig,
     private readonly creds: () => Promise<Credentials>,
+    private readonly state?: SftpState,
   ) {
+    this.known = `${cfg.name}|${cfg.host}`;
     const m = /^(.*?)(?::(\d+))?$/.exec(cfg.host) as RegExpExecArray;
     this.host = m[1] as string;
     this.port = m[2] ? Number(m[2]) : 22;
@@ -81,6 +102,8 @@ export class SftpBackend implements SourceBackend {
     if (!c.username) throw new FsError(502, "source credentials are missing");
     const conn = new Client();
     const pinned = this.opts.hostKeySha256?.replace(/^SHA256:/, "").replace(/=+$/, "");
+    // no pin: the key remembered from an earlier run (if the state folder exists) counts as the first one seen
+    if (!pinned && this.seenKey === null && this.state && fs.existsSync(path.dirname(this.state.hostKeyFile))) this.seenKey = readKnown(this.state.hostKeyFile)[this.known] ?? null;
     let keyRefused = false;
     const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
       // a failed attempt (bad credentials, unreachable) must not leave a half-open connection behind
@@ -107,6 +130,16 @@ export class SftpBackend implements SourceBackend {
           if (changed) {
             keyRefused = true;
             return false;
+          }
+          if (!pinned && this.seenKey !== got && this.state && fs.existsSync(path.dirname(this.state.hostKeyFile))) {
+            try {
+              const all = { ...readKnown(this.state.hostKeyFile), [this.known]: got };
+              const tmp = `${this.state.hostKeyFile}.${process.pid}.tmp`;
+              fs.writeFileSync(tmp, JSON.stringify(all), { mode: 0o600 });
+              fs.renameSync(tmp, this.state.hostKeyFile);
+            } catch {
+              /* read-only or full volume: the key is still remembered for this run */
+            }
           }
           this.seenKey = got;
           return true;
@@ -190,6 +223,16 @@ export class SftpBackend implements SourceBackend {
     }
   }
 
+  async statFollow(p: string): Promise<SourceStat | null> {
+    try {
+      const a = await this.call<Stats>((s, cb) => s.stat(this.real(p), cb));
+      return { type: kindOf(a), size: a.size, mtime: a.mtime * 1000, mode: a.mode & 0o7777 };
+    } catch (e) {
+      if (e instanceof FsError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
   async read(p: string, range?: { start: number; end: number }): Promise<Readable> {
     const s = await this.open();
     const rs = s.createReadStream(this.real(p), range ? { start: range.start, end: range.end } : undefined);
@@ -236,7 +279,8 @@ export class SftpBackend implements SourceBackend {
       try {
         await this.call<void>((x, cb) => x.rename(from, to, cb as (e?: Error | null) => void));
       } catch (e) {
-        if (e instanceof FsError && e.status === 502) throw new FsError(409, "destination exists");
+        // a generic SFTP failure is only "destination exists" when something is there; anything else keeps its own error
+        if (e instanceof FsError && e.status === 502 && (await this.statAbs(to).catch(() => null))) throw new FsError(409, "destination exists");
         throw e;
       }
       return;
@@ -253,6 +297,15 @@ export class SftpBackend implements SourceBackend {
     }
     await this.call<void>((x, cb) => x.unlink(to, cb as (e?: Error | null) => void));
     await this.call<void>((x, cb) => x.rename(from, to, cb as (e?: Error | null) => void));
+  }
+
+  private async statAbs(real: string): Promise<Stats | null> {
+    try {
+      return await this.call<Stats>((s, cb) => s.lstat(real, cb));
+    } catch (e) {
+      if (e instanceof FsError && e.status === 404) return null;
+      throw e;
+    }
   }
 
   async mkdir(p: string): Promise<void> {

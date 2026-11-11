@@ -1,3 +1,4 @@
+import { ErrorBoundary } from "./ErrorBoundary";
 import { brand } from "./brand";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -187,16 +188,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
         else history.replaceState({ ...arrival, paths: arrival.paths }, "", latest.current.url);
         return;
       }
-      if (restored) {
-        // A panel-navigation entry stores the complete app snapshot in the URL,
-        // including selection, cursor, tab state and the other panels. Restore it
-        // just like a view transition instead of reconstructing only node/path.
-        fromPop.current = true;
-        restoreRoute(restored);
-        const target = leaves(restored.tree).find((panel) => panel.id === focused);
-        setStatus(`${back ? "Back" : "Forward"}: ${target ? `${target.node}:${target.path}` : "view"}`);
-        return;
-      }
+      // A panel-navigation entry restores only that panel's own folder; layout, selection and the other panels stay as they are.
       const target = arrival.paths[focused];
       if (!target) return;
       fromPop.current = true;
@@ -529,6 +521,7 @@ export function App() {
       const nx = all.length > 1 ? all[(all.findIndex((l) => l.id === t.id) + 1) % all.length] : undefined;
       return (
         <DockSlot id={t.id} dragging={dragId} onDock={dock}>
+        <ErrorBoundary what="This panel" resetKeys={[t.node, t.path]} onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : undefined}>
         <FilePanel
           dragProps={dragProps(t.id)}
           onDock={onKeyDock(t.id)}
@@ -558,6 +551,7 @@ export function App() {
           peers={leaves(tree!).filter((l) => l.id !== t.id).map((l) => ({ id: l.id, node: l.node, path: l.path, sel: l.sel, picked: panelSel.includes(l.id) }))}
           onStatus={setStatus}
         />
+        </ErrorBoundary>
         </DockSlot>
       );
     }
@@ -582,10 +576,18 @@ export function App() {
     );
   };
 
+  // Status line, compare notes and the jobs tray. On a phone they sit under the file list: the drawer is hidden until opened, and a hidden live region is never read out.
+  const notices = (
+    <>
+      <CompareInfo />
+      <div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div>
+      <JobsTray nodes={nodes} />
+    </>
+  );
   return (
     <div className="app">
       <CompareCtx.Provider value={routedCompare}>
-      <Sidebar drawer={phone && drawerOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<><CompareInfo /><div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div><JobsTray nodes={nodes} /><div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
+      <Sidebar drawer={phone && drawerOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<>{!phone && notices}<div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
       <div className="app-col">
       <header className="site-header">
         <div className="site-header__inner">
@@ -636,16 +638,21 @@ export function App() {
               <div className="phone-leaf" key={activeLeaf?.id}>{render(activeLeaf ?? leaves(tree)[0]!, count(tree))}</div>
             </>
           ) : tree ? render(tree, count(tree)) : <div className="pad muted">Loading nodes...</div>}
+          {phone && <div className="phone-foot">{notices}</div>}
           {trash && (
-            <Suspense fallback={null}>
-              <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => closeView(() => setTrash(null))} onStatus={setStatus} />
-            </Suspense>
+            <ErrorBoundary what="The trash view" onClose={() => closeView(() => setTrash(null))}>
+              <Suspense fallback={null}>
+                <TrashBrowser node={trash.node} volume={trash.volume} onVolume={(volume) => setTrash((t) => (t ? { ...t, volume } : t))} onClose={() => closeView(() => setTrash(null))} onStatus={setStatus} />
+              </Suspense>
+            </ErrorBoundary>
           )}
-          {settingsOpen && <SettingsView onClose={() => closeView(() => setSettingsOpen(false))} />}
+          {settingsOpen && <ErrorBoundary what="Settings" onClose={() => closeView(() => setSettingsOpen(false))}><SettingsView onClose={() => closeView(() => setSettingsOpen(false))} /></ErrorBoundary>}
           {diff && (
-            <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
-              <DiffViewer overlay left={diff.left} right={diff.right} onClose={() => closeView(() => setDiff(null))} onStatus={setStatus} />
-            </Suspense>
+            <ErrorBoundary what="The diff viewer" resetKeys={[diff.left, diff.right]} onClose={() => closeView(() => setDiff(null))}>
+              <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
+                <DiffViewer overlay left={diff.left} right={diff.right} onClose={() => closeView(() => setDiff(null))} onStatus={setStatus} />
+              </Suspense>
+            </ErrorBoundary>
           )}
         </main>
       </div>

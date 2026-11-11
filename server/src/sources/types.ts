@@ -31,6 +31,11 @@ export interface SourceBackend {
   list(path: string): Promise<SourceEntry[]>;
   /** Missing -> null. Never follows a final symlink. */
   stat(path: string): Promise<SourceStat | null>;
+  /**
+   * Optional: like `stat` but follows a final symlink (null when missing or the link is broken). Backends with
+   * symlinks implement it so that a linked file can be read; the others never report a symlink.
+   */
+  statFollow?(path: string): Promise<SourceStat | null>;
   /** Inclusive byte range when given. */
   read(path: string, range?: { start: number; end: number }): Promise<Readable>;
   /**

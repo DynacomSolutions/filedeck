@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
-import type { Readable } from "node:stream";
+import { PassThrough, type Readable } from "node:stream";
 import { FsError } from "./fsops.ts";
 import { direntsOf } from "./dirnames.ts";
 import type { JobCtl } from "./jobs.ts";
@@ -224,7 +224,11 @@ export async function extractTar(
       } finally {
         await fh.close();
       }
-      if (h.mtime > 0) await fs.utimes(target, h.mtime, h.mtime).catch(() => undefined);
+      if (h.mtime !== 0) {
+        // a Date, not a number: Node treats a negative number (a date before 1970) as "now"
+        const when = new Date(h.mtime * 1000);
+        await fs.utimes(target, when, when).catch(() => undefined);
+      }
       res.files++;
     }
   } catch (e) {
@@ -277,6 +281,10 @@ export async function streamList(
   const done = watch(child);
   let stopped = false;
   const rl = createInterface({ input: child.stdout as Readable });
+  // A killed child's destroyed stdout never ends, so readline would wait for ever: close it on abort.
+  const closeRl = () => rl.close();
+  if (signal.aborted) closeRl();
+  else signal.addEventListener("abort", closeRl, { once: true });
   for await (const line of rl) {
     const e = parseListLine(line);
     if (!e) continue; // continuation of a name with a newline, or noise
@@ -286,8 +294,11 @@ export async function streamList(
       break;
     }
   }
+  signal.removeEventListener("abort", closeRl);
   const { code, err } = await done;
-  if (!stopped && !signal.aborted && code !== 0) throw new ArchiveError(400, `cannot read archive: ${err.split("\n")[0] || "unsupported format"}`);
+  // a listing cut short by the deadline (or an abort) is an error, never a complete-looking partial list
+  if (!stopped && signal.aborted) throw signal.reason instanceof ArchiveError ? signal.reason : new ArchiveError(408, "listing the archive took too long");
+  if (!stopped && code !== 0) throw new ArchiveError(400, `cannot read archive: ${err.split("\n")[0] || "unsupported format"}`);
   return { stopped };
 }
 
@@ -313,6 +324,7 @@ export async function listArchive(root: string, p: string, limit = 5000, passwor
       return { path: r.virtual, entries, truncated: l.truncated, bytes: total, encrypted: l.encrypted, passwordUsed: l.encrypted && !!password };
     } catch (e) {
       if (e instanceof PasswordError) throw e; // else: let bsdtar try (and report) the format
+      if (signal.aborted) throw new ArchiveError(408, "listing the archive took too long");
     }
   }
   const entries: ListedEntry[] = [];
@@ -375,6 +387,10 @@ export async function prepareExtract(root: string, archive: string, destDir: str
   if (o.entries && (o.entries.length > 10000 || o.entries.some((e) => typeof e !== "string" || e.includes("\0")))) throw new ArchiveError(400, "invalid entry selection");
   // Encrypted zip/7z: detect it and check the password now, so a wrong one is a 401 on the request instead of a failed job.
   let viaSz = false;
+  // Split volumes (name.7z.001, name.zip.001) only make sense to 7-Zip: bsdtar would see the first part alone.
+  const split = /\.(7z|zip)\.001$/i.test(a.real);
+  if (split && !haveSevenZip()) throw new ArchiveError(501, "split archives need 7-Zip, which is not installed in this image");
+  if (split) viaSz = true;
   if (szCapable(a.real)) {
     const signal = AbortSignal.timeout(60_000);
     let l;
@@ -388,7 +404,8 @@ export async function prepareExtract(root: string, archive: string, destDir: str
       viaSz = true;
     }
   }
-  return { archiveReal: a.real, archiveName: path.basename(a.real), destReal: d.real, destVirtual: d.virtual, subfolder, overwrite, entries: o.entries ?? [], password: viaSz ? o.password : undefined, viaSz };
+  const usePassword = viaSz && !!o.password;
+  return { archiveReal: a.real, archiveName: path.basename(a.real), destReal: d.real, destVirtual: d.virtual, subfolder, overwrite, entries: o.entries ?? [], password: usePassword ? o.password : undefined, viaSz };
 }
 
 async function exists(p: string) {
@@ -810,12 +827,23 @@ async function freeSetName(dir: string, name: string, suffixes: string[]): Promi
 export function zipStream(dirReal: string, names: string[], signal: AbortSignal): Readable {
   const child = tool(["--null", "--format", "zip", "-cf", "-", "-T", "-"], { cwd: dirReal, stdin: true });
   killOnAbort(child, signal);
-  const out = child.stdout as Readable;
+  const src = child.stdout as Readable;
   const done = watch(child);
   (child.stdin as import("node:stream").Writable).on("error", () => undefined);
   (child.stdin as import("node:stream").Writable).end(names.map((n) => n + "\0").join(""));
-  void done.then(({ code, err }) => {
-    if (code !== 0 && !signal.aborted) out.destroy(new Error(err || "zip failed")); // truncated body: the browser shows a failed download
+  // The body must not end before bsdtar has exited: a failure after the last byte would otherwise
+  // look like a complete download. The consumer sees the end only after a clean exit, an error otherwise.
+  const out = new PassThrough();
+  src.pipe(out, { end: false });
+  src.on("end", () => {
+    void done.then(({ code, err }) => {
+      if (code === 0 || signal.aborted) out.end();
+      else out.destroy(new Error(err || "zip failed")); // truncated body: the browser shows a failed download
+    });
+  });
+  src.on("error", (e) => out.destroy(e));
+  src.on("close", () => {
+    if (!src.readableEnded) out.destroy(new Error("zip stream interrupted")); // killed or destroyed before its end
   });
   out.on("close", () => terminate(child));
   return out;
