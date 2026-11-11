@@ -6,11 +6,14 @@ import "./styles.css";
 import "./accessibility.css";
 import "./sidebar.css";
 import { AccessibilityChrome } from "./AccessibilityChrome";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { installViewportTracking } from "./viewport";
 
 installViewportTracking();
 
 createRoot(document.getElementById("root") as HTMLElement).render(<SWRConfig value={swrConfig}>
   <AccessibilityChrome />
-  <App />
+  <ErrorBoundary what="Filedeck" scope="root">
+    <App />
+  </ErrorBoundary>
 </SWRConfig>);
