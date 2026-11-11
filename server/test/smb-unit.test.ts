@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { BAD_NAME, SmbBackend, parseLs } from "../src/sources/smb.ts";
+import { spawnSync } from "node:child_process";
+import { BAD_NAME, SmbBackend, parseLs, smbOptionArgs } from "../src/sources/smb.ts";
 
 const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-smbclient.mjs");
-const KNOBS = ["FILEDECK_SMBCLIENT", "FAKE_SMB_ROOT", "FAKE_SMB_USER", "FAKE_SMB_PASSWORD", "FAKE_SMB_LOG", "FAKE_SMB_FAIL_RENAME_TO"];
+const KNOBS = ["FILEDECK_SMBCLIENT", "FAKE_SMB_ROOT", "FAKE_SMB_USER", "FAKE_SMB_PASSWORD", "FAKE_SMB_LOG", "FAKE_SMB_FAIL_RENAME_TO", "FAKE_SMB_NO_F", "FAKE_SMB_APPLY_THEN_FAIL", "FAKE_SMB_FAIL_RESTORE", "FAKE_SMB_FAIL_DEL_OLD"];
 const saved: Record<string, string | undefined> = {};
 let tmp = "";
 let share = "";
@@ -70,7 +71,7 @@ test("commands are quoted and the charset options are passed", async () => {
   assert.equal(c[0]?.cmds, 'ls "dir one\\*"');
   assert.equal(c[1]?.cmds, 'ls "dir one\\f.txt"');
   assert.ok(c[0]?.argv.includes("--option=unix charset=UTF-8"));
-  assert.ok(c[0]?.argv.includes("--option=display charset=UTF-8"));
+  assert.ok(!c[0]?.argv.some((a) => a.includes("display charset")), "not an option the real client accepts");
   assert.ok(c[0]?.argv.includes("//h/s"));
   assert.ok(!c[0]?.argv.some((a) => a.includes("p") && a === "p"), "password stays out of argv");
 });
@@ -148,4 +149,131 @@ test("a failed rename over an existing file keeps both files", async () => {
   await b.rename("/src.txt", "/dst.txt", true);
   assert.equal(fs.readFileSync(path.join(share, "dst.txt"), "utf8"), "source");
   assert.deepEqual(fs.readdirSync(share).filter((n) => n.startsWith(".dst.txt")), []);
+});
+
+const hasReal = spawnSync("smbclient", ["--version"]).status === 0;
+test("the real smbclient accepts the option arguments the backend builds", { skip: !hasReal && "smbclient not installed" }, () => {
+  // port 1 refuses at once, so this needs no server; a rejected option would stop smbclient before it connects
+  const r = spawnSync("smbclient", ["//127.0.0.1/s", "-s", "/dev/null", ...smbOptionArgs(), "-d", "1", "-p", "1", "-N", "-c", "ls"], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: "/tmp", LANG: "C" }, timeout: 20_000 });
+  const text = `${r.stdout}${r.stderr}`;
+  assert.doesNotMatch(text, /Unknown option|Unknown parameter|Error setting option|Can't load/, text);
+  assert.match(text, /NT_STATUS_[A-Z_]+/, text); // it got as far as connecting
+});
+
+const SNAP = (dir: string) => fs.readdirSync(dir).sort();
+const hidden = (dir: string) => fs.readdirSync(dir).filter((n) => n.startsWith(".fd"));
+const put = (b: SmbBackend, p: string, text: string) => b.write(p, Readable.from([Buffer.from(text)]), { overwrite: true });
+
+test("overwrite uses the one-step replace and leaves no helper files", async () => {
+  const b = backend();
+  fs.writeFileSync(path.join(share, "one.txt"), "old");
+  resetLog();
+  await put(b, "/one.txt", "new");
+  assert.equal(fs.readFileSync(path.join(share, "one.txt"), "utf8"), "new");
+  assert.deepEqual(hidden(share), []);
+  assert.ok(calls().some((c) => / -f$/.test(c.cmds)), "rename -f was used");
+  assert.ok(!calls().some((c) => c.cmds.startsWith("rename") && c.cmds.endsWith(".old\"")), "no move-aside needed");
+});
+
+test("a server that refuses -f gets the move-aside sequence", async () => {
+  const b = backend();
+  fs.writeFileSync(path.join(share, "nof.txt"), "old");
+  process.env.FAKE_SMB_NO_F = "1";
+  try {
+    await put(b, "/nof.txt", "new");
+  } finally {
+    delete process.env.FAKE_SMB_NO_F;
+  }
+  assert.equal(fs.readFileSync(path.join(share, "nof.txt"), "utf8"), "new");
+  assert.deepEqual(hidden(share), []);
+});
+
+test("a rename that is applied but reported as failed ends with the new content and nothing lost", async () => {
+  const b = backend();
+  const f = path.join(share, "applied.txt");
+  // (a) the one-step replace is applied, then the connection drops
+  fs.writeFileSync(f, "old");
+  process.env.FAKE_SMB_APPLY_THEN_FAIL = "applied.txt";
+  try {
+    await put(b, "/applied.txt", "new-a");
+    assert.equal(fs.readFileSync(f, "utf8"), "new-a");
+    // (b) fallback path, the move-aside is applied then reported failed
+    process.env.FAKE_SMB_NO_F = "1";
+    process.env.FAKE_SMB_APPLY_THEN_FAIL = ".old";
+    await put(b, "/applied.txt", "new-b");
+    assert.equal(fs.readFileSync(f, "utf8"), "new-b");
+    // (c) fallback path, the move-in is applied then reported failed
+    process.env.FAKE_SMB_APPLY_THEN_FAIL = "applied.txt";
+    await put(b, "/applied.txt", "new-c");
+    assert.equal(fs.readFileSync(f, "utf8"), "new-c");
+  } finally {
+    delete process.env.FAKE_SMB_APPLY_THEN_FAIL;
+    delete process.env.FAKE_SMB_NO_F;
+  }
+  assert.deepEqual(hidden(share), []);
+});
+
+test("when the old file cannot be put back the error says so and both copies stay", async () => {
+  const b = backend();
+  const f = path.join(share, "stuck.txt");
+  fs.writeFileSync(f, "old-content");
+  Object.assign(process.env, { FAKE_SMB_NO_F: "1", FAKE_SMB_FAIL_RENAME_TO: "stuck.txt", FAKE_SMB_FAIL_RESTORE: "1" });
+  try {
+    await assert.rejects(put(b, "/stuck.txt", "new-content"), (e: unknown) => (e as { status?: number }).status === 502 && /hidden \.old name/.test((e as Error).message));
+  } finally {
+    for (const k of ["FAKE_SMB_NO_F", "FAKE_SMB_FAIL_RENAME_TO", "FAKE_SMB_FAIL_RESTORE"]) delete process.env[k];
+  }
+  const contents = hidden(share).map((n) => fs.readFileSync(path.join(share, n), "utf8")).sort();
+  assert.deepEqual(contents, ["new-content", "old-content"]);
+  for (const n of hidden(share)) fs.rmSync(path.join(share, n));
+});
+
+test("a backup that cannot be deleted is reported, not ignored", async () => {
+  const b = backend();
+  const f = path.join(share, "bak.txt");
+  fs.writeFileSync(f, "old");
+  Object.assign(process.env, { FAKE_SMB_NO_F: "1", FAKE_SMB_FAIL_DEL_OLD: "1" });
+  try {
+    await assert.rejects(put(b, "/bak.txt", "new"), (e: unknown) => /could not be removed/.test((e as Error).message));
+  } finally {
+    for (const k of ["FAKE_SMB_NO_F", "FAKE_SMB_FAIL_DEL_OLD"]) delete process.env[k];
+  }
+  assert.equal(fs.readFileSync(f, "utf8"), "new");
+  for (const n of hidden(share)) fs.rmSync(path.join(share, n));
+});
+
+test("overwriting a file with a very long name works", async () => {
+  const b = backend();
+  const name = "n".repeat(240) + ".txt";
+  fs.writeFileSync(path.join(share, name), "old");
+  await put(b, "/" + name, "new");
+  assert.equal(fs.readFileSync(path.join(share, name), "utf8"), "new");
+  assert.deepEqual(hidden(share), []);
+});
+
+test("names SMB commands cannot carry are left out of a listing, the rest stays", async () => {
+  const b = backend();
+  const dir = path.join(share, "semi");
+  fs.mkdirSync(dir);
+  for (const n of ["fine.txt", "bad;name.txt", "q?.txt"]) fs.writeFileSync(path.join(dir, n), "x");
+  const warn = console.warn;
+  const said: string[] = [];
+  console.warn = (m: string) => void said.push(String(m));
+  try {
+    assert.deepEqual((await b.list("/semi")).map((e) => e.name), ["fine.txt"]);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /2 entries/);
+  assert.ok(!said[0]!.includes("bad;name"), "names stay out of the log");
+});
+
+test("a listing is parsed as it streams: multi-byte names split across reads stay whole", async () => {
+  const b = backend();
+  const dir = path.join(share, "chunks");
+  fs.mkdirSync(dir);
+  const names = Array.from({ length: 3000 }, (_, i) => `日本語-${String(i).padStart(5, "0")}-é`);
+  for (const n of names) fs.writeFileSync(path.join(dir, n), "");
+  assert.deepEqual((await b.list("/chunks")).map((e) => e.name).sort(), [...names].sort());
 });

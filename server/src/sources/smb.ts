@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { PassThrough, Transform, type Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { FsError } from "../fsops.ts";
 import { cleanVirtual } from "../paths.ts";
 import type { Credentials, SourceBackend, SourceConfig, SourceEntry, SourceStat } from "./types.ts";
@@ -8,8 +9,10 @@ import type { Credentials, SourceBackend, SourceConfig, SourceEntry, SourceStat 
 const META_TIMEOUT_MS = 60_000;
 const MAX_PROCS = 6;
 const ERR_CAP = 64 * 1024;
-/** Upper bound for the output of one command (a listing of several hundred thousand entries); beyond it the call fails instead of returning a cut-off list. */
-const OUT_CAP = 64 * 1024 * 1024;
+/** Upper bound on the entries of one listing; beyond it the call fails instead of returning a cut-off list. */
+const MAX_ENTRIES = 500_000;
+/** A line longer than this is not smbclient output we understand. */
+const MAX_LINE = 64 * 1024;
 
 export interface SmbOptions {
   /** share name on the server (required) */
@@ -51,18 +54,36 @@ export function smbError(text: string, what = "request"): FsError | null {
 export const BAD_NAME = /[";\\*?<>|:\x00-\x1f]/;
 const LS_LINE = /^ {2}(.+?)\s+([ADHSRN]*)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4})\s*$/;
 
+/** One `ls` output line as an entry, or null when it is not an entry line (header, summary, message). */
+function parseLine(line: string): SourceEntry | null {
+  const m = LS_LINE.exec(line.replace(/\r$/, ""));
+  if (!m) return null;
+  const [, name, attr, size, date] = m as unknown as [string, string, string, string, string];
+  const isDir = attr.includes("D");
+  const t = Date.parse(date.replace(/\s+/g, " ") + " UTC"); // server times carry no zone; treat as UTC consistently
+  return { name, type: isDir ? "dir" : "file", size: isDir ? 0 : Number(size), mtime: Number.isFinite(t) ? t : null, mode: isDir ? 0o755 : attr.includes("R") ? 0o444 : 0o644 };
+}
+
 /** Parse the entry lines of `ls` output (header/summary lines are skipped). */
 export function parseLs(out: string): SourceEntry[] {
   const res: SourceEntry[] = [];
   for (const line of out.split("\n")) {
-    const m = LS_LINE.exec(line.replace(/\r$/, ""));
-    if (!m) continue;
-    const [, name, attr, size, date] = m as unknown as [string, string, string, string, string];
-    const isDir = attr.includes("D");
-    const t = Date.parse(date.replace(/\s+/g, " ") + " UTC"); // server times carry no zone; treat as UTC consistently
-    res.push({ name, type: isDir ? "dir" : "file", size: isDir ? 0 : Number(size), mtime: Number.isFinite(t) ? t : null, mode: isDir ? 0o755 : attr.includes("R") ? 0o444 : 0o644 });
+    const e = parseLine(line);
+    if (e) res.push(e);
   }
   return res;
+}
+
+/** The option arguments every smbclient call starts with (after the service and `-s`); tests run the real binary with exactly these. */
+export function smbOptionArgs(minProtocol = "SMB2"): string[] {
+  const args = ["-d", "0"];
+  // smbclient wants writable state dirs; the hub's root filesystem is read-only, /tmp is an emptyDir.
+  for (const o of ["lock directory", "cache directory", "state directory", "private dir"]) args.push(`--option=${o}=/tmp`);
+  args.push(`--option=client min protocol=${minProtocol}`);
+  // names are UTF-8 on the wire and in the command line whatever locale the container has
+  // (`display charset` is not a client option: the real binary refuses to start with it)
+  args.push("--option=unix charset=UTF-8");
+  return args;
 }
 
 /** Counting semaphore so a busy hub cannot fork an unbounded number of smbclient processes. */
@@ -129,12 +150,7 @@ export class SmbBackend implements SourceBackend {
   private async launch(cmd: string, fromStdin = false): Promise<{ child: ChildProcess; release: () => void }> {
     const c = await this.creds();
     const release = await this.slots.take();
-    const args = [`//${this.host}/${this.share}`, "-s", "/dev/null", "-d", "0"];
-    // smbclient wants writable state dirs; the hub's root filesystem is read-only, /tmp is an emptyDir.
-    for (const o of ["lock directory", "cache directory", "state directory", "private dir"]) args.push(`--option=${o}=/tmp`);
-    args.push(`--option=client min protocol=${this.opts.minProtocol ?? "SMB2"}`);
-    // names are UTF-8 on both sides whatever locale the container has
-    for (const o of ["unix charset=UTF-8", "display charset=UTF-8"]) args.push(`--option=${o}`);
+    const args = [`//${this.host}/${this.share}`, "-s", "/dev/null", ...smbOptionArgs(this.opts.minProtocol)];
     if (this.port) args.push("-p", this.port);
     const domain = c.domain ?? this.opts.domain;
     if (domain) args.push("-W", domain);
@@ -149,8 +165,12 @@ export class SmbBackend implements SourceBackend {
     return { child, release };
   }
 
-  /** Run one command to completion and return its output; throws the mapped FsError on failure. */
-  private async run(cmd: string, stdin?: Readable, what = "request"): Promise<string> {
+  /**
+   * Run one command to completion. Output is parsed line by line as it streams (entry lines of a listing become
+   * entries, everything else is kept as text for error detection), so memory stays bounded by the entry count.
+   * Throws the mapped FsError on failure.
+   */
+  private async run(cmd: string, stdin?: Readable, what = "request"): Promise<{ entries: SourceEntry[]; text: string }> {
     const { child, release } = await this.launch(cmd, stdin !== undefined);
     const kill = () => {
       try {
@@ -160,17 +180,35 @@ export class SmbBackend implements SourceBackend {
         /* already gone */
       }
     };
-    const outChunks: Buffer[] = [];
-    let outLen = 0;
+    const entries: SourceEntry[] = [];
+    let other = "";
     let tooBig = false;
-    let err = "";
-    child.stdout?.on("data", (d: Buffer) => {
-      outLen += d.length;
-      if (outLen > OUT_CAP) {
+    let pending = "";
+    const decoder = new StringDecoder("utf8"); // keeps a multi-byte name split across reads whole
+    const line = (l: string) => {
+      const e = parseLine(l);
+      if (e) {
+        if (entries.length >= MAX_ENTRIES) {
+          tooBig = true;
+          kill();
+        } else entries.push(e);
+      } else if (other.length < ERR_CAP) other += l + "\n";
+    };
+    const feed = (str: string) => {
+      pending += str;
+      let i: number;
+      while ((i = pending.indexOf("\n")) >= 0) {
+        line(pending.slice(0, i));
+        pending = pending.slice(i + 1);
+      }
+      if (pending.length > MAX_LINE) {
         tooBig = true;
+        pending = "";
         kill();
-      } else outChunks.push(d);
-    });
+      }
+    };
+    let err = "";
+    child.stdout?.on("data", (d: Buffer) => feed(decoder.write(d)));
     child.stderr?.on("data", (d: Buffer) => {
       if (err.length < ERR_CAP) err += d.toString("utf8");
     });
@@ -185,15 +223,15 @@ export class SmbBackend implements SourceBackend {
         child.on("error", () => reject(new FsError(502, "smbclient is not available")));
         child.on("close", (c, sig) => resolve(sig ? null : c));
       });
+      feed(decoder.end());
+      if (pending) line(pending);
       if (tooBig) throw new FsError(502, "remote answer too large");
-      const out = Buffer.concat(outChunks).toString("utf8"); // decoded once, so a multi-byte name split across reads stays whole
       // entry lines of a listing are data (a file may be called NT_STATUS_x); everything else can carry an error
-      const text = out.split("\n").filter((l) => !LS_LINE.test(l.replace(/\r$/, ""))).join("\n") + "\n" + err;
-      const e = smbError(text, what);
+      const e = smbError(other + "\n" + err, what);
       if (e) throw e;
       if (code === null) throw new FsError(504, "remote timed out");
-      if (code !== 0 && !out.trim() && err.trim()) throw new FsError(502, `remote ${what} failed`);
-      return out;
+      if (code !== 0 && !other.trim() && err.trim()) throw new FsError(502, `remote ${what} failed`);
+      return { entries, text: other };
     } finally {
       clearTimeout(timer);
       release();
@@ -207,15 +245,18 @@ export class SmbBackend implements SourceBackend {
 
   async list(p: string): Promise<SourceEntry[]> {
     const w = this.win(p);
-    const out = await this.run(w ? `ls ${this.q(w + "\\*")}` : "ls", undefined, "listing");
-    return parseLs(out).filter((e) => e.name !== "." && e.name !== "..");
+    const { entries } = await this.run(w ? `ls ${this.q(w + "\\*")}` : "ls", undefined, "listing");
+    // names this client cannot address (it would refuse every later operation on them) are left out, and said so
+    const ok = entries.filter((e) => e.name !== "." && e.name !== ".." && !BAD_NAME.test(e.name));
+    const skipped = entries.filter((e) => e.name !== "." && e.name !== "..").length - ok.length;
+    if (skipped > 0) console.warn(`smb source: ${skipped} entr${skipped === 1 ? "y" : "ies"} with characters SMB commands cannot carry left out of a listing`);
+    return ok;
   }
 
   async stat(p: string): Promise<SourceStat | null> {
     if (cleanVirtual(p).length === 0) return { type: "dir", size: 0, mtime: null, mode: 0o755 };
     try {
-      const out = await this.run(`ls ${this.q(this.win(p))}`, undefined, "stat");
-      const e = parseLs(out)[0];
+      const e = (await this.run(`ls ${this.q(this.win(p))}`, undefined, "stat")).entries[0];
       if (!e) return null;
       const { name: _n, ...s } = e;
       return s;
@@ -317,45 +358,95 @@ export class SmbBackend implements SourceBackend {
     return n;
   }
 
-  /** hidden sibling of a backslash path, used for upload and backup copies */
+  /** short hidden sibling of a backslash path for upload and aside copies; short so long names still fit the 255 limit */
   private sibling(target: string, kind: "part" | "old"): string {
     const dir = target.includes("\\") ? target.slice(0, target.lastIndexOf("\\") + 1) : "";
-    return `${dir}.${target.slice(dir.length)}.filedeck-${randomUUID().slice(0, 8)}.${kind}`;
+    return `${dir}.fd${randomUUID().slice(0, 8)}.${kind}`;
+  }
+
+  /** Is there something at this backslash path? null when that could not be determined. */
+  private async probe(w: string): Promise<boolean | null> {
+    try {
+      return (await this.run(`ls ${this.q(w)}`, undefined, "stat")).entries.length > 0;
+    } catch (e) {
+      return e instanceof FsError && e.status === 404 ? false : null;
+    }
   }
 
   /**
-   * Rename `from` to `target`. smbclient's rename never replaces, so an existing file is first moved aside and only
-   * deleted once the new one is in place; if the move fails the old file is put back, so a failure never loses it.
-   * `dropFrom`: delete `from` when the move fails and the old file is back (an upload's temporary copy).
+   * Rename `from` to `target`, replacing an existing file when `replace`. smbclient reports failures unreliably
+   * (a rename can be applied on the server while the call ends in a reset or a timeout), so after every error the
+   * share is inspected before anything is deleted. The new content is never deleted while the target name is empty.
+   * First choice is the one-step `rename -f` (supersede); servers that refuse it get a move-aside sequence in which
+   * the old file is put back if the new one cannot be moved in.
+   * `dropFrom`: delete `from` when the target keeps its old content (an upload's temporary copy).
    */
   private async moveOver(from: string, target: string, replace: boolean, what: string, dropFrom = false): Promise<void> {
+    const drop = async () => {
+      if (dropFrom) await this.run(`del ${this.q(from)}`, undefined, "cleanup").catch(() => undefined);
+    };
+    const applied = async () => (await this.probe(from)) === false && (await this.probe(target)) === true;
+    const unknown = () => new FsError(502, `${what} failed and the state on the share could not be verified; nothing was deleted`);
     if (!replace) {
       try {
         await this.run(`rename ${this.q(from)} ${this.q(target)}`, undefined, what);
       } catch (e) {
-        if (dropFrom) await this.run(`del ${this.q(from)}`, undefined, "cleanup").catch(() => undefined);
+        if (await applied()) return;
+        await drop();
         throw e;
       }
       return;
     }
+    try {
+      await this.run(`rename ${this.q(from)} ${this.q(target)} -f`, undefined, what);
+      return;
+    } catch (e) {
+      if (await applied()) return;
+      if ((await this.probe(from)) !== true) throw unknown();
+      if ((await this.probe(target)) === null) throw unknown();
+    }
+    // fallback: move the old file aside, move the new one in, delete the aside
     const bak = this.sibling(target, "old");
-    await this.run(`rename ${this.q(target)} ${this.q(bak)}`, undefined, "replace").catch(async (e) => {
-      if (dropFrom) await this.run(`del ${this.q(from)}`, undefined, "cleanup").catch(() => undefined);
-      throw e;
-    });
+    try {
+      await this.run(`rename ${this.q(target)} ${this.q(bak)}`, undefined, "replace");
+    } catch (e) {
+      const [b, t] = [await this.probe(bak), await this.probe(target)];
+      if (!(b === true && t === false)) {
+        if (t === true) await drop(); // the old file is still in place
+        else if (t === null || b === null) throw unknown();
+        throw e;
+      }
+    }
+    let moved = true;
+    let failure: unknown;
     try {
       await this.run(`rename ${this.q(from)} ${this.q(target)}`, undefined, what);
     } catch (e) {
+      failure = e;
+      moved = await applied();
+    }
+    if (!moved) {
+      let restored = true;
       try {
         await this.run(`rename ${this.q(bak)} ${this.q(target)}`, undefined, "restore");
       } catch {
-        // nothing more can be done safely: both copies stay on the share
-        throw new FsError(502, "replace failed; the previous version was kept under a hidden .old name");
+        restored = (await this.probe(bak)) === false && (await this.probe(target)) === true;
       }
-      if (dropFrom) await this.run(`del ${this.q(from)}`, undefined, "cleanup").catch(() => undefined);
-      throw e;
+      if (restored) {
+        await drop();
+        throw failure;
+      }
+      const left = await this.probe(bak);
+      throw new FsError(502, left === true ? "replace failed; the previous version is kept on the share under a hidden .old name" : "replace failed and the state on the share could not be verified; nothing was deleted");
     }
-    await this.run(`del ${this.q(bak)}`, undefined, "cleanup").catch(() => undefined);
+    try {
+      await this.run(`del ${this.q(bak)}`, undefined, "cleanup");
+    } catch {
+      if ((await this.probe(bak)) !== false) {
+        await this.run(`del ${this.q(bak)}`, undefined, "cleanup").catch(() => undefined);
+        if ((await this.probe(bak)) !== false) throw new FsError(502, "the file was replaced but a hidden .old backup next to it could not be removed");
+      }
+    }
   }
 
   async mkdir(p: string): Promise<void> {
