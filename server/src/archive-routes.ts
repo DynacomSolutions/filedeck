@@ -61,18 +61,18 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     return c.json(res, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
   });
 
-  // Inode+size identity of a file, so the hub's vault can find a saved password after a rename or move.
+  // Device, inode and size identity of a file (the device keeps two volumes' equal inode numbers apart), so the hub's vault can find a saved password after a rename or move.
   app.get("/api/fs/fid", async (c) => {
     const r = resolveRead(root, c.req.query("path") ?? "");
     const st = await fs.stat(r.real);
     if (!st.isFile()) throw bad("not a regular file");
-    return c.json({ fid: `${st.ino}:${st.size}` });
+    return c.json({ fid: `${st.dev}:${st.ino}:${st.size}` });
   });
 
-  // Multi-select / folder download: a zip streamed straight to the client.
-  app.on(["GET", "HEAD"], "/api/fs/zip", async (c) => {
-    const dir = c.req.query("dir") ?? "/";
-    const names = c.req.queries("name") ?? [];
+  // Multi-select / folder download: a zip streamed straight to the client. The names come
+  // from the query (GET, small selections) or a JSON body (POST, so a long list does not
+  // overflow the URL limits of proxies).
+  const zipResponse = async (c: Context, dir: string, names: string[]) => {
     const sel = await ar.prepareSelection(root, dir, names);
     const base = sel.names.length === 1 ? sel.names[0]! : path.posix.basename(sel.d.virtual) || "files";
     const headers = {
@@ -83,6 +83,11 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     if (c.req.method === "HEAD") return new Response(null, { headers });
     const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal);
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
+  };
+  app.on(["GET", "HEAD"], "/api/fs/zip", (c) => zipResponse(c, c.req.query("dir") ?? "/", c.req.queries("name") ?? []));
+  app.post("/api/fs/zip", async (c) => {
+    const b = await body<{ dir?: string; names?: string[] }>(c);
+    return zipResponse(c, b.dir === undefined ? "/" : str(b.dir, "dir"), strs(b.names, "names"));
   });
 
   app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));

@@ -62,3 +62,15 @@ export function parseHistory(raw: string | null): HistoryEntry[] {
     return [];
   }
 }
+
+/**
+ * When a finished job counts as having ended. A job already finished when its source
+ * first answered (page opened, node came online later) has no end time of its own,
+ * so its creation time stands in; it must not look as if it had just ended.
+ */
+export const endTime = (endedAt: number | undefined, createdAt: number, initial: boolean, now: number): number => endedAt ?? (initial ? createdAt : now);
+
+/** One sentence per job that ended while the page was open, for a screen-reader status region. */
+export function announceEnded(entries: HistoryEntry[]): string {
+  return entries.map((e) => `${e.title} ${e.outcome === "done" ? "finished" : e.outcome}${e.outcome === "failed" && e.detail ? `: ${e.detail}` : ""}.`).join(" ");
+}

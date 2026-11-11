@@ -53,10 +53,10 @@ export function credentialLoader(dir: string, name: string): () => Promise<Crede
   };
 }
 
-export function createBackend(sc: SourceConfig, creds: () => Promise<Credentials>): SourceBackend {
+export function createBackend(sc: SourceConfig, creds: () => Promise<Credentials>, state?: { sftpHostKeyFile?: string }): SourceBackend {
   switch (sc.type) {
     case "sftp":
-      return new SftpBackend(sc, creds);
+      return new SftpBackend(sc, creds, state?.sftpHostKeyFile ? { hostKeyFile: state.sftpHostKeyFile } : undefined);
     case "webdav":
       return new WebdavBackend(sc, creds);
     case "s3":
@@ -73,8 +73,10 @@ export interface SourceEntryInfo {
   backend: SourceBackend;
 }
 
-export function buildSources(cfg: Pick<Config, "sources" | "sourceSecretDir">): Map<string, SourceEntryInfo> {
+export function buildSources(cfg: Pick<Config, "sources" | "sourceSecretDir"> & Partial<Pick<Config, "vaultFile">>): Map<string, SourceEntryInfo> {
   const m = new Map<string, SourceEntryInfo>();
-  for (const sc of cfg.sources) m.set(sc.name, { config: sc, backend: createBackend(sc, credentialLoader(cfg.sourceSecretDir, sc.name)) });
+  // first-seen SFTP host keys are kept beside the vault, on the volume that survives a restart
+  const state = cfg.vaultFile ? { sftpHostKeyFile: path.join(path.dirname(cfg.vaultFile), "sftp-hostkeys.json") } : undefined;
+  for (const sc of cfg.sources) m.set(sc.name, { config: sc, backend: createBackend(sc, credentialLoader(cfg.sourceSecretDir, sc.name), state) });
   return m;
 }
