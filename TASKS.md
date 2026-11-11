@@ -186,7 +186,7 @@ ETA: 2026-11-12 14:00 ICT
 | 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | in_review | claude-20261112-rv-fsops | rv-trash | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/180 |
 | 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | in_review | claude-20261112-rv-archives | rv-archives | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/183 |
 | 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | todo | | rv-sources-streams | 13.110 | | Found in review |
-| 116 | Cross-filesystem moves keep times and owners; copies use a temporary name; long names | todo | | rv-move-copy-names | 14.113 | | Found in review |
+| 116 | Cross-filesystem moves keep times and owners; copies use a temporary name; long names | in_review | claude-20261112-rv-fsops | rv-move-copy-names | 14.113 | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/187 |
 | 117 | Compare cache and hash queue recover after a folder is recreated or a compare is cancelled | todo | | rv-compare-cache | 14.112 | | Found in review |
 
 ## 15. Web app correctness
@@ -196,7 +196,7 @@ ETA: 2026-11-12 14:00 ICT
 |---|---|---|---|---|---|---|---|
 | 118 | File panel: filtered select all, rename validation, filter bar state, editor keeps unsaved edits | in_progress | claude-20261112-rv-panel | rv-panel-editor | | 2026-11-12 09:30 ICT | Found in review; one event stream per tab |
 | 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | in_progress | claude-20261112-rv-compare | rv-compare-trash-views | | 2026-11-12 09:30 ICT | Found in review |
-| 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | in_progress | claude-20261112-rv-shell | rv-app-shell | | 2026-11-12 09:30 ICT | Found in review |
+| 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | in_review | claude-20261112-rv-shell | rv-app-shell | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/185 |
 | 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | in_progress | claude-20261112-rv-components | rv-uploads-tree | | 2026-11-12 09:30 ICT | Found in review |
 
 ## 16. Large folders and narrow screens
@@ -214,7 +214,7 @@ ETA: 2026-11-12 16:00 ICT
 |---|---|---|---|---|---|---|---|
 | 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | todo | | rv-list-access | 15.118 | | Found in review |
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | in_progress | claude-20261112-rv-menus | rv-menus-dialogs | | 2026-11-12 09:30 ICT | Found in review |
-| 126 | Contrast, focus rings, selected marks, target sizes and forced colours | in_progress | claude-20261112-rv-css | rv-contrast-targets | | 2026-11-12 09:30 ICT | Found in review |
+| 126 | Contrast, focus rings, selected marks, target sizes and forced colours | in_review | claude-20261112-rv-css | rv-contrast-targets | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/186 |
 | 127 | Component roles, names and announcements | todo | | rv-aria-announce | 15.121 | | Found in review |
 | 128 | Browser acceptance checks repaired and run in CI; audit document updated | todo | | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Found in review: two of three scopes fail on main |
 | 129 | Release v0.3.36 with the review fixes | todo | | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | After every row above is merged |
