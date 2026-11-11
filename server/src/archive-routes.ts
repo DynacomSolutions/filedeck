@@ -8,7 +8,7 @@ import * as ar from "./archive.ts";
 import { Jobs } from "./jobs.ts";
 import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
-import { hitsReadOnly } from "./readonly.ts";
+import { extractBlocked, hitsReadOnly } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 import { ZipTickets } from "./zip-tickets.ts";
 
@@ -138,6 +138,8 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
       entries: b.entries === undefined ? [] : strs(b.entries, "entries"),
       password: pw(c),
     });
+    // judged on the resolved destination and the real archive name, which are what the extraction will use
+    if (extractBlocked(root, cfg.readOnly, plan, ar.archiveBase)) throw new ops.FsError(403, "read-only volume");
     const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => ar.runExtract(plan, limits, ctl));
     return c.json(job, 202, plan.viaSz ? { "x-filedeck-pw": "ok" } : {});
   });

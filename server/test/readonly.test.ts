@@ -9,11 +9,15 @@ import { execFileSync } from "node:child_process";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import { createHub } from "../src/hub.ts";
-import { parseReadOnly } from "../src/readonly.ts";
+import { hitsReadOnly, parseReadOnly, reachesReadOnly, readOnlyForms } from "../src/readonly.ts";
 
 test("parseReadOnly keeps absolute prefixes only", () => {
-  assert.deepEqual(parseReadOnly(" /mnt/a/, rel ,/ , /x"), ["/mnt/a", "/", "/x"]);
+  assert.deepEqual(parseReadOnly(" /mnt/a/, /,, /x"), ["/mnt/a", "/", "/x"]);
   assert.deepEqual(parseReadOnly(undefined), []);
+  // doubled and dotted segments are cleaned, so the entry protects what it says
+  assert.deepEqual(parseReadOnly("//srv/./backup/, /a/b/../c//"), ["/srv/backup", "/a/c"]);
+  // an entry that cannot be made an absolute path inside the root stops the start with a message
+  for (const bad of ["rel", "mnt/a", "/..", "/a/../../b", "/a\0b"]) assert.throws(() => parseReadOnly(bad), /FILEDECK_READONLY: ".*" is not an absolute path/, bad);
 });
 
 test("read-only prefixes block every change under them, reads and outside writes pass", async () => {
@@ -209,6 +213,86 @@ test("the hub's job queue cannot merge or replace into a folder holding a read-o
     }
   } finally {
     for (const s of servers) s.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("extract is judged on the resolved destination and the real archive name", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-roextract-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "srv/backup/a.txt"), "protected");
+    fs.mkdirSync(path.join(tmp, "rw/src/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "rw/src/backup/a.txt"), "EVIL");
+    execFileSync("tar", ["-cf", path.join(tmp, "rw/srv.tar"), "-C", path.join(tmp, "rw/src"), "backup"]);
+    fs.symlinkSync("/srv", path.join(tmp, "rw/lnk")); // a link to the ancestor of the prefix
+    fs.symlinkSync("/rw/srv.tar", path.join(tmp, "rw/harmless.tar")); // a link to an archive whose own name is "srv"
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_READONLY: "/srv/backup" } as never));
+    const post = (u: string, b: unknown) => app.request(u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+    const kept = () => fs.readFileSync(path.join(tmp, "srv/backup/a.txt"), "utf8") === "protected";
+    for (const overwrite of ["overwrite", "skip"]) {
+      assert.equal((await post("/api/jobs/extract", { path: "/rw/srv.tar", destDir: "/rw/lnk", subfolder: false, overwrite })).status, 403, `link to the ancestor, ${overwrite}`);
+    }
+    assert.equal((await post("/api/jobs/extract", { path: "/rw/harmless.tar", destDir: "/", overwrite: "overwrite" })).status, 403, "the subfolder is named after the real archive");
+    assert.equal((await post("/api/jobs/extract", { path: "/rw/harmless.tar", destDir: "/rw/lnk/../", overwrite: "overwrite" })).status < 500, true);
+    assert.ok(kept());
+    // keep-both and a destination away from the prefix are not affected
+    assert.equal((await post("/api/jobs/extract", { path: "/rw/srv.tar", destDir: "/rw/lnk", subfolder: false, overwrite: "rename" })).status, 202);
+    fs.mkdirSync(path.join(tmp, "rw/out"));
+    assert.equal((await post("/api/jobs/extract", { path: "/rw/harmless.tar", destDir: "/rw/out", overwrite: "overwrite" })).status, 202);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(kept());
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a prefix that is itself a link protects the place it leads to, and a file prefix cannot be replaced by an upload", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-rolink-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "mnt/disk"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "mnt/disk/a.txt"), "protected");
+    fs.symlinkSync("/mnt/disk", path.join(tmp, "ro"));
+    fs.mkdirSync(path.join(tmp, "srv"));
+    fs.writeFileSync(path.join(tmp, "srv/conf.yaml"), "protected");
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_READONLY: "/ro,/srv/conf.yaml" } as never));
+    const post = (u: string, b: unknown) => app.request(u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+    assert.equal((await post("/api/fs/mkdir", { path: "/ro/newdir" })).status, 403);
+    assert.equal((await post("/api/fs/delete", { paths: ["/ro/a.txt"] })).status, 403);
+    assert.equal((await post("/api/fs/delete", { paths: ["/mnt/disk/a.txt"] })).status, 403, "by its real name too");
+    assert.equal((await post("/api/fs/mkdir", { path: "/mnt/disk/newdir" })).status, 403);
+    assert.ok(fs.existsSync(path.join(tmp, "mnt/disk/a.txt")) && !fs.existsSync(path.join(tmp, "mnt/disk/newdir")));
+    // retargeting the link is followed at the next request
+    fs.mkdirSync(path.join(tmp, "mnt/other"));
+    fs.rmSync(path.join(tmp, "ro"));
+    fs.symlinkSync("/mnt/other", path.join(tmp, "ro"));
+    assert.equal((await post("/api/fs/mkdir", { path: "/mnt/other/x" })).status, 403);
+    assert.equal((await post("/api/fs/mkdir", { path: "/mnt/disk/free" })).status, 201);
+    // a file prefix: replacing it through its folder
+    const put = (u: string, headers: Record<string, string> = {}) => app.request(u, { method: "PUT", headers, body: "EVIL" });
+    assert.equal((await put("/api/fs/upload?dir=/srv&name=conf.yaml&overwrite=1", { "content-type": "application/octet-stream" })).status, 403);
+    assert.equal((await app.request("/api/upload/chunk?dir=/srv&name=conf.yaml&id=0123456789abcdef&offset=0&total=4&overwrite=1", { method: "PATCH", body: "EVIL" })).status, 403);
+    assert.equal((await put("/api/fs/write?path=/srv/conf.yaml", { "if-match": "x" })).status, 403);
+    assert.equal(fs.readFileSync(path.join(tmp, "srv/conf.yaml"), "utf8"), "protected");
+    assert.equal((await put("/api/fs/upload?dir=/srv&name=other.yaml")).status, 201, "other names in the folder are free");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("on a case-insensitive filesystem a prefix is matched without regard to case", () => {
+  const forms = [{ p: "/mnt/Vfat/Ro", fold: true }, { p: "/mnt/ext/ro", fold: false }];
+  assert.equal(hitsReadOnly("/nonexistent-root", [], "/MNT/vfat/RO/a.txt", forms), true);
+  assert.equal(hitsReadOnly("/nonexistent-root", [], "/mnt/vfat/ro", forms), true);
+  assert.equal(hitsReadOnly("/nonexistent-root", [], "/mnt/EXT/RO/a.txt", forms), false, "a case-sensitive place stays exact");
+  assert.equal(reachesReadOnly("/nonexistent-root", [], "/MNT/VFAT", false, forms), true, "an ancestor, in any case");
+  // the probe is real: a folder on this (case-sensitive) filesystem is not folded
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-rocase-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "Ro"));
+    const f = readOnlyForms(tmp, ["/Ro"]);
+    assert.deepEqual(f, [{ p: "/Ro", fold: false }]);
+  } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
