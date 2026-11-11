@@ -28,7 +28,8 @@ export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size]
       --cached        answer from stored sizes only; never starts a scan (reports folders that are not stored)
       --json          print the hub's answer as JSON
       --timeout SECONDS  give up after this long in total (default: 600; 0 follows a live job until it ends)
-environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token)`;
+environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token)
+exit status: 0 success, 1 an argument failed, 2 usage or configuration error, 130 interrupted (Ctrl-C)`;
 
 export class UsageError extends Error {}
 
