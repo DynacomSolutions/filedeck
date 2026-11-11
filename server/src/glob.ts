@@ -7,6 +7,8 @@
  * Patterns are matched by a linear-time automaton simulation (no regular expressions, no backtracking) and are
  * length-capped, so a hostile pattern cannot stall the process.
  */
+import { FsError } from "./fsops.ts";
+
 export interface Matcher {
   test(rel: string, isDir: boolean): boolean;
 }
@@ -84,80 +86,167 @@ function tokenise(g: string): Tok[] | null {
   return out;
 }
 
-const fold = (s: string, ic: boolean) => (ic ? s.toLowerCase() : s);
+/** Most rules (after brace expansion) and tokens in one matcher: more is refused (400), so the cost per path stays bounded. */
+export const MAX_RULES = 512;
+export const MAX_TOTAL_TOKENS = 2048;
+
+const LIT = 0, ONE = 1, CLS = 2, STAR = 3, DSTAR = 4, DSA = 5, DSB = 6;
+
+/** A glob ready to run: parallel arrays, class tables for ASCII, scratch lists reused between calls. */
+interface Prog {
+  m: number;
+  kind: Uint8Array;
+  lit: string[];
+  neg: Uint8Array;
+  tab: (Uint8Array | null)[];
+  cls: ([string, string][] | null)[];
+  ic: boolean;
+  a: Int32Array;
+  b: Int32Array;
+  seen: Uint32Array;
+  stamp: number;
+}
+
+function buildProg(toks: Tok[], ic: boolean): Prog {
+  const m = toks.length;
+  const p: Prog = { m, kind: new Uint8Array(m), lit: new Array(m).fill(""), neg: new Uint8Array(m), tab: new Array(m).fill(null), cls: new Array(m).fill(null), ic, a: new Int32Array(m + 3), b: new Int32Array(m + 3), seen: new Uint32Array(m + 3), stamp: 0 };
+  toks.forEach((t, i) => {
+    switch (t.k) {
+      case "lit":
+        p.kind[i] = LIT;
+        p.lit[i] = ic ? t.c.toLowerCase() : t.c;
+        break;
+      case "one":
+        p.kind[i] = ONE;
+        break;
+      case "cls": {
+        p.kind[i] = CLS;
+        p.neg[i] = t.neg ? 1 : 0;
+        p.cls[i] = t.items;
+        const tab = new Uint8Array(128);
+        for (let c = 0; c < 128; c++) tab[c] = inClass(t.items, String.fromCharCode(c), ic) !== t.neg ? 1 : 0;
+        p.tab[i] = tab;
+        break;
+      }
+      case "star":
+        p.kind[i] = STAR;
+        break;
+      case "dstar":
+        p.kind[i] = DSTAR;
+        break;
+      case "dsa":
+        p.kind[i] = DSA;
+        break;
+      case "dsb":
+        p.kind[i] = DSB;
+        break;
+    }
+  });
+  return p;
+}
+
+function inClass(items: [string, string][], ch: string, ic: boolean): boolean {
+  if (ic) {
+    const lo = ch.toLowerCase();
+    const up = ch.toUpperCase();
+    return items.some(([a, b]) => (ch >= a && ch <= b) || (lo >= a && lo <= b) || (up >= a && up <= b));
+  }
+  return items.some(([a, b]) => ch >= a && ch <= b);
+}
 
 /**
- * Match `text` against the tokens by simulating the automaton one character at a time: the set of live positions is
- * advanced for every character, so the work is at most (text length x token count) whatever the pattern looks like.
+ * Match `text` (already lower-cased when the matcher ignores case) by simulating the automaton one character at a time,
+ * keeping only the states that are alive: the work is at most (text length x token count) whatever the pattern looks
+ * like, and for ordinary patterns one or two states are alive, so it is close to a plain comparison.
  * (A backtracking matcher can take exponential or high-polynomial time on patterns such as `*a*a*a*b`.)
  */
-function matchTokens(toks: Tok[], text: string, ic: boolean): boolean {
-  const m = toks.length;
-  let cur = new Uint8Array(m + 1);
-  let next = new Uint8Array(m + 1);
-  const close = (set: Uint8Array) => {
-    for (let i = 0; i < m; i++) {
-      if (!set[i]) continue;
-      const k = toks[i]!.k;
-      if (k === "star" || k === "dstar") set[i + 1] = 1;
-      else if (k === "dsa") set[i + 2] = 1; // "**/" matching nothing skips both of its elements
+function run(p: Prog, text: string): boolean {
+  const { m, kind, lit, tab, cls, neg, seen, ic } = p;
+  let cur = p.a;
+  let nxt = p.b;
+  let nc = 0;
+  let nn = 0;
+  let stamp = ++p.stamp;
+  // adds state i and what it reaches without consuming a character
+  const add = (list: Int32Array, n: number, i: number): number => {
+    for (;;) {
+      if (seen[i] === stamp) return n;
+      seen[i] = stamp;
+      list[n++] = i;
+      const k = kind[i]!;
+      if (i >= m) return n;
+      if (k === STAR || k === DSTAR) i += 1;
+      else if (k === DSA) i += 2;
+      else return n;
     }
   };
-  cur[0] = 1;
-  close(cur);
-  for (let n = 0; n < text.length; n++) {
-    const ch = text[n] as string;
-    const lc = ic ? ch.toLowerCase() : ch;
-    next.fill(0);
-    let live = false;
-    for (let i = 0; i < m; i++) {
-      if (!cur[i]) continue;
-      const t = toks[i]!;
-      switch (t.k) {
-        case "lit":
-          if (fold(t.c, ic) === lc) next[i + 1] = 1;
+  nc = add(cur, 0, 0);
+  for (let pos = 0; pos < text.length; pos++) {
+    const ch = text[pos] as string;
+    const code = text.charCodeAt(pos);
+    stamp = ++p.stamp;
+    nn = 0;
+    for (let j = 0; j < nc; j++) {
+      const i = cur[j]!;
+      if (i >= m) continue;
+      switch (kind[i]) {
+        case LIT:
+          if (lit[i] === ch) nn = add(nxt, nn, i + 1);
           break;
-        case "one":
-          if (ch !== "/") next[i + 1] = 1;
+        case ONE:
+          if (ch !== "/") nn = add(nxt, nn, i + 1);
           break;
-        case "cls": {
-          const forms = ic ? [ch, ch.toLowerCase(), ch.toUpperCase()] : [ch];
-          const inSet = t.items.some(([lo, hi]) => forms.some((f) => f >= lo && f <= hi));
-          if (inSet !== t.neg) next[i + 1] = 1;
+        case CLS: {
+          const hit = code < 128 ? tab[i]![code] === 1 : inClass(cls[i]!, ch, ic) !== (neg[i] === 1);
+          if (hit) nn = add(nxt, nn, i + 1);
           break;
         }
-        case "star":
-          if (ch !== "/") next[i] = 1;
+        case STAR:
+          if (ch !== "/") nn = add(nxt, nn, i);
           break;
-        case "dstar":
-          next[i] = 1;
+        case DSTAR:
+          nn = add(nxt, nn, i);
           break;
-        case "dsa": // first character of the run: enter it
-          next[i + 1] = 1;
-          if (ch === "/") next[i + 2] = 1;
+        case DSA: // first character of the run: enter it
+          nn = add(nxt, nn, i + 1);
+          if (ch === "/") nn = add(nxt, nn, i + 2);
           break;
-        case "dsb":
-          next[i] = 1;
-          if (ch === "/") next[i + 1] = 1;
+        case DSB:
+          nn = add(nxt, nn, i);
+          if (ch === "/") nn = add(nxt, nn, i + 1);
           break;
       }
     }
-    close(next);
-    for (let i = 0; i <= m; i++) if (next[i]) live = true;
-    if (!live) return false;
-    [cur, next] = [next, cur];
+    if (nn === 0) return false;
+    [cur, nxt] = [nxt, cur];
+    nc = nn;
   }
-  return cur[m] === 1;
+  for (let j = 0; j < nc; j++) if (cur[j] === m) return true;
+  return false;
+}
+
+/** Patterns made of plain text with at most one `*` at an end are compared directly. */
+type Fast = { f: "eq" | "prefix" | "suffix"; lit: string };
+function fastOf(toks: Tok[], ic: boolean): Fast | null {
+  const plain = (ts: Tok[]) => ts.every((t) => t.k === "lit");
+  const text = (ts: Tok[]) => ts.map((t) => (t as { c: string }).c).join("");
+  const fold = (s: string) => (ic ? s.toLowerCase() : s);
+  if (plain(toks)) return { f: "eq", lit: fold(text(toks)) };
+  if (toks[0]!.k === "star" && plain(toks.slice(1))) return { f: "suffix", lit: fold(text(toks.slice(1))) };
+  if (toks.at(-1)!.k === "star" && plain(toks.slice(0, -1))) return { f: "prefix", lit: fold(text(toks.slice(0, -1))) };
+  return null;
 }
 
 interface Rule {
-  toks: Tok[];
+  prog: Prog;
+  fast: Fast | null;
   base: boolean;
   dirOnly: boolean;
 }
 
 export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
   const rules: Rule[] = [];
+  let tokens = 0;
   for (let raw of patterns.slice(0, MAX_PATTERNS)) {
     raw = raw.trim();
     if (!raw || raw.length > MAX_PATTERN) continue;
@@ -169,19 +258,45 @@ export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
     const base = !anchored && !raw.includes("/");
     for (const g of expandBraces(raw)) {
       const toks = tokenise(g);
-      if (toks) rules.push({ toks, base, dirOnly });
+      if (!toks || !toks.length) continue;
+      tokens += toks.length;
+      if (rules.length >= MAX_RULES || tokens > MAX_TOTAL_TOKENS) throw new FsError(400, "the glob patterns are too large: use fewer patterns or fewer {alternatives}");
+      rules.push({ prog: buildProg(toks, ignoreCase), fast: fastOf(toks, ignoreCase), base, dirOnly });
     }
   }
   return {
     test(rel, isDir) {
       if (!rules.length) return false;
       const name = rel.slice(rel.lastIndexOf("/") + 1);
+      let lname: string | null = null;
+      let lrel: string | null = null;
       for (const r of rules) {
         if (r.dirOnly && !isDir) continue;
-        if (matchTokens(r.toks, r.base ? name : rel, ignoreCase)) return true;
+        let t = r.base ? name : rel;
+        if (ignoreCase) t = r.base ? (lname ??= name.toLowerCase()) : (lrel ??= rel.toLowerCase());
+        const f = r.fast;
+        let hit: boolean;
+        if (f) {
+          if (f.f === "eq") hit = t === f.lit;
+          else if (f.f === "suffix") hit = t.endsWith(f.lit) && (r.base || !t.slice(0, t.length - f.lit.length).includes("/"));
+          else hit = t.startsWith(f.lit) && (r.base || !t.slice(f.lit.length).includes("/"));
+        } else hit = run(r.prog, t);
+        if (hit) return true;
       }
       return false;
     },
+  };
+}
+
+/**
+ * A time slicer for loops that match many paths: `const tick = timeSlicer(); ... const w = tick(); if (w) await w;`
+ * gives the event loop a turn whenever the loop has run for `sliceMs` since its last turn.
+ */
+export function timeSlicer(sliceMs = 8): () => Promise<void> | null {
+  let last = performance.now();
+  return () => {
+    if (performance.now() - last < sliceMs) return null;
+    return new Promise<void>((r) => setImmediate(() => ((last = performance.now()), r())));
   };
 }
 

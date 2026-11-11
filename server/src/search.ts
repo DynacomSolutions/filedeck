@@ -1,9 +1,9 @@
 import { StringDecoder } from "node:string_decoder";
-import vm from "node:vm";
+import { Worker } from "node:worker_threads";
 import type { Readable } from "node:stream";
 import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
-import { compileGlobs } from "./glob.ts";
+import { compileGlobs, timeSlicer } from "./glob.ts";
 import { resolveRead } from "./paths.ts";
 import { walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
 import { createReadStream } from "node:fs";
@@ -73,61 +73,134 @@ export function safeRegex(src: string, flags: string): RegExp {
   }
 }
 
-/** How long one batch of matches may run before the pattern is cut off. A sane pattern needs a few milliseconds. */
-export const REGEX_BUDGET_MS = 500;
+/**
+ * Limits for user regular expressions. A regular expression a user writes can take very long on some text however it
+ * is screened, so it is never run on the event loop: each search that uses one gets a worker thread, and the time the
+ * search spends waiting for that worker, added up over the whole search, may not pass `regexTotalMs`. Past it, or when
+ * the client goes away, the worker is terminated. Only `maxWorkers` such searches run at once. (Mutable for tests.)
+ */
+export const searchLimits = { regexTotalMs: 20_000, maxWorkers: 4 };
 
-/** Matches many strings in one call, so a user regular expression can be run under a time limit. */
+/** Matches many strings in one call (a batch of names, the lines of a chunk), so one round trip serves many tests. */
 export interface Tester {
-  testMany(items: string[]): boolean[];
+  testMany(items: string[]): Promise<boolean[]>;
+  /** release the worker, if any; safe to call twice */
+  close(): void;
 }
+
+/** The time one search may spend in user regular expressions, shared by its name and content patterns. */
+export interface RegexBudget {
+  leftMs: number;
+}
+export const newBudget = (): RegexBudget => ({ leftMs: searchLimits.regexTotalMs });
 
 /** A pattern the program built itself (escaped text): it cannot backtrack badly, so it runs directly. */
 function plainTester(re: RegExp): Tester {
-  return { testMany: (items) => items.map((s) => re.test(s)) };
+  return { testMany: async (items) => items.map((s) => re.test(s)), close() {} };
 }
 
+const WORKER_CODE = `
+const { parentPort, workerData } = require("node:worker_threads");
+const re = new RegExp(workerData.src, workerData.flags);
+parentPort.on("message", (m) => {
+  const items = m.items, out = new Uint8Array(items.length);
+  for (let i = 0; i < items.length; i++) out[i] = re.test(items[i]) ? 1 : 0;
+  parentPort.postMessage({ id: m.id, out });
+});
+`;
+
+let activeWorkers = 0;
+const TOO_LONG = "pattern took too long to run: simplify the regular expression";
+
 /**
- * A user's regular expression, run in its own V8 context with an execution time limit: a pattern the heuristics in
- * `safeRegex` let through (such as `(a|a)*b`) is cut off after `REGEX_BUDGET_MS` and answered with a 400 instead of
- * stalling the event loop. The whole batch is matched in one call, which keeps the cost of the time limit per batch,
- * not per string.
+ * A user's regular expression in a worker thread (see `searchLimits`). Answers 400 when the search's time in it runs
+ * out; the event loop is never blocked, and `terminate()` stops even a pattern stuck in backtracking.
  */
-function guardedTester(src: string, flags: string, budgetMs = REGEX_BUDGET_MS): Tester {
+function workerTester(src: string, flags: string, budget: RegexBudget, signal?: AbortSignal): Tester {
   safeRegex(src, flags); // length, heuristics and syntax, with the 400 messages
-  const ctx = vm.createContext({ src, flags, items: [] as string[] }, { codeGeneration: { strings: false, wasm: false } });
-  new vm.Script("globalThis.re = new RegExp(src, flags);").runInContext(ctx);
-  const run = new vm.Script("(() => { const o = new Array(items.length); for (let i = 0; i < items.length; i++) o[i] = re.test(items[i]); return o; })()");
+  if (activeWorkers >= searchLimits.maxWorkers) throw new FsError(429, "too many regular-expression searches running, try again shortly");
+  activeWorkers++;
+  const worker = new Worker(WORKER_CODE, { eval: true, workerData: { src, flags }, resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 } });
+  let closed = false;
+  let failure: FsError | null = null;
+  let next = 1;
+  const pending = new Map<number, { resolve: (v: boolean[]) => void; reject: (e: unknown) => void }>();
+  const fail = (e: FsError) => {
+    failure ??= e;
+    for (const p of pending.values()) p.reject(e);
+    pending.clear();
+    close();
+  };
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    activeWorkers--;
+    signal?.removeEventListener("abort", onAbort);
+    void worker.terminate();
+  };
+  const onAbort = () => fail(new FsError(400, "canceled"));
+  signal?.addEventListener("abort", onAbort, { once: true });
+  worker.on("message", (m: { id: number; out: Uint8Array }) => {
+    const p = pending.get(m.id);
+    pending.delete(m.id);
+    p?.resolve(Array.from(m.out, (x) => x === 1));
+  });
+  worker.on("error", () => fail(new FsError(400, "the regular expression could not be run")));
+  worker.on("exit", () => {
+    if (!closed && pending.size) fail(new FsError(500, "regular-expression worker stopped"));
+  });
+  worker.unref(); // after the listeners: adding a "message" listener takes a reference again
   return {
     testMany(items) {
-      ctx.items = items;
-      try {
-        return Array.from(run.runInContext(ctx, { timeout: budgetMs }) as boolean[]);
-      } catch (e) {
-        if ((e as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") throw new FsError(400, "pattern took too long to run: simplify the regular expression");
-        throw e;
-      } finally {
-        ctx.items = [];
+      if (failure) return Promise.reject(failure);
+      if (closed) return Promise.reject(new FsError(400, "canceled"));
+      if (budget.leftMs <= 0) {
+        fail(new FsError(400, TOO_LONG));
+        return Promise.reject(failure);
       }
+      const id = next++;
+      const t0 = performance.now();
+      return new Promise<boolean[]>((resolve, reject) => {
+        const timer = setTimeout(() => fail(new FsError(400, TOO_LONG)), budget.leftMs);
+        const settle = <T>(f: (v: T) => void) => (v: T) => {
+          clearTimeout(timer);
+          budget.leftMs -= performance.now() - t0;
+          f(v);
+        };
+        pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+        worker.postMessage({ id, items });
+      });
     },
+    close,
   };
 }
 
 /** `userRegex`: the text is a regular expression written by the user; otherwise it is literal text and is escaped. */
-export function makeTester(text: string, userRegex: boolean, ignoreCase: boolean, budgetMs = REGEX_BUDGET_MS): Tester {
+export function makeTester(text: string, userRegex: boolean, ignoreCase: boolean, budget: RegexBudget = newBudget(), signal?: AbortSignal): Tester {
   const flags = ignoreCase ? "i" : "";
-  return userRegex ? guardedTester(text, flags, budgetMs) : plainTester(safeRegex(esc(text), flags));
+  return userRegex ? workerTester(text, flags, budget, signal) : plainTester(safeRegex(esc(text), flags));
 }
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Which of `rels` match the name query. Names are matched in batches so a regular expression can be time-limited. */
-function nameMatcher(o: SearchOpts): (rels: WalkEntry[]) => boolean[] {
-  if (!o.q) return (es) => es.map(() => true);
+/** Which of the entries match the name query. Names are matched in batches so a regular expression runs as one worker round trip. */
+function nameMatcher(o: SearchOpts, testers: Tester[], budget: RegexBudget, signal?: AbortSignal): (es: WalkEntry[]) => Promise<boolean[]> {
+  if (!o.q) return async (es) => es.map(() => true);
   if (o.mode === "glob") {
     const m = compileGlobs([o.q], o.ignoreCase);
-    return (es) => es.map((e) => m.test(e.p, e.t === "dir"));
+    return async (es) => {
+      const tick = timeSlicer();
+      const out: boolean[] = [];
+      for (const e of es) {
+        const w = tick();
+        if (w) await w;
+        out.push(m.test(e.p, e.t === "dir"));
+      }
+      return out;
+    };
   }
-  const t = makeTester(o.q, o.mode === "regex", o.ignoreCase);
+  const t = makeTester(o.q, o.mode === "regex", o.ignoreCase, budget, signal);
+  testers.push(t);
   return (es) => t.testMany(es.map((e) => e.p.slice(e.p.lastIndexOf("/") + 1)));
 }
 
@@ -146,8 +219,26 @@ export async function* searchTree(
   read: (rel: string) => Promise<Readable>,
   signal?: AbortSignal,
 ): AsyncGenerator<SearchBatch, SearchSummary> {
-  const nameOk = nameMatcher(o);
-  const grep = o.content ? makeTester(o.content, o.contentRegex, o.contentIgnoreCase) : null;
+  const testers: Tester[] = [];
+  try {
+    return yield* searchWith(walk, o, read, testers, signal);
+  } finally {
+    for (const t of testers) t.close(); // also on a cancelled request: stops a worker that is still matching
+    await walk.return({ truncated: false, depthLimited: false, errors: 0 }).catch(() => undefined);
+  }
+}
+
+async function* searchWith(
+  walk: AsyncGenerator<WalkEntry[], WalkSummary>,
+  o: SearchOpts,
+  read: (rel: string) => Promise<Readable>,
+  testers: Tester[],
+  signal?: AbortSignal,
+): AsyncGenerator<SearchBatch, SearchSummary> {
+  const budget = newBudget();
+  const nameOk = nameMatcher(o, testers, budget, signal);
+  const grep = o.content ? makeTester(o.content, o.contentRegex, o.contentIgnoreCase, budget, signal) : null;
+  if (grep) testers.push(grep);
   if (!o.q && !grep && o.types === "all") throw new FsError(400, "empty search");
   const sum: SearchSummary = { truncated: false, depthLimited: false, errors: 0, scanned: 0, grepped: 0, skipped: 0, capped: false };
   let bytes = 0;
@@ -188,9 +279,9 @@ export async function* searchTree(
     const decoder = new StringDecoder("utf8");
     let checked = false;
     let read_ = 0;
-    const scan = (lines: string[]) => {
+    const scan = async (lines: string[]) => {
       const ts = lines.map((line) => (line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line));
-      const hit = grep!.testMany(ts);
+      const hit = await grep!.testMany(ts);
       for (let i = 0; i < ts.length; i++) {
         lineNo++;
         if (hit[i]) {
@@ -216,14 +307,14 @@ export async function* searchTree(
         const parts = (carry + decoder.write(chunk)).split("\n");
         // the unfinished last line goes on into the next chunk; only its first MAX_LINE characters are ever matched
         carry = (parts.pop() as string).slice(0, MAX_LINE);
-        scan(parts.map((p) => (p.endsWith("\r") ? p.slice(0, -1) : p)));
+        await scan(parts.map((p) => (p.endsWith("\r") ? p.slice(0, -1) : p)));
         if (bytes > o.maxTotalBytes) {
           sum.capped = true;
           break;
         }
       }
       carry += decoder.end();
-      if (carry) scan([carry]);
+      if (carry) await scan([carry]);
     } catch (err) {
       if (signal?.aborted || err instanceof FsError) throw err;
       sum.skipped++;
@@ -247,7 +338,7 @@ export async function* searchTree(
         sum.errors = r.value.errors;
         break;
       }
-      const nameHit = nameOk(r.value);
+      const nameHit = await nameOk(r.value);
       for (const [idx, e] of r.value.entries()) {
         sum.scanned++;
         if (signal?.aborted) throw new FsError(400, "canceled");

@@ -5,7 +5,7 @@ import path from "node:path";
 import * as ops from "../fsops.ts";
 import { FsError, MAX_LIST, mimeFor, parseRange, type Entry } from "../fsops.ts";
 import { cleanVirtual, virtualJoin } from "../paths.ts";
-import { compileGlobs } from "../glob.ts";
+import { compileGlobs, timeSlicer } from "../glob.ts";
 import { Semaphore, type WalkEntry, type WalkOpts, type WalkSummary } from "../walk.ts";
 import { walkResponse } from "../diff-routes.ts";
 import { IndexCache, spillPath, type IdxEntry } from "../index-cache.ts";
@@ -409,6 +409,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     await mustDir(start);
     const exclude = compileGlobs(w.exclude, w.ignoreCase);
     const include = w.include.length ? compileGlobs(w.include, w.ignoreCase) : null;
+    const tick = timeSlicer();
     const summary: WalkSummary = { truncated: false, depthLimited: false, errors: 0 };
     let total = 0;
     const stack: { virtual: string; rel: string; depth: number }[] = [{ virtual: start, rel: "", depth: 1 }];
@@ -429,6 +430,8 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
         if (it.name === "." || it.name === ".." || (!w.hidden && it.name.startsWith("."))) continue;
         const rel = dir.rel ? `${dir.rel}/${it.name}` : it.name;
         const isDir = it.type === "dir";
+        const turn = tick();
+        if (turn) await turn;
         if (exclude.test(rel, isDir)) continue;
         if (!isDir && include && !include.test(rel, false)) continue;
         if (total >= w.max) {
