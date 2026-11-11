@@ -186,7 +186,7 @@ ETA: 2026-11-12 14:00 ICT
 | 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | done | claude-20261112-rv-fsops | rv-trash | | | Merged https://github.com/DynacomSolutions/filedeck/pull/180, CI green<br>4 new tests fail without the change |
 | 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | done | claude-20261112-rv-archives | rv-archives | | | Merged https://github.com/DynacomSolutions/filedeck/pull/183, CI green<br>Split sets without 7-Zip answer 501 |
 | 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | done | claude-20261112-rv-sources | rv-sources-streams | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/194, CI green<br>First SFTP host key is kept beside the vault file; a key change needs a pin |
-| 116 | Cross-filesystem moves keep times and owners; copies use a temporary name; long names | in_review | claude-20261112-rv-fsops | rv-move-copy-names | 14.113 | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/187 |
+| 116 | Cross-filesystem moves keep times and owners; copies use a temporary name; long names | done | claude-20261112-rv-fsops | rv-move-copy-names | 14.113 | | Merged https://github.com/DynacomSolutions/filedeck/pull/187, CI green |
 | 117 | Compare cache and hash queue recover after a folder is recreated or a compare is cancelled | done | claude-20261112-rv-transfers | rv-compare-cache | 14.112 | | Merged https://github.com/DynacomSolutions/filedeck/pull/196, CI green<br>5 new tests fail without the change |
 
 ## 15. Web app correctness
