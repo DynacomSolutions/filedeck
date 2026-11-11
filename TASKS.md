@@ -161,3 +161,60 @@ ETA: 2026-11-01 01:00 ICT
 | 88 | Editor supports select and select all (keyboard and a visible action) | done | claude-20261031-editor-mobile | editor-mobile | | 2026-11-01 01:00 ICT | Merged #151<br>Select all action, Ctrl/Cmd+A from toolbar; live after next release |
 | 89 | Mobile: panels no longer crushed, on-screen keyboard never covers the edit input | done | claude-20261031-editor-mobile | editor-mobile | | 2026-11-01 01:00 ICT | Merged #151<br>Phone drawer, one panel at a time, viewport tracking<br>Real iOS and Android keyboards untested |
 | 90 | Release v0.3.31 so 12.87, 12.88 and 12.89 deploy | done | claude-20261031-release-v0331 | release-v0331 | 12.87, 12.88, 12.89 | 2026-10-31 18:30 ICT | Released 31 Oct (#153)<br>Hub and all agents on 0.3.31, 0 restarts |
+
+## 13. Request and filesystem hardening
+Findings from the 12 November 2026 review: request handling, read-only volumes, git and search inputs, and operations that must stay inside the root.
+ETA: 2026-11-12 16:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | in_progress | claude-20261112-rv-hub | rv-request-guard | | 2026-11-12 09:00 ICT | Found in review; includes request body size limits |
+| 104 | Read-only prefixes also protect their parent folders and trash restore targets | todo | | rv-readonly-cover | 13.103 | | Found in review |
+| 105 | Hub sends security headers, optional host allowlist, compressed and cacheable static assets | todo | | rv-hub-headers-static | 13.104 | | Found in review; missing assets answer 404 |
+| 106 | Git reads ignore programs named in repository config and stay inside the root | in_progress | claude-20261112-rv-search-git | rv-git-config | | 2026-11-12 08:30 ICT | Found in review |
+| 107 | Search and glob patterns cannot block the agent | todo | | rv-search-patterns | | | Found in review; also multi-byte matches on chunk boundaries |
+| 108 | Archive extraction stages and merges through pinned directory descriptors | todo | | rv-extract-pinned | 14.114 | | Found in review |
+| 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | todo | | rv-pinned-walks | 14.113, 14.116 | | Found in review |
+| 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_progress | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 09:00 ICT | Found in review |
+| 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | in_progress | claude-20261112-rv-chart | rv-chart-workflows | | 2026-11-12 09:00 ICT | Found in review |
+
+## 14. Data-safe file operations
+Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
+ETA: 2026-11-12 14:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 112 | Transfers page through large folders and keep the source when anything was skipped | in_progress | claude-20261112-rv-transfers | rv-transfer-paging | | 2026-11-12 09:00 ICT | Found in review; also long agent calls, paused jobs, links |
+| 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | in_progress | claude-20261112-rv-fsops | rv-trash | | 2026-11-12 09:00 ICT | Found in review |
+| 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | in_progress | claude-20261112-rv-archives | rv-archives | | 2026-11-12 09:00 ICT | Found in review |
+| 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | todo | | rv-sources-streams | 13.110 | | Found in review |
+| 116 | Cross-filesystem moves keep times and owners; copies use a temporary name; long names | todo | | rv-move-copy-names | 14.113 | | Found in review |
+| 117 | Compare cache and hash queue recover after a folder is recreated or a compare is cancelled | todo | | rv-compare-cache | 14.112 | | Found in review |
+
+## 15. Web app correctness
+Findings from the 12 November 2026 review in the web app: selection, editor, compare, trash, uploads and navigation behaviour.
+ETA: 2026-11-12 14:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 118 | File panel: filtered select all, rename validation, filter bar state, editor keeps unsaved edits | in_progress | claude-20261112-rv-panel | rv-panel-editor | | 2026-11-12 09:30 ICT | Found in review; one event stream per tab |
+| 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | in_progress | claude-20261112-rv-compare | rv-compare-trash-views | | 2026-11-12 09:30 ICT | Found in review |
+| 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | in_progress | claude-20261112-rv-shell | rv-app-shell | | 2026-11-12 09:30 ICT | Found in review |
+| 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | in_progress | claude-20261112-rv-components | rv-uploads-tree | | 2026-11-12 09:30 ICT | Found in review |
+
+## 16. Large folders and narrow screens
+Findings from the 12 November 2026 review: very large folders freeze the list, and narrow, landscape and zoomed layouts hide content.
+ETA: 2026-11-12 15:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 122 | File list renders only the visible rows | todo | | rv-list-window | 17.124 | | Found in review: 30,000 files froze scrolling |
+| 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | todo | | rv-narrow-layout | 15.120 | | Found in review |
+
+## 17. Keyboard and screen reader access
+Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and AA.
+ETA: 2026-11-12 16:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | todo | | rv-list-access | 15.118 | | Found in review |
+| 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | in_progress | claude-20261112-rv-menus | rv-menus-dialogs | | 2026-11-12 09:30 ICT | Found in review |
+| 126 | Contrast, focus rings, selected marks, target sizes and forced colours | in_progress | claude-20261112-rv-css | rv-contrast-targets | | 2026-11-12 09:30 ICT | Found in review |
+| 127 | Component roles, names and announcements | todo | | rv-aria-announce | 15.121 | | Found in review |
+| 128 | Browser acceptance checks repaired and run in CI; audit document updated | todo | | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Found in review: two of three scopes fail on main |
+| 129 | Release v0.3.36 with the review fixes | todo | | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | After every row above is merged |
