@@ -177,14 +177,14 @@ ETA: 2026-11-12 16:00 ICT
 | 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | done | claude-20261112-rv-sources | rv-smb-source | | | Merged https://github.com/DynacomSolutions/filedeck/pull/182, CI green, independent review clean on second pass<br>Not tried against a real SMB server |
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
 | 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | done | claude-20261112-rv-sources | rv-smb-followup | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/204, CI green<br>Listing cap is 100,000 entries<br>Image build stage not exercised until 13.131 |
-| 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | in_review | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | 2026-11-12 09:30 ICT | The image is only built on a release tag today<br>https://github.com/DynacomSolutions/filedeck/pull/206 |
+| 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | done | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | | Merged https://github.com/DynacomSolutions/filedeck/pull/206, CI green<br>Found and fixed: final image lacked server dependencies and crashed at start<br>Cold build 4m31s |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
 ETA: 2026-11-12 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 112 | Transfers page through large folders and keep the source when anything was skipped | in_review | claude-20261112-rv-transfers | rv-transfer-paging | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/191 |
+| 112 | Transfers page through large folders and keep the source when anything was skipped | done | claude-20261112-rv-transfers | rv-transfer-paging | | | Merged https://github.com/DynacomSolutions/filedeck/pull/191, CI green, two independent reviews<br>An incomplete folder listing fails the item and keeps the source |
 | 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | done | claude-20261112-rv-fsops | rv-trash | | | Merged https://github.com/DynacomSolutions/filedeck/pull/180, CI green<br>4 new tests fail without the change |
 | 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | done | claude-20261112-rv-archives | rv-archives | | | Merged https://github.com/DynacomSolutions/filedeck/pull/183, CI green<br>Split sets without 7-Zip answer 501 |
 | 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | done | claude-20261112-rv-sources | rv-sources-streams | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/194, CI green<br>First SFTP host key is kept beside the vault file; a key change needs a pin |
@@ -214,7 +214,7 @@ Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and A
 ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | in_review | claude-20261112-rv-panel | rv-list-access | 15.118 | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/203 |
+| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | done | claude-20261112-rv-panel | rv-list-access | 15.118 | | Merged https://github.com/DynacomSolutions/filedeck/pull/203, CI green<br>Panels switch with Alt+PageDown and Alt+PageUp; F6 unchanged<br>Not checked with a screen reader |
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | done | claude-20261112-rv-menus | rv-menus-dialogs | | | Merged https://github.com/DynacomSolutions/filedeck/pull/200, CI green<br>Checked at 1366x768 and 390 px |
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
 | 127 | Component roles, names and announcements | done | claude-20261112-rv-components | rv-aria-announce | 15.121 | | Merged https://github.com/DynacomSolutions/filedeck/pull/202, CI green<br>Long selections download through a one-use ticket<br>axe clean at 1440 and 390 px |
