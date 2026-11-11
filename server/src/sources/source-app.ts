@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { requestGuard } from "../request-guard.ts";
 import { createHash } from "node:crypto";
 import { Readable, Transform } from "node:stream";
 import path from "node:path";
@@ -66,6 +67,7 @@ const DIR_STAT: SourceStat = { type: "dir", size: 0, mtime: null, mode: 0o755 };
  */
 export function createSourceApp(name: string, backend: SourceBackend, o: SourceAppOptions) {
   const app = new Hono();
+  app.use("*", requestGuard({ maxEdit: o.maxEdit }));
   const hashes = new Semaphore(Math.max(1, o.hashConcurrency));
   const index = new IndexCache(o.indexFile || spillPath("source"), {
     async statDir(p) {
