@@ -35,6 +35,8 @@ RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samb
 # fanotify helper: only started when the chart's agent.fanotify.enabled sets FILEDECK_FANWATCH (it needs CAP_SYS_ADMIN).
 COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwatch
 COPY --from=build /src/node_modules node_modules
+# Dependencies npm could not hoist to the root (a version the web workspace does not share) live beside the server.
+COPY --from=build /src/server/node_modules server/node_modules
 COPY --from=build /src/server/package.json server/package.json
 COPY --from=build /src/server/dist server/dist
 COPY --from=build /src/web/dist web
