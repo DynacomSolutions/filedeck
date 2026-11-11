@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { KEYBOARD_MIN_INSET, installViewportTracking, isEditableTarget, scrollDeltaToReveal, viewportMetrics } from "../src/viewport.ts";
+import { KEYBOARD_MIN_INSET, PHONE_QUERY, installViewportTracking, isEditableTarget, scrollDeltaToReveal, viewportMetrics } from "../src/viewport.ts";
 
 test("full-height viewport: no keyboard", () => {
   assert.deepEqual(viewportMetrics(667, { height: 667, offsetTop: 0 }), { height: 667, top: 0, keyboard: 0, keyboardOpen: false });
@@ -17,6 +17,18 @@ test("shrunk visual viewport reports the keyboard height and the usable area", (
 test("a panned viewport (iOS) counts the offset and never goes negative", () => {
   assert.deepEqual(viewportMetrics(844, { height: 500, offsetTop: 40 }), { height: 500, top: 40, keyboard: 304, keyboardOpen: true });
   assert.equal(viewportMetrics(600, { height: 650, offsetTop: 0 }).keyboard, 0);
+});
+
+test("a pinch-zoomed page is not a keyboard", () => {
+  // zoomed to 2x and scrolled to the top: the visual viewport is half the layout height
+  assert.deepEqual(viewportMetrics(800, { height: 400, offsetTop: 0, scale: 2 }), { height: 800, top: 0, keyboard: 0, keyboardOpen: false });
+  assert.ok(viewportMetrics(800, { height: 400, offsetTop: 0, scale: 1 }).keyboardOpen);
+});
+
+test("phone layout also applies to a short, landscape-sized window", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.equal(PHONE_QUERY, "(max-width: 700px), (max-height: 500px) and (max-width: 1000px)");
+  assert.ok(!/@media ?\(max-width: ?700px\) ?\{/.test(css), "every phone rule uses the shared query");
 });
 
 test("a small bar change (browser chrome) is not a keyboard", () => {
@@ -95,7 +107,7 @@ test("phone sidebar is an off-canvas drawer with focus trap, Escape and backdrop
   assert.match(app, /function DrawerGuard[\s\S]*?useDialogFocus\(root\)[\s\S]*?e\.key === "Escape"/);
   assert.match(app, /onOpen=\{\(n, p, h\) => \{ closeDrawer\(\); openFromSide/);
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-  assert.match(css, /@media\(max-width:700px\)\{\s*\.phone-only\{display:inline-flex\}[\s\S]*?\.side\{position:fixed;[^}]*translateX\(-102%\)/);
+  assert.match(css, /@media\(max-width:700px\),\(max-height:500px\) and \(max-width:1000px\)\{\s*\.phone-only\{display:inline-flex\}[\s\S]*?\.side\{position:fixed;[^}]*translateX\(-102%\)/);
 });
 
 test("the editor pane has no second close button that would drop unsaved edits", () => {
