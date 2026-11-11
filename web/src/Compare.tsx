@@ -5,15 +5,16 @@ import { useSettings } from "./settings";
 import { ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronRight, CircleAlert, Equal, EqualNot, LoaderCircle, TriangleAlert, type LucideIcon } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffCounts, type DiffJobView, type DiffMode, type DiffRow, type DiffStats, type Loc, type OpJob, type SyncStepSpec } from "./api";
-import { flattenFolders, joinRoot, relUnder, type CNode, type FolderData } from "./compareModel";
+import { flattenFolders, joinRoot, rangeBetween, relUnder, singleFlight, type CNode, type FolderData } from "./compareModel";
+import { parsePresets, sanitizeOpts } from "./comparePresets";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Modal } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
 import { wheelX } from "./scrollx";
 import { getPresentation, usePresentation } from "./presentation";
-import { joinRel, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
-import { DEFAULT_UI, DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
+import { joinRel, pickedForPlan, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
+import { DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
 import * as Ic from "lucide-react";
 import { backoff, classify, gaveUp } from "./jobPoll";
 import { Dropdown } from "./Dropdown";
@@ -40,8 +41,7 @@ const PRESET_KEY = "filedeck-folderdiff-presets";
 type Presets = Record<string, UiOpts>;
 function loadPresets(): Presets {
   try {
-    const v = JSON.parse(localStorage.getItem(PRESET_KEY) ?? "{}") as Presets;
-    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+    return parsePresets(localStorage.getItem(PRESET_KEY));
   } catch {
     return {};
   }
@@ -76,6 +76,8 @@ interface Exec {
   action: SyncAction;
   plan: Plan;
   state: "plan" | "running" | "done";
+  /** the sync job is being created: Run is disabled until the hub answers */
+  starting?: boolean;
   done: number;
   errors: string[];
   canceled: boolean;
@@ -166,6 +168,11 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   const [rate, setRate] = useState(0);
   const [selected, setSelectedState] = useState<Set<string>>(new Set());
   const [cursor, setCursor] = useState<string | null>(null);
+  /** where the current range selection started; Shift+click and Shift+Arrow extend from here */
+  const anchor = useRef<string | null>(null);
+  /** the selection set made by "Select differing": complete as it is, nothing below it is added for a sync */
+  const exactSel = useRef<ReadonlySet<string> | null>(null);
+  const runOnce = useRef(singleFlight());
   const [exec, setExec] = useState<Exec | null>(null);
   const [presets, setPresets] = useState<Presets>(loadPresets);
   const scrollers = useRef<{ left: HTMLElement | null; right: HTMLElement | null }>({ left: null, right: null });
@@ -350,6 +357,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
       if (l) patchLeaf(s.lp, { node: s.left.node, path: joinRoot(s.left.path, to), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
       if (r) patchLeaf(s.rp, { node: s.right.node, path: joinRoot(s.right.path, rightRelOf(to)), sel: undefined, sels: undefined, closed: undefined, sr: undefined, q: undefined });
       setCursor(null);
+      anchor.current = null;
       setSelectedState(new Set());
       setExpanded(new Set());
       scrollers.current.left?.scrollTo?.({ top: 0 });
@@ -405,15 +413,15 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   const click: CompareCtl["click"] = (e, n) => {
     if (n.skel) return;
     setCursor(n.row.p);
-    if (e.shiftKey && cursor) {
-      const a = rows.findIndex((x) => x.row.p === cursor);
-      const b = rows.findIndex((x) => x.row.p === n.row.p);
-      if (a >= 0 && b >= 0) {
-        const next = new Set<string>();
-        for (const x of rows.slice(Math.min(a, b), Math.max(a, b) + 1)) withLoaded(x).forEach((p) => next.add(p));
-        return setSelectedState(next);
-      }
+    const range = e.shiftKey ? rangeBetween(rows.map((x) => x.row.p), anchor.current ?? cursor, n.row.p) : null;
+    if (range) {
+      const next = new Set<string>();
+      const byPath = new Map(rows.map((x) => [x.row.p, x]));
+      for (const p of range) withLoaded(byPath.get(p) as CNode).forEach((q) => next.add(q));
+      anchor.current ??= cursor;
+      return setSelectedState(next);
     }
+    anchor.current = n.row.p;
     const all = withLoaded(n);
     if (e.ctrlKey || e.metaKey) {
       setSelectedState((s) => {
@@ -433,7 +441,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   /* ---------- options ---------- */
   const setOpts = (o: UiOpts) => setState((x) => (x ? { ...x, opts: o } : x));
   const setPreset = (p: string) => {
-    setState((x) => (x ? { ...x, preset: p, opts: p && presets[p] ? { ...DEFAULT_UI, ...presets[p] } : x.opts } : x));
+    setState((x) => (x ? { ...x, preset: p, opts: p && presets[p] ? sanitizeOpts(presets[p]) : x.opts } : x));
   };
   const toggleStatus = (s: DiffStatus) => setState((x) => (x ? { ...x, hide: x.hide.includes(s) ? x.hide.filter((h) => h !== s) : [...x.hide, s] } : x));
   const savePreset = (name: string) => {
@@ -459,6 +467,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
   const preview = async (action: SyncAction, paths?: string[]) => {
     const chosen = paths ?? [...selected];
     if (!jobId || !chosen.length) return;
+    const exact = paths === undefined && exactSel.current === selected;
     const sel = chosen;
     const tops = sel.filter((p) => !sel.some((q) => q !== p && p.startsWith(q + "/")));
     let all: DiffRow[];
@@ -469,8 +478,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     }
     const final = all.filter((r) => r.status !== "pending") as (DiffRow & { status: DiffStatus })[];
     if (final.length < all.length) onStatus(`${all.length - final.length} selected rows are still being compared and were left out`);
-    const picked = new Set(chosen);
-    for (const r of final) if (tops.some((t) => r.p === t || r.p.startsWith(t + "/"))) picked.add(r.p);
+    const picked = pickedForPlan(final, chosen, exact);
     const plan = planSync(final, picked, action, { wholeDirs: !filtersActive });
     setExec({ action, plan, state: "plan", done: 0, errors: [], canceled: false });
   };
@@ -478,14 +486,18 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     if (!jobId) return;
     const want = DIFF_STATUSES.filter((x) => x !== "identical" && !hide.has(x));
     try {
-      setSelectedState(new Set(await api.diffPaths(jobId, want)));
+      const exact = new Set(await api.diffPaths(jobId, want));
+      exactSel.current = exact;
+      setSelectedState(exact);
     } catch (e) {
       onStatus((e as Error).message);
     }
   };
   /** The plan becomes one hub job: it keeps running when the compare or the browser is closed. */
-  const runExec = async () => {
-    if (!exec || !st) return;
+  const runExec = () => void runOnce.current(runExecNow);
+  const runExecNow = async () => {
+    if (!exec || !st || exec.state !== "plan") return;
+    setExec({ ...exec, starting: true });
     const loc = (side: Side) => (side === "left" ? st.left : st.right);
     const steps: SyncStepSpec[] = [];
     for (const s of exec.plan.steps) {
@@ -500,9 +512,9 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     }
     try {
       const j = await api.startOp({ op: "sync", steps, title: `${ACTION_LABEL[exec.action]}: ${st.left.node}:${st.left.path} / ${st.right.node}:${st.right.path}` });
-      setExec({ ...exec, state: "running", jobId: j.id, job: j });
+      setExec({ ...exec, starting: false, state: "running", jobId: j.id, job: j });
     } catch (e) {
-      setExec({ ...exec, state: "done", errors: [(e as Error).message], done: 0 });
+      setExec({ ...exec, starting: false, state: "done", errors: [(e as Error).message], done: 0 });
     }
   };
   const execJobId = exec?.state === "running" ? exec.jobId : undefined;
@@ -569,7 +581,7 @@ export function useCompare({ state, setState, leafOf, patchLeaf, activeId, onFil
     toggleStatus,
     preview: (a: SyncAction, paths?: string[]) => void preview(a, paths),
     exec,
-    runExec: () => void runExec(),
+    runExec,
     stopExec: () => exec?.jobId && void api.opAction(exec.jobId, "cancel"),
     closeExec,
     presets,
@@ -672,11 +684,12 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
     setMenu({ x: e.clientX, y: e.clientY, items });
   };
   return (
-    <div className={"cmp cmp-" + side} aria-label={`Compare, ${side} side`}>
+    <div className={"cmp cmp-" + side} role="group" aria-label={`Compare, ${side} side`}>
       <div
         className="cmp-scroll"
         ref={ref}
         role="grid"
+        aria-multiselectable="true"
         tabIndex={0}
         aria-activedescendant={ctl.cursor ? `${side}-compare-${encodeURIComponent(ctl.cursor)}` : undefined}
         aria-label={`Aligned rows, ${side} side`}
@@ -691,7 +704,7 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
           <span role="columnheader">{side === "left" ? "Left" : "Right"}: name</span>
           <span role="columnheader" className="num">Size</span>
           <span role="columnheader">Modified</span>
-          <span role="columnheader" aria-label="Comparison status" />
+          <span role="columnheader"><span className="visually-hidden">Comparison status</span></span>
         </div>
         {showUp && (
           <div className="cmp-row up" role="row" style={{ position: "relative", height: rowHeight }} onClick={ctl.up}>
@@ -734,7 +747,7 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
                 ) : (
                   <span role="gridcell" className="cmp-status" title={r.why ?? STATUS[r.status].label}>
                     {(() => { const I = STATUS[r.status].Icon; return <I aria-hidden="true" />; })()}
-                    <span className="visually-hidden">{STATUS[r.status].label}</span>
+                    <span className="visually-hidden">{STATUS[r.status].label}{r.why ? `: ${r.why}` : ""}</span>
                   </span>
                 )}
               </div>
@@ -761,8 +774,8 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
     const n = rows[Math.max(0, Math.min(rows.length - 1, to))];
     if (!n) return;
     ctl.setCursor(n.row.p);
-    if (e.shiftKey) ctl.click({ shiftKey: true, ctrlKey: false, metaKey: false }, n);
-    else ctl.setSelected(new Set(ctl.descend(n)));
+    // a plain move starts a new range at this row; Shift keeps the old anchor, so the range keeps growing
+    ctl.click({ shiftKey: e.shiftKey, ctrlKey: false, metaKey: false }, n);
     document.querySelectorAll<HTMLElement>(`.cmp-scroll`).forEach((sc) => {
       const off = sc.querySelector(".cmp-row.up") ? rowHeight : 0;
       const y = headHeight + off + rows.indexOf(n) * rowHeight;
@@ -862,22 +875,35 @@ function warnRow(w: string): { short: string; full: string } {
 /** "Compare by": always visible in the sidebar, one click re-runs the compare in the new mode. */
 function ModeControl({ ctl }: { ctl: CompareCtl }) {
   const o = ctl.st.opts;
+  const choose = (id: DiffMode) => {
+    if (o.mode === id) return;
+    const next = { ...o, mode: id };
+    ctl.setOpts(next);
+    ctl.start(next);
+  };
+  // Radio group keyboard model: one Tab stop on the checked radio, arrows move and check.
+  const onKeys = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const at = MODES.findIndex((m) => m.id === o.mode);
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    const to = e.key === "Home" ? 0 : e.key === "End" ? MODES.length - 1 : step ? (at + step + MODES.length) % MODES.length : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    choose(MODES[to]!.id);
+    requestAnimationFrame(() => e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[to]?.focus());
+  };
   return (
     <>
     <p className="side-cmp-cap muted" id="cmp-by">Compare by</p>
-    <div className="cmp-seg" role="radiogroup" aria-labelledby="cmp-by">
+    <div className="cmp-seg" role="radiogroup" aria-labelledby="cmp-by" onKeyDown={onKeys}>
       {MODES.map((m) => (
         <Tip key={m.id} label={`${m.label}: ${m.help}`}>
           <button
             type="button"
             role="radio"
             aria-checked={o.mode === m.id}
-            onClick={() => {
-              if (o.mode === m.id) return;
-              const next = { ...o, mode: m.id };
-              ctl.setOpts(next);
-              ctl.start(next);
-            }}
+            tabIndex={o.mode === m.id ? 0 : -1}
+            onClick={() => choose(m.id)}
           >
             {m.short}
           </button>
@@ -950,7 +976,9 @@ export function CompareInfo() {
       <ModeControl ctl={ctl} />
       {err && <p className="side-cmp-err" role="alert">{err}</p>}
       {/* Fixed two-line block while running and after, so the sidebar does not jump as numbers change. */}
-      <div className="side-cmp-run" role="status" aria-live="polite">
+      {/* Announced only when the state changes (queued, comparing, done); the numbers below change too often to be read out. */}
+      <p className="visually-hidden" role="status">{running ? (job?.state === "queued" ? "Comparison queued" : "Comparing") : s?.finishedAt ? "Comparison done" : ""}</p>
+      <div className="side-cmp-run">
         {running && job?.state === "queued" && (
           <>
             <b>{job.queue?.ahead.length ? `Queued behind ${job.queue.ahead.length} ${job.queue.ahead.length === 1 ? "job" : "jobs"}` : "Queued"}</b>
@@ -1022,14 +1050,14 @@ export function SyncDialog({ ctl }: { ctl: CompareCtl }) {
             <PlanList steps={exec.plan.steps} />
             <div className="modal-actions">
               <button onClick={ctl.closeExec}><Ic.X /> Cancel</button>
-              <button className="primary" onClick={ctl.runExec} disabled={exec.plan.steps.every((s) => s.op === "skip")}><Ic.Play /> Run</button>
+              <button className="primary" onClick={ctl.runExec} disabled={exec.starting || exec.plan.steps.every((s) => s.op === "skip")}><Ic.Play /> Run</button>
             </div>
           </>
         )}
         {exec.state === "running" && (
           <>
             <progress aria-label="Sync progress" max={Math.max(1, exec.job?.counts.total ?? 1)} value={exec.job?.progress.entries ?? 0} />
-            <p className="muted" role="status">
+            <p className="muted">
               {exec.job?.progress.entries ?? 0} / {exec.job?.counts.total ?? "?"} steps
               {exec.job && exec.job.progress.bytes > 0 ? ` - ${fmtSize(exec.job.progress.bytes)}${exec.job.speed > 0 ? ` at ${fmtSize(exec.job.speed)}/s` : ""}` : ""}
               {exec.job?.state === "paused" ? " - paused" : ""} {exec.job?.progress.current ? `- ${exec.job.progress.current}` : ""}
