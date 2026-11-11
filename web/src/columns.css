@@ -38,7 +38,7 @@ body.col-resizing,body.col-resizing *{cursor:col-resize!important;user-select:no
 .ft th.colh-fill{z-index:0}
 
 /* narrow screens: back to the automatic layout, no dividers, optional columns folded away */
-@media(max-width:700px){
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){
   .ft.cols{table-layout:auto;min-width:0!important}
   .ft.cols col{width:auto!important}
   .colh-handle,.ft .c-fill,.ft .c-type,.ft .c-mode,.ft .colh-fill{display:none}
