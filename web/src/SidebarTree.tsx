@@ -280,6 +280,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const groupIds = useMemo(() => new Map([...byId.keys()].map((k, i) => [k, `${groupBase}-g${i}`])), [byId, groupBase]);
   const rows = useMemo(() => flatten(shown, (n) => openNow(n as TNode)), [shown, expanded, heldNow]);
   const tabId = rovingId(rows, focusId);
+  const actionRow = tabId ? byId.get(tabId) : undefined;
   // The first visible row for the current folder (a bookmark of it is not "the" current row).
   const currentId = current ? rows.find((r) => { const t = byId.get(r.id); return t && t.kind !== "bookmark" && t.node === current.node && t.path === current.path; })?.id : undefined;
   useEffect(() => {
@@ -467,6 +468,16 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
       <ul role="tree" aria-label="Navigation" className="st-tree" ref={root} aria-busy={nodesView === "loading" || undefined}>
         {shown.map((t) => renderRow(t, 1))}
       </ul>
+      {/* Outside the tree (a tree may only hold tree items): the row's actions for touch screen readers, which have no Shift+F10.
+          It names the row it acts on, which is the one last focused or touched. Not a Tab stop; keyboard users have Shift+F10. */}
+      {actionRow && (
+        <div role="toolbar" aria-label="Navigation row actions" className="sr-only">
+          <button type="button" tabIndex={-1} aria-haspopup="menu" disabled={!bookmarkOf(actionRow) && actionRow.kind !== "trash"} onClick={() => {
+            const el = root.current?.querySelector<HTMLElement>(`[data-tid="${CSS.escape(actionRow.id)}"]`);
+            if (el) showMenu(actionRow, el);
+          }}>Actions for {actionRow.label}</button>
+        </div>
+      )}
       {wants.map((w) => <Feed key={w.k} want={w} onDirs={onDirs} onMounts={onMounts} onDu={onDu} />)}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </>

@@ -14,7 +14,7 @@ const html = (n: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMa
 test("office: runs of bullet paragraphs become one real list", () => {
   const p = (text: string, bullet = false): Block => ({ t: "p", h: 0, spans: [{ text }], ...(bullet ? { bullet: true } : {}) });
   const out = html(createElement("div", null, blocksOf([p("intro"), p("a", true), p("b", true), p("outro"), p("c", true)])));
-  assert.equal(out, "<div><p>intro</p><ul class=\"pv-ul\" style=\"list-style:disc;padding-left:1.4rem\"><li>a</li><li>b</li></ul><p>outro</p><ul class=\"pv-ul\" style=\"list-style:disc;padding-left:1.4rem\"><li>c</li></ul></div>");
+  assert.equal(out, "<div><p>intro</p><ul class=\"pv-ul\"><li>a</li><li>b</li></ul><p>outro</p><ul class=\"pv-ul\"><li>c</li></ul></div>");
 });
 
 test("office: a sheet tab list controls a tab panel", () => {
@@ -56,4 +56,18 @@ test("the address bar enters edit mode on Enter, Space or click, not on focus", 
   const src = readFileSync(new URL("../src/AddressBar.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(src, /onFocus=\{\(\) => !skipFocus/);
   assert.match(src, /aria-label="Edit address" onClick=\{begin\} onKeyDown=\{\(e\) => \(e\.key === "Enter" \|\| e\.key === " "\)/);
+});
+
+test("the previews restore list markers that the global reset removes", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.pv-md ul,\.pv-office ul\{list-style:disc\}/);
+  assert.match(css, /\.pv-md ol\{list-style:decimal\}/);
+});
+
+test("sidebar row actions are reachable by touch screen readers outside the tree, and the tooltip bubble is not page content", () => {
+  const read = (f: string) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
+  const tree = read("SidebarTree.tsx");
+  assert.match(tree, /role="toolbar" aria-label="Navigation row actions"/);
+  assert.match(tree, /Actions for \{actionRow\.label\}/);
+  assert.match(read("Tooltip.tsx"), /role="tooltip" aria-hidden="true"/);
 });

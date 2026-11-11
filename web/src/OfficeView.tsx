@@ -31,7 +31,7 @@ export function blocksOf(blocks: Block[]) {
         items.push(<li key={i}><BlockView b={x} /></li>);
       }
       i--;
-      out.push(<ul key={`l${i}`} className="pv-ul" style={{ listStyle: "disc", paddingLeft: "1.4rem" }}>{items}</ul>);
+      out.push(<ul key={`l${i}`} className="pv-ul">{items}</ul>);
     } else if (b.t === "p" && !b.h) out.push(<p key={i}><BlockView b={b} /></p>);
     else out.push(<BlockView key={i} b={b} />);
   }

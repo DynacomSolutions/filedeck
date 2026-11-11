@@ -30,6 +30,8 @@ function hook() {
   DOMPurify.addHook("afterSanitizeAttributes", (el) => {
     // GFM task lists render disabled checkboxes; any other input (an image button) can load an address
     if (el.tagName === "INPUT" && (el.getAttribute("type") ?? "").toLowerCase() !== "checkbox") return el.remove();
+    // a task-list checkbox has no label of its own: name it by its item's text
+    if (el.tagName === "INPUT") el.setAttribute("aria-label", (el.parentElement?.textContent ?? "").trim().slice(0, 120) || "Task");
     if (el.tagName !== "A" && el.tagName !== "IMG") {
       // nothing but links (clicked) and images (rewritten) may carry an address; anything else would load it on render
       for (const a of Array.from(el.attributes)) if (isRemoteRef(a.value)) el.removeAttribute(a.name);
