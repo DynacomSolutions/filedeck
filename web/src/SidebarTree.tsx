@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star, Trash2 } from "lucide-react";
-import { fmtSize, type Entry, type Mount, type NodeInfo } from "./api";
+import { fmtSize, onFsChanged, type Entry, type Mount, type NodeInfo } from "./api";
 import { duFetcher, duKey, listFetcher, listKey as swrListKey, mountsFetcher, mountsKey } from "./data";
 import { listState } from "./sidebarState";
 import { SkeletonTreeRows } from "./Skeleton";
@@ -142,6 +142,22 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const marks = useBookmarks();
   const root = useRef<HTMLUListElement>(null);
   const { mutate } = useSWRConfig();
+  // A change made here (create, rename, delete, upload, job end) re-reads the open folders of the tree, so it does not wait for a refocus.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const pending = new Set<string | undefined>();
+    const off = onFsChanged((node) => {
+      pending.add(node);
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const all = pending.has(undefined);
+        const hit = new Set(pending);
+        pending.clear();
+        void mutate((k) => Array.isArray(k) && (k[0] === "dirs" || k[0] === "du") && (all || hit.has(k[1] as string)));
+      }, 250);
+    });
+    return () => (off(), clearTimeout(timer));
+  }, [mutate]);
   const nodes = nodesState.nodes ?? [];
   const nodesView = listState({ data: nodesState.nodes, error: nodesState.error, isLoading: nodesState.isLoading });
   const wantFocus = useRef(false);
