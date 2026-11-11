@@ -12,7 +12,7 @@ import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 import { readOnlyGuard } from "../src/readonly.ts";
 import { audit } from "../src/audit.ts";
-import { MAX_JSON_BODY, matchesHostList, requestGuard } from "../src/request-guard.ts";
+import { MAX_JSON_BODY, MAX_SMALL_JSON, isBulkRoute, matchesHostList, requestGuard } from "../src/request-guard.ts";
 
 const listen = (app: { fetch: never }) =>
   new Promise<ReturnType<typeof serve>>((res) => {
@@ -335,4 +335,71 @@ test("refusal audit lines carry the client address like any other line", async (
   assert.equal(r.status, 403);
   assert.equal(r.ip, "10.1.2.3");
   assert.equal(r.forwardedFor, "198.51.100.9, 10.1.2.3");
+});
+
+test("a JSON body that starts with a byte-order mark is accepted as before", async () => {
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify({ path: "/bom-dir" }))]);
+  const r = await agent.request("/api/fs/mkdir", { method: "POST", headers: J, body: bom });
+  assert.equal(r.status, 201);
+  assert.ok(fs.existsSync(path.join(tmp, "bom-dir")));
+  const h = await fetch(`${hub}/api/nodes/t/api/fs/mkdir`, { method: "POST", headers: J, body: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify({ path: "/bom-dir2" }))]) });
+  assert.equal(h.status, 201);
+});
+
+test("the hub forwards a proxied body it does not need to read: the agent is the one that parses it", async () => {
+  const real = JSON.parse;
+  let big = 0;
+  JSON.parse = ((t: string, r?: never) => ((big += t.length > 100_000 ? 1 : 0), real(t, r))) as typeof JSON.parse;
+  try {
+    const body = JSON.stringify({ paths: Array.from({ length: 10_000 }, (_, i) => `/nothing/${"d".repeat(120)}/${i}`) });
+    assert.ok(body.length > 1_000_000);
+    const r = await raw("POST", `${hub}/api/nodes/t/api/fs/delete`, { ...J, "content-length": String(Buffer.byteLength(body)) }, body);
+    assert.equal(r.status, 404, "the agent got the whole body and looked at the first path");
+    assert.equal(big, 1, "one parse of the large body in this process: the agent's");
+    // the hub's own routes still parse theirs (here once, by the hub)
+    big = 0;
+    const steps = Array.from({ length: 6000 }, (_, i) => ({ kind: "mkdir", node: "t", path: `/${"d".repeat(120)}/${i}` }));
+    const j = await fetch(`${hub}/api/ops/jobs`, { method: "POST", headers: J, body: JSON.stringify({ op: "sync", steps }) });
+    assert.equal(j.status, 202);
+    assert.equal(big, 1);
+    await fetch(`${hub}/api/ops/jobs/${((await j.json()) as { id: string }).id}/cancel`, { method: "POST" });
+  } finally {
+    JSON.parse = real;
+  }
+});
+
+test("every route the web app posts a list to takes a body at the server's item limit", async () => {
+  // Discovered from the client, so a new list route cannot be added there without being sorted here.
+  const src = fs.readFileSync(path.join(import.meta.dirname, "../../web/src/api.ts"), "utf8");
+  const found = new Set<string>();
+  for (const m of src.matchAll(/\bpost\(node, "(\w+)"/g)) found.add(`/api/fs/${m[1]}`);
+  for (const m of src.matchAll(/\bpostJob\(node, "(\w+)"/g)) found.add(`/api/jobs/${m[1]}`);
+  for (const m of src.matchAll(/\btrashPost<[^>]*>\(node, "(\w+)"/g)) found.add(`/api/trash/${m[1]}`);
+  for (const m of src.matchAll(/opReq\("([^"]*)", "POST"/g)) found.add(`/api/ops/jobs${m[1]}`.replace(/\/\$\{[^}]*\}/g, "/:x"));
+  for (const m of src.matchAll(/fetch\(`?"?((?:\$\{nodeBase\(node\)\})?\/api\/[^`"?]*)[`"?][^\n]*method: "POST"/g)) found.add(m[1]!.replace("${nodeBase(node)}", "").replace(/\$\{[^}]*\}/g, ":x"));
+  const list = new Set(["/api/fs/move", "/api/fs/copy", "/api/fs/trash", "/api/fs/delete", "/api/fs/zip-ticket", "/api/jobs/compress", "/api/jobs/extract", "/api/trash/restore", "/api/trash/delete", "/api/ops/jobs", "/api/diff/jobs", "/api/diff/jobs/:x/focus", "/api/diff/jobs/:x/subtree"]);
+  const small = new Set(["/api/fs/mkdir", "/api/fs/symlink", "/api/fs/rename", "/api/fs/perms", "/api/jobs/size", "/api/trash/empty", "/api/ops/jobs/:x/pause", "/api/ops/jobs/:x/resolve", "/api/vault/forget", "/api/transfer", "/api/jobs/:x/cancel", "/api/vault/:x/extend", "/api/diff/jobs/:x/cancel"]);
+  found.delete("/api/trash/:x"); // the helper behind trashPost, whose operations are found above
+  assert.ok(found.size > 15, [...found].join(" "));
+  for (const r of found) assert.ok(list.has(r) || small.has(r) || /\/(?:cancel|extend|pause|resume)$/.test(r), `a POST route the client uses is not classified: ${r}`);
+  // the guard agrees with the table, at a body of 10,000 entries of 200 characters (about 2 MiB)
+  const app = new Hono();
+  app.use("*", requestGuard());
+  app.all("/*", (c) => c.json({ ok: true }));
+  const body = JSON.stringify({ items: Array.from({ length: 10_000 }, (_, i) => `/${"d".repeat(200)}/${i}`) });
+  assert.ok(body.length > MAX_SMALL_JSON && body.length < MAX_JSON_BODY);
+  for (const r of list) {
+    const url = r.replace(":x", "abc");
+    assert.equal(isBulkRoute(url), true, r);
+    assert.equal((await app.request(url, { method: "POST", headers: J, body })).status, 200, r);
+    assert.equal(isBulkRoute(`/api/nodes/t${url}`), true, `through the hub: ${r}`);
+  }
+  for (const r of small) assert.equal((await app.request(r.replace(":x", "abc"), { method: "POST", headers: J, body })).status, 413, r);
+});
+
+test("zip-ticket takes at most 10,000 names", async () => {
+  const names = Array.from({ length: 10_001 }, (_, i) => `n${i}`);
+  const r = await agent.request("/api/fs/zip-ticket", { method: "POST", headers: J, body: JSON.stringify({ dir: "/", names }) });
+  assert.equal(r.status, 400);
+  assert.match(((await r.json()) as { error: string }).error, /at most 10000/);
 });

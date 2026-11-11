@@ -19,7 +19,7 @@ import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
-import { matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
+import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
@@ -54,7 +54,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.use("*", webHeaders());
   app.use("*", textCompression());
   // editor saves are limited by the agent that takes them (its own maxEdit), not here
-  app.use("*", requestGuard({ allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
+  app.use("*", requestGuard({ forward: true, allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
   app.use("*", apiTokenAuth(cfg.apiToken));
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
@@ -305,6 +305,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
     } catch (e) {
       if ((e as Error).name === "AbortError") return new Response(null, { status: 499 });
+      if (isBodyTooLarge(e)) return c.json({ error: "request body too large" }, 413);
       return c.json({ error: "agent unreachable" }, 502);
     }
   });

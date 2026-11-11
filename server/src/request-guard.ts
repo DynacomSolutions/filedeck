@@ -29,6 +29,8 @@ import { auditRefusal, type AuditSink } from "./audit.ts";
  */
 export const MAX_JSON_BODY = 16 * 1024 * 1024;
 export const MAX_SMALL_JSON = 1024 * 1024;
+/** The audit line reads a body only up to this size (see audit.ts). */
+const AUDIT_BODY = 256 * 1024;
 
 /** The path as the agent sees it: a hub request for `/api/nodes/<node>/<rest>` is judged by `<rest>`. */
 export function agentPath(p: string): string {
@@ -111,13 +113,41 @@ function crossSite(c: import("hono").Context, allowed: readonly string[]): boole
   return !originListed(c, u, allowed);
 }
 
-const BULK = new Set(["/api/ops/jobs", "/api/fs/delete", "/api/fs/trash", "/api/fs/copy", "/api/fs/move", "/api/jobs/compress", "/api/trash/restore", "/api/trash/delete", "/api/diff/jobs"]);
+const BULK = new Set(["/api/ops/jobs", "/api/fs/delete", "/api/fs/trash", "/api/fs/copy", "/api/fs/move", "/api/jobs/compress", "/api/trash/restore", "/api/trash/delete", "/api/diff/jobs", "/api/jobs/extract", "/api/fs/zip-ticket"]);
 const BULK_DIFF = /^\/api\/diff\/jobs\/[^/]+\/(?:focus|subtree)$/;
 
 /** Routes that take lists of paths (up to the item limit of a job) and so may carry a large JSON body. */
 export function isBulkRoute(p: string): boolean {
   const r = agentPath(p);
   return BULK.has(r) || BULK_DIFF.test(r);
+}
+
+/** Thrown into a forwarded body that outgrew its cap (the proxy answers 413 for it). */
+export class BodyTooLarge extends Error {
+  constructor() {
+    super("request body too large");
+    this.name = "BodyTooLarge";
+  }
+}
+
+/** Whether `e` (or what it wraps) is a BodyTooLarge. */
+export function isBodyTooLarge(e: unknown): boolean {
+  for (let x = e as { name?: string; cause?: unknown } | undefined, i = 0; x && i < 5; x = x.cause as typeof x, i++) if (x.name === "BodyTooLarge") return true;
+  return false;
+}
+
+/** The body passed on as it arrives, counted, and failed as soon as it is over `max` (nothing is buffered or parsed). */
+function capStream(body: ReadableStream<Uint8Array>, max: number): ReadableStream<Uint8Array> {
+  let n = 0;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, ctl) {
+        n += chunk.length;
+        if (n > max) ctl.error(new BodyTooLarge());
+        else ctl.enqueue(chunk);
+      },
+    }),
+  );
 }
 
 /** Read a request body up to `max` bytes; `undefined` as soon as it is over (the rest is not read). */
@@ -147,6 +177,8 @@ export interface GuardOptions {
   maxJson?: number;
   /** extra host names an Origin may carry (the hub's allowed-hosts list) */
   allowedHosts?: readonly string[];
+  /** the hub: a request proxied to an agent is checked and counted while its bytes pass through, never parsed here (the agent parses it once) */
+  forward?: boolean;
   /** where a refused request is written to the audit log (the body is not read) */
   audit?: { who: string; sink?: AuditSink };
 }
@@ -177,12 +209,19 @@ export function requestGuard(o: GuardOptions = {}): MiddlewareHandler {
     const hasBody = c.req.raw.headers.has("transfer-encoding") || (cl !== undefined ? cl !== "0" : ct !== undefined);
     if (!hasBody) return next();
     if (!(ct && JSON_TYPE.test(ct))) return refuse(c, 415, "content type must be application/json");
-    const buf = await readCapped(c.req.raw, isBulkRoute(c.req.path) ? maxBulk : maxSmall);
+    const cap = isBulkRoute(c.req.path) ? maxBulk : maxSmall;
+    if (o.forward && agentPath(c.req.path) !== c.req.path && !(cl !== undefined && Number(cl) <= AUDIT_BODY)) {
+      // proxied, and not small enough to be worth reading for the audit line: stream it through under the cap
+      if (Number(cl ?? "0") > cap) return refuse(c, 413, "request body too large");
+      if (c.req.raw.body) c.req.raw = new Request(c.req.raw, { body: capStream(c.req.raw.body, cap), duplex: "half" } as RequestInit);
+      return next();
+    }
+    const buf = await readCapped(c.req.raw, cap);
     if (!buf) return refuse(c, 413, "request body too large");
     // parse once; everything after this (read-only guard, audit, the route) gets this value from the body cache
     const parsed = new Promise<unknown>((resolve, reject) => {
       try {
-        resolve(JSON.parse(buf.toString("utf8")));
+        resolve(JSON.parse(new TextDecoder().decode(buf))); // decode() drops a leading byte-order mark, as Request.json() does
       } catch (e) {
         reject(e);
       }
