@@ -98,6 +98,8 @@ export interface RestoreOpts {
   conflict?: "fail" | "rename" | "replace";
   /** restore into this folder (keeping the name) instead of the original location */
   toDir?: string;
+  /** true for a path the caller must not change (a read-only volume, or a folder that contains one); checked on the computed destination */
+  blocked?: (virtual: string) => boolean;
 }
 export interface TrashResult {
   id: string;
@@ -122,6 +124,7 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
       const dest = resolveWrite(root, target);
       assertNotTrash(dest.virtual);
       if (dest.virtual === "/") throw bad("cannot restore onto the root");
+      if (opts.blocked?.(dest.virtual)) throw new ops.FsError(403, "read-only volume");
       await fs.mkdir(path.dirname(dest.real), { recursive: true });
       let finalReal = dest.real;
       if (await ops.exists(dest.real)) {

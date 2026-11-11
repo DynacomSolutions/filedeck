@@ -69,6 +69,37 @@ export function hitsReadOnly(root: string, prefixes: string[], target: string): 
   }
 }
 
+/** The paths a request would remove, move away or change recursively: an ancestor of a read-only prefix must not be among them. */
+export function removalTargets(method: string, route: string, body: Record<string, unknown>): { paths: string[]; followFinal: boolean } {
+  if (method !== "POST") return { paths: [], followFinal: false };
+  const b = (k: string) => arr(body[k]);
+  switch (route) {
+    case "/api/fs/delete":
+    case "/api/fs/trash":
+      return { paths: b("paths"), followFinal: false };
+    case "/api/fs/rename":
+      return { paths: [...b("from"), ...(body.overwrite === true ? b("to") : [])], followFinal: false };
+    case "/api/fs/move":
+      return { paths: b("from"), followFinal: false };
+    case "/api/fs/perms":
+      return { paths: body.recursive === true ? b("path") : [], followFinal: true }; // a link is followed by the change
+  }
+  return { paths: [], followFinal: false };
+}
+
+/** Whether `target` is a read-only prefix itself, lies under one, or contains one (removing or recursing into it would reach it). */
+export function reachesReadOnly(root: string, prefixes: string[], target: string, followFinal = false): boolean {
+  if (hitsReadOnly(root, prefixes, target)) return true;
+  try {
+    const v = resolveInRoot(root, target, { followFinal }).virtual;
+    const vs = followFinal ? [v, resolveInRoot(root, target, { followFinal: false }).virtual] : [v];
+    return prefixes.some((p) => vs.some((x) => under(p, x)));
+  } catch (e) {
+    if (!(e instanceof PathError)) throw e;
+    return false;
+  }
+}
+
 export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandler {
   return async (c, next) => {
     if (prefixes.length === 0 || ["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return next();
@@ -82,6 +113,8 @@ export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandl
       }
     }
     if (writeTargets(c.req.method, c.req.path, (k) => c.req.query(k), body).some((t) => hitsReadOnly(root, prefixes, t))) return c.json({ error: "read-only volume" }, 403);
+    const rm = removalTargets(c.req.method, c.req.path, body);
+    if (rm.paths.some((t) => reachesReadOnly(root, prefixes, t, rm.followFinal))) return c.json({ error: "read-only volume" }, 403);
     return next();
   };
 }
