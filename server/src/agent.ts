@@ -21,6 +21,7 @@ import { registerThumbRoutes } from "./thumbs.ts";
 import { registerTranscodeRoutes } from "./transcode.ts";
 import { agentAuth } from "./agent-auth.ts";
 import { audit, type AuditSink } from "./audit.ts";
+import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, isReadOnly } from "./readonly.ts";
 import type { Config } from "./config.ts";
 
@@ -37,6 +38,7 @@ function dispo(name: string) {
 export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
   app.use("*", agentAuth(cfg.agentToken));
+  app.use("*", requestGuard({ maxEdit: cfg.maxEdit }));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   const watches = new Watches();

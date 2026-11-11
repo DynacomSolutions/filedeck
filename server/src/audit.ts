@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from "hono";
+import { isRawRoute } from "./request-guard.ts";
 
 /**
  * Write audit log: one JSON line on stdout per state-changing request
@@ -36,7 +37,7 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
     const t0 = Date.now();
     let body: unknown;
     const len = Number(c.req.header("content-length") ?? "0"); // 0 = not declared
-    if ((c.req.header("content-type") ?? "").includes("json") && len <= MAX_BODY) {
+    if (!isRawRoute(m, p) && len <= MAX_BODY) { // whatever the content type; raw uploads are never read
       try {
         body = pick(await c.req.raw.clone().json());
       } catch {

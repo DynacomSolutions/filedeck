@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { PathError, resolveInRoot } from "./paths.ts";
+import { MAX_JSON_BODY, isRawRoute } from "./request-guard.ts";
 
 /**
  * Read-only volumes: virtual path prefixes (FILEDECK_READONLY, comma separated)
@@ -73,7 +74,9 @@ export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandl
   return async (c, next) => {
     if (prefixes.length === 0 || ["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return next();
     let body: Record<string, unknown> = {};
-    if ((c.req.header("content-type") ?? "").includes("json")) {
+    // The body is read whatever its content type: the routes parse it themselves and do not look at the type.
+    const len = Number(c.req.header("content-length") ?? "0");
+    if (!isRawRoute(c.req.method, c.req.path) && len <= MAX_JSON_BODY) {
       try {
         const j = await c.req.raw.clone().json();
         if (j && typeof j === "object") body = j as Record<string, unknown>;
