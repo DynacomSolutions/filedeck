@@ -340,7 +340,10 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .pv-tabs button.on{color:var(--fg);border-color:var(--border-strong);background:var(--surface-2)}
 .pv-md{padding:.9rem 1.1rem;font-size:.86rem;line-height:1.6;overflow-wrap:anywhere;text-align:left}
 .pv-md h1,.pv-md h2,.pv-md h3,.pv-md h4{margin:1.1em 0 .45em;line-height:1.25}.pv-md h1{font-size:1.5rem}.pv-md h2{font-size:1.2rem;border-bottom:1px solid var(--border);padding-bottom:.25rem}.pv-md h3{font-size:1.02rem}
-.pv-md p,.pv-md ul,.pv-md ol,.pv-md pre,.pv-md table,.pv-md blockquote{margin:.6em 0}
+.pv-md p,.pv-md ul,.pv-md ol,.pv-md pre,.pv-md table,/* theme.css resets every list; the previews bring their markers back */
+.pv-md ul,.pv-md ol,.pv-office ul{padding-left:1.6rem}.pv-md ul,.pv-office ul{list-style:disc}.pv-md ol{list-style:decimal}.pv-md ul ul{list-style:circle}.pv-md li>ul,.pv-md li>ol{margin:.2em 0}
+.pv-md li:has(>input[type=checkbox]){list-style:none;margin-left:-1.2rem}.pv-md li>input[type=checkbox]{margin-right:.4rem}
+.pv-md blockquote{margin:.6em 0}
 .pv-md code{font:.8rem var(--mono);background:var(--surface-2);padding:.05rem .3rem;border-radius:var(--radius-sm)}
 .pv-md pre{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:.6rem .75rem;overflow:auto}.pv-md pre code{background:none;padding:0}
 .pv-md blockquote{border-left:3px solid var(--accent-line);padding:.1rem .9rem;color:var(--fg-soft)}

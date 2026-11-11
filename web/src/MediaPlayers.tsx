@@ -76,6 +76,7 @@ export function MediaPlayer({ node, path, name, kind }: { node: string; path: st
                 step={1}
                 value={pos}
                 aria-label="Seek (restarts the transcoded stream)"
+                aria-valuetext={`${clock(pos)} of ${clock(dur)}`}
                 onChange={(e) => setPos(Number(e.target.value))}
                 onPointerUp={() => setOffset(pos)}
                 onKeyUp={() => setOffset(pos)}

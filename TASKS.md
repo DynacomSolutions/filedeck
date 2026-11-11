@@ -167,15 +167,16 @@ Findings from the 12 November 2026 review: request handling, read-only volumes, 
 ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | in_review | claude-20261112-rv-hub | rv-request-guard | | 2026-11-12 09:00 ICT | Found in review; includes request body size limits<br>https://github.com/DynacomSolutions/filedeck/pull/188 |
+| 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | done | claude-20261112-rv-hub | rv-request-guard | | | Merged https://github.com/DynacomSolutions/filedeck/pull/188, CI green, independent review clean on second pass<br>JSON bodies capped at 16 MiB; refused requests are audited |
 | 104 | Read-only prefixes also protect their parent folders and trash restore targets | in_review | claude-20261112-rv-hub | rv-readonly-cover | 13.103 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/195 |
 | 105 | Hub sends security headers, optional host allowlist, compressed and cacheable static assets | in_review | claude-20261112-rv-hub | rv-hub-headers-static | 13.104 | 2026-11-12 11:00 ICT | Found in review; missing assets answer 404<br>https://github.com/DynacomSolutions/filedeck/pull/201 |
 | 106 | Git reads ignore programs named in repository config and stay inside the root | in_review | claude-20261112-rv-search-git | rv-git-config | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/181 |
 | 107 | Search and glob patterns cannot block the agent | in_review | claude-20261112-rv-search-git | rv-search-patterns | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/190 |
 | 108 | Archive extraction stages and merges through pinned directory descriptors | in_review | claude-20261112-rv-archives | rv-extract-pinned | 14.114 | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/192 |
 | 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | in_review | claude-20261112-rv-fsops | rv-pinned-walks | 14.113, 14.116 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/199 |
-| 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | in_review | claude-20261112-rv-sources | rv-smb-source | | 2026-11-12 08:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/182 |
+| 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | done | claude-20261112-rv-sources | rv-smb-source | | | Merged https://github.com/DynacomSolutions/filedeck/pull/182, CI green, independent review clean on second pass<br>Not tried against a real SMB server |
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
+| 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | in_review | claude-20261112-rv-sources | rv-smb-followup | 13.110 | 2026-11-12 09:00 ICT | From the second review of 13.110<br>https://github.com/DynacomSolutions/filedeck/pull/204 |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
@@ -212,9 +213,9 @@ Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and A
 ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | todo | | rv-list-access | 15.118 | | Found in review |
+| 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | in_review | claude-20261112-rv-panel | rv-list-access | 15.118 | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/203 |
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | done | claude-20261112-rv-menus | rv-menus-dialogs | | | Merged https://github.com/DynacomSolutions/filedeck/pull/200, CI green<br>Checked at 1366x768 and 390 px |
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
-| 127 | Component roles, names and announcements | in_review | claude-20261112-rv-components | rv-aria-announce | 15.121 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/202 |
+| 127 | Component roles, names and announcements | done | claude-20261112-rv-components | rv-aria-announce | 15.121 | | Merged https://github.com/DynacomSolutions/filedeck/pull/202, CI green<br>Long selections download through a one-use ticket<br>axe clean at 1440 and 390 px |
 | 128 | Browser acceptance checks repaired and run in CI; audit document updated | todo | | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Found in review: two of three scopes fail on main |
 | 129 | Release v0.3.36 with the review fixes | todo | | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | After every row above is merged |

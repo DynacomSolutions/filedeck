@@ -16,6 +16,7 @@ import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
 import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
+import { requestGuard, stripBrowserContext } from "./request-guard.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
@@ -38,6 +39,8 @@ function clean(h: Headers, keepLength: boolean): Headers {
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault };
+  // editor saves are limited by the agent that takes them (its own maxEdit), not here
+  app.use("*", requestGuard({ audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
   app.use("*", apiTokenAuth(cfg.apiToken));
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
@@ -246,6 +249,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       signal: c.req.raw.signal,
       redirect: "manual",
     };
+    stripBrowserContext(init.headers as Headers); // judged above; the agent sees a hub call
     if (hasBody) {
       init.body = c.req.raw.body;
       init.duplex = "half";

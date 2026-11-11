@@ -40,7 +40,8 @@ export function SkeletonTiles({ tiles = 12 }: { tiles?: number }) {
 /** A block of text-line placeholders for a pane that is loading (preview, properties). `lines` keeps the height stable. */
 export function SkeletonLines({ lines = 8 }: { lines?: number }) {
   return (
-    <div className="sk-lines" role="status" aria-label="Loading">
+    <div className="sk-lines" role="status">
+      <span className="sr-only">Loading...</span>
       {Array.from({ length: lines }, (_, i) => (
         <span key={i} className="sk" style={{ width: `${NAME_W[(i * 5) % NAME_W.length]! + 20}%` }} />
       ))}

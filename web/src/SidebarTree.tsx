@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star, Trash2 } from "lucide-react";
 import { fmtSize, onFsChanged, type Entry, type Mount, type NodeInfo } from "./api";
@@ -275,8 +275,12 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
     walk(shown);
     return m;
   }, [shown]);
+  // each expanded row owns its group of children (ids are numbered: a path may hold spaces)
+  const groupBase = useId();
+  const groupIds = useMemo(() => new Map([...byId.keys()].map((k, i) => [k, `${groupBase}-g${i}`])), [byId, groupBase]);
   const rows = useMemo(() => flatten(shown, (n) => openNow(n as TNode)), [shown, expanded, heldNow]);
   const tabId = rovingId(rows, focusId);
+  const actionRow = tabId ? byId.get(tabId) : undefined;
   // The first visible row for the current folder (a bookmark of it is not "the" current row).
   const currentId = current ? rows.find((r) => { const t = byId.get(r.id); return t && t.kind !== "bookmark" && t.node === current.node && t.path === current.path; })?.id : undefined;
   useEffect(() => {
@@ -393,6 +397,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
         data-tid={t.id}
         aria-level={level}
         aria-expanded={t.expandable ? isExp : undefined}
+        aria-owns={isExp && (t.children?.length || t.note) ? groupIds.get(t.id) : undefined}
         aria-disabled={t.offline || undefined}
         aria-current={t.id === currentId ? "page" : undefined}
         aria-keyshortcuts={hasMenu ? "Shift+F10" : undefined}
@@ -426,6 +431,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
           <span className="st-icon" aria-hidden="true">{t.icon}</span>
           <span className="st-label">{t.label}</span>
           {t.extra}
+          {t.offline && <span className="muted st-sub">offline</span>}
           {known(t.size) && <span className="muted st-sub">{fmtSize(known(t.size)!.used)}</span>}
         </span>
         {(t.usage ?? known(t.size)) && <UsageBar usage={(t.usage ?? known(t.size))!} />}
@@ -442,7 +448,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
           )}
         </div>
         {isExp && (t.children?.length || t.note) ? (
-          <ul role="group" className="st-group">
+          <ul role="group" id={groupIds.get(t.id)} className="st-group">
             {t.children?.map((c) => renderRow(c, level + 1))}
             {t.note?.kind === "skeleton" && <SkeletonTreeRows level={level + 1} />}
             {t.note && t.note.kind !== "skeleton" && (
@@ -462,6 +468,16 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
       <ul role="tree" aria-label="Navigation" className="st-tree" ref={root} aria-busy={nodesView === "loading" || undefined}>
         {shown.map((t) => renderRow(t, 1))}
       </ul>
+      {/* Outside the tree (a tree may only hold tree items): the row's actions for touch screen readers, which have no Shift+F10.
+          It names the row it acts on, which is the one last focused or touched. Not a Tab stop; keyboard users have Shift+F10. */}
+      {actionRow && (
+        <div role="toolbar" aria-label="Navigation row actions" className="sr-only">
+          <button type="button" tabIndex={-1} aria-haspopup="menu" disabled={!bookmarkOf(actionRow) && actionRow.kind !== "trash"} onClick={() => {
+            const el = root.current?.querySelector<HTMLElement>(`[data-tid="${CSS.escape(actionRow.id)}"]`);
+            if (el) showMenu(actionRow, el);
+          }}>Actions for {actionRow.label}</button>
+        </div>
+      )}
       {wants.map((w) => <Feed key={w.k} want={w} onDirs={onDirs} onMounts={onMounts} onDu={onDu} />)}
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </>
