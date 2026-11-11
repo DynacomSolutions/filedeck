@@ -72,6 +72,24 @@ function kind(st: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink():
   return st.isSymbolicLink() ? "symlink" : st.isDirectory() ? "dir" : st.isFile() ? "file" : "other";
 }
 
+/** Longest file name the filesystems we serve accept, in bytes. */
+const NAME_MAX = 255;
+
+/** `name` cut at a character boundary to at most `max` UTF-8 bytes. */
+export function clipName(name: string, max: number): string {
+  const b = Buffer.from(name);
+  if (b.length <= max) return name;
+  return b.subarray(0, Math.max(0, max)).toString("utf8").replace(/\uFFFD+$/, "");
+}
+
+/**
+ * Name of a hidden working file beside `name`: `.<name><suffix>`. The name is clipped so the whole thing stays within
+ * the file-name limit, otherwise a long (but valid) name would fail only when a temporary file is made for it.
+ */
+export function tempName(name: string, suffix: string): string {
+  return `.${clipName(name, NAME_MAX - 1 - Buffer.byteLength(suffix))}${suffix}`;
+}
+
 async function toEntry(root: string, parentVirtual: string, parentReal: string, name: string): Promise<Entry | null> {
   try {
     const st = await fs.lstat(path.join(parentReal, name));
@@ -324,7 +342,7 @@ export async function symlink(root: string, p: string, target: string, overwrite
     if (!cur) return fs.symlink(target, at);
     if (!overwrite) throw new FsError(409, "already exists");
     if (!cur.isSymbolicLink()) throw new FsError(409, "exists and is not a symbolic link");
-    const tmp = path.join(path.dirname(at), `.${path.basename(at)}.filedeck-ln-${randomUUID().slice(0, 8)}`);
+    const tmp = path.join(path.dirname(at), tempName(path.basename(at), `.filedeck-ln-${randomUUID().slice(0, 8)}`));
     try {
       await fs.symlink(target, tmp);
       await fs.rename(tmp, at);
@@ -344,9 +362,38 @@ export async function rename(root: string, from: string, to: string, overwrite =
   if (a.virtual === "/" || b.virtual === "/") throw new FsError(400, "cannot move root");
   if (b.virtual === a.virtual) return b.virtual;
   if (b.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot move into itself");
-  if (!overwrite && (await exists(b.real))) throw new FsError(409, "destination exists");
-  await pinParent(root, a.real, (from) => pinParent(root, b.real, (to) => moveReal(from, to, overwrite)));
+  let caseOnly = false;
+  if (!overwrite && (await exists(b.real))) {
+    // On a case-insensitive volume "a.txt" -> "A.txt" finds the file itself at the destination: that is a rename, not a clash.
+    if (!(await isCaseChange(a.real, b.real))) throw new FsError(409, "destination exists");
+    caseOnly = true;
+  }
+  await pinParent(root, a.real, (from) => pinParent(root, b.real, (to) => (caseOnly ? moveCaseOnly(from, to) : moveReal(from, to, overwrite))));
   return b.virtual;
+}
+
+/** The destination is the source itself under another spelling of the same name (same folder, same file). */
+async function isCaseChange(from: string, to: string): Promise<boolean> {
+  const [fa, fb] = [path.basename(from), path.basename(to)];
+  if (path.dirname(from) !== path.dirname(to) || fa === fb || fa.toLowerCase() !== fb.toLowerCase()) return false;
+  const [x, y] = await Promise.all([fs.lstat(from), fs.lstat(to)]);
+  return x.dev === y.dev && x.ino === y.ino;
+}
+
+/**
+ * Change the case of a name in two steps through a temporary name. When the volume tells the two spellings apart
+ * (a second link to the same file, say) the destination still exists after the first step: undo it and refuse.
+ */
+async function moveCaseOnly(from: string, to: string) {
+  const tmp = path.join(path.dirname(from), tempName(path.basename(from), `.filedeck-case-${randomUUID().slice(0, 8)}`));
+  await fs.rename(from, tmp);
+  try {
+    if (await exists(to)) throw new FsError(409, "destination exists");
+    await fs.rename(tmp, to);
+  } catch (e) {
+    await fs.rename(tmp, from).catch(() => undefined);
+    throw e;
+  }
 }
 
 /** rename(2), falling back to copy-beside + swap + remove when source and destination are on different devices. */
@@ -358,9 +405,10 @@ export async function moveReal(from: string, to: string, overwrite: boolean) {
     // Copy beside the destination first so a failure midway leaves nothing
     // at the real name and the temp tree can be removed; the source is only
     // deleted once the copy is complete and in place.
-    const tmp = path.join(path.dirname(to), `.${path.basename(to)}.filedeck-part-${randomUUID()}`);
+    const tmp = path.join(path.dirname(to), tempName(path.basename(to), `.filedeck-part-${randomUUID()}`));
     try {
-      await fs.cp(from, tmp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+      await fs.cp(from, tmp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, preserveTimestamps: true });
+      await copyMeta(from, tmp); // a move keeps owner and times of every entry, as rename(2) does
       if (overwrite) await fs.rm(to, { recursive: true, force: true });
       await fs.rename(tmp, to);
     } catch (err) {
@@ -369,6 +417,16 @@ export async function moveReal(from: string, to: string, overwrite: boolean) {
     }
     await fs.rm(from, { recursive: true, force: true });
   }
+}
+
+/** Give every entry of the copy at `to` the owner and times of the one at `from` (best effort: changing the owner needs privilege). */
+async function copyMeta(from: string, to: string): Promise<void> {
+  const st = await fs.lstat(from);
+  if (st.isDirectory()) {
+    for (const n of await fs.readdir(from)) await copyMeta(path.join(from, n), path.join(to, n));
+  }
+  await fs.lchown(to, st.uid, st.gid).catch(() => undefined);
+  await fs.lutimes(to, st.atime, st.mtime).catch(() => undefined);
 }
 
 export async function exists(real: string) {
@@ -385,10 +443,31 @@ export async function uniqueName(dirReal: string, name: string): Promise<string>
   const dot = name.lastIndexOf(".");
   const [base, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
   for (let i = 1; i < 10000; i++) {
-    const cand = `${base} (copy${i > 1 ? " " + i : ""})${ext}`;
+    const tail = ` (copy${i > 1 ? " " + i : ""})${ext}`;
+    const cand = `${clipName(base, NAME_MAX - Buffer.byteLength(tail))}${tail}`;
     if (!(await exists(path.join(dirReal, cand)))) return cand;
   }
   throw new FsError(409, "cannot find a free name");
+}
+
+/** Move `tmp` to `dest` only if nothing is at `dest`: EEXIST otherwise. A file is linked (atomic, never replaces); a folder is renamed after a check. */
+async function placeNew(tmp: string, dest: string): Promise<void> {
+  const st = await fs.lstat(tmp);
+  if (st.isDirectory()) {
+    if (await exists(dest)) throw Object.assign(new Error("exists"), { code: "EEXIST" });
+    await fs.rename(tmp, dest);
+    return;
+  }
+  try {
+    await fs.link(tmp, dest);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw e;
+    // no hard links on this filesystem (FAT, some network mounts): fall back to check-then-rename
+    if (await exists(dest)) throw Object.assign(new Error("exists"), { code: "EEXIST" });
+    await fs.rename(tmp, dest);
+    return;
+  }
+  await fs.unlink(tmp);
 }
 
 export interface CopyOpts {
@@ -407,15 +486,25 @@ export async function copy(root: string, from: string, toDir: string, opts: Copy
   if (d.virtual === a.virtual || d.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot copy into itself");
   const cpOpts = { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, preserveTimestamps: opts.preserveTimes === true };
   if (!opts.overwrite) {
-    const name = await uniqueName(d.real, path.basename(a.real));
-    await fs.cp(a.real, path.join(d.real, name), cpOpts);
-    return virtualJoin(d.virtual, name);
+    // Copy beside the destination and put it in place whole: a failed copy leaves nothing under the real name.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const name = await uniqueName(d.real, path.basename(a.real));
+      const tmp = path.join(d.real, tempName(name, `.filedeck-part-${randomUUID()}`));
+      try {
+        await fs.cp(a.real, tmp, cpOpts);
+        await placeNew(tmp, path.join(d.real, name));
+        return virtualJoin(d.virtual, name);
+      } catch (e) {
+        await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 4) throw e; // somebody took the name meanwhile: pick another
+      }
+    }
   }
   const name = path.basename(a.real);
   const dest = path.join(d.real, name);
   if (dest === a.real) throw new FsError(400, "source and destination are the same");
   // Copy beside the destination, then swap in: a failed copy never damages the existing file.
-  const tmp = path.join(d.real, `.${name}.filedeck-part-${randomUUID()}`);
+  const tmp = path.join(d.real, tempName(name, `.filedeck-part-${randomUUID()}`));
   try {
     await fs.cp(a.real, tmp, cpOpts);
     const [src, cur] = [await fs.lstat(tmp), await fs.lstat(dest).catch(() => null)];
@@ -474,7 +563,12 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   };
   await fs.mkdir(path.join(dir, id));
   await fs.writeFile(path.join(dir, id, "meta.json"), JSON.stringify(meta));
-  await pinParent(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
+  try {
+    await pinParent(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
+  } catch (e) {
+    await fs.rm(path.join(dir, id), { recursive: true, force: true }).catch(() => undefined); // no ghost item without data
+    throw e;
+  }
   return meta;
 }
 
@@ -497,6 +591,7 @@ export async function upload(
   const d = resolveRead(root, dir);
   assertNotTrash(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name));
+  assertNotTrash(target.virtual); // a file may not take the name of the trash store
   // Work through the pinned destination folder so it cannot be swapped for a link mid-upload.
   return pinDir(root, d.real, async (at) => {
     const dest = path.join(at, path.basename(target.real));
@@ -504,7 +599,7 @@ export async function upload(
       body.resume();
       throw new FsError(409, "destination exists");
     }
-    const tmp = path.join(at, `.${name}.filedeck-${randomUUID().slice(0, 8)}.part`);
+    const tmp = path.join(at, tempName(name, `.filedeck-${randomUUID().slice(0, 8)}.part`));
     let written = 0;
     const handle = await fs.open(tmp, "wx", 0o644);
     try {
@@ -585,7 +680,7 @@ export async function writeText(root: string, p: string, body: Buffer, ifMatch: 
         throw new FsError(409, "file changed on disk since it was opened", { etag: etagOf(cur), mtime: cur.mtimeMs });
       }
     }
-    const tmp = path.join(dir, `.${path.basename(r.real)}.filedeck-${randomUUID().slice(0, 8)}.part`);
+    const tmp = path.join(dir, tempName(path.basename(r.real), `.filedeck-${randomUUID().slice(0, 8)}.part`));
     try {
       await fs.writeFile(tmp, body, { flag: "wx", mode: cur ? Number(cur.mode) & 0o7777 : 0o644 });
       if (cur) {

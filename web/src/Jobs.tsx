@@ -7,7 +7,7 @@ import * as Ic from "lucide-react";
 import { splitByOrigin } from "./jobOrigin";
 import { gaveUp } from "./jobPoll";
 import { etaText, jobLines, statusPill } from "./jobRow";
-import { HISTORY_KEY, IDLE_COLLAPSE_MS, addToHistory, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
+import { HISTORY_KEY, IDLE_COLLAPSE_MS, addToHistory, announceEnded, endTime, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
 
 const COLLAPSE_KEY = "filedeck-jobs-collapsed";
 const live = (j: JobView) => j.state === "queued" || j.state === "running";
@@ -145,7 +145,7 @@ function OpRow({ job, stale, detail, expanded, onToggle, onChange }: { job: OpJo
             <button onClick={() => answer("overwrite")}>{job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? <Ic.Merge /> : <Ic.Replace />} {job.conflict.dstType === "dir" && job.conflict.srcType === "dir" ? "Merge" : "Overwrite"}</button>
             <button className="primary" onClick={() => answer("rename")}><Ic.CopyPlus /> Keep both</button>
           </div>
-          {askErr && <div className="fp-err">{askErr}</div>}
+          {askErr && <div className="fp-err" role="alert">{askErr}</div>}
           <label className="ck"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /><span className="ck-box" aria-hidden="true"><Ic.Check /></span><span>Apply to all remaining</span></label>
         </div>
       )}
@@ -252,27 +252,36 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   // Finished jobs by key: when they were first seen finished. Clean ones leave the live list soon after, but stay in history.
   const finished = useRef(new Map<string, Finished>());
   const firstLoad = useRef(true);
+  // Sources ("hub" or a node) that have answered a poll. Jobs already finished when a source first answers did not just end.
+  const polled = useRef(new Set<string>());
+  // Jobs seen finishing since the last announcement.
+  const justEnded = useRef<HistoryEntry[]>([]);
+  const [announce, setAnnounce] = useState("");
   const cleared = useRef(new Set<string>());
   const [history, setHistory] = useState<HistoryEntry[]>(loadHistory);
   const [showHistory, setShowHistory] = useState(false);
   const [showBg, setShowBg] = useState(false);
   const [, tick] = useState(0);
 
-  const track = useCallback((key: string, state: string, endedAt: number | undefined, createdAt: number, title: string, where: string | undefined, attention: boolean, detail: string | undefined) => {
+  const track = useCallback((key: string, state: string, endedAt: number | undefined, createdAt: number, title: string, where: string | undefined, attention: boolean, detail: string | undefined, initial: boolean = firstLoad.current) => {
     if (state !== "done" && state !== "failed" && state !== "canceled") return;
     if (finished.current.has(key)) return;
-    // Already finished when the page opened: do not let it linger as if it had just ended.
-    const at = endedAt ?? (firstLoad.current ? createdAt : Date.now());
-    finished.current.set(key, { at, attention: attention || state === "failed", entry: { key, title, where, outcome: outcomeOf(state), detail, at } });
+    // Already finished when this source first answered: do not let it linger as if it had just ended.
+    const at = endTime(endedAt, createdAt, initial, Date.now());
+    const entry: HistoryEntry = { key, title, where, outcome: outcomeOf(state), detail, at };
+    finished.current.set(key, { at, attention: attention || state === "failed", entry });
+    if (!initial) justEnded.current.push(entry);
   }, []);
-  const trackOp = useCallback((o: OpJob) => {
+  const trackOp = useCallback((o: OpJob, initial?: boolean) => {
     const c = o.counts;
     const detail = o.state === "failed" && o.error ? o.error : `${c.done} done${c.skipped ? `, ${c.skipped} skipped` : ""}${c.failed ? `, ${c.failed} failed` : ""}`;
-    track("o:" + o.id, o.state, o.finishedAt, o.createdAt, o.title, undefined, c.failed > 0 || c.skipped > 0, detail);
+    track("o:" + o.id, o.state, o.finishedAt, o.createdAt, o.title, undefined, c.failed > 0 || c.skipped > 0, detail, initial);
   }, [track]);
   const flushHistory = useCallback(() => {
     const all = [...finished.current.values()].map((f) => f.entry).filter((e) => !cleared.current.has(e.key));
     setHistory((h) => addToHistory(h, all));
+    const ended = justEnded.current.splice(0);
+    if (ended.length) setAnnounce(announceEnded(ended));
   }, []);
 
   const poll = useCallback(async () => {
@@ -313,9 +322,11 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     for (const [node, l] of Object.entries(next))
       for (const j of splitByOrigin(l).fore) {
         const sk = j.result?.skipped;
-        track(`j:${node}:${j.id}`, j.state, undefined, j.createdAt, j.title, node, !!sk && sk.symlinks + sk.hardlinks + sk.special > 0, j.state === "failed" ? j.error : j.result?.path);
+        track(`j:${node}:${j.id}`, j.state, undefined, j.createdAt, j.title, node, !!sk && sk.symlinks + sk.hardlinks + sk.special > 0, j.state === "failed" ? j.error : j.result?.path, !polled.current.has(node));
       }
-    for (const o of opList) trackOp(o);
+    for (const o of opList) trackOp(o, !polled.current.has("hub"));
+    for (const k of Object.keys(next)) if (!down.has(k)) polled.current.add(k);
+    if (!down.has("hub")) polled.current.add("hub");
     firstLoad.current = false;
     flushHistory();
     setJobs(next);
@@ -424,7 +435,9 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     return () => clearTimeout(t);
   }, [idle]);
 
-  if (!total && !history.length && !bgRows.length) return null;
+  // The announcement region stays mounted so a result that arrives as the tray appears is still read out.
+  const announcer = <span className="sr-only" role="status">{announce}</span>;
+  if (!total && !history.length && !bgRows.length) return announcer;
   const folded = (collapsed || autoCollapsed) && !asking;
   const clearHistory = () => {
     setHistory([]);
@@ -433,6 +446,8 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     cleared.current = new Set(finished.current.keys());
   };
   return (
+    <>
+    {announcer}
     <section className={"jobs" + (folded ? " collapsed" : "")} aria-label="Background jobs">
       <span className="sr-only" role="status">{asking ? `${total} background jobs. An operation needs an answer.` : `${running} of ${total} background jobs running.`}</span>
       <button type="button" className="jobs-toggle" aria-expanded={!folded} onClick={() => setCollapsedPersist(!folded)}>
@@ -497,5 +512,6 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
         </div>
       )}
     </section>
+    </>
   );
 }

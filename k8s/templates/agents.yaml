@@ -59,12 +59,12 @@ spec:
               value: {{ .name | quote }}
             - name: PORT
               value: {{ $.Values.port | quote }}
-            {{- if $.Values.agentToken.secretName }}
+            {{- if include "filedeck.agentTokenSecret" $ }}
             # Shared hub-to-agent secret (Secret created out of band, never in Git).
             - name: FILEDECK_AGENT_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ $.Values.agentToken.secretName }}
+                  name: {{ include "filedeck.agentTokenSecret" $ }}
                   key: {{ $.Values.agentToken.key }}
             {{- end }}
             - name: FILEDECK_MAX_UPLOAD

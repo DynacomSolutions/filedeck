@@ -10,7 +10,12 @@ import { useSyncExternalStore } from "react";
 
 /** Widths up to this many CSS pixels are laid out as a phone: one panel at a time. */
 export const PHONE_MAX_WIDTH = 700;
-export const PHONE_QUERY = `(max-width: ${PHONE_MAX_WIDTH}px)`;
+/** A short window up to this wide (a phone held sideways) gets the phone layout too, so the file list keeps its height. Keep in step with the `@media` queries in the style sheets. */
+export const PHONE_SHORT_MAX_HEIGHT = 500;
+export const PHONE_SHORT_MAX_WIDTH = 1000;
+export const PHONE_QUERY = `(max-width: ${PHONE_MAX_WIDTH}px), (max-height: ${PHONE_SHORT_MAX_HEIGHT}px) and (max-width: ${PHONE_SHORT_MAX_WIDTH}px)`;
+/** Page zoom by pinching (scale above this) shows part of the page; that is not a keyboard. */
+const ZOOMED_SCALE = 1.01;
 /** A visual viewport this much shorter than the layout viewport means a keyboard is open. */
 export const KEYBOARD_MIN_INSET = 120;
 /** Space kept between a focused control and the keyboard edge. */
@@ -19,6 +24,8 @@ const MARGIN = 8;
 export interface VisualViewportLike {
   height: number;
   offsetTop: number;
+  /** pinch-zoom factor; absent or 1 when not zoomed */
+  scale?: number;
 }
 
 export interface ViewportMetrics {
@@ -33,6 +40,8 @@ export interface ViewportMetrics {
 
 /** Derive the usable area from the layout viewport height and the visual viewport. */
 export function viewportMetrics(layoutHeight: number, vv: VisualViewportLike): ViewportMetrics {
+  // A pinch-zoomed page shows only part of the layout viewport: the whole layout stays in use and no keyboard is assumed.
+  if ((vv.scale ?? 1) > ZOOMED_SCALE) return { height: Math.max(0, Math.round(layoutHeight)), top: 0, keyboard: 0, keyboardOpen: false };
   const height = Math.max(0, Math.round(vv.height));
   const top = Math.max(0, Math.round(vv.offsetTop));
   const keyboard = Math.max(0, Math.round(layoutHeight - vv.height - vv.offsetTop));

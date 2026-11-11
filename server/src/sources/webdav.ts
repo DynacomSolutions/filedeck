@@ -4,7 +4,12 @@ import { FsError } from "../fsops.ts";
 import { cleanVirtual } from "../paths.ts";
 import type { Credentials, SourceBackend, SourceConfig, SourceEntry, SourceStat } from "./types.ts";
 
-const TIMEOUT_MS = 30_000;
+/**
+ * Time limits. `headerMs` bounds metadata calls and the wait for a response to start; `idleMs` is how long an upload
+ * may make no progress (no chunk accepted, no answer) before it is cut. Neither caps the total duration of a
+ * transfer: a large file that keeps moving is never aborted. Exported so tests can shrink them.
+ */
+export const davTimeouts = { headerMs: 30_000, idleMs: 300_000 };
 const PROPFIND = `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>`;
 const parser = new XMLParser({ removeNSPrefix: true, ignoreAttributes: true, parseTagValue: false });
 
@@ -57,11 +62,11 @@ export class WebdavBackend implements SourceBackend {
     if (c.token) headers.authorization = `Bearer ${c.token}`;
     else if (c.username) headers.authorization = "Basic " + Buffer.from(`${c.username}:${c.password ?? ""}`).toString("base64");
     else throw new FsError(502, "source credentials are missing");
-    const signal = init.signal ?? AbortSignal.timeout(TIMEOUT_MS);
+    const signal = init.signal ?? AbortSignal.timeout(davTimeouts.headerMs);
     try {
       return await fetch(url, { method, headers, body: init.body ?? null, signal, redirect: "manual", ...(init.duplex ? { duplex: "half" } : {}) } as RequestInit);
     } catch (e) {
-      if ((e as Error).name === "TimeoutError") throw new FsError(504, "remote timed out");
+      if ((e as Error).name === "TimeoutError" || (e as Error).name === "AbortError") throw new FsError(504, "remote timed out");
       throw new FsError(502, "connection failed");
     }
   }
@@ -126,33 +131,60 @@ export class WebdavBackend implements SourceBackend {
   }
 
   async read(p: string, range?: { start: number; end: number }): Promise<Readable> {
-    const r = await this.req("GET", this.url(p), { signal: AbortSignal.timeout(TIMEOUT_MS * 120), headers: range ? { range: `bytes=${range.start}-${range.end}` } : {} });
-    if (!r.ok || !r.body) throw davError(r.status, "read");
-    let stream = Readable.fromWeb(r.body as never);
+    // only the wait for the response is time-limited; the body streams for as long as the reader keeps reading and
+    // is cancelled when the reader goes away
+    const ac = new AbortController();
+    const wait = setTimeout(() => ac.abort(), davTimeouts.headerMs);
+    let r: Response;
+    try {
+      r = await this.req("GET", this.url(p), { signal: ac.signal, headers: range ? { range: `bytes=${range.start}-${range.end}` } : {} });
+    } finally {
+      clearTimeout(wait);
+    }
+    if (!r.ok || !r.body) {
+      ac.abort();
+      throw davError(r.status, "read");
+    }
+    const source = Readable.fromWeb(r.body as never);
+    let stream = source;
     if (range && r.status === 200) {
       // The server ignored Range: skip to the start and stop at the end ourselves.
       let pos = 0;
-      stream = stream.pipe(
-        new Transform({
-          transform(chunk: Buffer, _e, cb) {
-            const from = Math.max(0, range.start - pos);
-            const to = Math.min(chunk.length, range.end + 1 - pos);
-            pos += chunk.length;
-            if (to > from) this.push(chunk.subarray(from, to));
-            if (pos > range.end) this.push(null);
-            cb();
-          },
-        }),
-      );
+      const cut = new Transform({
+        transform(chunk: Buffer, _e, cb) {
+          const from = Math.max(0, range.start - pos);
+          const to = Math.min(chunk.length, range.end + 1 - pos);
+          pos += chunk.length;
+          if (to > from) this.push(chunk.subarray(from, to));
+          if (pos > range.end) this.push(null);
+          cb();
+        },
+      });
+      source.on("error", (e) => cut.destroy(e)); // pipe() does not forward errors
+      stream = source.pipe(cut);
     }
+    stream.on("close", () => {
+      source.destroy();
+      ac.abort();
+    });
     return stream;
   }
 
   async write(p: string, body: Readable, o: { overwrite: boolean; mtime?: number; size?: number }): Promise<number> {
+    // the upload is cut only when it stalls: the timer restarts whenever a chunk arrives and runs while waiting for the answer
+    const ac = new AbortController();
+    let idle: NodeJS.Timeout | undefined;
+    let done = false;
+    const touch = () => {
+      if (done) return;
+      clearTimeout(idle);
+      idle = setTimeout(() => ac.abort(), davTimeouts.idleMs);
+    };
     let n = 0;
     const count = new Transform({
       transform(chunk: Buffer, _e, cb) {
         n += chunk.length;
+        touch();
         cb(null, chunk);
       },
     });
@@ -160,12 +192,20 @@ export class WebdavBackend implements SourceBackend {
     if (!o.overwrite) headers["if-none-match"] = "*";
     if (o.size !== undefined) headers["content-length"] = String(o.size);
     if (o.mtime && o.mtime > 0) headers["x-oc-mtime"] = String(Math.floor(o.mtime / 1000)); // Nextcloud/ownCloud
+    body.on("error", (e) => {
+      count.destroy(e);
+      ac.abort();
+    });
+    touch();
     let r: Response;
     try {
-      r = await this.req("PUT", this.url(p), { headers, body: Readable.toWeb(body.pipe(count)) as unknown as BodyInit, duplex: true, signal: AbortSignal.timeout(TIMEOUT_MS * 240) });
+      r = await this.req("PUT", this.url(p), { headers, body: Readable.toWeb(body.pipe(count)) as unknown as BodyInit, duplex: true, signal: ac.signal });
     } catch (e) {
       body.destroy();
       throw e;
+    } finally {
+      done = true;
+      clearTimeout(idle);
     }
     if (r.status === 412 || (r.status === 405 && !o.overwrite)) throw new FsError(409, "destination exists");
     if (!r.ok) throw davError(r.status, "upload");

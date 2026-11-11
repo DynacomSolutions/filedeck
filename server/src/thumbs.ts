@@ -145,12 +145,15 @@ export class Thumbnailer {
     if (running) return running;
     const p = (async () => {
       const release = await this.slot(signal);
-      let h = await open();
+      let h: { input: ThumbInput; close: () => Promise<void> | void } | undefined;
       try {
+        h = await open(); // inside the try: a failing open must give the slot back
         let out = await this.encode(h.input, kind, 1);
         if (!out.length && kind === "video" && "fd" in h.input) {
           // clip shorter than 1 s: retry from the start on a fresh handle (the first run moved the shared file offset)
-          await h.close();
+          const old = h;
+          h = undefined;
+          await old.close();
           h = await open();
           out = await this.encode(h.input, kind, 0);
         }
@@ -161,8 +164,11 @@ export class Thumbnailer {
         }
         return await this.store(k, out);
       } finally {
-        await h.close();
-        release();
+        try {
+          await h?.close();
+        } finally {
+          release();
+        }
       }
     })();
     this.inflight.set(k, p);

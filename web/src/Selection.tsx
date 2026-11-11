@@ -2,7 +2,7 @@
 // and the actions here run on the combined list (hub jobs take items from any node).
 import { useState } from "react";
 import { createPortal } from "react-dom";
-import { api, canEdit, fileUrl, zipUrl, type Entry, type OpSpec } from "./api";
+import { api, canEdit, fileUrl, zipFitsInUrl, zipPost, zipUrl, type Entry, type OpSpec } from "./api";
 import { setClip } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { CompressDialog } from "./ArchiveDialog";
@@ -51,16 +51,30 @@ export function groupRefs(refs: SelRef[]): Group[] {
   return [...m.values()];
 }
 
-/** Start one download per group, spaced out so the browser does not drop them. */
-export function downloadRefs(refs: SelRef[]) {
+const clickDownload = (href: string, name = "") => {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
+
+/** Start one download per group, spaced out so the browser does not drop them. Long name lists go in a POST body instead of the URL. */
+export function downloadRefs(refs: SelRef[], onStatus?: (m: string) => void) {
   groupRefs(refs).forEach((g, i) => {
     setTimeout(() => {
-      const a = document.createElement("a");
-      a.href = g.single ? fileUrl(g.node, g.single.path, "download") : zipUrl(g.node, g.dir, g.names);
-      a.download = "";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      if (g.single) return clickDownload(fileUrl(g.node, g.single.path, "download"));
+      if (zipFitsInUrl(g.node, g.dir, g.names)) return clickDownload(zipUrl(g.node, g.dir, g.names));
+      onStatus?.(`Preparing a zip of ${g.names.length} items...`);
+      zipPost(g.node, g.dir, g.names)
+        .then(({ blob, name }) => {
+          const url = URL.createObjectURL(blob);
+          clickDownload(url, name);
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          onStatus?.(`Zip ready: ${name}`);
+        })
+        .catch((e: Error) => onStatus?.(`Download failed: ${e.message}`));
     }, i * 600);
   });
 }
@@ -125,7 +139,7 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
   const primary = [
     { id: "copy", label: "Copy", tip: "Copy the selection to the file clipboard", icon: <Ic.Copy />, run: clip("copy") },
     { id: "cut", label: "Cut", tip: "Cut the selection to the file clipboard", icon: <Ic.Scissors />, run: clip("cut") },
-    { id: "download", label: "Download", tip: "Download the selection (several items or folders as a zip)", icon: <Ic.Download />, run: () => downloadRefs(refs) },
+    { id: "download", label: "Download", tip: "Download the selection (several items or folders as a zip)", icon: <Ic.Download />, run: () => downloadRefs(refs, onStatus) },
     { id: "trash", label: "Trash", tip: "Move the selection to the trash", icon: <Ic.Trash2 />, run: doTrash },
   ];
   const openMore = (e: React.MouseEvent) => {
