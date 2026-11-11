@@ -367,6 +367,21 @@ test("multi-file/folder download streams a valid zip", needTool, async () => {
   await one.arrayBuffer();
 });
 
+test("zip download also accepts the name list in a JSON body", needTool, async () => {
+  const many = [...Array(1200)].map((_, i) => `missing-${i}-${"x".repeat(40)}`);
+  assert.equal((await post("/api/fs/zip", { dir: "/src", names: many })).status, 404, "a long list is not limited by URL length");
+  const r = await post("/api/fs/zip", { dir: "/src", names: ["a.txt", "sub"] });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get("content-type"), "application/zip");
+  const f = path.join(work, "dl-post.zip");
+  fs.writeFileSync(f, Buffer.from(await r.arrayBuffer()));
+  const names = spawnSync("bsdtar", ["-tf", f]).stdout.toString().trim().split("\n").sort();
+  assert.deepEqual(names, ["a.txt", "sub/", "sub/b c.txt"]);
+  assert.equal((await post("/api/fs/zip", { dir: "/src", names: ["..%2Fetc"] })).status, 404);
+  assert.equal((await post("/api/fs/zip", { dir: "/src", names: ["../etc"] })).status, 400);
+  assert.equal((await post("/api/fs/zip", { dir: "/src" })).status, 400);
+});
+
 test("download and compress reject traversal and non-children", async () => {
   assert.equal((await fetch(`${base}/api/fs/zip?dir=/src&name=..%2Fetc`)).status, 400);
   assert.equal((await fetch(`${base}/api/fs/zip?dir=/src&name=nope`)).status, 404);

@@ -28,6 +28,12 @@ function hook() {
   if (hooked) return;
   hooked = true;
   DOMPurify.addHook("afterSanitizeAttributes", (el) => {
+    // GFM task lists render disabled checkboxes; any other input (an image button) can load an address
+    if (el.tagName === "INPUT" && (el.getAttribute("type") ?? "").toLowerCase() !== "checkbox") return el.remove();
+    if (el.tagName !== "A" && el.tagName !== "IMG") {
+      // nothing but links (clicked) and images (rewritten) may carry an address; anything else would load it on render
+      for (const a of Array.from(el.attributes)) if (isRemoteRef(a.value)) el.removeAttribute(a.name);
+    }
     if (el.tagName === "A") {
       const href = el.getAttribute("href") ?? "";
       if (/^https?:\/\//i.test(href)) {
@@ -59,11 +65,18 @@ function hook() {
   });
 }
 
+/** Markup that can make the browser fetch something by itself, other than the images the hook below rewrites. */
+export const MD_FORBID_TAGS = ["style", "form", "iframe", "object", "embed", "button", "textarea", "select", "video", "audio", "source", "track", "picture", "link", "meta", "base", "svg", "math"];
+export const MD_FORBID_ATTR = ["style", "srcset", "background", "poster", "ping", "formaction", "xlink:href"];
+
+/** Whether an attribute value points off the page (or inlines data): such an attribute is dropped from everything except links and images. */
+export const isRemoteRef = (v: string) => /^\s*((https?:)?\/\/|data:|javascript:)/i.test(v);
+
 export function renderMarkdown(src: string, node: string, dir: string): string {
   hook();
   ctx = { node, dir };
   const html = md.parse(src, { async: false }) as string;
-  return DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_TAGS: ["style", "form", "iframe", "object", "embed", "button", "textarea", "select"], FORBID_ATTR: ["style", "srcset"] });
+  return DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_TAGS: MD_FORBID_TAGS, FORBID_ATTR: MD_FORBID_ATTR });
 }
 
 /** Markdown rendered with GFM tables, task lists and code blocks; "Source" shows the raw text. */

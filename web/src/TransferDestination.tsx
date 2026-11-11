@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, parent, type Entry } from "./api";
 import { useNodes } from "./data";
 import { Modal } from "./ArchiveDialog";
@@ -48,25 +48,37 @@ export function TransferDestination({ kind, items, initialNode, initialPath, onC
     return () => controller.abort();
   }, [node, dir]);
 
+  // Choosing a folder (or node) replaces the buttons the user was on. Keep focus inside the list once the new folders arrive.
+  const listRef = useRef<HTMLDivElement>(null);
+  const navigated = useRef(false);
+  useLayoutEffect(() => {
+    if (loading || !navigated.current) return;
+    navigated.current = false;
+    const list = listRef.current;
+    const active = document.activeElement;
+    const stale = !active || active === document.body || (active as HTMLButtonElement).disabled || !!list?.contains(active);
+    if (list && stale) (list.querySelector<HTMLElement>("button") ?? list).focus({ preventScroll: true });
+  }, [loading, entries]);
+  const goDir = (next: string) => { navigated.current = true; setDir(next); };
   const valid = validTransferDestination(items, node, dir);
   const label = kind === "copy" ? "Copy to folder" : "Move to folder";
   return (
     <Modal title={label} onClose={onClose} wide>
       <label>
         Destination node
-        <Dropdown autoFocus label="Destination node" value={node} onChange={(v) => { setNode(v); setDir("/"); }} options={nodes.map((n) => ({ value: n.name, label: n.name + (n.online ? "" : " (offline)"), disabled: !n.online }))} />
+        <Dropdown autoFocus label="Destination node" value={node} onChange={(v) => { navigated.current = false; setNode(v); setDir("/"); }} options={nodes.map((n) => ({ value: n.name, label: n.name + (n.online ? "" : " (offline)"), disabled: !n.online }))} />
       </label>
       <div className="transfer-destination-path">
         <span>Destination folder: <strong>{node}:{dir}</strong></span>
-        <button type="button" aria-label="Up one destination folder" disabled={dir === "/"} onClick={() => setDir(parent(dir))}><Ic.ArrowUp /> Up</button>
+        <button type="button" aria-label="Up one destination folder" disabled={dir === "/"} onClick={() => goDir(parent(dir))}><Ic.ArrowUp /> Up</button>
       </div>
       {error && <div className="fp-err" role="alert">{error}</div>}
-      {loading ? <p role="status">Loading folders...</p> : (
-        <div className="transfer-destination-list" role="group" aria-label="Folders in destination">
-          {entries.map((entry) => <button key={entry.path} type="button" onClick={() => setDir(entry.path)}><Ic.Folder /> {entry.name}</button>)}
-          {!entries.length && !error && <p className="muted">No subfolders</p>}
-        </div>
-      )}
+      {loading && <p role="status">Loading folders...</p>}
+      {/* stays mounted while loading, so the button that was pressed keeps focus until the new folders replace it */}
+      <div ref={listRef} tabIndex={-1} className="transfer-destination-list" role="group" aria-label="Folders in destination" aria-busy={loading} style={loading && !entries.length ? { display: "none" } : undefined}>
+        {entries.map((entry) => <button key={entry.path} type="button" onClick={() => !loading && goDir(entry.path)}><Ic.Folder /> {entry.name}</button>)}
+        {!loading && !entries.length && !error && <p className="muted">No subfolders</p>}
+      </div>
       {!valid && <p className="fp-err" role="alert">A folder cannot be copied or moved into itself or a folder inside it.</p>}
       <div className="modal-actions">
         <button type="button" onClick={onClose}><Ic.X /> Cancel</button>

@@ -3,7 +3,7 @@ import { usePhone } from "./viewport";
 import { Dropdown } from "./Dropdown";
 import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, isArchive, join, nodeBase, parent, zipUrl, type Entry } from "./api";
+import { api, listStream, canEdit, onOpFinished, type OpSpec, createFile, fileUrl, isArchive, join, parent, zipUrl, type Entry } from "./api";
 import { dropEntries, enqueueUpload, gatherDrop, pickedFromInput } from "./uploads";
 import { CompressDialog, ExtractDialog } from "./ArchiveDialog";
 import { getDrag, hasFiles, setDrag } from "./DragData";
@@ -25,7 +25,7 @@ import { gitApi, type GitListing } from "./git";
 import { GitBadge, GitPill } from "./GitUi";
 import { isBookmarked, toggleBookmark, useBookmarks } from "./bookmarks";
 import { EMPTY_SEARCH, MAX_SELS, encodeState, type Dock, type Leaf, type Loc, type SearchForm, type SortKey } from "./urlState";
-import type { ClickKind } from "./panelSelection";
+import { selectAllPaths, type ClickKind } from "./panelSelection";
 import { ClipboardPaste, Copy, CopyPlus, FolderUp, Link2, ListChecks, RefreshCw, Ellipsis, Eye, EyeOff, ArrowLeft, ArrowRight, ArrowUp, Archive, ChevronDown, ChevronUp, CircleX, Columns2, CornerLeftUp, Diff, Download, FilePen, FilePlus, FolderPlus, GitBranch, GripVertical, LayoutGrid, List, PackageOpen, PanelBottom, PanelLeft, PanelRight, PanelTop, Pencil, Rows2, Search, SquareCheck, Star, Trash2, Upload, X, type LucideIcon } from "lucide-react";
 import { Tip } from "./Tooltip";
 import { FileIcon } from "./FileIcon";
@@ -33,6 +33,8 @@ import { resolvePanelPreferences, setSettings, useSettings } from "./settings";
 import { SkeletonRows, SkeletonTiles } from "./Skeleton";
 import { TransferDestination, type TransferKind } from "./TransferDestination";
 import { usePresentation } from "./presentation";
+import { changeHub } from "./eventStream";
+import { plainNameError } from "./editDrafts";
 import { typeAheadMatch, type TypeAheadState } from "./letterNavigation";
 import * as Ic from "lucide-react";
 
@@ -178,6 +180,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const view = preferences.view;
   const filter = leaf.q ?? "";
   const [filterOpen, setFilterOpen] = useState(!!leaf.q);
+  /** the bar is also shown whenever a filter is in force, however it got there (browser history restores one into a mounted panel) */
+  const filterShown = filterOpen || !!filter;
   const filterInput = useRef<HTMLInputElement>(null);
   const secRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -192,6 +196,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   loadingRef.current = loading;
   const navigate = (n: string, p: string) => {
     if (active && (n !== node || p !== path)) focusAfterNavigation.current = { node: n, path: p };
+    // A name filter belongs to the folder it was typed in: another folder opens unfiltered.
+    if (filter && (n !== node || p !== path)) {
+      onPatch({ q: undefined });
+      setFilterOpen(false);
+    }
     onNavigate(n, p);
   };
   // Browser history and parent-driven restores do not pass through a local click handler.
@@ -344,14 +353,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
 
   // Live feed: refresh when the watched directory changes.
   useEffect(() => {
-    const es = new EventSource(`${nodeBase(node)}/api/events?path=${encodeURIComponent(path)}`);
+    // One shared stream per folder (see eventStream.ts), not one connection per panel.
     // A busy folder (a temp dir, a build output) fires many change events: relist at most once per 700 ms, after the last one.
     let t = 0;
-    es.addEventListener("change", () => {
+    const off = changeHub().subscribe(node, path, () => {
       window.clearTimeout(t);
       t = window.setTimeout(refresh, 700);
     });
-    return () => (window.clearTimeout(t), es.close());
+    return () => (window.clearTimeout(t), off());
   }, [node, path, refresh]);
 
   // Git status for the folder, asked for once its listing is on screen. A change event (tick) asks for a fresh read; a repository too big to
@@ -639,7 +648,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     { label: "New folder...", onSelect: () => startCreate(dir, "folder") },
     { label: "New symbolic link...", onSelect: () => setModal({ k: "link", dir }) },
     { label: pasteLabel, hint: here ? "Ctrl+V" : undefined, disabled: !clip, onSelect: () => void paste(dir) },
-    ...(here ? ([{ label: "Select all", hint: "Ctrl+A", onSelect: () => setSel(new Set(entries.map((x) => x.path))) }, { label: "Upload...", onSelect: () => fileInput.current?.click() }, { label: "Upload folder...", onSelect: () => folderInput.current?.click() }, { label: "Refresh", onSelect: refresh }] as MenuItem[]) : []),
+    ...(here ? ([{ label: "Select all", hint: "Ctrl+A", onSelect: () => setSel(new Set(selectAllPaths(visible))) }, { label: "Upload...", onSelect: () => fileInput.current?.click() }, { label: "Upload folder...", onSelect: () => folderInput.current?.click() }, { label: "Refresh", onSelect: refresh }] as MenuItem[]) : []),
     "sep",
     ...compareItems(),
     { label: "Copy path", onSelect: () => void copyPaths([dir]) },
@@ -853,6 +862,10 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
           if (e.key === "Enter") {
             e.preventDefault();
             const v = e.currentTarget.value.trim();
+            if (v && v !== en.name) {
+              const bad = plainNameError(v);
+              if (bad) return onStatus(`Rename failed: ${bad}`); // stay in the editor so the name can be corrected
+            }
             setRenaming(null);
             if (v && v !== en.name) void run("Rename", () => api.rename(node, en.path, join(parent(en.path), v)));
           }
@@ -876,7 +889,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         if (e.key === "Escape") return setCreating(null);
         if (e.key !== "Enter") return;
         const v = e.currentTarget.value.trim();
-        if (!v || v.includes("/") || v === "." || v === "..") return setErr("Enter a plain name without slashes");
+        if (plainNameError(v)) return setErr(plainNameError(v));
         const target = join(path, v);
         const kind = creating;
         setCreating(null);
@@ -1127,7 +1140,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         } else setFilterOpen(true); // the input autofocuses when it mounts
         return true;
       }
-      if (mod && key.toLowerCase() === "a") return !hasText && (setSel(new Set(visible.map((x) => x.path))), true);
+      if (mod && key.toLowerCase() === "a") return !hasText && (setSel(new Set(selectAllPaths(visible))), true);
       if (mod && key.toLowerCase() === "c") return !hasText && combine(selEntries).length > 0 && (setClipboard("copy", selEntries), true);
       if (mod && key.toLowerCase() === "x") return combine(selEntries).length > 0 && (setClipboard("cut", selEntries), true);
       if (mod && key.toLowerCase() === "v") return !!getClip() && (void paste(path), true);
@@ -1244,7 +1257,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   ];
   const moreItems = (): MenuItem[] => [
     { label: pasteLabel, hint: "Ctrl+V", icon: ClipboardPaste, disabled: !clip, onSelect: () => void paste(path) },
-    { label: "Select all", hint: "Ctrl+A", icon: ListChecks, disabled: !entries.length, onSelect: () => setSel(new Set(entries.map((x) => x.path))) },
+    { label: "Select all", hint: "Ctrl+A", icon: ListChecks, disabled: !visible.length, onSelect: () => setSel(new Set(selectAllPaths(visible))) },
     { label: selEntries.length > 1 ? "Copy paths" : "Copy path", hint: "Alt+C", icon: Copy, onSelect: () => void copyPaths(selEntries.length ? selEntries.map((x) => x.path) : [path]) },
     "sep",
     { label: "Rename", hint: "F2", icon: Pencil, disabled: sel.size !== 1 || others.length > 0, onSelect: () => setRenaming([...sel][0] ?? null) },
@@ -1373,11 +1386,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       </div>
       </header>
       {cside && cmpCtl && <CompareBar ctl={cmpCtl} side={cside} otherLabel={cside === "left" ? `${cmpCtl.st.right.node}:${cmpCtl.st.right.path}` : `${cmpCtl.st.left.node}:${cmpCtl.st.left.path}`} />}
-      {filterOpen && !cside && (
+      {filterShown && !cside && (
         <div className="fp-filter">
           <input
             ref={filterInput}
-            autoFocus
+            autoFocus={filterOpen}
             type="search"
             placeholder="Filter this folder (Esc to clear)"
             aria-label="Filter this folder"

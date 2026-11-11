@@ -1,24 +1,30 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, passwordState, type ArchiveFormat, type OverwritePolicy, type Pw } from "./api";
 import { Tip } from "./Tooltip";
 import "./archive.css";
 import * as Ic from "lucide-react";
-import { useDialogFocus } from "./dialogFocus";
+import { backdropClose, useDialogFocus } from "./dialogFocus";
 import { Dropdown } from "./Dropdown";
 
-export function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
+export function Modal({ title, onClose, wide, describedBy, children }: { title: string; onClose: () => void; wide?: boolean; /** id of the element holding the dialog's message */ describedBy?: string; children: React.ReactNode }) {
   const form = useRef<HTMLFormElement>(null);
   useDialogFocus(form);
+  // A click on the backdrop closes the dialog, but not after a drag, and not once the user has typed something.
+  const dirty = useRef(false);
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  const backdrop = useMemo(() => backdropClose(() => latest.current(), () => dirty.current), []);
   return (
-    <div className="modal-back" role="presentation" onMouseDown={onClose}>
+    <div className="modal-back" role="presentation" {...backdrop}>
       <form
         ref={form}
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        aria-describedby={describedBy}
         tabIndex={-1}
         className={"modal" + (wide ? " wide" : "")}
-        onMouseDown={(e) => e.stopPropagation()}
+        onInput={() => { dirty.current = true; }}
         onKeyDown={(e) => e.key === "Escape" && onClose()}
         onSubmit={(e) => e.preventDefault()}
       >
@@ -70,16 +76,27 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
   const [unit, setUnit] = useState(UNITS[0]!.n);
   const [excl, setExcl] = useState("");
   const [err, setErr] = useState("");
+  /** the field a validation message is about; it gets aria-invalid and aria-describedby, and focus */
+  const [errField, setErrField] = useState<"name" | "pw" | "pw2" | "vol" | null>(null);
+  const errId = useId();
+  const fieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const bad = (field: "name" | "pw" | "pw2" | "vol", msg: string) => {
+    setErrField(field);
+    setErr(msg);
+    fieldRefs.current[field]?.focus();
+  };
+  const fieldErr = (field: string) => ({ "aria-invalid": errField === field && !!err || undefined, "aria-describedby": errField === field && err ? errId : undefined });
   const [busy, setBusy] = useState(false);
   const spec = FORMATS.find((f) => f.id === format)!;
   const canHdr = format === "7z" && pw !== "";
   const go = async () => {
     setErr("");
+    setErrField(null);
     const volBytes = vol.trim() === "" ? undefined : Math.round(Number(vol) * unit);
-    if (spec.encrypt && pw !== pw2) return setErr("The two passwords do not match.");
-    if (/[\r\n]/.test(pw)) return setErr("A password cannot contain a line break.");
-    if (format === "zip" && /[^\x20-\x7e]/.test(pw)) return setErr("Zip passwords can only use plain ASCII characters. Use 7z for any characters.");
-    if (volBytes !== undefined && (!Number.isFinite(volBytes) || volBytes < 64 * 1024)) return setErr("Volume size must be at least 64 KB.");
+    if (spec.encrypt && pw !== pw2) return bad("pw2", "The two passwords do not match.");
+    if (/[\r\n]/.test(pw)) return bad("pw", "A password cannot contain a line break.");
+    if (format === "zip" && /[^\x20-\x7e]/.test(pw)) return bad("pw", "Zip passwords can only use plain ASCII characters. Use 7z for any characters.");
+    if (volBytes !== undefined && (!Number.isFinite(volBytes) || volBytes < 64 * 1024)) return bad("vol", "Volume size must be at least 64 KB.");
     const exclude = excl.split("\n").map((x) => x.trim()).filter(Boolean);
     setBusy(true);
     try {
@@ -128,11 +145,11 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
         </label>
         <label>
           Password
-          <input type="password" autoComplete="new-password" value={pw} disabled={!spec.encrypt} placeholder={spec.encrypt ? "Optional" : "Not available for this format"} onChange={(e) => setPw(e.target.value)} />
+          <input ref={(el) => { fieldRefs.current.pw = el; }} {...fieldErr("pw")} type="password" autoComplete="new-password" value={pw} disabled={!spec.encrypt} placeholder={spec.encrypt ? "Optional" : "Not available for this format"} onChange={(e) => setPw(e.target.value)} />
         </label>
         <label>
           Repeat password
-          <input type="password" autoComplete="new-password" value={pw2} disabled={!spec.encrypt || pw === ""} onChange={(e) => setPw2(e.target.value)} />
+          <input ref={(el) => { fieldRefs.current.pw2 = el; }} {...fieldErr("pw2")} type="password" autoComplete="new-password" value={pw2} disabled={!spec.encrypt || pw === ""} onChange={(e) => setPw2(e.target.value)} />
         </label>
         <label className="chk ad-span">
           <input type="checkbox" checked={canHdr && hdr} disabled={!canHdr} onChange={(e) => setHdr(e.target.checked)} /> Also encrypt file names (.7z with a password)
@@ -140,7 +157,7 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
         <label>
           Split into volumes
           <span className="ad-row">
-            <input type="number" min={0} step="any" inputMode="decimal" value={vol} disabled={!spec.split} placeholder={spec.split ? "No splitting" : "Zip and 7z only"} onChange={(e) => setVol(e.target.value)} />
+            <input ref={(el) => { fieldRefs.current.vol = el; }} {...fieldErr("vol")} type="number" min={0} step="any" inputMode="decimal" value={vol} disabled={!spec.split} placeholder={spec.split ? "No splitting" : "Zip and 7z only"} onChange={(e) => setVol(e.target.value)} />
             <Dropdown label="Volume size unit" value={String(unit)} disabled={!spec.split} onChange={(v) => setUnit(Number(v))} options={UNITS.map((u) => ({ value: String(u.n), label: u.u }))} />
           </span>
         </label>
@@ -153,7 +170,7 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
         {spec.hint}
         {groups.length > 1 ? ` The items sit in ${groups.length} folders, so ${groups.length} archives are made.` : ""}
       </p>
-      <div className="ad-err" role="alert">{err}</div>
+      <div id={errId} className="ad-err" role="alert">{err}</div>
       <div className="modal-actions">
         <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
         <button type="submit" disabled={busy} onClick={() => void go()}><Ic.Archive /> Compress</button>
@@ -164,7 +181,7 @@ export function CompressDialog({ groups, onClose, onStatus }: { groups: Compress
 
 /** Password row for a locked archive; `state` says why it is shown. */
 export type LockState = "none" | "required" | "incorrect" | "saved";
-export function PasswordInput({ value, onChange, state, disabled, label = "Password" }: { value: string; onChange: (v: string) => void; state: LockState; disabled?: boolean; label?: string }) {
+export function PasswordInput({ value, onChange, state, disabled, label = "Password", errorId }: { value: string; onChange: (v: string) => void; state: LockState; disabled?: boolean; label?: string; /** id of an error message about this password; sets aria-invalid and aria-describedby */ errorId?: string }) {
   return (
     <label className="ad-pw">
       {label}
@@ -173,6 +190,8 @@ export function PasswordInput({ value, onChange, state, disabled, label = "Passw
         <input
           type="password"
           autoComplete="off"
+          aria-invalid={errorId ? true : undefined}
+          aria-describedby={errorId}
           value={value}
           disabled={disabled ?? (state === "none" || state === "saved")}
           placeholder={state === "none" ? "Not password protected" : state === "saved" ? "Using the saved password" : state === "incorrect" ? "Wrong password, try again" : "This archive is password protected"}
@@ -227,6 +246,8 @@ export function ExtractDialog({
   const [folder, setFolder] = useState(initialPw?.folder ?? false);
   const [lock, setLock] = useState<LockState>(initialPw ? "required" : "none");
   const [err, setErr] = useState("");
+  const [errAbout, setErrAbout] = useState<"pw" | "dest">("dest");
+  const errId = useId();
   const [busy, setBusy] = useState(false);
   // Detect protection up front: the password row switches on instead of failing the job later.
   useEffect(() => {
@@ -249,6 +270,7 @@ export function ExtractDialog({
     } catch (e) {
       const st = passwordState(e);
       if (st) setLock(st);
+      setErrAbout(st ? "pw" : "dest");
       setErr(st === "incorrect" ? "Wrong password." : st === "required" ? "Enter the archive password." : (e as Error).message);
       setBusy(false);
     }
@@ -258,7 +280,7 @@ export function ExtractDialog({
       {!!entries?.length && <p className="muted ad-note">Extracting {entries.length} selected item(s) from the archive.</p>}
       <label>
         Destination folder
-        <input autoFocus value={dest} onChange={(e) => setDest(e.target.value)} />
+        <input autoFocus value={dest} aria-invalid={!!err && errAbout === "dest" || undefined} aria-describedby={err && errAbout === "dest" ? errId : undefined} onChange={(e) => setDest(e.target.value)} />
       </label>
       <label className="chk">
         <input type="checkbox" checked={sub} onChange={(e) => setSub(e.target.checked)} /> Put contents in a new subfolder named after the archive
@@ -271,7 +293,7 @@ export function ExtractDialog({
           { value: "skip", label: "Skip, keep the existing file" },
         ]} />
       </label>
-      <PasswordInput value={pw} onChange={setPw} state={lock} />
+      <PasswordInput value={pw} onChange={setPw} state={lock} errorId={err && errAbout === "pw" ? errId : undefined} />
       <div className="ad-saved">
         {lock === "saved" ? (
           <button type="button" onClick={() => setLock("required")}><Ic.KeyRound /> Use a different password</button>
@@ -279,7 +301,7 @@ export function ExtractDialog({
           <RememberOptions remember={remember} setRemember={setRemember} folder={folder} setFolder={setFolder} disabled={lock === "none"} />
         )}
       </div>
-      <div className="ad-err" role="alert">{err}</div>
+      <div id={errId} className="ad-err" role="alert">{err}</div>
       <div className="modal-actions">
         <button type="button" onClick={onClose}><Ic.X /> Cancel</button>
         <button type="submit" disabled={busy} onClick={() => void go()}><Ic.PackageOpen /> Extract</button>
