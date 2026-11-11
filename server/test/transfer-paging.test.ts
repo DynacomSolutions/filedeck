@@ -11,6 +11,7 @@ import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 import { agentFetch } from "../src/agent-fetch.ts";
 import { OpQueue, type OpSpec, type OpView } from "../src/ops-queue.ts";
+import { ChildListError, listChildren } from "../src/child-list.ts";
 import type { Target } from "../src/hub.ts";
 
 const nap = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -137,20 +138,20 @@ test("one item that cannot be read does not fail the whole job", async () => {
 test("a paused job gives its concurrency slot to a queued one, and takes one again on resume", async () => {
   let release!: () => void;
   const hold = new Promise<void>((r) => (release = r));
-  const S = memNode({ "/a": { type: "file", data: "a" }, "/b": { type: "file", data: "b" }, "/c": { type: "file", data: "c" } }, { slow: (op) => (op === "download" ? nap(1) : Promise.resolve()) });
+  const S = memNode({ "/a": { type: "file", data: "a" }, "/a2": { type: "file", data: "a" }, "/b": { type: "file", data: "b" }, "/c": { type: "file", data: "c" } }, { slow: (op) => (op === "download" ? nap(1) : Promise.resolve()) });
   const D = memNode({ "/in": { type: "dir" } });
   const gate: Target = {
     fetch: async (rest, init) => {
-      if (rest.startsWith("/api/fs/upload") && rest.includes("name=a")) await hold;
+      if (rest.startsWith("/api/fs/upload") && /name=a(&|$)/.test(rest)) await hold;
       return D.t.fetch(rest, init);
     },
   };
   const q = mkq({ S: S.t, D: gate }, 1);
-  const first = q.create(cp("copy", "/a"));
+  const first = q.create({ op: "copy", items: [{ node: "S", path: "/a" }, { node: "S", path: "/a2" }], dst: { node: "D", dir: "/in" }, conflict: "ask" });
   await nap(30);
   q.pause(first.id);
   const second = q.create(cp("copy", "/b"));
-  // the first job is parked inside an upload; it hits its checkpoint when the data moves on. Pause takes effect at the next one.
+  // the first job is parked inside an upload; it reaches its next checkpoint (between items) when the upload ends, and gives the slot up there.
   release();
   const v2 = await settle(q, second.id);
   assert.equal(v2.state, "done", "the queued job ran although the paused one holds the only slot's place");
@@ -187,7 +188,7 @@ test("agentFetch: a slow answer, a streamed body and an abort", async () => {
 
 // ---- the hub's own /api/transfer, with real agents
 const srvs: ReturnType<typeof serve>[] = [];
-let A: string, B: string, hub: string;
+let A: string, B: string, hub: string, urlA: string, urlB: string;
 const open = (app: { fetch: never }) => new Promise<ReturnType<typeof serve>>((res) => { const s: ReturnType<typeof serve> = serve({ fetch: app.fetch, port: 0 }, () => res(s)); });
 const portOf = (s: ReturnType<typeof serve>) => (s.address() as AddressInfo).port;
 const transfer = (body: unknown) => fetch(hub + "/api/transfer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -200,6 +201,8 @@ before(async () => {
   const sh = await open(createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: A, NODES: `A=http://127.0.0.1:${portOf(sa)},B=http://127.0.0.1:${portOf(sb)}` } as never)) as never);
   srvs.push(sa, sb, sh);
   hub = `http://127.0.0.1:${portOf(sh)}`;
+  urlA = `http://127.0.0.1:${portOf(sa)}`;
+  urlB = `http://127.0.0.1:${portOf(sb)}`;
 });
 after(() => {
   for (const s of srvs) s.close();
@@ -228,4 +231,177 @@ test("/api/transfer: a link chosen by name transfers what it points at", async (
   const r = await transfer({ src: { node: "A", path: "/top-link" }, dst: { node: "B", dir: "/in" }, op: "copy" });
   assert.equal(r.status, 201, await r.clone().text());
   assert.equal(fs.readFileSync(path.join(B, "in/top-link"), "utf8"), "data");
+});
+
+// ---- listings that did not reach their end
+const walkBody = (...lines: unknown[]) => async () => new Response(lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+const never = (r: Response) => Promise.resolve(new Error(String(r.status)));
+const list = (body: () => Promise<Response>) => listChildren(body, "/d", undefined, never);
+
+test("listChildren refuses a listing with read errors, an error line, or no end", async () => {
+  const ok = await list(walkBody({ e: [{ p: "a", t: "file", s: 1, m: 1 }, { p: "x/y", t: "file", s: 1, m: 1 }] }, { done: { truncated: false, errors: 0 } }));
+  assert.deepEqual(ok.entries.map((e) => e.name), ["a"], "a name with a slash is dropped");
+  await assert.rejects(list(walkBody({ e: [] }, { done: { truncated: false, errors: 2 } })), ChildListError);
+  await assert.rejects(list(walkBody({ e: [{ p: "a", t: "file", s: 1, m: 1 }] }, { error: "boom" })), ChildListError);
+  await assert.rejects(list(walkBody({ e: [{ p: "a", t: "file", s: 1, m: 1 }] })), ChildListError);
+});
+
+const unreadable = process.getuid?.() === 0 ? { skip: "root reads every folder" } : {};
+const seed = (name: string) => {
+  fs.mkdirSync(path.join(A, name, "sub"), { recursive: true });
+  fs.writeFileSync(path.join(A, name, "a.txt"), "a");
+  fs.writeFileSync(path.join(A, name, "sub/secret.txt"), "s");
+  fs.chmodSync(path.join(A, name, "sub"), 0o300);
+};
+const unseed = (name: string) => {
+  try {
+    fs.chmodSync(path.join(A, name, "sub"), 0o700);
+  } catch {
+    /* gone */
+  }
+};
+const viaQueue = async (op: "copy" | "move", from: string) => {
+  const q = new OpQueue({ agents: new Map<string, Target>([["A", { fetch: (x, i) => agentFetch(urlA + x, i) }], ["B", { fetch: (x, i) => agentFetch(urlB + x, i) }]]), isSource: () => false });
+  return settle(q, q.create({ op, items: [{ node: "A", path: from }], dst: { node: "B", dir: "/in" }, conflict: "ask" }).id);
+};
+
+for (const op of ["copy", "move"] as const) {
+  test(`/api/transfer ${op}: a folder with an unreadable subfolder fails and the source stays`, unreadable, async () => {
+    const name = `u-t-${op}`;
+    seed(name);
+    try {
+      fs.mkdirSync(path.join(B, "in"), { recursive: true });
+      const r = await transfer({ src: { node: "A", path: "/" + name }, dst: { node: "B", dir: "/in" }, op });
+      assert.equal(r.status, 502, await r.clone().text());
+      assert.ok(fs.existsSync(path.join(A, name, "a.txt")), "source kept");
+      assert.equal(fs.readdirSync(path.join(A)).filter((n) => n.startsWith(".")).length, 0, "nothing went to the trash");
+    } finally {
+      unseed(name);
+    }
+  });
+  test(`job queue ${op}: a folder with an unreadable subfolder fails the item and the source stays`, unreadable, async () => {
+    const name = `u-q-${op}`;
+    seed(name);
+    try {
+      fs.mkdirSync(path.join(B, "in"), { recursive: true });
+      const v = await viaQueue(op, "/" + name);
+      assert.equal(v.state, "failed", JSON.stringify(v));
+      assert.match(v.items?.[0]?.error ?? "", /could not be read/);
+      assert.ok(fs.existsSync(path.join(A, name, "a.txt")), "source kept");
+    } finally {
+      unseed(name);
+    }
+  });
+}
+
+// ---- connection failures, slots, links
+test("a refused connection fails the job by node name and shows no address", async () => {
+  const dead = http.createServer();
+  await new Promise<void>((r) => dead.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(dead.address() as AddressInfo).port}`;
+  await new Promise((r) => dead.close(r));
+  const gone: Target = { fetch: (x, i) => agentFetch(url + x, i) };
+  const D = memNode({ "/in": { type: "dir" } });
+  const q = mkq({ S: gone, D: D.t });
+  const spec: OpSpec = { op: "copy", items: [{ node: "S", path: "/a" }, { node: "S", path: "/b" }], dst: { node: "D", dir: "/in" }, conflict: "ask" };
+  const v = await settle(q, q.create(spec).id);
+  const all = JSON.stringify(v);
+  assert.match(all, /agent unreachable \(S\)/);
+  assert.ok(!all.includes("127.0.0.1") && !all.includes("ECONNREFUSED"), all);
+});
+
+const slotRig = () => {
+  const holds = new Map<string, () => void>();
+  const t: Target = {
+    async fetch(rest) {
+      const u = new URL("http://x" + rest);
+      const p = u.searchParams.get("path") ?? "";
+      const op = u.pathname.split("/").pop();
+      if (op === "stat") return p.startsWith("/in/") ? new Response("{}", { status: 404 }) : Response.json({ type: "file", size: 1, mtime: 1 });
+      if (op === "download") {
+        await new Promise<void>((r) => holds.set(p, r));
+        return new Response("x");
+      }
+      return Response.json({ ok: true }, { status: 201 });
+    },
+  };
+  const q = new OpQueue({ agents: new Map([["S", t], ["D", t]]), isSource: () => false, concurrency: 1 });
+  const priv = q as unknown as { jobs: Map<string, { holdsSlot?: boolean }>; running: number; ctx(j: unknown): { checkpoint(): Promise<void> } };
+  const mk = (p: string) => q.create({ op: "copy", items: [{ node: "S", path: p }], dst: { node: "D", dir: "/in" }, conflict: "ask" }).id;
+  return { holds, q, priv, mk };
+};
+
+test("two checkpoints of one job waiting together take one slot, and the queue is idle afterwards", async () => {
+  const { holds, q, priv, mk } = slotRig();
+  const a = mk("/a");
+  await nap(30);
+  const b = mk("/b");
+  await nap(30);
+  const ja = priv.jobs.get(a)!;
+  q.pause(a);
+  const c = priv.ctx(ja);
+  const p1 = c.checkpoint();
+  const p2 = c.checkpoint(); // as a parked stream and a retry would
+  await nap(30);
+  assert.equal(q.get(b)!.state, "running", "the paused job gave its slot away");
+  q.resume(a);
+  await nap(20);
+  holds.get("/b")?.();
+  await nap(50);
+  assert.equal(q.get(b)!.state, "done");
+  holds.get("/a")?.();
+  await Promise.all([p1, p2]);
+  await settle(q, a);
+  assert.equal(priv.running, 0, "no slot is left over");
+  const cId = mk("/c");
+  await nap(20);
+  assert.equal(q.get(cId)!.state, "running", "a new job still starts");
+  holds.get("/c")?.();
+  await settle(q, cId);
+});
+
+test("a resumed job gets the freed slot before a queued job", async () => {
+  const { holds, q, priv, mk } = slotRig();
+  const a = mk("/a");
+  await nap(30);
+  const b = mk("/b");
+  const ja = priv.jobs.get(a)!;
+  q.pause(a);
+  const pa = priv.ctx(ja).checkpoint(); // a parks and frees the only slot: b starts
+  await nap(30);
+  assert.equal(q.get(b)!.state, "running");
+  const c = mk("/c");
+  q.resume(a);
+  await nap(20);
+  holds.get("/b")?.();
+  await nap(50);
+  assert.equal(ja.holdsSlot, true, "handed straight to the resumed job");
+  assert.equal(q.get(c)!.state, "queued");
+  await pa;
+  holds.get("/a")?.();
+  await settle(q, a);
+  holds.get("/c")?.();
+  await settle(q, c);
+  assert.equal(priv.running, 0);
+});
+
+test("a link moved to another node is refused and nothing is removed; a copy still works", async () => {
+  const S = memNode({ "/real": { type: "dir" }, "/real/f": { type: "file", data: "f" }, "/ln": { type: "symlink", linkDir: true } });
+  const D = memNode({ "/in": { type: "dir" } });
+  const q = mkq({ S: S.t, D: D.t });
+  const v = await settle(q, q.create(cp("move", "/ln")).id);
+  assert.equal(v.state, "failed", JSON.stringify(v));
+  assert.match(v.items?.[0]?.error ?? "", /link cannot be moved/);
+  assert.ok(S.fsm.has("/ln") && S.fsm.has("/real/f"));
+  assert.ok(!S.calls.some((c) => c.startsWith("trash")), "nothing was trashed");
+});
+
+test("/api/transfer: moving a link is refused and the link stays", async () => {
+  fs.mkdirSync(path.join(A, "lk-real"), { recursive: true });
+  fs.writeFileSync(path.join(A, "lk-real/f"), "f");
+  fs.symlinkSync("lk-real", path.join(A, "lk-top"));
+  const r = await transfer({ src: { node: "A", path: "/lk-top" }, dst: { node: "B", dir: "/in" }, op: "move" });
+  assert.equal(r.status, 400, await r.clone().text());
+  assert.ok(fs.lstatSync(path.join(A, "lk-top")).isSymbolicLink());
+  assert.ok(!fs.existsSync(path.join(B, "in/lk-top")));
 });

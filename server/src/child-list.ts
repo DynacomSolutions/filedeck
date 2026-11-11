@@ -20,6 +20,9 @@ export interface ChildList {
   truncated: boolean;
 }
 
+/** The listing did not reach its end: a folder could not be read, the node reported an error, or the answer stopped early. */
+export class ChildListError extends Error {}
+
 export type Fetcher = (rest: string, init?: RequestInit) => Promise<Response>;
 
 const WALK_MAX = 100_000_000; // the node clamps this to its own walk limit
@@ -29,12 +32,18 @@ export async function listChildren(fetcher: Fetcher, dir: string, signal: AbortS
   if (!r.ok) throw await fail(r);
   const out: Child[] = [];
   let truncated = false;
+  let ended = false;
   const prefix = dir === "/" ? "" : dir;
   const eat = (line: string) => {
     if (!line) return;
-    const m = JSON.parse(line) as { e?: { p: string; t: string; s: number; m: number }[]; done?: { truncated?: boolean } };
-    for (const e of m.e ?? []) out.push({ name: e.p, path: `${prefix}/${e.p}`, type: e.t, size: e.s, mtime: e.m });
-    if (m.done?.truncated) truncated = true;
+    const m = JSON.parse(line) as { e?: { p: string; t: string; s: number; m: number }[]; done?: { truncated?: boolean; errors?: number }; error?: string };
+    if (m.error !== undefined) throw new ChildListError("the node could not list it completely");
+    for (const e of m.e ?? []) if (!e.p.includes("/")) out.push({ name: e.p, path: `${prefix}/${e.p}`, type: e.t, size: e.s, mtime: e.m });
+    if (m.done) {
+      ended = true;
+      if ((m.done.errors ?? 0) > 0) throw new ChildListError("some entries could not be read");
+      if (m.done.truncated) truncated = true;
+    }
   };
   const dec = new TextDecoder();
   let buf = "";
@@ -49,5 +58,6 @@ export async function listChildren(fetcher: Fetcher, dir: string, signal: AbortS
     }
   }
   eat(buf + dec.decode());
+  if (!ended) throw new ChildListError("the listing ended early");
   return { entries: out, truncated };
 }

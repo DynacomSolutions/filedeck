@@ -15,7 +15,7 @@ import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
 import { agentFetch } from "./agent-fetch.ts";
-import { listChildren } from "./child-list.ts";
+import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { audit, type AuditSink } from "./audit.ts";
@@ -163,6 +163,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   interface TOpts {
     overwrite: boolean;
     preserveTimes: boolean;
+    move: boolean;
   }
   async function transferFile(src: Target, sp: string, st: StatLite, dst: Target, dir: string, name: string, o: TOpts) {
     const down = await src.fetch(`/api/fs/download?path=${q(sp)}`);
@@ -186,6 +187,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     if (st.type === "symlink" && depth === 0) {
       // a link chosen by name is followed to what it points at; links inside folders are not
       if (st.broken) throw new TransferError(400, "the link points at nothing");
+      // a move would copy what the link points at and remove only the link: the data would exist twice
+      if (o.move) throw new TransferError(400, "a link cannot be moved; copy it, or move what it points at");
       st.type = st.linkDir ? "dir" : "file";
     }
     const name = path.posix.basename(sp);
@@ -200,7 +203,10 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       if (!mk.ok) throw await failed(mk, "destination mkdir");
     }
     // every child, not the page the browser gets (that one stops at 20 000 entries)
-    const ls = await listChildren((rest, init) => src.fetch(rest, init), sp, undefined, (r) => failed(r, "source list"));
+    const ls = await listChildren((rest, init) => src.fetch(rest, init), sp, undefined, (r) => failed(r, "source list")).catch((e) => {
+      if (e instanceof ChildListError) throw new TransferError(502, `source list: ${sp}: ${e.message}`);
+      throw e;
+    });
     if (ls.truncated) throw new TransferError(502, `source list: ${sp} has more entries than the node lists in one walk`);
     for (const e of ls.entries) {
       if (e.type === "symlink" || e.type === "other") {
@@ -230,7 +236,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     }
     try {
       const tally: Tally = { skipped: 0 };
-      const res = await transferTree(src, b.src.path, dst, b.dst.dir, { overwrite: b.overwrite === true, preserveTimes: b.preserveTimes === true }, tally);
+      const res = await transferTree(src, b.src.path, dst, b.dst.dir, { overwrite: b.overwrite === true, preserveTimes: b.preserveTimes === true, move: b.op === "move" }, tally);
       if (b.op === "move" && tally.skipped > 0) {
         throw new TransferError(409, `copied, but ${tally.skipped} link${tally.skipped === 1 ? "" : "s"} or special file${tally.skipped === 1 ? " was" : "s were"} not transferred; the source was kept`);
       }
