@@ -2,6 +2,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Target } from "./hub.ts";
 import type { JobRow, JobStore } from "./job-store.ts";
+import { ChildListError, listChildren } from "./child-list.ts";
 
 /**
  * Hub-side queue for bulk file operations (copy, move, trash, delete, folder-diff sync).
@@ -89,6 +90,11 @@ interface StatLite {
   type: string;
   size?: number;
   mtime?: number;
+  /** a link: whether it points at a folder, and whether it points at nothing */
+  linkDir?: boolean;
+  broken?: boolean;
+  /** a link chosen by name, followed to what it points at */
+  viaLink?: boolean;
 }
 
 interface Job {
@@ -116,6 +122,11 @@ interface Job {
   /** the last write was skipped or coalesced; the tick writes it */
   dirty?: boolean;
   savedAt: number;
+  /** this job counts against the concurrency limit */
+  holdsSlot?: boolean;
+  /** the job has ended: it never takes a slot again */
+  closed?: boolean;
+  slotWait?: Promise<void>;
   /** copy/move totals are known (a resumed job must not count them twice) */
   scanned?: boolean;
   /** items taken over mid-flight and retried: a 404 then means the earlier attempt succeeded */
@@ -196,7 +207,9 @@ export interface OpQueueDeps {
 
 export class OpQueue {
   private jobs = new Map<string, Job>();
+  /** jobs that hold a slot: running and moving, not paused and not waiting for an answer */
   private running = 0;
+  private slotWaiters: { job: Job; wake: () => void }[] = [];
   private readonly me = randomUUID();
   private stopping = false;
   constructor(private d: OpQueueDeps) {
@@ -341,6 +354,7 @@ export class OpQueue {
       j.gate?.open();
       j.gate = undefined;
       this.save(j);
+      this.pump();
     }
     return this.view(j, false);
   }
@@ -536,8 +550,9 @@ export class OpQueue {
   private pump() {
     if (this.stopping) return;
     for (const j of this.jobs.values()) {
-      if (this.running >= (this.d.concurrency ?? 2)) return;
-      if (j.state !== "queued") continue;
+      if (this.running >= (this.d.concurrency ?? 2) || this.slotWaiters.length) return; // a resumed job goes first
+      if (j.state !== "queued" || j.paused) continue; // a job paused before it started waits without a slot
+      j.holdsSlot = true;
       this.running++;
       j.state = "running";
       j.startedAt ??= Date.now();
@@ -552,7 +567,8 @@ export class OpQueue {
           }
         })
         .finally(() => {
-          this.running--;
+          j.closed = true;
+          this.release(j);
           if ((this.stopping || j.lost) && live(j.state)) return;
           j.finishedAt = Date.now();
           j.progress.current = "";
@@ -561,6 +577,63 @@ export class OpQueue {
           this.pump();
         });
     }
+  }
+
+  // ---------------------------------------------------------------- concurrency slots
+
+  /**
+   * Give the slot back (idempotent). Waiting jobs that are resuming get it directly, in the same step, so no queued job can slip in
+   * between; the count never goes over the limit. With nobody to hand it to, the next queued job starts.
+   */
+  private release(j: Job) {
+    if (!j.holdsSlot) return;
+    j.holdsSlot = false;
+    this.running--;
+    while (this.running < (this.d.concurrency ?? 2)) {
+      const w = this.slotWaiters.shift();
+      if (!w) break;
+      if (w.job.holdsSlot || w.job.closed) {
+        w.wake(); // nothing to hand over to this one
+        continue;
+      }
+      w.job.holdsSlot = true;
+      this.running++;
+      w.wake();
+    }
+    if (!this.slotWaiters.length) this.pump();
+  }
+
+  /**
+   * Take a slot again after a pause or a question; waits while the queue is full. A job that is canceled (or lost, or stopping)
+   * while it waits leaves without a slot: it only has to unwind. Several checkpoints of one job may wait at once; it takes one slot.
+   */
+  private async acquire(j: Job) {
+    if (j.holdsSlot || j.closed) return;
+    const sig = j.abort.signal;
+    const leaving = () => sig.aborted || !!j.lost || this.stopping;
+    if (this.running >= (this.d.concurrency ?? 2)) {
+      if (leaving()) return;
+      j.slotWait ??= new Promise<void>((resolve) => {
+        const w = {
+          job: j,
+          wake: () => {
+            sig.removeEventListener("abort", onAbort);
+            resolve();
+          },
+        };
+        const onAbort = () => {
+          const at = this.slotWaiters.indexOf(w);
+          if (at >= 0) this.slotWaiters.splice(at, 1);
+          w.wake();
+        };
+        this.slotWaiters.push(w);
+        sig.addEventListener("abort", onAbort, { once: true });
+      }).finally(() => (j.slotWait = undefined));
+      await j.slotWait;
+    }
+    if (j.holdsSlot || j.closed || leaving()) return; // handed over directly, or the job ended or is leaving
+    j.holdsSlot = true;
+    this.running++;
   }
 
   // ---------------------------------------------------------------- execution
@@ -594,15 +667,33 @@ export class OpQueue {
   private target(node: string): Target {
     const t = this.d.agents.get(node);
     if (!t) throw new OpError(404, `unknown node ${node}`);
-    return t;
+    // a connection failure is reported by node name; the address and the system's wording never reach a job view
+    return {
+      fetch: async (rest, init) => {
+        try {
+          return await t.fetch(rest, init);
+        } catch (e) {
+          if (connectionFailure(e)) throw new OpError(502, `agent unreachable (${node})`);
+          throw e;
+        }
+      },
+    };
   }
 
   private ctx(j: Job) {
     const sig = j.abort.signal;
     const checkpoint = async () => {
       if (sig.aborted || j.lost) throw new Aborted();
-      while (j.paused && j.gate) {
-        await j.gate.promise;
+      if (j.paused && j.gate) {
+        this.release(j); // a paused job does not keep other jobs from running
+        try {
+          while (j.paused && j.gate) {
+            await j.gate.promise;
+            if (sig.aborted || j.lost) throw new Aborted();
+          }
+        } finally {
+          await this.acquire(j);
+        }
         if (sig.aborted || j.lost) throw new Aborted();
       }
     };
@@ -614,12 +705,14 @@ export class OpQueue {
     const ask = async (c: PendingConflict): Promise<Choice> => {
       if (j.policy !== "ask") return j.policy as Choice;
       await checkpoint();
+      this.release(j); // waiting for the user: the slot is free for other jobs
       const answer = await new Promise<{ action: Choice; all: boolean }>((resolve, reject) => {
         j.waiting = { conflict: c, resolve };
         this.save(j);
         sig.addEventListener("abort", () => reject(new Aborted()), { once: true });
-      }).finally(() => {
+      }).finally(async () => {
         j.waiting = undefined;
+        await this.acquire(j);
       });
       if (answer.all) j.policy = answer.action;
       return answer.action;
@@ -650,10 +743,14 @@ export class OpQueue {
     return r;
   }
 
+  /** Every child of a folder (not a page: a folder of any size is listed completely, or the job says it could not). */
   private async listDir(t: Target, p: string, signal: AbortSignal, what: string) {
-    const r = await t.fetch(`/api/fs/list?path=${q(p)}&hidden=1`, { signal });
-    if (!r.ok) throw await this.failed(r, what);
-    return ((await r.json()) as { entries: { name: string; path: string; type: string; size: number; mtime: number }[] }).entries;
+    const got = await listChildren((rest, init) => t.fetch(rest, init), p, signal, (r) => this.failed(r, what)).catch((e) => {
+      if (e instanceof ChildListError) throw new OpError(502, `${what}: ${p}: ${e.message}`);
+      throw e;
+    });
+    if (got.truncated) throw new OpError(502, `${what}: ${p} has more entries than the node lists in one walk; copy it in parts`);
+    return got.entries;
   }
 
   /** Remove one path: node trash, or permanent on a network source (which has no trash). */
@@ -783,9 +880,10 @@ export class OpQueue {
         await ctx.boundary();
         const it = spec.items[i]!;
         const t = this.target(it.node);
+        // an item that cannot be read now is not counted; its own turn reports the cause and the other items still run
         const st = await this.statOf(t, it.path, ctx.sig).catch((e) => {
           if (ctx.sig.aborted) throw new Aborted();
-          throw e;
+          return null;
         });
         if (st) {
           const m = await this.measure(t, it.path, st, ctx.sig);
@@ -838,7 +936,17 @@ export class OpQueue {
     const srcT = this.target(src.node);
     const dstT = this.target(dst.node);
     const st = await this.statOf(srcT, src.path, ctx.sig);
+    let isLink = false;
     if (!st) throw new OpError(404, "source not found");
+    if (st.type === "symlink") {
+      // A link chosen by name is followed to what it points at (the node keeps that inside its root); nested links are not.
+      if (st.broken) throw new OpError(400, "the link points at nothing");
+      st.type = st.linkDir ? "dir" : "file";
+      st.viaLink = true;
+      isLink = true;
+      // Moving would copy what the link points at and remove only the link: the data would exist twice. Refused, nothing is touched.
+      if (o.move && !(src.node === dst.node)) throw new OpError(400, "a link cannot be moved to another node; copy it, or move what it points at");
+    }
     if (st.type !== "file" && st.type !== "dir") throw new OpError(400, "only files and folders can be copied");
     const name = path.posix.basename(src.path);
     const same = src.node === dst.node;
@@ -884,7 +992,7 @@ export class OpQueue {
     }
 
     // Fast native path: same node and nothing in the way (or an in-place file replace by move).
-    if (same && (free || (replaceFile && o.move))) {
+    if (same && (free || (replaceFile && o.move)) && !(isLink && !o.move)) {
       const m = await this.measure(srcT, src.path, st, ctx.sig).catch(() => ({ files: 0, bytes: 0 }));
       const finalTarget = joinP(dst.dir, useName);
       if (o.move) await this.json(srcT, "/api/fs/rename", { from: src.path, to: finalTarget, overwrite: replaceFile }, ctx.sig, "move");
@@ -916,6 +1024,7 @@ export class OpQueue {
     o: { overwrite: boolean; preserveTimes: boolean; move: boolean },
     iv?: ItemView,
   ): Promise<"done" | "skipped"> {
+    if (o.move && st.viaLink) throw new OpError(400, "a link cannot be moved this way; copy it, or move what it points at");
     const res: TreeRes = { errors: 0, skipped: 0 };
     await this.tree(j, ctx, this.target(src.node), src.path, st, this.target(dst.node), dst.dir, useName, overwriteFile || force, o, res, 0);
     if (res.errors > 0) throw new OpError(502, `${res.errors} item${res.errors === 1 ? "" : "s"} failed${res.firstError ? `, first: ${res.firstError}` : ""}${o.move ? "; the source was kept" : ""}`);
@@ -959,7 +1068,10 @@ export class OpQueue {
     }
     const entries = await this.listDir(src, sp, ctx.sig, "source list");
     for (const e of entries) {
-      if (e.type === "symlink" || e.type === "other") continue; // links and special files are not transferred
+      if (e.type === "symlink" || e.type === "other") {
+        res.skipped++; // links and special files are not transferred; counted so a move keeps its source
+        continue;
+      }
       await ctx.checkpoint();
       const hit = existing.get(e.name);
       let childName = e.name;
@@ -1031,7 +1143,7 @@ export class OpQueue {
       let sent = 0;
       const body = new ReadableStream<Uint8Array>({
         async pull(ctl) {
-          await ctx.checkpoint();
+          await ctx.checkpoint(); // parks a paused stream and frees the slot; takes one again (once per job, however many wait) on resume
           const r = reader ? await reader.read() : { done: true as const, value: undefined };
           if (r.done) return ctl.close();
           sent += r.value.length;
@@ -1067,6 +1179,14 @@ export class OpQueue {
     }
     j.progress.entries++;
   }
+}
+
+const CONN_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "ECONNABORTED"]);
+/** A failed connection to an agent (a Node error with a code, or a fetch TypeError), as opposed to an answer or an abort. */
+export function connectionFailure(e: unknown): boolean {
+  if (!(e instanceof Error) || e.name === "AbortError") return false;
+  const code = (e as { code?: unknown }).code ?? (e as { cause?: { code?: unknown } }).cause?.code;
+  return (typeof code === "string" && (CONN_CODES.has(code) || code.startsWith("UND_ERR"))) || (e instanceof TypeError && e.message === "fetch failed");
 }
 
 function titleOf(s: OpSpec): string {
