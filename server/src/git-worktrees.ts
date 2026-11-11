@@ -13,7 +13,7 @@ import path from "node:path";
 import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
 import { resolveRead } from "./paths.ts";
-import { findRepo, runGit } from "./git.ts";
+import { NO_SUBMODULE_RECURSION, confineGitDir, findRepo, runGit } from "./git.ts";
 import type { Config } from "./config.ts";
 
 const LIST_MAX_BYTES = 4 * 1024 * 1024;
@@ -133,8 +133,9 @@ async function privateDirs(m: Mapper, common: string): Promise<Map<string, strin
   return out;
 }
 
-async function dirtyOf(gitDir: string, workTree: string): Promise<boolean | null> {
-  const r = await runGit(workTree, ["--git-dir", gitDir, "--work-tree", workTree, "status", "--porcelain", "-uno", "--no-renames"], { timeoutMs: STATUS_BUDGET_MS, maxBytes: 64 * 1024 });
+async function dirtyOf(root: string, gitDir: string, workTree: string): Promise<boolean | null> {
+  if (!(await confineGitDir(root, gitDir))) return null; // links or alternates leading out of the root: not asked
+  const r = await runGit(workTree, ["--git-dir", gitDir, "--work-tree", workTree, "status", "--porcelain", "-uno", "--no-renames", NO_SUBMODULE_RECURSION], { timeoutMs: STATUS_BUDGET_MS, maxBytes: 64 * 1024 });
   if (r.truncated) return true;
   if (r.timedOut || r.code !== 0) return null;
   return r.stdout.length > 0;
@@ -179,7 +180,7 @@ export async function listWorktrees(root: string, virtualDir: string): Promise<W
       };
       if (!bare && real && !prunable) {
         const gitDir = i === 0 ? common : priv.get(real);
-        if (gitDir) info.dirty = await dirtyOf(gitDir, real);
+        if (gitDir) info.dirty = await dirtyOf(m.rootReal, gitDir, real);
       }
       return info;
     }),

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
-import { BASE_ARGS, filterNeutralisedEnv, gitEnv } from "./git.ts";
+import { BASE_ARGS, NO_SUBMODULE_RECURSION, filterNeutralisedEnv, gitDirEnv, gitEnv } from "./git.ts";
 
 /**
  * Read-only git for the pull request diff view. Everything here runs `git` next to the data (a work tree or a bare
@@ -31,7 +31,9 @@ export async function runGit(cwd: string, args: string[], o: RunOpts = {}): Prom
   const extra: NodeJS.ProcessEnv = { HOME: "/nonexistent", LANG: "C" };
   if (o.ceiling) extra.GIT_CEILING_DIRECTORIES = o.ceiling;
   // The repository's config belongs to someone else: git.ts neutralises its fsmonitor, hooks, pager and content filters.
-  const env = await filterNeutralisedEnv(cwd, args, gitEnv(extra));
+  const pin = gitDirEnv(args);
+  if (!pin) throw new FsError(404, "not a known git repository");
+  const env = await filterNeutralisedEnv(cwd, args, gitEnv({ ...extra, ...pin }));
   if (!env) throw new FsError(504, "git configuration could not be read");
   return new Promise((resolve, reject) => {
     const p = spawn("git", [...BASE_ARGS, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -249,7 +251,7 @@ export function parseNumstat(buf: string): Map<string, { add: number | null; del
 /** Changed files between the merge-base and the head, with status, rename source and line counts. */
 export async function prDiff(c: GitCtx, input: DiffInput): Promise<PrDiff> {
   const range = await resolveRange(c, input);
-  const base = ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-M", "-z"];
+  const base = ["diff", "--no-ext-diff", "--no-textconv", NO_SUBMODULE_RECURSION, "--no-color", "-M", "-z"];
   const [ns, num] = await Promise.all([
     git(c, [...base, "--name-status", range.base.sha, range.head.sha, "--"], { maxBytes: 16 * 1024 * 1024, timeoutMs: 30_000 }),
     git(c, [...base, "--numstat", range.base.sha, range.head.sha, "--"], { maxBytes: 16 * 1024 * 1024, timeoutMs: 30_000 }),

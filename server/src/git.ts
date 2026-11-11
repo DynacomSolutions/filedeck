@@ -50,7 +50,18 @@ export const BASE_ARGS = [
   "-c", "core.sshCommand=false", "-c", "core.askPass=false", "-c", "core.editor=false", "-c", "sequence.editor=false",
   "-c", "core.alternateRefsCommand=false", "-c", "credential.helper=", "-c", "uploadpack.packObjectsHook=false",
   "-c", "web.browser=false",
+  // Nothing here may reach a remote: a partial clone's lazy fetch, a `url` using a command transport and a
+  // `remote.<name>.uploadpack` program all start a process. No transport is allowed, and lazy fetching is off in the
+  // environment (`GIT_NO_LAZY_FETCH`, see `gitEnv`); each of the two alone stops it, both are kept.
+  "-c", "protocol.allow=never", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false",
 ];
+
+/**
+ * Submodule handling for every status and diff command line. A `.gitmodules` file in the work tree can set
+ * `submodule.<name>.ignore=none`, which overrides `diff.ignoreSubmodules` from the configuration, but not this option:
+ * only the commit a submodule is at is compared, and Git never enters a submodule (and never runs its filters).
+ */
+export const NO_SUBMODULE_RECURSION = "--ignore-submodules=dirty";
 
 /**
  * Subcommands that only read objects and refs: they never run a clean, smudge or process filter, so they skip the
@@ -146,8 +157,38 @@ export function gitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     GIT_ASKPASS: "true",
     GIT_PAGER: "cat",
     GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_NO_LAZY_FETCH: "1",
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: "",
     ...extra,
   };
+}
+
+/**
+ * The common git directory of every git directory `repoAt` has validated, by the path the commands are given.
+ * Git is told both places through `GIT_DIR` (`--git-dir`) and `GIT_COMMON_DIR`, so it never reads a `commondir` file
+ * (which could be swapped after the check, or hold an absolute host path that was only checked re-based).
+ */
+const validated = new Map<string, string>();
+function remember(gitDir: string, commonDir: string): void {
+  if (validated.size > 20_000) validated.clear();
+  validated.set(gitDir, commonDir);
+  validated.set(commonDir, commonDir);
+}
+
+/**
+ * Environment that pins the git directory named by the leading `--git-dir` to its validated common directory. `{}` when
+ * the arguments name no git directory (discovery from the working directory); null when they name one that was not
+ * validated, which the caller must refuse to run.
+ */
+export function gitDirEnv(args: string[]): NodeJS.ProcessEnv | null {
+  const { lead } = subcommand(args);
+  const i = lead.indexOf("--git-dir");
+  if (i < 0) return {};
+  const dir = lead[i + 1]!;
+  const common = validated.get(dir);
+  if (!common) return null;
+  // a git directory that is its own common directory has no `commondir` file (`confined` refuses one that does)
+  return common === dir ? {} : { GIT_COMMON_DIR: common };
 }
 
 /** At most this many Git processes at once on a node, so a big listing never floods the host. */
@@ -170,7 +211,8 @@ export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<Gi
   const timeoutMs = o.timeoutMs ?? 10_000;
   const maxBytes = o.maxBytes ?? 8 * 1024 * 1024;
   return slot(async () => {
-    const env = await filterNeutralisedEnv(cwd, args, gitEnv());
+    const pin = gitDirEnv(args);
+    const env = pin ? await filterNeutralisedEnv(cwd, args, gitEnv(pin)) : null;
     if (!env) return { code: null, stdout: "", stderr: "git configuration could not be read", timedOut: true, truncated: false, buf: Buffer.alloc(0) };
     return await new Promise<GitRun & { buf: Buffer }>((resolve) => {
         const child = spawn("git", [...BASE_ARGS, ...args], {
@@ -305,8 +347,78 @@ async function isGitDir(root: string, dir: string): Promise<boolean> {
   return looksBare(dir);
 }
 
+const inside = (rootReal: string, real: string) => {
+  const rel = path.relative(rootReal, real);
+  return rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel);
+};
+
+/** `objects/info/alternates` of an object directory, followed down (Git itself stops at five levels): every directory that exists must be inside the root. */
+async function alternatesInside(rootReal: string, objectsDir: string, depth = 0): Promise<boolean> {
+  const text = await fs.readFile(path.join(objectsDir, "info", "alternates"), "utf8").then((t) => t.slice(0, 64 * 1024), () => null);
+  if (text === null) return true;
+  if (depth >= 5) return false;
+  for (let line of text.split("\n")) {
+    line = line.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith('"')) return false; // quoted (escaped) form: not followed here
+    let real: string;
+    try {
+      real = await fs.realpath(path.resolve(objectsDir, line)); // relative entries are relative to the objects directory
+    } catch {
+      continue; // missing: Git skips it too
+    }
+    if (!inside(rootReal, real) || !(await alternatesInside(rootReal, real, depth + 1))) return false;
+  }
+  return true;
+}
+
+const GIT_DIR_ENTRIES = ["objects", "refs", "packed-refs", "HEAD", "config", "commondir", "gitdir", "info", "shallow"];
+
+/**
+ * A repository is only usable when everything Git will read from its git directories is inside the root once links are
+ * resolved: the entries above (a link to somewhere else is refused) and the alternate object directories. Remembers the
+ * validated common directory for `gitDirEnv`.
+ */
+async function confined(root: string, r: Repo): Promise<Repo | null> {
+  let rootReal: string;
+  try {
+    rootReal = await fs.realpath(root);
+  } catch {
+    return null;
+  }
+  if (r.gitDir === r.commonDir && (await exists(path.join(r.gitDir, "commondir")))) return null;
+  const dirs = [...new Set([r.gitDir, r.commonDir])];
+  for (const d of dirs) {
+    for (const name of GIT_DIR_ENTRIES) {
+      let real: string;
+      try {
+        real = await fs.realpath(path.join(d, name));
+      } catch {
+        continue; // absent
+      }
+      if (!inside(rootReal, real)) return null;
+    }
+    if (!inside(rootReal, await fs.realpath(d).catch(() => "/"))) return null;
+  }
+  if (!(await alternatesInside(rootReal, path.join(r.commonDir, "objects")))) return null;
+  remember(r.gitDir, r.commonDir);
+  return r;
+}
+
+/** Validates a git directory that is not a repository root (a linked worktree's admin directory) for use with `runGit`. */
+export async function confineGitDir(root: string, gitDir: string): Promise<boolean> {
+  const cd = (await exists(path.join(gitDir, "commondir"))) ? await commonDirOf(root, gitDir) : gitDir;
+  if (!cd) return false;
+  return (await confined(root, { kind: "linked", workDir: gitDir, gitDir, commonDir: cd, root })) !== null;
+}
+
 /** Is `dir` itself a repository root (a `.git` entry in it, or a bare repository)? */
 export async function repoAt(root: string, dir: string): Promise<Repo | null> {
+  const r = await repoAtUnchecked(root, dir);
+  return r ? confined(root, r) : null;
+}
+
+async function repoAtUnchecked(root: string, dir: string): Promise<Repo | null> {
   if (path.basename(dir) === ".git") return null;
   const dotgit = path.join(dir, ".git");
   let st;
@@ -437,7 +549,7 @@ export class GitError extends FsError {
 /** Full status of a repository (bare: only the branch). */
 export async function repoStatus(r: Repo, o: { timeoutMs?: number } = {}): Promise<StatusResult> {
   if (r.kind === "bare") return { summary: await bareSummary(r), files: new Map() };
-  const res = await runGit(repoCwd(r), [...repoArgs(r), "status", "--porcelain=v2", "-z", "--branch", "--no-renames", "--untracked-files=normal", "--ignored=matching"], { timeoutMs: o.timeoutMs ?? 30_000, maxBytes: 32 * 1024 * 1024 });
+  const res = await runGit(repoCwd(r), [...repoArgs(r), "status", "--porcelain=v2", "-z", "--branch", "--no-renames", NO_SUBMODULE_RECURSION, "--untracked-files=normal", "--ignored=matching"], { timeoutMs: o.timeoutMs ?? 30_000, maxBytes: 32 * 1024 * 1024 });
   if (res.timedOut) throw new GitError(504, "git status timed out");
   if (res.code !== 0 && !res.truncated) throw new GitError(500, res.stderr.trim().split("\n")[0] || "git status failed");
   return parseStatus(r.kind, res.stdout);
