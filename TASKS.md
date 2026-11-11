@@ -194,9 +194,9 @@ Findings from the 12 November 2026 review in the web app: selection, editor, com
 ETA: 2026-11-12 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 118 | File panel: filtered select all, rename validation, filter bar state, editor keeps unsaved edits | in_review | claude-20261112-rv-panel | rv-panel-editor | | 2026-11-12 10:00 ICT | Found in review; one event stream per tab<br>https://github.com/DynacomSolutions/filedeck/pull/193 |
+| 118 | File panel: filtered select all, rename validation, filter bar state, editor keeps unsaved edits | done | claude-20261112-rv-panel | rv-panel-editor | | | Merged https://github.com/DynacomSolutions/filedeck/pull/193, CI green |
 | 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | done | claude-20261112-rv-compare | rv-compare-trash-views | | | Merged https://github.com/DynacomSolutions/filedeck/pull/189, CI green<br>Checked in a browser at 1440 and 390 px |
-| 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | in_review | claude-20261112-rv-shell | rv-app-shell | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/185 |
+| 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | done | claude-20261112-rv-shell | rv-app-shell | | | Merged https://github.com/DynacomSolutions/filedeck/pull/185, CI green<br>Root error boundary not forced live |
 | 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | in_review | claude-20261112-rv-components | rv-uploads-tree | | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/197 |
 
 ## 16. Large folders and narrow screens
