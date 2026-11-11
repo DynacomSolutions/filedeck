@@ -213,7 +213,7 @@ ETA: 2026-11-12 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | todo | | rv-list-access | 15.118 | | Found in review |
-| 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | in_review | claude-20261112-rv-menus | rv-menus-dialogs | | 2026-11-12 10:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/200 |
+| 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | done | claude-20261112-rv-menus | rv-menus-dialogs | | | Merged https://github.com/DynacomSolutions/filedeck/pull/200, CI green<br>Checked at 1366x768 and 390 px |
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
 | 127 | Component roles, names and announcements | todo | | rv-aria-announce | 15.121 | | Found in review |
 | 128 | Browser acceptance checks repaired and run in CI; audit document updated | todo | | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Found in review: two of three scopes fail on main |
