@@ -969,7 +969,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
       const cs = getComputedStyle(box);
       const gap = parseFloat(cs.rowGap) || 0;
       const t0 = tiles[0]!.getBoundingClientRect();
-      const across = Math.max(1, tiles.findIndex((t) => t.getBoundingClientRect().top - t0.top > 1) < 0 ? tiles.length : tiles.findIndex((t) => t.getBoundingClientRect().top - t0.top > 1));
+      // the number of columns the grid resolves to, not a count of the tiles that happen to be on screen
+      const across = Math.max(1, cs.gridTemplateColumns.split(/\s+/).filter(Boolean).length);
       g.offset = box.getBoundingClientRect().top - top + (parseFloat(cs.paddingTop) || 0);
       const w = Math.round(t0.width);
       if (tileBox.current.width !== w) tileBox.current = { width: w, height: 0 };
@@ -1201,12 +1202,12 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     scrollEntryIntoView(visible.findIndex((x) => x.path === cursor), "nearest");
   }, [cursor]); // eslint-disable-line react-hooks/exhaustive-deps
   // The row pitch is measured from what is on screen and can change as tiles load: keep the active entry where the user put it.
-  const pitchSeen = useRef(pitch);
+  const geoSeen = useRef(`${pitch}|${perRow}`);
   useEffect(() => {
-    if (pitchSeen.current === pitch) return;
-    pitchSeen.current = pitch;
+    if (geoSeen.current === `${pitch}|${perRow}`) return;
+    geoSeen.current = `${pitch}|${perRow}`;
     if (cursor && listHadFocus.current) scrollEntryIntoView(visible.findIndex((x) => x.path === cursor), "nearest");
-  }, [pitch]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pitch, perRow]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const p = scrollTo.current;
     if (!p || !entries.some((e) => e.path === p)) return;

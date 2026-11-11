@@ -176,7 +176,8 @@ ETA: 2026-11-12 16:00 ICT
 | 109 | Copy, chunked upload, trash restore and recursive permission changes hold directory descriptors | in_review | claude-20261112-rv-fsops | rv-pinned-walks | 14.113, 14.116 | 2026-11-12 11:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/199 |
 | 110 | SMB source: safe names, complete listings, UTF-8 names, overwrite keeps one copy | done | claude-20261112-rv-sources | rv-smb-source | | | Merged https://github.com/DynacomSolutions/filedeck/pull/182, CI green, independent review clean on second pass<br>Not tried against a real SMB server |
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
-| 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | in_review | claude-20261112-rv-sources | rv-smb-followup | 13.110 | 2026-11-12 09:00 ICT | From the second review of 13.110<br>https://github.com/DynacomSolutions/filedeck/pull/204 |
+| 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | done | claude-20261112-rv-sources | rv-smb-followup | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/204, CI green<br>Listing cap is 100,000 entries<br>Image build stage not exercised until 13.131 |
+| 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | in_review | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | 2026-11-12 09:30 ICT | The image is only built on a release tag today<br>https://github.com/DynacomSolutions/filedeck/pull/206 |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
@@ -205,7 +206,7 @@ Findings from the 12 November 2026 review: very large folders freeze the list, a
 ETA: 2026-11-12 15:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 122 | File list renders only the visible rows | todo | | rv-list-window | 17.124 | | Found in review: 30,000 files froze scrolling |
+| 122 | File list renders only the visible rows | in_review | claude-20261112-rv-panel | rv-list-window | 17.124 | 2026-11-12 09:30 ICT | Found in review: 30,000 files froze scrolling<br>https://github.com/DynacomSolutions/filedeck/pull/205 |
 | 123 | Narrow and zoomed layouts: status in the header, landscape phones, pinch zoom | done | claude-20261112-rv-shell | rv-narrow-layout | 15.120 | | Merged https://github.com/DynacomSolutions/filedeck/pull/198, CI green<br>Full rows: 844x390 6, 320x256 3<br>Pinch zoom covered by a unit test only |
 
 ## 17. Keyboard and screen reader access
