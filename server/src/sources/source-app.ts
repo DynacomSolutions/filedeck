@@ -100,6 +100,14 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     if (!s) throw new FsError(404, "not found");
     return s;
   };
+  /** `need` for reading content: a symlink is followed (a broken one is 404) when the backend can resolve it */
+  const needRead = async (p: string): Promise<SourceStat> => {
+    const s = await need(p);
+    if (s.type !== "symlink" || !backend.statFollow) return s;
+    const t = await backend.statFollow(p);
+    if (!t) throw new FsError(404, "not found");
+    return t;
+  };
   const mustDir = async (p: string) => {
     if ((await need(p)).type !== "dir") throw new FsError(400, "not a directory");
   };
@@ -126,7 +134,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
 
   const serve = async (c: Context, download: boolean) => {
     const p = norm(c.req.query("path") ?? "");
-    const s = await need(p);
+    const s = await needRead(p);
     if (s.type === "dir") throw new FsError(400, "is a directory");
     if (s.type !== "file") throw new FsError(400, "not a regular file");
     const headers: Record<string, string> = {
@@ -179,7 +187,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
 
   app.get("/api/fs/text", async (c) => {
     const p = norm(c.req.query("path") ?? "");
-    const s = await need(p);
+    const s = await needRead(p);
     if (s.type !== "file") throw new FsError(400, s.type === "dir" ? "is a directory" : "not a regular file");
     if (s.size > o.maxEdit) throw new FsError(413, "file too large to edit");
     const buf = await slurp(p, o.maxEdit);
@@ -217,14 +225,18 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     const target = virtualJoin(dir, c.req.query("name") ?? "");
     await mustDir(dir);
     let n = 0;
-    const stream = Readable.fromWeb(body as never).pipe(
-      new Transform({
-        transform(ch: Buffer, _e, cb) {
-          n += ch.length;
-          cb(n > o.maxUpload ? new FsError(413, "upload too large") : null, ch);
-        },
-      }),
-    );
+    const incoming = Readable.fromWeb(body as never);
+    const stream = new Transform({
+      transform(ch: Buffer, _e, cb) {
+        n += ch.length;
+        cb(n > o.maxUpload ? new FsError(413, "upload too large") : null, ch);
+      },
+    });
+    // pipe() does not forward errors: an aborted request body must fail the stream the backend reads, not crash the process
+    incoming.on("error", (e) => stream.destroy(e));
+    stream.on("close", () => incoming.destroy());
+    stream.on("error", () => undefined); // a backend that returns early never reads it; the error still reaches whoever does
+    incoming.pipe(stream);
     const mt = c.req.query("mtime") ? Number(c.req.query("mtime")) : undefined;
     const len = Number(c.req.header("content-length"));
     const size = await backend.write(target, stream, {
@@ -376,7 +388,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     const signal = c.req.raw.signal;
     const p = norm(c.req.query("path") ?? "");
     const r = await hashes.run(async () => {
-      const s = await need(p);
+      const s = await needRead(p);
       if (s.type === "dir") throw new FsError(400, "is a directory");
       if (s.type !== "file") throw new FsError(400, "not a regular file");
       const got = await index.hash(p, { size: s.size, mtime: Math.floor(s.mtime ?? 0), ino: 0 }, async () => {
@@ -459,7 +471,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
 
   app.get("/api/fs/thumb", async (c) => {
     const p = norm(c.req.query("path") ?? "");
-    const s = await need(p);
+    const s = await needRead(p);
     if (s.type !== "file") throw new FsError(400, "not a regular file");
     if (!o.thumbs || thumbKind(base(p)) !== "image") throw new FsError(415, "no thumbnail for this type");
     if (s.size > THUMB_MAX_IMAGE_BYTES) throw new FsError(413, "image too large for a thumbnail");

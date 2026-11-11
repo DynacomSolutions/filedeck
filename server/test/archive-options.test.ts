@@ -208,6 +208,15 @@ test("split volumes: parts are at most the volume size and join back into a vali
   assert.equal(again.result.path, "/src/split (2).7z.001");
 });
 
+test("split volumes without a password extract in full from the first part", needSz, async () => {
+  const job = await compress({ format: "7z", name: "splitx", level: 0, splitBytes: 100_000 }, undefined);
+  assert.equal(job.state, "done", JSON.stringify(job));
+  const x = await waitJob((await j(await post("/api/jobs/extract", { path: job.result.path, destDir: "/out", subfolder: true }))).id);
+  assert.equal(x.state, "done", JSON.stringify(x));
+  const dir = path.join(tmp, "out", x.result.path.split("/").pop());
+  assert.ok(fs.statSync(path.join(dir, "big.bin")).size > 100_000);
+});
+
 test("overwrite policies when extracting into a folder that already has the files", needTool, async () => {
   const z = await compress({ format: "zip", name: "pol" });
   fs.mkdirSync(path.join(tmp, "out/p"), { recursive: true });

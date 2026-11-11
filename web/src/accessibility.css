@@ -6,7 +6,10 @@
   --a11y-action-fill: #143b80;
   --a11y-action-fill-hover: #0e2b60;
   /* themed dark boundary: never a light grey outline on dark surfaces */
-  --a11y-control-boundary: #4a4a54;
+  --a11y-control-boundary: #7a7a86;
+  --focus-ring: #a7c7ff;
+  --sel-mark: #a7c7ff;
+  --sel-bg: rgba(79, 140, 255, 0.2);
 }
 
 :root[data-theme="light"] {
@@ -16,6 +19,9 @@
   --a11y-action-fill: #143b80;
   --a11y-action-fill-hover: #0e2b60;
   --a11y-control-boundary: #626262;
+  --focus-ring: #16346c;
+  --sel-mark: #16346c;
+  --sel-bg: rgba(79, 140, 255, 0.16);
 }
 
 /* Buttons carry no outline: tinted fill, shadow and the focus ring identify them (single button system). */
@@ -62,6 +68,152 @@ button.primary:hover:not(:disabled) {
 
 .addr-in {
   border: 0 !important;
+}
+
+/* Text fields keep a boundary of at least 3:1 even where a dialog rule removed the border. */
+.av-lock input[type="password"],
+.modal :is(input, textarea):not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.fd-opts :is(input, textarea):not([type="checkbox"]):not([type="radio"]),
+.perm-row input:not([type="checkbox"]) {
+  border: 1px solid var(--a11y-control-boundary);
+}
+
+/* Selected and checked states carry a mark that does not depend on hue: a bar on the leading edge of rows and
+   tiles, an underline on toggles, a ring on option cards. The fill only supports it. */
+.ft tr.sel {
+  background-color: var(--sel-bg);
+}
+.ft tr.sel td:first-child,
+.cmp-row.sel > :first-child {
+  box-shadow: inset 4px 0 0 var(--sel-mark);
+}
+.cmp-row.sel,
+.cmp-row.ph.sel {
+  background: var(--sel-bg) !important;
+}
+.tile.sel {
+  background: var(--sel-bg);
+  box-shadow: inset 0 0 0 2px var(--sel-mark);
+}
+.fp-actions button.marked,
+.fp-tools button.marked,
+.pv-dockbtn.on,
+.tr-tabs button.on,
+.fd-tog[aria-pressed="true"],
+.side-set[aria-pressed="true"],
+.git-pr-mode button.on,
+.wt-pill.on {
+  background: var(--sel-bg);
+  box-shadow: inset 0 -3px 0 var(--sel-mark);
+}
+.theme-seg button[aria-checked="true"],
+.cmp-seg button[aria-checked="true"],
+.theme-option[aria-checked="true"] {
+  box-shadow: var(--shadow-1), inset 0 -3px 0 var(--sel-mark);
+}
+.set-opt {
+  position: relative;
+}
+.set-opt::after {
+  content: "";
+  flex: none;
+  order: -1;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid var(--a11y-control-boundary);
+}
+.set-opt.on::after {
+  border: 5px solid var(--sel-mark);
+}
+.set-opt.on {
+  background: var(--sel-bg);
+  box-shadow: var(--shadow-1), inset 4px 0 0 var(--sel-mark);
+}
+.set-opt:focus-within {
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+.set-opt.on:focus-within {
+  box-shadow: 0 0 0 2px var(--focus-ring), inset 4px 0 0 var(--sel-mark);
+}
+
+/* Colour is not the only carrier of status: the compare toggles are struck through when off (see styles.css),
+   and the unfilled usage bar track keeps a visible edge. */
+:root[data-theme="light"] .side .bar i {
+  background: var(--accent-text);
+}
+
+/* Forced colours: box-shadow marks and background tints are removed by the browser, so selection, focus and
+   separators are redrawn with outlines, borders and system colours. */
+@media (forced-colors: active) {
+  :focus-visible,
+  :where(.fp-tools button, .fp-up, .fp-actions button, .crumbs button, .addr-fill, .addr-in, .addr-base, .addr-recent, .git-change-head button, .git-branch-file-head button, .git-file-diff-head button):focus-visible,
+  .set-opt:focus-within {
+    outline: 2px solid Highlight !important;
+    outline-offset: 1px !important;
+  }
+  .ft tr.sel,
+  .cmp-row.sel,
+  .tile.sel,
+  .set-opt.on,
+  .fp-actions button.marked,
+  .fp-tools button.marked,
+  .pv-dockbtn.on,
+  .tr-tabs button.on,
+  .fd-tog[aria-pressed="true"],
+  .side-set[aria-pressed="true"],
+  .git-pr-mode button.on,
+  .wt-pill.on,
+  .theme-seg button[aria-checked="true"],
+  .cmp-seg button[aria-checked="true"],
+  .theme-option[aria-checked="true"] {
+    outline: 3px solid Highlight;
+    outline-offset: -3px;
+  }
+  .ft tr.sel td:first-child,
+  .cmp-row.sel > :first-child {
+    border-left: 4px solid Highlight;
+  }
+  .set-opt::after {
+    border-color: ButtonText;
+  }
+  .set-opt.on::after {
+    border-color: Highlight;
+  }
+  .fp .sep {
+    --sep-c: ButtonText;
+  }
+  .fp .sep:hover,
+  .fp .sep[data-separator="active"] {
+    --sep-c: Highlight;
+  }
+  .colh-handle::after {
+    background: ButtonText;
+  }
+  .side .bar {
+    border: 1px solid ButtonText;
+  }
+  .side .bar i {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+  label.ck .ck-box {
+    border: 2px solid ButtonText;
+    box-shadow: none;
+  }
+  label.ck .ck-box svg {
+    visibility: hidden;
+  }
+  label.ck input:checked + .ck-box svg {
+    visibility: visible;
+    color: HighlightText;
+  }
+  label.ck input:checked + .ck-box {
+    background: Highlight;
+    border-color: Highlight;
+    forced-color-adjust: none;
+  }
 }
 
 .skip-navigation {
