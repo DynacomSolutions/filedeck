@@ -1,5 +1,7 @@
 import type { MiddlewareHandler } from "hono";
 import { PathError, resolveInRoot } from "./paths.ts";
+import path from "node:path";
+import { archiveBase } from "./archive.ts";
 import { MAX_JSON_BODY, isRawRoute } from "./request-guard.ts";
 
 /**
@@ -88,6 +90,32 @@ export function removalTargets(method: string, route: string, body: Record<strin
   return { paths: [], followFinal: false };
 }
 
+/**
+ * Destinations a copy, move or extract would merge into or replace, when the request names only the folder and the
+ * items: `toDir/<name>` for a copy that overwrites and for a move, and for an extract that merges (policy overwrite or
+ * skip) the folder itself, or the folder named after the archive. Keep-both copies and extracts always pick a free name.
+ * Refused when such a destination is, or contains, a read-only prefix. (The hub's job queue reaches the same routes:
+ * its per-file uploads and folder creation are checked on their own folder, its removals by `removalTargets`.)
+ */
+export function mergeTargets(method: string, route: string, body: Record<string, unknown>): string[] {
+  if (method !== "POST") return [];
+  const dirs = (k: string) => arr(body[k]).map((p) => path.posix.basename(p.replace(/\/+$/, "")));
+  const into = (toDir: string, names: string[]) => names.filter(Boolean).map((n) => `${toDir.replace(/\/+$/, "")}/${n}`);
+  const toDir = typeof body.toDir === "string" ? body.toDir : undefined;
+  switch (route) {
+    case "/api/fs/copy":
+      return toDir !== undefined && body.overwrite === true ? into(toDir, dirs("from")) : [];
+    case "/api/fs/move":
+      return toDir !== undefined ? into(toDir, dirs("from")) : [];
+    case "/api/jobs/extract": {
+      const policy = body.overwrite ?? "rename";
+      if (policy === "rename" || typeof body.destDir !== "string") return [];
+      return body.subfolder === false || typeof body.path !== "string" ? [body.destDir] : into(body.destDir, [archiveBase(path.posix.basename(body.path))]);
+    }
+  }
+  return [];
+}
+
 /** Whether `target` is a read-only prefix itself, lies under one, or contains one (removing or recursing into it would reach it). */
 export function reachesReadOnly(root: string, prefixes: string[], target: string, followFinal = false): boolean {
   if (hitsReadOnly(root, prefixes, target)) return true;
@@ -126,6 +154,7 @@ export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandl
     if (writeTargets(c.req.method, c.req.path, (k) => c.req.query(k), body).some((t) => hitsReadOnly(root, prefixes, t))) return c.json({ error: "read-only volume" }, 403);
     const rm = removalTargets(c.req.method, c.req.path, body);
     if (rm.paths.some((t) => reachesReadOnly(root, prefixes, t, rm.followFinal))) return c.json({ error: "read-only volume" }, 403);
+    if (mergeTargets(c.req.method, c.req.path, body).some((t) => reachesReadOnly(root, prefixes, t))) return c.json({ error: "read-only volume" }, 403);
     return next();
   };
 }

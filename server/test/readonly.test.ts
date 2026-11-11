@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
+import { execFileSync } from "node:child_process";
+import { serve } from "@hono/node-server";
+import type { AddressInfo } from "node:net";
+import { createHub } from "../src/hub.ts";
 import { parseReadOnly } from "../src/readonly.ts";
 
 test("parseReadOnly keeps absolute prefixes only", () => {
@@ -125,6 +129,86 @@ test("trash restore checks the computed destination and the item it would replac
     assert.equal(r.ok, true);
     assert.ok(fs.existsSync(path.join(tmp, "rw/b.txt")));
   } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a copy, move or extract that would merge into or replace a folder holding a read-only prefix is refused", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-romerge-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "srv/backup/a.txt"), "protected");
+    fs.mkdirSync(path.join(tmp, "rw/srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "rw/srv/backup/a.txt"), "other");
+    fs.writeFileSync(path.join(tmp, "rw/srv/new.txt"), "n");
+    execFileSync("tar", ["-cf", path.join(tmp, "rw/srv.tar"), "-C", path.join(tmp, "rw"), "srv"]);
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_READONLY: "/srv/backup" } as never));
+    const post = (u: string, b: unknown) => app.request(u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+    const kept = () => fs.readFileSync(path.join(tmp, "srv/backup/a.txt"), "utf8") === "protected" && !fs.existsSync(path.join(tmp, "srv/new.txt"));
+    const denied = async (r: Response | Promise<Response>) => {
+      assert.equal((await r).status, 403);
+      assert.ok(kept());
+    };
+    await denied(post("/api/fs/copy", { from: ["/rw/srv"], toDir: "/", overwrite: true }));
+    await denied(post("/api/fs/move", { from: ["/rw/srv"], toDir: "/" }));
+    await denied(post("/api/jobs/extract", { path: "/rw/srv.tar", destDir: "/", overwrite: "overwrite" })); // lands in /srv
+    await denied(post("/api/jobs/extract", { path: "/rw/srv.tar", destDir: "/srv", subfolder: false, overwrite: "overwrite" }));
+    await denied(post("/api/jobs/extract", { path: "/rw/srv.tar", destDir: "/srv", subfolder: false, overwrite: "skip" }));
+    // keep-both only ever picks a free name: allowed, and the protected folder is untouched
+    assert.equal((await post("/api/fs/copy", { from: ["/rw/srv"], toDir: "/" })).status, 200);
+    const ex = await post("/api/jobs/extract", { path: "/rw/srv.tar", destDir: "/srv", subfolder: false, overwrite: "rename" });
+    assert.equal(ex.status, 202);
+    for (let i = 0; i < 100; i++) {
+      const j = (await (await app.request(`/api/jobs/${((await ex.clone().json()) as { id: string }).id}`)).json()) as { state: string };
+      if (j.state !== "running" && j.state !== "queued") break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(fs.readFileSync(path.join(tmp, "srv/backup/a.txt"), "utf8"), "protected");
+    // an overwrite that does not reach the prefix still works
+    fs.mkdirSync(path.join(tmp, "rw/dst"));
+    assert.equal((await post("/api/fs/copy", { from: ["/rw/srv"], toDir: "/rw/dst", overwrite: true })).status, 200);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the hub's job queue cannot merge or replace into a folder holding a read-only prefix", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-rohub-")));
+  const open = (app: { fetch: never }) =>
+    new Promise<ReturnType<typeof serve>>((res) => {
+      const s: ReturnType<typeof serve> = serve({ fetch: app.fetch, port: 0 }, () => res(s));
+    });
+  const servers: ReturnType<typeof serve>[] = [];
+  try {
+    fs.mkdirSync(path.join(tmp, "srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "srv/backup/a.txt"), "protected");
+    fs.mkdirSync(path.join(tmp, "rw/srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "rw/srv/backup/a.txt"), "other");
+    fs.writeFileSync(path.join(tmp, "rw/srv/new.txt"), "n");
+    const agent = await open(createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_READONLY: "/srv/backup" } as never)) as never);
+    servers.push(agent);
+    const hubSrv = await open(createHub(loadConfig({ FILEDECK_MODE: "hub", NODES: `t=http://127.0.0.1:${(agent.address() as AddressInfo).port}`, FILEDECK_STATIC: tmp } as never)) as never);
+    servers.push(hubSrv);
+    const hub = `http://127.0.0.1:${(hubSrv.address() as AddressInfo).port}`;
+    for (const op of ["copy", "move"]) {
+      const r = await fetch(`${hub}/api/ops/jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op, items: [{ node: "t", path: "/rw/srv" }], dst: { node: "t", dir: "/" }, conflict: "overwrite" }),
+      });
+      assert.equal(r.status, 202);
+      const id = ((await r.json()) as { id: string }).id;
+      let state = "";
+      for (let i = 0; i < 200 && !["done", "failed", "canceled"].includes(state); i++) {
+        await new Promise((res) => setTimeout(res, 50));
+        state = ((await (await fetch(`${hub}/api/ops/jobs/${id}`)).json()) as { state: string }).state;
+      }
+      assert.equal(state, "failed", op); // files beside the prefix may be written, the prefix itself is refused
+      assert.equal(fs.readFileSync(path.join(tmp, "srv/backup/a.txt"), "utf8"), "protected", op);
+      assert.ok(fs.existsSync(path.join(tmp, "rw/srv/new.txt")), "the source is kept");
+    }
+  } finally {
+    for (const s of servers) s.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
