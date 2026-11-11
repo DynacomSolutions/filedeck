@@ -138,3 +138,16 @@ test("an unwritable cache dir still serves thumbnails", { skip: !hasFfmpeg }, as
   assert.equal(r.status, 200);
   assert.deepEqual(jpegSize(Buffer.from(await r.arrayBuffer())), { w: 90, h: 120 });
 });
+
+test("a failing open() gives its slot back", async () => {
+  const t = new Thumbnailer({ dir: path.join(os.tmpdir(), "filedeck-th-none"), maxBytes: 1 << 20, concurrency: 1, queue: 0, timeoutMs: 1000, ffmpeg: "ffmpeg" });
+  for (let i = 0; i < 4; i++) {
+    // with the slot leaked, the second call would answer 429 (queue 0) instead of the open error
+    await assert.rejects(
+      t.get(`id-${i}`, "image", async () => {
+        throw new Error("open failed");
+      }),
+      { message: "open failed" },
+    );
+  }
+});
