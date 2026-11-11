@@ -29,6 +29,31 @@ export function pick(v: unknown, depth = 0): unknown {
   return out;
 }
 
+/** The audit line of a request the guard refused: status, method, route, query and the origin it claimed; the body is never read. */
+export function auditRefusal(who: string, c: import("hono").Context, status: number, sink: AuditSink = (l) => console.log(l)): void {
+  const q: Record<string, string> = {};
+  for (const k of QUERY_KEYS) {
+    const v = c.req.query(k);
+    if (v !== undefined) q[k] = clip(v);
+  }
+  const origin = c.req.header("origin");
+  const site = c.req.header("sec-fetch-site");
+  sink(
+    JSON.stringify({
+      audit: true,
+      ts: new Date().toISOString(),
+      who,
+      method: c.req.method,
+      route: clip(c.req.path),
+      query: Object.keys(q).length ? q : undefined,
+      ...(origin ? { origin: clip(origin) } : {}),
+      ...(site ? { fetchSite: site } : {}),
+      refused: true,
+      status,
+    }),
+  );
+}
+
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {
   return async (c, next) => {
     const m = c.req.method;

@@ -39,7 +39,8 @@ function clean(h: Headers, keepLength: boolean): Headers {
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault };
-  app.use("*", requestGuard({ maxEdit: cfg.maxEdit }));
+  // editor saves are limited by the agent that takes them (its own maxEdit), not here
+  app.use("*", requestGuard({ audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
   app.use("*", apiTokenAuth(cfg.apiToken));
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });

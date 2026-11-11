@@ -38,7 +38,7 @@ function dispo(name: string) {
 export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
   app.use("*", agentAuth(cfg.agentToken));
-  app.use("*", requestGuard({ maxEdit: cfg.maxEdit }));
+  app.use("*", requestGuard({ maxEdit: cfg.maxEdit, audit: { who: `agent:${cfg.node}`, sink: auditSink } }));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   const watches = new Watches();

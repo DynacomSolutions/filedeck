@@ -12,8 +12,12 @@ import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 import { readOnlyGuard } from "../src/readonly.ts";
 import { audit } from "../src/audit.ts";
-import { MAX_JSON_BODY } from "../src/request-guard.ts";
+import { MAX_JSON_BODY, requestGuard } from "../src/request-guard.ts";
 
+const listen = (app: { fetch: never }) =>
+  new Promise<ReturnType<typeof serve>>((res) => {
+    const s: ReturnType<typeof serve> = serve({ fetch: app.fetch, port: 0 }, () => res(s));
+  });
 const J = { "content-type": "application/json" };
 let tmp: string, agentSrv: ReturnType<typeof serve>, hubSrv: ReturnType<typeof serve>, hub: string, host: string;
 let agent: ReturnType<typeof createAgent>;
@@ -114,6 +118,10 @@ test("body sizes are capped before buffering", async () => {
   assert.equal((await w(65)).status, 413);
   assert.ok(!fs.existsSync(path.join(tmp, "big.txt")));
   assert.equal((await w(64)).status, 200);
+  // through the hub the agent's own limit applies (the hub has none of its own for this route)
+  const hw = (n: number) => send("PUT", `${hub}/api/nodes/t/api/fs/write?path=/big2.txt&create=1`, "a".repeat(n));
+  assert.equal((await hw(65)).status, 413);
+  assert.equal((await hw(64)).status, 200);
   // a raw upload is larger than the JSON cap and goes through
   const up = await send("PUT", `${hub}/api/nodes/t/api/fs/upload?dir=/&name=large.bin`, Buffer.alloc(MAX_JSON_BODY + 10));
   assert.equal(up.status, 201);
@@ -142,4 +150,106 @@ test("the audit log records the paths whatever the content type, and never reads
   const [d, u] = lines.map((l) => JSON.parse(l));
   assert.deepEqual(d.body, { paths: ["/gone"] });
   assert.equal(u.body, undefined);
+});
+
+/** A request sent with chunked transfer encoding (no Content-Length), `size` bytes of body in 1 MiB pieces. */
+function chunked(port: number, p: string, headers: Record<string, string>, size: number, first = ""): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ method: "POST", host: "127.0.0.1", port, path: p, headers: { ...headers, "transfer-encoding": "chunked" }, agent: false }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode ?? 0));
+    });
+    req.on("error", reject);
+    req.write(first);
+    let left = size - first.length;
+    while (left > 0) {
+      const n = Math.min(left, 1024 * 1024);
+      req.write(Buffer.alloc(n, 0x20));
+      left -= n;
+    }
+    req.end();
+  });
+}
+
+test("a bulk job of 10,000 steps with long paths is accepted through the hub", async () => {
+  const seg = "d".repeat(100);
+  const steps = Array.from({ length: 10_000 }, (_, i) => ({ kind: "copy", src: { node: "t", path: `/${seg}/${i}` }, dst: { node: "t", dir: `/${seg}/out` } }));
+  const body = JSON.stringify({ op: "sync", steps });
+  assert.ok(body.length > 2 * 1024 * 1024);
+  const r = await fetch(`${hub}/api/ops/jobs`, { method: "POST", headers: J, body });
+  assert.equal(r.status, 202);
+  const job = (await r.json()) as { id: string };
+  await fetch(`${hub}/api/ops/jobs/${job.id}/cancel`, { method: "POST" });
+});
+
+test("a chunked JSON body over the cap is refused with 413, one under it is read by the read-only guard", async () => {
+  const aport = (agentSrv.address() as AddressInfo).port;
+  assert.equal(await chunked(aport, "/api/fs/delete", J, MAX_JSON_BODY + 1, '{"paths":["/x"],"pad":"'), 413);
+  assert.equal(await chunked((hubSrv.address() as AddressInfo).port, "/api/nodes/t/api/fs/delete", J, MAX_JSON_BODY + 1, '{"paths":["/x"],"pad":"'), 413);
+  // under the cap, with the body spread over several chunks, the paths are still found
+  fs.mkdirSync(path.join(tmp, "ro"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "ro/a.txt"), "x");
+  const ro = await listen(createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "r", FILEDECK_READONLY: "/ro" } as never)) as never);
+  try {
+    const port = (ro.address() as AddressInfo).port;
+    const pad = " ".repeat(3 * 1024 * 1024);
+    const code = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ method: "POST", host: "127.0.0.1", port, path: "/api/fs/delete", headers: { ...J, "transfer-encoding": "chunked" }, agent: false }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode ?? 0));
+      });
+      req.on("error", reject);
+      req.write('{"paths":');
+      req.write(pad);
+      req.write('["/ro/a.txt"]}');
+      req.end();
+    });
+    assert.equal(code, 403);
+    assert.ok(fs.existsSync(path.join(tmp, "ro/a.txt")));
+  } finally {
+    ro.close();
+  }
+});
+
+test("the read-only guard refuses a body it cannot read on a route that needs it", async () => {
+  const app = new Hono();
+  app.use("*", readOnlyGuard(tmp, ["/ro"]));
+  app.post("/api/fs/delete", (c) => c.json({ ok: true }));
+  app.post("/api/fs/mkdir", (c) => c.json({ ok: true }));
+  const post = (u: string, body: string, headers: Record<string, string> = J) => app.request(u, { method: "POST", headers, body });
+  assert.equal((await post("/api/fs/delete", "{not json")).status, 400);
+  assert.equal((await post("/api/fs/delete", "")).status, 400);
+  assert.equal((await post("/api/fs/delete", '"a string"')).status, 400);
+  assert.equal((await post("/api/fs/delete", "[]")).status, 400);
+  assert.equal((await post("/api/fs/mkdir", "{}", { ...J, "content-length": String(MAX_JSON_BODY + 1) })).status, 413);
+  assert.equal((await post("/api/fs/delete", '{"paths":["/rw/x"]}')).status, 200, "a readable body outside the prefix passes");
+});
+
+test("without Sec-Fetch-Site an Origin is accepted for Host, X-Forwarded-Host or a listed host, nothing else", async () => {
+  const app = new Hono();
+  app.use("*", requestGuard({ allowedHosts: ["files.example.test", "Other.example.test:8443"] }));
+  app.post("/x", (c) => c.json({ ok: true }));
+  const post = async (headers: Record<string, string>) => (await app.request("http://internal.local:8080/x", { method: "POST", headers: { ...J, ...headers }, body: "{}" })).status;
+  assert.equal(await post({ origin: "http://internal.local:8080" }), 200, "Origin equals Host");
+  assert.equal(await post({ origin: "https://files.example.test", host: "internal.local:8080", "x-forwarded-host": "files.example.test" }), 200, "the proxy rewrote Host");
+  assert.equal(await post({ origin: "https://files.example.test", host: "internal.local:8080" }), 200, "listed host (name only: any port)");
+  assert.equal(await post({ origin: "https://other.example.test:8443", host: "internal.local:8080" }), 200, "listed host:port");
+  assert.equal(await post({ origin: "https://other.example.test:9", host: "internal.local:8080" }), 403, "a listed host:port is exact");
+  assert.equal(await post({ origin: "https://evil.example", host: "internal.local:8080" }), 403);
+  assert.equal(await post({ origin: "https://evil.example", host: "internal.local:8080", "x-forwarded-host": "files.example.test" }), 403, "forwarded host names another site");
+  assert.equal(await post({ origin: "https://files.example.test", "sec-fetch-site": "cross-site", "x-forwarded-host": "files.example.test" }), 403, "Sec-Fetch-Site decides when present");
+});
+
+test("refused requests are audited with their status and claimed origin, without the body", async () => {
+  const lines: string[] = [];
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "a" } as never), (l) => lines.push(l));
+  const body = JSON.stringify({ paths: ["/SECRET-BODY-PATH"] });
+  await app.request("/api/fs/delete", { method: "POST", headers: { ...J, origin: "https://evil.example", "sec-fetch-site": "cross-site" }, body });
+  await app.request("/api/fs/delete", { method: "POST", headers: { "content-type": "text/plain" }, body });
+  await app.request("/api/fs/delete", { method: "POST", headers: { ...J, "content-length": String(MAX_JSON_BODY + 1) }, body });
+  const rows = lines.map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((r) => r.status), [403, 415, 413]);
+  assert.ok(rows.every((r) => r.audit === true && r.refused === true && r.method === "POST" && r.route === "/api/fs/delete" && r.who === "agent:a"));
+  assert.equal(rows[0].origin, "https://evil.example");
+  assert.ok(!lines.join("\n").includes("SECRET-BODY-PATH"));
 });

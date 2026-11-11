@@ -70,18 +70,26 @@ export function hitsReadOnly(root: string, prefixes: string[], target: string): 
   }
 }
 
+/** POST routes whose paths come from the JSON body (see writeTargets). */
+const BODY_ROUTES = new Set([
+  "/api/fs/mkdir", "/api/fs/symlink", "/api/fs/perms", "/api/fs/rename", "/api/fs/move", "/api/fs/copy", "/api/fs/trash", "/api/fs/delete",
+  "/api/trash/restore", "/api/trash/delete", "/api/trash/empty", "/api/jobs/compress", "/api/jobs/extract",
+]);
+
 export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandler {
   return async (c, next) => {
     if (prefixes.length === 0 || ["GET", "HEAD", "OPTIONS"].includes(c.req.method)) return next();
     let body: Record<string, unknown> = {};
-    // The body is read whatever its content type: the routes parse it themselves and do not look at the type.
-    const len = Number(c.req.header("content-length") ?? "0");
-    if (!isRawRoute(c.req.method, c.req.path) && len <= MAX_JSON_BODY) {
+    // The body is read whatever its content type. On a route that takes its paths from the body, a body that cannot be
+    // read (too large for the guard's own limit, not JSON) is refused: the guard never passes what it could not check.
+    if (!isRawRoute(c.req.method, c.req.path) && c.req.method === "POST" && BODY_ROUTES.has(c.req.path)) {
+      if (Number(c.req.header("content-length") ?? "0") > MAX_JSON_BODY) return c.json({ error: "request body too large" }, 413);
       try {
         const j = await c.req.raw.clone().json();
-        if (j && typeof j === "object") body = j as Record<string, unknown>;
+        if (!j || typeof j !== "object" || Array.isArray(j)) throw new Error("not an object");
+        body = j as Record<string, unknown>;
       } catch {
-        /* the route reports the bad body itself */
+        return c.json({ error: "request body cannot be read" }, 400);
       }
     }
     if (writeTargets(c.req.method, c.req.path, (k) => c.req.query(k), body).some((t) => hitsReadOnly(root, prefixes, t))) return c.json({ error: "read-only volume" }, 403);
