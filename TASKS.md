@@ -184,7 +184,7 @@ Findings from the 12 November 2026 review where an operation could lose, skip or
 ETA: 2026-11-12 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 112 | Transfers page through large folders and keep the source when anything was skipped | in_review | claude-20261112-rv-transfers | rv-transfer-paging | | 2026-11-12 09:00 ICT | Found in review<br>https://github.com/DynacomSolutions/filedeck/pull/191 |
+| 112 | Transfers page through large folders and keep the source when anything was skipped | done | claude-20261112-rv-transfers | rv-transfer-paging | | | Merged https://github.com/DynacomSolutions/filedeck/pull/191, CI green, two independent reviews<br>An incomplete folder listing fails the item and keeps the source |
 | 113 | Trash: age filter, volumes outside the mount list, failed moves, reserved name | done | claude-20261112-rv-fsops | rv-trash | | | Merged https://github.com/DynacomSolutions/filedeck/pull/180, CI green<br>4 new tests fail without the change |
 | 114 | Archives: sparse files, dates before 1970, split volumes, listing time limit, zip download errors | done | claude-20261112-rv-archives | rv-archives | | | Merged https://github.com/DynacomSolutions/filedeck/pull/183, CI green<br>Split sets without 7-Zip answer 501 |
 | 115 | Network sources survive aborted uploads; WebDAV, SFTP and thumbnail fixes | done | claude-20261112-rv-sources | rv-sources-streams | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/194, CI green<br>First SFTP host key is kept beside the vault file; a key change needs a pin |
