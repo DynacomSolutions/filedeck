@@ -127,7 +127,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .pv-body img,.pv-body video{max-width:100%;max-height:100%;object-fit:contain}.pv-body audio{width:100%;margin:1rem}.pv-body iframe{width:100%;height:100%;border:0;background:#fff}
 .pv-text{margin:0;padding:.7rem;font:.78rem/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;width:100%}
 .pv-empty{padding:1rem;font-size:.84rem}
-@media(max-width:700px){.side{flex-basis:9rem}}
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){.side{flex-basis:9rem}}
 
 /* editor / diff overlay */
 .ed{position:fixed;inset:var(--vv-top,0) 0 auto 0;height:var(--vvh,100dvh);z-index:50;display:flex;flex-direction:column;background:var(--bg)}
@@ -340,7 +340,10 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 .pv-tabs button.on{color:var(--fg);border-color:var(--border-strong);background:var(--surface-2)}
 .pv-md{padding:.9rem 1.1rem;font-size:.86rem;line-height:1.6;overflow-wrap:anywhere;text-align:left}
 .pv-md h1,.pv-md h2,.pv-md h3,.pv-md h4{margin:1.1em 0 .45em;line-height:1.25}.pv-md h1{font-size:1.5rem}.pv-md h2{font-size:1.2rem;border-bottom:1px solid var(--border);padding-bottom:.25rem}.pv-md h3{font-size:1.02rem}
-.pv-md p,.pv-md ul,.pv-md ol,.pv-md pre,.pv-md table,.pv-md blockquote{margin:.6em 0}
+.pv-md p,.pv-md ul,.pv-md ol,.pv-md pre,.pv-md table,/* theme.css resets every list; the previews bring their markers back */
+.pv-md ul,.pv-md ol,.pv-office ul{padding-left:1.6rem}.pv-md ul,.pv-office ul{list-style:disc}.pv-md ol{list-style:decimal}.pv-md ul ul{list-style:circle}.pv-md li>ul,.pv-md li>ol{margin:.2em 0}
+.pv-md li:has(>input[type=checkbox]){list-style:none;margin-left:-1.2rem}.pv-md li>input[type=checkbox]{margin-right:.4rem}
+.pv-md blockquote{margin:.6em 0}
 .pv-md code{font:.8rem var(--mono);background:var(--surface-2);padding:.05rem .3rem;border-radius:var(--radius-sm)}
 .pv-md pre{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:.6rem .75rem;overflow:auto}.pv-md pre code{background:none;padding:0}
 .pv-md blockquote{border-left:3px solid var(--accent-line);padding:.1rem .9rem;color:var(--fg-soft)}
@@ -367,7 +370,7 @@ kbd{font:600 .72rem var(--mono);background:var(--surface-2);border:1px solid var
 /* theme.css --muted (#737373) is 4.4:1 on the black page; nudged to pass 4.5:1 for small text. */
 :root:not([data-theme="light"]){--muted:#8c8c8c}
 :focus-visible{outline:2px solid var(--focus-ring,var(--accent));outline-offset:2px}
-@media(max-width:700px){
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){
   .site-header__inner{flex-wrap:nowrap;gap:.4rem}
   .site-header .status{display:none}
   .body{flex-direction:column}
@@ -533,7 +536,7 @@ button.danger{color:var(--danger-text)}
 .selbar-actions[data-icons] .bl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .site-header__actions .diffmark-label{display:inline-block;max-width:10rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
 @container hdr (max-width:860px){.bl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}}
-@media(max-width:700px){.app{flex-direction:column}.side{flex:0 0 auto;height:auto;max-height:26vh;width:100%;box-shadow:var(--shadow-1)}.side-brand{display:none}}
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){.app{flex-direction:column}.side{flex:0 0 auto;height:auto;max-height:26vh;width:100%;box-shadow:var(--shadow-1)}.side-brand{display:none}}
 
 .cmp-row .cmp-name{color:var(--fg);font-weight:600}.cmp-row .num,.cmp-row .cmp-mt{color:var(--muted)}.cmp-row .cmp-mt{font-variant-numeric:tabular-nums}
 .side-scroll button,.jobs-toggle{justify-content:flex-start}
@@ -677,7 +680,7 @@ button.danger{color:var(--danger-text)}
 .pp .props>div{grid-template-columns:5.5rem 1fr}
 /* The Properties body owns scrolling on every screen size so sticky Git rows
    stay anchored to the same right-hand scrollport. */
-@media(max-width:700px){
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){
   .fp .pv{overflow:hidden}
   .fp .pv-head{flex:0 0 auto;min-width:0;align-items:flex-start}
   .fp .pv-body.pp-body{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto}
@@ -743,7 +746,7 @@ button.danger{color:var(--danger-text)}
 .tile-git{display:flex;justify-content:center;min-width:0;overflow:hidden}
 .git-chip{flex:none;display:flex;align-items:center;margin:0 .35rem;max-width:16rem}
 .git-inline{display:none}
-@media(max-width:700px){.git-th,.ft td.git-td{display:none}.git-inline{display:block;margin-top:.1rem}.git-chip .git-n{display:none}.git-chip .git-br{max-width:5rem}}
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){.git-th,.ft td.git-td{display:none}.git-inline{display:block;margin-top:.1rem}.git-chip .git-n{display:none}.git-chip .git-br{max-width:5rem}}
 .git-sec .props>div{grid-template-columns:5.5rem 1fr}
 .git-sec code{font-family:var(--mono);font-size:.78rem}
 .git-list{margin-top:.4rem}
@@ -964,7 +967,7 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 .ed.inline .ed-head .pv-extra,.ed.in-pane .ed-head .pv-extra{flex:none;margin-left:0}
 .pv{container:pvpane/inline-size}
 .pv-head .pv-title{min-width:3.5rem}
-@media(max-width:700px){.fp .pv-head{align-items:center;min-width:0}.pv-head .pv-meta{display:none}}
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){.fp .pv-head{align-items:center;min-width:0}.pv-head .pv-meta{display:none}}
 /* narrow pane (docked side, or a phone): icon-only Edit and compact 34px icon targets (above the 24px WCAG 2.2 minimum) so the title keeps room */
 @container pvpane (max-width:440px){
   .pv-head{padding-left:.6rem;gap:.3rem;padding-right:.2rem}
@@ -986,7 +989,7 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 /* ---- phone: one view at a time, keyboard-aware ---- */
 .fp-phonepane{flex:1;min-height:0;min-width:0;display:flex;flex-direction:column}
 .fp-phonepane>*{flex:1;min-height:0}
-@media(max-width:700px){
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){
   .fp.phone-pane>.fp-bar,.fp.phone-pane>.fp-filter,.fp.phone-pane>.fp-err{display:none}
   /* Browse a folder or read a file: the sidebar gets out of the way while a pane is open or the keyboard is up. */
   .main{padding:.3rem}
@@ -1014,7 +1017,7 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 /* ---- phone: the sidebar is an off-canvas drawer opened from the top bar ---- */
 .phone-only{display:none}
 .drawer-back{display:none}
-@media(max-width:700px){
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){
   .phone-only{display:inline-flex}
   .site-header__inner{height:44px}
   .selbar b.selbar-none{display:none}
@@ -1031,4 +1034,4 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .side-brand{display:flex}
   .drawer-back{display:block;position:fixed;inset:0;z-index:65;background:rgba(0,0,0,.5)}
 }
-@media(max-width:700px) and (prefers-reduced-motion:reduce){.side,.side.open{transition:none}}
+@media(prefers-reduced-motion:reduce) and (max-width:700px),(prefers-reduced-motion:reduce) and (max-height:500px) and (max-width:1000px){.side,.side.open{transition:none}}

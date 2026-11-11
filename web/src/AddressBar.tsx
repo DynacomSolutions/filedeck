@@ -166,13 +166,15 @@ interface Props {
   /** navigate (pushes the panel history); `select` is a file to select in that folder */
   onGo: (node: string, path: string, select?: string) => void;
   onCrumbMenu: (e: React.MouseEvent, path: string) => void;
+  /** accessible name of the breadcrumb landmark; panels give theirs a distinguishing suffix */
+  label?: string;
 }
 
 /**
  * The panel's location as a URI (`node-a:/home/user`). Idle it shows clickable path segments; click, focus or
  * Ctrl+L turns it into a combobox input with suggestions (nodes, child folders, bookmarks, recents).
  */
-export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Props) {
+export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, label = "Breadcrumb" }: Props) {
   const here = fmtAddr(node, path);
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(here);
@@ -200,7 +202,6 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     if (restore) requestAnimationFrame(() => popOpener.current?.focus({ preventScroll: true }));
   }, []);
   const navRef = useRef<HTMLElement>(null);
-  const skipFocus = useRef(false);
   const listId = useId();
   const marks = useBookmarks();
   const dirCache = useRef(new Map<string, { name: string; dir: boolean }[]>());
@@ -269,10 +270,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
     setItems([]);
     setError("");
     setBusy(false);
-    if (refocus) {
-      skipFocus.current = true;
-      setTimeout(() => (editBtn.current?.focus(), (skipFocus.current = false)), 0);
-    }
+    if (refocus) setTimeout(() => editBtn.current?.focus(), 0);
   }, []);
 
   useLayoutEffect(() => {
@@ -588,7 +586,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
       }
     }}>
       {basePicker}
-      <nav className={"crumbs" + (tight ? " tight" : "")} aria-label="Breadcrumb" ref={navRef}>
+      <nav className={"crumbs" + (tight ? " tight" : "")} aria-label={label} ref={navRef}>
         {shownSegs.map(({ sg, i }) => (
           <span className={"crumb" + (i === segs.length - 1 ? " last" : "")} key={sg.path}>
             {i === folded + 1 && folded > 0 && (
@@ -613,7 +611,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu }: Pr
         ))}
       </nav>
       <Tip label="Edit the address" shortcut="Ctrl+L">
-        <span ref={editBtn} className="addr-fill" role="button" tabIndex={0} aria-label="Edit address" onFocus={() => !skipFocus.current && begin()} />
+        <span ref={editBtn} className="addr-fill" role="button" tabIndex={0} aria-label="Edit address" onClick={begin} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), begin())} />
       </Tip>
       <Tip label="Recent locations">
         <button type="button" className={"addr-recent" + (pop?.kind === "recent" ? " open" : "")} aria-label="Recent locations" aria-haspopup="menu" aria-expanded={pop?.kind === "recent"} onClick={(e) => openRecents(e.currentTarget)}>

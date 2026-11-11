@@ -48,7 +48,7 @@ export interface VaultEntryView {
 export interface PutOptions {
   remember?: boolean;
   scope?: Scope;
-  /** inode/size identity of the file, used when the path no longer matches */
+  /** device:inode:size identity of the file, used when the path no longer matches (older entries hold inode:size and simply stop matching by identity) */
   fid?: string;
 }
 
@@ -197,7 +197,7 @@ export class Vault {
   }
 
   /**
-   * The password for this file: its own entry, else the same inode+size under
+   * The password for this file: its own entry, else the same device+inode+size under
    * another path (renamed or moved), else the nearest folder entry above it.
    * A use refreshes the sliding TTL (never past the absolute cap); `touch: false` peeks without counting as a use.
    */
