@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import { createHub } from "../src/hub.ts";
-import { hitsReadOnly, parseReadOnly, reachesReadOnly, readOnlyForms } from "../src/readonly.ts";
+import { hitsReadOnly, jobMayWrite, parseReadOnly, reachesReadOnly, readOnlyForms } from "../src/readonly.ts";
 
 test("parseReadOnly keeps absolute prefixes only", () => {
   assert.deepEqual(parseReadOnly(" /mnt/a/, /,, /x"), ["/mnt/a", "/", "/x"]);
@@ -292,6 +292,172 @@ test("on a case-insensitive filesystem a prefix is matched without regard to cas
     fs.mkdirSync(path.join(tmp, "Ro"));
     const f = readOnlyForms(tmp, ["/Ro"]);
     assert.deepEqual(f, [{ p: "/Ro", fold: false }]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+function agentFor(tmp: string, extra: Record<string, string>) {
+  return createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_PROC_MOUNTS: path.join(tmp, "no-mount-table"), ...extra } as never));
+}
+type App = ReturnType<typeof createAgent>;
+const postTo = (app: App, u: string, b: unknown) => app.request(u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+async function jobEnd(app: App, id: string): Promise<{ state: string; error?: string }> {
+  for (let i = 0; i < 400; i++) {
+    const j = (await (await app.request(`/api/jobs/${id}`)).json()) as { state: string; error?: string };
+    if (j.state !== "running" && j.state !== "queued") return j;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error("job did not end");
+}
+
+test("a link, folder or file on the way to a prefix cannot be replaced or removed, in the written or the resolved form", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-rocomp-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "mnt/data/ro"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "mnt/data/ro/a.txt"), "protected");
+    fs.mkdirSync(path.join(tmp, "other/ro"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, "rw/data"), { recursive: true });
+    fs.symlinkSync("/mnt/data", path.join(tmp, "data"));
+    const app = agentFor(tmp, { FILEDECK_READONLY: "/data/ro" });
+    const kept = () => fs.readFileSync(path.join(tmp, "mnt/data/ro/a.txt"), "utf8") === "protected" && fs.readlinkSync(path.join(tmp, "data")) === "/mnt/data";
+    // the middle link retargeted by a symlink that overwrites it
+    assert.equal((await postTo(app, "/api/fs/symlink", { path: "/data", target: "/other", overwrite: true })).status, 403);
+    assert.equal((await postTo(app, "/api/fs/symlink", { path: "/mnt/data", target: "/other", overwrite: true })).status, 403, "resolved form");
+    // rename or move something onto it, or it away
+    assert.equal((await postTo(app, "/api/fs/rename", { from: "/rw/data", to: "/data", overwrite: true })).status, 403);
+    assert.equal((await postTo(app, "/api/fs/rename", { from: "/data", to: "/data2" })).status, 403);
+    assert.equal((await postTo(app, "/api/fs/move", { from: ["/rw/data"], toDir: "/" })).status, 403);
+    assert.equal((await postTo(app, "/api/fs/copy", { from: ["/rw/data"], toDir: "/", overwrite: true })).status, 403);
+    assert.equal((await postTo(app, "/api/fs/delete", { paths: ["/data"] })).status, 403);
+    assert.equal((await postTo(app, "/api/fs/trash", { paths: ["/mnt/data"] })).status, 403);
+    // a link that is not on the way is free to change
+    assert.equal((await postTo(app, "/api/fs/symlink", { path: "/free", target: "/other" })).status, 201);
+    assert.equal((await postTo(app, "/api/fs/symlink", { path: "/free", target: "/mnt", overwrite: true })).status, 201);
+    assert.ok(kept());
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a prefix link made after the start, and a restore into the resolved form, are refused", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-rolate-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "mnt/disk"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "mnt/disk/a.txt"), "orig");
+    const free = agentFor(tmp, {});
+    await postTo(free, "/api/fs/trash", { paths: ["/mnt/disk/a.txt"] }); // trashed from the resolved form while nothing was protected
+    const app = agentFor(tmp, { FILEDECK_READONLY: "/ro" });
+    fs.symlinkSync("/mnt/disk", path.join(tmp, "ro")); // made by the operator after the agent started
+    fs.writeFileSync(path.join(tmp, "mnt/disk/b.txt"), "protected");
+    assert.equal((await postTo(app, "/api/fs/delete", { paths: ["/mnt/disk/b.txt"] })).status, 403, "protected from the moment the link exists");
+    const vol = ((await (await free.request("/api/trash/list")).json()) as { volumes: { volume: string; items: { id: string }[] }[] }).volumes[0]!;
+    const r = (await (await postTo(app, "/api/trash/restore", { volume: vol.volume, ids: [vol.items[0]!.id] })).json()) as { results: { ok: boolean; error?: string }[] };
+    assert.deepEqual([r.results[0]!.ok, r.results[0]!.error], [false, "read-only volume"]);
+    assert.ok(!fs.existsSync(path.join(tmp, "mnt/disk/a.txt")));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a file prefix cannot be replaced through a link to its folder", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-rofile-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "srv"));
+    fs.mkdirSync(path.join(tmp, "rw"));
+    fs.writeFileSync(path.join(tmp, "srv/conf.yaml"), "protected");
+    fs.writeFileSync(path.join(tmp, "rw/conf.yaml"), "EVIL");
+    fs.symlinkSync("/srv", path.join(tmp, "rw/lnk"));
+    const app = agentFor(tmp, { FILEDECK_READONLY: "/srv/conf.yaml" });
+    const codes = [
+      (await app.request("/api/fs/upload?dir=/srv/&name=conf.yaml&overwrite=1", { method: "PUT", body: "EVIL" })).status,
+      (await app.request("/api/fs/upload?dir=/rw/lnk&name=conf.yaml&overwrite=1", { method: "PUT", body: "EVIL" })).status,
+      (await app.request("/api/upload/chunk?dir=/srv&name=conf.yaml&id=0123456789abcdef&offset=0&total=4&overwrite=1", { method: "PATCH", body: "EVIL" })).status,
+      (await app.request("/api/fs/write?path=/rw/lnk/conf.yaml", { method: "PUT", body: "EVIL", headers: { "if-match": "x" } })).status,
+      (await postTo(app, "/api/fs/copy", { from: ["/rw/conf.yaml"], toDir: "/rw/lnk", overwrite: true })).status,
+      (await postTo(app, "/api/fs/rename", { from: "/rw/conf.yaml", to: "/rw/lnk/conf.yaml", overwrite: true })).status,
+    ];
+    assert.deepEqual(codes, [403, 403, 403, 403, 403, 403]);
+    assert.equal(fs.readFileSync(path.join(tmp, "srv/conf.yaml"), "utf8"), "protected");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+/** A job slot held by a long compression, so that the jobs queued behind it start only when it is cancelled. */
+async function holdSlot(app: App, tmp: string) {
+  fs.mkdirSync(path.join(tmp, "rw/big"), { recursive: true });
+  execFileSync("truncate", ["-s", "1G", path.join(tmp, "rw/big/zeros")]);
+  const blocker = (await (await postTo(app, "/api/jobs/compress", { dir: "/rw/big", names: ["zeros"], format: "tar.gz", level: 9 })).json()) as { id: string };
+  return { release: () => postTo(app, `/api/jobs/${blocker.id}/cancel`, {}) };
+}
+
+test("a queued extract is checked again where its destination really is when it starts", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-roqueue-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "srv/backup/a.txt"), "protected");
+    fs.mkdirSync(path.join(tmp, "rw/src/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "rw/src/backup/a.txt"), "EVIL");
+    fs.mkdirSync(path.join(tmp, "rw/x"));
+    execFileSync("tar", ["-cf", path.join(tmp, "rw/x.tar"), "-C", path.join(tmp, "rw/src"), "backup"]);
+    const app = agentFor(tmp, { FILEDECK_READONLY: "/srv/backup", FILEDECK_JOB_CONCURRENCY: "1" });
+    const slot = await holdSlot(app, tmp);
+    const queued = await postTo(app, "/api/jobs/extract", { path: "/rw/x.tar", destDir: "/rw/x", subfolder: false, overwrite: "overwrite" });
+    assert.equal(queued.status, 202);
+    const id = ((await queued.json()) as { id: string }).id;
+    // swap the destination for a link to the parent of the protected folder
+    assert.equal((await postTo(app, "/api/fs/rename", { from: "/rw/x", to: "/rw/x-old" })).status, 200);
+    assert.equal((await postTo(app, "/api/fs/symlink", { path: "/rw/x", target: "../srv" })).status, 201);
+    await slot.release();
+    const end = await jobEnd(app, id);
+    assert.equal(end.state, "failed");
+    assert.match(end.error ?? "", /read-only/);
+    assert.equal(fs.readFileSync(path.join(tmp, "srv/backup/a.txt"), "utf8"), "protected");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a queued recursive permissions change is checked again where its target really is when it starts", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-roqperms-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "srv/backup/a.txt"), "protected");
+    fs.chmodSync(path.join(tmp, "srv/backup/a.txt"), 0o644);
+    fs.mkdirSync(path.join(tmp, "rw/x"), { recursive: true });
+    const app = agentFor(tmp, { FILEDECK_READONLY: "/srv/backup", FILEDECK_JOB_CONCURRENCY: "1" });
+    const slot = await holdSlot(app, tmp);
+    const queued = await postTo(app, "/api/fs/perms", { path: "/rw/x", mode: 0o700, recursive: true });
+    assert.equal(queued.status, 202);
+    const id = ((await queued.json()) as { id: string }).id;
+    assert.equal((await postTo(app, "/api/fs/rename", { from: "/rw/x", to: "/rw/x-old" })).status, 200);
+    assert.equal((await postTo(app, "/api/fs/symlink", { path: "/rw/x", target: "../srv" })).status, 201);
+    await slot.release();
+    const end = await jobEnd(app, id);
+    assert.equal(end.state, "failed");
+    assert.match(end.error ?? "", /read-only/);
+    assert.equal(fs.statSync(path.join(tmp, "srv/backup/a.txt")).mode & 0o777, 0o644);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("jobMayWrite resolves the location at the moment it is asked", () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-rojmw-")));
+  try {
+    fs.mkdirSync(path.join(tmp, "srv/backup"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, "rw/x"), { recursive: true });
+    const ro = ["/srv/backup"];
+    assert.equal(jobMayWrite(tmp, ro, path.join(tmp, "rw/x"), { contains: true }), true);
+    fs.rmSync(path.join(tmp, "rw/x"), { recursive: true });
+    fs.symlinkSync(path.join(tmp, "srv"), path.join(tmp, "rw/x"));
+    assert.equal(jobMayWrite(tmp, ro, path.join(tmp, "rw/x"), { contains: true }), false, "it holds the prefix");
+    assert.equal(jobMayWrite(tmp, ro, path.join(tmp, "rw/x"), { contains: false }), true, "adding a file beside the prefix is not a change to it");
+    assert.equal(jobMayWrite(tmp, ro, path.join(tmp, "rw/x/backup"), { contains: false }), false, "it is the prefix");
+    assert.equal(jobMayWrite(tmp, ro, path.join(tmp, "rw/x"), { contains: true, follow: false }), true, "the link itself, not followed");
+    assert.equal(jobMayWrite(tmp, ro, path.join(tmp, "gone"), { contains: true }), true, "missing: the job fails by itself");
+    assert.equal(jobMayWrite(tmp, [], path.join(tmp, "rw/x"), { contains: true }), true);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

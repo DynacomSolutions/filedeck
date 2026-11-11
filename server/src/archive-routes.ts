@@ -8,7 +8,7 @@ import * as ar from "./archive.ts";
 import { Jobs } from "./jobs.ts";
 import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
-import { extractBlocked, hitsReadOnly } from "./readonly.ts";
+import { extractBlocked, hitsReadOnly, jobMayWrite } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 import { ZipTickets } from "./zip-tickets.ts";
 
@@ -41,12 +41,27 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
   const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
 
+  // Queued jobs are checked again when they start, on where the destination really is by then (a folder may have been swapped for a link meanwhile).
+  const mayWrite = (real: string, contains: boolean) => {
+    if (!jobMayWrite(root, cfg.readOnly, real, { contains })) throw new ops.FsError(403, "read-only volume");
+  };
+  const runCompress = async (plan: ar.CompressPlan, ctl: Parameters<typeof ar.runCompress>[2]) => {
+    mayWrite(path.dirname(plan.outReal), false);
+    return ar.runCompress(plan, limits, ctl);
+  };
+  const runExtract = async (plan: ar.ExtractPlan, ctl: Parameters<typeof ar.runExtract>[2]) => {
+    const merge = plan.overwrite !== "rename";
+    mayWrite(plan.destReal, merge && !plan.subfolder);
+    if (merge && plan.subfolder) mayWrite(path.join(plan.destReal, ar.archiveBase(plan.archiveName)), true);
+    return ar.runExtract(plan, limits, ctl);
+  };
+
   jobs.register("compress", async (p) => {
     const b = p as { dir: string; names: string[]; format: string; name?: string; level?: number; encryptHeaders?: boolean; splitBytes?: number; exclude?: string[]; destDir?: string };
     try {
       if ([b.dir, b.destDir].some((t) => t !== undefined && hitsReadOnly(root, cfg.readOnly, t))) throw new ops.FsError(403, "read-only volume");
       const plan = await ar.prepareCompress(root, b.dir, b.names, b.format, b.name, { level: b.level, encryptHeaders: b.encryptHeaders === true, splitBytes: b.splitBytes, exclude: b.exclude ?? [], destDir: b.destDir });
-      return { run: (ctl) => ar.runCompress(plan, limits, ctl) };
+      return { run: (ctl) => runCompress(plan, ctl) };
     } catch (e) {
       return { run: async () => Promise.reject(e) }; // a refusal fails the job with its message
     }
@@ -127,7 +142,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     });
     // Allowlisted fields only, and none at all when a password was given: that job is failed after a restart, never stored.
     const params = plan.password ? undefined : { dir: b.dir, names: b.names, format: b.format, name: b.name, level: b.level, encryptHeaders: b.encryptHeaders, splitBytes: b.splitBytes, exclude: b.exclude, destDir: b.destDir };
-    const job = jobs.create("compress", `Compress ${plan.names.length} item(s) to ${plan.outName}`, (ctl) => ar.runCompress(plan, limits, ctl), undefined, undefined, { params });
+    const job = jobs.create("compress", `Compress ${plan.names.length} item(s) to ${plan.outName}`, (ctl) => runCompress(plan, ctl), undefined, undefined, { params });
     return c.json(job, 202);
   });
 
@@ -140,7 +155,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     });
     // judged on the resolved destination and the real archive name, which are what the extraction will use
     if (extractBlocked(root, cfg.readOnly, plan, ar.archiveBase)) throw new ops.FsError(403, "read-only volume");
-    const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => ar.runExtract(plan, limits, ctl));
+    const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => runExtract(plan, ctl));
     return c.json(job, 202, plan.viaSz ? { "x-filedeck-pw": "ok" } : {});
   });
 

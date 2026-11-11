@@ -1,5 +1,5 @@
 import type { MiddlewareHandler } from "hono";
-import { lstatSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { PathError, resolveInRoot } from "./paths.ts";
 import { MAX_JSON_BODY, isRawRoute } from "./request-guard.ts";
@@ -150,6 +150,8 @@ export function removalTargets(method: string, route: string, body: Record<strin
       return { paths: [...b("from"), ...(body.overwrite === true ? b("to") : [])], followFinal: false };
     case "/api/fs/move":
       return { paths: b("from"), followFinal: false };
+    case "/api/fs/symlink":
+      return { paths: body.overwrite === true ? b("path") : [], followFinal: false }; // replaces what is at `path`: a link or folder on the way to a prefix
     case "/api/fs/perms":
       return { paths: body.recursive === true ? b("path") : [], followFinal: true }; // a link is followed by the change
   }
@@ -188,6 +190,31 @@ export function reachesReadOnly(root: string, prefixes: string[], target: string
     if (!(e instanceof PathError)) throw e;
     return false;
   }
+}
+
+/**
+ * Whether a job that was accepted earlier may write at `real` now that it starts. The location is resolved again at
+ * this moment (a folder swapped for a link after the request was checked is followed to where it leads), and refused
+ * when it lies under a read-only prefix, or, with `contains`, holds one (a merge or recursive change would reach it).
+ * `follow: false` keeps the last name as it is (a single entry is changed through a descriptor opened without following a link). A location that
+ * is outside the root or cannot be resolved is refused, except when it does not exist (the job fails on its own then).
+ * This is the function an operation calls on the location it has pinned.
+ */
+export function jobMayWrite(root: string, prefixes: string[], real: string, opts: { contains: boolean; follow?: boolean }): boolean {
+  if (prefixes.length === 0) return true;
+  let at: string;
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+    at = opts.follow === false ? path.join(realpathSync(path.dirname(real)), path.basename(real)) : realpathSync(real);
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  const rel = path.relative(rootReal, at);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return false;
+  const virtual = "/" + rel.split(path.sep).filter(Boolean).join("/");
+  const forms = readOnlyForms(root, prefixes);
+  return !forms.some((f) => underF(virtual, f) || (opts.contains && underF(f.p, { p: virtual, fold: f.fold })));
 }
 
 /**
