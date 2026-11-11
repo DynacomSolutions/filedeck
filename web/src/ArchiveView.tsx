@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtSize, parent, passwordState, type ArchiveEntry, type Entry, type Pw } from "./api";
 import { ExtractDialog, PasswordInput, RememberOptions } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
+import { singleFlight } from "./singleFlight";
 import * as Ic from "lucide-react";
 
 type Listing = { entries: ArchiveEntry[]; truncated: boolean; bytes: number; encrypted?: boolean };
@@ -19,6 +20,15 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
   const [lock, setLock] = useState<"required" | "incorrect" | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<string[] | null>(null);
+  const [starting, setStarting] = useState(false);
+  const startHere = useRef<() => Promise<unknown>>(async () => undefined);
+  startHere.current = () =>
+    api
+      .startExtract(node, entry.path, parent(entry.path), true, {}, pw)
+      .then((j) => setMsg(`Started: ${j.title}`))
+      .catch((e: Error) => (passwordState(e) ? setDialog([]) : setMsg(e.message)));
+  // one wrapper for the life of the view, so a double click starts one job
+  const extractHere = useRef(singleFlight(() => startHere.current(), setStarting)).current;
   useEffect(() => {
     setData(null);
     setErr("");
@@ -83,14 +93,7 @@ export function ArchiveView({ node, entry }: { node: string; entry: Entry }) {
   return (
     <div className="av">
       <div className="av-bar">
-        <button
-          onClick={() =>
-            api
-              .startExtract(node, entry.path, parent(entry.path), true, {}, pw)
-              .then((j) => setMsg(`Started: ${j.title}`))
-              .catch((e: Error) => (passwordState(e) ? setDialog([]) : setMsg(e.message)))
-          }
-        >
+        <button disabled={starting} onClick={() => void extractHere()}>
           <Ic.PackageOpen /> Extract here
         </button>
         <Tip label="Choose a destination, overwrite policy and password for the ticked entries">
