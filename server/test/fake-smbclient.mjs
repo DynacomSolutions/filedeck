@@ -101,7 +101,7 @@ try {
     const dest = args[1];
     if (force && process.env.FAKE_SMB_NO_F) fail("NT_STATUS_INVALID_PARAMETER", `renaming files \\${args[0]} -> \\${dest} `, 0); // a server that refuses supersede
     const hitFail = process.env.FAKE_SMB_FAIL_RENAME_TO && dest.endsWith(process.env.FAKE_SMB_FAIL_RENAME_TO) && (process.env.FAKE_SMB_FAIL_RESTORE || !args[0].endsWith(".old"));
-    if (hitFail) fail("NT_STATUS_ACCESS_DENIED", `renaming files \\${args[0]} -> \\${dest} `, 0);
+    if (hitFail) fail(process.env.FAKE_SMB_RENAME_STATUS || "NT_STATUS_ACCESS_DENIED", `renaming files \\${args[0]} -> \\${dest} `, 0);
     const [a, b] = [real(args[0]), real(dest)];
     if (!fs.existsSync(a)) fail("NT_STATUS_OBJECT_NAME_NOT_FOUND", `renaming files \\${args[0]} -> \\${dest} `);
     if (fs.existsSync(b) && !force) fail("NT_STATUS_OBJECT_NAME_COLLISION", `renaming files \\${args[0]} -> \\${dest} `);

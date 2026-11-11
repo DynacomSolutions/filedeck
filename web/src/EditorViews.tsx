@@ -25,7 +25,32 @@ export const OPTS: MonacoEditor.IStandaloneEditorConstructionOptions = {
   scrollBeyondLastLine: false,
   fontSize: 13,
   tabSize: 2,
+  // Tab inserts a tab here, which would otherwise trap keyboard users: say how to get out (Ctrl+M, or the toolbar button).
+  ariaLabel: "Editor. Tab inserts a tab. Press Control+M, or use the Tab key button, to let Tab leave the editor.",
 };
+
+/**
+ * Keyboard users cannot leave Monaco with Tab while it takes the key. This runs Monaco's own "Toggle Tab Key Moves Focus" action
+ * (the same as Ctrl+M), and Monaco announces the new mode itself, so the button carries no pressed state that could go stale.
+ */
+function TabFocusToggle({ editor }: { editor: () => MonacoEditor.ICodeEditor | null | undefined }) {
+  return (
+    <Tip label="Toggle whether Tab moves focus out of the editor" shortcut="Ctrl+M">
+      <button
+        type="button"
+        aria-label="Toggle Tab key moves focus"
+        onClick={() => {
+          const e = editor();
+          if (!e) return;
+          e.focus();
+          e.trigger("toolbar", "editor.action.toggleTabFocusMode", null);
+        }}
+      >
+        <Ic.ArrowRightToLine /><span className="ed-lbl"> Tab key</span>
+      </button>
+    </Tip>
+  );
+}
 
 function useCtrlS(save: () => void) {
   const ref = useRef(save);
@@ -182,6 +207,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
         <span className="muted">{node}:{path}{loaded ? ` · ${fmtSize(loaded.size)}` : ""}</span>
         <span className="ed-spacer" />
         <Tip label="Select all" shortcut="Ctrl+A"><button type="button" className="ed-selall" aria-label="Select all" disabled={!loaded} onClick={() => selectAllInEditor(editorRef.current)}><Ic.TextSelect /><span className="ed-lbl"> Select all</span></button></Tip>
+        <TabFocusToggle editor={() => editorRef.current} />
         <Tip label="Save" shortcut="Ctrl+S"><button aria-label="Save" onClick={() => void save()} disabled={!dirty || saving}><Ic.Save /><span className="ed-lbl"> {saving ? "Saving..." : "Save"}</span></button></Tip>
         <Tip label="Close"><button aria-label="Close" onClick={close}><Ic.X /><span className="ed-lbl"> Close</span></button></Tip>
         {extra}
@@ -206,6 +232,35 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
       </div>
     </div>
   );
+}
+
+/**
+ * Focus handling of the page-level diff dialog. It is not `useDialogFocus`: that trap would also catch the Tab key Monaco uses to
+ * insert a tab. Here Tab only wraps when it reaches the dialog's own controls (Monaco keeps the key while it is taking Tab), and
+ * the focus goes back to where it was when the dialog closes.
+ */
+function OverlayFocus({ root }: { root: React.RefObject<HTMLDivElement | null> }) {
+  const opener = useRef<Element | null>(document.activeElement);
+  useEffect(() => {
+    const el = root.current;
+    const wrap = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || !el) return;
+      const items = Array.from(el.querySelectorAll<HTMLElement>("button:not([disabled]),input:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])")).filter((x) => x.getClientRects().length > 0);
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (!first || !last) return;
+      const here = document.activeElement;
+      if (e.shiftKey && (here === first || here === el)) (e.preventDefault(), last.focus());
+      else if (!e.shiftKey && here === last) (e.preventDefault(), first.focus());
+    };
+    // bubbling phase on the dialog: Monaco has already used the key if it inserted a tab
+    el?.addEventListener("keydown", wrap);
+    return () => {
+      el?.removeEventListener("keydown", wrap);
+      if (opener.current instanceof HTMLElement && opener.current.isConnected) opener.current.focus({ preventScroll: true });
+    };
+  }, [root]);
+  return null;
 }
 
 /** Two-file diff: left is read-only, right is editable and saveable. */
@@ -310,9 +365,23 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
     onClose();
   };
   const same = l && r && l.content === r.content;
+  const root = useRef<HTMLDivElement>(null);
 
   return (
-    <div className={"ed" + (overlay ? " over" : "") + (inPane ? " in-pane" : "")} role="region" aria-label="File diff">
+    <div
+      ref={root}
+      className={"ed" + (overlay ? " over" : "") + (inPane ? " in-pane" : "")}
+      // The page-level diff covers the panels, so it is a modal dialog: Tab stays in it, Escape closes it, focus returns to where it was.
+      {...(overlay ? { role: "dialog", "aria-modal": true, tabIndex: -1 } : { role: "region" })}
+      aria-label="File diff"
+      onKeyDown={(e) => {
+        if (overlay && e.key === "Escape" && !e.defaultPrevented) {
+          e.stopPropagation();
+          close();
+        }
+      }}
+    >
+      {overlay && <OverlayFocus root={root} />}
       <div className="ed-head" role="group" aria-label="Diff toolbar">
         <b>Diff</b>
         <Tip label={`${left.rev ? left.rev + " of " : ""}${left.node}:${left.path}`}><span className="muted ed-pair">{left.rev ? `${left.rev}:` : ""}{left.node}:{left.path}</span></Tip>
@@ -324,6 +393,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
         {same && <span className="pill">identical</span>}
         {left.rev && (l as { absent?: boolean } | null)?.absent && <span className="pill">not in {left.rev}</span>}
         <span className="ed-spacer" />
+        <TabFocusToggle editor={() => ed.current?.getModifiedEditor()} />
         <Tip label="Toggle side-by-side / inline">
           <button onClick={() => setInline((v) => !v)} aria-pressed={inline}>
             {inline ? <Ic.Columns2 /> : <Ic.Rows2 />} {inline ? "Side by side" : "Inline"}
@@ -350,6 +420,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
             options={{ ...OPTS, renderSideBySide: !inline, originalEditable: false, readOnly: false, useInlineViewWhenSpaceIsLimited: false }}
             onMount={(e) => {
               ed.current = e;
+             
               e.getModifiedEditor().focus();
               e.getModifiedEditor().onDidChangeModelContent(() => setRText(e.getModifiedEditor().getValue()));
             }}
