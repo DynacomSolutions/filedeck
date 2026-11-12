@@ -97,6 +97,8 @@ export interface RestoreOpts {
   conflict?: "fail" | "rename" | "replace";
   /** restore into this folder (keeping the name) instead of the original location */
   toDir?: string;
+  /** true for a path the caller must not change (a read-only volume, or a folder that contains one); checked on the computed destination */
+  blocked?: (virtual: string) => boolean;
 }
 export interface TrashResult {
   id: string;
@@ -124,6 +126,7 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
       const dest = resolveWrite(root, target);
       assertNotReserved(dest.virtual);
       if (dest.virtual === "/") throw bad("cannot restore onto the root");
+      if (opts.blocked?.(dest.virtual)) throw new ops.FsError(403, "read-only volume");
       // The destination folder is created and held one component at a time, and the item is moved out of its own pinned
       // folder, so neither side can be swapped for a link between the checks and the move.
       const res = await pinDirCreate(root, path.dirname(dest.real), async (dstAt): Promise<TrashResult> => {

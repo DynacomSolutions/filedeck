@@ -22,8 +22,8 @@ import { registerTranscodeRoutes } from "./transcode.ts";
 import { agentAuth } from "./agent-auth.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { requestGuard } from "./request-guard.ts";
-import { readOnlyGuard, isReadOnly } from "./readonly.ts";
-import { registerReadOnly } from "./pinwalk.ts";
+import { readOnlyGuard, isReadOnly, hitsReadOnly, reachesReadOnly } from "./readonly.ts";
+import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -41,7 +41,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.use("*", agentAuth(cfg.agentToken));
   app.use("*", requestGuard({ maxEdit: cfg.maxEdit, audit: { who: `agent:${cfg.node}`, sink: auditSink } }));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
-  registerReadOnly(cfg.root, cfg.readOnly); // the pinned operations re-check where their descriptors really point
+  app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   const watches = new Watches();
   const root = cfg.root;
@@ -248,7 +248,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.get("/api/trash/list", async (c) => c.json({ volumes: await trash.listTrash(root, cfg.procMounts) }));
   app.post("/api/trash/restore", async (c) => {
     const b = await json<{ volume: string; ids: string[]; conflict?: "fail" | "rename" | "replace"; toDir?: string }>(c);
-    return c.json({ results: await trash.restoreItems(root, str(b.volume, "volume"), b.ids, { conflict: b.conflict, ...(b.toDir ? { toDir: str(b.toDir, "toDir") } : {}) }) });
+    return c.json({ results: await trash.restoreItems(root, str(b.volume, "volume"), b.ids, { conflict: b.conflict, blocked: (v) => hitsReadOnly(root, cfg.readOnly, v) || reachesReadOnly(root, cfg.readOnly, v), ...(b.toDir ? { toDir: str(b.toDir, "toDir") } : {}) }) });
   });
   app.post("/api/trash/delete", async (c) => {
     const b = await json<{ volume: string; ids: string[] }>(c);

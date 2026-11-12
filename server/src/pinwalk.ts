@@ -2,9 +2,10 @@ import { constants as C, type Dirent } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { direntsOf } from "./dirnames.ts";
 import { PathError, TRASH_DIR, assertNotTrash, openChecked, pinDir } from "./paths.ts";
-import { hitsReadOnly } from "./readonly.ts";
+import { jobMayWrite } from "./readonly.ts";
 
 /**
  * Walks that hold a descriptor for every folder they enter. The path handed to the next step names the folder through
@@ -56,39 +57,38 @@ export async function openListedDir(p: string, listed: { dev: number; ino: numbe
 
 /* ---- read-only prefixes, checked on where a descriptor really points ---- */
 
-const READ_ONLY = new Map<string, string[]>();
+/**
+ * The read-only prefixes of the agent that is serving the request. The agent opens this scope around every request, so
+ * two agents on one root (as in tests) never see each other's prefixes, and a helper called outside any request sees none.
+ */
+const SCOPE = new AsyncLocalStorage<{ root: string; prefixes: string[] }>();
 
-/** The agent tells the pinned helpers which prefixes of `root` are read-only (FILEDECK_READONLY). */
-export function registerReadOnly(root: string, prefixes: string[]): void {
-  if (prefixes.length) READ_ONLY.set(root, prefixes);
-  else READ_ONLY.delete(root);
-}
+/** Run `fn` (and everything it awaits) with `prefixes` (FILEDECK_READONLY) as the read-only prefixes of `root`. */
+export const withReadOnly = <T>(root: string, prefixes: string[], fn: () => T): T => SCOPE.run({ root, prefixes }, fn);
 
-const lies = (v: string, prefix: string) => prefix === "/" || v === prefix || v.startsWith(prefix + "/");
+const readOnlyOf = (root: string): string[] | undefined => {
+  const sc = SCOPE.getStore();
+  return sc && sc.root === root && sc.prefixes.length ? sc.prefixes : undefined;
+};
 
 /**
- * Whether changing `virtual` would touch a read-only prefix. With `contains` an entry that holds a prefix inside it counts
- * too (it cannot be removed, moved or changed as a whole). This is the one place the rule lives for the pinned operations.
+ * Refuse before anything is changed: `real` (a resolved location) lies in a read-only prefix, or with `contains` holds one.
+ * The rule itself is `jobMayWrite` in readonly.ts; this only adds the error.
  */
-function blocked(root: string, prefixes: string[], virtual: string, contains: boolean): boolean {
-  if (hitsReadOnly(root, prefixes, virtual)) return true;
-  return contains && prefixes.some((p) => lies(p, virtual));
+export function assertMayChange(root: string, real: string, contains: boolean): void {
+  const prefixes = readOnlyOf(root);
+  if (prefixes && !jobMayWrite(root, prefixes, real, { contains, follow: true })) throw new PathError(403, "read-only volume");
 }
 
-/** Refuse before anything is changed: `virtual` (a resolved path) lies in a read-only prefix, or with `contains` holds one. */
-export function assertMayChange(root: string, virtual: string, contains: boolean): void {
-  const prefixes = READ_ONLY.get(root);
-  if (prefixes && blocked(root, prefixes, virtual, contains)) throw new PathError(403, "read-only volume");
-}
-
-/** Refuse when the folder `at` (a `/proc/self/fd` path), or its entry `name`, lies in a read-only prefix (or holds one, with `contains`). Looks at the location the descriptor resolves to now, after any link in an ancestor was followed. */
+/**
+ * Refuse when the folder `at` (a `/proc/self/fd` path), or its entry `name`, lies in a read-only prefix (or holds one, with `contains`).
+ * Looks at the location the descriptor resolves to now, after any link in an ancestor was followed; an entry is judged by its own name.
+ */
 export async function assertWritableAt(root: string, at: string, name?: string, contains = false): Promise<void> {
-  const prefixes = READ_ONLY.get(root);
+  const prefixes = readOnlyOf(root);
   if (!prefixes || !LINUX) return;
-  const loc = await fs.readlink(at);
-  const virtual = loc === root ? "/" : root === "/" ? loc : loc.startsWith(root + "/") ? loc.slice(root.length) : "/";
-  const target = name ? (virtual === "/" ? "/" + name : virtual + "/" + name) : virtual;
-  if (blocked(root, prefixes, target, contains)) throw new PathError(403, "read-only volume");
+  const ok = name === undefined ? jobMayWrite(root, prefixes, at, { contains, follow: true }) : jobMayWrite(root, prefixes, path.join(at, name), { contains, follow: false });
+  if (!ok) throw new PathError(403, "read-only volume");
 }
 
 /** `pinDir` for a folder that is about to be changed: refused when it resolves into a read-only prefix. */

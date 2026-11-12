@@ -8,7 +8,7 @@ import { Readable } from "node:stream";
 import * as ops from "../src/fsops.ts";
 import { uploadChunk } from "../src/chunked.ts";
 import { deleteItems, restoreItems } from "../src/trash.ts";
-import { registerReadOnly, STAGING_PREFIX } from "../src/pinwalk.ts";
+import { STAGING_PREFIX, withReadOnly } from "../src/pinwalk.ts";
 import { applyPerms, planPerms } from "../src/props.ts";
 import { loadConfig } from "../src/config.ts";
 
@@ -337,8 +337,7 @@ test("a folder swapped into a read-only prefix after the guard ran is refused", 
   fresh("ro");
   fs.mkdirSync(path.join(root, "d"));
   fs.mkdirSync(path.join(root, "ro"));
-  registerReadOnly(root, ["/ro"]);
-  try {
+  {
     const real = fsp.open.bind(fsp);
     let done = false;
     mock.method(fsp, "open", async (p: string, ...rest: never[]) => {
@@ -349,20 +348,17 @@ test("a folder swapped into a read-only prefix after the guard ran is refused", 
       }
       return real(p, ...rest);
     });
-    await assert.rejects(ops.upload(root, "/d", "x.txt", Readable.from([Buffer.from("x")]), false, 100), /read-only/);
+    await withReadOnly(root, ["/ro"], () => assert.rejects(ops.upload(root, "/d", "x.txt", Readable.from([Buffer.from("x")]), false, 100), /read-only/));
     assert.deepEqual(fs.readdirSync(path.join(root, "ro")), []);
     mock.restoreAll();
     // a recursive change on a parent does not walk into a prefix
     fs.mkdirSync(path.join(root, "parent/ro"), { recursive: true });
     fs.writeFileSync(path.join(root, "parent/ro/f.txt"), "f");
     fs.chmodSync(path.join(root, "parent/ro/f.txt"), 0o644);
-    registerReadOnly(root, ["/parent/ro"]);
-    const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never);
+    const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_READONLY: "/parent/ro" } as never);
     const plan = await planPerms(cfg, { path: "/parent", mode: 0o750, recursive: true });
     await assert.rejects(applyPerms(cfg, plan), /read-only/);
     assert.equal(fs.statSync(path.join(root, "parent/ro/f.txt")).mode & 0o777, 0o644);
-  } finally {
-    registerReadOnly(root, []);
   }
 });
 
@@ -423,8 +419,7 @@ test("a recursive change refuses a read-only prefix inside the target before it 
   fs.writeFileSync(path.join(root, "top/a.txt"), "a");
   fs.chmodSync(path.join(root, "top/ro"), 0o755);
   const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_READONLY: "/top/ro" } as never);
-  registerReadOnly(root, cfg.readOnly);
-  try {
+  {
     const plan = await planPerms(cfg, { path: "/top", mode: 0o700, recursive: true });
     await assert.rejects(applyPerms(cfg, plan), /read-only/);
     for (const p of ["top", "top/a.txt", "top/ro", "top/ro/deep", "top/ro/deep/f"]) assert.notEqual(fs.statSync(path.join(root, p)).mode & 0o777, 0o700, `${p} must be untouched`);
@@ -434,8 +429,8 @@ test("a recursive change refuses a read-only prefix inside the target before it 
     fs.writeFileSync(path.join(root, "srv/backup/a.txt"), "p");
     fs.chmodSync(path.join(root, "srv/backup/a.txt"), 0o644);
     fs.chmodSync(path.join(root, "srv/backup"), 0o755);
-    registerReadOnly(root, ["/srv/backup"]);
-    const plan2 = await planPerms(cfg, { path: "/rw/x", mode: 0o700, recursive: true });
+    const cfg2 = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_READONLY: "/srv/backup" } as never);
+    const plan2 = await planPerms(cfg2, { path: "/rw/x", mode: 0o700, recursive: true });
     const progress: { current?: string } = {};
     let cur = "";
     Object.defineProperty(progress, "current", {
@@ -448,11 +443,9 @@ test("a recursive change refuses a read-only prefix inside the target before it 
       },
       get: () => cur,
     });
-    await applyPerms(cfg, plan2, { signal: new AbortController().signal, progress } as never);
+    await applyPerms(cfg2, plan2, { signal: new AbortController().signal, progress } as never);
     assert.equal(fs.statSync(path.join(root, "srv/backup/a.txt")).mode & 0o777, 0o644);
     assert.equal(fs.statSync(path.join(root, "srv/backup")).mode & 0o777, 0o755);
-  } finally {
-    registerReadOnly(root, []);
   }
 });
 

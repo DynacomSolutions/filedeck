@@ -6,8 +6,8 @@ import * as ops from "./fsops.ts";
 import { direntsOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
 import { PathError, TRASH_DIR, openChecked, resolveRead, resolveWrite } from "./paths.ts";
-import { MAX_DEPTH, assertMayChange, assertNotReserved, dirAt, isReservedName, openDir, pinParentW, tooDeep, walkGuard } from "./pinwalk.ts";
-import { hitsReadOnly } from "./readonly.ts";
+import { MAX_DEPTH, assertMayChange, assertNotReserved, dirAt, isReservedName, openDir, pinParentW, tooDeep, walkGuard, withReadOnly } from "./pinwalk.ts";
+import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { SizeStore, type DuEntry } from "./size-store.ts";
@@ -234,7 +234,12 @@ async function applyOne(real: string, type: Props["type"], plan: PermsPlan): Pro
   }
 }
 
-export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise<PermsResult> {
+export function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise<PermsResult> {
+  // the pinned steps re-check the read-only prefixes of this agent wherever the job runs from
+  return withReadOnly(cfg.root, cfg.readOnly, () => applyPermsIn(cfg, plan, ctl));
+}
+
+async function applyPermsIn(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise<PermsResult> {
   const res: PermsResult = { path: plan.virtual, changed: 0, skipped: 0, errors: 0 };
   if (!plan.recursive) {
     const one = (at: string) => applyOne(at, plan.type, plan);
@@ -243,7 +248,7 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
     else res.skipped = 1;
     return res;
   }
-  assertMayChange(cfg.root, plan.virtual, true); // a prefix at or below the target: refuse before anything is changed
+  assertMayChange(cfg.root, plan.real, true); // a prefix at or below the target: refuse before anything is changed
   let seen = 0;
   const guard = walkGuard(cfg.root);
   const wants = (t: Props["type"]) => plan.scope === "all" || (plan.scope === "files" ? t !== "dir" : t === "dir");
@@ -569,17 +574,24 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (plan.recursive) {
       const what = [plan.mode !== undefined ? `mode ${plan.mode.toString(8)}` : "", plan.uid !== undefined || plan.gid !== undefined ? "owner" : ""].filter(Boolean).join(" and ");
       const { path: p, mode, owner, group, recursive, scope } = req; // allowlist, never the raw body
-      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => applyPerms(cfg, plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope } });
+      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope } });
       return c.json(job, 202);
     }
     return c.json(await applyPerms(cfg, plan));
   });
+  // A queued change is checked again when it starts, on where its target really is by then (a folder may have been swapped for a link meanwhile).
+  const runPerms = (plan: PermsPlan, ctl: Parameters<typeof applyPerms>[2]) => {
+    if (!jobMayWrite(cfg.root, cfg.readOnly, plan.real, { contains: plan.recursive, follow: plan.recursive })) return Promise.reject(new ops.FsError(403, "read-only volume"));
+    return applyPerms(cfg, plan, ctl);
+  };
   // Planned again, so confinement and read-only checks apply to the moment of the restart; a refusal fails the job with its message.
   jobs.register("perms", async (p) => {
     try {
-      if (hitsReadOnly(cfg.root, cfg.readOnly, (p as PermsRequest).path)) throw new ops.FsError(403, "read-only volume");
+      const req = p as PermsRequest;
+      // a recursive change reaches everything below: an ancestor of a read-only prefix is refused too (also for a job stored before the prefix was configured)
+      if (hitsReadOnly(cfg.root, cfg.readOnly, req.path) || (req.recursive === true && reachesReadOnly(cfg.root, cfg.readOnly, req.path, true))) throw new ops.FsError(403, "read-only volume");
       const plan = await planPerms(cfg, p as PermsRequest);
-      return { run: (ctl) => applyPerms(cfg, plan, ctl) };
+      return { run: (ctl) => runPerms(plan, ctl) };
     } catch (e) {
       return { run: async () => Promise.reject(e) };
     }
