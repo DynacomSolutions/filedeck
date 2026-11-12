@@ -31,6 +31,8 @@ export interface SandboxInfo {
   rights: { fs: string; net: string; scope: string } | null;
   /** the launcher's socket filter (seccomp) can be installed here: socket, connect, bind, listen, accept and io_uring are refused */
   seccomp: boolean;
+  /** the launcher can clear capabilities here (it always does before it starts a program) */
+  caps: boolean;
   /** "landlock" (confined), "fallback" (runs unconfined, the caller must check its input), "off", or "unavailable" (require, and no Landlock) */
   state: "landlock" | "fallback" | "off" | "unavailable";
 }
@@ -51,6 +53,8 @@ export interface SandboxInfo {
  * a descriptor the program already holds: the launcher marks every descriptor above 2 close-on-exec (the root descriptors
  * included), and callers must not hand a confined program any descriptor it should not use through `stdio` either.
  * `uid`/`gid` 0 are refused by the launcher.
+ * Capabilities: the launcher clears every capability of a confined program (also one that stays root) except those named in `keepCaps`, and its
+ * seccomp filter refuses the privilege, mount, namespace and (unless `allowMetadata`) metadata calls; see the comment in the launcher.
  */
 
 /** The user and group unprivileged helper programs run as when the agent is root (the same ones the media tools use). */
@@ -72,8 +76,9 @@ export interface Probe {
   abi: number;
   rights: { fs: string; net: string; scope: string } | null;
   seccomp: boolean;
+  caps: boolean;
 }
-const NO_PROBE: Probe = { ok: false, abi: 0, rights: null, seccomp: false };
+const NO_PROBE: Probe = { ok: false, abi: 0, rights: null, seccomp: false, caps: false };
 
 /** Does the launcher at `helper` report a usable Landlock (exit 0), which rights, and is its socket filter available? Exit 70: no. */
 export function probeHelperInfo(helper: string): Promise<Probe> {
@@ -87,8 +92,8 @@ export function probeHelperInfo(helper: string): Promise<Probe> {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) return resolve(NO_PROBE);
-      const m = /landlock abi (\d+) fs (0x[0-9a-f]+) net (0x[0-9a-f]+) scope (0x[0-9a-f]+)(?: seccomp (\d))?/.exec(out);
-      resolve(m ? { ok: true, abi: Number(m[1]), rights: { fs: m[2]!, net: m[3]!, scope: m[4]! }, seccomp: m[5] === "1" } : { ok: true, abi: 0, rights: null, seccomp: false });
+      const m = /landlock abi (\d+) fs (0x[0-9a-f]+) net (0x[0-9a-f]+) scope (0x[0-9a-f]+)(?: seccomp (\d))?(?: caps (\d))?/.exec(out);
+      resolve(m ? { ok: true, abi: Number(m[1]), rights: { fs: m[2]!, net: m[3]!, scope: m[4]! }, seccomp: m[5] === "1", caps: m[6] === "1" } : { ok: true, abi: 0, rights: null, seccomp: false, caps: false });
     });
   });
 }
@@ -98,12 +103,12 @@ export const probeHelper = async (helper: string): Promise<boolean> => (await pr
 export function sandboxInfo(): Promise<SandboxInfo> {
   cached ??= (async () => {
     const mode = modeFromEnv();
-    if (mode === "off") return { mode, helper: null, landlock: false, abi: 0, rights: null, seccomp: false, state: "off" as const };
+    if (mode === "off") return { mode, helper: null, landlock: false, abi: 0, rights: null, seccomp: false, caps: false, state: "off" as const };
     const helper = process.env.FILEDECK_SANDBOX_HELPER ?? DEFAULT_HELPER;
     const usable = await fs.access(helper, fs.constants.X_OK).then(() => true, () => false);
     const probe = usable ? await probeHelperInfo(helper) : NO_PROBE;
     const landlock = probe.ok;
-    return { mode, helper: usable ? helper : null, landlock, abi: probe.abi, rights: probe.rights, seccomp: probe.seccomp, state: landlock ? ("landlock" as const) : mode === "require" ? ("unavailable" as const) : ("fallback" as const) };
+    return { mode, helper: usable ? helper : null, landlock, abi: probe.abi, rights: probe.rights, seccomp: probe.seccomp, caps: probe.caps, state: landlock ? ("landlock" as const) : mode === "require" ? ("unavailable" as const) : ("fallback" as const) };
   })();
   return cached;
 }
@@ -113,25 +118,29 @@ export function resetSandbox(): void {
   cached = null;
 }
 
-/** Called once when the agent starts: finds the mode and says so, in a line, when programs are not confined by the kernel. */
+/** Called once when the agent starts: finds the mode and says so, in lines, when programs are not confined by the kernel. */
 export async function initSandbox(log: (msg: string) => void = (m) => console.warn(m)): Promise<SandboxInfo> {
   const info = await sandboxInfo();
   log(sandboxLine(info));
-  if (info.state === "fallback") log("sandbox unavailable (Landlock is not usable here): helper programs run without kernel confinement; Git is used only for repositories whose git directory has no symbolic links or include settings");
-  else if (info.state === "unavailable") log("sandbox unavailable (Landlock is not usable here) and FILEDECK_SANDBOX=require: the features that start helper programs answer an error");
+  if (info.state === "off") log("sandbox off (FILEDECK_SANDBOX=off): git, bsdtar and 7zz run with no kernel confinement and no launcher, only the agent's own path checks; for development only");
+  else if (info.state === "fallback") log("sandbox unavailable (Landlock is not usable here): git, bsdtar and 7zz run without kernel confinement, only with the agent's own path checks (git is used only for repositories whose git directory has no symbolic links or include settings); set FILEDECK_SANDBOX=require to refuse instead");
+  else if (info.state === "unavailable") log("sandbox unavailable (Landlock is not usable here) and FILEDECK_SANDBOX=require: the features that start git, bsdtar or 7zz (repositories, archives, zip downloads) answer an error");
   return info;
 }
 
 /** One line for the start-up log: the state, the Landlock ABI and rights, and whether the socket filter is on. */
 export function sandboxLine(i: SandboxInfo): string {
   const r = i.rights ? ` rights fs=${i.rights.fs} net=${i.rights.net} scope=${i.rights.scope}` : "";
-  return `sandbox: mode ${i.mode}, state ${i.state}, landlock ${i.landlock ? `abi ${i.abi}${r}` : "unavailable"}, socket filter ${i.seccomp ? "on" : "off (this kernel or architecture cannot install it)"}`;
+  return `sandbox: mode ${i.mode}, state ${i.state}, archive tools and git ${archiveToolsState(i)}, landlock ${i.landlock ? `abi ${i.abi}${r}` : "unavailable"}, socket filter ${i.seccomp ? "on" : "off (this kernel or architecture cannot install it)"}`;
 }
 
+/** Whether the helper programs (git, bsdtar, 7zz) are confined by the kernel, run unconfined, or refuse to run. */
+export const archiveToolsState = (i: SandboxInfo): "confined" | "unconfined" | "disabled" => (i.state === "landlock" ? "confined" : i.state === "unavailable" ? "disabled" : "unconfined");
+
 /** A summary that is safe to show an operator (/api/info): no paths. */
-export async function sandboxSummary(): Promise<{ mode: SandboxMode; state: SandboxInfo["state"]; landlockAbi: number; socketFilter: boolean }> {
+export async function sandboxSummary(): Promise<{ mode: SandboxMode; state: SandboxInfo["state"]; landlockAbi: number; socketFilter: boolean; archiveTools: "confined" | "unconfined" | "disabled" }> {
   const i = await sandboxInfo();
-  return { mode: i.mode, state: i.state, landlockAbi: i.abi, socketFilter: i.seccomp };
+  return { mode: i.mode, state: i.state, landlockAbi: i.abi, socketFilter: i.seccomp, archiveTools: archiveToolsState(i) };
 }
 
 /** The error answered when the sandbox is required and not available. */
@@ -139,6 +148,15 @@ export const sandboxRequiredError = () => new FsError(503, "disabled: the sandbo
 
 /** A folder the program may use: a path (opened by the launcher when it starts), or an open directory descriptor of this process (the rule is attached to that directory itself, so renames and links swapped in afterwards change nothing). */
 export type Root = string | number;
+
+/** Who a tool runs as: the user and group, and the one capability it keeps (see `SandboxOpts.keepCaps`). */
+export type Capability = "dac_read_search" | "dac_override";
+
+export interface RunAs {
+  uid: number;
+  gid: number;
+  keepCaps?: Capability[];
+}
 
 export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
   /** read files and list folders beneath these */
@@ -150,10 +168,42 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
   /** run as this user and group, supplementary groups cleared (applied before the program starts) */
   uid?: number;
   gid?: number;
+  /**
+   * start the program in this directory, given as an open descriptor of this process (the launcher does `fchdir` on it, after every
+   * descriptor is in place: a `/proc/self/fd/N` working folder can name the wrong descriptor). Use this, not `cwd`, for a pinned folder.
+   * Without a launcher (mode `off`, or no launcher installed) the folder's current path is used.
+   */
+  cwdFd?: number;
+  /**
+   * descriptors of this process the program is meant to use (an archive opened read-only): they become its descriptors 3, 4, ... in this
+   * order, in every mode, and stay open for it; every other descriptor above 2 is closed. Not folders to allow: Landlock does not restrict a
+   * descriptor that is already open, so pass only what the program should read.
+   */
+  keepFds?: number[];
+  /**
+   * capabilities the program keeps (the launcher clears every other one, also for a program that stays root): `dac_read_search` lets it read
+   * files and search folders regardless of their mode, `dac_override` does that and also writes (for a container without the first; Landlock still limits both to the roots). The caller must hold the capability
+   * (`hasCapability`); with a user change the launcher keeps it across the change.
+   */
+  keepCaps?: Capability[];
+  /** do not refuse the calls that change modes, owners, times and extended attributes (a program that extracts into a private folder sets them on what it creates) */
+  allowMetadata?: boolean;
   /** let the program create sockets of any kind (see the UDP note above); TCP stays denied wherever the kernel's Landlock can deny it */
   allowSockets?: boolean;
   /** do not add the system folders, /etc files and /dev/null the launcher allows by default (the program must then be static) */
   noSystem?: boolean;
+}
+
+/** Most roots (folders and files the program may use) one start can carry; the launcher's own limit. More is an error, never a silent cut. */
+export const MAX_ROOTS = 4096;
+
+/** The launcher's exit statuses that mean the launcher failed and the program did NOT run (usage error, a step failed, Landlock unsupported). */
+export const isLauncherFailure = (code: number | null, stderrText: string): boolean => (code === 64 || code === 70 || code === 71) && /filedeck-sandbox:/.test(stderrText);
+
+async function helperPath(info: SandboxInfo): Promise<string | null> {
+  if (info.helper) return info.helper;
+  const h = process.env.FILEDECK_SANDBOX_HELPER ?? DEFAULT_HELPER;
+  return (await fs.access(h, fs.constants.X_OK).then(() => true, () => false)) ? h : null;
 }
 
 /**
@@ -164,33 +214,74 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
  * If the launcher itself exits with `EXIT_LANDLOCK_UNSUPPORTED`, the program did not run: call `resetSandbox()` and treat it as unavailable.
  */
 export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxOpts = {}): Promise<ChildProcess> {
-  const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, allowSockets, stdio, ...rest } = opts;
+  const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, allowSockets, keepCaps = [], allowMetadata, cwdFd, keepFds = [], stdio, ...rest } = opts;
   const info = await sandboxInfo();
   if (info.state === "unavailable") throw sandboxRequiredError();
   if ((uid === 0 || gid === 0) && uid !== process.getuid?.()) throw new FsError(500, "refusing to run a confined program as root");
+  if (readOnly.length + readExec.length + readWrite.length > MAX_ROOTS) throw new FsError(500, `the sandbox was given ${readOnly.length + readExec.length + readWrite.length} folders and files to allow; the limit is ${MAX_ROOTS}`);
   const owner = uid !== undefined && gid !== undefined && uid !== process.getuid?.() ? { uid, gid } : null;
   const std: SpawnOptions["stdio"] = stdio ?? ["ignore", "pipe", "pipe"];
-  if (info.state === "off") return spawn(cmd, args, { ...rest, stdio: std });
-  if (info.state === "fallback") {
-    if (owner && info.helper) return spawn(info.helper, ["--no-landlock", "--uid", String(owner.uid), "--gid", String(owner.gid), "--", cmd, ...args], { ...rest, stdio: std });
-    return spawn(cmd, args, { ...rest, stdio: std, ...(owner ? owner : {}) });
-  }
   const fds: unknown[] = Array.isArray(std) ? [...std] : [std, std, std];
   while (fds.length < 3) fds.push("ignore");
+  const addFd = (fd: number): number => (fds.push(fd), fds.length - 1);
+  const kept = keepFds.map(addFd); // first, so the first is descriptor 3 whatever else follows
+  // No Landlock rules (state off or fallback): the privilege drop and the working folder still must not depend on the mode, so the
+  // launcher, when there is one, runs `--no-landlock` with them (it also clears the supplementary groups, which spawn's uid option does not).
+  if (info.state === "off" || info.state === "fallback") {
+    const helper = owner || cwdFd !== undefined || keepCaps.length ? await helperPath(info) : null;
+    if (helper) {
+      const flags = ["--no-landlock"];
+      for (const k of kept) flags.push("--keep-fd", String(k));
+      if (owner) flags.push("--uid", String(owner.uid), "--gid", String(owner.gid));
+      if (cwdFd !== undefined) flags.push("--cwd-fd", String(addFd(cwdFd)));
+      for (const c of keepCaps) flags.push("--keep-cap", c);
+      if (allowMetadata) flags.push("--allow-metadata");
+      return spawn(helper, [...flags, "--", cmd, ...args], { ...rest, stdio: fds as SpawnOptions["stdio"] });
+    }
+    // no launcher (a development start without the helper): the folder by its current path, and the drop by spawn's own uid and gid (Node/libuv
+    // clears the supplementary groups itself when a gid is given; the root-only test in sandbox.test.ts checks `id -G`); the kept descriptors are inherited as they are
+    const cwd = cwdFd !== undefined ? await fs.readlink(`/proc/self/fd/${cwdFd}`).catch(() => rest.cwd) : rest.cwd;
+    return spawn(cmd, args, { ...rest, ...(cwd !== undefined ? { cwd } : {}), stdio: kept.length ? (fds as SpawnOptions["stdio"]) : std, ...(owner && !keepCaps.length ? owner : {}) }); // a capability cannot be handed on without the launcher: the tool then stays the agent's own user
+  }
   const flags: string[] = [];
+  for (const k of kept) flags.push("--keep-fd", String(k));
   const add = (flag: string, roots: Root[]) => {
     for (const r of roots) {
-      if (typeof r === "number") {
-        fds.push(r);
-        flags.push(flag, `fd:${fds.length - 1}`);
-      } else flags.push(flag, r);
+      if (typeof r === "number") flags.push(flag, `fd:${addFd(r)}`);
+      else flags.push(flag, r);
     }
   };
   add("--ro", readOnly);
   add("--rx", readExec);
   add("--rw", readWrite);
+  if (cwdFd !== undefined) flags.push("--cwd-fd", String(addFd(cwdFd)));
   if (noSystem) flags.push("--no-system");
   if (allowSockets) flags.push("--allow-sockets");
+  for (const c of keepCaps) flags.push("--keep-cap", c);
+  if (allowMetadata) flags.push("--allow-metadata");
   if (owner) flags.push("--uid", String(owner.uid), "--gid", String(owner.gid));
   return spawn(info.helper!, [...flags, "--", cmd, ...args], { ...rest, stdio: fds as SpawnOptions["stdio"] });
+}
+
+/** Does this process hold the capability in its effective set? (A non-root agent, or a container that dropped it, does not.) Read from /proc/self/status. */
+export async function hasCapability(name: Capability): Promise<boolean> {
+  const bit = { dac_read_search: 2n, dac_override: 1n }[name];
+  try {
+    const m = /^CapEff:\s*([0-9a-f]+)/m.exec(await fs.readFile("/proc/self/status", "utf8"));
+    return !!m && (BigInt("0x" + m[1]!) & (1n << bit)) !== 0n;
+  } catch {
+    return false;
+  }
+}
+
+/** The capability a tool is given to read what only root can read: read-search where this process holds it, else override (container defaults hold that one); null when it holds neither. */
+export async function readerCapability(): Promise<Capability | null> {
+  if (await hasCapability("dac_read_search")) return "dac_read_search";
+  if (await hasCapability("dac_override")) return "dac_override";
+  return null;
+}
+
+/** Is there a launcher that can hand a capability over (installed, and not mode `off` without it)? Without one a tool cannot keep a capability across a user change. */
+export async function launcherAvailable(): Promise<boolean> {
+  return (await helperPath(await sandboxInfo())) !== null;
 }

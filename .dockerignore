@@ -1,4 +1,7 @@
 **/node_modules
 **/dist
-k8s
+k8s/*
+!k8s/templates
+k8s/templates/*
+!k8s/templates/agents.yaml
 HISTORY.md

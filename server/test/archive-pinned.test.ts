@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import * as ops from "../src/fsops.ts";
 import { Readable } from "node:stream";
 import type { JobCtl } from "../src/jobs.ts";
+import { resetSandbox } from "../src/sandbox.ts";
 
 /**
  * Extraction and compression stage in a private work folder and write into pinned folders. These tests
@@ -37,22 +38,38 @@ function entry(name: string, data: string): Buffer {
 }
 
 let tmp: string;
+let ownTmp: string;
+let tmpBefore: string | undefined;
 let work: string;
 const saved: Record<string, string | undefined> = {};
-const ENVS = ["FILEDECK_BSDTAR", "FILEDECK_7Z", "FILEDECK_7Z_RECHECK", "FILEDECK_WORK_DIR"];
+const ENVS = ["FILEDECK_SANDBOX", "FILEDECK_BSDTAR", "FILEDECK_7Z", "FILEDECK_7Z_RECHECK", "FILEDECK_WORK_DIR"];
 before(() => {
   for (const k of ENVS) saved[k] = process.env[k];
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-pinned-"));
+  fs.chmodSync(tmp, 0o755); // an agent that is root runs extraction tools as the unprivileged user: they must be able to reach the stand-ins
   work = path.join(tmp, "work");
   fs.mkdirSync(work, { mode: 0o700 });
   process.env.FILEDECK_WORK_DIR = work;
   process.env.FILEDECK_7Z_RECHECK = "1";
+  // The stand-in tools here are shell scripts in a temporary folder, which the sandbox (rightly) would not let them run from: this file tests
+  // the pinning and the moves around the tools. archive-sandbox.test.ts runs the real tools in the real sandbox.
+  process.env.FILEDECK_SANDBOX = "off";
+  resetSandbox();
+  // the tool users' private folders go to a temp folder of this file's own: other test files run at the same time and make such folders too
+  tmpBefore = process.env.TMPDIR;
+  ownTmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-tmpdir-"));
+  fs.chmodSync(ownTmp, 0o1777);
+  process.env.TMPDIR = ownTmp;
 });
 after(() => {
+  if (tmpBefore === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = tmpBefore;
+  fs.rmSync(ownTmp, { recursive: true, force: true });
   for (const k of ENVS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
+  resetSandbox();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -81,6 +98,10 @@ function scene(name: string) {
   // every stand-in gives up after 30 s, so a cut-off test never leaves one running
   const wait = `i=0; while [ ! -e '${go}' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done`;
   const seen = path.join(dir, "seen-archive");
+  const extractId = path.join(dir, "extract-id");
+  fs.chmodSync(dir, 0o755);
+  fs.chmodSync(root, 0o755);
+  for (const f of [seen, extractId]) (fs.writeFileSync(f, ""), fs.chmodSync(f, 0o666)); // written by the tool, which may run as another user
   const tar = path.join(dir, "fake-bsdtar.sh");
   fs.writeFileSync(
     tar,
@@ -92,11 +113,11 @@ case "$*" in
     out=""; prev=""
     for a in "$@"; do [ "$prev" = "-cf" ] && out="$a"; prev="$a"; done
     ${wait}
-    if [ "$out" = "-" ]; then id -u; else printf ARCHIVE > "$out"; fi; exit 0;;
+    printf "ARCHIVE:%s" "$(id -u)" > "$out"; exit 0;;
 esac
 cat '${path.join(dir, "first.tar")}'
 ${wait}
-case "$*" in *"@/dev/fd/3"*) cat /dev/fd/3 > '${seen}';; esac
+case "$*" in *"@-"*) cat > '${seen}'; id -u > '${extractId}';; esac
 cat '${path.join(dir, "rest.tar")}'
 `,
     { mode: 0o755 },
@@ -116,6 +137,7 @@ case "$1" in
      for a in "$@"; do [ "$prev" = "--" ] && out="$a"; prev="$a"; done
      case "$(cat '${path.join(dir, "szmode")}' 2>/dev/null)" in
        dir) mkdir "$out"; echo x > "$out/inner"; exit 0;;
+       two) printf 7Z > "$out.001"; printf 7Z > "$out.002"; exit 0;;
        sparse) printf 7Z > "$out"; truncate -s 300M "$out"; exit 0;;
        args) printf '%s\n' "$@" > '${path.join(dir, "szargs")}'; for a in "$@"; do case "$a" in -x@*) f="$(printf %s "$a" | cut -c4-)"; { cat "$f" 2>&1 || echo "cannot read $f as $(id -u)"; } > '${path.join(dir, "szlist")}';; esac; done; printf 7Z > "$out"; exit 0;;
        hardlink) ln '${path.join(dir, "outside", "secret.bin")}' "$out"; exit 0;;
@@ -129,7 +151,7 @@ esac
   process.env.FILEDECK_BSDTAR = tar;
   process.env.FILEDECK_7Z = sz;
   const szmode = path.join(dir, "szmode");
-  return { dir, root, outside, go, seen, szmode, dest: path.join(root, "out"), wd: path.join(root, ".filedeck-work") };
+  return { dir, root, outside, go, seen, extractId, szmode, dest: path.join(root, "out"), wd: path.join(root, ".filedeck-work") };
 }
 
 const mkCtl = () => {
@@ -288,7 +310,7 @@ test("compress: swapping the output folder for an outside link mid-job writes no
   const r = await job;
   assert.deepEqual(fs.readdirSync(s.outside), []);
   assert.equal(r.path, "/out/result.tar.gz");
-  assert.equal(fs.readFileSync(path.join(moved, "result.tar.gz"), "utf8"), "ARCHIVE");
+  assert.match(fs.readFileSync(path.join(moved, "result.tar.gz"), "utf8"), /^ARCHIVE/);
   assert.deepEqual(leftovers(s.wd), []);
 });
 
@@ -377,7 +399,7 @@ test("an archive swapped for a link after the request but before the job is refu
   fs.writeFileSync(s.go, "");
   await assert.rejects(runExtract(plan, LIM, mkCtl().ctl));
   assert.deepEqual(fs.readdirSync(s.dest), []);
-  assert.equal(fs.existsSync(s.seen), false);
+  assert.equal(fs.readFileSync(s.seen, "utf8"), "", "the tool never read the swapped-in file");
 });
 
 test("an archive swapped for a link while the job runs is still read from the file that was opened", async () => {
@@ -399,9 +421,9 @@ test("a split part that is a link is refused; the parts are copied into the work
   fs.writeFileSync(path.join(s.root, "set.7z.001"), "part one");
   fs.writeFileSync(path.join(s.outside, "p2"), "outside part");
   fs.symlinkSync(path.join(s.outside, "p2"), path.join(s.root, "set.7z.002"));
-  const plan = await prepareExtract(s.root, "/set.7z.001", "/out", false, { overwrite: "rename" });
   fs.writeFileSync(s.go, "");
-  await assert.rejects(runExtract(plan, LIM, mkCtl().ctl));
+  // refused when the request is checked, or at the latest when the job opens the parts
+  await assert.rejects(async () => runExtract(await prepareExtract(s.root, "/set.7z.001", "/out", false, { overwrite: "rename" }), LIM, mkCtl().ctl));
   assert.deepEqual(leftovers(s.wd), []);
   fs.rmSync(path.join(s.root, "set.7z.002"));
   fs.writeFileSync(path.join(s.root, "set.7z.002"), "part two");
@@ -525,11 +547,11 @@ test("compression of a user's folder runs the tool as that user and the archive 
   const plan = await prepareCompress(s.root, "/src", ["f.txt"], "tar.gz", "mine", { destDir: "/out" });
   await runCompress(plan, LIM, mkCtl().ctl);
   const f = path.join(s.dest, "mine.tar.gz");
-  if (IS_ROOT) assert.equal(fs.readFileSync(f, "utf8").trim(), String(NOBODY), "the stand-in tool reports the user it ran as");
+  if (IS_ROOT) assert.equal(fs.readFileSync(f, "utf8").trim(), `ARCHIVE:${NOBODY}`, "the stand-in tool reports the user it ran as");
   assert.equal(fs.statSync(f).uid, OWNER);
 });
 
-test("compression of a root-owned folder runs as the agent and leaves the archive private to it", async () => {
+test("compression of a root-owned folder runs as the archive user with only the read-search capability (never as root) and leaves the archive private to the agent", async () => {
   const s = scene("rootowned");
   fs.mkdirSync(path.join(s.root, "src"));
   fs.writeFileSync(path.join(s.root, "src/f.txt"), "data");
@@ -797,4 +819,42 @@ test("an archive that is a second name for a file in a root-owned folder is refu
   fs.linkSync(path.join(s.outside, "p.tar"), path.join(s.root, "planted.tar"));
   const plan = await prepareExtract(s.root, "/planted.tar", "/out", false, { overwrite: "rename" });
   await assert.rejects(runExtract(plan, LIM, mkCtl().ctl), (e: { status?: number }) => e.status === 403);
+});
+
+test("the archive size setting applies to the total of the volumes the agent's own tool produced", async () => {
+  const s = scene("sz-total");
+  fs.mkdirSync(path.join(s.root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(s.root, "src/f.txt"), "data");
+  fs.writeFileSync(s.szmode, "two");
+  const plan = await prepareCompress(s.root, "/src", ["f.txt"], "7z", "x", { destDir: "/out", splitBytes: 65_536 });
+  // each volume (2 bytes) is within the limit, the two together (4 bytes) are not
+  await assert.rejects(runCompress(plan, { maxEntries: 100, maxBytes: 3 }, mkCtl().ctl), (e: { status?: number; message?: string }) => e.status === 413 && /the archive is 4 bytes/.test(e.message ?? ""));
+  assert.deepEqual(fs.readdirSync(s.dest), []);
+  const ok = await runCompress(plan, { maxEntries: 100, maxBytes: 1 << 20 }, mkCtl().ctl);
+  assert.equal(ok.volumes, 2);
+});
+
+test("the exclude list file keeps its mode whatever the umask (set on its descriptor)", async () => {
+  if (!IS_ROOT) return; // needs the tool to run as another user than the file's creator (a root agent); a umask that hides the file from its owner also stops a plain user from making the work folder
+  const s = szCompressScene("sz-umask", "args");
+  for (const f of ["szargs", "szlist"]) fs.writeFileSync(path.join(s.dir, f), "", { mode: 0o666 }), fs.chmodSync(path.join(s.dir, f), 0o666);
+  fs.mkdirSync(path.join(s.root, "src/vol/.filedeck-work-abc"), { recursive: true });
+  const old = process.umask(0o777);
+  try {
+    await runCompress(await prepareCompress(s.root, "/src", ["vol"], "7z", "x", { destDir: "/out", splitBytes: 65_536 }), LIM, mkCtl().ctl);
+  } finally {
+    process.umask(old);
+  }
+  assert.match(fs.readFileSync(path.join(s.dir, "szlist"), "utf8"), /^vol\/\.filedeck-work-abc$/m, "the tool could read the list");
+});
+
+test("extraction runs the archive tool as the unprivileged user when the agent is root (checked when root)", async () => {
+  if (!IS_ROOT) return;
+  const s = scene("ext-identity");
+  fs.writeFileSync(path.join(s.root, "a.tar"), "ARCHIVE-BYTES");
+  fs.chmodSync(path.join(s.root, "a.tar"), 0o600); // only root can read it by name: bsdtar is handed it as standard input, whoever it runs as
+  fs.writeFileSync(s.go, "");
+  await runExtract(await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" }), LIM, mkCtl().ctl);
+  assert.equal(fs.readFileSync(s.extractId, "utf8").trim(), "65533", "the archive tools' own user, not the media tools' 65534");
+  assert.equal(fs.readFileSync(s.seen, "utf8"), "ARCHIVE-BYTES");
 });

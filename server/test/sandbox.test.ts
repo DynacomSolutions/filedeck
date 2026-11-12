@@ -5,7 +5,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { EXIT_LANDLOCK_UNSUPPORTED, resetSandbox, sandboxInfo, spawnSandboxed, type SandboxOpts } from "../src/sandbox.ts";
+import { EXIT_LANDLOCK_UNSUPPORTED, readerCapability, resetSandbox, sandboxInfo, spawnSandboxed, type SandboxOpts } from "../src/sandbox.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
 /**
@@ -381,7 +381,286 @@ test("the sandbox state is reported: --probe says whether the socket filter is a
     assert.ok(info.abi >= 1 && info.rights);
   }
   const { sandboxLine, sandboxSummary } = await import("../src/sandbox.ts");
-  assert.match(sandboxLine(info), /sandbox: mode \w+, state \w+, landlock .*socket filter (on|off)/);
+  assert.match(sandboxLine(info), /sandbox: mode \w+, state \w+, archive tools and git (confined|unconfined|disabled), landlock .*socket filter (on|off)/);
   const sum = await sandboxSummary();
-  assert.deepEqual(Object.keys(sum).sort(), ["landlockAbi", "mode", "socketFilter", "state"]);
+  assert.deepEqual(Object.keys(sum).sort(), ["archiveTools", "landlockAbi", "mode", "socketFilter", "state"]);
+});
+
+/* ---- working folder by descriptor, the privilege drop in every mode, the root limit, launcher failures ---- */
+
+live("a working folder given by descriptor is exact even when its number collides with a slot the launcher's grants take", async () => {
+  const base = path.join(tmp, "cwdfd");
+  const grantDirs: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    write(path.join(base, `g${i}`, "id"), `grant-${i}\n`);
+    grantDirs.push(path.join(base, `g${i}`));
+  }
+  write(path.join(base, "pinned", "id"), "pinned\n");
+  const pinned = fs.openSync(path.join(base, "pinned"), "r"); // opened first: a low descriptor number
+  const grants = grantDirs.map((d) => fs.openSync(d, "r"));
+  try {
+    assert.ok(pinned < 3 + grants.length, `descriptor ${pinned} must fall among the ${grants.length} grant slots for this test to mean anything`);
+    const got = await run("cat", ["id"], { readOnly: [...grants, pinned], cwdFd: pinned });
+    assert.equal(got.stdout, "pinned\n", got.stderr);
+    // the old way, a /proc/self/fd path as the working folder, lands in another folder: that is the bug this option removes
+    const old = await run("cat", ["id"], { readOnly: [...grants, pinned], cwd: `/proc/self/fd/${pinned}` });
+    assert.notEqual(old.stdout, "pinned\n");
+  } finally {
+    for (const f of [...grants, pinned]) fs.closeSync(f);
+  }
+});
+
+live("a launcher failure is told apart from the program's own failure; too many roots is a clear error", async () => {
+  const { isLauncherFailure, MAX_ROOTS } = await import("../src/sandbox.ts");
+  const f = path.join(tmp, "plainfile");
+  write(f, "x");
+  const fd = fs.openSync(f, "r");
+  try {
+    const r = await run("true", [], { cwdFd: fd }); // fchdir to a file fails: the launcher says so and the program does not run
+    assert.ok(isLauncherFailure(r.code, r.stderr), `${r.code} ${r.stderr}`);
+    const own = await run("sh", ["-c", "echo filedeck-sandbox: fake >&2; exit 71"]);
+    assert.ok(isLauncherFailure(own.code, own.stderr), "the check is on the status and the launcher's prefix; a program printing both is indistinguishable, so callers use it only for tools that never do");
+    assert.equal(isLauncherFailure(1, "tar: error"), false);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const many = Array.from({ length: MAX_ROOTS + 1 }, () => f);
+  await assert.rejects(spawnSandboxed("true", [], { readOnly: many }), (e: { status?: number; message?: string }) => e.status === 500 && /limit is/.test(e.message ?? ""));
+  // a few hundred descriptor roots work (a split set of 200 parts, a selection of 300 files)
+  const fds = Array.from({ length: 300 }, () => fs.openSync(f, "r"));
+  try {
+    const ok = await run("cat", [f], { readOnly: fds });
+    assert.equal(ok.stdout, "x", ok.stderr);
+  } finally {
+    for (const x of fds) fs.closeSync(x);
+  }
+});
+
+/** the child's uid, gid and supplementary groups, in each of the three modes (root only: an agent that is not root changes nothing) */
+for (const mode of ["landlock", "fallback", "off"] as const) {
+  test(`the privilege drop does not depend on the sandbox mode: ${mode}`, { skip: process.getuid?.() === 0 ? false : "sandbox live: skipped (not running as root)" }, async (t) => {
+    if (mode === "landlock" && box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+    try {
+      if (mode === "off") process.env.FILEDECK_SANDBOX = "off";
+      else if (mode === "fallback") {
+        process.env.FILEDECK_SANDBOX = "auto";
+        process.env.FILEDECK_SANDBOX_HELPER = path.join(tmp, "no-such-launcher"); // no launcher at all: spawn's own uid and gid
+      } else process.env.FILEDECK_SANDBOX = "auto";
+      resetSandbox();
+      const state = (await sandboxInfo()).state;
+      assert.equal(state, mode);
+      const r = await run("sh", ["-c", "id -u; id -g; id -G"], { uid: 65534, gid: 65534 }); // /proc is not readable inside Landlock
+      const [u, g, groups] = r.stdout.split("\n");
+      assert.equal(u, "65534", r.stderr);
+      assert.equal(g, "65534");
+      assert.equal(groups, "65534", `the supplementary groups are cleared in ${mode} mode (with no launcher it is Node's own spawn that does it: libuv calls setgroups(0) when a gid is given)`);
+    } finally {
+      for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+        if (prev[i] === undefined) delete process.env[k];
+        else process.env[k] = prev[i];
+      }
+      resetSandbox();
+    }
+  });
+}
+
+test("the start-up log says clearly when the helper programs are not confined (off, fallback) and when they are required", async () => {
+  const { initSandbox } = await import("../src/sandbox.ts");
+  const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+  const lines = async (mode: string, helper?: string) => {
+    process.env.FILEDECK_SANDBOX = mode;
+    if (helper) process.env.FILEDECK_SANDBOX_HELPER = helper;
+    resetSandbox();
+    const out: string[] = [];
+    await initSandbox((m) => out.push(m));
+    return out;
+  };
+  try {
+    const off = await lines("off");
+    assert.equal(off.length, 2);
+    assert.match(off[0]!, /state off, archive tools and git unconfined/);
+    assert.match(off[1]!, /bsdtar and 7zz run with no kernel confinement/);
+    const fb = await lines("auto", path.join(tmp, "no-such-launcher"));
+    assert.match(fb[0]!, /state fallback, archive tools and git unconfined/);
+    assert.match(fb[1]!, /bsdtar and 7zz run without kernel confinement/);
+    const req = await lines("require", path.join(tmp, "no-such-launcher"));
+    assert.match(req[0]!, /archive tools and git disabled/);
+    assert.match(req[1]!, /answer an error/);
+  } finally {
+    for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+      if (prev[i] === undefined) delete process.env[k];
+      else process.env[k] = prev[i];
+    }
+    resetSandbox();
+  }
+});
+
+/* ---- a descriptor kept open for the program: readable in the child, every other descriptor above 2 closed, in each mode ---- */
+
+for (const mode of ["landlock", "fallback", "off"] as const) {
+  test(`keepFds: the archive descriptor is readable in the child and every other descriptor above 2 is closed: ${mode}`, async (t) => {
+    if (mode === "landlock" && box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+    const kept = path.join(tmp, `kept-${mode}`);
+    const other = path.join(tmp, `other-${mode}`);
+    write(kept, "KEPT-CONTENT");
+    write(other, "OTHER-CONTENT");
+    const keptFd = fs.openSync(kept, "r");
+    const otherFd = fs.openSync(other, "r");
+    try {
+      if (mode === "off") process.env.FILEDECK_SANDBOX = "off";
+      else if (mode === "fallback") {
+        process.env.FILEDECK_SANDBOX = "auto";
+        process.env.FILEDECK_SANDBOX_HELPER = path.join(tmp, "no-such-launcher");
+      } else process.env.FILEDECK_SANDBOX = "auto";
+      resetSandbox();
+      assert.equal((await sandboxInfo()).state, mode);
+      // descriptor 3 is the kept one; the other descriptor is handed over as a Landlock root (descriptor 4 in the child) and must not stay open
+      const r = await run("sh", ["-c", "cat <&3; echo; cat <&4 2>&1; cat <&5 2>&1; exit 0"], { keepFds: [keptFd], readOnly: [otherFd] });
+      const [first, ...rest] = r.stdout.split("\n");
+      assert.equal(first, "KEPT-CONTENT", r.stderr);
+      assert.ok(!r.stdout.includes("OTHER-CONTENT"), "no other descriptor may reach the program");
+      assert.match(r.stderr + rest.join("\n"), /Bad file descriptor|not open|bad fd/i);
+      // and through a user change too (root only): the descriptor is still the program's
+      if (process.getuid?.() === 0) {
+        fs.chmodSync(tmp, 0o755);
+        const again = fs.openSync(kept, "r"); // a fresh open: the first run read the shared one to its end
+        try {
+          const u = await run("sh", ["-c", "cat <&3"], { keepFds: [again], uid: 65534, gid: 65534 });
+          assert.equal(u.stdout, "KEPT-CONTENT", u.stderr);
+        } finally {
+          fs.closeSync(again);
+        }
+      }
+    } finally {
+      for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+        if (prev[i] === undefined) delete process.env[k];
+        else process.env[k] = prev[i];
+      }
+      resetSandbox();
+      fs.closeSync(keptFd);
+      fs.closeSync(otherFd);
+    }
+  });
+}
+
+/* ---- capabilities and the metadata filter: a confined program never keeps root's powers ---- */
+
+const IS_ROOT = process.getuid?.() === 0;
+const ROOT_ONLY = IS_ROOT ? false : "sandbox live: skipped (not running as root)";
+const liveRoot = (name: string, fn: () => Promise<void>) =>
+  test(name, { skip: ROOT_ONLY }, async (t) => {
+    if (box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    await fn();
+  });
+const caps = (text: string) => Object.fromEntries([...text.matchAll(/^(Cap\w+):\s*([0-9a-f]+)$/gm)].map((m) => [m[1]!, BigInt("0x" + m[2]!)]));
+
+live("the metadata calls are refused unless allowed: chmod, touch -d and chown fail, also inside a writable grant; writing still works", async () => {
+  const rw = path.join(tmp, "meta-rw");
+  write(path.join(rw, "f.txt"), "x");
+  fs.chmodSync(path.join(rw, "f.txt"), 0o644);
+  const sh = "echo hi > new.txt; echo write=$?; chmod 600 f.txt; echo chmod=$?; touch -d 2001-02-03 f.txt; echo touch=$?; ln -s f.txt l; echo link=$?";
+  const refused = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw });
+  assert.match(refused.stdout, /write=0/);
+  assert.match(refused.stdout, /chmod=1/);
+  assert.match(refused.stdout, /touch=1/);
+  assert.match(refused.stdout, /link=0/);
+  assert.equal(fs.statSync(path.join(rw, "f.txt")).mode & 0o777, 0o644);
+  const allowed = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw, allowMetadata: true });
+  assert.match(allowed.stdout, /chmod=0/);
+  assert.match(allowed.stdout, /touch=0/);
+  assert.equal(fs.statSync(path.join(rw, "f.txt")).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(rw, "f.txt")).mtime.getUTCFullYear(), 2001);
+});
+
+live("mount, unshare, chroot and a new user namespace are refused for a confined program", async () => {
+  const r = await run("sh", ["-c", "unshare -r true 2>/dev/null; echo unshare=$?; unshare -m true 2>/dev/null; echo unsharem=$?; mount -t tmpfs x /mnt 2>/dev/null; echo mount=$?; chroot / true 2>/dev/null; echo chroot=$?"], {});
+  assert.match(r.stdout, /unshare=[1-9]/);
+  assert.match(r.stdout, /unsharem=[1-9]/);
+  assert.match(r.stdout, /mount=[1-9]/);
+  assert.match(r.stdout, /chroot=[1-9]/);
+});
+
+live("threads still start (clone without a namespace flag is allowed)", async () => {
+  const r = await run("sh", ["-c", "(echo a) & wait; echo done"], {});
+  assert.equal(r.stdout, "a\ndone\n");
+});
+
+liveRoot("a program run as root keeps no capability: every set is empty, also the bounding set", async () => {
+  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc"] });
+  const c = caps(r.stdout);
+  for (const k of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) assert.equal(c[k], 0n, `${k}: ${r.stdout} ${r.stderr}`);
+});
+
+liveRoot("with a user change and keepCaps the program holds exactly the one named capability, in every set", async () => {
+  const cap = await readerCapability();
+  console.log(`# reader capability chosen: ${cap ?? "none (the tool would run as the agent with no capability)"}`);
+  assert.ok(cap, "the agent holds the read-search or the override capability (container defaults hold the latter)");
+  const bit = cap === "dac_read_search" ? 4n : 2n;
+  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc"], uid: 65533, gid: 65533, keepCaps: [cap] });
+  const c = caps(r.stdout);
+  for (const k of ["CapInh", "CapPrm", "CapEff", "CapAmb", "CapBnd"]) assert.equal(c[k], bit, `${k}: ${r.stdout} ${r.stderr}`);
+  const none = await run("cat", ["/proc/self/status"], { readOnly: ["/proc"], uid: 65533, gid: 65533 });
+  assert.ok(Object.keys(caps(none.stdout)).length >= 5, none.stderr);
+  for (const v of Object.values(caps(none.stdout))) assert.equal(v, 0n);
+});
+
+liveRoot("as root without capabilities: chown, chmod and touch -d on a file outside every grant fail, and so does reading what only another user could", async () => {
+  const outside = path.join(tmp, "caps-outside");
+  const inside = path.join(tmp, "caps-inside");
+  write(path.join(outside, "o.txt"), "O");
+  write(path.join(inside, "i.txt"), "I");
+  fs.chmodSync(path.join(inside, "i.txt"), 0o600);
+  for (const f of [path.join(outside, "o.txt"), path.join(inside, "i.txt")]) fs.chownSync(f, 65534, 65534);
+  fs.chmodSync(path.join(outside, "o.txt"), 0o644);
+  const sh = (o: string) => `chown 0 ${o}; echo chown=$?; chmod 777 ${o}; echo chmod=$?; touch -d 2001-02-03 ${o}; echo touch=$?`;
+  // control: root with its capabilities changes all of it
+  const ctl = spawnSync("sh", ["-c", sh(path.join(outside, "o.txt"))], { encoding: "utf8" });
+  assert.match(ctl.stdout, /chown=0[\s\S]*chmod=0[\s\S]*touch=0/);
+  fs.chownSync(path.join(outside, "o.txt"), 65534, 65534);
+  fs.chmodSync(path.join(outside, "o.txt"), 0o644);
+  for (const allowMetadata of [false, true]) {
+    const r = await run("sh", ["-c", sh(path.join(outside, "o.txt"))], { readOnly: [inside], allowMetadata });
+    assert.match(r.stdout, /chown=[1-9]/, `allowMetadata ${allowMetadata}: ${r.stdout}`);
+    assert.match(r.stdout, /chmod=[1-9]/);
+    assert.match(r.stdout, /touch=[1-9]/);
+    assert.equal(fs.statSync(path.join(outside, "o.txt")).uid, 65534);
+    assert.equal(fs.statSync(path.join(outside, "o.txt")).mode & 0o777, 0o644);
+  }
+  // inside a read-only grant, a 0600 file of another user is not readable by root without the capability
+  const r = await run("cat", [path.join(inside, "i.txt")], { readOnly: [inside] });
+  assert.notEqual(r.code, 0);
+  assert.equal(r.stdout, "");
+});
+
+liveRoot("inside a writable grant the metadata of a file of another user cannot be changed even when metadata calls are allowed (no ownership, no capability)", async () => {
+  const rw = path.join(tmp, "caps-rw");
+  write(path.join(rw, "theirs.txt"), "t");
+  write(path.join(rw, "ours.txt"), "o");
+  fs.chownSync(path.join(rw, "theirs.txt"), 65534, 65534);
+  fs.chownSync(path.join(rw, "ours.txt"), 65533, 65533);
+  fs.chmodSync(rw, 0o777);
+  const sh = "chmod 600 theirs.txt; echo theirs=$?; chmod 600 ours.txt; echo ours=$?";
+  const denied = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw, uid: 65533, gid: 65533 });
+  assert.match(denied.stdout, /theirs=1[\s\S]*ours=1/, "refused by the filter without allowMetadata");
+  const allowed = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw, uid: 65533, gid: 65533, allowMetadata: true });
+  assert.match(allowed.stdout, /theirs=1[\s\S]*ours=0/, allowed.stdout);
+});
+
+liveRoot("keepCaps (read-search, or override where that is what the agent holds) lets uid 65533 read a 0600 root-owned file inside a read-only grant, and nothing outside the grants", async () => {
+  const ro = path.join(tmp, "dac-ro");
+  const out = path.join(tmp, "dac-out");
+  write(path.join(ro, "secret.txt"), "INSIDE");
+  write(path.join(out, "secret.txt"), "OUTSIDE");
+  fs.chmodSync(path.join(ro, "secret.txt"), 0o600);
+  fs.chmodSync(path.join(out, "secret.txt"), 0o600);
+  fs.chmodSync(ro, 0o700); // searching the folder needs the capability too
+  const plain = await run("cat", [path.join(ro, "secret.txt")], { readOnly: [ro], uid: 65533, gid: 65533 });
+  assert.notEqual(plain.code, 0, "control: the user alone cannot read it");
+  const r = await run("sh", ["-c", `cat ${path.join(ro, "secret.txt")}; echo; cat ${path.join(out, "secret.txt")} 2>&1; echo status=$?; echo x > ${path.join(ro, "w")} 2>&1; echo write=$?`], { readOnly: [ro], uid: 65533, gid: 65533, keepCaps: [(await readerCapability())!] });
+  assert.match(r.stdout, /INSIDE/, r.stderr);
+  assert.doesNotMatch(r.stdout, /OUTSIDE/);
+  assert.match(r.stdout, /status=1/);
+  assert.match(r.stdout, /write=[12]/);
 });

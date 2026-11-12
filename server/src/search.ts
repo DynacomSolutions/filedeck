@@ -509,7 +509,7 @@ export async function* limitSearch<T, S>(inner: AsyncGenerator<T, S>, abort: () 
  * cannot tell the hub from anybody else) and for direct requests the key is the socket's peer address, which behind a hub
  * is the hub itself: all its users then share a key, which the bound's floor of two slots is generous enough for.
  */
-function clientKey(c: import("hono").Context, agentToken: string | undefined): string {
+export function clientKey(c: import("hono").Context, agentToken: string | undefined): string {
   if (agentToken) {
     const v = c.req.header("x-filedeck-client")?.trim();
     if (v) return v.slice(0, 64);

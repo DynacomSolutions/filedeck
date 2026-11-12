@@ -5,9 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { prepareCompress, prepareExtract, runCompress, runExtract } from "../src/archive.ts";
+import { listArchive, prepareCompress, prepareExtract, runCompress, runExtract } from "../src/archive.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
 import type { JobCtl } from "../src/jobs.ts";
+import { useSandbox } from "./sandbox-env.ts";
+import { resetSandbox, sandboxInfo } from "../src/sandbox.ts";
 
 /**
  * Tests with the real 7-Zip (`7zz`); they skip where it is not installed (CI has it). They check that what the
@@ -19,13 +21,27 @@ const IS_ROOT = process.getuid?.() === 0;
 const NOBODY = 65534;
 
 let tmp: string;
-before(() => {
+let ownTmp: string;
+let tmpBefore: string | undefined;
+let box: Awaited<ReturnType<typeof useSandbox>>;
+before(async () => {
+  box = await useSandbox(); // 7-Zip runs inside the real sandbox where the kernel has Landlock
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-7z-"));
   fs.chmodSync(tmp, 0o755);
   process.env.FILEDECK_WORK_DIR = path.join(tmp, "workdir");
   fs.mkdirSync(process.env.FILEDECK_WORK_DIR, { mode: 0o700 });
+  // the tool users' private folders go to a temp folder of this file's own: other test files run at the same time and make such folders too
+  tmpBefore = process.env.TMPDIR;
+  ownTmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-tmpdir-"));
+  fs.chmodSync(ownTmp, 0o1777);
+  process.env.TMPDIR = ownTmp;
 });
 after(() => {
+  if (tmpBefore === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = tmpBefore;
+  fs.rmSync(ownTmp, { recursive: true, force: true });
+  fs.rmSync(box.dir, { recursive: true, force: true });
+  delete process.env.FILEDECK_SANDBOX_HELPER;
   delete process.env.FILEDECK_WORK_DIR;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -180,6 +196,129 @@ test("with wildcard matching off, -xr!NAME excludes that exact name at any depth
   assert.match(list, /odd\?\.txt/);
   assert.doesNotMatch(list, /\.filedeck-(work|trash)/);
 });
+
+test("the privilege-dropped 7-Zip reads a list file naming a staging-prefix folder and that folder is absent from the archive", needSz, async () => {
+  const s = userScene("list-file");
+  const nested = path.join(s.sel, "z", ".filedeck-work-abc");
+  fs.mkdirSync(nested);
+  fs.writeFileSync(path.join(nested, "staged.bin"), "STAGED-CONTENT");
+  if (IS_ROOT) {
+    fs.chownSync(nested, NOBODY, NOBODY);
+    fs.chownSync(path.join(nested, "staged.bin"), NOBODY, NOBODY);
+  }
+  // an umask that would hide the list file from its reader is irrelevant: the file's mode is set on its descriptor (root can make the
+  // folders under it; a plain user could not, so the hostile umask is applied only for a root agent)
+  const old = process.umask(IS_ROOT ? 0o777 : 0o022);
+  let r;
+  try {
+    r = await runCompress(await prepareCompress(s.root, "/src", ["sel"], "7z", "listed", { destDir: "/out", splitBytes: 65_536, level: 0 }), LIM, mkCtl());
+  } finally {
+    process.umask(old);
+  }
+  const list = list7z(path.join(s.root, r.path));
+  assert.match(list, /inner\.txt/);
+  assert.doesNotMatch(list, /\.filedeck-work-abc|staged\.bin/);
+});
+
+test("a reserved folder with an exact name that appears after the scan is left out by 7-Zip's own pattern", needSz, async () => {
+  const s = userScene("late-exact");
+  const plan = await prepareCompress(s.root, "/src", ["sel"], "7z", "late", { destDir: "/out", splitBytes: 65_536, level: 0 });
+  let made = false;
+  const guard = () => {
+    if (made) return;
+    made = true; // after the scan
+    for (const r of [".filedeck-work", ".filedeck-trash"]) {
+      fs.mkdirSync(path.join(s.sel, "z", r));
+      fs.writeFileSync(path.join(s.sel, "z", r, "staged.bin"), "STAGED-CONTENT");
+      if (IS_ROOT) {
+        fs.chownSync(path.join(s.sel, "z", r), NOBODY, NOBODY);
+        fs.chownSync(path.join(s.sel, "z", r, "staged.bin"), NOBODY, NOBODY);
+      }
+    }
+  };
+  const r = await runCompress(plan, LIM, mkCtl(), guard);
+  assert.ok(made);
+  const list = list7z(path.join(s.root, r.path));
+  assert.match(list, /inner\.txt/);
+  assert.doesNotMatch(list, /\.filedeck-(work|trash)|staged\.bin/);
+});
+
+test("password and split archives compress, list and extract inside the sandbox", needSz, async () => {
+  const s = userScene("pw-split");
+  const c = await runCompress(await prepareCompress(s.root, "/src", ["sel"], "7z", "pw", { destDir: "/out", password: "s3cret", splitBytes: 65_536, level: 0 }), LIM, mkCtl());
+  assert.ok((c.volumes ?? 0) > 1, JSON.stringify(c));
+  const { prepareExtract, runExtract } = await import("../src/archive.ts");
+  const plan = await prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: "s3cret" });
+  assert.equal(plan.viaSz, true);
+  const r = await runExtract(plan, LIM, mkCtl());
+  assert.ok(r.files >= 41, JSON.stringify(r));
+});
+
+for (const parts of [64, 200]) {
+  test(`a split set of ${parts} or more parts is listed, checked and extracted inside the sandbox (one grant per part for reading, the private folder for extraction)`, needSz, async () => {
+    const s = scene(`parts-${parts}`);
+    const pack = path.join(s.src, "pack");
+    fs.mkdirSync(pack);
+    fs.writeFileSync(path.join(pack, "big.bin"), randomBytes(parts * 65_536));
+    for (const password of [undefined, "s3cret"]) {
+      const name = password ? `pw${parts}` : `plain${parts}`;
+      const c = await runCompress(await prepareCompress(s.root, "/src", ["pack"], "7z", name, { destDir: "/out", splitBytes: 65_536, level: 0, password }), LIM, mkCtl());
+      assert.ok((c.volumes ?? 0) >= parts, JSON.stringify(c));
+      const l = await listArchive(s.root, c.path, 5000, password);
+      assert.ok(l.entries.some((e) => e.name.endsWith("big.bin")), JSON.stringify(l.entries.slice(0, 3)));
+      const plan = await prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password });
+      assert.equal(plan.viaSz, true);
+      if (password) await assert.rejects(prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: "wrong" }), (e: { status?: number }) => e.status === 401);
+      const r = await runExtract(plan, LIM, mkCtl());
+      assert.ok(r.files >= 1, JSON.stringify(r));
+      assert.equal(fs.statSync(path.join(s.root, r.path, "pack/big.bin")).size, parts * 65_536);
+    }
+  });
+}
+
+/* ---- split sets are listed, password-checked and extracted in every sandbox mode; a failure is an error, never a skipped check ---- */
+
+for (const mode of ["landlock", "fallback", "off"] as const) {
+  test(`a split set is listed and password-checked, and a wrong password is a 401, with the sandbox in ${mode} mode`, needSz, async (t) => {
+    if (mode === "landlock" && box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+    try {
+      const s = scene(`split-${mode}`);
+      const pack = path.join(s.src, "pack");
+      fs.mkdirSync(pack);
+      fs.writeFileSync(path.join(pack, "big.bin"), randomBytes(5 * 65_536));
+      const pw = "s3cret";
+      const c = await runCompress(await prepareCompress(s.root, "/src", ["pack"], "7z", "sp", { destDir: "/out", splitBytes: 65_536, level: 0, password: pw, encryptHeaders: true }), LIM, mkCtl());
+      assert.ok((c.volumes ?? 0) >= 4, JSON.stringify(c));
+      if (mode === "off") process.env.FILEDECK_SANDBOX = "off";
+      else if (mode === "fallback") {
+        process.env.FILEDECK_SANDBOX = "auto";
+        process.env.FILEDECK_SANDBOX_HELPER = path.join(tmp, "no-such-launcher");
+      }
+      resetSandbox();
+      assert.equal((await sandboxInfo()).state, mode);
+      const l = await listArchive(s.root, c.path, 5000, pw);
+      assert.ok(l.entries.some((e) => e.name.endsWith("big.bin")), JSON.stringify(l.entries));
+      await assert.rejects(listArchive(s.root, c.path, 5000, "wrong"), (e: { status?: number }) => e.status === 401);
+      await assert.rejects(prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: "wrong" }), (e: { status?: number }) => e.status === 401);
+      const plan = await prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: pw });
+      assert.equal(plan.viaSz, true);
+      const r = await runExtract(plan, LIM, mkCtl());
+      assert.equal(fs.statSync(path.join(s.root, r.path, "pack/big.bin")).size, 5 * 65_536);
+      // a missing middle part is an error, not a skipped check
+      const parts = fs.readdirSync(path.join(s.root, "out")).filter((n) => n.startsWith("sp.7z.")).sort();
+      fs.rmSync(path.join(s.root, "out", parts[1]!));
+      await assert.rejects(listArchive(s.root, c.path, 5000, pw));
+      await assert.rejects(prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: pw }));
+    } finally {
+      for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+        if (prev[i] === undefined) delete process.env[k];
+        else process.env[k] = prev[i];
+      }
+      resetSandbox();
+    }
+  });
+}
 
 test("diagnostic: does 7-Zip open nested paths by name? (recorded in the log; never fails)", needSz, () => {
   const strace = spawnSync("strace", ["-V"], { encoding: "utf8", timeout: 30_000 });

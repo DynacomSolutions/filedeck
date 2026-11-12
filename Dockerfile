@@ -16,6 +16,8 @@ COPY server/package.json server/
 COPY web/package.json web/
 RUN npm ci --no-audit --no-fund
 COPY server server
+# the chart's capability list, which a launcher test reads so that the test and the chart cannot drift
+COPY k8s/templates/agents.yaml k8s/templates/agents.yaml
 COPY web web
 RUN npm run typecheck \
  && npm run build \

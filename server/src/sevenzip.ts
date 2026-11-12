@@ -1,7 +1,9 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { FsError } from "./fsops.ts";
+import { isLauncherFailure, sandboxInfo, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
 
 /**
  * 7-Zip (`7zz`) backs everything bsdtar cannot do: writing AES-256 zip and 7z
@@ -18,6 +20,18 @@ let have: boolean | undefined;
 export function haveSevenZip(): boolean {
   if (have === undefined || process.env.FILEDECK_7Z_RECHECK) have = spawnSync(sevenZip(), ["--help"], { stdio: "ignore", env: ENV }).error === undefined;
   return have;
+}
+
+/** The sandbox launcher could not start an archive tool (a step failed, too many folders, Landlock gone): never answered by trying another tool. */
+export class SandboxError extends FsError {
+  constructor(detail: string) {
+    console.error("sandbox launcher failed:", detail);
+    super(500, "the sandbox could not start the archive tool");
+  }
+}
+/** Throws a `SandboxError` when the output of a failed start is the launcher's own (the tool did not run). */
+export function failIfLauncher(code: number | null, text: string): void {
+  if (isLauncherFailure(code, text)) throw new SandboxError(text.split("\n").find((l) => l.includes("filedeck-sandbox:")) ?? text.slice(0, 200));
 }
 
 export class PasswordError extends FsError {
@@ -55,29 +69,100 @@ export interface SzProc {
   done: Promise<{ code: number | null; text: string }>;
 }
 
-/** Run 7zz with the password (if any) on stdin; `text` is a bounded, scrubbed tail of stderr + stdout noise. */
-export function runSz(
+/**
+ * How 7-Zip reaches the archive it reads. Inside the Landlock sandbox the launcher closes every descriptor it was handed, so
+ * 7-Zip opens the archive by name and the kernel rule is attached to the archive's own file (`file`, an open descriptor of this
+ * process): a name swapped for something else afterwards is simply not openable. Without the sandbox (fallback or off) there is
+ * no such rule, so the open descriptor itself is handed over as descriptor 3 and read as /dev/fd/3.
+ */
+export interface SzSource {
+  /** the name to give 7-Zip */
+  arg: string;
+  /** an open descriptor of the archive (this process's) */
+  file?: number;
+  /** open descriptors of the other parts of a split set */
+  also?: number[];
+  /** other roots 7-Zip may read (a private folder holding copies of the parts) */
+  roots?: Root[];
+  /** archive format, for descriptors (no extension to go by) */
+  type?: string;
+  /** a working folder (descriptor) the name `arg` is relative to */
+  cwdFd?: number;
+  /** run 7-Zip as this user and group (the agent as root parses an untrusted archive as nobody, not as itself) */
+  runAs?: RunAs;
+}
+
+/** Where 7-Zip is allowed to go and who it runs as. */
+export interface SzAccess {
+  /** read-only roots: paths, or open directory (or file) descriptors */
+  readOnly?: Root[];
+  /** read-write roots (what 7-Zip writes by name): a private folder */
+  readWrite?: Root[];
+  /** run as this user and group, supplementary groups cleared (only effective when the agent is root) */
+  runAs?: RunAs;
+}
+
+/**
+ * The name and the confinement for reading `src`.
+ *  - one archive (any mode): the open read-only descriptor, kept open through the launcher and read as /dev/fd/3. It needs no permission
+ *    on the file and no name can be swapped; under Landlock the rule is attached to the same file, so the open of /dev/fd/3 is allowed.
+ *  - a split set: 7-Zip finds the next parts by changing the name, so a descriptor alone cannot work (checked with 7-Zip 25.01: "Cannot
+ *    open the file as archive"). With Landlock each part is a rule on the file itself and 7-Zip opens them by name; without Landlock the
+ *    parts are opened by name after the agent checked them (no kernel rule to hold them: a weaker guarantee, only in `off` and fallback,
+ *    where the tool is unconfined anyway). Extraction of a split set does not come here: it reads private copies by a relative name (`cwdFd`).
+ */
+export async function szReadArgs(src: SzSource): Promise<{ arg: string; fd?: number; readOnly: Root[] }> {
+  const info = await sandboxInfo();
+  const rules: Root[] = info.state === "landlock" ? [...(src.file !== undefined ? [src.file] : []), ...(src.also ?? []), ...(src.roots ?? [])] : [];
+  if (src.file !== undefined && !src.also?.length && !src.roots?.length && !src.cwdFd) return { arg: "/dev/fd/3", fd: src.file, readOnly: rules };
+  return { arg: src.arg, readOnly: rules };
+}
+
+/**
+ * Run 7zz with the password (if any) on stdin, inside the sandbox (see sandbox.ts); `text` is a bounded, scrubbed tail of
+ * stderr + stdout noise. It can read and write only the roots it is given (and the system folders it needs to start).
+ */
+export async function runSz(
   args: string[],
-  opts: {
+  opts: SzAccess & {
     cwd?: string;
+    /** the working folder as an open descriptor (exact: see `SandboxOpts.cwdFd`); preferred to `cwd` */
+    cwdFd?: number;
     password?: string;
     signal?: AbortSignal;
     onLine?: (l: string) => void;
     stdinExtra?: string;
-    /** an open file handed to 7-Zip as descriptor 3 (read it as /dev/fd/3): the archive, opened and checked by the caller */
+    /** an open file handed to 7-Zip as descriptor 3 (read it as /dev/fd/3), kept open through the launcher; only where there is no kernel rule */
     fd?: number;
-    /** run as this user and group, supplementary groups cleared (only effective when the agent is root) */
-    runAs?: { uid: number; gid: number };
+    /** 7-Zip sets modes and times on what it extracts (into a private folder): do not refuse those calls */
+    allowMetadata?: boolean;
   } = {},
-): SzProc {
+): Promise<SzProc> {
   // 7-Zip sizes its thread pool from the host's core count (128 here), not the pod's CPU limit; two threads is plenty.
   const withThreads = [args[0]!, "-mmt=2", ...args.slice(1)];
-  const child = spawn(sevenZip(), withThreads, {
+  const child = await spawnSz(withThreads, opts);
+  return finishSz(child, opts);
+}
+
+type RunOpts = Parameters<typeof runSz>[1] & object;
+function spawnSz(withThreads: string[], opts: RunOpts): Promise<ChildProcess> {
+  return spawnSandboxed(sevenZip(), withThreads, {
     cwd: opts.cwd,
+    cwdFd: opts.cwdFd !== undefined && opts.cwdFd >= 0 ? opts.cwdFd : undefined,
     env: ENV,
-    stdio: opts.fd === undefined ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", opts.fd],
-    ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid } : {}),
+    stdio: ["pipe", "pipe", "pipe"],
+    keepFds: opts.fd === undefined ? undefined : [opts.fd], // the archive, as descriptor 3 (read as /dev/fd/3) where there is no kernel rule
+    // /dev/urandom: an AES archive needs a random salt and IV
+    readOnly: [...(opts.readOnly ?? []), "/dev/urandom"],
+    // a tool installed outside the system folders (FILEDECK_7Z=/opt/...) must still be startable
+    readExec: path.isAbsolute(sevenZip()) ? [sevenZip()] : undefined,
+    readWrite: opts.readWrite,
+    ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid, keepCaps: opts.runAs.keepCaps } : {}),
+    allowMetadata: opts.allowMetadata,
   });
+}
+
+function finishSz(child: ChildProcess, opts: RunOpts): SzProc {
   const stdin = child.stdin as Writable;
   stdin.on("error", () => undefined);
   // two lines: 7-Zip asks twice when creating an encrypted archive
@@ -117,6 +202,7 @@ export function runSz(
 
 /** Map a failed 7zz run to the right client-visible error. */
 export function szFailure(code: number | null, text: string, password: string | undefined, what: string): never {
+  failIfLauncher(code, text);
   const t = text.toLowerCase();
   const wants = t.includes("enter password") || t.includes("break signaled") || t.includes("cannot open encrypted archive") || t.includes("wrong password") || t.includes("data error in encrypted") || t.includes("crc failed in encrypted");
   if (wants) {
@@ -164,7 +250,7 @@ export interface SzList {
 }
 
 /** List an archive with 7-Zip. Throws PasswordError when a password is needed or wrong (header-encrypted 7z). */
-export async function listSz(real: string, password: string | undefined, signal: AbortSignal, limit = Infinity, via?: { fd: number; type?: string }): Promise<SzList> {
+export async function listSz(real: string | SzSource, password: string | undefined, signal: AbortSignal, limit = Infinity): Promise<SzList> {
   const entries: SzEntry[] = [];
   let buf = "";
   let stopped = false;
@@ -188,10 +274,15 @@ export async function listSz(real: string, password: string | undefined, signal:
       }
     } else entries.push(e);
   };
-  proc = runSz(["l", "-slt", "-ba", "-spd", ...(via?.type ? [`-t${via.type}`] : []), "--", via ? "/dev/fd/3" : real], {
+  const src = typeof real === "string" ? null : real;
+  const how = src ? await szReadArgs(src) : { arg: real as string, fd: undefined, readOnly: [real as string] };
+  proc = await runSz(["l", "-slt", "-ba", "-spd", ...(src?.type ? [`-t${src.type}`] : []), "--", how.arg], {
     password,
     signal,
-    fd: via?.fd,
+    fd: how.fd,
+    readOnly: how.readOnly,
+    cwdFd: src?.cwdFd,
+    runAs: src?.runAs,
     onLine: (l) => {
       if (l === "") {
         if (buf) push(buf);
@@ -209,11 +300,13 @@ export async function listSz(real: string, password: string | undefined, signal:
  * Verify a password against an encrypted archive by test-extracting its
  * smallest encrypted file (a zip/7z password check needs real ciphertext).
  */
-export async function verifyPassword(real: string, entries: SzEntry[], password: string | undefined, signal: AbortSignal): Promise<void> {
+export async function verifyPassword(real: string | SzSource, entries: SzEntry[], password: string | undefined, signal: AbortSignal): Promise<void> {
   const enc = entries.filter((e) => e.encrypted && e.type === "file");
   if (!enc.length) return;
   if (!password) throw new PasswordError("password_required", "this archive is password protected");
   const pick = enc.reduce((a, b) => (b.size < a.size ? b : a));
-  const { code, text } = await runSz(["t", "-spd", "--", real, pick.name], { password, signal }).done;
+  const src = typeof real === "string" ? null : real;
+  const how = src ? await szReadArgs(src) : { arg: real as string, fd: undefined, readOnly: [real as string] };
+  const { code, text } = await (await runSz(["t", "-spd", ...(src?.type ? [`-t${src.type}`] : []), "--", how.arg, pick.name], { password, signal, fd: how.fd, readOnly: how.readOnly, cwdFd: src?.cwdFd, runAs: src?.runAs })).done;
   if (code !== 0) szFailure(code, text, password, "cannot read archive");
 }

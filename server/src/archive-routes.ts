@@ -12,6 +12,18 @@ import { extractBlocked, hitsReadOnly, jobMayWrite } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import { ZipTickets } from "./zip-tickets.ts";
+import { downloadGate, listGate } from "./tool-gate.ts";
+import { clientKey } from "./search.ts";
+
+/**
+ * Who a request belongs to for the per-client limits of the download and listing pools, and whether that key can be trusted to tell clients apart. It can when
+ * the agent token is set (the hub's `x-filedeck-client` header is then believed, and a request without it is a direct client, keyed by its peer address). Without
+ * an agent token the agent cannot tell the hub from a direct client, so every user behind the hub shares one key (the hub's address): the per-client limit is
+ * then not applied and only the pool's own limit holds.
+ */
+export function clientIdentity(c: Context, agentToken: string | undefined): { key: string; limited: boolean } {
+  return { key: clientKey(c, agentToken), limited: !!agentToken };
+}
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -27,7 +39,7 @@ const str = (v: unknown, what: string) => {
   return v;
 };
 /** most names a selection may hold (the same bound as the job queue's items) */
-const MAX_NAMES = 10_000;
+const MAX_NAMES = ar.MAX_SELECTED; // one limit for the zip route, the ticket route, compression and the web client
 const strs = (v: unknown, what: string) => {
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || !x)) throw bad(`${what} must be an array of strings`);
   return v as string[];
@@ -76,9 +88,17 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.get("/api/archive/list", async (c) => {
     const lim = Number(c.req.query("limit"));
-    const { passwordUsed, ...res } = await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c));
+    const who = clientIdentity(c, cfg.agentToken);
+    const slot = await listGate.acquire(c.req.raw.signal, who.key, who.limited); // a listing is never held up by downloads: its own pool
+    let res: Awaited<ReturnType<typeof ar.listArchive>>;
+    try {
+      res = await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c));
+    } finally {
+      slot.release();
+    }
+    const { passwordUsed, ...rest } = res;
     // tells the hub the password was needed and right (so it may save it); stripped before the client sees it
-    return c.json(res, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
+    return c.json(rest, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
   });
 
   // Device, inode and size identity of a file (the device keeps two volumes' equal inode numbers apart), so the hub's vault can find a saved password after a rename or move.
@@ -109,7 +129,11 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
       "X-Content-Type-Options": "nosniff",
     };
     if (c.req.method === "HEAD") return new Response(null, { headers });
-    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal);
+    await ar.assertSandboxUsable();
+    const who = clientIdentity(c, cfg.agentToken);
+    const client = who.key;
+    const slot = await downloadGate.acquire(c.req.raw.signal, client, who.limited); // a client over its own limit (or a full pool) is answered 429 here, before the response starts
+    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root, slot, client });
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
   });
   app.post("/api/fs/zip-ticket", async (c) => {
@@ -153,11 +177,18 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.post("/api/jobs/extract", async (c) => {
     const b = await body<{ path?: string; destDir?: string; subfolder?: boolean; overwrite?: string; entries?: string[] }>(c);
-    const plan = await ar.prepareExtract(root, str(b.path, "path"), str(b.destDir, "destDir"), b.subfolder !== false, {
-      overwrite: b.overwrite as ar.OverwritePolicy | undefined,
-      entries: b.entries === undefined ? [] : strs(b.entries, "entries"),
-      password: pw(c),
-    });
+    const who = clientIdentity(c, cfg.agentToken);
+    const slot = await listGate.acquire(c.req.raw.signal, who.key, who.limited); // preparing reads the archive's listing (and checks a password): the listing pool
+    let plan: Awaited<ReturnType<typeof ar.prepareExtract>>;
+    try {
+      plan = await ar.prepareExtract(root, str(b.path, "path"), str(b.destDir, "destDir"), b.subfolder !== false, {
+        overwrite: b.overwrite as ar.OverwritePolicy | undefined,
+        entries: b.entries === undefined ? [] : strs(b.entries, "entries"),
+        password: pw(c),
+      });
+    } finally {
+      slot.release();
+    }
     // judged on the resolved destination and the real archive name, which are what the extraction will use
     if (extractBlocked(root, cfg.readOnly, plan, ar.archiveBase)) throw new ops.FsError(403, "read-only volume");
     const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => runExtract(plan, ctl));

@@ -10,6 +10,7 @@ import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
+import { useSandbox } from "./sandbox-env.ts";
 import { extractTar, parseListLine, safeSegments } from "../src/archive.ts";
 
 const HAVE_BSDTAR = spawnSync("bsdtar", ["--version"]).status === 0;
@@ -184,6 +185,7 @@ test("parseListLine", () => {
 /* ------------------------------------------------- HTTP, with real bsdtar */
 
 let tmp: string, srv: ReturnType<typeof serve>, base: string;
+let box: Awaited<ReturnType<typeof useSandbox>>;
 const sh = (cmd: string, args: string[], cwd?: string) => {
   const r = spawnSync(cmd, args, { cwd });
   assert.equal(r.status, 0, `${cmd} ${args.join(" ")}: ${r.stderr}`);
@@ -202,6 +204,7 @@ async function waitJob(id: string, want = ["done", "failed", "canceled"]) {
 }
 
 before(async () => {
+  box = await useSandbox(); // the real tools run inside the real sandbox where the kernel has Landlock
   work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-arch-")));
   tmp = path.join(work, "root");
   fs.mkdirSync(path.join(tmp, "src/sub"), { recursive: true });
@@ -220,6 +223,8 @@ before(async () => {
 after(() => {
   srv.close();
   fs.rmSync(work, { recursive: true, force: true });
+  fs.rmSync(box.dir, { recursive: true, force: true });
+  delete process.env.FILEDECK_SANDBOX_HELPER;
 });
 
 for (const format of ["zip", "tar.gz", "tar.zst", "7z"]) {
