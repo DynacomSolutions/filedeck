@@ -7,7 +7,7 @@ import path from "node:path";
 import { findRepo, runGit, repoArgs } from "../src/git.ts";
 import { selfCheckTools, listArchive, prepareCompress, prepareExtract, runCompress, runExtract } from "../src/archive.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
-import { resetSandbox } from "../src/sandbox.ts";
+import { readerCapability, resetSandbox, spawnSandboxed } from "../src/sandbox.ts";
 import type { JobCtl } from "../src/jobs.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
@@ -100,6 +100,19 @@ after(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+/** what a program sees when started as the archive user with the reader capability under this wrapper (shown when a test fails, so a CI log says why) */
+async function diagnose(dir: string, file: string): Promise<string> {
+  const cap = await readerCapability();
+  const run = async (opts: Parameters<typeof spawnSandboxed>[2]) => {
+    const c = await spawnSandboxed("sh", ["-c", `id; grep ^Cap /proc/self/status; ls -ld ${dir}; wc -c < ${file}; bsdtar --version; bsdtar -cf - ${file} | wc -c`], { readOnly: [dir, "/proc"], ...opts });
+    let out = "";
+    c.stdout?.on("data", (d) => (out += d));
+    c.stderr?.on("data", (d) => (out += d));
+    await new Promise((r) => c.on("close", r));
+    return out;
+  };
+  return `reader ${cap}\n--- as the archive user with it:\n${await run({ uid: 65533, gid: 65533, ...(cap ? { keepCaps: [cap] } : {}) })}\n--- as the agent without capabilities:\n${await run({})}`;
+}
 const live = (name: string, fn: () => Promise<void>) =>
   test(name, { skip: IS_ROOT ? false : "sandbox live: skipped (not running as root)" }, async (t) => {
     if (box.state !== "landlock") return t.skip(`skipped (${box.why})`);
@@ -130,7 +143,7 @@ live("under the chart's capabilities Git reads a root-owned repository that the 
   const r = (await findRepo(root, d))!;
   assert.ok(r);
   const log = await runGit(d, [...repoArgs(r), "log", "--format=%s"]);
-  assert.equal(log.code, 0, log.stderr);
+  assert.equal(log.code, 0, `${JSON.stringify({ code: log.code, stderr: log.stderr, timedOut: log.timedOut })}\n${await diagnose(d, path.join(d, "own.txt"))}`);
   assert.equal(log.stdout.trim(), "own");
 });
 
@@ -144,7 +157,9 @@ live("under the chart's capabilities every archive operation works on 0600 and 0
   fs.writeFileSync(path.join(root, "src/pick/a.bin"), body, { mode: 0o600 });
   fs.chmodSync(path.join(root, "src/pick"), 0o700);
   fs.chmodSync(path.join(root, "src"), 0o700);
-  const c = await runCompress(await prepareCompress(root, "/src", ["pick"], "tar.gz", "t", { destDir: "/out" }), LIM, mkCtl());
+  const c = await runCompress(await prepareCompress(root, "/src", ["pick"], "tar.gz", "t", { destDir: "/out" }), LIM, mkCtl()).catch(async (e) => {
+    throw new Error(`${e.message}\n${await diagnose(path.join(root, "src/pick"), path.join(root, "src/pick/a.bin"))}`);
+  });
   assert.equal(fs.statSync(path.join(root, c.path)).mode & 0o777, 0o600);
   assert.ok(JSON.stringify(await listArchive(root, c.path)).includes("a.bin"));
   const x = await runExtract(await prepareExtract(root, c.path, "/out", true, { overwrite: "rename" }), LIM, mkCtl());
