@@ -389,6 +389,11 @@ async function holdSlot(app: App, tmp: string) {
   fs.mkdirSync(path.join(tmp, "rw/big"), { recursive: true });
   execFileSync("truncate", ["-s", "1G", path.join(tmp, "rw/big/zeros")]);
   const blocker = (await (await postTo(app, "/api/jobs/compress", { dir: "/rw/big", names: ["zeros"], format: "tar.gz", level: 9 })).json()) as { id: string };
+  for (let i = 0; i < 200; i++) {
+    const j = (await (await app.request(`/api/jobs/${blocker.id}`)).json()) as { state: string };
+    if (j.state === "running") break; // the slot is taken only once the blocker really runs
+    await new Promise((r) => setTimeout(r, 10));
+  }
   return { release: () => postTo(app, `/api/jobs/${blocker.id}/cancel`, {}) };
 }
 
@@ -405,7 +410,9 @@ test("a queued extract is checked again where its destination really is when it 
     const slot = await holdSlot(app, tmp);
     const queued = await postTo(app, "/api/jobs/extract", { path: "/rw/x.tar", destDir: "/rw/x", subfolder: false, overwrite: "overwrite" });
     assert.equal(queued.status, 202);
-    const id = ((await queued.json()) as { id: string }).id;
+    const qj = (await queued.json()) as { id: string; state: string };
+    assert.equal(qj.state, "queued", "the job waits behind the blocker");
+    const id = qj.id;
     // swap the destination for a link to the parent of the protected folder
     assert.equal((await postTo(app, "/api/fs/rename", { from: "/rw/x", to: "/rw/x-old" })).status, 200);
     assert.equal((await postTo(app, "/api/fs/symlink", { path: "/rw/x", target: "../srv" })).status, 201);
@@ -430,7 +437,9 @@ test("a queued recursive permissions change is checked again where its target re
     const slot = await holdSlot(app, tmp);
     const queued = await postTo(app, "/api/fs/perms", { path: "/rw/x", mode: 0o700, recursive: true });
     assert.equal(queued.status, 202);
-    const id = ((await queued.json()) as { id: string }).id;
+    const qj = (await queued.json()) as { id: string; state: string };
+    assert.equal(qj.state, "queued", "the job waits behind the blocker");
+    const id = qj.id;
     assert.equal((await postTo(app, "/api/fs/rename", { from: "/rw/x", to: "/rw/x-old" })).status, 200);
     assert.equal((await postTo(app, "/api/fs/symlink", { path: "/rw/x", target: "../srv" })).status, 201);
     await slot.release();
