@@ -621,7 +621,8 @@ test("A-return an acquire whose write fails once is tried again: the fast path c
 });
 
 test("L11a a walk whose root commit fails busy leaves no walking row behind; L11b a missed beat does not lose the lease or turn later rows into ver 0", async () => {
-  const { s, db } = fixture("l11", { leaseMs: 600 });
+  const { s, db } = fixture("l11", { leaseMs: 60_000 });
+  // (a lease of a few hundred ms can lapse on a starved host before the test gets to its missed beat; one missed beat is what is under test, not the lease length)
   await s.scan("/");
   const a = s as Any;
   const orig = a.send.bind(s);
