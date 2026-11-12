@@ -224,8 +224,9 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
     const j = (await (await post(`${hub}/api/diff/jobs`, { left: { node: "n1", path: "/cmp" }, right: { node: "nas", path: "/cmp" }, options: opts })).json()) as { id: string };
     let state = "";
     for (let i = 0; i < 100 && state !== "done"; i++) {
-      state = ((await (await fetch(`${hub}/api/diff/jobs/${j.id}`)).json()) as { state: string }).state;
-      if (state === "failed") assert.fail("diff job failed");
+      const view = (await (await fetch(`${hub}/api/diff/jobs/${j.id}`)).json()) as { state: string; error?: string };
+      state = view.state;
+      if (state === "failed") assert.fail("diff job failed: " + JSON.stringify(view));
       if (state !== "done") await new Promise((r) => setTimeout(r, 50));
     }
     const res = (await (await fetch(`${hub}/api/diff/jobs/${j.id}/result`)).json()) as { rows: { p: string; status: string }[] };
