@@ -63,16 +63,16 @@ export const tableStyle = (s: ColumnState, git: boolean): React.CSSProperties =>
 /** Number of cells in a full row (visible columns, Git, and the filler). */
 export const cellCount = (cols: ColDef[], git: boolean) => cols.length + (git ? 1 : 0) + 1;
 
-export const FillCell = () => <td className="colh-fill" aria-hidden="true" />;
+export const FillCell = () => <td className="colh-fill" role="gridcell" aria-hidden="true" />;
 
 /** Cell for every column except Name (which the panel renders itself). */
 export function dataCell(c: ColDef, en: Entry, isDir: boolean) {
   const cls = (c.align ? "num" : "txt") + " c-" + c.id;
   switch (c.id) {
-    case "size": return <td key={c.id} className={cls}>{isDir ? "" : fmtSize(en.size)}</td>;
-    case "mtime": return <td key={c.id} className={cls}>{fmtDate(en.mtime)}</td>;
-    case "type": return <td key={c.id} className={cls}>{typeLabel(en, isDir)}</td>;
-    case "mode": return <td key={c.id} className={cls + " mono"}>{fmtMode(en.mode, en.type)}</td>;
+    case "size": return <td key={c.id} role="gridcell" className={cls}>{isDir ? "" : fmtSize(en.size)}</td>;
+    case "mtime": return <td key={c.id} role="gridcell" className={cls}>{fmtDate(en.mtime)}</td>;
+    case "type": return <td key={c.id} role="gridcell" className={cls}>{typeLabel(en, isDir)}</td>;
+    case "mode": return <td key={c.id} role="gridcell" className={cls + " mono"}>{fmtMode(en.mode, en.type)}</td>;
     default: return null;
   }
 }
@@ -209,6 +209,8 @@ export function HeaderRow({ s, cols, git, sort, onSort, onMenu }: {
 }) {
   return (
     <tr
+      role="row"
+      aria-rowindex={1}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -223,6 +225,7 @@ export function HeaderRow({ s, cols, git, sort, onSort, onMenu }: {
           <th
             key={c.id}
             scope="col"
+            role="columnheader"
             aria-sort={c.sort ? (on ? (sort.asc ? "ascending" : "descending") : "none") : undefined}
             className={"colh c-" + c.id + (c.sort ? " sortable" : "") + (c.align ? " end" : "")}
             style={{ zIndex: cols.length + 2 - i }}
@@ -238,7 +241,7 @@ export function HeaderRow({ s, cols, git, sort, onSort, onMenu }: {
             <Handle col={c} s={s} label={c.label} />
           </th>
         );
-        return i === 0 && git ? [th, <th key="git" scope="col" className="colh git-th c-git"><span className="colh-txt">Git</span></th>] : th;
+        return i === 0 && git ? [th, <th key="git" scope="col" role="columnheader" className="colh git-th c-git"><span className="colh-txt">Git</span></th>] : th;
       })}
       <th className="colh colh-fill" aria-hidden="true" />
     </tr>

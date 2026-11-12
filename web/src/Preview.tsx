@@ -80,7 +80,7 @@ export function Preview({ node, entry, onEdit, extra }: { node: string; entry: E
     } },
   ];
   return (
-    <div className="pv">
+    <div className="pv" role="region" aria-label={`Preview of ${entry.name}`}>
       <div className="pv-head">
         <Tip label={entry.path}><b className="pv-title">{entry.name}</b></Tip>
         <span className="muted pv-meta">{fmtSize(entry.size)} · {fmtDate(entry.mtime)}</span>

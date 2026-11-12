@@ -74,14 +74,14 @@ test("choosing an item restores focus before the menu unmounts, so a dialog reme
   assert.match(menu, /if \(e\.key === "Escape" \|\| e\.key === "Tab"\) \{\s*onRestore\?\.\(\);/s);
 });
 
-test("confirm dialogs name their message, archive errors are tied to fields, help lists F6 and uses h3", () => {
+test("confirm dialogs name their message, archive errors are tied to fields, help lists the panel switch keys and uses h3", () => {
   assert.match(src("Dialogs.tsx"), /describedBy=\{messageId\}/);
   assert.match(src("ArchiveDialog.tsx"), /aria-describedby=\{describedBy\}/);
   const archive = src("ArchiveDialog.tsx");
   assert.match(archive, /<div id=\{errId\} className="ad-err" role="alert">/);
   assert.match(archive, /fieldErr\("vol"\)/);
   const help = src("Shortcuts.tsx");
-  assert.match(help, /\["F6 \/ Shift\+F6", "Next \/ previous panel/);
+  assert.match(help, /\["Alt\+PageDown \/ Alt\+PageUp", "Next \/ previous panel's file list/);
   assert.match(help, /<h3>\{g\.title\}<\/h3>/);
   assert.ok(!help.includes("onMouseDown={onClose}"));
 });

@@ -512,7 +512,7 @@ export function App() {
     const to = all[i + dir];
     if (!to) return false;
     setActiveId(to.id);
-    setTimeout(() => document.querySelector<HTMLElement>(`[data-fp="${to.id}"]`)?.focus(), 0);
+    setTimeout(() => (document.querySelector<HTMLElement>(`[data-fp="${to.id}"] .fp-scroll`) ?? document.querySelector<HTMLElement>(`[data-fp="${to.id}"]`))?.focus(), 0);
     return true;
   };
   const render = (t: Tree, total: number): React.ReactNode => {

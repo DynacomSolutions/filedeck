@@ -2,7 +2,7 @@
 // and the actions here run on the combined list (hub jobs take items from any node).
 import { useState } from "react";
 import { createPortal } from "react-dom";
-import { api, canEdit, fileUrl, zipFitsInUrl, zipPost, zipUrl, type Entry, type OpSpec } from "./api";
+import { api, canEdit, fileUrl, zipFitsInUrl, zipTicketUrl, zipUrl, type Entry, type OpSpec } from "./api";
 import { setClip } from "./clipboard";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { CompressDialog } from "./ArchiveDialog";
@@ -60,20 +60,14 @@ const clickDownload = (href: string, name = "") => {
   a.remove();
 };
 
-/** Start one download per group, spaced out so the browser does not drop them. Long name lists go in a POST body instead of the URL. */
+/** Start one download per group, spaced out so the browser does not drop them. A long name list is exchanged for a one-use ticket instead of going in the URL. */
 export function downloadRefs(refs: SelRef[], onStatus?: (m: string) => void) {
   groupRefs(refs).forEach((g, i) => {
     setTimeout(() => {
       if (g.single) return clickDownload(fileUrl(g.node, g.single.path, "download"));
       if (zipFitsInUrl(g.node, g.dir, g.names)) return clickDownload(zipUrl(g.node, g.dir, g.names));
-      onStatus?.(`Preparing a zip of ${g.names.length} items...`);
-      zipPost(g.node, g.dir, g.names)
-        .then(({ blob, name }) => {
-          const url = URL.createObjectURL(blob);
-          clickDownload(url, name);
-          setTimeout(() => URL.revokeObjectURL(url), 60_000);
-          onStatus?.(`Zip ready: ${name}`);
-        })
+      zipTicketUrl(g.node, g.dir, g.names)
+        .then((url) => clickDownload(url))
         .catch((e: Error) => onStatus?.(`Download failed: ${e.message}`));
     }, i * 600);
   });
