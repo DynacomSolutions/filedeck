@@ -20,7 +20,7 @@ import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
 import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
-import { audit, type AuditSink } from "./audit.ts";
+import { audit, clientOf, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
 
@@ -29,7 +29,9 @@ export interface Target {
   fetch(rest: string, init?: RequestInit): Promise<Response>;
 }
 
-const HOP = new Set(["connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "host", "content-length"]);
+/** The header the hub sets for the agent with the client address it saw itself; any copy a client sends is dropped. */
+export const CLIENT_HEADER = "x-filedeck-client";
+const HOP = new Set([CLIENT_HEADER, "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "host", "content-length"]);
 
 function clean(h: Headers, keepLength: boolean): Headers {
   const out = new Headers();
@@ -289,6 +291,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       redirect: "manual",
     };
     stripBrowserContext(init.headers as Headers); // judged above; the agent sees a hub call
+    // who is asking, as this hub saw it (the last hop of the forwarded chain behind a proxy, else the socket's peer: what the audit log records)
+    const who = clientOf(c).ip;
+    if (who) (init.headers as Headers).set(CLIENT_HEADER, who.slice(0, 64));
     if (hasBody) {
       init.body = c.req.raw.body;
       init.duplex = "half";

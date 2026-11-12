@@ -1,7 +1,10 @@
+import { StringDecoder } from "node:string_decoder";
+import { getConnInfo } from "@hono/node-server/conninfo";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 import type { Readable } from "node:stream";
 import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
-import { compileGlobs } from "./glob.ts";
+import { GLOB_SKIP, compileGlobs, timeSlicer } from "./glob.ts";
 import { resolveRead } from "./paths.ts";
 import { walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
 import { createReadStream } from "node:fs";
@@ -71,16 +74,141 @@ export function safeRegex(src: string, flags: string): RegExp {
   }
 }
 
+/**
+ * Limits for user regular expressions. A regular expression a user writes can take very long on some text however it
+ * is screened, so it is never run on the event loop: each search that uses one gets a worker thread, and the time the
+ * search spends waiting for that worker, added up over the whole search, may not pass `regexTotalMs`. Past it, or when
+ * the client goes away, the worker is terminated. Only `maxWorkers` such searches run at once. (Mutable for tests.)
+ */
+export const searchHooks = { newWorker: (code: string, o: WorkerOptions): Worker => new Worker(code, o) }; // a seam for tests
+export const searchLimits = { regexTotalMs: 20_000, maxWorkers: 4, wallMs: 300_000, stallMs: 20_000 };
+
+/** Matches many strings in one call (a batch of names, the lines of a chunk), so one round trip serves many tests. */
+export interface Tester {
+  testMany(items: string[]): Promise<boolean[]>;
+  /** release the worker, if any; safe to call twice */
+  close(): void;
+}
+
+/** The time one search may spend in user regular expressions, shared by its name and content patterns. */
+export interface RegexBudget {
+  leftMs: number;
+}
+export const newBudget = (): RegexBudget => ({ leftMs: searchLimits.regexTotalMs });
+
+/** A pattern the program built itself (escaped text): it cannot backtrack badly, so it runs directly. */
+function plainTester(re: RegExp): Tester {
+  return { testMany: async (items) => items.map((s) => re.test(s)), close() {} };
+}
+
+const WORKER_CODE = `
+const { parentPort, workerData } = require("node:worker_threads");
+const re = new RegExp(workerData.src, workerData.flags);
+parentPort.on("message", (m) => {
+  const items = m.items, out = new Uint8Array(items.length);
+  for (let i = 0; i < items.length; i++) out[i] = re.test(items[i]) ? 1 : 0;
+  parentPort.postMessage({ id: m.id, out });
+});
+`;
+
+let activeWorkers = 0;
+const TOO_LONG = "pattern took too long to run: simplify the regular expression";
+
+/**
+ * A user's regular expression in a worker thread (see `searchLimits`). Answers 400 when the search's time in it runs
+ * out; the event loop is never blocked, and `terminate()` stops even a pattern stuck in backtracking.
+ */
+function workerTester(src: string, flags: string, budget: RegexBudget, signal?: AbortSignal): Tester {
+  safeRegex(src, flags); // length, heuristics and syntax, with the 400 messages
+  if (activeWorkers >= searchLimits.maxWorkers) throw new FsError(429, "too many regular-expression searches running, try again shortly");
+  let worker: Worker;
+  try {
+    worker = searchHooks.newWorker(WORKER_CODE, { eval: true, workerData: { src, flags }, resourceLimits: { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16 } });
+  } catch {
+    throw new FsError(500, "the regular-expression worker could not be started"); // nothing was counted: no slot is held
+  }
+  activeWorkers++; // counted once the worker exists; `close` is the only place that gives it back
+  let closed = false;
+  let failure: FsError | null = null;
+  let next = 1;
+  const pending = new Map<number, { resolve: (v: boolean[]) => void; reject: (e: unknown) => void }>();
+  const fail = (e: FsError) => {
+    failure ??= e;
+    for (const p of pending.values()) p.reject(e);
+    pending.clear();
+    close();
+  };
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    activeWorkers--;
+    signal?.removeEventListener("abort", onAbort);
+    void worker.terminate();
+  };
+  const onAbort = () => fail(new FsError(400, "canceled"));
+  signal?.addEventListener("abort", onAbort, { once: true });
+  worker.on("message", (m: { id: number; out: Uint8Array }) => {
+    const p = pending.get(m.id);
+    pending.delete(m.id);
+    p?.resolve(Array.from(m.out, (x) => x === 1));
+  });
+  worker.on("error", () => fail(new FsError(400, "the regular expression could not be run")));
+  worker.on("exit", () => {
+    if (!closed && pending.size) fail(new FsError(500, "regular-expression worker stopped"));
+  });
+  worker.unref(); // after the listeners: adding a "message" listener takes a reference again
+  return {
+    testMany(items) {
+      if (failure) return Promise.reject(failure);
+      if (closed) return Promise.reject(new FsError(400, "canceled"));
+      if (budget.leftMs <= 0) {
+        fail(new FsError(400, TOO_LONG));
+        return Promise.reject(failure);
+      }
+      const id = next++;
+      const t0 = performance.now();
+      return new Promise<boolean[]>((resolve, reject) => {
+        const timer = setTimeout(() => fail(new FsError(400, TOO_LONG)), budget.leftMs);
+        const settle = <T>(f: (v: T) => void) => (v: T) => {
+          clearTimeout(timer);
+          budget.leftMs -= performance.now() - t0;
+          f(v);
+        };
+        pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+        worker.postMessage({ id, items });
+      });
+    },
+    close,
+  };
+}
+
+/** `userRegex`: the text is a regular expression written by the user; otherwise it is literal text and is escaped. */
+export function makeTester(text: string, userRegex: boolean, ignoreCase: boolean, budget: RegexBudget = newBudget(), signal?: AbortSignal): Tester {
+  const flags = ignoreCase ? "i" : "";
+  return userRegex ? workerTester(text, flags, budget, signal) : plainTester(safeRegex(esc(text), flags));
+}
+
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-function nameMatcher(o: SearchOpts): (rel: string, isDir: boolean) => boolean {
-  if (!o.q) return () => true;
+/** Which of the entries match the name query. Names are matched in batches so a regular expression runs as one worker round trip. */
+function nameMatcher(o: SearchOpts, testers: Tester[], budget: RegexBudget, signal?: AbortSignal): (es: WalkEntry[]) => Promise<(boolean | typeof GLOB_SKIP)[]> {
+  if (!o.q) return async (es) => es.map(() => true);
   if (o.mode === "glob") {
     const m = compileGlobs([o.q], o.ignoreCase);
-    return (rel, isDir) => m.test(rel, isDir);
+    return async (es) => {
+      const tick = timeSlicer();
+      const out: (boolean | typeof GLOB_SKIP)[] = [];
+      for (const e of es) {
+        const w = tick();
+        if (w) await w;
+        out.push(m.test(e.p, e.t === "dir"));
+      }
+      return out;
+    };
   }
-  const re = safeRegex(o.mode === "regex" ? o.q : esc(o.q), o.ignoreCase ? "i" : "");
-  return (rel) => re.test(rel.slice(rel.lastIndexOf("/") + 1));
+  const t = makeTester(o.q, o.mode === "regex", o.ignoreCase, budget, signal);
+  testers.push(t);
+  return (es) => t.testMany(es.map((e) => e.p.slice(e.p.lastIndexOf("/") + 1)));
 }
 
 /** Binary heuristic: a NUL byte in the first chunk. */
@@ -98,8 +226,26 @@ export async function* searchTree(
   read: (rel: string) => Promise<Readable>,
   signal?: AbortSignal,
 ): AsyncGenerator<SearchBatch, SearchSummary> {
-  const nameOk = nameMatcher(o);
-  const grep = o.content ? safeRegex(o.contentRegex ? o.content : esc(o.content), o.contentIgnoreCase ? "i" : "") : null;
+  const testers: Tester[] = [];
+  try {
+    return yield* searchWith(walk, o, read, testers, signal);
+  } finally {
+    for (const t of testers) t.close(); // also on a cancelled request: stops a worker that is still matching
+    await walk.return({ truncated: false, depthLimited: false, errors: 0 }).catch(() => undefined);
+  }
+}
+
+async function* searchWith(
+  walk: AsyncGenerator<WalkEntry[], WalkSummary>,
+  o: SearchOpts,
+  read: (rel: string) => Promise<Readable>,
+  testers: Tester[],
+  signal?: AbortSignal,
+): AsyncGenerator<SearchBatch, SearchSummary> {
+  const budget = newBudget();
+  const nameOk = nameMatcher(o, testers, budget, signal);
+  const grep = o.content ? makeTester(o.content, o.contentRegex, o.contentIgnoreCase, budget, signal) : null;
+  if (grep) testers.push(grep);
   if (!o.q && !grep && o.types === "all") throw new FsError(400, "empty search");
   const sum: SearchSummary = { truncated: false, depthLimited: false, errors: 0, scanned: 0, grepped: 0, skipped: 0, capped: false };
   let bytes = 0;
@@ -136,14 +282,19 @@ export async function* searchTree(
     let n = 0;
     let lineNo = 0;
     let carry = "";
+    // a multi-byte character cut by the chunk boundary is held back until its remaining bytes arrive
+    const decoder = new StringDecoder("utf8");
     let checked = false;
     let read_ = 0;
-    const scan = (line: string) => {
-      lineNo++;
-      const t = line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line;
-      if (grep!.test(t)) {
-        n++;
-        if (!first) first = { l: lineNo, x: t.trim().slice(0, SNIPPET) };
+    const scan = async (lines: string[]) => {
+      const ts = lines.map((line) => (line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line));
+      const hit = await grep!.testMany(ts);
+      for (let i = 0; i < ts.length; i++) {
+        lineNo++;
+        if (hit[i]) {
+          n++;
+          if (!first) first = { l: lineNo, x: ts[i]!.trim().slice(0, SNIPPET) };
+        }
       }
     };
     try {
@@ -160,17 +311,19 @@ export async function* searchTree(
           }
         }
         if (read_ > o.maxFileBytes) break;
-        const parts = (carry + chunk.toString("utf8")).split("\n");
-        carry = (parts.pop() as string).slice(-MAX_LINE * 2);
-        for (const p of parts) scan(p.endsWith("\r") ? p.slice(0, -1) : p);
+        const parts = (carry + decoder.write(chunk)).split("\n");
+        // the unfinished last line goes on into the next chunk; only its first MAX_LINE characters are ever matched
+        carry = (parts.pop() as string).slice(0, MAX_LINE);
+        await scan(parts.map((p) => (p.endsWith("\r") ? p.slice(0, -1) : p)));
         if (bytes > o.maxTotalBytes) {
           sum.capped = true;
           break;
         }
       }
-      if (carry) scan(carry);
+      carry += decoder.end();
+      if (carry) await scan([carry]);
     } catch (err) {
-      if (signal?.aborted) throw err;
+      if (signal?.aborted || err instanceof FsError) throw err;
       sum.skipped++;
       return null;
     } finally {
@@ -192,13 +345,18 @@ export async function* searchTree(
         sum.errors = r.value.errors;
         break;
       }
-      for (const e of r.value) {
+      const nameHit = await nameOk(r.value);
+      for (const [idx, e] of r.value.entries()) {
         sum.scanned++;
         if (signal?.aborted) throw new FsError(400, "canceled");
         const isDir = e.t === "dir";
         if (o.types === "file" && isDir) continue;
         if (o.types === "dir" && !isDir) continue;
-        if (!nameOk(e.p, isDir)) continue;
+        if (nameHit[idx] === GLOB_SKIP) {
+          sum.skipped++; // the pattern is too expensive for this path: left out, and counted
+          continue;
+        }
+        if (!nameHit[idx]) continue;
         if (grep) {
           if (e.t !== "file") continue;
           const g = await grepFile(e);
@@ -260,18 +418,95 @@ export function parseSearch(q: (k: string) => string | undefined, cfg: { searchM
   };
 }
 
-/** At most this many searches walk one agent at a time; more get a 429 and the SPA says to retry. */
+/**
+ * At most this many searches walk one agent at a time; more get a 429 and the SPA says to retry. One client (by the
+ * address the server itself observed, see `clientKey`) may hold at most `max - 1` slots (at least two, so that a default
+ * gate of two does not refuse a user's second tab), so it cannot take every slot of a larger gate.
+ */
 export class SearchGate {
   private n = 0;
+  private byClient = new Map<string, number>();
   constructor(private max: number) {}
-  async *wrap<T, S>(gen: AsyncGenerator<T, S>): AsyncGenerator<T, S> {
+  /** A client may hold `max - 1` slots, but never fewer than two: several tabs of one user, or several users who cannot be told apart, must not be refused. */
+  private get perClient() {
+    return Math.max(2, this.max - 1);
+  }
+  async *wrap<T, S>(gen: AsyncGenerator<T, S>, client = "-"): AsyncGenerator<T, S> {
+    const mine = this.byClient.get(client) ?? 0;
     if (this.n >= this.max) throw new FsError(429, "too many searches running, try again shortly");
+    if (mine >= this.perClient) throw new FsError(429, "too many searches from this client are running, try again shortly");
     this.n++;
+    this.byClient.set(client, mine + 1);
     try {
       return yield* gen;
     } finally {
       this.n--;
+      const left = (this.byClient.get(client) ?? 1) - 1;
+      if (left <= 0) this.byClient.delete(client);
+      else this.byClient.set(client, left);
     }
+  }
+}
+
+/**
+ * Ends a search that runs too long or whose reader has stopped reading. `inner` is the search (the gate included): when the
+ * wall-clock deadline passes the search is aborted through `abort`; when the consumer has not asked for the next batch for
+ * `stallMs` (a client that never reads holds nothing else up: its slot and its worker are released), the suspended search
+ * is closed at once. The consumer's next read then gets the error.
+ */
+export async function* limitSearch<T, S>(inner: AsyncGenerator<T, S>, abort: () => void, wallMs = searchLimits.wallMs, stallMs = searchLimits.stallMs): AsyncGenerator<T, S> {
+  const start = Date.now();
+  let atYield = false;
+  let yieldedAt = 0;
+  let why: string | null = null;
+  const timer = setInterval(() => {
+    const now = Date.now();
+    if (why) return;
+    if (now - start > wallMs) why = "search took too long: narrow it down";
+    else if (atYield && now - yieldedAt > stallMs) why = "search stopped: the results were not read in time";
+    else return;
+    abort(); // a search that is working notices at its next step
+    if (atYield) void inner.return(undefined as S).catch(() => undefined); // one that waits for its reader is closed now: slot and worker are given back
+  }, 250);
+  timer.unref();
+  try {
+    for (;;) {
+      let r: IteratorResult<T, S>;
+      try {
+        r = await inner.next();
+      } catch (e) {
+        throw why ? new FsError(400, why) : e;
+      }
+      atYield = false;
+      if (why) throw new FsError(400, why);
+      if (r.done) return r.value;
+      atYield = true;
+      yieldedAt = Date.now();
+      yield r.value;
+      atYield = false;
+    }
+  } finally {
+    clearInterval(timer);
+    await inner.return(undefined as S).catch(() => undefined);
+  }
+}
+
+/**
+ * Who a search belongs to, for the per-client bound: an address the server saw, never a value a client chose. The hub sets
+ * `x-filedeck-client` (and drops any copy it receives); the agent believes that header only when the shared agent token is
+ * configured, because then every request that gets here carries it and so comes from the hub. Otherwise (no token: the agent
+ * cannot tell the hub from anybody else) and for direct requests the key is the socket's peer address, which behind a hub
+ * is the hub itself: all its users then share a key, which the bound's floor of two slots is generous enough for.
+ */
+function clientKey(c: import("hono").Context, agentToken: string | undefined): string {
+  if (agentToken) {
+    const v = c.req.header("x-filedeck-client")?.trim();
+    if (v) return v.slice(0, 64);
+  }
+  try {
+    return getConnInfo(c).remote.address ?? "-";
+  } catch {
+    return "-"; // not served over a socket (tests)
   }
 }
 
@@ -281,12 +516,14 @@ export function registerSearchRoutes(app: Hono, cfg: Config) {
     const q = c.req.query.bind(c.req);
     const p = parseSearch(q, cfg);
     const start = q("path") ?? "/";
-    const signal = c.req.raw.signal;
+    const stop = new AbortController(); // for the wall-clock deadline (see limitSearch)
+    const signal = AbortSignal.any([c.req.raw.signal, stop.signal]);
     const walk = walkTree(cfg.root, start, { hidden: p.hidden, depth: p.depth, max: Math.min(p.maxEntries, cfg.walkMaxEntries), include: [], exclude: [], ignoreCase: false }, signal);
     const read = async (rel: string) => {
       const r = resolveRead(cfg.root, (start === "/" ? "" : start.replace(/\/+$/, "")) + "/" + rel);
       return createReadStream(r.real, { highWaterMark: 64 * 1024 });
     };
-    return walkResponse(gate.wrap(searchTree(walk, p, read, signal)));
+    const client = clientKey(c, cfg.agentToken);
+    return walkResponse(limitSearch(gate.wrap(searchTree(walk, p, read, signal), client), () => stop.abort()));
   });
 }
