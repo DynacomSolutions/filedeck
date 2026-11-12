@@ -20,7 +20,7 @@ import { registerGitWorktreeRoutes } from "./git-worktrees.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
 import { registerTranscodeRoutes } from "./transcode.ts";
 import { agentAuth } from "./agent-auth.ts";
-import { audit, type AuditSink } from "./audit.ts";
+import { audit, trustProxies, type AuditSink } from "./audit.ts";
 import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, isReadOnly, hitsReadOnly, reachesReadOnly } from "./readonly.ts";
 import type { Config } from "./config.ts";
@@ -37,6 +37,7 @@ function dispo(name: string) {
 
 export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
+  app.use("*", trustProxies(cfg.trustedProxies));
   app.use("*", agentAuth(cfg.agentToken));
   app.use("*", requestGuard({ maxEdit: cfg.maxEdit, audit: { who: `agent:${cfg.node}`, sink: auditSink } }));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));

@@ -2,7 +2,7 @@
  * filedeck-sandbox: run a command with access to the listed folders only.
  *
  *   filedeck-sandbox --probe
- *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] -- COMMAND [ARG...]
+ *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]
  *
  * ROOT is a path, or `fd:N`: the number of a directory descriptor the caller left open for this process (spawn it as an
  * inherited descriptor). The Landlock rule is attached to the opened directory itself, so it follows the directory: renaming
@@ -42,7 +42,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
 #include <linux/landlock.h>
+#include <linux/seccomp.h>
+#include <dirent.h>
+#include <stddef.h>
+#include <sys/resource.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,7 +97,9 @@ struct ll_attr { /* the ruleset attribute as of the newest ABI this helper knows
 
 enum ll_kind { KIND_FS, KIND_NET, KIND_SCOPE };
 
-/* does the kernel accept a ruleset that handles this one right? */
+/* does the kernel accept a ruleset that handles this one right? 1 yes; 0 "not offered": only the kernel's EINVAL for an unknown
+ * right counts as that (and E2BIG for an attribute larger than it knows); any other failure is -1 and the caller must not
+ * carry on, so that a right is never left unrestricted because of an unrelated error (out of memory, descriptors, ...) */
 static int supported(enum ll_kind kind, int bit) {
   struct ll_attr a = {0, 0, 0};
   uint64_t v = 1ULL << bit;
@@ -99,22 +107,33 @@ static int supported(enum ll_kind kind, int bit) {
   else if (kind == KIND_NET) a.handled_access_net = v;
   else a.scoped = v;
   int fd = ll_create(&a, sizeof a, 0);
-  if (fd < 0) return 0;
+  if (fd < 0) return (errno == EINVAL || errno == E2BIG) ? 0 : -1;
   close(fd);
   return 1;
 }
 
 /* Every right of every kind the running kernel offers (and this helper knows) is handled, so that everything not allowed
  * explicitly is denied: all file system rights, TCP and UDP bind/connect, abstract unix sockets and signals to processes
- * outside the sandbox. */
-static void handled_rights(struct ll_attr *h) {
+ * outside the sandbox. 0 on success, -1 when a probe failed for a reason other than "not offered". */
+static int handled_rights(struct ll_attr *h) {
   h->handled_access_fs = h->handled_access_net = h->scoped = 0;
   for (int b = 0; b < 64; b++) {
     uint64_t v = 1ULL << b;
-    if ((FS_KNOWN & v) && supported(KIND_FS, b)) h->handled_access_fs |= v;
-    if ((NET_KNOWN & v) && supported(KIND_NET, b)) h->handled_access_net |= v;
-    if ((SCOPE_KNOWN & v) && supported(KIND_SCOPE, b)) h->scoped |= v;
+    int r;
+    if (FS_KNOWN & v) {
+      if ((r = supported(KIND_FS, b)) < 0) return -1;
+      if (r) h->handled_access_fs |= v;
+    }
+    if (NET_KNOWN & v) {
+      if ((r = supported(KIND_NET, b)) < 0) return -1;
+      if (r) h->handled_access_net |= v;
+    }
+    if (SCOPE_KNOWN & v) {
+      if ((r = supported(KIND_SCOPE, b)) < 0) return -1;
+      if (r) h->scoped |= v;
+    }
   }
+  return 0;
 }
 
 /* 0 = usable (ABI in *abi), EXIT_UNSUPPORTED = not available here, EXIT_FAILED = unexpected error */
@@ -138,6 +157,77 @@ static int parse_id(const char *text, long *out) {
   if (errno || end == text || *end || v < 0 || v > 4294967294L || text[0] == '+' || text[0] == ' ') return -1;
   *out = v;
   return 0;
+}
+
+/* every descriptor above 2 close-on-exec: close_range(2) where the kernel has it, else the real list of open descriptors, else a loop up to the limit */
+static void mark_cloexec(void) {
+#ifndef __NR_close_range
+#define __NR_close_range 436
+#endif
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+  if (syscall(__NR_close_range, 3U, ~0U, CLOSE_RANGE_CLOEXEC) == 0) return;
+  DIR *d = opendir("/proc/self/fd");
+  if (d) {
+    int self = dirfd(d);
+    struct dirent *e;
+    while ((e = readdir(d))) {
+      char *end;
+      long n = strtol(e->d_name, &end, 10);
+      if (*end || end == e->d_name || n < 3 || n == self) continue;
+      fcntl((int)n, F_SETFD, FD_CLOEXEC);
+    }
+    closedir(d);
+    return;
+  }
+  struct rlimit rl;
+  long max = 65536;
+  if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY && (long)rl.rlim_cur < (1L << 20)) max = (long)rl.rlim_cur;
+  for (long fd = 3; fd < max; fd++) fcntl((int)fd, F_SETFD, FD_CLOEXEC);
+}
+
+/* Extra layer for kernels whose Landlock has no UDP rights: socket() and socketpair() fail with EACCES for everything but
+ * unix-domain stream sockets, and io_uring (which can open sockets) is refused. Best effort: a kernel without seccomp filters
+ * leaves UDP open, as documented. Only on the architectures whose audit number is known here. */
+#if defined(__x86_64__)
+#define SB_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define SB_ARCH AUDIT_ARCH_AARCH64
+#endif
+static int deny_sockets(void) {
+#ifdef SB_ARCH
+  const uint32_t nr_off = offsetof(struct seccomp_data, nr);
+  const uint32_t arg0 = offsetof(struct seccomp_data, args[0]);
+  const uint32_t arg1 = offsetof(struct seccomp_data, args[1]);
+  struct sock_filter f[] = {
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SB_ARCH, 1, 0),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, nr_off),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 3, 0),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socketpair, 2, 0),
+#ifdef __NR_io_uring_setup
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_setup, 6, 0),
+#else
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0xffffffffU, 6, 0),
+#endif
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+      /* socket / socketpair: allowed only for (AF_UNIX, SOCK_STREAM) */
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, arg0),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1 /* AF_UNIX */, 0, 3),
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, arg1),
+      BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0xf /* SOCK_TYPE_MASK */),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1 /* SOCK_STREAM */, 1, 0),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+  };
+  struct sock_fprog prog = {.len = (unsigned short)(sizeof f / sizeof f[0]), .filter = f};
+  return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
+#else
+  errno = ENOSYS;
+  return -1;
+#endif
 }
 
 #define MAX_ROOTS 64
@@ -199,7 +289,7 @@ int main(int argc, char **argv) {
   struct root_spec roots[MAX_ROOTS];
   int nroots = 0;
   long uid = -1, gid = -1;
-  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, i = 1;
+  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, allow_sockets = 0, i = 1;
   const uint64_t R = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
   const uint64_t RX = R | LANDLOCK_ACCESS_FS_EXECUTE;
   /* every right except execute: write, create, remove, rename, link (the ABI-specific ones are masked by `handled`) */
@@ -220,6 +310,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[i], "--probe")) do_probe = 1;
     else if (!strcmp(argv[i], "--no-landlock")) no_landlock = 1;
     else if (!strcmp(argv[i], "--no-system")) no_system = 1;
+    else if (!strcmp(argv[i], "--allow-sockets")) allow_sockets = 1;
     else if ((!strcmp(argv[i], "--ro") || !strcmp(argv[i], "--rx") || !strcmp(argv[i], "--rw")) && i + 1 < argc) {
       if (nroots >= MAX_ROOTS) {
         fprintf(stderr, "filedeck-sandbox: too many roots\n");
@@ -249,13 +340,16 @@ int main(int argc, char **argv) {
     int r = probe(&abi);
     if (r == 0) {
       struct ll_attr h;
-      handled_rights(&h);
+      if (handled_rights(&h) < 0) {
+        fprintf(stderr, "filedeck-sandbox: probing the rights: %s\n", strerror(errno));
+        return EXIT_FAILED;
+      }
       printf("landlock abi %d fs 0x%llx net 0x%llx scope 0x%llx\n", abi, (unsigned long long)h.handled_access_fs, (unsigned long long)h.handled_access_net, (unsigned long long)h.scoped);
     }
     return r;
   }
   if (i >= argc) {
-    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] -- COMMAND [ARG...]\n");
+    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]\n");
     return EXIT_USAGE;
   }
   if ((uid == 0 || gid == 0) && !allow_root_user) {
@@ -271,12 +365,17 @@ int main(int argc, char **argv) {
   int abi = 0;
   int rs = -1;
   uint64_t handled = 0;
+  int udp_handled = 0;
   if (!no_landlock) {
     int r = probe(&abi);
     if (r) return r;
     struct ll_attr attr;
-    handled_rights(&attr);
+    if (handled_rights(&attr) < 0) {
+      fprintf(stderr, "filedeck-sandbox: probing the rights: %s\n", strerror(errno));
+      return EXIT_FAILED;
+    }
     handled = attr.handled_access_fs;
+    udp_handled = (attr.handled_access_net & 0xcULL) == 0xcULL; /* UDP bind and connect/send are handled by the kernel */
     rs = ll_create(&attr, sizeof attr, 0);
     if (rs < 0) {
       if (errno == ENOSYS || errno == EOPNOTSUPP || errno == EPERM) return EXIT_UNSUPPORTED;
@@ -332,6 +431,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "filedeck-sandbox: no_new_privs: %s\n", strerror(errno));
     return EXIT_FAILED;
   }
+  /* Landlock does not restrict descriptors that are already open: nothing but the standard three may reach the command.
+   * Done before the ruleset is applied (the list of descriptors lives in /proc, which the ruleset hides). */
+  mark_cloexec();
+  /* UDP where the kernel's Landlock cannot control it (see above): refuse every socket that is not a unix stream socket */
+  if (!allow_sockets && !udp_handled && deny_sockets() < 0 && errno != ENOSYS && errno != EINVAL) {
+    fprintf(stderr, "filedeck-sandbox: seccomp: %s\n", strerror(errno));
+    return EXIT_FAILED;
+  }
   if (rs >= 0) {
     if (ll_restrict(rs, 0) < 0) {
       if (errno == ENOSYS || errno == EOPNOTSUPP || errno == EPERM) return EXIT_UNSUPPORTED;
@@ -341,9 +448,6 @@ int main(int argc, char **argv) {
     close(rs);
   }
 
-  /* Landlock does not restrict descriptors that are already open: nothing but the standard three may reach the command
-   * (the root descriptors were closed-on-exec above already, and so is everything else from here on) */
-  for (int fd = 3; fd < 1024; fd++) fcntl(fd, F_SETFD, FD_CLOEXEC);
   execvp(argv[i], argv + i);
   fprintf(stderr, "filedeck-sandbox: %s: %s\n", argv[i], strerror(errno));
   return 127;

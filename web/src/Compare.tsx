@@ -754,7 +754,11 @@ export function CompareBody({ ctl, side }: { ctl: CompareCtl; side: Side }) {
             );
           })}
         </div>
-        {!ctl.rows.length && !ctl.running && ctl.summary && <div className="cmp-empty muted">Nothing to show here with the current filters.</div>}
+        {!ctl.rows.length && !ctl.running && ctl.summary && (
+          <div className="cmp-empty muted">
+            {ctl.summary.stats.incomplete ? "Nothing to show here, but the comparison is incomplete: some paths were skipped (see the warning in the sidebar)." : "Nothing to show here with the current filters."}
+          </div>
+        )}
        </div>
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
@@ -868,6 +872,8 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
 
 /** Warnings from the compare (depth limit, unreadable folders) as a short label plus the full text for the tooltip. */
 function warnRow(w: string): { short: string; full: string } {
+  const left = /^(\d+) paths? (?:was|were) left out/.exec(w);
+  if (left) return { short: `${left[1]} path${left[1] === "1" ? "" : "s"} skipped: comparison incomplete`, full: w + ". Use simpler include/exclude patterns in the compare Options." };
   const deep = /deeper than (\d+) levels/.exec(w);
   return { short: deep ? `deeper than ${deep[1]} levels skipped` : w, full: w + (w.endsWith(".") ? "" : ".") + (deep ? " Raise \"Max depth\" in the compare Options." : "") };
 }
@@ -977,7 +983,7 @@ export function CompareInfo() {
       {err && <p className="side-cmp-err" role="alert">{err}</p>}
       {/* Fixed two-line block while running and after, so the sidebar does not jump as numbers change. */}
       {/* Announced only when the state changes (queued, comparing, done); the numbers below change too often to be read out. */}
-      <p className="visually-hidden" role="status">{running ? (job?.state === "queued" ? "Comparison queued" : "Comparing") : s?.finishedAt ? "Comparison done" : ""}</p>
+      <p className="visually-hidden" role="status">{running ? (job?.state === "queued" ? "Comparison queued" : "Comparing") : s?.finishedAt ? (s.incomplete ? "Comparison done, incomplete: some paths were skipped" : "Comparison done") : ""}</p>
       <div className="side-cmp-run">
         {running && job?.state === "queued" && (
           <>

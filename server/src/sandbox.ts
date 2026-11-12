@@ -13,7 +13,7 @@ import { FsError } from "./fsops.ts";
  *
  * `FILEDECK_SANDBOX` chooses what happens when Landlock is not usable (old kernel, not enabled, blocked by a seccomp
  * profile, launcher missing):
- *   auto (default)  the program still runs, without kernel confinement, as the given uid/gid; the caller must then do its own
+ *   auto            (the default of a plain start; the image and the chart set `require`) the program still runs, without kernel confinement, as the given uid/gid; the caller must then do its own
  *                   checks (`sandboxInfo().state === "fallback"`); logged once at start-up
  *   require         `spawnSandboxed` throws 503
  *   off             no launcher, no confinement, nothing extra: only the caller's own checks (development)
@@ -35,7 +35,11 @@ export interface SandboxInfo {
  * Landlock right the running kernel offers: all file system rights, TCP (and UDP where offered) bind and connect, abstract unix
  * sockets and signals to processes outside the sandbox. On an older kernel what is missing is what each ABI added: ABI 1
  * lacks cross-directory link/rename control and truncate control (ABI 2, 3), below ABI 4 the network is open, below ABI 5 device
- * ioctls are, below ABI 6 abstract unix sockets and signals are, below ABI 9 pathname unix sockets are. Landlock never restricts
+ * ioctls are, below ABI 6 abstract unix sockets and signals are, below ABI 9 pathname unix sockets are. UDP: no Landlock ABI
+ * this launcher knows controls UDP bind/connect before the kernel's newest one, so there UDP stays open to a confined program,
+ * with one extra layer: unless `allowSockets` is set the launcher installs a seccomp filter that makes `socket()` and
+ * `socketpair()` fail with EACCES for everything but unix-domain stream sockets (and refuses io_uring). That layer is
+ * best effort: a kernel without seccomp filters, or an architecture other than x86-64 and arm64, leaves UDP open. Landlock never restricts
  * a descriptor the program already holds: the launcher marks every descriptor above 2 close-on-exec (the root descriptors
  * included), and callers must not hand a confined program any descriptor it should not use through `stdio` either.
  * `uid`/`gid` 0 are refused by the launcher.
@@ -108,6 +112,8 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
   /** run as this user and group, supplementary groups cleared (applied before the program starts) */
   uid?: number;
   gid?: number;
+  /** let the program create sockets of any kind (see the UDP note above); TCP stays denied wherever the kernel's Landlock can deny it */
+  allowSockets?: boolean;
   /** do not add the system folders, /etc files and /dev/null the launcher allows by default (the program must then be static) */
   noSystem?: boolean;
 }
@@ -120,7 +126,7 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
  * If the launcher itself exits with `EXIT_LANDLOCK_UNSUPPORTED`, the program did not run: call `resetSandbox()` and treat it as unavailable.
  */
 export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxOpts = {}): Promise<ChildProcess> {
-  const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, stdio, ...rest } = opts;
+  const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, allowSockets, stdio, ...rest } = opts;
   const info = await sandboxInfo();
   if (info.state === "unavailable") throw sandboxRequiredError();
   if ((uid === 0 || gid === 0) && uid !== process.getuid?.()) throw new FsError(500, "refusing to run a confined program as root");
@@ -146,6 +152,7 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
   add("--rx", readExec);
   add("--rw", readWrite);
   if (noSystem) flags.push("--no-system");
+  if (allowSockets) flags.push("--allow-sockets");
   if (owner) flags.push("--uid", String(owner.uid), "--gid", String(owner.gid));
   return spawn(info.helper!, [...flags, "--", cmd, ...args], { ...rest, stdio: fds as SpawnOptions["stdio"] });
 }

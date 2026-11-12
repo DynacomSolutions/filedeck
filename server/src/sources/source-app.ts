@@ -494,7 +494,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     return thumbResponse(t);
   });
 
-  const searches = new SearchGate(o.searchConcurrency ?? 2);
+  const searches = new SearchGate(o.searchConcurrency ?? 3);
   app.get("/api/fs/search", async (c) => {
     const q = c.req.query.bind(c.req);
     const p = parseSearch(q, { searchMaxFileBytes: o.searchMaxFileBytes ?? 8 * 1024 * 1024, searchMaxBytes: o.searchMaxBytes ?? 256 * 1024 * 1024 });

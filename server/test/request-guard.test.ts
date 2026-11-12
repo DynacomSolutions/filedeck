@@ -332,7 +332,7 @@ test("an allowed-hosts entry compares names, and ports only when the entry names
 
 test("refusal audit lines carry the client address like any other line", async () => {
   const lines: string[] = [];
-  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "a" } as never), (l) => lines.push(l));
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "a", FILEDECK_TRUSTED_PROXIES: "1" } as never), (l) => lines.push(l));
   await app.request("/api/fs/delete", { method: "POST", headers: { ...J, "sec-fetch-site": "cross-site", "x-forwarded-for": "198.51.100.9, 10.1.2.3" }, body: "{}" });
   const r = JSON.parse(lines[0]!) as { ip: string; forwardedFor: string; status: number };
   assert.equal(r.status, 403);

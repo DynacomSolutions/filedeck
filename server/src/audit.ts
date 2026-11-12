@@ -31,20 +31,38 @@ export function pick(v: unknown, depth = 0): unknown {
 }
 
 /** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. */
-/** Who asked: the last X-Forwarded-For entry (what the nearest proxy saw), else the socket peer; the chain is kept as the caller can write it. */
+/**
+ * How many reverse proxies sit in front of this process (FILEDECK_TRUSTED_PROXIES, 0 = none, the default). The forwarded chain
+ * is believed only to that depth; with none, a client that talks to the process directly cannot choose the address that is
+ * recorded (or used as a key) by sending a header of its own. The count reaches `clientOf` through the context (`trustProxies`).
+ */
+export const trustProxies = (hops: number): MiddlewareHandler => async (c, next) => {
+  c.set("trustedProxies" as never, hops as never);
+  await next();
+};
+
+/**
+ * Who asked: with that many proxies in front, the `X-Forwarded-For` entry that many places from the right (what the
+ * outermost trusted proxy saw; the chain is kept as the caller can write it), otherwise the socket's peer address.
+ */
 export function clientOf(c: import("hono").Context): Record<string, string> {
   const chain = c.req.header("x-forwarded-for");
-  const fwd = chain?.split(",").pop()?.trim();
   let peer: string | undefined;
   try {
     peer = getConnInfo(c).remote.address;
   } catch {
     peer = undefined; // not served over a socket (tests)
   }
+  let fwd: string | undefined;
+  const hops = Number((c as { get(k: string): unknown }).get("trustedProxies") ?? 0) || 0;
+  if (hops > 0 && chain) {
+    const parts = chain.split(",").map((x) => x.trim());
+    fwd = parts.length >= hops ? parts[parts.length - hops] : undefined;
+  }
   const ip = fwd || peer;
   return {
     ...(ip ? { ip } : {}),
-    ...(chain && chain.includes(",") ? { forwardedFor: clip(chain) } : {}),
+    ...(hops > 0 && chain && chain.includes(",") ? { forwardedFor: clip(chain) } : {}),
     ...(peer && fwd && fwd !== peer ? { peer } : {}),
   };
 }

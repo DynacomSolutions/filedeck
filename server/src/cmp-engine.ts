@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { FsError } from "./fsops.ts";
-import { GLOB_SKIP, GLOB_SKIP_REASON, compileGlobs, timeSlicer } from "./glob.ts";
+import { GLOB_SKIP, compileGlobs, timeSlicer } from "./glob.ts";
 import { dropSpill, openDb } from "./index-cache.ts";
 import { TRASH_DIR } from "./paths.ts";
 import type { Progress } from "./jobs.ts";
@@ -111,9 +111,22 @@ const COLS = "id, parent, p, rp, depth, d, lt, ls, lm, ll, rt, rs, rm, rl, st, w
 export class CompareSession {
   readonly stats: SessionStats;
   private warnSet = new Set<string>();
-  /** depth limit and unreadable folders, as short sentences for the sidebar */
+  /** paths the include/exclude patterns were too expensive to judge: left out of the compare (a set, so a relist does not count one twice; capped) */
+  private skippedPaths = new Set<string>();
+  private skippedOver = 0;
+  /** how many paths were left out and the first few of them (for the compare result and the view) */
+  get skipped(): { count: number; paths: string[] } {
+    return { count: this.skippedPaths.size + this.skippedOver, paths: [...this.skippedPaths].slice(0, 5) };
+  }
+  /** some paths were not compared: "no differences" must not be read as "identical" */
+  get incomplete(): boolean {
+    return this.skippedPaths.size + this.skippedOver > 0;
+  }
+  /** depth limit, left-out paths and unreadable folders, as short sentences for the sidebar */
   get warnings(): string[] {
     const w = [...this.warnSet];
+    const sk = this.skipped;
+    if (sk.count) w.push(`${sk.count} path${sk.count === 1 ? " was" : "s were"} left out because the include/exclude patterns are too expensive to match against ${sk.count === 1 ? "it" : "them"} (the comparison is incomplete), for example: ${sk.paths.join(", ")}`);
     if (this.errorCount) w.push(`${this.errorCount} folder${this.errorCount === 1 ? "" : "s"} could not be read`);
     return w;
   }
@@ -283,7 +296,9 @@ export class CompareSession {
     const ex = this.exclude.test(rel, isDir);
     const inc = ex || isDir || !this.include ? true : this.include.test(rel, false);
     if (ex === GLOB_SKIP || inc === GLOB_SKIP) {
-      this.warnSet.add(`Some paths were left out, ${GLOB_SKIP_REASON.replace(/^skipped: /, "")}`); // the compare goes on without that path
+      // the compare goes on without that path, and says which (see `skipped`)
+      if (this.skippedPaths.size < 10_000) this.skippedPaths.add(rel);
+      else this.skippedOver++;
       return false;
     }
     return !ex && inc === true;

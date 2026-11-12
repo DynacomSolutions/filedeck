@@ -42,6 +42,8 @@ export interface Config {
   diffDir: string;
   /** search: concurrent searches per agent, per-file and total content bytes read */
   searchConcurrency: number;
+  /** reverse proxies in front of this process whose X-Forwarded-For is believed (0 = none) */
+  trustedProxies: number;
   searchMaxFileBytes: number;
   searchMaxBytes: number;
   /** thumbnails: cache dir (outside user data), cache ceiling in bytes, concurrent ffmpeg runs, binary */
@@ -145,7 +147,8 @@ export function loadConfig(env = process.env): Config {
     handoverMs: Number(env.FILEDECK_HANDOVER_MS ?? 6000),
     listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
     diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),
-    searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 2),
+    searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 3),
+    trustedProxies: Math.max(0, Math.min(8, Math.floor(Number(env.FILEDECK_TRUSTED_PROXIES ?? 0)) || 0)),
     searchMaxFileBytes: Number(env.FILEDECK_SEARCH_MAX_FILE ?? 8 * 1024 * 1024),
     searchMaxBytes: Number(env.FILEDECK_SEARCH_MAX_BYTES ?? 512 * 1024 * 1024),
     thumbDir: env.FILEDECK_THUMB_DIR ?? path.join(os.tmpdir(), "filedeck-thumbs"),

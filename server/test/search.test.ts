@@ -316,7 +316,9 @@ test("no single match can hold the event loop: a path the patterns are too expen
   const { compareTrees, localSource, normalizeOptions } = await import("../src/folderdiff.ts");
   const res = await compareTrees(localSource(path.join(tmp, "skipcmp-l"), "/"), localSource(path.join(tmp, "skipcmp-r"), "/"), normalizeOptions({ mode: "size", exclude }), { signal: new AbortController().signal, progress: () => undefined } as never);
   assert.deepEqual(res.rows.map((x: { p: string }) => x.p), ["same.txt"]);
-  assert.ok((res as { warnings?: string[] }).warnings?.some((w) => /too expensive/.test(w)), JSON.stringify((res as { warnings?: unknown }).warnings));
+  const r2 = res as { warnings: string[]; skipped: { count: number; paths: string[] }; incomplete: boolean };
+  assert.ok(r2.warnings.some((w) => /too expensive/.test(w) && w.includes(longName.slice(0, 20))), JSON.stringify(r2.warnings));
+  assert.deepEqual([r2.skipped.count, r2.skipped.paths, r2.incomplete], [1, [longName], true], "the count, the path and the incomplete mark");
 });
 
 test("a cancelled compare writes nothing after the cancel (the rows of a folder whose entries were still being judged)", async () => {
@@ -530,12 +532,15 @@ test("the per-client bound keys on an address the server saw: a forged header ga
     for (let i = 0; i < 3; i++) held.push(await gob(`10.2.0.${i}`));
     assert.equal((await gob("10.2.0.77")).status, 429, "all of them are one client to this agent");
     for (const r of held.splice(0)) await r.body?.cancel().catch(() => undefined);
-    // 3. a default gate of two does not refuse a second tab of the same user
+    // 3. the default gate is three: a second tab of the same user is not refused, and the per-client cap (two) applies by default,
+    //    so one client that reads slowly cannot hold every slot
     const c = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
     held.push(await Promise.resolve(c.request("/api/fs/search?path=/stall2&q=f")));
-    const second = await Promise.resolve(c.request("/api/fs/search?path=/s&q=main"));
+    const second = await Promise.resolve(c.request("/api/fs/search?path=/stall2&q=f"));
     assert.equal(second.status, 200, "a second search from the same address");
     held.push(second);
+    assert.equal((await Promise.resolve(c.request("/api/fs/search?path=/s&q=main"))).status, 429, "a third from the same address: the last slot stays free for others");
+    assert.equal(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never).searchConcurrency, 3);
   } finally {
     Object.assign(searchLimits, saved);
     for (const r of held) await r.body?.cancel().catch(() => undefined);
@@ -549,12 +554,17 @@ test("the hub drops a client-sent client header and sets its own from what it sa
   try {
     const port = (upstream.address() as import("node:net").AddressInfo).port;
     const { createHub } = await import("../src/hub.ts");
-    const hub = createHub(loadConfig({ NODES: `n1=http://127.0.0.1:${port}`, FILEDECK_MODE: "hub" } as never));
+    const hub = createHub(loadConfig({ NODES: `n1=http://127.0.0.1:${port}`, FILEDECK_MODE: "hub", FILEDECK_TRUSTED_PROXIES: "1" } as never));
     await hub.request("/api/nodes/n1/api/info", { headers: { "x-filedeck-client": "forged-by-client" } });
     await hub.request("/api/nodes/n1/api/info", { headers: { "x-filedeck-client": "forged-by-client", "x-forwarded-for": "1.1.1.1, 203.0.113.9" } });
     assert.equal(seen[0], null, "a forged value must not pass through");
     assert.equal(seen[1], "203.0.113.9", "the last hop of the forwarded chain, as the audit records it");
     await hub.close();
+    // by default (no proxy in front) the forwarded chain is not believed: the client chose it
+    const plain = createHub(loadConfig({ NODES: `n1=http://127.0.0.1:${port}`, FILEDECK_MODE: "hub" } as never));
+    await plain.request("/api/nodes/n1/api/info", { headers: { "x-forwarded-for": "1.1.1.1, 203.0.113.9" } });
+    assert.equal(seen[2], null, "a client-written chain must not become the key");
+    await plain.close();
   } finally {
     upstream.close();
   }

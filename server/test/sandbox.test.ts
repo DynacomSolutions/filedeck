@@ -226,3 +226,58 @@ test("--uid and --gid must be whole non-negative numbers, and 0 is refused unles
   }
   if (process.getuid?.() !== 0) await assert.rejects(spawnSandboxed("true", [], { uid: 0, gid: 0 }), /root/); // (as root, uid 0 is simply no change)
 });
+
+live("every descriptor above 2 is closed on exec, also above 1024", async () => {
+  const f = path.join(tmp, "secret-fd-high.txt");
+  write(f, "secret\n");
+  const fh = await fs.promises.open(f, "r");
+  try {
+    const hi = 1100;
+    const stdio: unknown[] = ["ignore", "pipe", "pipe"];
+    while (stdio.length < hi) stdio.push("ignore");
+    stdio.push(fh.fd);
+    const script = `if [ -e /dev/fd/${hi} ]; then echo open; else echo closed; fi`;
+    const r = await run("sh", ["-c", script], { stdio: stdio as never });
+    assert.equal(r.stdout.trim(), "closed", r.stderr);
+    const control = spawnSync("sh", ["-c", script], { encoding: "utf8", stdio: stdio as never });
+    assert.equal(control.stdout.trim(), "open", "control: a plain child inherits it");
+  } finally {
+    await fh.close();
+  }
+});
+
+live("a failure while probing the rights stops the launcher (exit 71) instead of leaving a right unrestricted", async () => {
+  // with four descriptors allowed and one in use, creating the probe ruleset fails with EMFILE: not "right not offered"
+  if (!box.staticBin) return; // only without a static libc (a dynamic launcher cannot even load with so few descriptors); the CI run requires the static build
+  const r = spawnSync("sh", ["-c", `exec 3</dev/null; ulimit -n 4; exec ${box.staticBin} -- echo ran`], { encoding: "utf8" });
+  assert.equal(r.status, 71, r.stderr);
+  assert.equal(r.stdout, "", "the program must not have run");
+  assert.match(r.stderr, /probing the rights/);
+});
+
+live("UDP: denied where the kernel cannot control it (a seccomp layer on socket()), unless sockets are allowed", async () => {
+  const r = rights();
+  const script = `
+    const dgram = require("dgram"); const out = {};
+    try { const s = dgram.createSocket("udp4"); s.on("error", (e) => { out.udp = e.code; fin(); }); s.bind(0, "127.0.0.1", () => { out.udp = "bound"; s.close(); fin(); }); } catch (e) { out.udp = e.code; fin(); }
+    function fin() { console.log(JSON.stringify(out)); }`;
+  const prefix = path.dirname(path.dirname(process.execPath));
+  const env = { ...process.env, OPENSSL_CONF: "/dev/null" };
+  const udp = async (opts: SandboxOpts) => JSON.parse((await run(process.execPath, ["-e", script], { readExec: [prefix], env, ...opts })).stdout.trim().split("\n").at(-1)!) as { udp: string };
+  const free = JSON.parse(spawnSync(process.execPath, ["-e", script], { encoding: "utf8" }).stdout.trim().split("\n").at(-1)!) as { udp: string };
+  assert.equal(free.udp, "bound", "control: without the sandbox UDP works");
+  console.log(`# sandbox UDP: kernel Landlock handles UDP rights: ${(r.net & 12n) === 12n}`);
+  assert.equal((await udp({})).udp, "EACCES");
+  if ((r.net & 12n) !== 12n) assert.equal((await udp({ allowSockets: true })).udp, "bound", "allowSockets opens the extra layer (the kernel has no UDP rights)");
+  // unix-domain stream sockets still work through the filter
+  const sock = path.join(tmp, "unix-ok.sock");
+  const srv = (await import("node:net")).createServer((c) => c.end("hi"));
+  await new Promise<void>((res) => srv.listen(sock, res));
+  try {
+    const un = `require("net").connect(${JSON.stringify(sock)}).on("data", (d) => console.log(String(d))).on("error", (e) => console.log("ERR " + e.code));`;
+    const res = await run(process.execPath, ["-e", un], { readExec: [prefix], readWrite: [tmp], env });
+    assert.ok(res.stdout.includes("hi") || /ERR (EACCES|EPERM)/.test(res.stdout), res.stdout); // allowed by seccomp; the kernel's own pathname-socket rule may still refuse it
+  } finally {
+    srv.close();
+  }
+});

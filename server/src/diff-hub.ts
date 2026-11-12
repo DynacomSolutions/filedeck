@@ -145,7 +145,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
   const strip = (j: JobView) => {
     const { result: _r, ...rest } = j;
     const s = sessions.get(j.id);
-    return { ...rest, ...(meta.get(j.id) ?? {}), ...(s ? { stats: { ...s.stats, warnings: s.warnings }, ...s.counts() } : {}) };
+    return { ...rest, ...(meta.get(j.id) ?? {}), ...(s ? { stats: { ...s.stats, warnings: s.warnings, incomplete: s.incomplete, skipped: s.skipped }, ...s.counts() } : {}) };
   };
   const session = (id: string) => {
     const s = sessions.get(id);
@@ -173,7 +173,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
       const job = jobs.create("folderdiff", `Compare ${left.node}:${left.path} with ${right.node}:${right.path}`, async (ctl) => {
         const s = sess;
         await s.run(ctl.signal, ctl.progress);
-        return { left, right, options, ...s.counts(), hashedFiles: s.stats.hashed, hashedBytes: s.stats.hashedBytes, warnings: s.warnings, durationMs: Date.now() - t0 };
+        return { left, right, options, ...s.counts(), hashedFiles: s.stats.hashed, hashedBytes: s.stats.hashedBytes, warnings: s.warnings, skipped: s.skipped, incomplete: s.incomplete, durationMs: Date.now() - t0 };
       });
       sessions.set(job.id, sess);
       seen.set(job.id, Date.now());
