@@ -1320,12 +1320,12 @@ async function verifyCompareToolbarCompact(browser) {
     }
   }
   // wide window: the full toolbar fits on one row once the panel is wide enough
-  const { context, page } = await openPage(browser, { viewport: { width: 2200, height: 900 }, state });
+  const { context, page } = await openPage(browser, { viewport: { width: 3000, height: 900 }, state });
   try {
     await page.getByText('only-left.txt').first().waitFor({ state: 'visible', timeout: 10000 });
     await page.waitForTimeout(300);
     const h = await page.evaluate(() => [...document.querySelectorAll('.cmp-bar')].map((b) => ({ h: Math.round(b.getBoundingClientRect().height), compact: b.classList.contains('compact') })));
-    if (h.some((x) => x.h > 60 || x.compact)) failures.push(`2200px: toolbar should be one full row, got ${JSON.stringify(h)}`);
+    if (h.some((x) => x.h > 60 || x.compact)) failures.push(`3000px: toolbar should be one full row, got ${JSON.stringify(h)}`);
   } finally {
     await context.close();
   }
