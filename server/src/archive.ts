@@ -1272,7 +1272,7 @@ export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl
 /** Run `rm -rf` as `user`, so whatever a user's tool or the user left in their folder is removed with that user's rights only. */
 function removeAsUser(dir: string, user: { uid: number; gid: number }): Promise<void> {
   return new Promise((resolve) => {
-    const c = spawn("rm", ["-rf", "--", dir], { uid: user.uid, gid: user.gid, stdio: "ignore", cwd: "/" });
+    const c = spawn("rm", ["-rf", "--", dir], { uid: user.uid, gid: user.gid, stdio: "ignore", cwd: "/", timeout: 60_000 });
     c.on("error", () => resolve());
     c.on("close", () => resolve());
   });

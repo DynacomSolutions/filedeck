@@ -443,7 +443,7 @@ test("Filedeck's own folders are not readable through the file API", () => {
 });
 
 const needTool = { skip: spawnSync("bsdtar", ["--version"]).status === 0 ? false : "bsdtar not installed" };
-const listTar = (f: string) => spawnSync("bsdtar", ["-tf", f]).stdout.toString().split("\n").filter(Boolean);
+const listTar = (f: string) => spawnSync("bsdtar", ["-tf", f], { timeout: 60_000 }).stdout.toString().split("\n").filter(Boolean);
 
 test("compress and zip download never read a nested volume's trash or work folder into an archive", needTool, async () => {
   const s = scene("reserved-compress");
@@ -494,7 +494,7 @@ const chownIfRoot = (p: string) => {
 
 test("a child started with a user and group has no supplementary groups left (checked when root)", () => {
   if (!IS_ROOT) return; // starting a child as another user needs root
-  const r = spawnSync("grep", ["^Groups:", "/proc/self/status"], { uid: NOBODY, gid: NOBODY, encoding: "utf8" });
+  const r = spawnSync("grep", ["^Groups:", "/proc/self/status"], { uid: NOBODY, gid: NOBODY, encoding: "utf8", timeout: 30_000 });
   assert.match(r.stdout, /^Groups:\s*$/m);
 });
 
@@ -646,7 +646,7 @@ test("a user-run 7-Zip that leaves a hard link to someone else's file is refused
 
 /* ---- opening a name the user controls never blocks, and only plain, readable archives are taken ---- */
 
-const mkfifo = (p: string) => assert.equal(spawnSync("mkfifo", [p]).status, 0);
+const mkfifo = (p: string) => assert.equal(spawnSync("mkfifo", [p], { timeout: 30_000 }).status, 0);
 const within = <T,>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error("blocked")), ms))]);
 
 test("a pipe swapped in for the archive is refused at once instead of blocking the open", { timeout: 60_000 }, async () => {

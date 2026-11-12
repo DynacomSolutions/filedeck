@@ -137,7 +137,7 @@ test("compress and zip download leave every reserved name out", needTool, async 
   }
   const lim = { maxEntries: 1000, maxBytes: 1 << 30 };
   const r = await runCompress(await prepareCompress(root, "/src", ["vol"], "tar.gz", "vol", { destDir: "/out" }), lim, ctl());
-  const names = spawnSync("bsdtar", ["-tf", path.join(root, r.path)]).stdout.toString().split("\n").filter(Boolean);
+  const names = spawnSync("bsdtar", ["-tf", path.join(root, r.path)], { timeout: 60_000 }).stdout.toString().split("\n").filter(Boolean);
   assert.ok(names.some((n) => n.endsWith("keep.txt")), names.join(","));
   assert.deepEqual(names.filter((n) => n.includes(".filedeck-")), []);
   const zip = path.join(tmp, "dl.zip");
@@ -148,7 +148,7 @@ test("compress and zip download leave every reserved name out", needTool, async 
     out.on("close", () => res());
     z.pipe(out);
   });
-  const zn = spawnSync("bsdtar", ["-tf", zip]).stdout.toString().split("\n").filter(Boolean);
+  const zn = spawnSync("bsdtar", ["-tf", zip], { timeout: 60_000 }).stdout.toString().split("\n").filter(Boolean);
   assert.ok(zn.some((n) => n.endsWith("keep.txt")));
   assert.deepEqual(zn.filter((n) => n.includes(".filedeck-")), []);
 });

@@ -13,7 +13,7 @@ import type { JobCtl } from "../src/jobs.ts";
  * Tests with the real 7-Zip (`7zz`); they skip where it is not installed (CI has it). They check that what the
  * agent promises about 7-Zip holds for the real program, not only for the stand-ins used elsewhere.
  */
-const HAVE = spawnSync("bsdtar", ["--version"]).status === 0 && haveSevenZip();
+const HAVE = spawnSync("bsdtar", ["--version"], { timeout: 30_000 }).status === 0 && haveSevenZip();
 const needSz = { skip: HAVE ? false : "7-Zip (7zz) or bsdtar not installed", timeout: 180_000 }; // a hang fails the test instead of the whole run
 const IS_ROOT = process.getuid?.() === 0;
 const NOBODY = 65534;
@@ -63,7 +63,7 @@ function userScene(name: string) {
   return { ...s, sel };
 }
 const outDirs = () => fs.readdirSync(os.tmpdir()).filter((n) => /^filedeck-out-/.test(n));
-const list7z = (first: string) => spawnSync(process.env.FILEDECK_7Z || "7zz", ["l", "-slt", "-ba", first], { encoding: "utf8" }).stdout;
+const list7z = (first: string) => spawnSync(process.env.FILEDECK_7Z || "7zz", ["l", "-slt", "-ba", first], { encoding: "utf8", timeout: 60_000, input: "" }).stdout;
 
 test("a split 7z set without a password compresses from a user-owned folder (7-Zip runs as the folder's owner when the agent is root) and holds every file", needSz, async () => {
   const before = outDirs().length;
@@ -165,7 +165,7 @@ test("exclude patterns with names containing * or ? are refused with a reason, f
 });
 
 test("diagnostic: does 7-Zip open nested paths by name? (recorded in the log; never fails)", needSz, () => {
-  const strace = spawnSync("strace", ["-V"], { encoding: "utf8" });
+  const strace = spawnSync("strace", ["-V"], { encoding: "utf8", timeout: 30_000 });
   if (strace.status !== 0) {
     console.log("# strace not available: diagnostic skipped");
     return;
@@ -175,7 +175,7 @@ test("diagnostic: does 7-Zip open nested paths by name? (recorded in the log; ne
     fs.mkdirSync(path.join(d, "t/sub/deeper"), { recursive: true });
     fs.writeFileSync(path.join(d, "t/sub/deeper/f.txt"), "x");
     const log = path.join(d, "trace.log");
-    spawnSync("strace", ["-f", "-o", log, "-e", "trace=openat,mkdir,mkdirat,newfstatat", process.env.FILEDECK_7Z || "7zz", "a", "-t7z", "-snl", path.join(d, "out.7z"), "./t"], { cwd: d, encoding: "utf8" });
+    spawnSync("strace", ["-f", "-o", log, "-e", "trace=openat,mkdir,mkdirat,newfstatat", process.env.FILEDECK_7Z || "7zz", "a", "-t7z", "-snl", path.join(d, "out.7z"), "./t"], { cwd: d, encoding: "utf8", timeout: 60_000, input: "" });
     const lines = fs.readFileSync(log, "utf8").split("\n").filter((l) => /t\/sub|"\.\/t|f\.txt/.test(l));
     console.log("# 7-Zip system calls touching the nested folder (a relative path through t/sub means it opens by name):");
     for (const l of lines.slice(0, 40)) console.log("#   " + l);
