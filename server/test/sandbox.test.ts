@@ -313,11 +313,39 @@ int main(void) {
   const cc = spawnSync("cc", ["-O2", "-o", bin, src], { encoding: "utf8" });
   if (cc.status !== 0) return t.skip(`sandbox live: skipped (cannot build the x32 probe: ${cc.stderr.trim().split("\n")[0]})`);
   const free = spawnSync(bin, [], { encoding: "utf8" });
-  if (!/opened/.test(free.stdout)) return t.skip(`sandbox live: skipped (this kernel has x32 calls disabled: ${free.stdout.trim()})`);
-  console.log("# sandbox x32: the kernel accepts x32 calls; the filter must stop them");
+  if (!/opened/.test(free.stdout)) {
+    console.log(`# sandbox x32: this kernel has x32 calls disabled (${free.stdout.trim()}): the x32 socket() branch is skipped here; the number probe below still covers the filter`);
+    return t.skip(`sandbox live: skipped (this kernel has x32 calls disabled: ${free.stdout.trim()})`);
+  }
+  console.log("# sandbox x32: the x32 socket() call was made inside the sandbox and the process was killed (this kernel accepts x32 calls)");
   const r = await run(bin, [], { readExec: [tmp] });
   assert.ok(!/opened/.test(r.stdout), `an x32 socket() was opened inside the sandbox: ${r.stdout}`);
   assert.ok(r.code !== 0, "the x32 call must end the process or fail");
+});
+
+live("any x32-numbered system call is killed by the filter, whether or not the kernel implements x32 (seccomp sees the number first)", async (t) => {
+  if (process.arch !== "x64") return t.skip("sandbox live: skipped (x32 calls exist on x86-64 only)");
+  const info = await sandboxInfo();
+  if (!info.seccomp) return t.skip("sandbox live: skipped (no socket filter on this kernel)");
+  const src = path.join(tmp, "x32num.c");
+  write(src, `#define _GNU_SOURCE
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+int main(void) {
+  long r = syscall(0x40000000 | SYS_getpid); /* an x32-numbered getpid */
+  printf("returned %ld\\n", r);
+  return 0;
+}
+`);
+  const bin = path.join(tmp, "x32numbin");
+  const cc = spawnSync("cc", ["-O2", "-o", bin, src], { encoding: "utf8" });
+  if (cc.status !== 0) return t.skip(`sandbox live: skipped (cannot build the x32 number probe: ${cc.stderr.trim().split("\n")[0]})`);
+  const free = spawnSync(bin, [], { encoding: "utf8" });
+  assert.equal(free.status, 0, "control: without the sandbox the call returns (a pid, or -1 where x32 is off)");
+  const r = await run(bin, [], { readExec: [tmp] });
+  console.log(`# sandbox x32 number probe: unconfined it ${free.stdout.trim()}; confined: ${r.code === null ? "killed" : "exit " + r.code}`);
+  assert.ok(r.code !== 0 && !/returned/.test(r.stdout), `the x32-numbered call was not stopped: ${r.stdout}`);
 });
 
 live("git, bsdtar and name lookups still work with the socket filter (they use only the descriptors they were given)", async () => {

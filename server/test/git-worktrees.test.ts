@@ -228,3 +228,33 @@ test("a worktree's name comes from its private directory's id, and a linked gitd
     fs.writeFileSync(gd, orig);
   }
 });
+
+test("a worktree made with relative paths (Git 2.48 and newer) is placed, with its dirty state and lock reason", async (t) => {
+  const v = /(\d+)\.(\d+)/.exec(g(tmp, "--version"));
+  if (!v || Number(v[1]) < 2 || (Number(v[1]) === 2 && Number(v[2]) < 48)) return t.skip(`git ${v?.[0] ?? "?"} has no --relative-paths (needs 2.48)`);
+  const main = path.join(tmp, "work/main");
+  const wt = path.join(tmp, "work/relwt");
+  g(main, "worktree", "add", "--relative-paths", "-b", "relwt", wt);
+  const gd = fs.readFileSync(path.join(main, ".git/worktrees/relwt/gitdir"), "utf8").trim();
+  assert.ok(!path.isAbsolute(gd), `control: the gitdir file holds a relative path (${gd})`);
+  g(main, "worktree", "lock", "--reason", "carried on a stick", wt);
+  fs.writeFileSync(path.join(wt, "a.txt"), "changed\n");
+  const w = (await list("/work/main")).body.worktrees.find((x) => x.name === "relwt");
+  assert.ok(w, "listed under its id");
+  assert.equal(w.path, "/work/relwt");
+  assert.equal(w.dirty, true, "a tracked file was edited");
+  assert.equal(w.locked, true);
+  assert.equal(w.lockReason, "carried on a stick");
+  // a relative path that leads out of the served root is not placed
+  const gdFile = path.join(main, ".git/worktrees/relwt/gitdir");
+  const orig = fs.readFileSync(gdFile);
+  try {
+    fs.writeFileSync(gdFile, "../../../../../../../../../../tmp/elsewhere/.git\n");
+    const out = (await list("/work/main")).body.worktrees.find((x) => x.name !== "main" && x.path === null && x.dirty === null && x.locked);
+    void out;
+    const again = (await list("/work/main")).body.worktrees.find((x) => x.path === "/work/relwt");
+    assert.equal(again, undefined, "a relative gitdir leaving the root must not place the worktree");
+  } finally {
+    fs.writeFileSync(gdFile, orig);
+  }
+});

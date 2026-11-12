@@ -126,8 +126,8 @@ interface Admin {
 
 /**
  * Private git directories of the linked worktrees, keyed by the real worktree path they record and by the path as recorded
- * (what git lists). Each `gitdir` file is read through `readAdminFile`; one that is a link, too big or not a single absolute
- * path is not trusted, and the worktree is then listed without a location.
+ * (what git lists). Each `gitdir` file is read through `readAdminFile`; one that is a link, too big or not a single path
+ * (absolute, or relative to the private directory) is not trusted, and the worktree is then listed without a location.
  */
 async function privateDirs(m: Mapper, common: string): Promise<{ byReal: Map<string, string>; byListed: Map<string, Admin> }> {
   const out = new Map<string, string>();
@@ -137,9 +137,13 @@ async function privateDirs(m: Mapper, common: string): Promise<{ byReal: Map<str
   for (const id of ids) {
     const dir = path.join(base, id);
     const gd = oneLine(await readAdminFile(m.rootReal, common, dir, "gitdir", ADMIN_FILE_MAX), 4096);
-    if (!gd || !gd.startsWith("/")) continue;
-    byListed.set(path.dirname(gd), { id, dir });
-    const g = guess(m, path.dirname(gd));
+    if (!gd) continue;
+    // an absolute path is the host's own; a relative one (`worktree.useRelativePaths`, Git 2.48 and newer) is relative to this
+    // private directory. Either way the place must lie inside the served root.
+    const full = path.isAbsolute(gd) ? path.normalize(gd) : path.resolve(dir, gd);
+    if (path.isAbsolute(gd) ? false : !within(m.rootReal, full)) continue;
+    byListed.set(path.dirname(full), { id, dir });
+    const g = guess(m, path.dirname(full));
     if (g) out.set(g, dir);
   }
   return { byReal: out, byListed };
