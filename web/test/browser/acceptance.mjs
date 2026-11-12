@@ -187,7 +187,8 @@ let currentCheck = 'check';
 let pendingShots = [];
 
 async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {} } = {}) {
-  const context = await browser.newContext({ viewport, colorScheme });
+  // bypassCSP only lets the harness inject axe-core into the page; the app's own scripts are unaffected.
+  const context = await browser.newContext({ viewport, colorScheme, bypassCSP: true });
   const page = await context.newPage();
   // The last screenshot of each page is kept in memory and written only when its check fails.
   const realClose = context.close.bind(context);
