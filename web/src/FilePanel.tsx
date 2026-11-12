@@ -292,7 +292,8 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   const setDock = (d: Dock) => onPatch({ pv: { dock: d, size: pvSize, ...(pvTab ? { tab: pvTab } : {}) } });
   const setTab = (tab: "props" | undefined) => onPatch({ pv: { dock: leaf.pv?.dock ?? "right", size: pvSize, ...(tab ? { tab } : {}) } });
   /** a folder named from a breadcrumb menu (not part of the selection); dropped as soon as the selection or folder changes */
-  const [propsFor, setPropsFor] = useState<string | null>(null);
+  const propsFor = leaf.wtPath ?? null;
+  const setPropsFor = (p: string | null) => { if ((leaf.wtPath ?? null) !== p) onPatch({ wtPath: p ?? undefined }); };
   const openProps = (forPath?: string) => {
     setClosedFor(null);
     setPropsFor(forPath ?? null);
@@ -300,7 +301,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   };
   /** Preview mode of the side pane. With nothing previewable selected it opens on the empty state (leaf.pe) instead of staying shut. */
   const showPreview = () =>
-    onPatch({ closed: undefined, pe: isPreviewableEntry(only) ? undefined : true, pv: { dock: leaf.pv?.dock ?? "right", size: pvSize } });
+    onPatch({ closed: undefined, wtPath: undefined, pe: isPreviewableEntry(only) ? undefined : true, pv: { dock: leaf.pv?.dock ?? "right", size: pvSize } });
 
   useEffect(() => {
     let live = true;
@@ -446,7 +447,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
   useEffect(() => {
     if (closedFor && closedFor !== cursor) setClosedFor(null);
   }, [cursor, closedFor]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => setPropsFor(null), [sel, cursor, node, path]);
+  // The named folder is part of the URL (wp): it must survive a reload, so only a change after the first render drops it.
+  const propsScope = useRef(`${node}\0${path}\0${cursor}\0${[...sel].join("\0")}`);
+  useEffect(() => {
+    const now = `${node}\0${path}\0${cursor}\0${[...sel].join("\0")}`;
+    if (propsScope.current === now) return;
+    propsScope.current = now;
+    setPropsFor(null);
+  }, [sel, cursor, node, path]); // eslint-disable-line react-hooks/exhaustive-deps
   // Mirror the active item and the selection into the URL once the listing has confirmed they exist.
   useEffect(() => {
     if (!entries.length && (sel.size || cursor)) return; // a deep-linked selection waits for the listing

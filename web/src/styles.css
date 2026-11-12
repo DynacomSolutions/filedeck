@@ -410,10 +410,11 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 
 /* ---- in-place compare ---- */
 .ed.over{position:absolute;inset:.6rem;z-index:20;border:1px solid var(--border-strong);border-radius:var(--radius);overflow:hidden;flex:none}
-.cmp-barwrap{position:relative;flex:none;height:36px;box-sizing:border-box;border-bottom:1px solid var(--border);background:var(--surface-2)}
-.cmp-bar{display:flex;flex-wrap:nowrap;gap:0 .5rem;align-items:center;height:100%;padding:0 .65rem;font-size:.78rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
-.cmp-bar>*{flex:none}
-.cmp-bar button{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{display:inline-flex;gap:.3rem;flex-wrap:nowrap}.cmp-bar .fd-toggles{display:inline-flex;gap:.3rem;flex-wrap:nowrap}
+.cmp-barwrap{position:relative;flex:none;display:flex;align-items:center;min-height:var(--cmp-bar-h,36px);box-sizing:border-box;border-bottom:1px solid var(--border);background:var(--surface-2)}
+/* the toolbar wraps onto more rows instead of scrolling sideways, so no action is ever cut off; both panels share the taller height (--cmp-bar-h) to keep their rows aligned */
+.cmp-bar{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:.2rem .5rem;align-items:center;box-sizing:border-box;min-height:36px;padding:.2rem .65rem;font-size:.78rem}
+.cmp-bar>*{flex:none}.cmp-bar>.fd-toggles,.cmp-bar>.fd-sync{flex:0 1 auto;min-width:0}
+.cmp-bar button{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{display:inline-flex;gap:.3rem;flex-wrap:wrap}.cmp-bar .fd-toggles{display:inline-flex;gap:.3rem;flex-wrap:wrap}
 .cmp-badge{font-weight:700;color:var(--accent-text)}
 .cmp-with{display:block;max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmp-exit{margin-left:auto}
@@ -871,10 +872,10 @@ button,button:hover,button:active,.btn--secondary,.btn--danger,.btn--ghost,.user
 .crumbs .crumb-sep svg.lucide{width:11px;height:11px;opacity:.7}
 .crumbs .crumb-sep.open{background:var(--accent-tint)}
 .crumbs button.here{font-weight:700}
-/* compact targets (24px, WCAG 2.5.8 AA) so the path reads as text; the empty bar area and recents button stay 44px */
-.crumbs button{min-height:44px!important;height:44px!important;min-width:0!important;padding:0 .2rem}
+/* compact targets (24px wide at least, WCAG 2.5.8 AA) so the path reads as text, all 44px tall; the location button gives way first when the bar is narrow */
+.crumbs button{min-height:44px!important;height:44px!important;min-width:24px!important;padding:0 .2rem}
 .crumbs .crumb-sep{min-width:24px!important;width:24px;margin:0}
-.addr-base.dd-btn{min-height:28px!important;height:28px;flex:0 0 auto;max-width:9rem;margin:0 4px 0 2px;padding:0 .4rem;background:transparent;box-shadow:none;color:var(--muted);font-weight:600}
+.addr-base.dd-btn{min-height:44px!important;height:44px;flex:0 100000 auto;min-width:5rem;max-width:9rem;margin:0 4px 0 2px;padding:0 .4rem;background:transparent;box-shadow:none;color:var(--muted);font-weight:600}
 .addr-base.dd-btn:hover:not(:disabled),.addr-base.dd-btn.open{background:var(--accent-tint);color:var(--fg)}
 /* ---- panel toolbar: drag handle, grouped menus, right-aligned side-panel group ---- */
 .fp-grip{flex:none;display:inline-flex;align-items:center;justify-content:center;width:24px;height:44px;margin-left:-.15rem;border-radius:var(--radius-sm,6px);color:var(--muted);cursor:grab;user-select:none;touch-action:none}

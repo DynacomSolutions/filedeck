@@ -3,7 +3,7 @@
 // The diff itself is the existing hub job (/api/diff/jobs); sync actions are one hub op job.
 import { useSettings } from "./settings";
 import { ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronRight, CircleAlert, Equal, EqualNot, LoaderCircle, TriangleAlert, type LucideIcon } from "lucide-react";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffCounts, type DiffJobView, type DiffMode, type DiffRow, type DiffStats, type Loc, type OpJob, type SyncStepSpec } from "./api";
 import { flattenFolders, joinRoot, rangeBetween, relUnder, singleFlight, type CNode, type FolderData } from "./compareModel";
 import { parsePresets, sanitizeOpts } from "./comparePresets";
@@ -11,7 +11,6 @@ import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Modal } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
-import { wheelX } from "./scrollx";
 import { getPresentation, usePresentation } from "./presentation";
 import { joinRel, pickedForPlan, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
@@ -817,7 +816,27 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
 
 /* ------------------------------------------------------------------ view: toolbar in the panel header */
 
+/** The toolbar wraps, so its height depends on its content; the bars of both panels take the tallest one (--cmp-bar-h) and the rows below stay level. */
+const barHeights = new Map<HTMLElement, number>();
+const publishBarHeight = (el: HTMLElement, h: number | null) => {
+  if (h === null) barHeights.delete(el);
+  else barHeights.set(el, h);
+  const root = document.documentElement.style;
+  if (barHeights.size) root.setProperty("--cmp-bar-h", `${Math.max(36, ...barHeights.values())}px`);
+  else root.removeProperty("--cmp-bar-h");
+};
+
 export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: Side; otherLabel: string }) {
+  const barRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    publishBarHeight(el, el.offsetHeight);
+    if (typeof ResizeObserver === "undefined") return () => publishBarHeight(el, null);
+    const ro = new ResizeObserver(() => publishBarHeight(el, el.offsetHeight));
+    ro.observe(el);
+    return () => (ro.disconnect(), publishBarHeight(el, null));
+  }, []);
   const { st, summary } = ctl;
   const o = st.opts;
   const c = summary?.files;
@@ -827,7 +846,7 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
   return (
     // Same fixed height on both sides (controls only, one scrollable row): row 0 of both lists lines up.
     <div className="cmp-barwrap">
-    <div className="cmp-bar" onWheel={wheelX} role="toolbar" aria-label={`Compare toolbar, ${side} panel`}>
+    <div className="cmp-bar" ref={barRef} role="toolbar" aria-label={`Compare toolbar, ${side} panel`}>
       <Tip label={`${st.left.node}:${st.left.path}  vs  ${st.right.node}:${st.right.path}`}><span className="cmp-badge">Compare</span></Tip>
       <Tip label={`${side === "left" ? "with" : "against"} ${otherLabel}${st.rel ? ` / ${st.rel}` : ""}`}><span className="muted cmp-with">{side === "left" ? "with" : "against"} {otherLabel}{st.rel ? ` / ${st.rel}` : ""}</span></Tip>
       <span className="fd-toggles" role="group" aria-label="Show">

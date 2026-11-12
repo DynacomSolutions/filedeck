@@ -107,3 +107,18 @@ test("a short sync plan and selection stay in the URL", () => {
   assert.equal(back?.tree.kind, "split");
   if (back?.tree.kind === "split") assert.deepEqual((back.tree.children[0] as { sels?: string[] }).sels, ["a", "b"]);
 });
+
+test("Properties opened for a breadcrumb folder keeps that folder in the URL", () => {
+  const state: AppState = {
+    tree: { kind: "leaf", id: "p1", node: "node-a", path: "/work/repo/sub", sel: "/work/repo/sub/a.txt", pv: { dock: "right", size: 40, tab: "props" }, pt: "git", wtPath: "/work/repo" },
+    active: "p1",
+  };
+  const restored = decodeState(encodeState(state));
+  assert.deepEqual(restored?.tree, state.tree);
+  // closing the side panel drops it; a relative path is never accepted
+  const closed = decodeState(encodeState({ ...state, tree: { ...state.tree, pv: undefined } as AppState["tree"] }));
+  assert.equal(closed?.tree.kind === "leaf" ? closed.tree.wtPath : "x", undefined);
+  const bad = `?s=${encodeURIComponent(JSON.stringify({ t: { i: "p1", n: "node-a", p: "/work", v: ["right", 40, "p"], wp: "repo" }, a: "p1" }))}`;
+  const parsed = decodeState(bad);
+  assert.equal(parsed?.tree.kind === "leaf" ? parsed.tree.wtPath : "x", undefined);
+});

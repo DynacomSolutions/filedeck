@@ -46,7 +46,7 @@ export interface Leaf {
   pv?: { dock: Dock; size: number; /** "props": the sub-panel shows Properties instead of the Preview */ tab?: "props" };
   /** active section within this panel's Properties view; details is the default */
   pt?: "details" | "git" | "permissions";
-  /** repository root explicitly selected from Properties while the Worktrees tab is open */
+  /** folder named for the Properties side panel (from a breadcrumb menu) instead of the selected item; kept in the URL as wp */
   wtPath?: string;
   /** path whose preview the user closed */
   closed?: string;
@@ -187,7 +187,7 @@ const toWire = (t: Tree, withSels = true): WTree => {
   if (typeof t.hidden === "boolean") w.h = t.hidden ? 1 : 0;
   if (t.pv) w.v = t.pv.tab ? [t.pv.dock, Math.round(t.pv.size * 10) / 10, "p"] : [t.pv.dock, Math.round(t.pv.size * 10) / 10];
   if (t.pt && t.pt !== "details") w.pt = t.pt;
-  if (t.wtPath) w.wp = t.wtPath;
+  if (t.wtPath && t.pv?.tab === "props") w.wp = t.wtPath;
   if (t.closed) w.c = t.closed;
   if (t.pe) w.pe = 1;
   if (t.edit) w.e = [t.edit.node, t.edit.path];
