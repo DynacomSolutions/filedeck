@@ -309,7 +309,8 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
       assert.equal(r.status, 202, await r.clone().text());
       const { id } = (await r.json()) as { id: string };
       for (let i = 0; i < 400; i++) {
-        const v = (await (await fetch(`${hub}/api/ops/jobs/${id}`)).json()) as { state: string; counts: { failed: number } };
+        // the test's own client (a pooled connection to a test server that closes idle ones after 5 s by default) can meet a reset on a loaded host: ask again once, the job is what is judged
+        const v = (await (await fetch(`${hub}/api/ops/jobs/${id}`).catch(() => fetch(`${hub}/api/ops/jobs/${id}`))).json()) as { state: string; counts: { failed: number } };
         if (["done", "failed", "canceled"].includes(v.state)) {
           assert.equal(v.state, "done");
           assert.equal(v.counts.failed, 0);
