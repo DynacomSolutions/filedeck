@@ -198,7 +198,9 @@ export function reachesReadOnly(root: string, prefixes: string[], target: string
  * when it lies under a read-only prefix, or, with `contains`, holds one (a merge or recursive change would reach it).
  * `follow: false` keeps the last name as it is (a single entry is changed through a descriptor opened without following a link). A location that
  * is outside the root or cannot be resolved is refused, except when it does not exist (the job fails on its own then).
- * This is the function an operation calls on the location it has pinned.
+ * This is the function an operation calls on the location it has pinned. Callers that rely on its signature: the
+ * compress, extract and recursive-permissions jobs here, the extract that pins its destination with a descriptor
+ * (#192), and the permissions walk that re-checks each folder on its real location (#199).
  */
 export function jobMayWrite(root: string, prefixes: string[], real: string, opts: { contains: boolean; follow?: boolean }): boolean {
   if (prefixes.length === 0) return true;

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
@@ -384,17 +385,27 @@ test("a file prefix cannot be replaced through a link to its folder", async () =
   }
 });
 
-/** A job slot held by a long compression, so that the jobs queued behind it start only when it is cancelled. */
+/** A job slot held by a long compression (seconds, against the milliseconds the test needs), so that the jobs queued behind it start only when it is cancelled. */
 async function holdSlot(app: App, tmp: string) {
   fs.mkdirSync(path.join(tmp, "rw/big"), { recursive: true });
-  execFileSync("truncate", ["-s", "1G", path.join(tmp, "rw/big/zeros")]);
-  const blocker = (await (await postTo(app, "/api/jobs/compress", { dir: "/rw/big", names: ["zeros"], format: "tar.gz", level: 9 })).json()) as { id: string };
+  // Incompressible data: gzip at level 9 needs seconds for it, where a sparse file of zeros is archived in milliseconds.
+  fs.writeFileSync(path.join(tmp, "rw/big/noise"), crypto.randomBytes(192 * 1024 * 1024));
+  const blocker = (await (await postTo(app, "/api/jobs/compress", { dir: "/rw/big", names: ["noise"], format: "tar.gz", level: 9 })).json()) as { id: string };
   for (let i = 0; i < 200; i++) {
     const j = (await (await app.request(`/api/jobs/${blocker.id}`)).json()) as { state: string };
     if (j.state === "running") break; // the slot is taken only once the blocker really runs
     await new Promise((r) => setTimeout(r, 10));
   }
-  return { release: () => postTo(app, `/api/jobs/${blocker.id}/cancel`, {}) };
+  const state = async (id: string) => ((await (await app.request(`/api/jobs/${id}`)).json()) as { state: string; error?: string });
+  return {
+    /** the job behind it must still be waiting, and the blocker still running, when the folder is swapped */
+    held: async (id: string) => {
+      const [b, q] = [await state(blocker.id), await state(id)];
+      assert.deepEqual([b.state, q.state], ["running", "queued"], JSON.stringify({ b, q }));
+      return `${b.state}/${q.state}`;
+    },
+    release: () => postTo(app, `/api/jobs/${blocker.id}/cancel`, {}),
+  };
 }
 
 test("a queued extract is checked again where its destination really is when it starts", async () => {
@@ -416,10 +427,11 @@ test("a queued extract is checked again where its destination really is when it 
     // swap the destination for a link to the parent of the protected folder
     assert.equal((await postTo(app, "/api/fs/rename", { from: "/rw/x", to: "/rw/x-old" })).status, 200);
     assert.equal((await postTo(app, "/api/fs/symlink", { path: "/rw/x", target: "../srv" })).status, 201);
+    const held = await slot.held(id);
     await slot.release();
     const end = await jobEnd(app, id);
-    assert.equal(end.state, "failed");
-    assert.match(end.error ?? "", /read-only/);
+    assert.equal(end.state, "failed", JSON.stringify(end));
+    assert.match(end.error ?? "", /read-only/, held + JSON.stringify(end));
     assert.equal(fs.readFileSync(path.join(tmp, "srv/backup/a.txt"), "utf8"), "protected");
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -442,10 +454,11 @@ test("a queued recursive permissions change is checked again where its target re
     const id = qj.id;
     assert.equal((await postTo(app, "/api/fs/rename", { from: "/rw/x", to: "/rw/x-old" })).status, 200);
     assert.equal((await postTo(app, "/api/fs/symlink", { path: "/rw/x", target: "../srv" })).status, 201);
+    const held = await slot.held(id);
     await slot.release();
     const end = await jobEnd(app, id);
-    assert.equal(end.state, "failed");
-    assert.match(end.error ?? "", /read-only/);
+    assert.equal(end.state, "failed", JSON.stringify(end));
+    assert.match(end.error ?? "", /read-only/, held + JSON.stringify(end));
     assert.equal(fs.statSync(path.join(tmp, "srv/backup/a.txt")).mode & 0o777, 0o644);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
