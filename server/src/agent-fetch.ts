@@ -11,7 +11,44 @@ import { Readable } from "node:stream";
 const plain = new http.Agent({ keepAlive: true });
 const secure = new https.Agent({ keepAlive: true });
 
-export function agentFetch(url: string, init?: RequestInit): Promise<Response> {
+/**
+ * A pooled connection the server has just closed fails the next request with a reset. That race is made rare twice over: the servers keep an idle
+ * connection longer than this (see `SERVER_KEEP_ALIVE_MS`), and this side drops an idle one after `CLIENT_IDLE_MS`. It is closed completely by the retry in
+ * `agentFetch`.
+ */
+export const CLIENT_IDLE_MS = 30_000;
+export const SERVER_KEEP_ALIVE_MS = 65_000;
+const dropWhenIdle = new WeakSet<object>();
+const busy = new WeakSet<object>();
+for (const a of [plain, secure]) {
+  a.on("free", (socket) => {
+    // only while the connection waits in the pool: a call in progress may stay silent as long as the work takes (the timeout is cleared when a request takes the socket)
+    socket.setTimeout(CLIENT_IDLE_MS);
+    if (dropWhenIdle.has(socket)) return;
+    dropWhenIdle.add(socket);
+    socket.on("timeout", () => {
+      if (!busy.has(socket)) socket.destroy();
+    });
+  });
+}
+
+const RESET = new Set(["ECONNRESET", "EPIPE"]);
+
+/** Fetch for the hub's calls to an agent; a call that fails on a reused pooled connection before any answer is repeated once on a new one when its body can be sent again. */
+export async function agentFetch(url: string, init?: RequestInit): Promise<Response> {
+  const body = init?.body;
+  const replayable = body === undefined || body === null || typeof body === "string" || body instanceof Uint8Array;
+  try {
+    return await agentFetchOnce(url, init, false);
+  } catch (e) {
+    const err = e as { code?: string; message?: string; reusedSocket?: boolean };
+    const reset = RESET.has(err.code ?? "") || err.message === "socket hang up";
+    if (replayable && reset && err.reusedSocket === true && !init?.signal?.aborted) return agentFetchOnce(url, init, true);
+    throw e;
+  }
+}
+
+function agentFetchOnce(url: string, init: RequestInit | undefined, fresh: boolean): Promise<Response> {
   const u = new URL(url);
   const signal = init?.signal ?? undefined;
   return new Promise<Response>((resolve, reject) => {
@@ -21,7 +58,10 @@ export function agentFetch(url: string, init?: RequestInit): Promise<Response> {
     const body = init?.body;
     if (typeof body === "string" && headers["content-length"] === undefined) headers["content-length"] = String(Buffer.byteLength(body));
     const lib = u.protocol === "https:" ? https : http;
-    const req = lib.request(u, { method: init?.method ?? "GET", headers, agent: u.protocol === "https:" ? secure : plain }, (res) => {
+    // a streamed body cannot be sent twice, so it never rides a pooled connection that may have just been closed: it gets a connection of its own
+    const streamed = body !== undefined && body !== null && typeof body !== "string" && !(body instanceof Uint8Array);
+    const pool = fresh || streamed ? false : u.protocol === "https:" ? secure : plain;
+    const req = lib.request(u, { method: init?.method ?? "GET", headers, agent: pool }, (res) => {
       signal?.removeEventListener("abort", onAbort);
       const h = new Headers();
       for (const [k, v] of Object.entries(res.headers)) for (const x of Array.isArray(v) ? v : v === undefined ? [] : [v]) h.append(k, x);
@@ -38,8 +78,14 @@ export function agentFetch(url: string, init?: RequestInit): Promise<Response> {
     });
     const onAbort = () => req.destroy(signal?.reason instanceof Error ? signal.reason : new DOMException("aborted", "AbortError"));
     signal?.addEventListener("abort", onAbort, { once: true });
+    req.on("socket", (socket) => {
+      busy.add(socket);
+      socket.setTimeout(0);
+      req.once("close", () => busy.delete(socket));
+    });
     req.on("error", (e) => {
       signal?.removeEventListener("abort", onAbort);
+      if (!signal?.aborted && req.reusedSocket) (e as { reusedSocket?: boolean }).reusedSocket = true;
       reject(signal?.aborted ? (signal.reason ?? e) : e);
     });
     if (body === undefined || body === null) req.end();
