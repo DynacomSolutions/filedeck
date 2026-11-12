@@ -111,6 +111,14 @@ case "$1" in
   x) printf one > first.txt
      ${wait}
      mkdir -p sub; printf two > second.txt; printf three > sub/third.txt; exit 0;;
+  a) # compressing: the archive path follows "--"; what it makes depends on the test's mode file
+     out=""; prev=""
+     for a in "$@"; do [ "$prev" = "--" ] && out="$a"; prev="$a"; done
+     case "$(cat '${path.join(dir, "szmode")}' 2>/dev/null)" in
+       dir) mkdir "$out"; echo x > "$out/inner"; exit 0;;
+       hardlink) ln '${path.join(dir, "outside", "secret.bin")}' "$out"; exit 0;;
+       *) printf 7Z > "$out"; exit 0;;
+     esac;;
   *) exit 0;;
 esac
 `,
@@ -118,7 +126,8 @@ esac
   );
   process.env.FILEDECK_BSDTAR = tar;
   process.env.FILEDECK_7Z = sz;
-  return { dir, root, outside, go, seen, dest: path.join(root, "out"), wd: path.join(root, ".filedeck-work") };
+  const szmode = path.join(dir, "szmode");
+  return { dir, root, outside, go, seen, szmode, dest: path.join(root, "out"), wd: path.join(root, ".filedeck-work") };
 }
 
 const mkCtl = () => {
@@ -162,6 +171,12 @@ test("the sweep removes only staging that has been idle for ages and never judge
     assert.equal(fs.existsSync(path.join(w, "oldhost.aaaaaaaaaaaa.x.AbCdE1.alive")), false, "the idle run's heartbeat goes with it");
   }
   assert.ok(fs.existsSync(path.join(s.root, "oldhost.aaaaaaaaaaaa.x.AbCdE9")), "nothing outside a work folder is touched");
+  // a writer whose clock runs ahead is never mistaken for an idle one, and the sweep can run again later
+  make(s.wd, "ahead.eeeeeeeeeeee.x.AbCdE5", -3 * DAY, -3 * DAY);
+  make(s.wd, "late.ffffffffffff.x.AbCdE6", 3 * DAY, 3 * DAY);
+  await sweepWorkArea(s.root, path.join(s.dir, "no-such-mounts"));
+  assert.ok(fs.existsSync(path.join(s.wd, "ahead.eeeeeeeeeeee.x.AbCdE5")), "a future time is not idle");
+  assert.equal(fs.existsSync(path.join(s.wd, "late.ffffffffffff.x.AbCdE6")), false, "a later sweep removes what became idle meanwhile");
   for (const w of [work, s.wd]) for (const n of fs.readdirSync(w)) fs.rmSync(path.join(w, n), { recursive: true, force: true }); // the other tests expect an empty work folder
 });
 
@@ -583,4 +598,103 @@ test("a destination reached through a swapped parent folder that now leads into 
   assert.deepEqual(fs.readdirSync(path.join(s.root, "ro")), ["protected.txt"]);
   assert.equal(protectedFile(s), "ORIGINAL");
   assert.deepEqual(leftovers(s.wd), []);
+});
+
+/* ---- a user's tool never gets its output walked or moved by root ---- */
+
+const outDirs = () => fs.readdirSync(os.tmpdir()).filter((n) => /^filedeck-out-/.test(n));
+function szCompressScene(name: string, mode: string) {
+  const s = scene(name);
+  opened(s);
+  fs.mkdirSync(path.join(s.root, "src"));
+  fs.writeFileSync(path.join(s.root, "src/f.txt"), "data");
+  fs.writeFileSync(path.join(s.outside, "secret.bin"), "ROOT-ONLY", { mode: 0o600 });
+  fs.chmodSync(s.outside, 0o755);
+  fs.writeFileSync(s.szmode, mode);
+  chownIfRoot(path.join(s.root, "src"));
+  chownIfRoot(s.dest);
+  return s;
+}
+const szPlan = (s: { root: string }) => prepareCompress(s.root, "/src", ["f.txt"], "7z", "x", { destDir: "/out", splitBytes: 65_536 });
+
+test("a user-run 7-Zip's file is copied into the output folder through descriptors and belongs to the folder's owner", async () => {
+  const before = outDirs().length;
+  const s = szCompressScene("sz-ok", "ok");
+  const r = await runCompress(await szPlan(s), LIM, mkCtl().ctl);
+  assert.equal(r.volumes, 1);
+  const f = path.join(s.dest, "x.7z");
+  assert.equal(fs.readFileSync(f, "utf8"), "7Z");
+  assert.equal(fs.statSync(f).uid, OWNER);
+  assert.equal(outDirs().length, before, "the tool's private folder is removed");
+});
+
+test("a user-run 7-Zip that leaves a folder as its output is refused, nothing is walked or moved", async () => {
+  if (!IS_ROOT) return; // without the privilege drop 7-Zip writes into the agent's own private folder
+  const s = szCompressScene("sz-dir", "dir");
+  await assert.rejects(runCompress(await szPlan(s), LIM, mkCtl().ctl), (e: { status?: number }) => e.status === 500);
+  assert.deepEqual(fs.readdirSync(s.dest), []);
+  assert.equal(fs.readFileSync(path.join(s.outside, "secret.bin"), "utf8"), "ROOT-ONLY");
+});
+
+test("a user-run 7-Zip that leaves a hard link to someone else's file is refused", async () => {
+  if (!IS_ROOT) return;
+  const s = szCompressScene("sz-hl", "hardlink");
+  await assert.rejects(runCompress(await szPlan(s), LIM, mkCtl().ctl));
+  assert.deepEqual(fs.readdirSync(s.dest), []);
+  assert.equal(fs.statSync(path.join(s.outside, "secret.bin")).uid, 0, "the file was not handed to the folder's owner");
+});
+
+/* ---- opening a name the user controls never blocks, and only plain, readable archives are taken ---- */
+
+const mkfifo = (p: string) => assert.equal(spawnSync("mkfifo", [p]).status, 0);
+const within = <T,>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error("blocked")), ms))]);
+
+test("a pipe swapped in for the archive is refused at once instead of blocking the open", async () => {
+  const s = scene("fifo");
+  const plan = await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" });
+  fs.rmSync(path.join(s.root, "a.tar"));
+  mkfifo(path.join(s.root, "a.tar"));
+  await assert.rejects(within(runExtract(plan, LIM, mkCtl().ctl), 5000), (e: Error) => e.message !== "blocked" && /regular file/.test(e.message));
+});
+
+test("a pipe swapped in for a split part is refused at once", async () => {
+  const s = scene("fifo-split");
+  fs.writeFileSync(path.join(s.root, "set.7z.001"), "one");
+  const plan = await prepareExtract(s.root, "/set.7z.001", "/out", false, { overwrite: "rename" });
+  mkfifo(path.join(s.root, "set.7z.002"));
+  await assert.rejects(within(runExtract(plan, LIM, mkCtl().ctl), 5000), (e: Error) => e.message !== "blocked");
+  assert.deepEqual(leftovers(s.wd), []);
+});
+
+test("a hard link to an archive only someone else can read is not taken as the folder's archive (checked when root)", async () => {
+  if (!IS_ROOT) return;
+  const s = scene("hl-archive");
+  opened(s);
+  fs.writeFileSync(path.join(s.outside, "private.tar"), "x", { mode: 0o600 });
+  fs.mkdirSync(path.join(s.root, "mine"));
+  fs.chownSync(path.join(s.root, "mine"), NOBODY, NOBODY);
+  fs.linkSync(path.join(s.outside, "private.tar"), path.join(s.root, "mine/a.tar"));
+  const plan = await prepareExtract(s.root, "/mine/a.tar", "/out", false, { overwrite: "rename" });
+  await assert.rejects(runExtract(plan, LIM, mkCtl().ctl), (e: { status?: number }) => e.status === 403);
+});
+
+/* ---- Filedeck's own folders are out of reach of stat, properties and git as well ---- */
+
+test("stat, properties and git refuse the reserved folders", async () => {
+  const s = scene("reserved-reads");
+  fs.mkdirSync(s.wd, { mode: 0o700 });
+  fs.mkdirSync(path.join(s.root, ".filedeck-trash"));
+  await assert.rejects(ops.stat(s.root, "/.filedeck-work"), (e: { status?: number }) => e.status === 403);
+  await assert.rejects(ops.stat(s.root, "/.filedeck-trash"), (e: { status?: number }) => e.status === 403);
+  const { props } = await import("../src/props.ts");
+  const { loadConfig } = await import("../src/config.ts");
+  const cfg = loadConfig({ FILEDECK_ROOT: s.root, FILEDECK_NODE: "t" } as never);
+  await assert.rejects(props(cfg, "/.filedeck-work"), (e: { status?: number }) => e.status === 403);
+  const { createAgent } = await import("../src/agent.ts");
+  const app = createAgent(cfg);
+  for (const u of ["/api/git/info?path=/.filedeck-work", "/api/git/show?path=/.filedeck-work/x&rev=HEAD", "/api/fs/stat?path=/.filedeck-work"]) {
+    const r = await app.request(u);
+    assert.equal(r.status, 403, u);
+  }
+  await (app as unknown as { close(): Promise<void> }).close();
 });

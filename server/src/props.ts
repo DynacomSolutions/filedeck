@@ -5,7 +5,7 @@ import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { isReservedName, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
+import { isReservedName, assertNotReserved, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
 import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
@@ -60,6 +60,7 @@ const kindOf = (st: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(
 
 export async function props(cfg: Config, p: string): Promise<Props> {
   const r = resolveWrite(cfg.root, p); // lstat semantics for the final component
+  assertNotReserved(r.virtual);
   const st = await fs.lstat(r.real);
   const [users, groups] = await Promise.all([nameTable(cfg.root, "passwd"), nameTable(cfg.root, "group")]);
   const out: Props = {

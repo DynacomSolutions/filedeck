@@ -129,6 +129,11 @@ export const WORK_DIR = ".filedeck-work";
 /** Names that belong to Filedeck: hidden from listings and scans, never a target of a user's create, upload, rename or extract. */
 export const isReservedName = (n: string): boolean => n === TRASH_DIR || n === WORK_DIR;
 
+/** Reads through lstat-style routes (stat, properties, git) may not look into Filedeck's own folders either. */
+export function assertNotReserved(virtual: string): void {
+  if (virtual.split("/").some(isReservedName)) throw new PathError(403, "this folder is managed by Filedeck");
+}
+
 /** Mutations may never target the trash store or the work folder directly (use the trash API). */
 export function assertNotTrash(virtual: string): void {
   const v = virtual.split("/");

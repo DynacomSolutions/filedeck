@@ -9,6 +9,7 @@ import {
   PathError,
   TRASH_DIR,
   isReservedName,
+  assertNotReserved,
   assertNotTrash,
   openChecked,
   pinDir,
@@ -248,6 +249,7 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
 
 export async function stat(root: string, p: string) {
   const r = resolveWrite(root, p); // lstat semantics for the final component
+  assertNotReserved(r.virtual);
   const parent = path.posix.dirname(r.virtual);
   const e = await toEntry(root, parent, path.dirname(r.real), path.basename(r.real));
   if (!e) throw new FsError(404, "not found");

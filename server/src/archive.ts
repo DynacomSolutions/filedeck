@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Stats } from "node:fs";
 import { constants as C } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -582,15 +583,39 @@ async function volumeWork(root: string, destReal: string, guard?: Guard): Promis
 }
 
 const swept = new Set<string>();
+const sweepTargets = new Set<string>();
+let sweepTimer: NodeJS.Timeout | undefined;
+
+/** "Now" as the filesystem holding `dir` stamps it: the time of a file made there this moment, so a clock that differs between machines sharing the folder does not matter. */
+async function fsNow(dir: string): Promise<number> {
+  const f = path.join(dir, `.clock-${randomBytes(4).toString("hex")}`);
+  try {
+    await fs.writeFile(f, "");
+    return (await fs.stat(f)).mtimeMs;
+  } catch {
+    return Date.now();
+  } finally {
+    await fs.rm(f, { force: true }).catch(() => undefined);
+  }
+}
+
 /**
  * Remove staging of crashed runs from an accepted work folder: entries that are not this process's own and that
- * neither the folder nor its heartbeat file has touched for a long time. A running job refreshes its heartbeat,
- * so another agent's live job (a rolling update, a shared mount) is never removed; process ids are never consulted.
+ * neither the folder nor its heartbeat file has touched for a long time, measured against the filesystem's own clock
+ * (the heartbeat is rewritten, not stamped with the writer's clock). A running job refreshes its heartbeat, so another
+ * agent's live job (a rolling update, a shared mount) is never removed; process ids are never consulted.
+ * Every folder swept once is swept again from time to time.
  */
-async function sweepDir(real: string) {
-  if (swept.has(real)) return;
+async function sweepDir(real: string, force = false) {
+  sweepTargets.add(real);
+  if (!sweepTimer) {
+    sweepTimer = setInterval(() => void Promise.all([...sweepTargets].map((d) => sweepDir(d, true).catch(() => undefined))), Math.min(3_600_000, Math.max(1000, idleMs() / 4)));
+    sweepTimer.unref();
+  }
+  if (!force && swept.has(real)) return;
   swept.add(real);
-  const old = (st: { mtimeMs: number } | null) => !st || Date.now() - st.mtimeMs > idleMs();
+  const now = await fsNow(real);
+  const old = (st: { mtimeMs: number } | null) => !st || now - st.mtimeMs > idleMs();
   for (const n of await fs.readdir(real).catch(() => [] as string[])) {
     if (n.includes(`.${PROC_ID}.`)) continue;
     const staging = n.endsWith(".alive") ? n.slice(0, -6) : n;
@@ -608,7 +633,7 @@ async function sweepDir(real: string) {
 /** Start-up sweep: the temp work folder and the `.filedeck-work` of the root and of every local mount; nothing else is looked at. */
 export async function sweepWorkArea(root: string, procMounts: string): Promise<void> {
   try {
-    await workRoot();
+    await sweepDir(await workRoot(), true);
   } catch (e) {
     console.error("archive work folder:", (e as Error).message);
   }
@@ -619,7 +644,7 @@ export async function sweepWorkArea(root: string, procMounts: string): Promise<v
     for (const v of vols) {
       try {
         const dir = path.join(resolveWrite(root, v).real, WORK_DIR);
-        if (await fs.lstat(dir).then((st) => st.isDirectory(), () => false)) await sweepDir(await privateDir(dir, false));
+        if (await fs.lstat(dir).then((st) => st.isDirectory(), () => false)) await sweepDir(await privateDir(dir, false), true);
       } catch {
         /* not accessible or not acceptable: left alone */
       }
@@ -672,7 +697,7 @@ async function makeWork(tag: string, root: string, destReal: string, need?: numb
   };
   try {
     await fs.writeFile(marker, "");
-    beat = setInterval(() => void fs.lutimes(marker, new Date(), new Date()).catch(() => undefined), Math.max(1000, Math.min(60_000, idleMs() / 4)));
+    beat = setInterval(() => void fs.writeFile(marker, String(Date.now())).catch(() => undefined), Math.max(1000, Math.min(60_000, idleMs() / 4)));
     beat.unref();
     let at = dir;
     if (LINUX) {
@@ -717,17 +742,17 @@ async function ownerOf(at: string): Promise<Mv["own"]> {
   const st = await fs.stat(at); // `at` is a held descriptor's path: this is the folder itself
   return { uid: st.uid, gid: st.gid };
 }
-/** Give the entry at `p` the destination's owner and group, through an open descriptor (a link put there is never followed). */
-async function chownEntry(mv: Mv, p: string, dir: boolean): Promise<void> {
+/**
+ * Give a staged file (private: no one else can reach it) the destination's owner and mode through a descriptor, before it
+ * becomes reachable from the destination folder. Nothing in a user's folder is ever chowned by reopening its name.
+ */
+async function stamp(mv: Mv, staged: string): Promise<void> {
   if (!mv.own && mv.mode === undefined) return;
-  const fh = await fs.open(p, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK | (dir ? C.O_DIRECTORY : 0)).catch(() => null);
-  if (!fh) return;
+  const fh = await fs.open(staged, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
   try {
-    const st = await fh.stat();
-    if (dir ? st.isDirectory() : st.isFile()) {
-      if (mv.own) await fh.chown(mv.own.uid, mv.own.gid).catch(() => undefined);
-      if (!dir && mv.mode !== undefined) await fh.chmod(mv.mode).catch(() => undefined);
-    }
+    if (!(await fh.stat()).isFile()) return;
+    if (mv.own) await fh.chown(mv.own.uid, mv.own.gid).catch(() => undefined);
+    if (mv.mode !== undefined) await fh.chmod(mv.mode).catch(() => undefined);
   } finally {
     await fh.close().catch(() => undefined);
   }
@@ -741,17 +766,46 @@ async function fillDir(mv: Mv, from: string, to: string, child: (mv: Mv, from: s
   }, mv.guard && ((loc) => mv.guard!(loc, false)));
   await fs.rmdir(from);
 }
-/** Put the file `from` at `to` without replacing anything: hard link, or an exclusive copy across filesystems; the source is then removed. */
+/**
+ * Copy an open file into a new file `to` (exclusive create, no link followed) in a pinned folder: owner, mode and times are set
+ * through the descriptor of the new file. `st` is the source's stat; `mode` overrides its permission bits.
+ */
+async function copyFd(mv: Mv, src: import("node:fs/promises").FileHandle, to: string, st: { mode: number; atime: Date; mtime: Date }, mode?: number): Promise<void> {
+  const dst = await fs.open(to, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o600); // EEXIST is the caller's
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    for (let pos = 0; ; ) {
+      const { bytesRead } = await src.read(buf, 0, buf.length, pos);
+      if (!bytesRead) break;
+      let off = 0;
+      while (off < bytesRead) off += (await dst.write(buf, off, bytesRead - off)).bytesWritten;
+      pos += bytesRead;
+    }
+    if (mv.own) await dst.chown(mv.own.uid, mv.own.gid).catch(() => undefined);
+    await dst.chmod(mode ?? mv.mode ?? (st.mode & 0o777)).catch(() => undefined);
+    await dst.utimes(st.atime, st.mtime).catch(() => undefined);
+  } catch (e) {
+    await dst.close().catch(() => undefined);
+    await fs.unlink(to).catch(() => undefined); // the file this call created
+    throw e;
+  }
+  await dst.close();
+}
+
+/** Put the file `from` (private staging) at `to` without replacing anything: hard link, or an exclusive copy across filesystems; the source is then removed. */
 async function placeFile(mv: Mv, from: string, to: string): Promise<void> {
-  const st = await fs.lstat(from);
+  await stamp(mv, from); // owner and mode are set while it is still private
   try {
     await fs.link(from, to);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") throw e;
-    await fs.copyFile(from, to, C.COPYFILE_EXCL);
-    await fs.lutimes(to, st.atime, st.mtime).catch(() => undefined); // the entry itself, never what a link put there points at
+    const src = await fs.open(from, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+    try {
+      await copyFd(mv, src, to, await src.stat());
+    } finally {
+      await src.close().catch(() => undefined);
+    }
   }
-  await chownEntry(mv, to, false);
   await fs.unlink(from);
 }
 
@@ -901,34 +955,44 @@ const szType = (n: string) => (/\.(zip|jar|war|whl)$/i.test(n) ? "zip" : /\.7z$/
 async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Promise<Source> {
   const real = plan.archiveReal;
   const notFile = () => new ArchiveError(400, "not a regular file");
-  if (!SPLIT.test(real)) {
-    const fh = await openChecked(plan.root, real, C.O_RDONLY);
+  /** open a name under the pinned folder: no link, no blocking on a pipe, a regular file the folder's owner could read too */
+  const openPlain = async (dirAt: string, dirSt: Stats, name: string) => {
+    const fh = await openChecked(plan.root, path.join(dirAt, name), C.O_RDONLY | C.O_NONBLOCK);
     try {
-      if (!(await fh.stat()).isFile()) throw notFile();
+      const st = await fh.stat();
+      if (!st.isFile()) throw notFile();
+      // A hard link to a file only someone else could read (possible where hard-link protection is off) is not this folder's archive.
+      if (!readableBy(st, dirSt)) throw new ArchiveError(403, "the archive is not readable by the owner of its folder");
+      return { fh, st };
     } catch (e) {
       await fh.close().catch(() => undefined);
       throw e;
     }
-    return { arg: "/dev/fd/3", fd: fh.fd, type: szType(real), done: () => fh.close().catch(() => undefined) };
+  };
+  if (!SPLIT.test(real)) {
+    return pinned(plan.root, path.dirname(real), async (dirAt) => {
+      const { fh } = await openPlain(dirAt, await fs.stat(dirAt), path.basename(real));
+      return { arg: "/dev/fd/3", fd: fh.fd, type: szType(real), done: () => fh.close().catch(() => undefined) } as Source;
+    });
   }
   const work = await makeWork("s", plan.root, destLoc, undefined, guard);
   try {
     const base = path.basename(real).slice(0, -4);
     await pinned(plan.root, path.dirname(real), async (dirAt) => {
+      const dirSt = await fs.stat(dirAt);
       for (let i = 1; ; i++) {
         const name = `${base}.${String(i).padStart(3, "0")}`;
-        let fh;
+        let opened;
         try {
-          fh = await openChecked(plan.root, path.join(dirAt, name), C.O_RDONLY);
+          opened = await openPlain(dirAt, dirSt, name);
         } catch (e) {
           if (i > 1 && (e as NodeJS.ErrnoException).code === "ENOENT") return;
           throw e;
         }
         try {
-          if (!(await fh.stat()).isFile()) throw notFile();
-          await fs.copyFile(LINUX ? `/proc/self/fd/${fh.fd}` : path.join(dirAt, name), path.join(work.dir, name), C.COPYFILE_EXCL);
+          await fs.copyFile(LINUX ? `/proc/self/fd/${opened.fh.fd}` : path.join(dirAt, name), path.join(work.dir, name), C.COPYFILE_EXCL);
         } finally {
-          await fh.close().catch(() => undefined);
+          await opened.fh.close().catch(() => undefined);
         }
       }
     });
@@ -937,6 +1001,14 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
     throw e;
   }
   return { arg: path.join(work.dir, path.basename(real)), done: work.done };
+}
+
+/** Whether the owner and group of `dir` could read the file `st` (its owner, its group, or everyone). */
+function readableBy(st: { uid: number; gid: number; mode: number }, dir: { uid: number; gid: number }): boolean {
+  if (dir.uid === 0) return true;
+  if (st.uid === dir.uid) return (st.mode & 0o400) !== 0;
+  if (st.gid === dir.gid) return (st.mode & 0o040) !== 0;
+  return (st.mode & 0o004) !== 0;
 }
 
 /** Extract an encrypted zip/7z with 7-Zip into `staging`; names and links are vetted from the listing first. */
@@ -1188,6 +1260,15 @@ export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl
   return pinned(plan.root, plan.dirReal, (srcAt) => pinned(plan.root, plan.outReal, (outAt) => compressInto(srcAt, outAt, plan, limits, ctl, guard), guard && ((loc) => guard(loc, false))));
 }
 
+/** Run `rm -rf` as `user`, so whatever a user's tool or the user left in their folder is removed with that user's rights only. */
+function removeAsUser(dir: string, user: { uid: number; gid: number }): Promise<void> {
+  return new Promise((resolve) => {
+    const c = spawn("rm", ["-rf", "--", dir], { uid: user.uid, gid: user.gid, stdio: "ignore", cwd: "/" });
+    c.on("error", () => resolve());
+    c.on("close", () => resolve());
+  });
+}
+
 async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   const sizes = new Map<string, number>();
   for (const n of plan.names) await walkSizes(srcAt, n, sizes, limits, ctl.signal);
@@ -1196,22 +1277,38 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
   ctl.progress.totalBytes = totalBytes;
   // Written into the private work folder and moved into place when complete.
   const work = await makeWork("c", plan.root, await locationOf(outAt), totalBytes, guard);
-  // When the agent is root and the selected folder belongs to someone else, the tools run as that user (groups cleared):
-  // whatever they open by name, they can only open what that user could. Otherwise they run as the agent.
-  const srcOwner = await fs.stat(srcAt); // the pinned folder itself
-  const runAs = process.getuid?.() === 0 && srcOwner.uid !== 0 ? { uid: srcOwner.uid, gid: srcOwner.gid } : undefined;
-  const mv: Mv = { root: plan.root, guard, own: await ownerOf(outAt).catch(() => undefined), mode: process.getuid?.() === 0 && !runAs ? 0o600 : undefined };
-  // 7-Zip writes its archive (and volumes) by name, so a user-run 7-Zip writes beside the destination under a hidden name, with that user's rights
-  // (it cannot be given a descriptor, and the private folder is not reachable to that user); otherwise the private folder holds it.
-  const szTmpPrefix = runAs && plan.viaSz ? `.filedeck-tmp-${randomBytes(4).toString("hex")}-` : "";
-  const tmpDir = szTmpPrefix ? plan.outReal : work.dir;
-  const tmp = path.join(tmpDir, szTmpPrefix + plan.outName);
-  const note = (rel: string) => {
-    ctl.progress.entries++;
-    ctl.progress.bytes += sizes.get(rel) ?? 0;
-    ctl.progress.current = rel;
-  };
+  let userDir: string | undefined;
+  let runAs: { uid: number; gid: number } | undefined;
+  const parts: import("node:fs/promises").FileHandle[] = [];
+  const placed: string[] = [];
   try {
+    // When the agent is root and the selected folder belongs to someone else, the tools run as that user (groups cleared): whatever they
+    // open by name, they can only open what that user could. The group is the folder's own: that is what the selection's permissions
+    // were set up for (shared group folders stay readable); the owner's primary group would grant nothing the folder does not.
+    // Otherwise they run as the agent.
+    const srcOwner = await fs.stat(srcAt); // the pinned folder itself
+    runAs = process.getuid?.() === 0 && srcOwner.uid !== 0 ? { uid: srcOwner.uid, gid: srcOwner.gid } : undefined;
+    const mv: Mv = { root: plan.root, guard, own: await ownerOf(outAt).catch(() => undefined), mode: process.getuid?.() === 0 && !runAs ? 0o600 : undefined };
+    // 7-Zip writes its archive (and volumes) by name, so a user-run 7-Zip gets a folder only it and the agent can reach (made here,
+    // owned by that user, mode 0700, under the temp directory) and writes files there. The agent never walks it: it opens the
+    // folder and each produced file without following links, requires plain files that the user owns, and copies them through
+    // those descriptors into the pinned output folder.
+    if (runAs && plan.viaSz) {
+      userDir = await fs.mkdtemp(path.join(os.tmpdir(), "filedeck-out-"));
+      const dfh = await fs.open(userDir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
+      try {
+        await dfh.chown(runAs.uid, runAs.gid);
+        await dfh.chmod(0o700);
+      } finally {
+        await dfh.close().catch(() => undefined);
+      }
+    }
+    const tmp = path.join(userDir ?? work.dir, plan.outName);
+    const note = (rel: string) => {
+      ctl.progress.entries++;
+      ctl.progress.bytes += sizes.get(rel) ?? 0;
+      ctl.progress.current = rel;
+    };
     if (plan.viaSz) {
       const type = plan.format === "7z" ? "7z" : "zip";
       // -snl stores symlinks as links (as bsdtar does) instead of archiving whatever they point at
@@ -1264,27 +1361,54 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
       if (code !== 0) throw new ArchiveError(500, `compression failed: ${err.split("\n").pop() || "unknown error"}`);
     }
     // Volumes are name.7z.001, .002 ...: pick a base that is free for the whole set.
-    const prefix = szTmpPrefix + plan.outName;
-    const produced = (await fs.readdir(tmpDir)).filter((n) => n === prefix || n.startsWith(prefix + ".")).map((n) => n.slice(szTmpPrefix.length));
-    if (!produced.length) throw new ArchiveError(500, "compression produced no archive");
-    const out = await freeSetName(outAt, plan.outName, produced.map((n) => n.slice(plan.outName.length)));
-    let size = 0;
-    for (const n of produced) {
-      const to = path.join(outAt, out + n.slice(plan.outName.length));
+    const isPart = (n: string) => n === plan.outName || n.startsWith(plan.outName + ".");
+    const found: { suffix: string; from?: string; fh?: import("node:fs/promises").FileHandle; st?: Stats }[] = [];
+    if (userDir) {
+      const dh = await fs.open(userDir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
       try {
-        await moveExcl(mv, path.join(szTmpPrefix ? outAt : work.dir, szTmpPrefix + n), to); // never replaces a file that appeared meanwhile
+        const dst = await dh.stat();
+        if (dst.uid !== runAs!.uid) throw new ArchiveError(500, "compression output folder was replaced");
+        const at = `/proc/self/fd/${dh.fd}`;
+        for (const n of (await fs.readdir(at)).filter(isPart).slice(0, 10_000)) {
+          const fh = await fs.open(path.join(at, n), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+          parts.push(fh);
+          const st = await fh.stat();
+          // a plain file the user's tool wrote: not a folder, a link, a device, or a hard link to something else
+          if (!st.isFile() || st.uid !== runAs!.uid || st.nlink !== 1) throw new ArchiveError(500, "compression produced an unexpected output");
+          found.push({ suffix: n.slice(plan.outName.length), fh, st });
+        }
+      } finally {
+        await dh.close().catch(() => undefined);
+      }
+    } else {
+      for (const n of (await fs.readdir(work.dir)).filter(isPart)) found.push({ suffix: n.slice(plan.outName.length), from: path.join(work.dir, n) });
+    }
+    if (!found.length) throw new ArchiveError(500, "compression produced no archive");
+    const out = await freeSetName(outAt, plan.outName, found.map((f) => f.suffix));
+    let size = 0;
+    for (const f of found) {
+      const to = path.join(outAt, out + f.suffix);
+      try {
+        if (f.fh) await copyFd(mv, f.fh, to, f.st!, 0o644); // never replaces a file that appeared meanwhile
+        else await moveExcl(mv, f.from!, to);
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new ArchiveError(409, "the archive name was taken while it was being written");
         throw e;
       }
+      placed.push(to);
       size += (await fs.lstat(to)).size;
     }
     // for volumes the path is the first part (name.7z.001), which 7-Zip opens together with its siblings
-    return { path: virtualJoin(plan.outVirtual, out + (plan.splitBytes ? ".001" : "")), size, volumes: plan.splitBytes ? produced.length : undefined };
+    return { path: virtualJoin(plan.outVirtual, out + (plan.splitBytes ? ".001" : "")), size, volumes: plan.splitBytes ? found.length : undefined };
+  } catch (e) {
+    // files this job created in the output folder (plain files only: it never makes anything else there)
+    for (const f of placed) await fs.unlink(f).catch(() => undefined);
+    throw e;
   } finally {
-    if (szTmpPrefix) {
-      // a failed or cancelled user-run 7-Zip may have left its hidden parts beside the destination
-      for (const n of await fs.readdir(outAt).catch(() => [] as string[])) if (n.startsWith(szTmpPrefix)) await fs.rm(path.join(outAt, n), { force: true }).catch(() => undefined);
+    for (const fh of parts) await fh.close().catch(() => undefined);
+    if (userDir) {
+      if (runAs) await removeAsUser(userDir, runAs); // whatever its shape, with the user's own rights
+      await fs.rmdir(userDir).catch(() => undefined);
     }
     await work.done();
   }
