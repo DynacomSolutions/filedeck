@@ -280,3 +280,8 @@ export async function readerCapability(): Promise<Capability | null> {
   if (await hasCapability("dac_override")) return "dac_override";
   return null;
 }
+
+/** Is there a launcher that can hand a capability over (installed, and not mode `off` without it)? Without one a tool cannot keep a capability across a user change. */
+export async function launcherAvailable(): Promise<boolean> {
+  return (await helperPath(await sandboxInfo())) !== null;
+}

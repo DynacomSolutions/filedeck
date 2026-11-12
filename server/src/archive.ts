@@ -15,7 +15,7 @@ import type { JobCtl } from "./jobs.ts";
 import { STAGING_PREFIX, TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, SandboxError, failIfLauncher, haveSevenZip, listSz, runSz, szFailure, szReadArgs, validPassword, verifyPassword, type SzSource } from "./sevenzip.ts";
-import { readerCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
+import { launcherAvailable, readerCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
 import { toolGate, type Slot } from "./tool-gate.ts";
 
 /**
@@ -164,7 +164,7 @@ const sayOnce = (msg: string) => {
 /** The archive user with the read-search capability; without it (the agent lacks it) the agent's own user, as a non-root agent would. */
 async function readerIdentity(): Promise<RunAs | undefined> {
   if (process.getuid?.() !== 0) return undefined;
-  const cap = await readerCapability();
+  const cap = (await launcherAvailable()) ? await readerCapability() : null; // no launcher: nothing can hand a capability over
   if (cap) return { ...archiveUser(), keepCaps: [cap] };
   sayOnce("archive tools: this process holds neither the read-search nor the override capability, so a tool that must read what only root can read runs as the agent's own user (with no capabilities) instead of the archive user");
   return undefined;
