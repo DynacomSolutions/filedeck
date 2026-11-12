@@ -363,7 +363,8 @@ test("the store tells a folder it handed out is still being applied until noteRa
 test("a run that carried a predecessor's chain but never held the lease passes the predecessor's min_epoch on", async () => {
   const { root, s: A, db } = fixture("minepoch");
   await A.scan("/");
-  const B = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 300 });
+  const B = new SizeStore(db, { root, ttlMs: 3_600_000, maxEntries: 1000, leaseMs: 60_000 });
+  // (B judges A's heartbeat by B's own lease length: a short one lets a starved host see A as gone and hand B the lease, which this test must not have)
   stores.push(B);
   await B.mayScan();
   assert.equal(B.isWriter, false);

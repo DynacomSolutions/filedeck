@@ -142,8 +142,14 @@ test("the du CLI whose job was forgotten while it was away asks for the scan aga
     err: (s) => err.push(s),
     sleep: async () => {
       sleeps++;
-      if (sleeps === 1) await sleep(900); // the client is away longer than the grace period: its queued job is forgotten
-      else if (sleeps === 2) await holder.close(); // then the other process leaves and the scan can run
+      if (sleeps === 1) {
+        // the client is away until its queued job has been forgotten (the grace period passed and the agent dropped it), however long a loaded host takes for that
+        for (let i = 0; i < 3000; i++) {
+          const list = (await (await a.app.request("/api/jobs")).json()) as { jobs: { kind?: string; state: string }[] };
+          if (!list.jobs.some((j) => j.state === "queued" || j.state === "running")) break;
+          await sleep(20);
+        }
+      } else if (sleeps === 2) await holder.close(); // then the other process leaves and the scan can run
       else await sleep(20);
     },
     now: Date.now,

@@ -49,11 +49,18 @@ export function makeTreeA() {
   fs.writeFileSync(at("a/.filedeck-trash/t"), "T".repeat(1000));
 }
 
-/** readdir calls made while `fn` runs; the paths are kept so a failed count says which folders were read */
+/**
+ * readdir calls made while `fn` runs on folders of the test tree (`tmp`); the paths are kept so a failed count says which folders were read.
+ * Folders elsewhere are not counted: a timer of the archive module sweeps its own work folder in the same process now and then, and that is not the walk.
+ */
 export async function countReaddir(fn: () => Promise<unknown>, paths: string[] = []): Promise<number> {
   const orig = fsp.readdir;
   let n = 0;
-  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (n++, paths.push(String(a[0])), (orig as (...x: unknown[]) => unknown)(...a));
+  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => {
+    const p = String(a[0]);
+    if (p === tmp || p.startsWith(tmp + path.sep)) (n++, paths.push(p));
+    return (orig as (...x: unknown[]) => unknown)(...a);
+  };
   try {
     await fn();
   } finally {

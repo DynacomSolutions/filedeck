@@ -92,13 +92,13 @@ test("webdav: transfers are not capped by a total time, a stalled upload is cut"
     assert.equal((await drain(await b.read("/big.bin"))).length, 300_000);
     const slow = Readable.from(
       (async function* () {
-        for (let i = 0; i < 4; i++) {
-          await sleep(150);
-          yield Buffer.alloc(1000, i);
+        for (let i = 0; i < 5; i++) {
+          await sleep(400);
+          yield Buffer.alloc(800, i);
         }
       })(),
     );
-    davTimeouts.idleMs = 400; // longer than each gap, shorter than the whole upload
+    davTimeouts.idleMs = 1500; // several times each gap (a starved host sleeps late), shorter than the whole upload (2 s)
     assert.equal(await b.write("/slow.bin", slow, { overwrite: true, size: 4000 }), 4000);
     assert.equal(fs.statSync(path.join(tmp, "r", "slow.bin")).size, 4000);
     assert.ok(seen.every((ms) => ms <= 60_000), `no fixed long timeout is armed: ${seen.join(",")}`);
