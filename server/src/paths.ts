@@ -100,7 +100,10 @@ export function resolveInRoot(
 
 /** Resolve for reading: symlinks are followed, clamped at the root. */
 export function resolveRead(root: string, input: string): Resolved {
-  return resolveInRoot(root, input, { followFinal: true });
+  const r = resolveInRoot(root, input, { followFinal: true });
+  // Filedeck's own folders (trash store, work folders) are not readable through the file API; the trash routes reach the trash directly.
+  assertNotReserved(r.virtual);
+  return r;
 }
 
 /**
@@ -121,11 +124,27 @@ export function virtualJoin(dir: string, name: string): string {
 }
 
 export const TRASH_DIR = ".filedeck-trash";
+/** Per-volume private staging for extraction and compression (see archive.ts); like the trash store it is Filedeck's own. */
+export const WORK_DIR = ".filedeck-work";
+/** Prefix of the private staging folders made inside a destination folder for copies (see pinwalk.ts). */
+export const STAGING_PREFIX = ".filedeck-work-";
 
-/** Mutations may never target the trash store directly (use the trash API). */
-export function assertNotTrash(virtual: string): void {
-  if (virtual.split("/").includes(TRASH_DIR)) throw new PathError(403, "trash is managed via the trash API");
+/**
+ * The one test for Filedeck's own names: the trash store, the exact work folder name and the staging prefix. Such names are hidden
+ * from listings and scans, never a target of a user's create, upload, rename, copy or extract, never an archive entry, and not
+ * readable through the file API.
+ */
+export const isReservedName = (n: string): boolean => n === TRASH_DIR || n === WORK_DIR || n.startsWith(STAGING_PREFIX);
+
+/** No path may go through the trash store or a work or staging folder (the trash has its own API). */
+export function assertNotReserved(virtual: string): void {
+  const v = virtual.split("/");
+  if (v.includes(TRASH_DIR)) throw new PathError(403, "trash is managed via the trash API");
+  if (v.some(isReservedName)) throw new PathError(403, "this name is reserved for the file manager's own use");
 }
+
+/** Mutations may never target Filedeck's own folders (the trash store through its API only). */
+export const assertNotTrash = assertNotReserved;
 
 const LINUX = process.platform === "linux";
 

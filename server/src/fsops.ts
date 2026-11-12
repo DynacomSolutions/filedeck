@@ -8,6 +8,9 @@ import type { Readable } from "node:stream";
 import {
   PathError,
   TRASH_DIR,
+  isReservedName,
+  assertNotReserved,
+  assertNotTrash,
   openChecked,
   pinParent,
   resolveRead,
@@ -15,7 +18,7 @@ import {
   virtualJoin,
   type Resolved,
 } from "./paths.ts";
-import { assertNotReserved, assertWritableAt, copyTree, isReservedName, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
+import { assertWritableAt, copyTree, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
 
 export interface Entry {
   name: string;
@@ -125,7 +128,7 @@ export async function list(root: string, p: string, hidden: boolean) {
   let truncated = false;
   const slice: string[] = [];
   for await (const n of direntsOf(r.real)) {
-    if (n.name === TRASH_DIR || isReservedName(n.name) || (!hidden && n.name.startsWith("."))) continue;
+    if (isReservedName(n.name) || (!hidden && n.name.startsWith("."))) continue;
     if (slice.length >= MAX_LIST) {
       truncated = true;
       break;
@@ -214,7 +217,7 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
   };
   let chunk: Dirent[] = [];
   for await (const d of direntsOf(r.real)) {
-    if (d.name === TRASH_DIR || isReservedName(d.name) || (!hidden && d.name.startsWith("."))) continue;
+    if (isReservedName(d.name) || (!hidden && d.name.startsWith("."))) continue;
     chunk.push(d);
     if (chunk.length >= 4096) {
       await flush(chunk);
@@ -246,6 +249,7 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
 
 export async function stat(root: string, p: string) {
   const r = resolveWrite(root, p); // lstat semantics for the final component
+  assertNotReserved(r.virtual);
   const parent = path.posix.dirname(r.virtual);
   const e = await toEntry(root, parent, path.dirname(r.real), path.basename(r.real));
   if (!e) throw new FsError(404, "not found");

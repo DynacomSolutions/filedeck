@@ -3,7 +3,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { FsError } from "./fsops.ts";
 import { GLOB_SKIP, compileGlobs, timeSlicer } from "./glob.ts";
 import { dropSpill, openDb } from "./index-cache.ts";
-import { TRASH_DIR } from "./paths.ts";
+import { isReservedName } from "./paths.ts";
 import type { Progress } from "./jobs.ts";
 import { classify, type DiffOptions, type Row, type Side, type Status, type Counts } from "./folderdiff.ts";
 
@@ -290,7 +290,7 @@ export class CompareSession {
 
   private key = (name: string) => (this.o.ignoreCase ? name.toLowerCase() : name);
   private wanted(rel: string, e: LsEntry) {
-    if (e.n === "." || e.n === ".." || e.n === TRASH_DIR) return false;
+    if (e.n === "." || e.n === ".." || isReservedName(e.n)) return false;
     if (this.o.ignoreHidden && e.n.startsWith(".")) return false;
     const isDir = e.t === "dir";
     const ex = this.exclude.test(rel, isDir);

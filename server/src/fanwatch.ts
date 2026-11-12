@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable } from "node:stream";
 import { listMounts } from "./mounts.ts";
-import { TRASH_DIR } from "./paths.ts";
+import { isReservedName } from "./paths.ts";
 
 /**
  * Keeps the size store current from kernel change notifications (fanotify, via the small native helper
@@ -76,7 +76,7 @@ export function mapPath(root: string, hostPath: string): string | null {
   else if (hostPath === root) v = "/";
   else if (hostPath.startsWith(root + "/")) v = hostPath.slice(root.length);
   else return null;
-  return v.split("/").includes(TRASH_DIR) ? null : v;
+  return v.split("/").some(isReservedName) ? null : v;
 }
 
 /** Inverse of the helper's escaping: `\\` and `\xHH`. Lines are split on "\n" only, which the helper never leaves unescaped inside a path. */

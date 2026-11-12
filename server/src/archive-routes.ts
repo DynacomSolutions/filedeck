@@ -10,6 +10,7 @@ import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
 import { extractBlocked, hitsReadOnly, jobMayWrite } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
+import { withReadOnly } from "./pinwalk.ts";
 import { ZipTickets } from "./zip-tickets.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
@@ -39,6 +40,7 @@ function dispo(name: string) {
 
 export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   const root = cfg.root;
+  void ar.sweepWorkArea(root, cfg.procMounts); // leftovers of a crashed run are removed from the private work folder, nowhere else
   const limits: ar.ArchiveLimits = { maxEntries: cfg.archiveMaxEntries, maxBytes: cfg.archiveMaxBytes };
   const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
   const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
@@ -49,13 +51,13 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
   };
   const runCompress = async (plan: ar.CompressPlan, ctl: Parameters<typeof ar.runCompress>[2]) => {
     mayWrite(path.dirname(plan.outReal), false);
-    return ar.runCompress(plan, limits, ctl);
+    return withReadOnly(root, cfg.readOnly, () => ar.runCompress(plan, limits, ctl, mayWrite));
   };
   const runExtract = async (plan: ar.ExtractPlan, ctl: Parameters<typeof ar.runExtract>[2]) => {
     const merge = plan.overwrite !== "rename";
     mayWrite(plan.destReal, merge && !plan.subfolder);
     if (merge && plan.subfolder) mayWrite(path.join(plan.destReal, ar.archiveBase(plan.archiveName)), true);
-    return ar.runExtract(plan, limits, ctl);
+    return withReadOnly(root, cfg.readOnly, () => ar.runExtract(plan, limits, ctl, mayWrite)); // a queued job runs outside the request that made it: the scope is opened here
   };
 
   jobs.register("compress", async (p) => {
