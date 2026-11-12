@@ -15,6 +15,16 @@ import { ZipTickets } from "./zip-tickets.ts";
 import { downloadGate, listGate } from "./tool-gate.ts";
 import { clientKey } from "./search.ts";
 
+/**
+ * Who a request belongs to for the per-client limits of the download and listing pools, and whether that key can be trusted to tell clients apart. It can when
+ * the agent token is set (the hub's `x-filedeck-client` header is then believed, and a request without it is a direct client, keyed by its peer address). Without
+ * an agent token the agent cannot tell the hub from a direct client, so every user behind the hub shares one key (the hub's address): the per-client limit is
+ * then not applied and only the pool's own limit holds.
+ */
+export function clientIdentity(c: Context, agentToken: string | undefined): { key: string; limited: boolean } {
+  return { key: clientKey(c, agentToken), limited: !!agentToken };
+}
+
 const bad = (m: string) => new ops.FsError(400, m);
 
 async function body<T>(c: Context): Promise<T> {
@@ -78,7 +88,8 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.get("/api/archive/list", async (c) => {
     const lim = Number(c.req.query("limit"));
-    const slot = await listGate.acquire(c.req.raw.signal, clientKey(c, cfg.agentToken)); // a listing is never held up by downloads: its own pool
+    const who = clientIdentity(c, cfg.agentToken);
+    const slot = await listGate.acquire(c.req.raw.signal, who.key, who.limited); // a listing is never held up by downloads: its own pool
     let res: Awaited<ReturnType<typeof ar.listArchive>>;
     try {
       res = await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c));
@@ -119,8 +130,9 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     };
     if (c.req.method === "HEAD") return new Response(null, { headers });
     await ar.assertSandboxUsable();
-    const client = clientKey(c, cfg.agentToken);
-    const slot = await downloadGate.acquire(c.req.raw.signal, client); // a client over its own limit (or a full pool) is answered 429 here, before the response starts
+    const who = clientIdentity(c, cfg.agentToken);
+    const client = who.key;
+    const slot = await downloadGate.acquire(c.req.raw.signal, client, who.limited); // a client over its own limit (or a full pool) is answered 429 here, before the response starts
     const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root, slot, client });
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
   });
@@ -165,7 +177,8 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.post("/api/jobs/extract", async (c) => {
     const b = await body<{ path?: string; destDir?: string; subfolder?: boolean; overwrite?: string; entries?: string[] }>(c);
-    const slot = await listGate.acquire(c.req.raw.signal, clientKey(c, cfg.agentToken)); // preparing reads the archive's listing (and checks a password): the listing pool
+    const who = clientIdentity(c, cfg.agentToken);
+    const slot = await listGate.acquire(c.req.raw.signal, who.key, who.limited); // preparing reads the archive's listing (and checks a password): the listing pool
     let plan: Awaited<ReturnType<typeof ar.prepareExtract>>;
     try {
       plan = await ar.prepareExtract(root, str(b.path, "path"), str(b.destDir, "destDir"), b.subfolder !== false, {

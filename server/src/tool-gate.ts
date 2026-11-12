@@ -32,7 +32,7 @@ export interface GateOpts {
 export class ToolGate {
   private active = 0;
   private byClient = new Map<string, number>();
-  private waiting: { go: () => void; client: string }[] = [];
+  private waiting: { go: () => void; client: string; limited: boolean }[] = [];
   constructor(private o: GateOpts) {}
 
   get running(): number {
@@ -56,16 +56,20 @@ export class ToolGate {
         if (left <= 0) this.byClient.delete(client);
         else this.byClient.set(client, left);
         // the slot passes to the first waiter whose client is under its own limit
-        const i = this.waiting.findIndex((w) => this.mine(w.client) < this.o.perClient);
+        const i = this.waiting.findIndex((w) => !w.limited || this.mine(w.client) < this.o.perClient);
         if (i >= 0) this.waiting.splice(i, 1)[0]!.go();
         else this.active--;
       },
     };
   }
 
-  async acquire(signal?: AbortSignal, client = "-"): Promise<Slot> {
+  /**
+   * `limited` false: the caller cannot tell its clients apart (see `clientIdentity` in archive-routes.ts), so only the pool's own limit applies and
+   * the refusal, when the pool is full, says the server is busy.
+   */
+  async acquire(signal?: AbortSignal, client = "-", limited = true): Promise<Slot> {
     if (signal?.aborted) throw new FsError(400, "canceled");
-    if (this.mine(client) >= this.o.perClient) throw new FsError(429, `you already have ${this.mine(client)} ${this.o.what} running (the limit for one client is ${this.o.perClient}): wait for one to finish`);
+    if (limited && this.mine(client) >= this.o.perClient) throw new FsError(429, `you already have ${this.mine(client)} ${this.o.what} running (the limit for one client is ${this.o.perClient}): wait for one to finish`);
     if (this.active < this.o.concurrency) {
       this.active++;
       return this.take(client);
@@ -74,6 +78,7 @@ export class ToolGate {
     await new Promise<void>((go, fail) => {
       const w = {
         client,
+        limited,
         go: () => {
           clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);

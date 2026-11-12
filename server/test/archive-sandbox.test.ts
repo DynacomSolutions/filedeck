@@ -856,6 +856,44 @@ live("unread downloads of one client cannot starve another client, a listing, or
   await until(() => downloadGate.running === 0, "the downloads to be released");
 });
 
+live("without an agent token the clients cannot be told apart: no per-client limit, the pool limit only, worded as busy", async () => {
+  const s = scene("gate-shared");
+  fs.writeFileSync(path.join(s.src, "big.bin"), randomBytes(6 << 20));
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: s.root, FILEDECK_NODE: "t" } as never)); // no FILEDECK_AGENT_TOKEN: the hub's client header is not believed
+  const held: Response[] = [];
+  try {
+    const dl = (client: string) => Promise.resolve(app.request("/api/fs/zip?dir=/src&name=big.bin", { headers: { "x-filedeck-client": client } }));
+    for (let i = 0; i < 16; i++) {
+      const r = await dl("10.8.0.1");
+      assert.equal(r.status, 200, `download ${i + 1} (all of them are one key, and one key may use the whole pool)`);
+      held.push(r);
+    }
+    const over = await dl("10.8.0.2");
+    assert.equal(over.status, 429);
+    const msg = await over.text();
+    assert.match(msg, /busy/);
+    assert.doesNotMatch(msg, /you already have/, "not worded as the caller's own limit");
+  } finally {
+    for (const r of held) await r.body?.cancel().catch(() => undefined);
+    await (app as unknown as { close(): Promise<void> }).close();
+  }
+  await until(() => downloadGate.running === 0, "the downloads to be released");
+});
+
+test("a gate call that is not limited per client applies the pool limit only", async () => {
+  const g = new ToolGate({ concurrency: 3, perClient: 1, queue: 0, waitMs: 50, what: "things" });
+  const a = await g.acquire(undefined, "same", false);
+  const b = await g.acquire(undefined, "same", false);
+  const c = await g.acquire(undefined, "same", false);
+  await assert.rejects(g.acquire(undefined, "same", false), (e: { message?: string }) => /busy/.test(e.message ?? "") && !/already have/.test(e.message ?? ""));
+  a.release();
+  b.release();
+  c.release();
+  const x = await g.acquire(undefined, "same"); // limited: one is the limit
+  await assert.rejects(g.acquire(undefined, "same"), (e: { message?: string }) => /already have 1 things running/.test(e.message ?? ""));
+  x.release();
+});
+
 async function until(f: () => boolean, what: string, ms = 20_000) {
   const end = Date.now() + ms;
   while (!f()) {
