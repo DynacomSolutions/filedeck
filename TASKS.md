@@ -178,6 +178,7 @@ ETA: 2026-11-12 12:00 ICT
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
 | 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | done | claude-20261112-rv-sources | rv-smb-followup | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/204, CI green<br>Listing cap is 100,000 entries<br>Image build stage not exercised until 13.131 |
 | 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | done | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | | Merged https://github.com/DynacomSolutions/filedeck/pull/206, CI green<br>Found and fixed: final image lacked server dependencies and crashed at start<br>Cold build 4m31s |
+| 132 | Archive tools run inside the read sandbox, limited to the pinned source folder | todo | | rv-archive-sandbox | 13.106, 13.108 | | From the second review of 13.108: compression can follow a swapped subfolder |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
