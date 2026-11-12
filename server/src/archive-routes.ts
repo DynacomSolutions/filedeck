@@ -25,6 +25,8 @@ const str = (v: unknown, what: string) => {
   if (typeof v !== "string" || !v) throw bad(`${what} must be a non-empty string`);
   return v;
 };
+/** most names a selection may hold (the same bound as the job queue's items) */
+const MAX_NAMES = 10_000;
 const strs = (v: unknown, what: string) => {
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || !x)) throw bad(`${what} must be an array of strings`);
   return v as string[];
@@ -113,6 +115,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     const b = await body<{ dir?: string; names?: string[] }>(c);
     const dir = b.dir === undefined ? "/" : str(b.dir, "dir");
     const names = strs(b.names, "names");
+    if (names.length > MAX_NAMES) throw bad(`names must hold at most ${MAX_NAMES} entries`);
     await ar.prepareSelection(root, dir, names); // refuse a bad selection now, not at download time
     const id = tickets.issue({ dir, names });
     if (!id) return c.json({ error: "too many pending downloads" }, 429);
