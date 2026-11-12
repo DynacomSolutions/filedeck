@@ -823,7 +823,7 @@ async function until(f: () => boolean, what: string, ms = 20_000) {
 
 live("as root, root-only files and folders are archived, listed and extracted by tools that hold only the read-search capability", async () => {
   const s = scene("root-only");
-  const body = randomBytes(30_000);
+  const body = randomBytes(200_000);
   fs.mkdirSync(path.join(s.src, "pick"));
   fs.chmodSync(path.join(s.src, "pick"), 0o700);
   fs.writeFileSync(path.join(s.src, "pick/a.bin"), body, { mode: 0o600 });
@@ -855,7 +855,7 @@ live("as root, root-only files and folders are archived, listed and extracted by
   assert.deepEqual(fs.readFileSync(path.join(s.root, ex.path, "pick/a.bin")), body);
   // 7-Zip: password, split volumes, listing and extraction of the 0600 set
   if (haveSevenZip()) {
-    const c = await runCompress(await prepareCompress(s.root, "/src", ["pick"], "7z", "pw", { destDir: "/out", password: "secret", splitBytes: 8192 }), LIM, mkCtl());
+    const c = await runCompress(await prepareCompress(s.root, "/src", ["pick"], "7z", "pw", { destDir: "/out", password: "secret", splitBytes: 65_536 }), LIM, mkCtl());
     assert.ok((c.volumes ?? 0) >= 2, "split into volumes");
     const first = path.join(s.root, c.path);
     assert.equal(fs.statSync(first).mode & 0o777, 0o600);

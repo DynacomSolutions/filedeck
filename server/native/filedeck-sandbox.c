@@ -20,8 +20,9 @@
  * Unless --no-system is given, the folders a program needs to start are readable and executable as well (/usr, /lib,
  * /lib64, /bin, /sbin), a few world-readable files of /etc (loader cache, passwd, group, time zone) are readable, and
  * /dev/null can be read and written. Nothing else can be opened.
- *   --keep-cap NAME  keep this one Linux capability for COMMAND (repeatable; only `dac_read_search` is known: read any file and search any
- *               folder by the file's mode, which Landlock still limits to the roots). Every other capability is removed in every
+ *   --keep-cap NAME  keep this Linux capability for COMMAND (repeatable; `dac_read_search`: read any file and search any folder by the
+ *               file's mode; `dac_override`: the same and write too, for a container that does not hold the first, as the usual container
+ *               defaults do not; Landlock still limits both to the roots). Every other capability is removed in every
  *               case, also when COMMAND runs as uid 0: the permitted, effective, inheritable and ambient sets are cleared and the
  *               bounding set is emptied (when this process may). The caller must hold a capability to keep it, else the helper fails.
  *   --allow-metadata  do not refuse the calls that change modes, owners, times and extended attributes (see the seccomp note below).
@@ -264,6 +265,7 @@ struct cap_hdr {
 struct cap_data {
   uint32_t effective, permitted, inheritable;
 };
+#define CAP_BIT_DAC_OVERRIDE 1
 #define CAP_BIT_DAC_READ_SEARCH 2
 #define CAP_BIT_SETPCAP 8
 
@@ -543,8 +545,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--allow-metadata")) allow_metadata = 1;
     else if (!strcmp(argv[i], "--keep-cap") && i + 1 < argc) {
       if (!strcmp(argv[++i], "dac_read_search")) keep_caps |= 1ULL << CAP_BIT_DAC_READ_SEARCH;
+      else if (!strcmp(argv[i], "dac_override")) keep_caps |= 1ULL << CAP_BIT_DAC_OVERRIDE;
       else {
-        fprintf(stderr, "filedeck-sandbox: --keep-cap knows only dac_read_search\n");
+        fprintf(stderr, "filedeck-sandbox: --keep-cap knows only dac_read_search and dac_override\n");
         return EXIT_USAGE;
       }
     }
@@ -675,7 +678,7 @@ int main(int argc, char **argv) {
   if (keep_caps) {
     uint64_t perm = 0;
     if (cap_get(NULL, &perm, NULL) < 0 || (keep_caps & ~perm) != 0) {
-      fprintf(stderr, "filedeck-sandbox: cannot keep a capability this process does not hold\n");
+      fprintf(stderr, "filedeck-sandbox: cannot keep a capability this process does not hold (needs 0x%llx, has 0x%llx)\n", (unsigned long long)keep_caps, (unsigned long long)perm);
       return EXIT_FAILED;
     }
   }

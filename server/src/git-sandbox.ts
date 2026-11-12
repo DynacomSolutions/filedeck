@@ -2,7 +2,7 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
-import { UNPRIVILEGED, hasCapability, sandboxInfo, spawnSandboxed, type RunAs } from "./sandbox.ts";
+import { UNPRIVILEGED, readerCapability, sandboxInfo, spawnSandboxed, type RunAs } from "./sandbox.ts";
 
 const said = new Set<string>();
 const sayOnce = (m: string) => {
@@ -62,9 +62,10 @@ export async function launchGit(cwd: string, gitArgs: string[], env: NodeJS.Proc
     if (st.uid !== 0) owner = { uid: st.uid, gid: st.gid };
     else if ((await worldReadableDir(where.gitDir)) && (await worldReadableDir(cwd))) owner = { ...UNPRIVILEGED };
     else if (info.state === "fallback") throw new FsError(403, "this git directory cannot be used safely here");
-    else if (await hasCapability("dac_read_search")) owner = { ...UNPRIVILEGED, keepCaps: ["dac_read_search"] }; // root-owned and not readable by that user: only the read-search capability
     else {
-      sayOnce("git: this process lacks the read-search capability, so git runs as the agent's own user (with no capabilities) for repositories the unprivileged user cannot read");
+      const cap = await readerCapability();
+      if (cap) owner = { ...UNPRIVILEGED, keepCaps: [cap] }; // root-owned and not readable by that user: only the read-search capability (or, where the container has not got it, the override one)
+      else sayOnce("git: this process holds neither the read-search nor the override capability, so git runs as the agent's own user (with no capabilities) for repositories the unprivileged user cannot read");
     }
   }
   return spawnSandboxed("git", gitArgs, { ...spawnOpts, cwd, env, readOnly: where.root ? [where.root] : [], ...(owner ?? {}) });

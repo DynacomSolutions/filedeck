@@ -5,7 +5,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { EXIT_LANDLOCK_UNSUPPORTED, resetSandbox, sandboxInfo, spawnSandboxed, type SandboxOpts } from "../src/sandbox.ts";
+import { EXIT_LANDLOCK_UNSUPPORTED, readerCapability, resetSandbox, sandboxInfo, spawnSandboxed, type SandboxOpts } from "../src/sandbox.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
 /**
@@ -588,17 +588,20 @@ live("threads still start (clone without a namespace flag is allowed)", async ()
 });
 
 liveRoot("a program run as root keeps no capability: every set is empty, also the bounding set", async () => {
-  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc/self/status"] });
+  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc"] });
   const c = caps(r.stdout);
-  for (const k of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) assert.equal(c[k], 0n, `${k}: ${r.stdout}`);
+  for (const k of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) assert.equal(c[k], 0n, `${k}: ${r.stdout} ${r.stderr}`);
 });
 
-liveRoot("with a user change and keepCaps the program holds exactly the read-search capability, in every set", async () => {
-  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc/self/status"], uid: 65533, gid: 65533, keepCaps: ["dac_read_search"] });
+liveRoot("with a user change and keepCaps the program holds exactly the one named capability, in every set", async () => {
+  const cap = await readerCapability();
+  assert.ok(cap, "the agent holds the read-search or the override capability (container defaults hold the latter)");
+  const bit = cap === "dac_read_search" ? 4n : 2n;
+  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc"], uid: 65533, gid: 65533, keepCaps: [cap] });
   const c = caps(r.stdout);
-  for (const k of ["CapInh", "CapPrm", "CapEff", "CapAmb"]) assert.equal(c[k], 4n, `${k}: ${r.stdout}`);
-  assert.equal(c.CapBnd, 4n);
-  const none = await run("cat", ["/proc/self/status"], { readOnly: ["/proc/self/status"], uid: 65533, gid: 65533 });
+  for (const k of ["CapInh", "CapPrm", "CapEff", "CapAmb", "CapBnd"]) assert.equal(c[k], bit, `${k}: ${r.stdout} ${r.stderr}`);
+  const none = await run("cat", ["/proc/self/status"], { readOnly: ["/proc"], uid: 65533, gid: 65533 });
+  assert.ok(Object.keys(caps(none.stdout)).length >= 5, none.stderr);
   for (const v of Object.values(caps(none.stdout))) assert.equal(v, 0n);
 });
 
@@ -644,7 +647,7 @@ liveRoot("inside a writable grant the metadata of a file of another user cannot 
   assert.match(allowed.stdout, /theirs=1[\s\S]*ours=0/, allowed.stdout);
 });
 
-liveRoot("keepCaps read-search lets uid 65533 read a 0600 root-owned file inside a read-only grant, and nothing outside the grants", async () => {
+liveRoot("keepCaps (read-search, or override where that is what the agent holds) lets uid 65533 read a 0600 root-owned file inside a read-only grant, and nothing outside the grants", async () => {
   const ro = path.join(tmp, "dac-ro");
   const out = path.join(tmp, "dac-out");
   write(path.join(ro, "secret.txt"), "INSIDE");
@@ -654,8 +657,8 @@ liveRoot("keepCaps read-search lets uid 65533 read a 0600 root-owned file inside
   fs.chmodSync(ro, 0o700); // searching the folder needs the capability too
   const plain = await run("cat", [path.join(ro, "secret.txt")], { readOnly: [ro], uid: 65533, gid: 65533 });
   assert.notEqual(plain.code, 0, "control: the user alone cannot read it");
-  const r = await run("sh", ["-c", `cat ${path.join(ro, "secret.txt")}; echo; cat ${path.join(out, "secret.txt")} 2>&1; echo status=$?; echo x > ${path.join(ro, "w")} 2>&1; echo write=$?`], { readOnly: [ro], uid: 65533, gid: 65533, keepCaps: ["dac_read_search"] });
-  assert.match(r.stdout, /INSIDE/);
+  const r = await run("sh", ["-c", `cat ${path.join(ro, "secret.txt")}; echo; cat ${path.join(out, "secret.txt")} 2>&1; echo status=$?; echo x > ${path.join(ro, "w")} 2>&1; echo write=$?`], { readOnly: [ro], uid: 65533, gid: 65533, keepCaps: [(await readerCapability())!] });
+  assert.match(r.stdout, /INSIDE/, r.stderr);
   assert.doesNotMatch(r.stdout, /OUTSIDE/);
   assert.match(r.stdout, /status=1/);
   assert.match(r.stdout, /write=1/);

@@ -15,7 +15,7 @@ import type { JobCtl } from "./jobs.ts";
 import { STAGING_PREFIX, TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, SandboxError, failIfLauncher, haveSevenZip, listSz, runSz, szFailure, szReadArgs, validPassword, verifyPassword, type SzSource } from "./sevenzip.ts";
-import { hasCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
+import { readerCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
 import { toolGate, type Slot } from "./tool-gate.ts";
 
 /**
@@ -164,8 +164,9 @@ const sayOnce = (msg: string) => {
 /** The archive user with the read-search capability; without it (the agent lacks it) the agent's own user, as a non-root agent would. */
 async function readerIdentity(): Promise<RunAs | undefined> {
   if (process.getuid?.() !== 0) return undefined;
-  if (await hasCapability("dac_read_search")) return { ...archiveUser(), keepCaps: ["dac_read_search"] };
-  sayOnce("archive tools: this process lacks the read-search capability, so a tool that must read what only root can read runs as the agent's own user (with no capabilities) instead of the archive user");
+  const cap = await readerCapability();
+  if (cap) return { ...archiveUser(), keepCaps: [cap] };
+  sayOnce("archive tools: this process holds neither the read-search nor the override capability, so a tool that must read what only root can read runs as the agent's own user (with no capabilities) instead of the archive user");
   return undefined;
 }
 /** Who a tool runs as when it reads a folder owned by `uid`/`gid`: that owner (groups cleared), and for a root-owned folder the archive user with the read-search capability. */

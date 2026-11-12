@@ -150,10 +150,12 @@ export const sandboxRequiredError = () => new FsError(503, "disabled: the sandbo
 export type Root = string | number;
 
 /** Who a tool runs as: the user and group, and the one capability it keeps (see `SandboxOpts.keepCaps`). */
+export type Capability = "dac_read_search" | "dac_override";
+
 export interface RunAs {
   uid: number;
   gid: number;
-  keepCaps?: "dac_read_search"[];
+  keepCaps?: Capability[];
 }
 
 export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
@@ -180,10 +182,10 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
   keepFds?: number[];
   /**
    * capabilities the program keeps (the launcher clears every other one, also for a program that stays root): `dac_read_search` lets it read
-   * files and search folders regardless of their mode (Landlock still limits it to the roots). The caller must hold the capability
+   * files and search folders regardless of their mode, `dac_override` does that and also writes (for a container without the first; Landlock still limits both to the roots). The caller must hold the capability
    * (`hasCapability`); with a user change the launcher keeps it across the change.
    */
-  keepCaps?: "dac_read_search"[];
+  keepCaps?: Capability[];
   /** do not refuse the calls that change modes, owners, times and extended attributes (a program that extracts into a private folder sets them on what it creates) */
   allowMetadata?: boolean;
   /** let the program create sockets of any kind (see the UDP note above); TCP stays denied wherever the kernel's Landlock can deny it */
@@ -262,12 +264,19 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
 }
 
 /** Does this process hold the capability in its effective set? (A non-root agent, or a container that dropped it, does not.) Read from /proc/self/status. */
-export async function hasCapability(name: "dac_read_search"): Promise<boolean> {
-  const bit = { dac_read_search: 2n }[name];
+export async function hasCapability(name: Capability): Promise<boolean> {
+  const bit = { dac_read_search: 2n, dac_override: 1n }[name];
   try {
     const m = /^CapEff:\s*([0-9a-f]+)/m.exec(await fs.readFile("/proc/self/status", "utf8"));
     return !!m && (BigInt("0x" + m[1]!) & (1n << bit)) !== 0n;
   } catch {
     return false;
   }
+}
+
+/** The capability a tool is given to read what only root can read: read-search where this process holds it, else override (container defaults hold that one); null when it holds neither. */
+export async function readerCapability(): Promise<Capability | null> {
+  if (await hasCapability("dac_read_search")) return "dac_read_search";
+  if (await hasCapability("dac_override")) return "dac_override";
+  return null;
 }
