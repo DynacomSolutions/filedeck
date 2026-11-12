@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { FsError } from "./fsops.ts";
-import { compileGlobs, timeSlicer } from "./glob.ts";
+import { GLOB_SKIP, GLOB_SKIP_REASON, compileGlobs, timeSlicer } from "./glob.ts";
 import { dropSpill, openDb } from "./index-cache.ts";
 import { TRASH_DIR } from "./paths.ts";
 import type { Progress } from "./jobs.ts";
@@ -280,9 +280,13 @@ export class CompareSession {
     if (e.n === "." || e.n === ".." || e.n === TRASH_DIR) return false;
     if (this.o.ignoreHidden && e.n.startsWith(".")) return false;
     const isDir = e.t === "dir";
-    if (this.exclude.test(rel, isDir)) return false;
-    if (!isDir && this.include && !this.include.test(rel, false)) return false;
-    return true;
+    const ex = this.exclude.test(rel, isDir);
+    const inc = ex || isDir || !this.include ? true : this.include.test(rel, false);
+    if (ex === GLOB_SKIP || inc === GLOB_SKIP) {
+      this.warnSet.add(`Some paths were left out, ${GLOB_SKIP_REASON.replace(/^skipped: /, "")}`); // the compare goes on without that path
+      return false;
+    }
+    return !ex && inc === true;
   }
 
   private async listOne(id: number, signal: AbortSignal) {
@@ -317,7 +321,8 @@ export class CompareSession {
       if (!r.fin) this.finish(id, BIT.error, e.message || "could not read folder");
       return;
     }
-    const kids = await this.children(r, L, R);
+    const kids = await this.children(r, L, R); // may yield: cancelled or dropped meanwhile means nothing more is written
+    if (signal.aborted || this.closed || !this.q.byId!.get(id)) return;
     let pend = 0;
     let mask = 0;
     let newDirs = 0;
@@ -525,6 +530,7 @@ export class CompareSession {
     const cur = this.q.byId!.get(id) as unknown as DbRow | undefined;
     if (this.closed || !cur || cur.job !== J.DONE) return;
     const kids = await this.children(cur, L, R); // may yield: the rows are read afterwards, in one go with the transaction
+    if (signal.aborted || this.closed) return;
     const cur2 = this.q.byId!.get(id) as unknown as DbRow | undefined;
     if (this.closed || !cur2 || cur2.job !== J.DONE) return;
     const have = new Map((this.q.kids!.all(id) as unknown as (DbRow & { k?: string })[]).map((x) => [this.key(x.p.slice(x.p.lastIndexOf("/") + 1)), x]));

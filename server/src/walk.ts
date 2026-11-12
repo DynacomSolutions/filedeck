@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
 import { TRASH_DIR, resolveRead } from "./paths.ts";
-import { compileGlobs, timeSlicer } from "./glob.ts";
+import { GLOB_SKIP, compileGlobs, timeSlicer } from "./glob.ts";
 import { namesOf } from "./dirnames.ts";
 
 /** Names are read and sorted in batches of this size: folders up to it list in name order, larger ones in batch order (shortcut: no global sort, which would need every name on the heap). */
@@ -105,8 +105,13 @@ export async function* walkTree(
         const turn = tick();
         if (turn) await turn;
         const isDir = g.e.t === "dir";
-        if (exclude.test(g.e.p, isDir)) continue;
-        if (!isDir && include && !include.test(g.e.p, false)) continue;
+        const ex = exclude.test(g.e.p, isDir);
+        const inc = ex || isDir || !include ? true : include.test(g.e.p, false);
+        if (ex === GLOB_SKIP || inc === GLOB_SKIP) {
+          summary.errors++; // the patterns are too expensive for this one path: it is left out and counted, the walk goes on
+          continue;
+        }
+        if (ex || !inc) continue;
         if (total >= o.max) {
           summary.truncated = true;
           break;

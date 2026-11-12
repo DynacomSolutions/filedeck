@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { serve } from "@hono/node-server";
 import type { WorkerOptions } from "node:worker_threads";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
@@ -284,18 +285,71 @@ test("a glob matcher with too many expanded alternatives is refused with a 400, 
   assert.deepEqual(["a.tmp", "x/y/a.tmp", "build", "build/", "build/a/b", "src/a.map", "a.txt", "xbuild/a", "a.tmp/b"].map((p) => sc.test(p, false)), [true, true, false, true, true, true, false, false, false]);
 });
 
-test("no single match can hold the event loop: a pattern set too expensive for the path is refused with a 400", () => {
+test("no single match can hold the event loop: a path the patterns are too expensive for is skipped, and the walk and the compare go on", async () => {
   const exclude = Array.from({ length: 4 }, (_, i) => "**?".repeat(80) + "z" + i);
   const m = compileGlobs(exclude, false);
   const longName = "a".repeat(251);
   const t0 = performance.now();
-  assert.throws(() => m.test(`d/${longName}`, false), (e: Error & { status?: number }) => e.status === 400 && /too expensive/.test(e.message));
+  assert.equal(m.test(`d/${longName}`, false), "skip");
   assert.ok(performance.now() - t0 < 100, `took ${Math.round(performance.now() - t0)} ms`);
+  assert.equal(m.test("d/short", false), false, "a short path is still judged (each call starts with a fresh allowance)");
   // each call starts with a fresh allowance, and ordinary patterns on long paths stay far below it
   const ok = compileGlobs(["*a*a*a*a*a*b", "src/**/*.test.ts", "[Tt]humbs.db"], false);
   const t1 = performance.now();
   for (let i = 0; i < 200; i++) assert.equal(ok.test("x/".repeat(60) + longName, false), false);
   assert.ok(performance.now() - t1 < 500);
+  // the walk: one odd name is left out and counted, the other entries are listed
+  write("skipwalk/ok1.txt", "1");
+  write("skipwalk/ok2.txt", "2");
+  write("skipwalk/" + longName, "3");
+  const qs = exclude.map((x) => "exclude=" + encodeURIComponent(x)).join("&");
+  const r = await agent.request("/api/fs/walk?path=/skipwalk&" + qs);
+  assert.equal(r.status, 200);
+  const lines = (await r.text()).trim().split("\n").map((l) => JSON.parse(l) as { e?: { p: string }[]; done?: { errors: number } });
+  assert.deepEqual(lines.flatMap((l) => l.e ?? []).map((e) => e.p).sort(), ["ok1.txt", "ok2.txt"]);
+  assert.ok((lines.at(-1)!.done?.errors ?? 0) >= 1, "the skipped path is counted");
+  // the compare: the same, with a warning that says why
+  for (const d of ["skipcmp-l", "skipcmp-r"]) {
+    write(`${d}/same.txt`, "x");
+    write(`${d}/${longName}`, "y");
+  }
+  const { compareTrees, localSource, normalizeOptions } = await import("../src/folderdiff.ts");
+  const res = await compareTrees(localSource(path.join(tmp, "skipcmp-l"), "/"), localSource(path.join(tmp, "skipcmp-r"), "/"), normalizeOptions({ mode: "size", exclude }), { signal: new AbortController().signal, progress: () => undefined } as never);
+  assert.deepEqual(res.rows.map((x: { p: string }) => x.p), ["same.txt"]);
+  assert.ok((res as { warnings?: string[] }).warnings?.some((w) => /too expensive/.test(w)), JSON.stringify((res as { warnings?: unknown }).warnings));
+});
+
+test("a cancelled compare writes nothing after the cancel (the rows of a folder whose entries were still being judged)", async () => {
+  const L = path.join(tmp, "cancel-l");
+  const R = path.join(tmp, "cancel-r");
+  for (const d of [L, R]) {
+    fs.mkdirSync(d, { recursive: true });
+    for (let i = 0; i < 2500; i++) fs.writeFileSync(path.join(d, "a".repeat(240) + String(i).padStart(5, "0")), "");
+  }
+  const { CompareSession } = await import("../src/cmp-engine.ts");
+  const { localSource, normalizeOptions } = await import("../src/folderdiff.ts");
+  const o = normalizeOptions({ mode: "size", exclude: Array.from({ length: 12 }, () => "*a*a*a*a*a*b") });
+  const sess = new CompareSession(localSource(L, "/"), localSource(R, "/"), o as never);
+  const ctl = new AbortController();
+  const count = () => (sess as unknown as { db: { prepare(s: string): { get(): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM rows").get().n;
+  // cancel the moment the folder's entries start to be judged (that pass yields now and then, so the cancel lands in the middle of it)
+  const proto = CompareSession.prototype as unknown as { children: (...a: unknown[]) => Promise<unknown> };
+  const orig = proto.children;
+  let rowsAtCancel = -1;
+  proto.children = function (this: unknown, ...a: unknown[]) {
+    ctl.abort();
+    rowsAtCancel = count();
+    return orig.apply(this, a);
+  };
+  try {
+    await sess.run(ctl.signal).catch(() => undefined);
+  } finally {
+    proto.children = orig;
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  assert.ok(rowsAtCancel >= 0, "the folder was judged");
+  assert.equal(count(), rowsAtCancel, "rows were inserted after the cancel");
+  sess.close?.();
 });
 
 test("a folder compare with many entries and many patterns gives the event loop turns", async () => {
@@ -452,20 +506,57 @@ test("a client that never reads its search gives the slot and the worker back af
   }
 });
 
-test("one client cannot take every search slot", async () => {
+test("the per-client bound keys on an address the server saw: a forged header gains nothing, ordinary use is not throttled", async () => {
   for (let i = 0; i < 60; i++) write(`stall2/f${i}.txt`, "x");
   const saved = { ...searchLimits };
   searchLimits.stallMs = 5000;
   const held: Response[] = [];
+  const mkAgent = (token: string | undefined) => createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_SEARCH_CONCURRENCY: "4", ...(token ? { FILEDECK_AGENT_TOKEN: token } : {}) } as never));
   try {
-    held.push(await searchAs("10.1.0.1", "path=/stall2&q=f"));
-    assert.equal((await searchAs("10.1.0.1", "path=/stall2&q=f")).status, 429, "a second search from the same client");
-    const other = await searchAs("10.1.0.2", "path=/s&q=main");
-    assert.equal(other.status, 200, "another client still has a slot");
-    await other.text();
+    // 1. with the shared token the hub's header is believed: a client holds at most three of four slots, whatever else it sends
+    const a = mkAgent("tok");
+    const hdr = (client: string, forged?: string) => ({ headers: { authorization: "Bearer tok", "x-filedeck-client": client, ...(forged ? { "x-forwarded-for": forged } : {}) } });
+    const go = (client: string, forged?: string) => Promise.resolve(a.request("/api/fs/search?path=/stall2&q=f", hdr(client, forged)));
+    for (let i = 0; i < 3; i++) held.push(await go("10.1.0.1", `9.9.9.${i}`)); // varying forwarded values do not make it a new client
+    assert.equal((await go("10.1.0.1", "9.9.9.99")).status, 429, "the same client again");
+    const other = await go("10.1.0.2");
+    assert.equal(other.status, 200, "another client has the last slot");
+    held.push(other);
+    for (const r of held.splice(0)) await r.body?.cancel().catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 300));
+    // 2. without a token the header is not believed: it cannot split a client into many, nor hide one
+    const b = mkAgent(undefined);
+    const gob = (client: string) => Promise.resolve(b.request("/api/fs/search?path=/stall2&q=f", { headers: { "x-filedeck-client": client } }));
+    for (let i = 0; i < 3; i++) held.push(await gob(`10.2.0.${i}`));
+    assert.equal((await gob("10.2.0.77")).status, 429, "all of them are one client to this agent");
+    for (const r of held.splice(0)) await r.body?.cancel().catch(() => undefined);
+    // 3. a default gate of two does not refuse a second tab of the same user
+    const c = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+    held.push(await Promise.resolve(c.request("/api/fs/search?path=/stall2&q=f")));
+    const second = await Promise.resolve(c.request("/api/fs/search?path=/s&q=main"));
+    assert.equal(second.status, 200, "a second search from the same address");
+    held.push(second);
   } finally {
     Object.assign(searchLimits, saved);
     for (const r of held) await r.body?.cancel().catch(() => undefined);
+  }
+});
+
+test("the hub drops a client-sent client header and sets its own from what it saw", async () => {
+  const seen: (string | null)[] = [];
+  const upstream = serve({ fetch: (req: Request) => (seen.push(req.headers.get("x-filedeck-client")), new Response("ok")), port: 0 });
+  await new Promise((r) => upstream.once("listening", r));
+  try {
+    const port = (upstream.address() as import("node:net").AddressInfo).port;
+    const { createHub } = await import("../src/hub.ts");
+    const hub = createHub(loadConfig({ NODES: `n1=http://127.0.0.1:${port}`, FILEDECK_MODE: "hub" } as never));
+    await hub.request("/api/nodes/n1/api/info", { headers: { "x-filedeck-client": "forged-by-client" } });
+    await hub.request("/api/nodes/n1/api/info", { headers: { "x-filedeck-client": "forged-by-client", "x-forwarded-for": "1.1.1.1, 203.0.113.9" } });
+    assert.equal(seen[0], null, "a forged value must not pass through");
+    assert.equal(seen[1], "203.0.113.9", "the last hop of the forwarded chain, as the audit records it");
+    await hub.close();
+  } finally {
+    upstream.close();
   }
 });
 

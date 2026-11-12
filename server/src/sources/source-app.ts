@@ -6,7 +6,7 @@ import path from "node:path";
 import * as ops from "../fsops.ts";
 import { FsError, MAX_LIST, mimeFor, parseRange, type Entry } from "../fsops.ts";
 import { cleanVirtual, virtualJoin } from "../paths.ts";
-import { compileGlobs, timeSlicer } from "../glob.ts";
+import { GLOB_SKIP, compileGlobs, timeSlicer } from "../glob.ts";
 import { Semaphore, type WalkEntry, type WalkOpts, type WalkSummary } from "../walk.ts";
 import { walkResponse } from "../diff-routes.ts";
 import { IndexCache, spillPath, type IdxEntry } from "../index-cache.ts";
@@ -434,8 +434,13 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
         const isDir = it.type === "dir";
         const turn = tick();
         if (turn) await turn;
-        if (exclude.test(rel, isDir)) continue;
-        if (!isDir && include && !include.test(rel, false)) continue;
+        const ex = exclude.test(rel, isDir);
+        const inc = ex || isDir || !include ? true : include.test(rel, false);
+        if (ex === GLOB_SKIP || inc === GLOB_SKIP) {
+          summary.errors++; // too expensive to match: left out and counted
+          continue;
+        }
+        if (ex || !inc) continue;
         if (total >= w.max) {
           summary.truncated = true;
           break;

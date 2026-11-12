@@ -9,9 +9,17 @@
  */
 import { FsError } from "./fsops.ts";
 
+/**
+ * What `Matcher.test` answers for a path the patterns are too expensive to match (the step budget below ran out): the path is
+ * not judged either way, and the caller leaves it out and says so (a skipped path with a reason), instead of failing the whole
+ * walk or compare for one odd name.
+ */
+export const GLOB_SKIP = "skip" as const;
 export interface Matcher {
-  test(rel: string, isDir: boolean): boolean;
+  test(rel: string, isDir: boolean): boolean | typeof GLOB_SKIP;
 }
+/** The reason shown with skipped paths. */
+export const GLOB_SKIP_REASON = "skipped: the include/exclude patterns are too expensive to match against this path";
 
 const MAX_PATTERN = 256;
 const MAX_PATTERNS = 100;
@@ -96,6 +104,7 @@ export const MAX_TOTAL_TOKENS = 1024;
  */
 export const MAX_STEPS_PER_TEST = 40_000;
 let stepsLeft = MAX_STEPS_PER_TEST;
+class OverBudget extends Error {}
 
 const LIT = 0, ONE = 1, CLS = 2, STAR = 3, DSTAR = 4, DSA = 5, DSB = 6;
 
@@ -193,7 +202,7 @@ function run(p: Prog, text: string): boolean {
     const code = text.charCodeAt(pos);
     stamp = ++p.stamp;
     let nn = 0;
-    if ((stepsLeft -= nc) < 0) throw new FsError(400, "the glob patterns are too expensive to match against this path: use simpler or fewer patterns");
+    if ((stepsLeft -= nc) < 0) throw new OverBudget();
     for (let j = 0; j < nc; j++) {
       const i = cur[j]!;
       if (i >= m) continue;
@@ -285,27 +294,35 @@ export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
     test(rel, isDir) {
       if (!rules.length) return false;
       stepsLeft = MAX_STEPS_PER_TEST;
-      const name = rel.slice(rel.lastIndexOf("/") + 1);
-      let lname: string | null = null;
-      let lrel: string | null = null;
-      for (const r of rules) {
-        if (r.dirOnly && !isDir) continue;
-        let t = r.base ? name : rel;
-        if (ignoreCase) t = r.base ? (lname ??= name.toLowerCase()) : (lrel ??= rel.toLowerCase());
-        const f = r.fast;
-        let hit: boolean;
-        if (f) {
-          if (f.f === "eq") hit = t === f.lit;
-          else if (f.f === "suffix") hit = t.endsWith(f.lit) && (r.base || !t.slice(0, t.length - f.lit.length).includes("/"));
-          else if (f.f === "prefix") hit = t.startsWith(f.lit) && (r.base || !t.slice(f.lit.length).includes("/"));
-          else if (f.f === "prefixAny") hit = t.startsWith(f.lit);
-          else hit = t.endsWith(f.lit);
-        } else hit = run(r.prog, t);
-        if (hit) return true;
+      try {
+        return testRules(rel, isDir);
+      } catch (e) {
+        if (e instanceof OverBudget) return GLOB_SKIP;
+        throw e;
       }
-      return false;
     },
   };
+  function testRules(rel: string, isDir: boolean): boolean {
+    const name = rel.slice(rel.lastIndexOf("/") + 1);
+    let lname: string | null = null;
+    let lrel: string | null = null;
+    for (const r of rules) {
+      if (r.dirOnly && !isDir) continue;
+      let t = r.base ? name : rel;
+      if (ignoreCase) t = r.base ? (lname ??= name.toLowerCase()) : (lrel ??= rel.toLowerCase());
+      const f = r.fast;
+      let hit: boolean;
+      if (f) {
+        if (f.f === "eq") hit = t === f.lit;
+        else if (f.f === "suffix") hit = t.endsWith(f.lit) && (r.base || !t.slice(0, t.length - f.lit.length).includes("/"));
+        else if (f.f === "prefix") hit = t.startsWith(f.lit) && (r.base || !t.slice(f.lit.length).includes("/"));
+        else if (f.f === "prefixAny") hit = t.startsWith(f.lit);
+        else hit = t.endsWith(f.lit);
+      } else hit = run(r.prog, t);
+      if (hit) return true;
+    }
+    return false;
+  }
 }
 
 /**

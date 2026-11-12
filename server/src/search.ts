@@ -1,9 +1,10 @@
 import { StringDecoder } from "node:string_decoder";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import type { Readable } from "node:stream";
 import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
-import { compileGlobs, timeSlicer } from "./glob.ts";
+import { GLOB_SKIP, compileGlobs, timeSlicer } from "./glob.ts";
 import { resolveRead } from "./paths.ts";
 import { walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
 import { createReadStream } from "node:fs";
@@ -190,13 +191,13 @@ export function makeTester(text: string, userRegex: boolean, ignoreCase: boolean
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Which of the entries match the name query. Names are matched in batches so a regular expression runs as one worker round trip. */
-function nameMatcher(o: SearchOpts, testers: Tester[], budget: RegexBudget, signal?: AbortSignal): (es: WalkEntry[]) => Promise<boolean[]> {
+function nameMatcher(o: SearchOpts, testers: Tester[], budget: RegexBudget, signal?: AbortSignal): (es: WalkEntry[]) => Promise<(boolean | typeof GLOB_SKIP)[]> {
   if (!o.q) return async (es) => es.map(() => true);
   if (o.mode === "glob") {
     const m = compileGlobs([o.q], o.ignoreCase);
     return async (es) => {
       const tick = timeSlicer();
-      const out: boolean[] = [];
+      const out: (boolean | typeof GLOB_SKIP)[] = [];
       for (const e of es) {
         const w = tick();
         if (w) await w;
@@ -351,6 +352,10 @@ async function* searchWith(
         const isDir = e.t === "dir";
         if (o.types === "file" && isDir) continue;
         if (o.types === "dir" && !isDir) continue;
+        if (nameHit[idx] === GLOB_SKIP) {
+          sum.skipped++; // the pattern is too expensive for this path: left out, and counted
+          continue;
+        }
         if (!nameHit[idx]) continue;
         if (grep) {
           if (e.t !== "file") continue;
@@ -415,16 +420,21 @@ export function parseSearch(q: (k: string) => string | undefined, cfg: { searchM
 
 /**
  * At most this many searches walk one agent at a time; more get a 429 and the SPA says to retry. One client (by the
- * address the audit log records) may hold at most `max - 1` slots (at least one), so it cannot take every slot.
+ * address the server itself observed, see `clientKey`) may hold at most `max - 1` slots (at least two, so that a default
+ * gate of two does not refuse a user's second tab), so it cannot take every slot of a larger gate.
  */
 export class SearchGate {
   private n = 0;
   private byClient = new Map<string, number>();
   constructor(private max: number) {}
+  /** A client may hold `max - 1` slots, but never fewer than two: several tabs of one user, or several users who cannot be told apart, must not be refused. */
+  private get perClient() {
+    return Math.max(2, this.max - 1);
+  }
   async *wrap<T, S>(gen: AsyncGenerator<T, S>, client = "-"): AsyncGenerator<T, S> {
     const mine = this.byClient.get(client) ?? 0;
     if (this.n >= this.max) throw new FsError(429, "too many searches running, try again shortly");
-    if (mine >= Math.max(1, this.max - 1)) throw new FsError(429, "too many searches from this client are running, try again shortly");
+    if (mine >= this.perClient) throw new FsError(429, "too many searches from this client are running, try again shortly");
     this.n++;
     this.byClient.set(client, mine + 1);
     try {
@@ -481,6 +491,25 @@ export async function* limitSearch<T, S>(inner: AsyncGenerator<T, S>, abort: () 
   }
 }
 
+/**
+ * Who a search belongs to, for the per-client bound: an address the server saw, never a value a client chose. The hub sets
+ * `x-filedeck-client` (and drops any copy it receives); the agent believes that header only when the shared agent token is
+ * configured, because then every request that gets here carries it and so comes from the hub. Otherwise (no token: the agent
+ * cannot tell the hub from anybody else) and for direct requests the key is the socket's peer address, which behind a hub
+ * is the hub itself: all its users then share a key, which the bound's floor of two slots is generous enough for.
+ */
+function clientKey(c: import("hono").Context, agentToken: string | undefined): string {
+  if (agentToken) {
+    const v = c.req.header("x-filedeck-client")?.trim();
+    if (v) return v.slice(0, 64);
+  }
+  try {
+    return getConnInfo(c).remote.address ?? "-";
+  } catch {
+    return "-"; // not served over a socket (tests)
+  }
+}
+
 export function registerSearchRoutes(app: Hono, cfg: Config) {
   const gate = new SearchGate(cfg.searchConcurrency);
   app.get("/api/fs/search", async (c) => {
@@ -494,8 +523,7 @@ export function registerSearchRoutes(app: Hono, cfg: Config) {
       const r = resolveRead(cfg.root, (start === "/" ? "" : start.replace(/\/+$/, "")) + "/" + rel);
       return createReadStream(r.real, { highWaterMark: 64 * 1024 });
     };
-    // the audit log's client address; searches without one share a key
-    const client = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "-";
+    const client = clientKey(c, cfg.agentToken);
     return walkResponse(limitSearch(gate.wrap(searchTree(walk, p, read, signal), client), () => stop.abort()));
   });
 }
