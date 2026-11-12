@@ -43,7 +43,7 @@ struct hdr { uint32_t v; int pid; };
 struct dat { uint32_t e, p, i; };
 int main(int argc, char **argv) {
   uint64_t keep = 0;
-  char *l = strdup(getenv("FD_CAPS"));
+  char *l = strdup(FD_CAPS_LIST); /* compiled in: the tools are started with their own environment, which has neither */
   for (char *t = strtok(l, ","); t; t = strtok(NULL, ",")) keep |= 1ULL << atoi(t);
   struct hdr h = {0x20080522, 0};
   struct dat d[2];
@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
   if (syscall(SYS_capset, &h, d) < 0) return 90;
   if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) return 91;
   if (argc > 1 && !strcmp(argv[1], "--raw")) { execvp(argv[2], argv + 2); return 92; }
-  argv[0] = getenv("FD_REAL");
+  argv[0] = FD_REAL_PATH;
   execv(argv[0], argv);
   return 93;
 }
@@ -77,11 +77,10 @@ before(async () => {
   const src = path.join(tmp, "wrap.c");
   fs.writeFileSync(src, WRAPPER);
   wrapper = path.join(tmp, "wrap");
-  const cc = spawnSync("cc", ["-O2", "-o", wrapper, src], { encoding: "utf8" });
+  const list = caps.map((n) => { assert.ok(n in CAPS, `capability ${n} is known to this test`); return CAPS[n]; }).join(",");
+  const cc = spawnSync("cc", ["-O2", `-DFD_CAPS_LIST="${list}"`, `-DFD_REAL_PATH="${box.bin}"`, "-o", wrapper, src], { encoding: "utf8" });
   assert.equal(cc.status, 0, cc.stderr);
   prevHelper = process.env.FILEDECK_SANDBOX_HELPER;
-  process.env.FD_CAPS = caps.map((n) => { assert.ok(n in CAPS, `capability ${n} is known to this test`); return CAPS[n]; }).join(",");
-  process.env.FD_REAL = box.bin;
   process.env.FILEDECK_SANDBOX_HELPER = wrapper;
   process.env.FILEDECK_WORK_DIR = path.join(tmp, "workdir");
   fs.mkdirSync(process.env.FILEDECK_WORK_DIR, { mode: 0o700 });
@@ -91,8 +90,6 @@ before(async () => {
 after(() => {
   if (IS_ROOT) {
     process.env.FILEDECK_SANDBOX_HELPER = prevHelper;
-    delete process.env.FD_CAPS;
-    delete process.env.FD_REAL;
     delete process.env.FILEDECK_WORK_DIR;
   }
   delete process.env.FILEDECK_SANDBOX_HELPER;
@@ -140,7 +137,7 @@ const live = (name: string, fn: () => Promise<void>) =>
   });
 
 live("the wrapper really holds exactly the chart's capabilities and not SETPCAP", async () => {
-  const r = spawnSync(wrapper, ["--raw", "grep", "-E", "^Cap(Eff|Prm|Bnd):", "/proc/self/status"], { encoding: "utf8", env: process.env });
+  const r = spawnSync(wrapper, ["--raw", "grep", "-E", "^Cap(Eff|Prm|Bnd):", "/proc/self/status"], { encoding: "utf8" });
   const eff = BigInt("0x" + /CapEff:\s*([0-9a-f]+)/.exec(r.stdout)![1]!);
   const held = BigInt("0x" + /CapPrm:\s*([0-9a-f]+)/.exec(fs.readFileSync("/proc/self/status", "utf8"))![1]!); // the wrapper keeps what this process holds of the chart's set
   const want = caps.reduce((a, n) => a | (1n << BigInt(CAPS[n]!)), 0n) & held;
