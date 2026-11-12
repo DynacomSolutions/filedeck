@@ -202,3 +202,29 @@ test("the lock reason is read from the lock file with a checked open, never from
   const body = (await list("/work/main")).body;
   for (const w of body.worktrees) assert.ok(!w.gitPath.startsWith("/") || w.gitPath === w.path, `${w.name}: a host path was passed on: ${w.gitPath}`);
 });
+
+test("a worktree's name comes from its private directory's id, and a linked gitdir file puts nothing of another file in the list", async () => {
+  const main = path.join(tmp, "work/main");
+  g(main, "worktree", "add", "-b", "namelink", path.join(tmp, "work/namelink"));
+  const gd = path.join(main, ".git/worktrees/namelink/gitdir");
+  const orig = fs.readFileSync(gd);
+  const secret = path.join(tmp, "secret-gitdir-line.txt");
+  fs.writeFileSync(secret, "TOP-SECRET-GITDIR-LINE\nmore\n");
+  try {
+    const ok = (await list("/work/main")).body.worktrees.find((w) => w.name === "namelink");
+    assert.ok(ok, "listed under its private directory's id");
+    fs.rmSync(gd);
+    fs.symlinkSync(secret, gd);
+    assert.match(g(main, "worktree", "list", "--porcelain"), /TOP-SECRET-GITDIR-LINE/, "control: git prints the linked file's first line as the path");
+    const r = await list("/work/main");
+    assert.equal(r.status, 200);
+    assert.equal(JSON.stringify(r.body).includes("TOP-SECRET"), false, "a linked gitdir file leaked into the list");
+    for (const w of r.body.worktrees) {
+      assert.ok(!/TOP-SECRET/.test(`${w.name}${w.gitPath}`));
+      if (w.path === null) assert.equal(w.dirty, null);
+    }
+  } finally {
+    fs.rmSync(gd, { force: true });
+    fs.writeFileSync(gd, orig);
+  }
+});

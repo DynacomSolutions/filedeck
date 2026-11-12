@@ -1356,8 +1356,8 @@ async function verifyCompareSkippedPaths(browser) {
       if (/Nothing to show here with the current filters/.test(text)) failures.push(`${width}px: the empty state says there is nothing to show with the current filters`);
       if (!/comparison is incomplete|some paths were skipped/.test(text + '\n' + (await page.locator('[role=status]').allTextContents()).join('\n'))) failures.push(`${width}px: nothing says the comparison is incomplete`);
       const status = (await page.locator('p.visually-hidden[role=status]').allTextContents()).join(' | ');
-      if (/Comparison done(?!, incomplete)/.test(status)) failures.push(`${width}px: the status says "Comparison done" for an incomplete compare: ${status}`);
-      if (!/incomplete/.test(status)) failures.push(`${width}px: the status does not say incomplete: ${status}`);
+      if (/Comparison done/.test(status)) failures.push(`${width}px: the status says "Comparison done" for an incomplete compare: ${status}`);
+      if (!/The comparison is incomplete: 2 paths were skipped/.test(status)) failures.push(`${width}px: the status does not say the comparison is incomplete and how many paths were skipped: ${status}`);
     } finally {
       await context.close();
     }

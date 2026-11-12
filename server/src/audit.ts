@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { getConnInfo } from "@hono/node-server/conninfo";
+import { isIP } from "node:net";
 import { isRawRoute } from "./request-guard.ts";
 
 /**
@@ -41,6 +42,16 @@ export const trustProxies = (hops: number): MiddlewareHandler => async (c, next)
   await next();
 };
 
+/** One hop of a forwarded chain as an IP address: a port and the brackets of an IPv6 address are removed; anything that is not an address gives undefined. */
+export function hopAddress(hop: string | undefined): string | undefined {
+  let h = (hop ?? "").trim();
+  const br = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(h);
+  if (br) h = br[1]!;
+  else if (/^[^:]+:\d{1,5}$/.test(h)) h = h.slice(0, h.lastIndexOf(":")); // "1.2.3.4:5678" (a bare IPv6 address has several colons)
+  h = h.replace(/%[\w.-]+$/, ""); // a zone id
+  return isIP(h) ? h : undefined;
+}
+
 /**
  * Who asked: with that many proxies in front, the `X-Forwarded-For` entry that many places from the right (what the
  * outermost trusted proxy saw; the chain is kept as the caller can write it), otherwise the socket's peer address.
@@ -57,7 +68,7 @@ export function clientOf(c: import("hono").Context): Record<string, string> {
   const hops = Number((c as { get(k: string): unknown }).get("trustedProxies") ?? 0) || 0;
   if (hops > 0 && chain) {
     const parts = chain.split(",").map((x) => x.trim());
-    fwd = parts.length >= hops ? parts[parts.length - hops] : undefined;
+    fwd = parts.length >= hops ? hopAddress(parts[parts.length - hops]) : undefined; // not an address: the socket peer is used
   }
   const ip = fwd || peer;
   return {

@@ -1066,7 +1066,7 @@ export function CompareInfo() {
       {err && <p className="side-cmp-err" role="alert">{err}</p>}
       {/* Fixed two-line block while running and after, so the sidebar does not jump as numbers change. */}
       {/* Announced only when the state changes (queued, comparing, done); the numbers below change too often to be read out. */}
-      <p className="visually-hidden" role="status">{running ? (job?.state === "queued" ? "Comparison queued" : "Comparing") : s?.finishedAt ? (s.incomplete ? "Comparison done, incomplete: some paths were skipped" : "Comparison done") : ""}</p>
+      <p className="visually-hidden" role="status">{running ? (job?.state === "queued" ? "Comparison queued" : "Comparing") : s?.finishedAt ? (s.incomplete ? `The comparison is incomplete: ${s.skipped?.count ?? "some"} path${s.skipped?.count === 1 ? " was" : "s were"} skipped` : "Comparison done") : ""}</p>
       <div className="side-cmp-run">
         {running && job?.state === "queued" && (
           <>

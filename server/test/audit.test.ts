@@ -50,6 +50,16 @@ test("the forwarded chain is believed only as far as the configured number of pr
     assert.equal((await ipFor({ FILEDECK_TRUSTED_PROXIES: "1" }, chain)).ip, "10.0.0.1");
     assert.equal((await ipFor({ FILEDECK_TRUSTED_PROXIES: "2" }, chain)).ip, "203.0.113.7");
     assert.equal((await ipFor({ FILEDECK_TRUSTED_PROXIES: "5" }, chain)).ip, undefined, "a chain shorter than the trusted depth is not believed");
+    // a proxy that writes address:port, a bracketed IPv6 address, or something that is not an address
+    const one = (xff: string) => ipFor({ FILEDECK_TRUSTED_PROXIES: "1" }, xff).then((x) => x.ip);
+    assert.equal(await one("203.0.113.7:51234"), "203.0.113.7");
+    assert.equal(await one("[2001:db8::7]:443"), "2001:db8::7");
+    assert.equal(await one("[2001:db8::7]"), "2001:db8::7");
+    assert.equal(await one("2001:db8::7"), "2001:db8::7");
+    assert.equal(await one("198.51.100.1, 203.0.113.7:80"), "203.0.113.7");
+    assert.equal(await one("unknown"), undefined, "not an address: the socket peer (none in tests)");
+    assert.equal(await one("203.0.113.7:99999x"), undefined);
+    assert.equal(await one("evil.example, <script>"), undefined);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

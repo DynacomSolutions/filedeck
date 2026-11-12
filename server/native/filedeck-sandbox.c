@@ -57,6 +57,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef PR_SET_NO_NEW_PRIVS
@@ -187,46 +188,63 @@ static void mark_cloexec(void) {
   for (long fd = 3; fd < max; fd++) fcntl((int)fd, F_SETFD, FD_CLOEXEC);
 }
 
-/* Extra layer for kernels whose Landlock has no UDP rights: socket() and socketpair() fail with EACCES for everything but
- * unix-domain stream sockets, and io_uring (which can open sockets) is refused. Best effort: a kernel without seccomp filters
- * leaves UDP open, as documented. Only on the architectures whose audit number is known here. */
+/* Network layer by seccomp, on every kernel (Landlock covers TCP, and on the newest kernels UDP and pathname unix sockets, but not
+ * on all): socket(), socketpair(), connect(), bind(), listen(), accept() and accept4() fail with EACCES, and so does io_uring (which
+ * can do the same without those calls). A program that is meant to talk to nobody (git, bsdtar, 7-Zip) needs none of them: it uses
+ * the descriptors it was given. Name lookups degrade to numeric ids (the lookup's socket() fails, then it reads /etc/passwd).
+ * On x86-64 the architecture value is the same for x32 system calls, whose numbers carry bit 0x40000000: any number at or above
+ * it ends the process, so an x32 socket() cannot go round the list. Only on the architectures whose audit number is known here;
+ * where this layer cannot be installed the caller says so (--probe prints it) and UDP and unix sockets rely on Landlock alone. */
 #if defined(__x86_64__)
 #define SB_ARCH AUDIT_ARCH_X86_64
+#define SB_NR_LIMIT 0x40000000U
 #elif defined(__aarch64__)
 #define SB_ARCH AUDIT_ARCH_AARCH64
 #endif
 static int deny_sockets(void) {
 #ifdef SB_ARCH
-  const uint32_t nr_off = offsetof(struct seccomp_data, nr);
-  const uint32_t arg0 = offsetof(struct seccomp_data, args[0]);
-  const uint32_t arg1 = offsetof(struct seccomp_data, args[1]);
-  struct sock_filter f[] = {
-      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SB_ARCH, 1, 0),
-      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, nr_off),
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 3, 0),
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socketpair, 2, 0),
+  static const long denied[] = {
+      __NR_socket, __NR_socketpair, __NR_connect, __NR_bind, __NR_listen, __NR_accept, __NR_accept4,
 #ifdef __NR_io_uring_setup
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_setup, 6, 0),
-#else
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0xffffffffU, 6, 0),
+      __NR_io_uring_setup, __NR_io_uring_enter, __NR_io_uring_register,
 #endif
-      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-      /* socket / socketpair: allowed only for (AF_UNIX, SOCK_STREAM) */
-      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, arg0),
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1 /* AF_UNIX */, 0, 3),
-      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, arg1),
-      BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0xf /* SOCK_TYPE_MASK */),
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1 /* SOCK_STREAM */, 1, 0),
-      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES),
-      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
   };
-  struct sock_fprog prog = {.len = (unsigned short)(sizeof f / sizeof f[0]), .filter = f};
+  enum { N = sizeof denied / sizeof denied[0] };
+  struct sock_filter f[8 + N];
+  int n = 0;
+  f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
+  f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SB_ARCH, 1, 0);
+  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+  f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
+#ifdef SB_NR_LIMIT
+  f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, SB_NR_LIMIT, 0, 1); /* x32 (and any other out-of-range) numbers */
+  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+#endif
+  for (int i = 0; i < N; i++) f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)denied[i], (uint8_t)(N - i), 0);
+  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES);
+  struct sock_fprog prog = {.len = (unsigned short)n, .filter = f};
   return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
 #else
   errno = ENOSYS;
   return -1;
+#endif
+}
+
+/* can the filter be installed here? (tried in a child, so this process is not restricted) 1 yes, 0 no */
+static int seccomp_works(void) {
+#ifdef SB_ARCH
+  pid_t pid = fork();
+  if (pid < 0) return 0;
+  if (pid == 0) {
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) _exit(1);
+    _exit(deny_sockets() == 0 ? 0 : 1);
+  }
+  int st = 0;
+  if (waitpid(pid, &st, 0) < 0) return 0;
+  return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+#else
+  return 0;
 #endif
 }
 
@@ -344,7 +362,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "filedeck-sandbox: probing the rights: %s\n", strerror(errno));
         return EXIT_FAILED;
       }
-      printf("landlock abi %d fs 0x%llx net 0x%llx scope 0x%llx\n", abi, (unsigned long long)h.handled_access_fs, (unsigned long long)h.handled_access_net, (unsigned long long)h.scoped);
+      printf("landlock abi %d fs 0x%llx net 0x%llx scope 0x%llx seccomp %d\n", abi, (unsigned long long)h.handled_access_fs, (unsigned long long)h.handled_access_net, (unsigned long long)h.scoped, seccomp_works());
     }
     return r;
   }
@@ -365,7 +383,6 @@ int main(int argc, char **argv) {
   int abi = 0;
   int rs = -1;
   uint64_t handled = 0;
-  int udp_handled = 0;
   if (!no_landlock) {
     int r = probe(&abi);
     if (r) return r;
@@ -375,7 +392,6 @@ int main(int argc, char **argv) {
       return EXIT_FAILED;
     }
     handled = attr.handled_access_fs;
-    udp_handled = (attr.handled_access_net & 0xcULL) == 0xcULL; /* UDP bind and connect/send are handled by the kernel */
     rs = ll_create(&attr, sizeof attr, 0);
     if (rs < 0) {
       if (errno == ENOSYS || errno == EOPNOTSUPP || errno == EPERM) return EXIT_UNSUPPORTED;
@@ -435,7 +451,7 @@ int main(int argc, char **argv) {
    * Done before the ruleset is applied (the list of descriptors lives in /proc, which the ruleset hides). */
   mark_cloexec();
   /* UDP where the kernel's Landlock cannot control it (see above): refuse every socket that is not a unix stream socket */
-  if (!allow_sockets && !udp_handled && deny_sockets() < 0 && errno != ENOSYS && errno != EINVAL) {
+  if (!allow_sockets && deny_sockets() < 0 && errno != ENOSYS && errno != EINVAL) {
     fprintf(stderr, "filedeck-sandbox: seccomp: %s\n", strerror(errno));
     return EXIT_FAILED;
   }

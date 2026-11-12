@@ -20,6 +20,7 @@ import { registerGitWorktreeRoutes } from "./git-worktrees.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
 import { registerTranscodeRoutes } from "./transcode.ts";
 import { agentAuth } from "./agent-auth.ts";
+import { sandboxSummary } from "./sandbox.ts";
 import { audit, trustProxies, type AuditSink } from "./audit.ts";
 import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, isReadOnly, hitsReadOnly, reachesReadOnly } from "./readonly.ts";
@@ -56,7 +57,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   });
 
   app.get("/healthz", (c) => c.text("ok"));
-  app.get("/api/info", (c) => c.json({ node: cfg.node, root: cfg.root, watches: watches.size, readOnly: cfg.readOnly }));
+  app.get("/api/info", async (c) => c.json({ node: cfg.node, root: cfg.root, watches: watches.size, readOnly: cfg.readOnly, sandbox: await sandboxSummary() }));
   app.get("/api/mounts", async (c) => c.json({ mounts: (await listMounts(root, cfg.procMounts)).map((m) => (isReadOnly(cfg.readOnly, m.mountpoint) ? { ...m, readOnly: true } : m)) }));
 
   app.get("/api/fs/list", async (c) => {

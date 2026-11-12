@@ -26,6 +26,11 @@ export interface SandboxInfo {
   helper: string | null;
   /** Landlock works here: confined programs are confined by the kernel */
   landlock: boolean;
+  /** Landlock ABI version the kernel offers (0 when unusable) and the rights the launcher handles there, as hexadecimal masks */
+  abi: number;
+  rights: { fs: string; net: string; scope: string } | null;
+  /** the launcher's socket filter (seccomp) can be installed here: socket, connect, bind, listen, accept and io_uring are refused */
+  seccomp: boolean;
   /** "landlock" (confined), "fallback" (runs unconfined, the caller must check its input), "off", or "unavailable" (require, and no Landlock) */
   state: "landlock" | "fallback" | "off" | "unavailable";
 }
@@ -37,9 +42,12 @@ export interface SandboxInfo {
  * lacks cross-directory link/rename control and truncate control (ABI 2, 3), below ABI 4 the network is open, below ABI 5 device
  * ioctls are, below ABI 6 abstract unix sockets and signals are, below ABI 9 pathname unix sockets are. UDP: no Landlock ABI
  * this launcher knows controls UDP bind/connect before the kernel's newest one, so there UDP stays open to a confined program,
- * with one extra layer: unless `allowSockets` is set the launcher installs a seccomp filter that makes `socket()` and
- * `socketpair()` fail with EACCES for everything but unix-domain stream sockets (and refuses io_uring). That layer is
- * best effort: a kernel without seccomp filters, or an architecture other than x86-64 and arm64, leaves UDP open. Landlock never restricts
+ * with one extra layer: unless `allowSockets` is set the launcher installs a seccomp filter that makes `socket()`,
+ * `socketpair()`, `connect()`, `bind()`, `listen()`, `accept()` and io_uring fail with EACCES (x32 system call numbers end the
+ * process), on every kernel, so a confined program can neither reach UDP nor connect to a pathname unix socket (such as a
+ * container runtime's) under the served root; it uses the descriptors it was given. That layer is best effort: a kernel without
+ * seccomp filters, or an architecture other than x86-64 and arm64, leaves it off, which `SandboxInfo.seccomp`, the start-up
+ * log line and `/api/info` report. Landlock never restricts
  * a descriptor the program already holds: the launcher marks every descriptor above 2 close-on-exec (the root descriptors
  * included), and callers must not hand a confined program any descriptor it should not use through `stdio` either.
  * `uid`/`gid` 0 are refused by the launcher.
@@ -59,26 +67,43 @@ function modeFromEnv(): SandboxMode {
   return v === "require" || v === "off" ? v : "auto";
 }
 
-/** Does the launcher at `helper` report a usable Landlock? Exit 0 yes, 70 no. */
-export function probeHelper(helper: string): Promise<boolean> {
+export interface Probe {
+  ok: boolean;
+  abi: number;
+  rights: { fs: string; net: string; scope: string } | null;
+  seccomp: boolean;
+}
+const NO_PROBE: Probe = { ok: false, abi: 0, rights: null, seccomp: false };
+
+/** Does the launcher at `helper` report a usable Landlock (exit 0), which rights, and is its socket filter available? Exit 70: no. */
+export function probeHelperInfo(helper: string): Promise<Probe> {
   return new Promise((resolve) => {
-    const child = spawn(helper, ["--probe"], { stdio: ["ignore", "ignore", "ignore"] });
+    const child = spawn(helper, ["--probe"], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    child.stdout!.on("data", (d) => (out += d));
     const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
     timer.unref();
-    child.on("error", () => (clearTimeout(timer), resolve(false)));
-    child.on("close", (code) => (clearTimeout(timer), resolve(code === 0)));
+    child.on("error", () => (clearTimeout(timer), resolve(NO_PROBE)));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return resolve(NO_PROBE);
+      const m = /landlock abi (\d+) fs (0x[0-9a-f]+) net (0x[0-9a-f]+) scope (0x[0-9a-f]+)(?: seccomp (\d))?/.exec(out);
+      resolve(m ? { ok: true, abi: Number(m[1]), rights: { fs: m[2]!, net: m[3]!, scope: m[4]! }, seccomp: m[5] === "1" } : { ok: true, abi: 0, rights: null, seccomp: false });
+    });
   });
 }
+export const probeHelper = async (helper: string): Promise<boolean> => (await probeHelperInfo(helper)).ok;
 
 /** What the sandbox is here, found once (the first sandboxed start, or `initSandbox` at start-up). */
 export function sandboxInfo(): Promise<SandboxInfo> {
   cached ??= (async () => {
     const mode = modeFromEnv();
-    if (mode === "off") return { mode, helper: null, landlock: false, state: "off" as const };
+    if (mode === "off") return { mode, helper: null, landlock: false, abi: 0, rights: null, seccomp: false, state: "off" as const };
     const helper = process.env.FILEDECK_SANDBOX_HELPER ?? DEFAULT_HELPER;
     const usable = await fs.access(helper, fs.constants.X_OK).then(() => true, () => false);
-    const landlock = usable && (await probeHelper(helper));
-    return { mode, helper: usable ? helper : null, landlock, state: landlock ? ("landlock" as const) : mode === "require" ? ("unavailable" as const) : ("fallback" as const) };
+    const probe = usable ? await probeHelperInfo(helper) : NO_PROBE;
+    const landlock = probe.ok;
+    return { mode, helper: usable ? helper : null, landlock, abi: probe.abi, rights: probe.rights, seccomp: probe.seccomp, state: landlock ? ("landlock" as const) : mode === "require" ? ("unavailable" as const) : ("fallback" as const) };
   })();
   return cached;
 }
@@ -91,9 +116,22 @@ export function resetSandbox(): void {
 /** Called once when the agent starts: finds the mode and says so, in a line, when programs are not confined by the kernel. */
 export async function initSandbox(log: (msg: string) => void = (m) => console.warn(m)): Promise<SandboxInfo> {
   const info = await sandboxInfo();
+  log(sandboxLine(info));
   if (info.state === "fallback") log("sandbox unavailable (Landlock is not usable here): helper programs run without kernel confinement; Git is used only for repositories whose git directory has no symbolic links or include settings");
   else if (info.state === "unavailable") log("sandbox unavailable (Landlock is not usable here) and FILEDECK_SANDBOX=require: the features that start helper programs answer an error");
   return info;
+}
+
+/** One line for the start-up log: the state, the Landlock ABI and rights, and whether the socket filter is on. */
+export function sandboxLine(i: SandboxInfo): string {
+  const r = i.rights ? ` rights fs=${i.rights.fs} net=${i.rights.net} scope=${i.rights.scope}` : "";
+  return `sandbox: mode ${i.mode}, state ${i.state}, landlock ${i.landlock ? `abi ${i.abi}${r}` : "unavailable"}, socket filter ${i.seccomp ? "on" : "off (this kernel or architecture cannot install it)"}`;
+}
+
+/** A summary that is safe to show an operator (/api/info): no paths. */
+export async function sandboxSummary(): Promise<{ mode: SandboxMode; state: SandboxInfo["state"]; landlockAbi: number; socketFilter: boolean }> {
+  const i = await sandboxInfo();
+  return { mode: i.mode, state: i.state, landlockAbi: i.abi, socketFilter: i.seccomp };
 }
 
 /** The error answered when the sandbox is required and not available. */

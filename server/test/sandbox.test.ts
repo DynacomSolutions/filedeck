@@ -30,10 +30,10 @@ async function run(cmd: string, args: string[], opts: SandboxOpts = {}, during?:
   await during?.();
   return done;
 }
-const live = (name: string, fn: () => Promise<void>) =>
+const live = (name: string, fn: (t: import("node:test").TestContext) => Promise<void> | void) =>
   test(name, async (t) => {
     if (box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
-    await fn();
+    await fn(t);
   });
 
 before(async () => {
@@ -193,7 +193,7 @@ live("a confined program cannot connect over TCP, reach an abstract unix socket 
     assert.equal(res.code, 0, res.stderr);
     const out = JSON.parse(res.stdout.trim().split("\n").at(-1)!) as { tcp: string; abs: string; sig: string };
     if (r.net & 2n) assert.equal(out.tcp, "EACCES", "TCP connect");
-    if (r.scope & 1n) assert.equal(out.abs, "EPERM", "abstract unix socket outside the sandbox");
+    if (r.scope & 1n) assert.match(out.abs, /^(EPERM|EACCES)$/, "abstract unix socket outside the sandbox");
     if (r.scope & 2n) assert.equal(out.sig, "EPERM", "signal to a process outside the sandbox");
     const control = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
     const free = JSON.parse(control.stdout.trim().split("\n").at(-1)!) as { tcp: string; abs: string; sig: string };
@@ -255,7 +255,7 @@ live("a failure while probing the rights stops the launcher (exit 71) instead of
   assert.match(r.stderr, /probing the rights/);
 });
 
-live("UDP: denied where the kernel cannot control it (a seccomp layer on socket()), unless sockets are allowed", async () => {
+live("sockets: UDP and pathname unix sockets are refused by the seccomp layer on every kernel, unless allowSockets is set", async () => {
   const r = rights();
   const script = `
     const dgram = require("dgram"); const out = {};
@@ -266,18 +266,94 @@ live("UDP: denied where the kernel cannot control it (a seccomp layer on socket(
   const udp = async (opts: SandboxOpts) => JSON.parse((await run(process.execPath, ["-e", script], { readExec: [prefix], env, ...opts })).stdout.trim().split("\n").at(-1)!) as { udp: string };
   const free = JSON.parse(spawnSync(process.execPath, ["-e", script], { encoding: "utf8" }).stdout.trim().split("\n").at(-1)!) as { udp: string };
   assert.equal(free.udp, "bound", "control: without the sandbox UDP works");
-  console.log(`# sandbox UDP: kernel Landlock handles UDP rights: ${(r.net & 12n) === 12n}`);
+  const info = await sandboxInfo();
+  console.log(`# sandbox sockets: kernel Landlock handles UDP rights: ${(r.net & 12n) === 12n}; socket filter (seccomp) on: ${info.seccomp}`);
+  if (!info.seccomp) {
+    // no filter on this kernel or architecture: reported, and UDP then relies on Landlock alone
+    assert.equal((await udp({})).udp, (r.net & 12n) === 12n ? "EACCES" : "bound");
+    return;
+  }
   assert.equal((await udp({})).udp, "EACCES");
-  if ((r.net & 12n) !== 12n) assert.equal((await udp({ allowSockets: true })).udp, "bound", "allowSockets opens the extra layer (the kernel has no UDP rights)");
-  // unix-domain stream sockets still work through the filter
+  assert.equal((await udp({ allowSockets: true })).udp, (r.net & 12n) === 12n ? "EACCES" : "bound", "allowSockets lifts the extra layer only");
+  // a pathname unix socket under a served folder: connecting is refused, whatever the kernel's Landlock offers
   const sock = path.join(tmp, "unix-ok.sock");
   const srv = (await import("node:net")).createServer((c) => c.end("hi"));
   await new Promise<void>((res) => srv.listen(sock, res));
   try {
     const un = `require("net").connect(${JSON.stringify(sock)}).on("data", (d) => console.log(String(d))).on("error", (e) => console.log("ERR " + e.code));`;
-    const res = await run(process.execPath, ["-e", un], { readExec: [prefix], readWrite: [tmp], env });
-    assert.ok(res.stdout.includes("hi") || /ERR (EACCES|EPERM)/.test(res.stdout), res.stdout); // allowed by seccomp; the kernel's own pathname-socket rule may still refuse it
+    const denied = await run(process.execPath, ["-e", un], { readExec: [prefix], readWrite: [tmp], env });
+    assert.match(denied.stdout, /ERR (EACCES|EPERM)/, `connect must be refused: ${denied.stdout}`);
+    const allowed = await run(process.execPath, ["-e", un], { readExec: [prefix], readWrite: [tmp], env, allowSockets: true });
+    assert.ok(allowed.stdout.includes("hi") || /ERR (EACCES|EPERM)/.test(allowed.stdout), allowed.stdout); // the kernel's own pathname-socket rule may still refuse it
   } finally {
     srv.close();
   }
+});
+
+live("an x32 system call number does not get round the socket filter (x86-64 only; skipped where the kernel has x32 disabled)", async (t) => {
+  if (process.arch !== "x64") return t.skip("sandbox live: skipped (x32 calls exist on x86-64 only)");
+  const info = await sandboxInfo();
+  if (!info.seccomp) return t.skip("sandbox live: skipped (no socket filter on this kernel)");
+  const src = path.join(tmp, "x32.c");
+  write(src, `#define _GNU_SOURCE
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/socket.h>
+int main(void) {
+  long fd = syscall(0x40000000 | 41, AF_INET, SOCK_DGRAM, 0); /* x32 socket() */
+  if (fd < 0) { printf("x32 socket: %s\\n", strerror(errno)); return 1; }
+  printf("x32 socket opened: %ld\\n", fd);
+  return 0;
+}
+`);
+  const bin = path.join(tmp, "x32bin");
+  const cc = spawnSync("cc", ["-O2", "-o", bin, src], { encoding: "utf8" });
+  if (cc.status !== 0) return t.skip(`sandbox live: skipped (cannot build the x32 probe: ${cc.stderr.trim().split("\n")[0]})`);
+  const free = spawnSync(bin, [], { encoding: "utf8" });
+  if (!/opened/.test(free.stdout)) return t.skip(`sandbox live: skipped (this kernel has x32 calls disabled: ${free.stdout.trim()})`);
+  console.log("# sandbox x32: the kernel accepts x32 calls; the filter must stop them");
+  const r = await run(bin, [], { readExec: [tmp] });
+  assert.ok(!/opened/.test(r.stdout), `an x32 socket() was opened inside the sandbox: ${r.stdout}`);
+  assert.ok(r.code !== 0, "the x32 call must end the process or fail");
+});
+
+live("git, bsdtar and name lookups still work with the socket filter (they use only the descriptors they were given)", async () => {
+  const r1 = await run("id", ["-un"], { readOnly: [tmp] });
+  assert.equal(r1.code, 0, r1.stderr);
+  const r2 = await run("ls", ["-ln", tmp], { readOnly: [tmp] });
+  assert.equal(r2.code, 0, r2.stderr);
+  if (spawnSync("bsdtar", ["--version"]).status === 0) {
+    const d = path.join(tmp, "tarsrc");
+    write(path.join(d, "a.txt"), "tar me\n");
+    const out = path.join(tmp, "out.tar");
+    const c = await run("bsdtar", ["-cf", out, "-C", d, "a.txt"], { readOnly: [d], readWrite: [tmp] });
+    assert.equal(c.code, 0, c.stderr);
+    const l = await run("bsdtar", ["-tf", out], { readOnly: [tmp] });
+    assert.equal(l.stdout.trim(), "a.txt", l.stderr);
+  } else console.log("# sandbox: bsdtar not installed here, its check is skipped");
+  const z = ["7zz", "7z"].find((x) => spawnSync(x, ["--help"]).status === 0);
+  if (z) {
+    const d = path.join(tmp, "zsrc");
+    write(path.join(d, "a.txt"), "zip me\n");
+    const out = path.join(tmp, "out.7z");
+    const c = await run(z, ["a", "-snl", out, path.join(d, "a.txt")], { readOnly: [d], readWrite: [tmp] });
+    assert.equal(c.code, 0, c.stdout + c.stderr);
+  } else console.log("# sandbox: 7-Zip not installed here, its check is skipped (CI runs it)");
+});
+
+test("the sandbox state is reported: --probe says whether the socket filter is available, sandboxInfo carries it", async () => {
+  const out = execFileSync(box.bin, ["--probe"], { encoding: "utf8" });
+  assert.match(out, /landlock abi \d+ fs 0x[0-9a-f]+ net 0x[0-9a-f]+ scope 0x[0-9a-f]+ seccomp [01]/);
+  const info = await sandboxInfo();
+  if (info.landlock) {
+    assert.equal(info.seccomp, / seccomp 1/.test(out));
+    assert.ok(info.abi >= 1 && info.rights);
+  }
+  const { sandboxLine, sandboxSummary } = await import("../src/sandbox.ts");
+  assert.match(sandboxLine(info), /sandbox: mode \w+, state \w+, landlock .*socket filter (on|off)/);
+  const sum = await sandboxSummary();
+  assert.deepEqual(Object.keys(sum).sort(), ["landlockAbi", "mode", "socketFilter", "state"]);
 });
