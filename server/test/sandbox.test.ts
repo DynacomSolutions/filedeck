@@ -544,3 +544,119 @@ for (const mode of ["landlock", "fallback", "off"] as const) {
     }
   });
 }
+
+/* ---- capabilities and the metadata filter: a confined program never keeps root's powers ---- */
+
+const IS_ROOT = process.getuid?.() === 0;
+const ROOT_ONLY = IS_ROOT ? false : "sandbox live: skipped (not running as root)";
+const liveRoot = (name: string, fn: () => Promise<void>) =>
+  test(name, { skip: ROOT_ONLY }, async (t) => {
+    if (box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    await fn();
+  });
+const caps = (text: string) => Object.fromEntries([...text.matchAll(/^(Cap\w+):\s*([0-9a-f]+)$/gm)].map((m) => [m[1]!, BigInt("0x" + m[2]!)]));
+
+live("the metadata calls are refused unless allowed: chmod, touch -d and chown fail, also inside a writable grant; writing still works", async () => {
+  const rw = path.join(tmp, "meta-rw");
+  write(path.join(rw, "f.txt"), "x");
+  fs.chmodSync(path.join(rw, "f.txt"), 0o644);
+  const sh = "echo hi > new.txt; echo write=$?; chmod 600 f.txt; echo chmod=$?; touch -d 2001-02-03 f.txt; echo touch=$?; ln -s f.txt l; echo link=$?";
+  const refused = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw });
+  assert.match(refused.stdout, /write=0/);
+  assert.match(refused.stdout, /chmod=1/);
+  assert.match(refused.stdout, /touch=1/);
+  assert.match(refused.stdout, /link=0/);
+  assert.equal(fs.statSync(path.join(rw, "f.txt")).mode & 0o777, 0o644);
+  const allowed = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw, allowMetadata: true });
+  assert.match(allowed.stdout, /chmod=0/);
+  assert.match(allowed.stdout, /touch=0/);
+  assert.equal(fs.statSync(path.join(rw, "f.txt")).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(rw, "f.txt")).mtime.getUTCFullYear(), 2001);
+});
+
+live("mount, unshare, chroot and a new user namespace are refused for a confined program", async () => {
+  const r = await run("sh", ["-c", "unshare -r true 2>/dev/null; echo unshare=$?; unshare -m true 2>/dev/null; echo unsharem=$?; mount -t tmpfs x /mnt 2>/dev/null; echo mount=$?; chroot / true 2>/dev/null; echo chroot=$?"], {});
+  assert.match(r.stdout, /unshare=[1-9]/);
+  assert.match(r.stdout, /unsharem=[1-9]/);
+  assert.match(r.stdout, /mount=[1-9]/);
+  assert.match(r.stdout, /chroot=[1-9]/);
+});
+
+live("threads still start (clone without a namespace flag is allowed)", async () => {
+  const r = await run("sh", ["-c", "(echo a) & wait; echo done"], {});
+  assert.equal(r.stdout, "a\ndone\n");
+});
+
+liveRoot("a program run as root keeps no capability: every set is empty, also the bounding set", async () => {
+  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc/self/status"] });
+  const c = caps(r.stdout);
+  for (const k of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) assert.equal(c[k], 0n, `${k}: ${r.stdout}`);
+});
+
+liveRoot("with a user change and keepCaps the program holds exactly the read-search capability, in every set", async () => {
+  const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc/self/status"], uid: 65533, gid: 65533, keepCaps: ["dac_read_search"] });
+  const c = caps(r.stdout);
+  for (const k of ["CapInh", "CapPrm", "CapEff", "CapAmb"]) assert.equal(c[k], 4n, `${k}: ${r.stdout}`);
+  assert.equal(c.CapBnd, 4n);
+  const none = await run("cat", ["/proc/self/status"], { readOnly: ["/proc/self/status"], uid: 65533, gid: 65533 });
+  for (const v of Object.values(caps(none.stdout))) assert.equal(v, 0n);
+});
+
+liveRoot("as root without capabilities: chown, chmod and touch -d on a file outside every grant fail, and so does reading what only another user could", async () => {
+  const outside = path.join(tmp, "caps-outside");
+  const inside = path.join(tmp, "caps-inside");
+  write(path.join(outside, "o.txt"), "O");
+  write(path.join(inside, "i.txt"), "I");
+  fs.chmodSync(path.join(inside, "i.txt"), 0o600);
+  for (const f of [path.join(outside, "o.txt"), path.join(inside, "i.txt")]) fs.chownSync(f, 65534, 65534);
+  fs.chmodSync(path.join(outside, "o.txt"), 0o644);
+  const sh = (o: string) => `chown 0 ${o}; echo chown=$?; chmod 777 ${o}; echo chmod=$?; touch -d 2001-02-03 ${o}; echo touch=$?`;
+  // control: root with its capabilities changes all of it
+  const ctl = spawnSync("sh", ["-c", sh(path.join(outside, "o.txt"))], { encoding: "utf8" });
+  assert.match(ctl.stdout, /chown=0[\s\S]*chmod=0[\s\S]*touch=0/);
+  fs.chownSync(path.join(outside, "o.txt"), 65534, 65534);
+  fs.chmodSync(path.join(outside, "o.txt"), 0o644);
+  for (const allowMetadata of [false, true]) {
+    const r = await run("sh", ["-c", sh(path.join(outside, "o.txt"))], { readOnly: [inside], allowMetadata });
+    assert.match(r.stdout, /chown=[1-9]/, `allowMetadata ${allowMetadata}: ${r.stdout}`);
+    assert.match(r.stdout, /chmod=[1-9]/);
+    assert.match(r.stdout, /touch=[1-9]/);
+    assert.equal(fs.statSync(path.join(outside, "o.txt")).uid, 65534);
+    assert.equal(fs.statSync(path.join(outside, "o.txt")).mode & 0o777, 0o644);
+  }
+  // inside a read-only grant, a 0600 file of another user is not readable by root without the capability
+  const r = await run("cat", [path.join(inside, "i.txt")], { readOnly: [inside] });
+  assert.notEqual(r.code, 0);
+  assert.equal(r.stdout, "");
+});
+
+liveRoot("inside a writable grant the metadata of a file of another user cannot be changed even when metadata calls are allowed (no ownership, no capability)", async () => {
+  const rw = path.join(tmp, "caps-rw");
+  write(path.join(rw, "theirs.txt"), "t");
+  write(path.join(rw, "ours.txt"), "o");
+  fs.chownSync(path.join(rw, "theirs.txt"), 65534, 65534);
+  fs.chownSync(path.join(rw, "ours.txt"), 65533, 65533);
+  fs.chmodSync(rw, 0o777);
+  const sh = "chmod 600 theirs.txt; echo theirs=$?; chmod 600 ours.txt; echo ours=$?";
+  const denied = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw, uid: 65533, gid: 65533 });
+  assert.match(denied.stdout, /theirs=1[\s\S]*ours=1/, "refused by the filter without allowMetadata");
+  const allowed = await run("sh", ["-c", sh], { readWrite: [rw], cwd: rw, uid: 65533, gid: 65533, allowMetadata: true });
+  assert.match(allowed.stdout, /theirs=1[\s\S]*ours=0/, allowed.stdout);
+});
+
+liveRoot("keepCaps read-search lets uid 65533 read a 0600 root-owned file inside a read-only grant, and nothing outside the grants", async () => {
+  const ro = path.join(tmp, "dac-ro");
+  const out = path.join(tmp, "dac-out");
+  write(path.join(ro, "secret.txt"), "INSIDE");
+  write(path.join(out, "secret.txt"), "OUTSIDE");
+  fs.chmodSync(path.join(ro, "secret.txt"), 0o600);
+  fs.chmodSync(path.join(out, "secret.txt"), 0o600);
+  fs.chmodSync(ro, 0o700); // searching the folder needs the capability too
+  const plain = await run("cat", [path.join(ro, "secret.txt")], { readOnly: [ro], uid: 65533, gid: 65533 });
+  assert.notEqual(plain.code, 0, "control: the user alone cannot read it");
+  const r = await run("sh", ["-c", `cat ${path.join(ro, "secret.txt")}; echo; cat ${path.join(out, "secret.txt")} 2>&1; echo status=$?; echo x > ${path.join(ro, "w")} 2>&1; echo write=$?`], { readOnly: [ro], uid: 65533, gid: 65533, keepCaps: ["dac_read_search"] });
+  assert.match(r.stdout, /INSIDE/);
+  assert.doesNotMatch(r.stdout, /OUTSIDE/);
+  assert.match(r.stdout, /status=1/);
+  assert.match(r.stdout, /write=1/);
+});

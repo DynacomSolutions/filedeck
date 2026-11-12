@@ -2,7 +2,7 @@
  * filedeck-sandbox: run a command with access to the listed folders only.
  *
  *   filedeck-sandbox --probe
- *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]
+ *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]
  *
  *   --cwd-fd N  start COMMAND in the directory descriptor N (fchdir, done after every descriptor is in place and before the user
  *               change and the restriction). A working folder given as a /proc/self/fd path can point at the wrong descriptor, because
@@ -20,6 +20,11 @@
  * Unless --no-system is given, the folders a program needs to start are readable and executable as well (/usr, /lib,
  * /lib64, /bin, /sbin), a few world-readable files of /etc (loader cache, passwd, group, time zone) are readable, and
  * /dev/null can be read and written. Nothing else can be opened.
+ *   --keep-cap NAME  keep this one Linux capability for COMMAND (repeatable; only `dac_read_search` is known: read any file and search any
+ *               folder by the file's mode, which Landlock still limits to the roots). Every other capability is removed in every
+ *               case, also when COMMAND runs as uid 0: the permitted, effective, inheritable and ambient sets are cleared and the
+ *               bounding set is emptied (when this process may). The caller must hold a capability to keep it, else the helper fails.
+ *   --allow-metadata  do not refuse the calls that change modes, owners, times and extended attributes (see the seccomp note below).
  * Before it executes COMMAND the helper drops to --uid/--gid with the supplementary groups cleared (when given; both must be
  * whole non-negative numbers, and 0 is refused unless --allow-root-user is also given), sets no-new-privileges and applies a
  * Landlock ruleset (Linux 5.13 or newer) that handles EVERY right the running kernel offers, so what is not allowed above is denied:
@@ -41,7 +46,9 @@
  * apply). --probe only reports whether Landlock can be used here and which rights it handles. No dependencies;
  * build: cc -O2 -static -o filedeck-sandbox filedeck-sandbox.c
  *
- * Exit status: 0 for --probe: Landlock works; 70 Landlock is not available (old kernel, not enabled in the kernel's list
+ * Order of the steps: open the roots, fchdir, bounding set, supplementary groups/gid/uid (keeping the named capabilities across the change),
+ * capability sets and ambient set, no-new-privileges, close descriptors, seccomp filter, Landlock, exec. --probe also reports `caps 1` when
+ * the capability steps work here. Exit status: 0 for --probe: Landlock works; 70 Landlock is not available (old kernel, not enabled in the kernel's list
  * of security modules, or blocked by a seccomp profile): COMMAND was NOT run; 64 usage error; 71 a step failed (message on
  * stderr): COMMAND was NOT run; 127 COMMAND could not be executed. Otherwise the helper replaces itself with COMMAND.
  */
@@ -70,6 +77,20 @@
 #ifndef PR_SET_NO_NEW_PRIVS
 #define PR_SET_NO_NEW_PRIVS 38
 #endif
+#ifndef PR_SET_KEEPCAPS
+#define PR_SET_KEEPCAPS 8
+#endif
+#ifndef PR_CAPBSET_READ
+#define PR_CAPBSET_READ 23
+#endif
+#ifndef PR_CAPBSET_DROP
+#define PR_CAPBSET_DROP 24
+#endif
+#ifndef PR_CAP_AMBIENT
+#define PR_CAP_AMBIENT 47
+#endif
+#define SB_AMBIENT_RAISE 2UL
+#define SB_AMBIENT_CLEAR_ALL 4UL
 
 /* the syscall numbers are the same on every architecture that uses the common table; older libc headers may not know them */
 #ifndef __NR_landlock_create_ruleset
@@ -230,44 +251,191 @@ static void mark_cloexec(void) {
     if (!kept(fd)) fcntl((int)fd, F_SETFD, FD_CLOEXEC);
 }
 
-/* Network layer by seccomp, on every kernel (Landlock covers TCP, and on the newest kernels UDP and pathname unix sockets, but not
- * on all): socket(), socketpair(), connect(), bind(), listen(), accept() and accept4() fail with EACCES, and so does io_uring (which
- * can do the same without those calls). A program that is meant to talk to nobody (git, bsdtar, 7-Zip) needs none of them: it uses
- * the descriptors it was given. Name lookups degrade to numeric ids (the lookup's socket() fails, then it reads /etc/passwd).
+/* ------------------------------------------------------------------ capabilities
+ * Raw capget/capset with the version 3 header (no libcap). A confined tool never keeps root's capabilities: after the user change every
+ * set is cleared, except for the capabilities the caller named with --keep-cap. Landlock does not restrict changing a file's mode, owner or
+ * times, so a process that stays root with its capabilities could still do that to any path it can name. */
+#define SB_CAP_V3 0x20080522U
+#define SB_CAP_LAST 63
+struct cap_hdr {
+  uint32_t version;
+  int pid;
+};
+struct cap_data {
+  uint32_t effective, permitted, inheritable;
+};
+#define CAP_BIT_DAC_READ_SEARCH 2
+#define CAP_BIT_SETPCAP 8
+
+static int cap_get(uint64_t *eff, uint64_t *perm, uint64_t *inh) {
+  struct cap_hdr h = {SB_CAP_V3, 0};
+  struct cap_data d[2];
+  memset(d, 0, sizeof d);
+  if (syscall(__NR_capget, &h, d) < 0) return -1;
+  if (eff) *eff = (uint64_t)d[0].effective | ((uint64_t)d[1].effective << 32);
+  if (perm) *perm = (uint64_t)d[0].permitted | ((uint64_t)d[1].permitted << 32);
+  if (inh) *inh = (uint64_t)d[0].inheritable | ((uint64_t)d[1].inheritable << 32);
+  return 0;
+}
+
+/* effective = permitted = inheritable = `set` */
+static int cap_set_all(uint64_t set) {
+  struct cap_hdr h = {SB_CAP_V3, 0};
+  struct cap_data d[2];
+  d[0].effective = d[0].permitted = d[0].inheritable = (uint32_t)set;
+  d[1].effective = d[1].permitted = d[1].inheritable = (uint32_t)(set >> 32);
+  return (int)syscall(__NR_capset, &h, d);
+}
+
+/* Empty the bounding set but for `keep` (a root process gets its bounding set back as capabilities at exec, so for uid 0 this matters most).
+ * Returns the number of capabilities of the set that are still in it (those that could not be dropped for lack of CAP_SETPCAP). */
+static int drop_bounding(uint64_t keep) {
+  int left = 0;
+  for (int c = 0; c <= SB_CAP_LAST; c++) {
+    if (keep & (1ULL << c)) continue;
+    int in = prctl(PR_CAPBSET_READ, c, 0, 0, 0);
+    if (in < 0) break; /* above the kernel's last capability */
+    if (in && prctl(PR_CAPBSET_DROP, c, 0, 0, 0) < 0) left++;
+  }
+  return left;
+}
+
+/* Clear the ambient set, then raise `keep` in it (it must be in the permitted and inheritable sets). */
+static int set_ambient(uint64_t keep) {
+  if (prctl(PR_CAP_AMBIENT, SB_AMBIENT_CLEAR_ALL, 0, 0, 0) < 0 && errno != EINVAL) return -1;
+  for (int c = 0; c <= SB_CAP_LAST; c++)
+    if ((keep & (1ULL << c)) && prctl(PR_CAP_AMBIENT, SB_AMBIENT_RAISE, c, 0, 0) < 0) return -1;
+  return 0;
+}
+
+/* do the capability steps work here? (the probe reports it) */
+static int caps_work(void) {
+  uint64_t p;
+  if (cap_get(NULL, &p, NULL) < 0) return 0;
+  if (prctl(PR_CAP_AMBIENT, SB_AMBIENT_CLEAR_ALL, 0, 0, 0) < 0 && errno != EINVAL) return 0;
+  return 1;
+}
+
+/* ------------------------------------------------------------------ seccomp
+ * A filter installed for every confined tool (on x86-64 and arm64; elsewhere it is not installed and the probe says so).
+ *  - sockets (unless --allow-sockets): socket(), socketpair(), connect(), bind(), listen(), accept() and accept4() fail with EACCES, and so does
+ *    io_uring (which can do the same without those calls). A program that is meant to talk to nobody (git, bsdtar, 7-Zip) needs none of them:
+ *    it uses the descriptors it was given. Name lookups degrade to numeric ids (the lookup's socket() fails, then it reads /etc/passwd).
+ *  - always: mount and the new mount API, umount2, pivot_root, chroot, the setuid/setgid family, capset, ptrace, process_vm_readv/writev,
+ *    kexec, bpf, unshare, setns, mknod/mknodat fail with EPERM; clone3 fails with ENOSYS (as container runtimes do, so the C library falls back
+ *    to clone), and clone with a new-namespace flag fails with EPERM.
+ *  - unless --allow-metadata: chmod, fchmod, fchmodat, fchmodat2, chown, fchown, lchown, fchownat, utime, utimes, utimensat, futimesat, and the
+ *    setxattr and removexattr families fail with EPERM. (Landlock does not restrict these.) Reading and listing need none of them.
  * On x86-64 the architecture value is the same for x32 system calls, whose numbers carry bit 0x40000000: any number at or above
- * it ends the process, so an x32 socket() cannot go round the list. Only on the architectures whose audit number is known here;
- * where this layer cannot be installed the caller says so (--probe prints it) and UDP and unix sockets rely on Landlock alone. */
+ * it ends the process, so an x32 call cannot go round the list. */
 #if defined(__x86_64__)
 #define SB_ARCH AUDIT_ARCH_X86_64
 #define SB_NR_LIMIT 0x40000000U
 #elif defined(__aarch64__)
 #define SB_ARCH AUDIT_ARCH_AARCH64
 #endif
-static int deny_sockets(void) {
+#ifndef __NR_clone3
+#define __NR_clone3 435
+#endif
+#define SB_NS_FLAGS 0x7e020000U /* CLONE_NEWNS | NEWCGROUP | NEWUTS | NEWIPC | NEWUSER | NEWPID | NEWNET */
+
 #ifdef SB_ARCH
-  static const long denied[] = {
-      __NR_socket, __NR_socketpair, __NR_connect, __NR_bind, __NR_listen, __NR_accept, __NR_accept4,
+#define MAXD 128
+static int build_filter(struct sock_filter *f, int allow_sockets, int allow_metadata) {
+  long sock[MAXD], always[MAXD], meta[MAXD];
+  int ns = 0, na = 0, nm = 0;
+#define S(nr) sock[ns++] = (nr)
+#define A(nr) always[na++] = (nr)
+#define M(nr) meta[nm++] = (nr)
+  S(__NR_socket); S(__NR_socketpair); S(__NR_connect); S(__NR_bind); S(__NR_listen); S(__NR_accept); S(__NR_accept4);
 #ifdef __NR_io_uring_setup
-      __NR_io_uring_setup, __NR_io_uring_enter, __NR_io_uring_register,
+  S(__NR_io_uring_setup); S(__NR_io_uring_enter); S(__NR_io_uring_register);
 #endif
-  };
-  enum { N = sizeof denied / sizeof denied[0] };
-  struct sock_filter f[8 + N];
+  A(__NR_mount); A(__NR_umount2); A(__NR_pivot_root); A(__NR_chroot);
+  A(__NR_setuid); A(__NR_setgid); A(__NR_setreuid); A(__NR_setregid); A(__NR_setresuid); A(__NR_setresgid); A(__NR_setfsuid); A(__NR_setfsgid); A(__NR_setgroups);
+  A(__NR_capset); A(__NR_ptrace); A(__NR_process_vm_readv); A(__NR_process_vm_writev); A(__NR_kexec_load); A(__NR_bpf); A(__NR_unshare); A(__NR_setns);
+  A(__NR_mknodat);
+#ifdef __NR_mknod
+  A(__NR_mknod);
+#endif
+#ifdef __NR_kexec_file_load
+  A(__NR_kexec_file_load);
+#endif
+  /* the new mount API (Linux 5.2 and later; the numbers are in the common table) */
+  A(428); A(429); A(430); A(431); A(432); A(433); A(442);
+  M(__NR_fchmod); M(__NR_fchmodat); M(__NR_fchown); M(__NR_fchownat); M(__NR_utimensat);
+  M(__NR_setxattr); M(__NR_lsetxattr); M(__NR_fsetxattr); M(__NR_removexattr); M(__NR_lremovexattr); M(__NR_fremovexattr);
+#ifdef __NR_chmod
+  M(__NR_chmod);
+#endif
+#ifdef __NR_chown
+  M(__NR_chown);
+#endif
+#ifdef __NR_lchown
+  M(__NR_lchown);
+#endif
+#ifdef __NR_utime
+  M(__NR_utime);
+#endif
+#ifdef __NR_utimes
+  M(__NR_utimes);
+#endif
+#ifdef __NR_futimesat
+  M(__NR_futimesat);
+#endif
+  M(452); /* fchmodat2 */
+  long all[3 * MAXD];
   int n = 0;
-  f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
-  f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SB_ARCH, 1, 0);
-  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
-  f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
+  if (!allow_sockets) for (int i = 0; i < ns; i++) all[n++] = sock[i];
+  for (int i = 0; i < na; i++) all[n++] = always[i];
+  if (!allow_metadata) for (int i = 0; i < nm; i++) all[n++] = meta[i];
+  int k = 0;
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
+  f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SB_ARCH, 1, 0);
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
 #ifdef SB_NR_LIMIT
-  f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, SB_NR_LIMIT, 0, 1); /* x32 (and any other out-of-range) numbers */
-  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+  f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, SB_NR_LIMIT, 0, 1); /* x32 (and any other out-of-range) numbers */
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
 #endif
-  for (int i = 0; i < N; i++) f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)denied[i], (uint8_t)(N - i), 0);
-  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-  f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES);
+  /* tail layout, after the n list entries:  clone3 test, clone test (3 instructions), allow, EPERM-or-EACCES, ENOSYS */
+  /* a list entry at index e jumps to the EPERM return; sockets use EACCES as before, so they get their own return */
+  int first = k;
+  int tail = first + n;          /* clone3 test */
+  int t_allow = tail + 1 + 3;    /* after the clone test */
+  int t_eperm = t_allow + 1;
+  int t_eacces = t_eperm + 1;
+  int t_enosys = t_eacces + 1;
+  for (int i = 0; i < n; i++) {
+    int is_sock = 0;
+    for (int j = 0; j < ns; j++) if (sock[j] == all[i]) is_sock = 1;
+    int target = is_sock ? t_eacces : t_eperm;
+    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)all[i], (uint8_t)(target - k - 1), 0);
+    k++;
+  }
+  f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone3, (uint8_t)(t_enosys - k - 1), 0);
+  k++;
+  f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone, 0, 2);
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
+  f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, SB_NS_FLAGS, (uint8_t)(t_eperm - k - 1), 0);
+  k++;
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES);
+  f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS);
+  return k;
+}
+#endif
+
+static int install_filter(int allow_sockets, int allow_metadata) {
+#ifdef SB_ARCH
+  struct sock_filter f[3 * MAXD + 24];
+  int n = build_filter(f, allow_sockets, allow_metadata);
   struct sock_fprog prog = {.len = (unsigned short)n, .filter = f};
   return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
 #else
+  (void)allow_sockets;
+  (void)allow_metadata;
   errno = ENOSYS;
   return -1;
 #endif
@@ -280,7 +448,7 @@ static int seccomp_works(void) {
   if (pid < 0) return 0;
   if (pid == 0) {
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) _exit(1);
-    _exit(deny_sockets() == 0 ? 0 : 1);
+    _exit(install_filter(0, 0) == 0 ? 0 : 1);
   }
   int st = 0;
   if (waitpid(pid, &st, 0) < 0) return 0;
@@ -349,7 +517,8 @@ int main(int argc, char **argv) {
   struct root_spec roots[MAX_ROOTS];
   int nroots = 0;
   long uid = -1, gid = -1, cwd_fd = -1;
-  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, allow_sockets = 0, i = 1;
+  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, allow_sockets = 0, allow_metadata = 0, i = 1;
+  uint64_t keep_caps = 0;
   const uint64_t R = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
   const uint64_t RX = R | LANDLOCK_ACCESS_FS_EXECUTE;
   /* every right except execute: write, create, remove, rename, link (the ABI-specific ones are masked by `handled`) */
@@ -371,6 +540,14 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--no-landlock")) no_landlock = 1;
     else if (!strcmp(argv[i], "--no-system")) no_system = 1;
     else if (!strcmp(argv[i], "--allow-sockets")) allow_sockets = 1;
+    else if (!strcmp(argv[i], "--allow-metadata")) allow_metadata = 1;
+    else if (!strcmp(argv[i], "--keep-cap") && i + 1 < argc) {
+      if (!strcmp(argv[++i], "dac_read_search")) keep_caps |= 1ULL << CAP_BIT_DAC_READ_SEARCH;
+      else {
+        fprintf(stderr, "filedeck-sandbox: --keep-cap knows only dac_read_search\n");
+        return EXIT_USAGE;
+      }
+    }
     else if (!strcmp(argv[i], "--keep-fd") && i + 1 < argc) {
       long n;
       if (parse_id(argv[++i], &n) < 0 || n < 3 || n > 8191 || nkeep >= MAX_KEEP) {
@@ -417,12 +594,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "filedeck-sandbox: probing the rights: %s\n", strerror(errno));
         return EXIT_FAILED;
       }
-      printf("landlock abi %d fs 0x%llx net 0x%llx scope 0x%llx seccomp %d\n", abi, (unsigned long long)h.handled_access_fs, (unsigned long long)h.handled_access_net, (unsigned long long)h.scoped, seccomp_works());
+      printf("landlock abi %d fs 0x%llx net 0x%llx scope 0x%llx seccomp %d caps %d\n", abi, (unsigned long long)h.handled_access_fs, (unsigned long long)h.handled_access_net, (unsigned long long)h.scoped, seccomp_works(), caps_work());
     }
     return r;
   }
   if (i >= argc) {
-    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]\n");
+    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]\n");
     return EXIT_USAGE;
   }
   if ((uid == 0 || gid == 0) && !allow_root_user) {
@@ -493,7 +670,21 @@ int main(int argc, char **argv) {
     fprintf(stderr, "filedeck-sandbox: working folder (descriptor %ld): %s\n", cwd_fd, strerror(errno));
     return EXIT_FAILED;
   }
+  /* capabilities: none survive but the ones named. The bounding set first (a root process gets it back as capabilities at exec), while the
+   * launcher still holds CAP_SETPCAP; a named capability must be held to be kept. */
+  if (keep_caps) {
+    uint64_t perm = 0;
+    if (cap_get(NULL, &perm, NULL) < 0 || (keep_caps & ~perm) != 0) {
+      fprintf(stderr, "filedeck-sandbox: cannot keep a capability this process does not hold\n");
+      return EXIT_FAILED;
+    }
+  }
+  int bounding_left = drop_bounding(keep_caps);
   if (uid >= 0) {
+    if (keep_caps && prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) < 0) {
+      fprintf(stderr, "filedeck-sandbox: keepcaps: %s\n", strerror(errno));
+      return EXIT_FAILED;
+    }
     if (setgroups(0, NULL) < 0 || setgid((gid_t)gid) < 0 || setuid((uid_t)uid) < 0) {
       fprintf(stderr, "filedeck-sandbox: cannot change to uid %ld gid %ld: %s\n", uid, gid, strerror(errno));
       return EXIT_FAILED;
@@ -503,6 +694,15 @@ int main(int argc, char **argv) {
       return EXIT_FAILED;
     }
   }
+  if (cap_set_all(keep_caps) < 0 || set_ambient(keep_caps) < 0) {
+    fprintf(stderr, "filedeck-sandbox: capabilities: %s\n", strerror(errno));
+    return EXIT_FAILED;
+  }
+  prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
+  if (bounding_left > 0 && geteuid() == 0) { /* root would get capabilities back at exec */
+    fprintf(stderr, "filedeck-sandbox: cannot empty the capability bounding set, and the program would run as root\n");
+    return EXIT_FAILED;
+  }
   if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
     fprintf(stderr, "filedeck-sandbox: no_new_privs: %s\n", strerror(errno));
     return EXIT_FAILED;
@@ -510,8 +710,8 @@ int main(int argc, char **argv) {
   /* Landlock does not restrict descriptors that are already open: nothing but the standard three may reach the command.
    * Done before the ruleset is applied (the list of descriptors lives in /proc, which the ruleset hides). */
   mark_cloexec();
-  /* UDP where the kernel's Landlock cannot control it (see above): refuse every socket that is not a unix stream socket */
-  if (!allow_sockets && deny_sockets() < 0 && errno != ENOSYS && errno != EINVAL) {
+  /* the socket, privilege and metadata filter (see above) */
+  if (install_filter(allow_sockets, allow_metadata) < 0 && errno != ENOSYS && errno != EINVAL) {
     fprintf(stderr, "filedeck-sandbox: seccomp: %s\n", strerror(errno));
     return EXIT_FAILED;
   }
