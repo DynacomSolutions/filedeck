@@ -845,6 +845,6 @@ test("extraction runs the archive tool as the unprivileged user when the agent i
   fs.chmodSync(path.join(s.root, "a.tar"), 0o600); // only root can read it by name: bsdtar is handed it as standard input, whoever it runs as
   fs.writeFileSync(s.go, "");
   await runExtract(await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" }), LIM, mkCtl().ctl);
-  assert.equal(fs.readFileSync(s.extractId, "utf8").trim(), "65534");
+  assert.equal(fs.readFileSync(s.extractId, "utf8").trim(), "65533", "the archive tools' own user, not the media tools' 65534");
   assert.equal(fs.readFileSync(s.seen, "utf8"), "ARCHIVE-BYTES");
 });

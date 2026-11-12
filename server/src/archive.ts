@@ -125,12 +125,11 @@ export async function spawnBsdtar(
 const cwdOf = (fd: number, at: string): { cwdFd: number } | { cwd: string } => (fd >= 0 ? { cwdFd: fd } : { cwd: at });
 
 /**
- * Who a tool that parses an untrusted archive runs as: the archive tools' own unprivileged user when the agent is root. It is neither
+ * Who a tool that parses an untrusted archive runs as: the archive tools' own unprivileged user when the agent is root, when it can read the archive. It is neither
  * root nor the media tools' user (a compromised media tool must not be able to signal, trace or reach the staging of an archive tool).
- * The ids are a fixed pair with no account needed, `FILEDECK_ARCHIVE_UID` / `FILEDECK_ARCHIVE_GID` (default 65533 for both). A single
- * archive is handed to the tool as an open read-only descriptor, which needs no permission on the file, so every archive can be read
- * by it. `byName` is for the one case that cannot use a descriptor (a split set listed by name): then that user must be able to read
- * the first part and every folder above it by mode, else the tool runs as the agent, still inside the sandbox.
+ * The ids are a fixed pair with no account needed, `FILEDECK_ARCHIVE_UID` / `FILEDECK_ARCHIVE_GID` (default 65533 for both). 7-Zip reads a single archive as `/dev/fd/3`, and opening a descriptor through /proc checks the file's own permissions
+ * again (CI: "Permission denied" for a 0600 archive), so the archive must be readable by that user by its mode, as must every folder above it
+ * for an archive opened by name (a split set listed by name); otherwise the tool runs as the agent, still inside the sandbox.
  */
 export function archiveUser(): { uid: number; gid: number } {
   const num = (v: string | undefined, d: number) => (v !== undefined && /^[1-9][0-9]{0,9}$/.test(v) && Number(v) < 4294967294 ? Number(v) : d);
@@ -423,7 +422,7 @@ async function openArchiveFiles(root: string, real: string): Promise<OpenedArchi
   try {
     if (!SPLIT.test(real)) {
       const fh = await open1(real);
-      return { sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity() }, fd: fh.fd, close };
+      return { sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity(real) }, fd: fh.fd, close };
     }
     const base = path.basename(real).slice(0, -4);
     await pinned(root, path.dirname(real), async (dirAt) => {
@@ -1132,7 +1131,7 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
   if (!SPLIT.test(real)) {
     return pinned(plan.root, path.dirname(real), async (dirAt) => {
       const { fh } = await openPlain(dirAt, await fs.stat(dirAt), path.basename(real));
-      return { arg: real, fd: fh.fd, sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity() }, done: () => fh.close().catch(() => undefined) } as Source;
+      return { arg: real, fd: fh.fd, sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity(real) }, done: () => fh.close().catch(() => undefined) } as Source;
     });
   }
   // A split set: the parts are opened and checked now (held open until the job ends) and copied into the private staging folder once it exists.
@@ -1160,23 +1159,18 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
   }
   const src: Source = { arg: real, sz: { arg: real }, done };
   src.stage = async (work) => {
-    const who = await toolIdentity();
-    const dir = path.join(work.at, PARTS_DIR);
+    // The copies sit in a reserved folder of the private staging folder and are opened by their absolute name. The tool therefore runs as the
+    // agent itself, inside the sandbox (read: that folder; write: the staging folder): 7-Zip turns a relative name into an absolute one with
+    // getcwd(), and the agent's work folders above are mode 0700, which the unprivileged user could not traverse (seen in CI as "Permission denied").
+    const dir = path.join(work.dir, PARTS_DIR);
     await fs.mkdir(dir, { mode: 0o700 });
-    if (who) {
-      await fs.chown(work.at, who.uid, who.gid); // the staging folder and the parts folder are the tool user's alone while the tool runs
-      await fs.chown(dir, who.uid, who.gid);
-    }
     for (const h of held) {
       const to = path.join(dir, h.name);
       await fs.copyFile(LINUX ? `/proc/self/fd/${h.fh.fd}` : h.name, to, C.COPYFILE_EXCL);
-      if (who) await fs.chown(to, who.uid, who.gid);
       await fs.chmod(to, 0o600);
     }
-    // The tool starts in the staging folder (by descriptor) and opens the first part by a relative name: the agent's work folder above it
-    // is 0700, so a name through it could not be followed by the tool user.
-    src.arg = `${PARTS_DIR}/${path.basename(real)}`;
-    src.sz = { arg: src.arg, cwdFd: work.fd >= 0 ? work.fd : undefined, roots: work.fd >= 0 ? [work.fd] : [], runAs: who };
+    src.arg = path.join(dir, path.basename(real));
+    src.sz = { arg: src.arg, roots: work.fd >= 0 ? [work.fd] : [] };
   };
   return src;
 }
