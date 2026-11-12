@@ -15,7 +15,8 @@ import type { JobCtl } from "./jobs.ts";
 import { STAGING_PREFIX, TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, SandboxError, failIfLauncher, haveSevenZip, listSz, runSz, szFailure, szReadArgs, validPassword, verifyPassword, type SzSource } from "./sevenzip.ts";
-import { sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root } from "./sandbox.ts";
+import { hasCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
+import { toolGate, type Slot } from "./tool-gate.ts";
 
 /**
  * Archive support. bsdtar (libarchive) does format decoding/encoding for zip,
@@ -104,10 +105,25 @@ export async function spawnBsdtar(
     readOnly?: Root[];
     /** a private folder the tool may write (the 7zip writer keeps a temporary file): its descriptor and its path (TMPDIR) */
     scratch?: { fd: number; dir: string };
-    /** run as this user and group, supplementary groups cleared (only effective when the agent is root) */
-    runAs?: { uid: number; gid: number };
+    /** run as this user and group, supplementary groups cleared (only effective when the agent is root), keeping at most the named capability */
+    runAs?: RunAs;
+    /** a slot of the tool gate the caller already holds (the download route takes it before the response starts, so a full gate is a 429); otherwise one is taken here */
+    slot?: Slot;
   } = {},
 ): Promise<ChildProcess> {
+  const slot = opts.slot ?? (await toolGate.acquire());
+  let child: ChildProcess;
+  try {
+    child = await spawnBsdtar1(args, opts);
+  } catch (e) {
+    slot.release();
+    throw e;
+  }
+  child.once("close", slot.release);
+  child.once("error", slot.release);
+  return child;
+}
+function spawnBsdtar1(args: string[], opts: Parameters<typeof spawnBsdtar>[1] = {}): Promise<ChildProcess> {
   return spawnSandboxed(bsdtar(), args, {
     cwd: opts.cwd,
     cwdFd: opts.cwdFd !== undefined && opts.cwdFd >= 0 ? opts.cwdFd : undefined,
@@ -117,7 +133,7 @@ export async function spawnBsdtar(
     // a tool installed outside the system folders (FILEDECK_BSDTAR=/opt/...) must still be startable
     readExec: path.isAbsolute(bsdtar()) ? [bsdtar()] : undefined,
     readWrite: opts.scratch && opts.scratch.fd >= 0 ? [opts.scratch.fd] : undefined,
-    ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid } : {}),
+    ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid, keepCaps: opts.runAs.keepCaps } : {}),
   });
 }
 
@@ -125,31 +141,61 @@ export async function spawnBsdtar(
 const cwdOf = (fd: number, at: string): { cwdFd: number } | { cwd: string } => (fd >= 0 ? { cwdFd: fd } : { cwd: at });
 
 /**
- * Who a tool that parses an untrusted archive runs as: the archive tools' own unprivileged user when the agent is root, when it can read the archive. It is neither
- * root nor the media tools' user (a compromised media tool must not be able to signal, trace or reach the staging of an archive tool).
- * The ids are a fixed pair with no account needed, `FILEDECK_ARCHIVE_UID` / `FILEDECK_ARCHIVE_GID` (default 65533 for both). 7-Zip reads a single archive as `/dev/fd/3`, and opening a descriptor through /proc checks the file's own permissions
- * again (CI: "Permission denied" for a 0600 archive), so the archive must be readable by that user by its mode, as must every folder above it
- * for an archive opened by name (a split set listed by name); otherwise the tool runs as the agent, still inside the sandbox.
+ * Who a tool that parses an untrusted archive runs as: when the agent is root, never root. The archive tools' own unprivileged user (a fixed
+ * pair with no account needed, `FILEDECK_ARCHIVE_UID` / `FILEDECK_ARCHIVE_GID`, default 65533 for both), which is neither root nor the media
+ * tools' user (a compromised media tool must not be able to signal, trace or reach the staging of an archive tool). The launcher clears every
+ * capability of the tool in every case. Where the tool must read what only root can read by mode (a 0600 archive, the agent's 0700 work
+ * folder, the parts of a split set, a root-owned source folder) it keeps one capability, read and search (`dac_read_search`), which Landlock
+ * still limits to the granted roots. An agent that lacks that capability (or is not root) cannot pass it on: the tool then runs as the agent's
+ * own user, with no capabilities, and the log says so once.
  */
 export function archiveUser(): { uid: number; gid: number } {
   const num = (v: string | undefined, d: number) => (v !== undefined && /^[1-9][0-9]{0,9}$/.test(v) && Number(v) < 4294967294 ? Number(v) : d);
   const uid = num(process.env.FILEDECK_ARCHIVE_UID, 65533);
   return { uid, gid: num(process.env.FILEDECK_ARCHIVE_GID, uid) };
 }
-async function toolIdentity(byName?: string): Promise<{ uid: number; gid: number } | undefined> {
+const said = new Set<string>();
+const sayOnce = (msg: string) => {
+  if (!said.has(msg)) {
+    said.add(msg);
+    console.warn(msg);
+  }
+};
+/** The archive user with the read-search capability; without it (the agent lacks it) the agent's own user, as a non-root agent would. */
+async function readerIdentity(): Promise<RunAs | undefined> {
+  if (process.getuid?.() !== 0) return undefined;
+  if (await hasCapability("dac_read_search")) return { ...archiveUser(), keepCaps: ["dac_read_search"] };
+  sayOnce("archive tools: this process lacks the read-search capability, so a tool that must read what only root can read runs as the agent's own user (with no capabilities) instead of the archive user");
+  return undefined;
+}
+/** Who a tool runs as when it reads a folder owned by `uid`/`gid`: that owner (groups cleared), and for a root-owned folder the archive user with the read-search capability. */
+export async function runIdentity(uid: number, gid: number): Promise<RunAs | undefined> {
+  if (process.getuid?.() !== 0) return undefined;
+  return uid !== 0 ? { uid, gid } : readerIdentity();
+}
+/**
+ * Who 7-Zip runs as for an archive. One archive is handed over as a descriptor and read as /dev/fd/N, which checks only the file's own mode:
+ * when the archive user can read it by mode it needs no capability, whatever the folders above it are. A split set is opened by name, so every
+ * folder above must be searchable too. Without `archive` (a stream on standard input) the tool needs nothing.
+ */
+async function toolIdentity(archive?: { name: string; split?: boolean }): Promise<RunAs | undefined> {
   if (process.getuid?.() !== 0) return undefined;
   const who = archiveUser();
-  if (byName === undefined) return who;
+  if (!archive) return who;
   try {
-    if (((await fs.stat(byName)).mode & 0o004) === 0) return undefined;
-    for (let d = path.dirname(byName); ; d = path.dirname(d)) {
-      if (((await fs.stat(d)).mode & 0o001) === 0) return undefined;
-      if (d === path.dirname(d)) break;
+    if (((await fs.stat(archive.name)).mode & 0o004) !== 0) {
+      if (!archive.split) return who;
+      let open = true;
+      for (let d = path.dirname(archive.name); open; d = path.dirname(d)) {
+        if (((await fs.stat(d)).mode & 0o001) === 0) open = false;
+        if (d === path.dirname(d)) break;
+      }
+      if (open) return who;
     }
   } catch {
-    return undefined;
+    /* unreadable by name: ask for the capability */
   }
-  return who;
+  return readerIdentity();
 }
 
 /** An archive tool that cannot run because the sandbox is required and unavailable answers the same 503 everywhere. */
@@ -422,7 +468,7 @@ async function openArchiveFiles(root: string, real: string): Promise<OpenedArchi
   try {
     if (!SPLIT.test(real)) {
       const fh = await open1(real);
-      return { sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity(real) }, fd: fh.fd, close };
+      return { sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity({ name: real }) }, fd: fh.fd, close };
     }
     const base = path.basename(real).slice(0, -4);
     await pinned(root, path.dirname(real), async (dirAt) => {
@@ -436,7 +482,7 @@ async function openArchiveFiles(root: string, real: string): Promise<OpenedArchi
       }
     });
     const [first, ...more] = handles;
-    return { sz: { arg: real, file: first!.fd, also: more.map((h) => h.fd), runAs: await toolIdentity(real) }, fd: first!.fd, close };
+    return { sz: { arg: real, file: first!.fd, also: more.map((h) => h.fd), runAs: await toolIdentity({ name: real, split: true }) }, fd: first!.fd, close };
   } catch (e) {
     await close();
     throw e;
@@ -1131,7 +1177,7 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
   if (!SPLIT.test(real)) {
     return pinned(plan.root, path.dirname(real), async (dirAt) => {
       const { fh } = await openPlain(dirAt, await fs.stat(dirAt), path.basename(real));
-      return { arg: real, fd: fh.fd, sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity(real) }, done: () => fh.close().catch(() => undefined) } as Source;
+      return { arg: real, fd: fh.fd, sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity({ name: real }) }, done: () => fh.close().catch(() => undefined) } as Source;
     });
   }
   // A split set: the parts are opened and checked now (held open until the job ends) and copied into the private staging folder once it exists.
@@ -1159,9 +1205,9 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
   }
   const src: Source = { arg: real, sz: { arg: real }, done };
   src.stage = async (work) => {
-    // The copies sit in a reserved folder of the private staging folder and are opened by their absolute name. The tool therefore runs as the
-    // agent itself, inside the sandbox (read: that folder; write: the staging folder): 7-Zip turns a relative name into an absolute one with
-    // getcwd(), and the agent's work folders above are mode 0700, which the unprivileged user could not traverse (seen in CI as "Permission denied").
+    // The copies sit in a reserved folder of the private staging folder and are opened by their absolute name. The tool therefore needs to
+    // search the agent's work folders above, which are mode 0700 (7-Zip turns a relative name into an absolute one with getcwd(), seen in CI as
+    // "Permission denied" for a user without the right) and to read the 0600 copies: it runs as the archive user with the read-search capability only.
     const dir = path.join(work.dir, PARTS_DIR);
     await fs.mkdir(dir, { mode: 0o700 });
     for (const h of held) {
@@ -1170,7 +1216,7 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
       await fs.chmod(to, 0o600);
     }
     src.arg = path.join(dir, path.basename(real));
-    src.sz = { arg: src.arg, roots: work.fd >= 0 ? [work.fd] : [] };
+    src.sz = { arg: src.arg, roots: work.fd >= 0 ? [work.fd] : [], runAs: await readerIdentity() };
   };
   return src;
 }
@@ -1223,6 +1269,7 @@ async function extractViaSz(plan: ExtractPlan, src: Source, work: Work, limits: 
     fd: how.fd,
     readOnly: how.readOnly,
     readWrite: work.fd >= 0 ? [work.fd] : undefined,
+    allowMetadata: true, // 7-Zip sets modes and times on what it creates in the private staging folder
     password: plan.password,
     signal,
     onLine: (line) => {
@@ -1492,6 +1539,9 @@ const O_PATH = 0o10000000; // Linux: a descriptor that names the inode and can d
  * Folders inside an entry cannot be taken out of its grant (Landlock allows by hierarchy), so Filedeck's own folders found inside an entry are
  * kept out by the tools' exclude patterns, not by the kernel (see the README).
  */
+/** Where the grant fallbacks are reported (tests replace it). */
+export const grantHooks = { log: (m: string) => console.warn(m) };
+const grantLog = (m: string) => grantHooks.log(m);
 export async function selectionGrants(srcAt: string, srcFd: number, names: string[]): Promise<{ roots: number[]; wholeFolder: boolean; close: () => Promise<void> }> {
   const handles: import("node:fs/promises").FileHandle[] = [];
   const close = async () => {
@@ -1510,7 +1560,8 @@ export async function selectionGrants(srcAt: string, srcFd: number, names: strin
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "ENOENT" || code === "ELOOP") continue; // gone, or a link (stored as itself)
         if (code === "EMFILE" || code === "ENFILE") {
-          await close(); // this process cannot hold that many descriptors: the pinned folder is granted instead
+          await close(); // this process cannot hold that many descriptors: the pinned folder is granted instead (a decision, and said so)
+          grantLog(`archive tools: this process cannot hold ${names.length} descriptors (open file limit reached): the tool is granted the whole source folder instead of the ${names.length} selected items`);
           return folder;
         }
         throw e;
@@ -1570,7 +1621,7 @@ async function compressInto(srcAt: string, srcFd: number, outAt: string, plan: C
   const work = await makeWork("c", plan.root, await locationOf(outAt), totalBytes, guard);
   let userDir: string | undefined;
   let userDirFh: import("node:fs/promises").FileHandle | undefined;
-  let runAs: { uid: number; gid: number } | undefined;
+  let runAs: RunAs | undefined;
   let grants: Awaited<ReturnType<typeof selectionGrants>> | undefined;
   const parts: import("node:fs/promises").FileHandle[] = [];
   const placed: string[] = [];
@@ -1578,13 +1629,13 @@ async function compressInto(srcAt: string, srcFd: number, outAt: string, plan: C
     // When the agent is root and the selected folder belongs to someone else, the tools run as that user (groups cleared): whatever they
     // open by name, they can only open what that user could. The group is the folder's own: that is what the selection's permissions
     // were set up for (shared group folders stay readable); the owner's primary group would grant nothing the folder does not.
-    // Otherwise they run as the agent.
+    // For a root-owned folder they run as the archive user with the read-search capability (never as root); without that capability as the agent.
     const srcOwner = await fs.stat(srcAt); // the pinned folder itself
-    runAs = process.getuid?.() === 0 && srcOwner.uid !== 0 ? { uid: srcOwner.uid, gid: srcOwner.gid } : undefined;
+    runAs = await runIdentity(srcOwner.uid, srcOwner.gid);
     const own = await ownerOf(outAt).catch(() => undefined);
     // One rule for the mode of what is produced: 0600 when the content was read with more privilege than the destination's owner has
     // (the agent as root, or a tool running as someone other than that owner); 0644 when it ran as the destination's owner; otherwise the tool's own.
-    const privileged = process.getuid?.() === 0 && (!runAs || runAs.uid !== own?.uid);
+    const privileged = process.getuid?.() === 0 && (!runAs || !!runAs.keepCaps || runAs.uid !== own?.uid);
     const mv: Mv = { root: plan.root, guard, own, mode: privileged ? 0o600 : runAs ? 0o644 : undefined };
     // 7-Zip writes its archive (and volumes) by name, so a user-run 7-Zip gets a folder only it and the agent can reach (made here,
     // owned by that user, mode 0700, under the temp directory) and writes files there. The agent never walks it: it opens the
@@ -1658,6 +1709,7 @@ async function compressInto(srcAt: string, srcFd: number, outAt: string, plan: C
       // its scratch folder is the one that belongs to its user (when it runs as one), else the private work folder
       const scratch = userDirFh ? { fd: userDirFh.fd, dir: userDir! } : { fd: work.fd, dir: work.dir };
       const child = await spawnBsdtar(args, { ...cwdOf(srcFd, srcAt), stdin: "pipe", readOnly: grants.roots, scratch, runAs });
+      await grants.close(); // the tool and the launcher hold their own copies: this process lets go of its descriptors now
       killOnAbort(child, ctl.signal);
       const done = watch(child, (l) => {
         if (l.startsWith("a ")) note(l.slice(2).replace(/^\.\//, "").replace(/\/$/, ""));
@@ -1764,25 +1816,39 @@ async function freeSetName(dir: string, name: string, suffixes: string[]): Promi
  * entries (or that folder) and write nothing; when the agent is root and the folder belongs to someone else it runs as that owner
  * (groups cleared). `opts.root` is the served root the folder must lie in; `opts.afterPin` runs once the folder is held (tests).
  */
-export function zipStream(dirReal: string, names: string[], signal: AbortSignal, opts: { root?: string; afterPin?: () => void | Promise<void> } = {}): Readable {
+export const zipLimits = { stallMs: 60_000 };
+export function zipStream(dirReal: string, names: string[], signal: AbortSignal, opts: { root?: string; afterPin?: () => void | Promise<void>; afterSpawn?: () => void | Promise<void>; slot?: Slot } = {}): Readable {
   // The body must not end before bsdtar has exited: a failure after the last byte would otherwise
   // look like a complete download. The consumer sees the end only after a clean exit, an error otherwise.
   const out = new PassThrough();
   void (async () => {
+    const slot = opts.slot ?? (await toolGate.acquire(signal).catch((e) => (out.destroy(e as Error), undefined)));
+    if (!slot) return;
     try {
       await pinned(opts.root ?? "/", dirReal, async (at, fd) => {
         await opts.afterPin?.();
         const st = await fs.stat(at); // the pinned folder itself
-        const runAs = process.getuid?.() === 0 && st.uid !== 0 ? { uid: st.uid, gid: st.gid } : undefined;
+        const run = await runIdentity(st.uid, st.gid);
         const grants = await selectionGrants(at, fd, names);
         try {
-          const child = await spawnBsdtar(["--null", "--format", "zip", ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", "-", "-T", "-"], { ...cwdOf(fd, at), stdin: "pipe", readOnly: grants.roots, runAs });
+          const child = await spawnBsdtar(["--null", "--format", "zip", ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", "-", "-T", "-"], { ...cwdOf(fd, at), stdin: "pipe", readOnly: grants.roots, runAs: run, slot });
+          // the tool and the launcher hold their own copies of what they were given: this process lets go of its grant descriptors now, not when the tool ends
+          await grants.close();
+          await opts.afterSpawn?.();
           killOnAbort(child, signal);
           const src = child.stdout as Readable;
           const done = watch(child);
           (child.stdin as import("node:stream").Writable).on("error", () => undefined);
           (child.stdin as import("node:stream").Writable).end(names.map((n) => n + "\0").join(""));
           src.pipe(out, { end: false });
+          // a download nobody reads: the pipe is paused (the reader is slow or gone) for longer than the stall time ends the tool, as a stalled search reader is released
+          let blockedSince = 0;
+          src.on("pause", () => (blockedSince = Date.now()));
+          src.on("resume", () => (blockedSince = 0));
+          const stall = setInterval(() => {
+            if (blockedSince && Date.now() - blockedSince > zipLimits.stallMs) out.destroy(new Error("download stopped: it was not read in time"));
+          }, 250);
+          out.on("close", () => clearInterval(stall));
           src.on("end", () => {
             void done.then(({ code, err }) => {
               if (code === 0 || signal.aborted) out.end();
@@ -1795,12 +1861,15 @@ export function zipStream(dirReal: string, names: string[], signal: AbortSignal,
           });
           out.on("close", () => terminate(child));
           await done; // the folder stays pinned until the tool has finished
+          clearInterval(stall);
         } finally {
           await grants.close();
         }
       });
     } catch (e) {
       out.destroy(e as Error);
+    } finally {
+      slot.release();
     }
   })();
   return out;

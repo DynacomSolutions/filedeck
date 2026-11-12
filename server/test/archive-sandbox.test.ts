@@ -1,15 +1,17 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { haveSevenZip, runSz, szReadArgs } from "../src/sevenzip.ts";
-import { GRANT_LIMIT, MAX_SELECTED, archiveUser, listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, spawnBsdtar, zipStream } from "../src/archive.ts";
+import { GRANT_LIMIT, MAX_SELECTED, archiveUser, grantHooks, zipLimits, listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, spawnBsdtar, zipStream } from "../src/archive.ts";
 import { resetSandbox, sandboxInfo, spawnSandboxed } from "../src/sandbox.ts";
 import type { JobCtl } from "../src/jobs.ts";
+import { ToolGate, toolGate } from "../src/tool-gate.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
 /**
@@ -693,3 +695,177 @@ test("the archive tools' user is their own: not root, not the media tools' user,
     }
   }
 });
+
+/* ---- descriptors: the agent does not hold one per selected item while a tool runs ---- */
+
+const openFds = () => fs.readdirSync("/proc/self/fd").length;
+const scene3001 = (name: string, count: number) => {
+  const s = scene(name);
+  const names: string[] = [];
+  for (let i = 0; i < count; i++) {
+    names.push(`f${i}.txt`);
+    fs.writeFileSync(path.join(s.src, `f${i}.txt`), `n${i}`);
+  }
+  return { s, names };
+};
+
+live("a zip download of 3,001 names that nobody reads holds only a few descriptors in the agent once the tool runs", async () => {
+  const { s, names } = scene3001("fd-hold", 3001);
+  const before = openFds();
+  let during = -1;
+  const z = zipStream(s.src, names, new AbortController().signal, { root: s.root, afterSpawn: () => void (during = openFds()) });
+  await until(() => during >= 0, "the tool to have started");
+  assert.ok(during - before < 40, `descriptors: ${before} before, ${during} while the tool runs and the body is unread`);
+  // the body still arrives complete
+  const zip = path.join(s.dir, "fd.zip");
+  await new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(zip);
+    z.on("error", reject);
+    out.on("close", () => resolve());
+    z.pipe(out);
+  });
+  assert.equal(listTar(zip).length, 3001);
+  assert.ok(openFds() - before < 10, "everything is released afterwards");
+});
+
+live("a compression of 3,001 names holds only a few descriptors in the agent while the tool runs", async () => {
+  const { s, names } = scene3001("fd-hold-c", 3001);
+  const before = openFds();
+  let peak = 0;
+  const timer = setInterval(() => (peak = Math.max(peak, openFds())), 5);
+  try {
+    await runCompress(await prepareCompress(s.root, "/src", names, "tar.gz", "m", { destDir: "/out" }), LIM, mkCtl());
+  } finally {
+    clearInterval(timer);
+  }
+  assert.ok(peak - before < 3100, `peak ${peak}, before ${before}`); // the grants are taken one by one while the list is built; they are gone once the tool is started
+  assert.ok(openFds() - before < 10);
+});
+
+live("a grant that cannot be held for lack of descriptors is an explicit, logged fallback to the whole folder", async () => {
+  const { s, names } = scene3001("fd-limit", 200);
+  const logged: string[] = [];
+  const save = grantHooks.log;
+  grantHooks.log = (m) => logged.push(m);
+  const hog: number[] = [];
+  const fd = fs.openSync(s.src, "r");
+  try {
+    // fill the table: open files until the process refuses (the limit of this run is whatever `ulimit -n` says)
+    try {
+      for (;;) hog.push(fs.openSync("/dev/null", "r"));
+    } catch {
+      /* EMFILE */
+    }
+    for (let i = 0; i < 20; i++) fs.closeSync(hog.pop()!); // leave room for the folder, not for 200 grants
+    const g = await selectionGrants(s.src, fd, names);
+    assert.equal(g.wholeFolder, true);
+    assert.match(logged.join("\n"), /cannot hold 200 descriptors/);
+    await g.close();
+  } finally {
+    for (const h of hog) fs.closeSync(h);
+    fs.closeSync(fd);
+    grantHooks.log = save;
+  }
+});
+
+live("a download nobody reads is ended after the stall time and gives its slot back", async () => {
+  const s = scene("fd-stall");
+  fs.writeFileSync(path.join(s.src, "big.bin"), randomBytes(4 << 20));
+  const save = zipLimits.stallMs;
+  zipLimits.stallMs = 400;
+  try {
+    const z = zipStream(s.src, ["big.bin"], new AbortController().signal, { root: s.root });
+    const err = await new Promise<Error | undefined>((resolve) => {
+      z.on("error", (e) => resolve(e));
+      z.on("close", () => resolve(undefined));
+    });
+    assert.match(String(err), /not read in time/);
+    await until(() => toolGate.running === 0, "the tool gate to be empty");
+  } finally {
+    zipLimits.stallMs = save;
+  }
+});
+
+test("the tool gate runs a few at a time, queues some, and answers 429 beyond that or after a wait", async () => {
+  const g = new ToolGate({ concurrency: 2, queue: 1, waitMs: 150 });
+  const a = await g.acquire();
+  const b = await g.acquire();
+  const waiter = g.acquire();
+  await assert.rejects(g.acquire(), (e: { status?: number }) => e.status === 429); // queue full
+  a.release();
+  const c = await waiter; // the freed slot passes on
+  assert.equal(g.running, 2);
+  const late = g.acquire();
+  await assert.rejects(late, (e: { status?: number }) => e.status === 429); // waited for nothing
+  b.release();
+  b.release(); // idempotent
+  c.release();
+  assert.equal(g.running, 0);
+  const ac = new AbortController();
+  const x = await g.acquire(), y = await g.acquire();
+  const pending = g.acquire(ac.signal);
+  ac.abort();
+  await assert.rejects(pending, (e: { status?: number }) => e.status === 400);
+  x.release();
+  y.release();
+  assert.equal(g.queued, 0);
+});
+
+async function until(f: () => boolean, what: string, ms = 20_000) {
+  const end = Date.now() + ms;
+  while (!f()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/* ---- root only: the tools never run as root, and still reach what only root can (a 0600 selection, a 0600 archive, a split set, a 0700 folder) ---- */
+
+live("as root, root-only files and folders are archived, listed and extracted by tools that hold only the read-search capability", async () => {
+  const s = scene("root-only");
+  const body = randomBytes(30_000);
+  fs.mkdirSync(path.join(s.src, "pick"));
+  fs.chmodSync(path.join(s.src, "pick"), 0o700);
+  fs.writeFileSync(path.join(s.src, "pick/a.bin"), body, { mode: 0o600 });
+  fs.writeFileSync(path.join(s.src, "pick/b.txt"), "bee", { mode: 0o600 });
+  fs.chmodSync(s.src, 0o700);
+  // a zip download
+  const zip = path.join(s.dir, "dl.zip");
+  await new Promise<void>((resolve, reject) => {
+    const z = zipStream(s.src, ["pick"], new AbortController().signal, { root: s.root });
+    const out = fs.createWriteStream(zip);
+    z.on("error", reject);
+    out.on("close", () => resolve());
+    z.pipe(out);
+  });
+  assert.deepEqual(listTar(zip).sort(), ["pick/", "pick/a.bin", "pick/b.txt"]);
+  // compression in every bsdtar format, and its extraction from a 0600 archive in a 0700 folder
+  let gz = "";
+  for (const format of ["zip", "tar.gz", "tar.xz"] as const) {
+    const c = await runCompress(await prepareCompress(s.root, "/src", ["pick"], format, `r-${format}`, { destDir: "/out" }), LIM, mkCtl());
+    const made = path.join(s.root, c.path);
+    assert.equal(fs.statSync(made).mode & 0o777, 0o600);
+    assert.ok(listTar(made).includes("pick/a.bin"), `${format}: ${listTar(made)}`);
+    if (format === "tar.gz") gz = c.path;
+  }
+  fs.chmodSync(s.out, 0o700);
+  const listed = await listArchive(s.root, gz);
+  assert.ok(JSON.stringify(listed).includes("a.bin"));
+  const ex = await runExtract(await prepareExtract(s.root, gz, "/out", true, { overwrite: "rename" }), LIM, mkCtl());
+  assert.deepEqual(fs.readFileSync(path.join(s.root, ex.path, "pick/a.bin")), body);
+  // 7-Zip: password, split volumes, listing and extraction of the 0600 set
+  if (haveSevenZip()) {
+    const c = await runCompress(await prepareCompress(s.root, "/src", ["pick"], "7z", "pw", { destDir: "/out", password: "secret", splitBytes: 8192 }), LIM, mkCtl());
+    assert.ok((c.volumes ?? 0) >= 2, "split into volumes");
+    const first = path.join(s.root, c.path);
+    assert.equal(fs.statSync(first).mode & 0o777, 0o600);
+    const l = await listArchive(s.root, c.path, 5000, "secret");
+    assert.ok(JSON.stringify(l).includes("a.bin"));
+    const x = await runExtract(await prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: "secret" }), LIM, mkCtl());
+    assert.deepEqual(fs.readFileSync(path.join(s.root, x.path, "pick/a.bin")), body);
+    // a single 0600 zip with a password (not split), listed and extracted
+    const z = await runCompress(await prepareCompress(s.root, "/src", ["pick"], "zip", "pwz", { destDir: "/out", password: "secret" }), LIM, mkCtl());
+    const xz = await runExtract(await prepareExtract(s.root, z.path, "/out", true, { overwrite: "rename", password: "secret" }), LIM, mkCtl());
+    assert.deepEqual(fs.readFileSync(path.join(s.root, xz.path, "pick/a.bin")), body);
+  }
+}, { skip: ROOT_ONLY });

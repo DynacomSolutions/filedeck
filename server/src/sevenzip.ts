@@ -3,7 +3,8 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { FsError } from "./fsops.ts";
-import { isLauncherFailure, sandboxInfo, spawnSandboxed, type Root } from "./sandbox.ts";
+import { isLauncherFailure, sandboxInfo, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
+import { toolGate } from "./tool-gate.ts";
 
 /**
  * 7-Zip (`7zz`) backs everything bsdtar cannot do: writing AES-256 zip and 7z
@@ -89,7 +90,7 @@ export interface SzSource {
   /** a working folder (descriptor) the name `arg` is relative to */
   cwdFd?: number;
   /** run 7-Zip as this user and group (the agent as root parses an untrusted archive as nobody, not as itself) */
-  runAs?: { uid: number; gid: number };
+  runAs?: RunAs;
 }
 
 /** Where 7-Zip is allowed to go and who it runs as. */
@@ -99,7 +100,7 @@ export interface SzAccess {
   /** read-write roots (what 7-Zip writes by name): a private folder */
   readWrite?: Root[];
   /** run as this user and group, supplementary groups cleared (only effective when the agent is root) */
-  runAs?: { uid: number; gid: number };
+  runAs?: RunAs;
 }
 
 /**
@@ -134,11 +135,28 @@ export async function runSz(
     stdinExtra?: string;
     /** an open file handed to 7-Zip as descriptor 3 (read it as /dev/fd/3), kept open through the launcher; only where there is no kernel rule */
     fd?: number;
+    /** 7-Zip sets modes and times on what it extracts (into a private folder): do not refuse those calls */
+    allowMetadata?: boolean;
   } = {},
 ): Promise<SzProc> {
   // 7-Zip sizes its thread pool from the host's core count (128 here), not the pod's CPU limit; two threads is plenty.
   const withThreads = [args[0]!, "-mmt=2", ...args.slice(1)];
-  const child = await spawnSandboxed(sevenZip(), withThreads, {
+  const slot = await toolGate.acquire(opts.signal);
+  let child: ChildProcess;
+  try {
+    child = await spawnSz(withThreads, opts);
+  } catch (e) {
+    slot.release();
+    throw e;
+  }
+  child.once("close", slot.release);
+  child.once("error", slot.release);
+  return finishSz(child, opts);
+}
+
+type RunOpts = Parameters<typeof runSz>[1] & object;
+function spawnSz(withThreads: string[], opts: RunOpts): Promise<ChildProcess> {
+  return spawnSandboxed(sevenZip(), withThreads, {
     cwd: opts.cwd,
     cwdFd: opts.cwdFd !== undefined && opts.cwdFd >= 0 ? opts.cwdFd : undefined,
     env: ENV,
@@ -149,8 +167,12 @@ export async function runSz(
     // a tool installed outside the system folders (FILEDECK_7Z=/opt/...) must still be startable
     readExec: path.isAbsolute(sevenZip()) ? [sevenZip()] : undefined,
     readWrite: opts.readWrite,
-    ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid } : {}),
+    ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid, keepCaps: opts.runAs.keepCaps } : {}),
+    allowMetadata: opts.allowMetadata,
   });
+}
+
+function finishSz(child: ChildProcess, opts: RunOpts): SzProc {
   const stdin = child.stdin as Writable;
   stdin.on("error", () => undefined);
   // two lines: 7-Zip asks twice when creating an encrypted archive

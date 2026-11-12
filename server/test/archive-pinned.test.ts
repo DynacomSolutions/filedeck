@@ -541,7 +541,7 @@ test("compression of a user's folder runs the tool as that user and the archive 
   assert.equal(fs.statSync(f).uid, OWNER);
 });
 
-test("compression of a root-owned folder runs as the agent and leaves the archive private to it", async () => {
+test("compression of a root-owned folder runs as the archive user with only the read-search capability (never as root) and leaves the archive private to the agent", async () => {
   const s = scene("rootowned");
   fs.mkdirSync(path.join(s.root, "src"));
   fs.writeFileSync(path.join(s.root, "src/f.txt"), "data");

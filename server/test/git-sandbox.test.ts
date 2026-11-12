@@ -215,6 +215,21 @@ test("as root, Git runs as the owner of the git directory (the privilege drop)",
   assert.match(res.stdout, /branch\.head main/);
 });
 
+test("as root, a root-owned repository the unprivileged user cannot read is read with only the read-search capability (never as root)", async (t) => {
+  if (process.getuid?.() !== 0) return t.skip("git sandbox live: skipped (not running as root)");
+  if (!landlock()) return t.skip(`git sandbox live: skipped (${box.why})`);
+  const d = mk("rootowned-private");
+  execFileSync("chmod", ["-R", "go-rwx", d]);
+  for (const p of [tmp, root]) fs.chmodSync(p, 0o755);
+  const r = (await findRepo(root, d))!;
+  assert.ok(r);
+  const st = await runGit(d, [...repoArgs(r), "status", "--porcelain=v2", "--branch"]);
+  assert.equal(st.code, 0, st.stderr);
+  assert.match(st.stdout, /branch\.head main/);
+  const log = await runGit(d, [...repoArgs(r), "log", "--format=%s"]);
+  assert.equal(log.stdout.trim(), "own");
+});
+
 test("repositories are still found and read in the mode that ran here", async () => {
   const d = mk("plain-final");
   const r = await findRepo(root, d);

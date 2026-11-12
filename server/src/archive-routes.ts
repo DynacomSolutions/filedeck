@@ -12,6 +12,7 @@ import { extractBlocked, hitsReadOnly, jobMayWrite } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import { ZipTickets } from "./zip-tickets.ts";
+import { toolGate } from "./tool-gate.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -110,7 +111,8 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     };
     if (c.req.method === "HEAD") return new Response(null, { headers });
     await ar.assertSandboxUsable();
-    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root });
+    const slot = await toolGate.acquire(c.req.raw.signal); // a full gate answers 429 here, before the response starts
+    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root, slot });
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
   });
   app.post("/api/fs/zip-ticket", async (c) => {
