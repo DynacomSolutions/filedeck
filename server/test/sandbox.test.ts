@@ -525,8 +525,13 @@ for (const mode of ["landlock", "fallback", "off"] as const) {
       // and through a user change too (root only): the descriptor is still the program's
       if (process.getuid?.() === 0) {
         fs.chmodSync(tmp, 0o755);
-        const u = await run("sh", ["-c", "cat <&3"], { keepFds: [keptFd], uid: 65534, gid: 65534 });
-        assert.equal(u.stdout, "KEPT-CONTENT", u.stderr);
+        const again = fs.openSync(kept, "r"); // a fresh open: the first run read the shared one to its end
+        try {
+          const u = await run("sh", ["-c", "cat <&3"], { keepFds: [again], uid: 65534, gid: 65534 });
+          assert.equal(u.stdout, "KEPT-CONTENT", u.stderr);
+        } finally {
+          fs.closeSync(again);
+        }
       }
     } finally {
       for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
