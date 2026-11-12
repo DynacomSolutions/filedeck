@@ -3,15 +3,15 @@
 // The diff itself is the existing hub job (/api/diff/jobs); sync actions are one hub op job.
 import { useSettings } from "./settings";
 import { ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronRight, CircleAlert, Equal, EqualNot, LoaderCircle, TriangleAlert, type LucideIcon } from "lucide-react";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, fmtDate, fmtSize, opLive, type DiffApiOptions, type DiffCounts, type DiffJobView, type DiffMode, type DiffRow, type DiffStats, type Loc, type OpJob, type SyncStepSpec } from "./api";
 import { flattenFolders, joinRoot, rangeBetween, relUnder, singleFlight, type CNode, type FolderData } from "./compareModel";
 import { parsePresets, sanitizeOpts } from "./comparePresets";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { usePhone } from "./viewport";
 import { Modal } from "./ArchiveDialog";
 import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
-import { wheelX } from "./scrollx";
 import { getPresentation, usePresentation } from "./presentation";
 import { joinRel, pickedForPlan, planSync, type Plan, type Step, type SyncAction } from "./folderSync";
 import { DIFF_STATUSES, type DiffStatus, type FolderState, type Leaf, type UiOpts } from "./urlState";
@@ -821,6 +821,16 @@ export function compareKey(ctl: CompareCtl, side: Side, e: React.KeyboardEvent):
 
 /* ------------------------------------------------------------------ view: toolbar in the panel header */
 
+/** The toolbar wraps, so its height depends on its content; the bars of both panels take the tallest one (--cmp-bar-h) and the rows below stay level. */
+const barHeights = new Map<HTMLElement, number>();
+const publishBarHeight = (el: HTMLElement, h: number | null) => {
+  if (h === null) barHeights.delete(el);
+  else barHeights.set(el, h);
+  const root = document.documentElement.style;
+  if (barHeights.size) root.setProperty("--cmp-bar-h", `${Math.max(36, ...barHeights.values())}px`);
+  else root.removeProperty("--cmp-bar-h");
+};
+
 export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: Side; otherLabel: string }) {
   const { st, summary } = ctl;
   const o = st.opts;
@@ -828,41 +838,114 @@ export function CompareBar({ ctl, side, otherLabel }: { ctl: CompareCtl; side: S
   const mode = MODES.find((m) => m.id === o.mode);
   const n = (s: DiffStatus) => (!c ? 0 : s === "identical" ? c.identical : s === "different" ? c.different : s === "left-only" ? c.leftOnly : s === "right-only" ? c.rightOnly : c.error);
   const sel = ctl.selected.size;
+  const barRef = useRef<HTMLDivElement>(null);
+  const phone = usePhone();
+  // Compact: the phone layout, or any panel too narrow for the whole toolbar on one row. Measured: the full toolbar is tried first and
+  // the compact one is kept while the panel stays no wider than it was when the full one stopped fitting.
+  const [narrow, setNarrow] = useState(false);
+  const collapsedAt = useRef(0);
+  const compact = phone || narrow;
+  const [menu, setMenu] = useState<{ kind: "filter" | "more"; x: number; y: number; opener: HTMLElement } | null>(null);
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    publishBarHeight(el, el.offsetHeight);
+    if (!phone && !narrow && el.scrollHeight > 52) { collapsedAt.current = el.clientWidth; setNarrow(true); }
+  });
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    publishBarHeight(el, el.offsetHeight);
+    if (typeof ResizeObserver === "undefined") return () => publishBarHeight(el, null);
+    const ro = new ResizeObserver(() => {
+      publishBarHeight(el, el.offsetHeight);
+      if (narrow && el.clientWidth > collapsedAt.current + 8) setNarrow(false);
+    });
+    ro.observe(el);
+    return () => (ro.disconnect(), publishBarHeight(el, null));
+  }, [narrow]);
+  const openMenu = (kind: "filter" | "more") => (e: React.MouseEvent<HTMLElement>) => {
+    if (menu?.kind === kind) return setMenu(null);
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenu({ kind, x: r.left, y: r.bottom + 2, opener: e.currentTarget });
+  };
+  const hiddenCount = DIFF_STATUSES.filter((x) => ctl.hide.has(x)).length;
+  const filterItems: MenuItem[] = DIFF_STATUSES.filter((x) => x !== "error" || n(x)).map((x) => ({ label: `${STATUS[x].label}${summary ? ` (${n(x).toLocaleString()})` : ""}`, checked: !ctl.hide.has(x), onSelect: () => ctl.toggleStatus(x) }));
+  const moreItems: MenuItem[] = [
+    { label: "Copy to the right", icon: ArrowRight, disabled: !sel, tip: "Copy selected left items over to the right side", onSelect: () => ctl.preview("copy-lr") },
+    { label: "Copy to the left", icon: ArrowLeft, disabled: !sel, tip: "Copy selected right items over to the left side", onSelect: () => ctl.preview("copy-rl") },
+    { label: "Delete left", disabled: !sel, tip: "Move selected left items to the trash", onSelect: () => ctl.preview("delete-left") },
+    { label: "Delete right", disabled: !sel, tip: "Move selected right items to the trash", onSelect: () => ctl.preview("delete-right") },
+    "sep",
+    { label: "Select differing", icon: Ic.ListChecks, disabled: !summary, tip: "Select every differing row in the whole tree", onSelect: ctl.selectDiffering },
+    { label: "Clear selection", disabled: !sel, onSelect: () => ctl.setSelected(new Set()) },
+  ];
+  const choose = (id: string) => {
+    if (o.mode === id) return;
+    const next = { ...o, mode: id as DiffMode };
+    ctl.setOpts(next);
+    ctl.start(next);
+  };
+  const withLabel = `${side === "left" ? "with" : "against"} ${otherLabel}${st.rel ? ` / ${st.rel}` : ""}`;
   return (
-    // Same fixed height on both sides (controls only, one scrollable row): row 0 of both lists lines up.
+    // Same height on both sides (the taller one wins, see publishBarHeight): row 0 of both lists lines up.
     <div className="cmp-barwrap">
-    <div className="cmp-bar" onWheel={wheelX} role="toolbar" aria-label={`Compare toolbar, ${side} panel`}>
+    <div className={"cmp-bar" + (compact ? " compact" : "")} ref={barRef} role="toolbar" aria-label={`Compare toolbar, ${side} panel`}>
       <Tip label={`${st.left.node}:${st.left.path}  vs  ${st.right.node}:${st.right.path}`}><span className="cmp-badge">Compare</span></Tip>
-      <Tip label={`${side === "left" ? "with" : "against"} ${otherLabel}${st.rel ? ` / ${st.rel}` : ""}`}><span className="muted cmp-with">{side === "left" ? "with" : "against"} {otherLabel}{st.rel ? ` / ${st.rel}` : ""}</span></Tip>
-      <span className="fd-toggles" role="group" aria-label="Show">
-        {DIFF_STATUSES.map((s) => {
-          if (s === "error" && !n(s)) return null;
-          return (
-            <button key={s} className={"fd-tog st-" + s} aria-pressed={!ctl.hide.has(s)} onClick={() => ctl.toggleStatus(s)}>
-              {(() => { const I = STATUS[s].Icon; return <I aria-hidden="true" />; })()} {STATUS[s].label} <span className="fd-n">{summary ? n(s).toLocaleString() : ""}</span>
-            </button>
-          );
-        })}
-      </span>
+      <Tip label={withLabel}><span className="muted cmp-with">{compact ? "" : withLabel}</span></Tip>
+      {compact ? (
+        <Tip label="Choose which kinds of rows to show">
+          <button type="button" className={"cmp-filter" + (menu?.kind === "filter" ? " open" : "")} aria-haspopup="menu" aria-expanded={menu?.kind === "filter"} onClick={openMenu("filter")}>
+            <Ic.Filter aria-hidden="true" /> Filter{hiddenCount ? ` (${hiddenCount} hidden)` : ""}
+          </button>
+        </Tip>
+      ) : (
+        <span className="fd-toggles" role="group" aria-label="Show">
+          {DIFF_STATUSES.map((s) => {
+            if (s === "error" && !n(s)) return null;
+            return (
+              <button key={s} className={"fd-tog st-" + s} aria-pressed={!ctl.hide.has(s)} onClick={() => ctl.toggleStatus(s)}>
+                {(() => { const I = STATUS[s].Icon; return <I aria-hidden="true" />; })()} {STATUS[s].label} <span className="fd-n">{summary ? n(s).toLocaleString() : ""}</span>
+              </button>
+            );
+          })}
+        </span>
+      )}
       {side === "left" && (
         <>
-          <Tip label={`Compare by ${mode?.label ?? o.mode}: ${mode?.help ?? ""}. Change it under Compare in the sidebar.`}>
-            <span className="cmp-mode-label"><Ic.Scale aria-hidden="true" /> By {mode?.short ?? o.mode}</span>
-          </Tip>
+          {compact ? (
+            <Dropdown className="cmp-by" label="Compare by" value={o.mode} onChange={choose} options={MODES.map((m) => ({ value: m.id, label: `By ${m.short}` }))} />
+          ) : (
+            <Tip label={`Compare by ${mode?.label ?? o.mode}: ${mode?.help ?? ""}. Change it under Compare in the sidebar.`}>
+              <span className="cmp-mode-label"><Ic.Scale aria-hidden="true" /> By {mode?.short ?? o.mode}</span>
+            </Tip>
+          )}
+          {compact && (
+            <Tip label="Copy, delete and selection actions">
+              <button type="button" className={"cmp-more" + (menu?.kind === "more" ? " open" : "")} aria-haspopup="menu" aria-expanded={menu?.kind === "more"} onClick={openMenu("more")}>
+                <Ic.Ellipsis aria-hidden="true" /> More
+              </button>
+            </Tip>
+          )}
           <button className="primary" onClick={() => (ctl.running ? ctl.cancel() : ctl.start())}>{ctl.running ? <Ic.X /> : <Ic.RefreshCw />} {ctl.running ? "Cancel" : "Compare again"}</button>
-          <span className="fd-sep" />
-          <span className="fd-sync" role="group" aria-label="Sync selected rows">
-            <Tip label="Copy selected left items over to the right side"><button disabled={!sel} onClick={() => ctl.preview("copy-lr")}>Copy <ArrowRight /></button></Tip>
-            <Tip label="Copy selected right items over to the left side"><button disabled={!sel} onClick={() => ctl.preview("copy-rl")}><ArrowLeft /> Copy</button></Tip>
-            <Tip label="Move selected left items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-left")}><Ic.Trash2 /> Delete left</button></Tip>
-            <Tip label="Move selected right items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-right")}><Ic.Trash2 /> Delete right</button></Tip>
-          </span>
-          <Tip label="Select every differing row in the whole tree"><button disabled={!summary} onClick={ctl.selectDiffering}><Ic.ListChecks /> Select differing</button></Tip>
-          <button disabled={!sel} onClick={() => ctl.setSelected(new Set())}><Ic.Eraser /> Clear</button>
+          {!compact && (
+            <>
+              <span className="fd-sep" />
+              <span className="fd-sync" role="group" aria-label="Sync selected rows">
+                <Tip label="Copy selected left items over to the right side"><button disabled={!sel} onClick={() => ctl.preview("copy-lr")}>Copy <ArrowRight /></button></Tip>
+                <Tip label="Copy selected right items over to the left side"><button disabled={!sel} onClick={() => ctl.preview("copy-rl")}><ArrowLeft /> Copy</button></Tip>
+                <Tip label="Move selected left items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-left")}><Ic.Trash2 /> Delete left</button></Tip>
+                <Tip label="Move selected right items to the trash"><button disabled={!sel} onClick={() => ctl.preview("delete-right")}><Ic.Trash2 /> Delete right</button></Tip>
+              </span>
+              <Tip label="Select every differing row in the whole tree"><button disabled={!summary} onClick={ctl.selectDiffering}><Ic.ListChecks /> Select differing</button></Tip>
+              <button disabled={!sel} onClick={() => ctl.setSelected(new Set())}><Ic.Eraser /> Clear</button>
+            </>
+          )}
         </>
       )}
-      <span className="muted fd-count">{sel} selected</span>
-      <Tip label="Leave compare mode (Esc)"><button className="cmp-exit" onClick={ctl.exit}><Ic.LogOut /> Exit compare</button></Tip>
+      {(!compact || sel > 0) && <span className="muted fd-count">{sel} selected</span>}
+      <Tip label="Leave compare mode (Esc)"><button className="cmp-exit" aria-label="Exit compare" onClick={ctl.exit}><Ic.LogOut /> {compact ? "Exit" : "Exit compare"}</button></Tip>
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.kind === "filter" ? filterItems : moreItems} opener={menu.opener} onClose={() => setMenu(null)} />}
     </div>
     </div>
   );

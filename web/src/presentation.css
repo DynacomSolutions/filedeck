@@ -17,8 +17,8 @@ body { font-family: var(--presentation-font); font-size: var(--presentation-size
 [data-user-presentation] .addr-in, [data-user-presentation] .addr-edit { height: auto; min-height: 44px; white-space: normal; overflow-wrap: anywhere; }
 [data-user-presentation] .crumbs { height: auto; min-height: 22px; flex-wrap: wrap; white-space: normal; overflow: visible; }
 [data-user-presentation] .fp-actions { height: auto; min-height: 44px; flex-wrap: wrap; overflow: visible; }
-[data-user-presentation] .cmp-barwrap { height: auto; min-height: 36px; overflow: visible; }
-[data-user-presentation] .cmp-bar { height: auto; min-height: 36px; flex-wrap: wrap; overflow: visible; padding-block: .35rem; }
+[data-user-presentation] .cmp-barwrap { overflow: visible; }
+[data-user-presentation] .cmp-bar { padding-block: .35rem; }
 [data-user-presentation] .cmp-row { line-height: var(--user-line-height, 1.6); padding-block: 2px; }
 [data-user-presentation] .cmp-head { min-height: 28px; height: auto; padding-block: 2px; white-space: normal; }
 [data-user-presentation] .side-brand { height: auto; min-height: 52px; flex-wrap: wrap; padding-block: .5rem; }

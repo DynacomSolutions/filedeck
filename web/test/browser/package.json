@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node acceptance.mjs"
+    "check": "node acceptance.mjs",
+    "install-browser": "playwright install chromium"
   },
   "devDependencies": {
     "axe-core": "^4.10.3",

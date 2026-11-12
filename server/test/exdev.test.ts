@@ -1,10 +1,14 @@
-import { test, mock } from "node:test";
+import { test as baseTest, mock } from "node:test";
 import assert from "node:assert/strict";
 import nodeFs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as ops from "../src/fsops.ts";
+import { withoutReadOnly } from "../src/pinwalk.ts";
+
+// These tests call the operations directly, outside a request: they run in an explicit scope with no read-only prefixes.
+const test = (name: string, fn: (t: never) => unknown) => baseTest(name, (t) => withoutReadOnly(() => fn(t as never)) as never);
 
 function setup() {
   const root = nodeFs.realpathSync(nodeFs.mkdtempSync(path.join(os.tmpdir(), "filedeck-exdev-")));
@@ -46,10 +50,12 @@ test("EXDEV move fallback copies then removes the source", async () => {
 test("EXDEV move fallback cleans up a partial copy and keeps the source", async () => {
   const root = setup();
   const m = forceExdev();
-  const c = mock.method(fsp, "cp", async (_from: string, to: string) => {
-    nodeFs.mkdirSync(to, { recursive: true });
-    nodeFs.writeFileSync(path.join(to, "a.txt"), "partial");
-    throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+  // the second file of the tree runs out of space after the first was copied
+  const realCopy = fsp.copyFile.bind(fsp);
+  let n = 0;
+  const c = mock.method(fsp, "copyFile", async (from: string, to: string, mode?: number) => {
+    if (++n === 2) throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+    return realCopy(from, to, mode);
   });
   try {
     await assert.rejects(ops.rename(root, "/src/tree", "/dst/tree"), /ENOSPC/);

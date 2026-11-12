@@ -8,15 +8,14 @@ import type { Readable } from "node:stream";
 import {
   PathError,
   TRASH_DIR,
-  assertNotTrash,
   openChecked,
-  pinDir,
   pinParent,
   resolveRead,
   resolveWrite,
   virtualJoin,
   type Resolved,
 } from "./paths.ts";
+import { assertNotReserved, assertWritableAt, copyTree, isReservedName, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
 
 export interface Entry {
   name: string;
@@ -126,7 +125,7 @@ export async function list(root: string, p: string, hidden: boolean) {
   let truncated = false;
   const slice: string[] = [];
   for await (const n of direntsOf(r.real)) {
-    if (n.name === TRASH_DIR || (!hidden && n.name.startsWith("."))) continue;
+    if (n.name === TRASH_DIR || isReservedName(n.name) || (!hidden && n.name.startsWith("."))) continue;
     if (slice.length >= MAX_LIST) {
       truncated = true;
       break;
@@ -215,7 +214,7 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
   };
   let chunk: Dirent[] = [];
   for await (const d of direntsOf(r.real)) {
-    if (d.name === TRASH_DIR || (!hidden && d.name.startsWith("."))) continue;
+    if (d.name === TRASH_DIR || isReservedName(d.name) || (!hidden && d.name.startsWith("."))) continue;
     chunk.push(d);
     if (chunk.length >= 4096) {
       await flush(chunk);
@@ -320,9 +319,9 @@ export function streamFile(f: Pick<Opened, "fh">, range?: { start: number; end: 
 
 export async function mkdir(root: string, p: string) {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(409, "already exists");
-  await pinParent(root, r.real, (at) => fs.mkdir(at));
+  await pinParentW(root, r.real, (at) => fs.mkdir(at), false);
   return r.virtual;
 }
 
@@ -334,10 +333,10 @@ export async function mkdir(root: string, p: string) {
  */
 export async function symlink(root: string, p: string, target: string, overwrite = false) {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(409, "already exists");
   if (typeof target !== "string" || target === "" || target.includes("\0") || target.length > 4096) throw new FsError(400, "invalid link target");
-  await pinParent(root, r.real, async (at) => {
+  await pinParentW(root, r.real, async (at) => {
     const cur = await fs.lstat(at).catch(() => null);
     if (!cur) return fs.symlink(target, at);
     if (!overwrite) throw new FsError(409, "already exists");
@@ -350,15 +349,15 @@ export async function symlink(root: string, p: string, target: string, overwrite
       await fs.rm(tmp, { force: true });
       throw e;
     }
-  });
+  }, false);
   return stat(root, r.virtual);
 }
 
 export async function rename(root: string, from: string, to: string, overwrite = false) {
   const a = resolveWrite(root, from);
   const b = resolveWrite(root, to);
-  assertNotTrash(a.virtual);
-  assertNotTrash(b.virtual);
+  assertNotReserved(a.virtual);
+  assertNotReserved(b.virtual);
   if (a.virtual === "/" || b.virtual === "/") throw new FsError(400, "cannot move root");
   if (b.virtual === a.virtual) return b.virtual;
   if (b.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot move into itself");
@@ -368,7 +367,7 @@ export async function rename(root: string, from: string, to: string, overwrite =
     if (!(await isCaseChange(a.real, b.real))) throw new FsError(409, "destination exists");
     caseOnly = true;
   }
-  await pinParent(root, a.real, (from) => pinParent(root, b.real, (to) => (caseOnly ? moveCaseOnly(from, to) : moveReal(from, to, overwrite))));
+  await pinParentW(root, a.real, (from) => pinParentW(root, b.real, (to) => (caseOnly ? moveCaseOnly(from, to) : moveReal(from, to, overwrite, root))));
   return b.virtual;
 }
 
@@ -397,7 +396,7 @@ async function moveCaseOnly(from: string, to: string) {
 }
 
 /** rename(2), falling back to copy-beside + swap + remove when source and destination are on different devices. */
-export async function moveReal(from: string, to: string, overwrite: boolean) {
+export async function moveReal(from: string, to: string, overwrite: boolean, root: string) {
   try {
     await fs.rename(from, to);
   } catch (e) {
@@ -405,28 +404,23 @@ export async function moveReal(from: string, to: string, overwrite: boolean) {
     // Copy beside the destination first so a failure midway leaves nothing
     // at the real name and the temp tree can be removed; the source is only
     // deleted once the copy is complete and in place.
-    const tmp = path.join(path.dirname(to), tempName(path.basename(to), `.filedeck-part-${randomUUID()}`));
-    try {
-      await fs.cp(from, tmp, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, preserveTimestamps: true });
-      await copyMeta(from, tmp); // a move keeps owner and times of every entry, as rename(2) does
-      if (overwrite) await fs.rm(to, { recursive: true, force: true });
-      await fs.rename(tmp, to);
-    } catch (err) {
-      await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
-      throw err;
-    }
-    await fs.rm(from, { recursive: true, force: true });
+    // Built in a private staging folder beside the destination and moved into place with one rename. A move keeps owner and
+    // times of every entry, as rename(2) does. `from` and `to` have pinned parents; the walks hold every folder they enter.
+    const guard = walkGuard(root);
+    await withStaging(path.dirname(to), async (stage) => {
+      const built = stagedEntry(stage);
+      const left: string[] = [];
+      await copyTree(from, built, { times: true, owner: true, skipped: left });
+      // What the copy leaves out (another volume's trash store, a working folder in use) would be lost with the source: keep the source instead.
+      if (left.length) throw new FsError(409, "cannot be moved to another volume: it holds a trash store or working folder with content");
+      if (overwrite) {
+        await assertWritableAt(root, path.dirname(to), path.basename(to), true); // where `to` really is, and what it holds
+        await rmTree(to, { force: true, guard });
+      }
+      await fs.rename(built, to);
+    });
+    await rmTree(from, { force: true, guard });
   }
-}
-
-/** Give every entry of the copy at `to` the owner and times of the one at `from` (best effort: changing the owner needs privilege). */
-async function copyMeta(from: string, to: string): Promise<void> {
-  const st = await fs.lstat(from);
-  if (st.isDirectory()) {
-    for (const n of await fs.readdir(from)) await copyMeta(path.join(from, n), path.join(to, n));
-  }
-  await fs.lchown(to, st.uid, st.gid).catch(() => undefined);
-  await fs.lutimes(to, st.atime, st.mtime).catch(() => undefined);
 }
 
 export async function exists(real: string) {
@@ -480,41 +474,42 @@ export interface CopyOpts {
 export async function copy(root: string, from: string, toDir: string, opts: CopyOpts = {}) {
   const a = resolveWrite(root, from);
   const d = resolveRead(root, toDir);
-  assertNotTrash(a.virtual);
-  assertNotTrash(d.virtual);
+  assertNotReserved(a.virtual);
+  assertNotReserved(d.virtual);
   if (a.virtual === "/") throw new FsError(400, "cannot copy root");
   if (d.virtual === a.virtual || d.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot copy into itself");
-  const cpOpts = { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true, preserveTimestamps: opts.preserveTimes === true };
-  if (!opts.overwrite) {
-    // Copy beside the destination and put it in place whole: a failed copy leaves nothing under the real name.
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const name = await uniqueName(d.real, path.basename(a.real));
-      const tmp = path.join(d.real, tempName(name, `.filedeck-part-${randomUUID()}`));
-      try {
-        await fs.cp(a.real, tmp, cpOpts);
-        await placeNew(tmp, path.join(d.real, name));
-        return virtualJoin(d.virtual, name);
-      } catch (e) {
-        await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 4) throw e; // somebody took the name meanwhile: pick another
-      }
-    }
-  }
-  const name = path.basename(a.real);
-  const dest = path.join(d.real, name);
-  if (dest === a.real) throw new FsError(400, "source and destination are the same");
-  // Copy beside the destination, then swap in: a failed copy never damages the existing file.
-  const tmp = path.join(d.real, tempName(name, `.filedeck-part-${randomUUID()}`));
-  try {
-    await fs.cp(a.real, tmp, cpOpts);
-    const [src, cur] = [await fs.lstat(tmp), await fs.lstat(dest).catch(() => null)];
-    if (cur && !(src.isFile() && cur.isFile())) await fs.rm(dest, { recursive: true, force: true });
-    await fs.rename(tmp, dest);
-  } catch (e) {
-    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
-    throw e;
-  }
-  return virtualJoin(d.virtual, name);
+  const tree = { times: opts.preserveTimes === true };
+  const name0 = path.basename(a.real);
+  if (opts.overwrite && path.join(d.real, name0) === a.real) throw new FsError(400, "source and destination are the same");
+  // Both folders are pinned and every folder the copy enters is held, so nothing below can be swapped for a link mid-copy.
+  return pinDirW(root, d.real, (dstAt) =>
+    pinParent(root, a.real, (srcPath) =>
+      // Built in a private staging folder inside the destination folder and moved into place whole: a failed copy leaves nothing under the real name.
+      withStaging(dstAt, async (stage) => {
+        const built = stagedEntry(stage);
+        await copyTree(srcPath, built, tree);
+        if (!opts.overwrite) {
+          for (let attempt = 0; ; attempt++) {
+            const name = await uniqueName(dstAt, name0);
+            await assertWritableAt(root, dstAt, name, false);
+            try {
+              await placeNew(built, path.join(dstAt, name));
+              return virtualJoin(d.virtual, name);
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 4) throw e; // somebody took the name meanwhile: pick another
+            }
+          }
+        }
+        const dest = path.join(dstAt, name0);
+        // The entry that is replaced, where it really is now: it may be, or hold, a read-only folder (the destination folder could have been swapped for a link after the request was checked).
+        await assertWritableAt(root, dstAt, name0, true);
+        const [src, cur] = [await fs.lstat(built), await fs.lstat(dest).catch(() => null)];
+        if (cur && !(src.isFile() && cur.isFile())) await rmTree(dest, { force: true, guard: walkGuard(root) });
+        await fs.rename(built, dest);
+        return virtualJoin(d.virtual, name0);
+      }),
+    ),
+  );
 }
 
 export async function move(root: string, from: string, toDir: string) {
@@ -546,7 +541,7 @@ export interface TrashMeta {
 
 export async function trash(root: string, p: string): Promise<TrashMeta> {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "cannot trash root");
   const st = await fs.lstat(r.real);
   const vol = await volumeRoot(path.dirname(r.real), root);
@@ -564,9 +559,9 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   await fs.mkdir(path.join(dir, id));
   await fs.writeFile(path.join(dir, id, "meta.json"), JSON.stringify(meta));
   try {
-    await pinParent(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
+    await pinParentW(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
   } catch (e) {
-    await fs.rm(path.join(dir, id), { recursive: true, force: true }).catch(() => undefined); // no ghost item without data
+    await pinDirW(root, dir, (at) => rmTree(path.join(at, id), { force: true })).catch(() => undefined); // no ghost item without data
     throw e;
   }
   return meta;
@@ -574,9 +569,9 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
 
 export async function permanentDelete(root: string, p: string) {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "cannot delete root");
-  await pinParent(root, r.real, (at) => fs.rm(at, { recursive: true }));
+  await pinParentW(root, r.real, (at) => rmTree(at, { guard: walkGuard(root) }));
 }
 
 export async function upload(
@@ -589,11 +584,12 @@ export async function upload(
   mtimeMs?: number,
 ) {
   const d = resolveRead(root, dir);
-  assertNotTrash(d.virtual);
+  assertNotReserved(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name));
-  assertNotTrash(target.virtual); // a file may not take the name of the trash store
+  assertNotReserved(target.virtual); // a file may not take the name of the trash store
   // Work through the pinned destination folder so it cannot be swapped for a link mid-upload.
-  return pinDir(root, d.real, async (at) => {
+  return pinDirW(root, d.real, async (at) => {
+    await assertWritableAt(root, at, path.basename(target.real), false); // the file that may be replaced, where it really is
     const dest = path.join(at, path.basename(target.real));
     if (!overwrite && (await exists(dest))) {
       body.resume();
@@ -659,11 +655,12 @@ export async function readText(root: string, p: string, maxBytes = MAX_EDIT) {
  */
 export async function writeText(root: string, p: string, body: Buffer, ifMatch: string | null, maxBytes = MAX_EDIT) {
   const r = resolveRead(root, p); // follow a final symlink, confined to root
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "is a directory");
   if (body.length > maxBytes) throw new FsError(413, "content too large");
   assertText(body);
-  return pinDir(root, path.dirname(r.real), async (dir) => {
+  return pinDirW(root, path.dirname(r.real), async (dir) => {
+    await assertWritableAt(root, dir, path.basename(r.real), false);
     const at = path.join(dir, path.basename(r.real));
     let cur: Awaited<ReturnType<typeof fs.stat>> | null = null;
     try {
