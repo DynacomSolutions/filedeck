@@ -56,10 +56,28 @@ export interface SzProc {
 }
 
 /** Run 7zz with the password (if any) on stdin; `text` is a bounded, scrubbed tail of stderr + stdout noise. */
-export function runSz(args: string[], opts: { cwd?: string; password?: string; signal?: AbortSignal; onLine?: (l: string) => void; stdinExtra?: string } = {}): SzProc {
+export function runSz(
+  args: string[],
+  opts: {
+    cwd?: string;
+    password?: string;
+    signal?: AbortSignal;
+    onLine?: (l: string) => void;
+    stdinExtra?: string;
+    /** an open file handed to 7-Zip as descriptor 3 (read it as /dev/fd/3): the archive, opened and checked by the caller */
+    fd?: number;
+    /** run as this user and group, supplementary groups cleared (only effective when the agent is root) */
+    runAs?: { uid: number; gid: number };
+  } = {},
+): SzProc {
   // 7-Zip sizes its thread pool from the host's core count (128 here), not the pod's CPU limit; two threads is plenty.
   const withThreads = [args[0]!, "-mmt=2", ...args.slice(1)];
-  const child = spawn(sevenZip(), withThreads, { cwd: opts.cwd, env: ENV, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(sevenZip(), withThreads, {
+    cwd: opts.cwd,
+    env: ENV,
+    stdio: opts.fd === undefined ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", opts.fd],
+    ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid } : {}),
+  });
   const stdin = child.stdin as Writable;
   stdin.on("error", () => undefined);
   // two lines: 7-Zip asks twice when creating an encrypted archive
@@ -146,7 +164,7 @@ export interface SzList {
 }
 
 /** List an archive with 7-Zip. Throws PasswordError when a password is needed or wrong (header-encrypted 7z). */
-export async function listSz(real: string, password: string | undefined, signal: AbortSignal, limit = Infinity): Promise<SzList> {
+export async function listSz(real: string, password: string | undefined, signal: AbortSignal, limit = Infinity, via?: { fd: number; type?: string }): Promise<SzList> {
   const entries: SzEntry[] = [];
   let buf = "";
   let stopped = false;
@@ -170,9 +188,10 @@ export async function listSz(real: string, password: string | undefined, signal:
       }
     } else entries.push(e);
   };
-  proc = runSz(["l", "-slt", "-ba", "-spd", "--", real], {
+  proc = runSz(["l", "-slt", "-ba", "-spd", ...(via?.type ? [`-t${via.type}`] : []), "--", via ? "/dev/fd/3" : real], {
     password,
     signal,
+    fd: via?.fd,
     onLine: (l) => {
       if (l === "") {
         if (buf) push(buf);

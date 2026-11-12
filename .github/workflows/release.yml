@@ -71,7 +71,7 @@ jobs:
           npm run typecheck
           npm test -w web
           npm run build
-          (cd server && node --import tsx --test --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
+          (cd server && node --import tsx --test --test-timeout=120000 --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
           npm run check:neutral
         timeout-minutes: 20
 

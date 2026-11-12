@@ -5,7 +5,7 @@ import { watch } from "node:fs";
 import path from "node:path";
 import { Semaphore, hashFile, walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
 import { IndexCache, spillPath, type DirReader, type IdxEntry } from "./index-cache.ts";
-import { TRASH_DIR, resolveRead } from "./paths.ts";
+import { isReservedName, resolveRead } from "./paths.ts";
 import { FsError } from "./fsops.ts";
 import type { Config } from "./config.ts";
 
@@ -18,7 +18,7 @@ export function localReader(): DirReader {
       return { ino: st.ino, mtime: st.mtimeMs };
     },
     async readDir(p) {
-      const names = (await fs.readdir(p)).filter((n) => n !== TRASH_DIR);
+      const names = (await fs.readdir(p)).filter((n) => !isReservedName(n));
       const out: IdxEntry[] = [];
       for (let i = 0; i < names.length; i += 32) {
         const got = await Promise.all(
