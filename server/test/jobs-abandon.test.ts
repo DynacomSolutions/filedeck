@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { Jobs } from "../src/jobs.ts";
+import { Jobs, jobsHooks } from "../src/jobs.ts";
 import { JobStore, type JobRow } from "../src/job-store.ts";
 import { SizeStore } from "../src/size-store.ts";
 import { run as duRun, type RunIo } from "../src/du-cli.ts";
@@ -167,11 +167,17 @@ test("a poll through another process writes the shared store at most once a seco
   A.abandonMs = B.abandonMs = 60_000;
   const j1 = A.create("du", "t", async () => 1, undefined, never, { origin: "cli", params: { path: "/x", fresh: false } });
   const j2 = A.create("du", "t", async () => 1, undefined, never, { origin: "cli", params: { path: "/y", fresh: false } });
-  const t0 = Date.now();
-  while (Date.now() - t0 < 1300) {
-    B.touch(j1.id);
-    B.touch(j2.id);
-    await sleep(20);
+  // a clock of the test's own: 1300 ms of polls every 20 ms, without waiting for them
+  let clock = 1_000_000;
+  const realNow = jobsHooks.now;
+  jobsHooks.now = () => clock;
+  try {
+    for (const end = clock + 1300; clock < end; clock += 20) {
+      B.touch(j1.id);
+      B.touch(j2.id);
+    }
+  } finally {
+    jobsHooks.now = realNow;
   }
   assert.ok(writes.filter((x) => x === j1.id).length >= 2 && writes.filter((x) => x === j1.id).length <= 3, writes.length + " writes for job 1");
   assert.ok(writes.filter((x) => x === j2.id).length >= 2 && writes.filter((x) => x === j2.id).length <= 3, "per job id");

@@ -82,6 +82,9 @@ const rowView = (r: JobRow): JobView => {
   return v.origin ? v : { ...v, origin: r.kind === "du" ? "cli" : "ui" };
 };
 
+/** Seam for tests: the clock `Jobs.touch` reads for its once-a-second limit on shared writes (the default is the real clock). */
+export const jobsHooks = { now: (): number => Date.now() };
+
 /** Background job queue: bounded concurrency, progress, cancel. In memory, or shared through a JobStore: bounded concurrency, progress, cancel. */
 export class Jobs {
   private jobs = new Map<string, Job>();
@@ -114,7 +117,7 @@ export class Jobs {
 
   /** A client waits on or polls this job: it is not abandoned. A job another process owns is recorded in the shared store, where its owner reads it. */
   touch(id: string) {
-    const now = Date.now();
+    const now = jobsHooks.now();
     const j = this.jobs.get(id);
     if (j) {
       j.seenAt = now;
