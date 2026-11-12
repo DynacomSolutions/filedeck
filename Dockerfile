@@ -9,6 +9,8 @@ RUN apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
 RUN apk add --no-cache gcc musl-dev linux-headers
 COPY server/native server/native
 RUN gcc -O2 -Wall -static -o /usr/local/bin/filedeck-fanwatch server/native/filedeck-fanwatch.c
+# The launcher that confines helper programs (git, archive tools) to the folders they are given (Landlock, server/src/sandbox.ts).
+RUN gcc -O2 -Wall -static -o /usr/local/bin/filedeck-sandbox server/native/filedeck-sandbox.c
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY server/package.json server/
 COPY web/package.json web/
@@ -17,11 +19,13 @@ COPY server server
 COPY web web
 RUN npm run typecheck \
  && npm run build \
- && FILEDECK_REQUIRE_SMBCLIENT=1 npm test && npm prune --omit=dev --workspace=server
+ && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SMBCLIENT=1 npm test && npm prune --omit=dev --workspace=server
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # libuv's file pool (4 threads by default) is the limit on parallel stat calls; the size walk keeps up to 32 in flight
 ENV NODE_ENV=production FILEDECK_STATIC=/app/web PORT=8080 UV_THREADPOOL_SIZE=64
+# The image does not fall back to unconfined helper programs: without Landlock the Git features answer an error (see the README, "Sandbox").
+ENV FILEDECK_SANDBOX=require
 WORKDIR /app
 # libarchive's bsdtar does zip/tar.*/7z encode and decode for the archive jobs, 7zip (7zz) the password-protected
 # (AES-256 zip, 7z with header encryption) and split-volume archives;
@@ -34,6 +38,8 @@ WORKDIR /app
 RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
 # fanotify helper: only started when the chart's agent.fanotify.enabled sets FILEDECK_FANWATCH (it needs CAP_SYS_ADMIN).
 COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwatch
+# Sandbox launcher: used for every Git command when the kernel has Landlock (FILEDECK_SANDBOX, default auto).
+COPY --from=build /usr/local/bin/filedeck-sandbox /usr/local/bin/filedeck-sandbox
 COPY --from=build /src/node_modules node_modules
 # Dependencies npm could not hoist to the root (a version the web workspace does not share) live beside the server.
 COPY --from=build /src/server/node_modules server/node_modules
