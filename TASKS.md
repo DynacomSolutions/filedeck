@@ -165,7 +165,7 @@ ETA: 2026-11-01 01:00 ICT
 
 ## 13. Request and filesystem hardening
 Findings from the 12 November 2026 review: request handling, read-only volumes, git and search inputs, and operations that must stay inside the root.
-ETA: 2026-11-13 07:00 ICT
+ETA: 2026-11-13 05:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | done | claude-20261112-rv-hub | rv-request-guard | | | Merged https://github.com/DynacomSolutions/filedeck/pull/188, CI green, independent review clean on second pass<br>JSON bodies capped at 16 MiB; refused requests are audited |
@@ -181,7 +181,7 @@ ETA: 2026-11-13 07:00 ICT
 | 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | done | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | | Merged https://github.com/DynacomSolutions/filedeck/pull/206, CI green<br>Found and fixed: final image lacked server dependencies and crashed at start<br>Cold build 4m31s |
 | 132 | Archive tools run inside the read sandbox, limited to the pinned source folder | done | claude-20261112-rv-archives | rv-archive-sandbox | 13.106, 13.108 | | Merged https://github.com/DynacomSolutions/filedeck/pull/210, CI green, five independent review rounds<br>Tools run without root capabilities; a default chart install is tested<br>7-Zip compression can read the whole source folder |
 | 133 | Git and search follow-ups: worktree lock text, launcher errors, search gate, compare skips | done | claude-20261112-rv-search-git | rv-git-search-followup | 13.106, 13.107 | | Merged https://github.com/DynacomSolutions/filedeck/pull/208, CI green, four review passes<br>Sandbox also refuses sockets; forwarded addresses need FILEDECK_TRUSTED_PROXIES<br>Default search gate is 3 |
-| 136 | Review follow-ups: interrupted move and copy, rename without replace, worktree paths in root | in_review | claude-20261113-rv-fsops-notes | rv-fsops-notes | 13.109, 13.133 | 2026-11-13 07:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/213<br>Two review rounds: seven points, then four notes, all reworked<br>The trash view shows the warning of a restore whose trash copy stays<br>Final check and CI in progress |
+| 136 | Review follow-ups: interrupted move and copy, rename without replace, worktree paths in root | done | claude-20261113-rv-fsops-notes | rv-fsops-notes | 13.109, 13.133 | | Merged https://github.com/DynacomSolutions/filedeck/pull/213, CI green, three review passes<br>A move that cannot remove its source says what is where; no replace of an item that appeared late<br>A long-stopped copy fails and keeps the source; worktree locations must lie in the served root<br>The skip gate matches whole skip texts; a restore that leaves its trash copy says so |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
@@ -217,7 +217,7 @@ ETA: 2026-11-12 15:00 ICT
 
 ## 17. Keyboard and screen reader access
 Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and AA.
-ETA: 2026-11-13 08:30 ICT
+ETA: 2026-11-13 06:30 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | done | claude-20261112-rv-panel | rv-list-access | 15.118 | | Merged https://github.com/DynacomSolutions/filedeck/pull/203, CI green<br>Panels switch with Alt+PageDown and Alt+PageUp; F6 unchanged<br>Not checked with a screen reader |
@@ -225,4 +225,4 @@ ETA: 2026-11-13 08:30 ICT
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
 | 127 | Component roles, names and announcements | done | claude-20261112-rv-components | rv-aria-announce | 15.121 | | Merged https://github.com/DynacomSolutions/filedeck/pull/202, CI green<br>Long selections download through a one-use ticket<br>axe clean at 1440 and 390 px |
 | 128 | Browser acceptance checks repaired and run in CI; audit document updated | done | claude-20261112-rv-acceptance | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Merged https://github.com/DynacomSolutions/filedeck/pull/207, CI green<br>30 checks in about 70 s; browser job 2m09s<br>Three defects it found are 15.134 |
-| 129 | Release v0.3.36 with the review fixes | todo | | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | After every row above is merged |
+| 129 | Release v0.3.36 with the review fixes | in_progress | claude-20261113-release-v0336 | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | 2026-11-13 06:30 ICT | 34 pull requests merged (180 to 213)<br>Release pull request, then the tag and the Release workflow |
