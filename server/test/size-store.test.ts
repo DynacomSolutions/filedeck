@@ -43,7 +43,7 @@ after(async () => {
 async function countReaddir(fn: () => Promise<unknown>): Promise<number> {
   const orig = fsp.readdir;
   let n = 0;
-  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (n++, (orig as (...x: unknown[]) => unknown)(...a));
+  (fsp as { readdir: unknown }).readdir = (...a: unknown[]) => (n++, console.log("# READDIR", String(a[0]), new Error().stack!.split("\n").slice(2, 7).join(" | ")), (orig as (...x: unknown[]) => unknown)(...a));
   try {
     await fn();
   } finally {
