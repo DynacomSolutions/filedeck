@@ -661,5 +661,5 @@ liveRoot("keepCaps (read-search, or override where that is what the agent holds)
   assert.match(r.stdout, /INSIDE/, r.stderr);
   assert.doesNotMatch(r.stdout, /OUTSIDE/);
   assert.match(r.stdout, /status=1/);
-  assert.match(r.stdout, /write=1/);
+  assert.match(r.stdout, /write=[12]/);
 });

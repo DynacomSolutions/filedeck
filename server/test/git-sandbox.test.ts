@@ -215,7 +215,7 @@ test("as root, Git runs as the owner of the git directory (the privilege drop)",
   assert.match(res.stdout, /branch\.head main/);
 });
 
-test("as root, a root-owned repository the unprivileged user cannot read is read with only the read-search capability (never as root)", async (t) => {
+test("as root, a root-owned repository the unprivileged user cannot read is read by the agent's own user with no capability", async (t) => {
   if (process.getuid?.() !== 0) return t.skip("git sandbox live: skipped (not running as root)");
   if (!landlock()) return t.skip(`git sandbox live: skipped (${box.why})`);
   const d = mk("rootowned-private");

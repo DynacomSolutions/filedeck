@@ -241,7 +241,7 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
     // no launcher (a development start without the helper): the folder by its current path, and the drop by spawn's own uid and gid (Node/libuv
     // clears the supplementary groups itself when a gid is given; the root-only test in sandbox.test.ts checks `id -G`); the kept descriptors are inherited as they are
     const cwd = cwdFd !== undefined ? await fs.readlink(`/proc/self/fd/${cwdFd}`).catch(() => rest.cwd) : rest.cwd;
-    return spawn(cmd, args, { ...rest, ...(cwd !== undefined ? { cwd } : {}), stdio: kept.length ? (fds as SpawnOptions["stdio"]) : std, ...(owner ? owner : {}) });
+    return spawn(cmd, args, { ...rest, ...(cwd !== undefined ? { cwd } : {}), stdio: kept.length ? (fds as SpawnOptions["stdio"]) : std, ...(owner && !keepCaps.length ? owner : {}) }); // a capability cannot be handed on without the launcher: the tool then stays the agent's own user
   }
   const flags: string[] = [];
   for (const k of kept) flags.push("--keep-fd", String(k));
