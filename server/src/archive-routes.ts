@@ -12,7 +12,8 @@ import { extractBlocked, hitsReadOnly, jobMayWrite } from "./readonly.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import { ZipTickets } from "./zip-tickets.ts";
-import { toolGate } from "./tool-gate.ts";
+import { downloadGate, listGate } from "./tool-gate.ts";
+import { clientKey } from "./search.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -77,9 +78,16 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.get("/api/archive/list", async (c) => {
     const lim = Number(c.req.query("limit"));
-    const { passwordUsed, ...res } = await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c));
+    const slot = await listGate.acquire(c.req.raw.signal, clientKey(c, cfg.agentToken)); // a listing is never held up by downloads: its own pool
+    let res: Awaited<ReturnType<typeof ar.listArchive>>;
+    try {
+      res = await ar.listArchive(root, c.req.query("path") ?? "", Number.isInteger(lim) && lim > 0 && lim <= 5000 ? lim : 5000, pw(c));
+    } finally {
+      slot.release();
+    }
+    const { passwordUsed, ...rest } = res;
     // tells the hub the password was needed and right (so it may save it); stripped before the client sees it
-    return c.json(res, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
+    return c.json(rest, 200, passwordUsed ? { "x-filedeck-pw": "ok" } : {});
   });
 
   // Device, inode and size identity of a file (the device keeps two volumes' equal inode numbers apart), so the hub's vault can find a saved password after a rename or move.
@@ -111,8 +119,9 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     };
     if (c.req.method === "HEAD") return new Response(null, { headers });
     await ar.assertSandboxUsable();
-    const slot = await toolGate.acquire(c.req.raw.signal); // a full gate answers 429 here, before the response starts
-    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root, slot });
+    const client = clientKey(c, cfg.agentToken);
+    const slot = await downloadGate.acquire(c.req.raw.signal, client); // a client over its own limit (or a full pool) is answered 429 here, before the response starts
+    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root, slot, client });
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
   });
   app.post("/api/fs/zip-ticket", async (c) => {
@@ -156,11 +165,17 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.post("/api/jobs/extract", async (c) => {
     const b = await body<{ path?: string; destDir?: string; subfolder?: boolean; overwrite?: string; entries?: string[] }>(c);
-    const plan = await ar.prepareExtract(root, str(b.path, "path"), str(b.destDir, "destDir"), b.subfolder !== false, {
-      overwrite: b.overwrite as ar.OverwritePolicy | undefined,
-      entries: b.entries === undefined ? [] : strs(b.entries, "entries"),
-      password: pw(c),
-    });
+    const slot = await listGate.acquire(c.req.raw.signal, clientKey(c, cfg.agentToken)); // preparing reads the archive's listing (and checks a password): the listing pool
+    let plan: Awaited<ReturnType<typeof ar.prepareExtract>>;
+    try {
+      plan = await ar.prepareExtract(root, str(b.path, "path"), str(b.destDir, "destDir"), b.subfolder !== false, {
+        overwrite: b.overwrite as ar.OverwritePolicy | undefined,
+        entries: b.entries === undefined ? [] : strs(b.entries, "entries"),
+        password: pw(c),
+      });
+    } finally {
+      slot.release();
+    }
     // judged on the resolved destination and the real archive name, which are what the extraction will use
     if (extractBlocked(root, cfg.readOnly, plan, ar.archiveBase)) throw new ops.FsError(403, "read-only volume");
     const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => runExtract(plan, ctl));

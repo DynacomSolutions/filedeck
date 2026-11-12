@@ -23,8 +23,8 @@
  *   --keep-cap NAME  keep this Linux capability for COMMAND (repeatable; `dac_read_search`: read any file and search any folder by the
  *               file's mode; `dac_override`: the same and write too, for a container that does not hold the first, as the usual container
  *               defaults do not; Landlock still limits both to the roots). Every other capability is removed in every
- *               case, also when COMMAND runs as uid 0: the permitted, effective, inheritable and ambient sets are cleared and the
- *               bounding set is emptied (when this process may). The caller must hold a capability to keep it, else the helper fails.
+ *               case, also when COMMAND runs as uid 0: the permitted, effective, inheritable and ambient sets are cleared (and checked) and
+ *               the bounding set is emptied when this process may; no-new-privileges keeps an exec from raising the permitted set again. The caller must hold a capability to keep it, else the helper fails.
  *   --allow-metadata  do not refuse the calls that change modes, owners, times and extended attributes (see the seccomp note below).
  * Before it executes COMMAND the helper drops to --uid/--gid with the supplementary groups cleared (when given; both must be
  * whole non-negative numbers, and 0 is refused unless --allow-root-user is also given), sets no-new-privileges and applies a
@@ -289,8 +289,8 @@ static int cap_set_all(uint64_t set) {
   return (int)syscall(__NR_capset, &h, d);
 }
 
-/* Empty the bounding set but for `keep` (a root process gets its bounding set back as capabilities at exec, so for uid 0 this matters most).
- * Returns the number of capabilities of the set that are still in it (those that could not be dropped for lack of CAP_SETPCAP). */
+/* Empty the bounding set but for `keep`, as far as this process may (best effort: it needs CAP_SETPCAP, which a container may not grant).
+ * Returns the number of capabilities that are still in it. */
 static int drop_bounding(uint64_t keep) {
   int left = 0;
   for (int c = 0; c <= SB_CAP_LAST; c++) {
@@ -417,7 +417,7 @@ static int build_filter(struct sock_filter *f, int allow_sockets, int allow_meta
   }
   f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone3, (uint8_t)(t_enosys - k - 1), 0);
   k++;
-  f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone, 0, 2);
+  f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone, 0, 2); /* not clone: skip the load and the flag test, onto ALLOW (a jump of 2 from here lands two after the next instruction) */
   f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
   f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, SB_NS_FLAGS, (uint8_t)(t_eperm - k - 1), 0);
   k++;
@@ -702,10 +702,17 @@ int main(int argc, char **argv) {
     return EXIT_FAILED;
   }
   prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0);
-  if (bounding_left > 0 && geteuid() == 0) { /* root would get capabilities back at exec */
-    fprintf(stderr, "filedeck-sandbox: cannot empty the capability bounding set, and the program would run as root\n");
-    return EXIT_FAILED;
+  /* The sets must be exactly what was asked. (The bounding set is shrunk only as far as this process may: without CAP_SETPCAP it stays as it
+   * is. That does not give a uid-0 program capabilities back at exec, because no-new-privileges, set next, stops an exec from raising the
+   * permitted set above what the process holds, and it holds `keep_caps` only.) */
+  {
+    uint64_t e = ~0ULL, p = ~0ULL, in = ~0ULL;
+    if (cap_get(&e, &p, &in) < 0 || e != keep_caps || p != keep_caps || in != keep_caps) {
+      fprintf(stderr, "filedeck-sandbox: capability sets are not what was asked (effective 0x%llx permitted 0x%llx inheritable 0x%llx)\n", (unsigned long long)e, (unsigned long long)p, (unsigned long long)in);
+      return EXIT_FAILED;
+    }
   }
+  (void)bounding_left;
   if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
     fprintf(stderr, "filedeck-sandbox: no_new_privs: %s\n", strerror(errno));
     return EXIT_FAILED;

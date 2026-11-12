@@ -11,7 +11,7 @@ import { haveSevenZip, runSz, szReadArgs } from "../src/sevenzip.ts";
 import { GRANT_LIMIT, MAX_SELECTED, archiveUser, grantHooks, zipLimits, listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, spawnBsdtar, zipStream } from "../src/archive.ts";
 import { readerCapability, resetSandbox, sandboxInfo, spawnSandboxed } from "../src/sandbox.ts";
 import type { JobCtl } from "../src/jobs.ts";
-import { ToolGate, toolGate } from "../src/tool-gate.ts";
+import { ToolGate, downloadGate } from "../src/tool-gate.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
 /**
@@ -780,35 +780,80 @@ live("a download nobody reads is ended after the stall time and gives its slot b
       z.on("close", () => resolve(undefined));
     });
     assert.match(String(err), /not read in time/);
-    await until(() => toolGate.running === 0, "the tool gate to be empty");
+    await until(() => downloadGate.running === 0, "the tool gate to be empty");
   } finally {
     zipLimits.stallMs = save;
   }
 });
 
-test("the tool gate runs a few at a time, queues some, and answers 429 beyond that or after a wait", async () => {
-  const g = new ToolGate({ concurrency: 2, queue: 1, waitMs: 150 });
-  const a = await g.acquire();
-  const b = await g.acquire();
-  const waiter = g.acquire();
-  await assert.rejects(g.acquire(), (e: { status?: number }) => e.status === 429); // queue full
-  a.release();
-  const c = await waiter; // the freed slot passes on
-  assert.equal(g.running, 2);
-  const late = g.acquire();
-  await assert.rejects(late, (e: { status?: number }) => e.status === 429); // waited for nothing
-  b.release();
-  b.release(); // idempotent
-  c.release();
+test("a gate runs a few at a time, queues some, refuses a client over its own limit at once, and answers 429 when busy", async () => {
+  const g = new ToolGate({ concurrency: 3, perClient: 2, queue: 1, waitMs: 150, what: "things" });
+  const a1 = await g.acquire(undefined, "a");
+  const a2 = await g.acquire(undefined, "a");
+  await assert.rejects(g.acquire(undefined, "a"), (e: { status?: number; message?: string }) => e.status === 429 && /already have 2 things running/.test(e.message ?? "")); // its own limit, at once
+  const b1 = await g.acquire(undefined, "b"); // another client is not affected
+  const waiter = g.acquire(undefined, "b");
+  await assert.rejects(g.acquire(undefined, "c"), (e: { status?: number }) => e.status === 429); // the wait queue is full
+  a1.release();
+  const b2 = await waiter; // the freed slot passes on
+  assert.equal(g.running, 3);
+  const late = g.acquire(undefined, "c");
+  await assert.rejects(late, (e: { status?: number; message?: string }) => e.status === 429 && /busy/.test(e.message ?? "")); // waited for nothing
+  a2.release();
+  a2.release(); // idempotent
+  b1.release();
+  b2.release();
   assert.equal(g.running, 0);
+  assert.equal(g.mine("a"), 0);
   const ac = new AbortController();
-  const x = await g.acquire(), y = await g.acquire();
-  const pending = g.acquire(ac.signal);
+  const x = await g.acquire(undefined, "x"), y = await g.acquire(undefined, "y"), z = await g.acquire(undefined, "z");
+  const pending = g.acquire(ac.signal, "w");
   ac.abort();
   await assert.rejects(pending, (e: { status?: number }) => e.status === 400);
   x.release();
   y.release();
+  z.release();
   assert.equal(g.queued, 0);
+});
+
+live("unread downloads of one client cannot starve another client, a listing, or a compression job; the client's own 9th download is told why", async () => {
+  const s = scene("gate-starve");
+  fs.writeFileSync(path.join(s.src, "big.bin"), randomBytes(6 << 20)); // large and incompressible, so an unread download keeps its tool
+  fs.writeFileSync(path.join(s.src, "small.txt"), "small");
+  spawnSync("bsdtar", ["-cf", path.join(s.root, "a.tar"), "-C", s.src, "small.txt"], { timeout: 30_000 });
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: s.root, FILEDECK_NODE: "t", FILEDECK_AGENT_TOKEN: "tok" } as never));
+  const hdr = (client: string) => ({ headers: { authorization: "Bearer tok", "x-filedeck-client": client } });
+  const held: Response[] = [];
+  try {
+    const dl = (client: string) => Promise.resolve(app.request("/api/fs/zip?dir=/src&name=big.bin", hdr(client)));
+    for (let i = 0; i < 8; i++) {
+      const r = await dl("10.9.0.1");
+      assert.equal(r.status, 200, `download ${i + 1} of the client`);
+      held.push(r);
+    }
+    const ninth = await dl("10.9.0.1");
+    assert.equal(ninth.status, 429);
+    assert.match(await ninth.text(), /already have 8 downloads running/);
+    for (let i = 0; i < 16; i++) assert.equal((await dl("10.9.0.1")).status, 429, "more of the same client are refused at once, not queued");
+    const other = await dl("10.9.0.2");
+    assert.equal(other.status, 200, "another client's download still starts");
+    held.push(other);
+    const lst = await app.request("/api/archive/list?path=/a.tar", hdr("10.9.0.1"));
+    assert.equal(lst.status, 200, "a listing is not blocked by downloads, not even of the client that holds them all");
+    const job = await app.request("/api/jobs/compress", { method: "POST", headers: { ...hdr("10.9.0.1").headers, "content-type": "application/json" }, body: JSON.stringify({ dir: "/src", names: ["small.txt"], format: "tar.gz", name: "j", destDir: "/out" }) });
+    assert.equal(job.status, 202);
+    const { id } = (await job.json()) as { id: string };
+    let state = "";
+    for (let i = 0; i < 400 && state !== "done" && state !== "failed"; i++) {
+      state = ((await (await app.request(`/api/jobs/${id}`, hdr("10.9.0.1"))).json()) as { state: string }).state;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(state, "done", "a compression job is never refused for lack of a download slot");
+  } finally {
+    for (const r of held) await r.body?.cancel().catch(() => undefined);
+    await (app as unknown as { close(): Promise<void> }).close();
+  }
+  await until(() => downloadGate.running === 0, "the downloads to be released");
 });
 
 async function until(f: () => boolean, what: string, ms = 20_000) {

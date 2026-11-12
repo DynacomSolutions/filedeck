@@ -4,7 +4,6 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { FsError } from "./fsops.ts";
 import { isLauncherFailure, sandboxInfo, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
-import { toolGate } from "./tool-gate.ts";
 
 /**
  * 7-Zip (`7zz`) backs everything bsdtar cannot do: writing AES-256 zip and 7z
@@ -141,16 +140,7 @@ export async function runSz(
 ): Promise<SzProc> {
   // 7-Zip sizes its thread pool from the host's core count (128 here), not the pod's CPU limit; two threads is plenty.
   const withThreads = [args[0]!, "-mmt=2", ...args.slice(1)];
-  const slot = await toolGate.acquire(opts.signal);
-  let child: ChildProcess;
-  try {
-    child = await spawnSz(withThreads, opts);
-  } catch (e) {
-    slot.release();
-    throw e;
-  }
-  child.once("close", slot.release);
-  child.once("error", slot.release);
+  const child = await spawnSz(withThreads, opts);
   return finishSz(child, opts);
 }
 

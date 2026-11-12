@@ -15,8 +15,8 @@ import type { JobCtl } from "./jobs.ts";
 import { STAGING_PREFIX, TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, SandboxError, failIfLauncher, haveSevenZip, listSz, runSz, szFailure, szReadArgs, validPassword, verifyPassword, type SzSource } from "./sevenzip.ts";
-import { launcherAvailable, readerCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
-import { toolGate, type Slot } from "./tool-gate.ts";
+import { UNPRIVILEGED, launcherAvailable, readerCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
+import { downloadGate, type Slot } from "./tool-gate.ts";
 
 /**
  * Archive support. bsdtar (libarchive) does format decoding/encoding for zip,
@@ -107,23 +107,8 @@ export async function spawnBsdtar(
     scratch?: { fd: number; dir: string };
     /** run as this user and group, supplementary groups cleared (only effective when the agent is root), keeping at most the named capability */
     runAs?: RunAs;
-    /** a slot of the tool gate the caller already holds (the download route takes it before the response starts, so a full gate is a 429); otherwise one is taken here */
-    slot?: Slot;
   } = {},
 ): Promise<ChildProcess> {
-  const slot = opts.slot ?? (await toolGate.acquire());
-  let child: ChildProcess;
-  try {
-    child = await spawnBsdtar1(args, opts);
-  } catch (e) {
-    slot.release();
-    throw e;
-  }
-  child.once("close", slot.release);
-  child.once("error", slot.release);
-  return child;
-}
-function spawnBsdtar1(args: string[], opts: Parameters<typeof spawnBsdtar>[1] = {}): Promise<ChildProcess> {
   return spawnSandboxed(bsdtar(), args, {
     cwd: opts.cwd,
     cwdFd: opts.cwdFd !== undefined && opts.cwdFd >= 0 ? opts.cwdFd : undefined,
@@ -200,6 +185,45 @@ async function toolIdentity(archive?: { name: string; split?: boolean }): Promis
     /* unreadable by name: ask for the capability */
   }
   return readerIdentity();
+}
+
+/**
+ * Start-up self-check (the agent calls it once): starts a harmless program through the launcher as every identity the tools can run as with this
+ * process's real capabilities (the archive user, with and without the capability it would be given, the agent's own user with no capability, and the
+ * unprivileged user Git uses), and logs ONE line: which choice was made, and which identities cannot be started (for example a container whose capability
+ * set lets the launcher neither change user nor clear its capabilities). Returns the failures. Does nothing where there is no launcher or the agent is not root.
+ */
+export async function selfCheckTools(log: (m: string) => void = (m) => console.warn(m)): Promise<string[]> {
+  const info = await sandboxInfo();
+  if (process.getuid?.() !== 0 || info.state === "off" || info.state === "unavailable" || !(await launcherAvailable())) return [];
+  const who = archiveUser();
+  const cap = await readerCapability();
+  const list: { name: string; opts: Parameters<typeof spawnSandboxed>[2] }[] = [
+    { name: "archive user", opts: { uid: who.uid, gid: who.gid } },
+    ...(cap ? [{ name: `archive user with ${cap}`, opts: { uid: who.uid, gid: who.gid, keepCaps: [cap] } }] : []),
+    { name: "agent's own user without capabilities", opts: {} },
+    { name: "git user", opts: { uid: UNPRIVILEGED.uid, gid: UNPRIVILEGED.gid } },
+  ];
+  const failed: string[] = [];
+  for (const t of list) {
+    const r = await new Promise<{ code: number | null; err: string }>((resolve) => {
+      spawnSandboxed("true", [], { ...t.opts, stdio: ["ignore", "ignore", "pipe"] }).then(
+        (c) => {
+          let err = "";
+          c.stderr?.on("data", (d) => (err += d));
+          c.on("error", (e) => resolve({ code: -1, err: String(e) }));
+          c.on("close", (code) => resolve({ code, err: err.trim().split("\n")[0] ?? "" }));
+        },
+        (e) => resolve({ code: -1, err: String(e) }),
+      );
+    });
+    if (r.code !== 0) failed.push(`${t.name} (${r.err || `exit ${r.code}`})`);
+  }
+  log(
+    `archive tools and git, identities: tools that must read what only root can read get ${cap ? `the ${cap} capability` : "no capability and run as the agent's own user"}; ` +
+      (failed.length ? `CANNOT START: ${failed.join("; ")}: the features that need them will fail` : "every identity starts"),
+  );
+  return failed;
 }
 
 /** An archive tool that cannot run because the sandbox is required and unavailable answers the same 503 everywhere. */
@@ -1245,6 +1269,12 @@ function readableBy(st: { uid: number; gid: number; mode: number; nlink: number 
 /** Extract an encrypted zip/7z with 7-Zip into `staging`; names and links are vetted from the listing first. */
 async function extractViaSz(plan: ExtractPlan, src: Source, work: Work, limits: ArchiveLimits, ctl: JobCtl, signal: AbortSignal, free?: number): Promise<ExtractResult> {
   const staging = work.at;
+  // Extraction by 7-Zip needs the metadata calls (it sets modes and times on what it creates), so it must never be combined with uid 0: with neither read
+  // capability the tool would run as the agent itself, which owns root's files. A default chart install holds the read-search capability and a plain
+  // container the override one, so this refusal only meets an agent that holds neither and is asked for an archive its own user cannot read.
+  if (process.getuid?.() === 0 && !src.sz.runAs && (await launcherAvailable())) {
+    throw new ArchiveError(403, "this archive cannot be extracted here: the agent holds neither the read-search nor the override capability, and the archive is not readable by the archive tools' user; make the archive readable by others, or grant the agent one of those capabilities");
+  }
   // 7-Zip writes the staging folder as the tool user, so that folder is that user's (it is the agent's private folder, nobody else can reach it)
   if (src.sz.runAs) await fs.chown(staging, src.sz.runAs.uid, src.sz.runAs.gid);
   const l = await listSz(src.sz, plan.password, signal, Infinity);
@@ -1821,12 +1851,12 @@ async function freeSetName(dir: string, name: string, suffixes: string[]): Promi
  * (groups cleared). `opts.root` is the served root the folder must lie in; `opts.afterPin` runs once the folder is held (tests).
  */
 export const zipLimits = { stallMs: 60_000 };
-export function zipStream(dirReal: string, names: string[], signal: AbortSignal, opts: { root?: string; afterPin?: () => void | Promise<void>; afterSpawn?: () => void | Promise<void>; slot?: Slot } = {}): Readable {
+export function zipStream(dirReal: string, names: string[], signal: AbortSignal, opts: { root?: string; afterPin?: () => void | Promise<void>; afterSpawn?: () => void | Promise<void>; slot?: Slot; client?: string } = {}): Readable {
   // The body must not end before bsdtar has exited: a failure after the last byte would otherwise
   // look like a complete download. The consumer sees the end only after a clean exit, an error otherwise.
   const out = new PassThrough();
   void (async () => {
-    const slot = opts.slot ?? (await toolGate.acquire(signal).catch((e) => (out.destroy(e as Error), undefined)));
+    const slot = opts.slot ?? (await downloadGate.acquire(signal, opts.client).catch((e) => (out.destroy(e as Error), undefined)));
     if (!slot) return;
     try {
       await pinned(opts.root ?? "/", dirReal, async (at, fd) => {
@@ -1835,7 +1865,7 @@ export function zipStream(dirReal: string, names: string[], signal: AbortSignal,
         const run = await runIdentity(st.uid, st.gid);
         const grants = await selectionGrants(at, fd, names);
         try {
-          const child = await spawnBsdtar(["--null", "--format", "zip", ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", "-", "-T", "-"], { ...cwdOf(fd, at), stdin: "pipe", readOnly: grants.roots, runAs: run, slot });
+          const child = await spawnBsdtar(["--null", "--format", "zip", ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", "-", "-T", "-"], { ...cwdOf(fd, at), stdin: "pipe", readOnly: grants.roots, runAs: run });
           // the tool and the launcher hold their own copies of what they were given: this process lets go of its grant descriptors now, not when the tool ends
           await grants.close();
           await opts.afterSpawn?.();
