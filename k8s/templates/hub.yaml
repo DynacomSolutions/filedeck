@@ -56,6 +56,10 @@ spec:
               value: hub
             - name: PORT
               value: {{ .Values.port | quote }}
+            {{- if .Values.hub.trustedProxies }}
+            - name: FILEDECK_TRUSTED_PROXIES
+              value: {{ .Values.hub.trustedProxies | quote }}
+            {{- end }}
             {{- with .Values.hub.allowedHosts }}
             - name: FILEDECK_ALLOWED_HOSTS
               value: {{ join "," . | quote }}

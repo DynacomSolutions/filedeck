@@ -346,6 +346,8 @@ export interface DiffResult {
   hashedFiles: number;
   hashedBytes: number;
   warnings: string[];
+  skipped?: { count: number; paths: string[] };
+  incomplete?: boolean;
   durationMs: number;
 }
 
@@ -365,6 +367,9 @@ export interface DiffStats {
   /** the hub follows both sides' change feeds for this compare */
   live?: boolean;
   warnings: string[];
+  /** some paths were left out (patterns too expensive for them): "no differences" does not mean identical */
+  incomplete?: boolean;
+  skipped?: { count: number; paths: string[] };
 }
 export type DiffJobView = JobView & { startedAt?: number; finishedAt?: number; stats?: DiffStats; files?: DiffCounts; dirs?: DiffCounts };
 export interface DiffFolder {
