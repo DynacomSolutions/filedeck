@@ -15,7 +15,7 @@ import type { JobCtl } from "./jobs.ts";
 import { STAGING_PREFIX, TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, SandboxError, failIfLauncher, haveSevenZip, listSz, runSz, szFailure, szReadArgs, validPassword, verifyPassword, type SzSource } from "./sevenzip.ts";
-import { UNPRIVILEGED, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root } from "./sandbox.ts";
+import { sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root } from "./sandbox.ts";
 
 /**
  * Archive support. bsdtar (libarchive) does format decoding/encoding for zip,
@@ -125,23 +125,32 @@ export async function spawnBsdtar(
 const cwdOf = (fd: number, at: string): { cwdFd: number } | { cwd: string } => (fd >= 0 ? { cwdFd: fd } : { cwd: at });
 
 /**
- * Who a tool that parses an untrusted archive runs as: the unprivileged tool user when the agent is root (an archive is other people's
- * data and the tool needs no identity of its own). With `real` (7-Zip opens the archive by name) that user must be able to read it
- * by the file's own mode and the folders above it, else the tool runs as the agent, still inside the sandbox.
+ * Who a tool that parses an untrusted archive runs as: the archive tools' own unprivileged user when the agent is root. It is neither
+ * root nor the media tools' user (a compromised media tool must not be able to signal, trace or reach the staging of an archive tool).
+ * The ids are a fixed pair with no account needed, `FILEDECK_ARCHIVE_UID` / `FILEDECK_ARCHIVE_GID` (default 65533 for both). A single
+ * archive is handed to the tool as an open read-only descriptor, which needs no permission on the file, so every archive can be read
+ * by it. `byName` is for the one case that cannot use a descriptor (a split set listed by name): then that user must be able to read
+ * the first part and every folder above it by mode, else the tool runs as the agent, still inside the sandbox.
  */
-async function toolIdentity(real?: string): Promise<{ uid: number; gid: number } | undefined> {
+export function archiveUser(): { uid: number; gid: number } {
+  const num = (v: string | undefined, d: number) => (v !== undefined && /^[1-9][0-9]{0,9}$/.test(v) && Number(v) < 4294967294 ? Number(v) : d);
+  const uid = num(process.env.FILEDECK_ARCHIVE_UID, 65533);
+  return { uid, gid: num(process.env.FILEDECK_ARCHIVE_GID, uid) };
+}
+async function toolIdentity(byName?: string): Promise<{ uid: number; gid: number } | undefined> {
   if (process.getuid?.() !== 0) return undefined;
-  if (real === undefined) return { ...UNPRIVILEGED };
+  const who = archiveUser();
+  if (byName === undefined) return who;
   try {
-    if (((await fs.stat(real)).mode & 0o004) === 0) return undefined;
-    for (let d = path.dirname(real); ; d = path.dirname(d)) {
+    if (((await fs.stat(byName)).mode & 0o004) === 0) return undefined;
+    for (let d = path.dirname(byName); ; d = path.dirname(d)) {
       if (((await fs.stat(d)).mode & 0o001) === 0) return undefined;
       if (d === path.dirname(d)) break;
     }
   } catch {
     return undefined;
   }
-  return { ...UNPRIVILEGED };
+  return who;
 }
 
 /** An archive tool that cannot run because the sandbox is required and unavailable answers the same 503 everywhere. */
@@ -414,7 +423,7 @@ async function openArchiveFiles(root: string, real: string): Promise<OpenedArchi
   try {
     if (!SPLIT.test(real)) {
       const fh = await open1(real);
-      return { sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity(real) }, fd: fh.fd, close };
+      return { sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity() }, fd: fh.fd, close };
     }
     const base = path.basename(real).slice(0, -4);
     await pinned(root, path.dirname(real), async (dirAt) => {
@@ -463,7 +472,7 @@ async function listOpened(r: { real: string; virtual: string }, arch: OpenedArch
       return { path: r.virtual, entries, truncated: l.truncated, bytes: total, encrypted: l.encrypted, passwordUsed: l.encrypted && !!password };
     } catch (e) {
       // a plain "not a 7-Zip archive" lets bsdtar try (and report) the format; a launcher failure, a password question or a limit never does
-      if (e instanceof PasswordError || e instanceof SandboxError || (e instanceof FsError && e.status >= 500)) throw e;
+      if (e instanceof PasswordError || e instanceof SandboxError || (e instanceof FsError && e.status >= 500) || SPLIT.test(r.real)) throw e;
       if (signal.aborted) throw new ArchiveError(408, "listing the archive took too long");
     }
   }
@@ -542,7 +551,8 @@ export async function prepareExtract(root: string, archive: string, destDir: str
       try {
         l = await listSz(arch.sz, o.password, signal, 2000);
       } catch (e) {
-        if (e instanceof PasswordError || e instanceof SandboxError || (e instanceof FsError && e.status >= 500)) throw e;
+        // for a split set there is no other tool to try: whatever failed is the answer, never a skipped check
+        if (e instanceof PasswordError || e instanceof SandboxError || (e instanceof FsError && e.status >= 500) || split) throw e;
       }
       if (l?.encrypted) {
         await verifyPassword(arch.sz, l.entries, o.password, signal);
@@ -1089,6 +1099,8 @@ interface Source {
   fd?: number;
   /** what 7-Zip may read: the archive's own file, or the private folder holding the parts */
   sz: SzSource;
+  /** a split set: copies the checked parts into the staging folder (see `stageParts`) once that exists; sets `arg` and `sz` */
+  stage?: (work: Work) => Promise<void>;
   done: () => Promise<void>;
 }
 const SPLIT = /\.(7z|zip)\.001$/i;
@@ -1120,40 +1132,57 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
   if (!SPLIT.test(real)) {
     return pinned(plan.root, path.dirname(real), async (dirAt) => {
       const { fh } = await openPlain(dirAt, await fs.stat(dirAt), path.basename(real));
-      return { arg: real, fd: fh.fd, sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity(real) }, done: () => fh.close().catch(() => undefined) } as Source;
+      return { arg: real, fd: fh.fd, sz: { arg: real, file: fh.fd, type: szType(real), runAs: await toolIdentity() }, done: () => fh.close().catch(() => undefined) } as Source;
     });
   }
-  const work = await makeWork("s", plan.root, destLoc, undefined, guard);
-  // The copies of the parts are opened by name, inside the agent's 0700 work folder, which the unprivileged user cannot reach: a split set
-  // is therefore extracted by 7-Zip as the agent itself, still inside the sandbox (read: the parts folder; write: the staging folder).
+  // A split set: the parts are opened and checked now (held open until the job ends) and copied into the private staging folder once it exists.
+  const held: { name: string; fh: import("node:fs/promises").FileHandle }[] = [];
+  const done = async () => {
+    for (const h of held.splice(0)) await h.fh.close().catch(() => undefined);
+  };
   try {
     const base = path.basename(real).slice(0, -4);
     await pinned(plan.root, path.dirname(real), async (dirAt) => {
       const dirSt = await fs.stat(dirAt);
       for (let i = 1; ; i++) {
         const name = `${base}.${String(i).padStart(3, "0")}`;
-        let opened;
         try {
-          opened = await openPlain(dirAt, dirSt, name);
+          held.push({ name, fh: (await openPlain(dirAt, dirSt, name)).fh });
         } catch (e) {
           if (i > 1 && (e as NodeJS.ErrnoException).code === "ENOENT") return;
           throw e;
         }
-        try {
-          const copyTo = path.join(work.dir, name);
-          await fs.copyFile(LINUX ? `/proc/self/fd/${opened.fh.fd}` : path.join(dirAt, name), copyTo, C.COPYFILE_EXCL);
-        } finally {
-          await opened.fh.close().catch(() => undefined);
-        }
       }
     });
   } catch (e) {
-    await work.done();
+    await done();
     throw e;
   }
-  const copy = path.join(work.dir, path.basename(real));
-  return { arg: copy, sz: { arg: copy, roots: [work.fd] }, done: work.done };
+  const src: Source = { arg: real, sz: { arg: real }, done };
+  src.stage = async (work) => {
+    const who = await toolIdentity();
+    const dir = path.join(work.at, PARTS_DIR);
+    await fs.mkdir(dir, { mode: 0o700 });
+    if (who) {
+      await fs.chown(work.at, who.uid, who.gid); // the staging folder and the parts folder are the tool user's alone while the tool runs
+      await fs.chown(dir, who.uid, who.gid);
+    }
+    for (const h of held) {
+      const to = path.join(dir, h.name);
+      await fs.copyFile(LINUX ? `/proc/self/fd/${h.fh.fd}` : h.name, to, C.COPYFILE_EXCL);
+      if (who) await fs.chown(to, who.uid, who.gid);
+      await fs.chmod(to, 0o600);
+    }
+    // The tool starts in the staging folder (by descriptor) and opens the first part by a relative name: the agent's work folder above it
+    // is 0700, so a name through it could not be followed by the tool user.
+    src.arg = `${PARTS_DIR}/${path.basename(real)}`;
+    src.sz = { arg: src.arg, cwdFd: work.fd >= 0 ? work.fd : undefined, roots: work.fd >= 0 ? [work.fd] : [], runAs: who };
+  };
+  return src;
 }
+
+/** The folder inside the staging folder that holds the copies of a split set's parts: a reserved name, so no archive entry can use it. */
+const PARTS_DIR = `${STAGING_PREFIX}parts`;
 
 /**
  * Whether an archive in a folder is taken as that folder's own. The folder owner must be able to read it (owner, group or everyone),
@@ -1213,6 +1242,7 @@ async function extractViaSz(plan: ExtractPlan, src: Source, work: Work, limits: 
   const { code, text } = await proc.done;
   if (ctl.signal.aborted) throw new Error("canceled");
   if (code !== 0) szFailure(code, text, plan.password, "extraction failed");
+  await fs.rm(path.join(staging, PARTS_DIR), { recursive: true, force: true }); // the copies of the parts are not part of the result
   return sanitizeTree(staging, limits, selector(plan.entries), { signal, progress: ctl.progress });
 }
 
@@ -1236,6 +1266,7 @@ async function extractStaged(dest: string, plan: ExtractPlan, src: Source, limit
   const work = await makeWork("x", plan.root, await locationOf(dest), undefined, guard);
   const staging = work.at;
   const mv: Mv = { root: plan.root, own: await ownerOf(dest).catch(() => undefined), guard };
+  if (src.stage) await src.stage(work).catch(async (e) => (await work.done(), Promise.reject(e)));
   const ac = new AbortController();
   const stop = () => ac.abort();
   ctl.signal.addEventListener("abort", stop, { once: true });
@@ -1358,7 +1389,7 @@ export interface CompressPlan {
 export async function prepareSelection(root: string, dir: string, names: string[]) {
   const d = resolveRead(root, dir);
   assertNotTrash(d.virtual);
-  if (!names.length || names.length > MAX_SELECTED) throw new ArchiveError(400, `select between 1 and ${MAX_SELECTED} items (archive the folder that holds them instead)`);
+  if (!names.length || names.length > MAX_SELECTED) throw new ArchiveError(400, `select between 1 and ${MAX_SELECTED} items`);
   const seen = new Set<string>();
   for (const n of names) {
     const v = virtualJoin(d.virtual, n); // rejects "..", "/" and NUL
@@ -1448,27 +1479,34 @@ export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl
 }
 
 /**
- * Most selected entries one archive job takes. Each selected entry is granted to the tool on its own (a descriptor of this process,
- * passed to the launcher and counted against this process's open-file limit), so that unselected siblings stay closed to it.
+ * Most items one archive job or zip download takes: one limit for the zip route, the ticket route, compression and extraction's entry
+ * list (and what the web client sends). The launcher takes at most `MAX_ROOTS` (4,096) folders and files to allow at a start.
  */
-export const MAX_SELECTED = 3000;
+export const MAX_SELECTED = 10_000;
+/** Items granted one by one; above it bsdtar is given the pinned source folder instead (leaving room for the other grants of a start). */
+export const GRANT_LIMIT = 4000;
 const O_PATH = 0o10000000; // Linux: a descriptor that names the inode and can do nothing else (no read, no side effect), enough for a Landlock rule
 
 /**
- * What a compression or zip tool may read, as descriptors of this process: each selected entry on its own, opened path-only
- * and without following a link (no read, so a FIFO, a device or a socket in the selection is never opened for reading), and never the
- * folder that holds them: unselected siblings and Filedeck's own folders next to the selection stay closed to the tool. A selected link
- * needs no grant (the tool stores the link itself), nor does anything that is not a file or a folder. Folders inside an entry cannot be
- * taken out of its grant (Landlock allows by hierarchy), so Filedeck's own folders found inside an entry are kept out by the tools'
- * exclude patterns, not by the kernel (see the README). More than `MAX_SELECTED` entries is a clear error.
+ * What a compression or zip tool may read, as descriptors of this process.
+ *  - Up to `GRANT_LIMIT` items: each selected entry on its own, opened path-only and without following a link (no read, so a FIFO, a device
+ *    or a socket in the selection is never opened for reading), and never the folder that holds them: unselected siblings and Filedeck's own
+ *    folders next to the selection stay closed to the tool. A selected link needs no grant (the tool stores the link itself), nor does
+ *    anything that is not a file or a folder.
+ *  - More items than that (or more than this process may hold open): the pinned source folder itself (`wholeFolder`). bsdtar is told the
+ *    names explicitly and stores links as links, so it archives only the selection, but it can read unselected siblings.
+ * Folders inside an entry cannot be taken out of its grant (Landlock allows by hierarchy), so Filedeck's own folders found inside an entry are
+ * kept out by the tools' exclude patterns, not by the kernel (see the README).
  */
-export async function selectionGrants(srcAt: string, names: string[]): Promise<{ roots: number[]; close: () => Promise<void> }> {
+export async function selectionGrants(srcAt: string, srcFd: number, names: string[]): Promise<{ roots: number[]; wholeFolder: boolean; close: () => Promise<void> }> {
   const handles: import("node:fs/promises").FileHandle[] = [];
   const close = async () => {
     for (const h of handles.splice(0)) await h.close().catch(() => undefined);
   };
-  if (names.length > MAX_SELECTED) throw new ArchiveError(400, `select at most ${MAX_SELECTED} items for one archive; archive the folder that holds them instead`);
-  if (!LINUX) return { roots: [], close };
+  const folder = { roots: srcFd >= 0 ? [srcFd] : [], wholeFolder: true, close };
+  if (names.length > MAX_SELECTED) throw new ArchiveError(400, `select at most ${MAX_SELECTED} items for one archive`);
+  if (!LINUX) return { roots: [], wholeFolder: false, close };
+  if (names.length > GRANT_LIMIT) return folder;
   try {
     for (const n of names) {
       let fh;
@@ -1477,7 +1515,10 @@ export async function selectionGrants(srcAt: string, names: string[]): Promise<{
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
         if (code === "ENOENT" || code === "ELOOP") continue; // gone, or a link (stored as itself)
-        if (code === "EMFILE" || code === "ENFILE") throw new ArchiveError(503, "too many items are selected for this server's open-file limit; archive the folder that holds them instead");
+        if (code === "EMFILE" || code === "ENFILE") {
+          await close(); // this process cannot hold that many descriptors: the pinned folder is granted instead
+          return folder;
+        }
         throw e;
       }
       const st = await fh.stat();
@@ -1488,7 +1529,7 @@ export async function selectionGrants(srcAt: string, names: string[]): Promise<{
     await close();
     throw e;
   }
-  return { roots: handles.map((h) => h.fd), close };
+  return { roots: handles.map((h) => h.fd), wholeFolder: false, close };
 }
 
 /** Write a small file for a tool (an exclude list): created exclusively, mode set on the descriptor so no umask matters, owned by the tool's user. */
@@ -1619,7 +1660,7 @@ async function compressInto(srcAt: string, srcFd: number, outAt: string, plan: C
       // The archive is written by name (a file named by `-cf` is written exactly, where standard output would be padded to a block): into the
       // private scratch folder below, the only place the tool may write. It reads only the selected entries.
       const args = ["--null", "-v", ...FORMATS[plan.format].args, ...(opt ? ["--options", opt] : []), ...plan.exclude.map((x) => `--exclude=${x}`), ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", tmp, "-T", "-"];
-      grants = await selectionGrants(srcAt, plan.names);
+      grants = await selectionGrants(srcAt, srcFd, plan.names);
       // its scratch folder is the one that belongs to its user (when it runs as one), else the private work folder
       const scratch = userDirFh ? { fd: userDirFh.fd, dir: userDir! } : { fd: work.fd, dir: work.dir };
       const child = await spawnBsdtar(args, { ...cwdOf(srcFd, srcAt), stdin: "pipe", readOnly: grants.roots, scratch, runAs });
@@ -1739,7 +1780,7 @@ export function zipStream(dirReal: string, names: string[], signal: AbortSignal,
         await opts.afterPin?.();
         const st = await fs.stat(at); // the pinned folder itself
         const runAs = process.getuid?.() === 0 && st.uid !== 0 ? { uid: st.uid, gid: st.gid } : undefined;
-        const grants = await selectionGrants(at, names);
+        const grants = await selectionGrants(at, fd, names);
         try {
           const child = await spawnBsdtar(["--null", "--format", "zip", ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", "-", "-T", "-"], { ...cwdOf(fd, at), stdin: "pipe", readOnly: grants.roots, runAs });
           killOnAbort(child, signal);

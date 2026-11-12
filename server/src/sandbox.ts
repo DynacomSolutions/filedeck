@@ -214,7 +214,8 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
       if (cwdFd !== undefined) flags.push("--cwd-fd", String(addFd(cwdFd)));
       return spawn(helper, [...flags, "--", cmd, ...args], { ...rest, stdio: fds as SpawnOptions["stdio"] });
     }
-    // no launcher: the folder by its current path, and the drop by spawn's own uid and gid (supplementary groups are not cleared); the kept descriptors are inherited as they are
+    // no launcher (a development start without the helper): the folder by its current path, and the drop by spawn's own uid and gid (Node/libuv
+    // clears the supplementary groups itself when a gid is given; the root-only test in sandbox.test.ts checks `id -G`); the kept descriptors are inherited as they are
     const cwd = cwdFd !== undefined ? await fs.readlink(`/proc/self/fd/${cwdFd}`).catch(() => rest.cwd) : rest.cwd;
     return spawn(cmd, args, { ...rest, ...(cwd !== undefined ? { cwd } : {}), stdio: kept.length ? (fds as SpawnOptions["stdio"]) : std, ...(owner ? owner : {}) });
   }

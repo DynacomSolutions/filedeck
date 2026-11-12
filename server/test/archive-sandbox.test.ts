@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { haveSevenZip, runSz, szReadArgs } from "../src/sevenzip.ts";
-import { MAX_SELECTED, listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, spawnBsdtar, zipStream } from "../src/archive.ts";
+import { GRANT_LIMIT, MAX_SELECTED, archiveUser, listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, spawnBsdtar, zipStream } from "../src/archive.ts";
 import { resetSandbox, sandboxInfo, spawnSandboxed } from "../src/sandbox.ts";
 import type { JobCtl } from "../src/jobs.ts";
 import { useSandbox } from "./sandbox-env.ts";
@@ -79,7 +79,7 @@ live("a link-following tool given the production grants cannot read through a su
   fs.writeFileSync(path.join(s.src, "sel/keep.txt"), "keep");
   const fd = fs.openSync(s.src, "r");
   try {
-    const grants = await selectionGrants(s.src, ["sel"]);
+    const grants = await selectionGrants(s.src, fd, ["sel"]);
     // the swap, after the grants were taken (the folder is held by descriptor from here on)
     fs.renameSync(path.join(s.src, "sel/z"), path.join(s.src, "sel/z-moved"));
     fs.symlinkSync(s.outside, path.join(s.src, "sel/z"));
@@ -421,7 +421,7 @@ live("a selection of 600 files compresses and each is granted on its own; more t
   assert.equal(got.length, 600);
   assert.ok(!got.includes("sibling.txt"));
   const many = Array.from({ length: MAX_SELECTED + 1 }, (_, i) => `x${i}`);
-  await assert.rejects(prepareCompress(s.root, "/src", many, "tar.gz", "m", { destDir: "/out" }), (e: { status?: number; message?: string }) => e.status === 400 && /select between 1 and \d+ items/.test(e.message ?? ""));
+  await assert.rejects(prepareCompress(s.root, "/src", many, "tar.gz", "m", { destDir: "/out" }), (e: { status?: number; message?: string }) => e.status === 400 && /select between 1 and 10000 items/.test(e.message ?? ""));
 });
 
 /* ---- one test per tool and operation: a path outside its grants is refused under Landlock and works without it ---- */
@@ -495,7 +495,7 @@ live("bsdtar compress is told to read a sibling that was not selected, and to wr
   fs.mkdirSync(scratchDir);
   const scratchFd = fs.openSync(scratchDir, "r");
   try {
-    const grants = await selectionGrants(s.src, ["own.txt"]);
+    const grants = await selectionGrants(s.src, srcFd, ["own.txt"]);
     await sandboxedAndNot("bsdtar compress (read)", async () => {
       const child = await spawnBsdtar(["--null", "-cf", "-", "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots, scratch: { fd: scratchFd, dir: scratchDir } });
       child.stdin!.end("own.txt\0sibling.txt\0");
@@ -520,7 +520,7 @@ live("the zip tool is told to read a sibling that was not selected: refused unde
   const s = opScene("op-zip");
   const srcFd = fs.openSync(s.src, "r");
   try {
-    const grants = await selectionGrants(s.src, ["own.txt"]);
+    const grants = await selectionGrants(s.src, srcFd, ["own.txt"]);
     await sandboxedAndNot("zip", async () => {
       const child = await spawnBsdtar(["--null", "--format", "zip", "-cf", "-", "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots });
       child.stdin!.end("own.txt\0sibling.txt\0");
@@ -611,5 +611,85 @@ liveSz("7-Zip compress is told to read a file outside the source folder and to w
   } finally {
     fs.closeSync(srcFd);
     fs.closeSync(outFd);
+  }
+});
+
+/* ---- the limit is one number for every entry point: 3,001 and 10,000 names work for a zip download, a ticket and a compression ---- */
+
+for (const count of [GRANT_LIMIT + 1, 3001, MAX_SELECTED]) {
+  live(`${count} selected items: a zip download, a ticketed download and a compression all work (above ${GRANT_LIMIT} the pinned folder is granted to bsdtar)`, async () => {
+    const s = scene(`many-${count}`);
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      names.push(`f${i}.txt`);
+      fs.writeFileSync(path.join(s.src, `f${i}.txt`), `n${i}`);
+    }
+    fs.writeFileSync(path.join(s.src, "sibling.txt"), "NOT-SELECTED");
+    const zip = path.join(s.dir, "dl.zip");
+    await new Promise<void>((resolve, reject) => {
+      const z = zipStream(s.src, names, new AbortController().signal, { root: s.root });
+      const out = fs.createWriteStream(zip);
+      z.on("error", reject);
+      out.on("close", () => resolve());
+      z.pipe(out);
+    });
+    const inZip = listTar(zip);
+    assert.equal(inZip.length, count);
+    assert.ok(!inZip.includes("sibling.txt"));
+    const c = await runCompress(await prepareCompress(s.root, "/src", names, "tar.gz", `m${count}`, { destDir: "/out" }), LIM, mkCtl());
+    const inTar = listTar(path.join(s.root, c.path));
+    assert.equal(inTar.length, count);
+    assert.ok(!inTar.includes("sibling.txt"));
+    // the HTTP routes accept the same count
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: s.root, FILEDECK_NODE: "t" } as never));
+    try {
+      const t = await app.request("/api/fs/zip-ticket", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir: "/src", names }) });
+      assert.equal(t.status, 201, await t.clone().text());
+      const { id } = (await t.json()) as { id: string };
+      const dl = await app.request(`/api/fs/zip?ticket=${id}`);
+      assert.equal(dl.status, 200);
+      const f = path.join(s.dir, "ticket.zip");
+      fs.writeFileSync(f, Buffer.from(await dl.arrayBuffer()));
+      assert.equal(listTar(f).length, count);
+    } finally {
+      await (app as unknown as { close(): Promise<void> }).close();
+    }
+  });
+}
+
+test("one more than the limit is refused by every entry point with the same number", needTool, async () => {
+  const s = scene("over-limit");
+  const names = Array.from({ length: MAX_SELECTED + 1 }, (_, i) => `x${i}`);
+  await assert.rejects(prepareCompress(s.root, "/src", names, "tar.gz", "m", { destDir: "/out" }), (e: { status?: number; message?: string }) => e.status === 400 && new RegExp(`${MAX_SELECTED}`).test(e.message ?? ""));
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: s.root, FILEDECK_NODE: "t" } as never));
+  try {
+    const t = await app.request("/api/fs/zip-ticket", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir: "/src", names }) });
+    assert.equal(t.status, 400);
+    assert.match(await t.text(), new RegExp(`${MAX_SELECTED}`));
+  } finally {
+    await (app as unknown as { close(): Promise<void> }).close();
+  }
+});
+
+test("the archive tools' user is their own: not root, not the media tools' user, configurable by one setting", () => {
+  const prev = [process.env.FILEDECK_ARCHIVE_UID, process.env.FILEDECK_ARCHIVE_GID];
+  try {
+    delete process.env.FILEDECK_ARCHIVE_UID;
+    delete process.env.FILEDECK_ARCHIVE_GID;
+    assert.deepEqual(archiveUser(), { uid: 65533, gid: 65533 });
+    assert.notEqual(archiveUser().uid, 65534);
+    process.env.FILEDECK_ARCHIVE_UID = "70001";
+    assert.deepEqual(archiveUser(), { uid: 70001, gid: 70001 });
+    process.env.FILEDECK_ARCHIVE_GID = "70002";
+    assert.deepEqual(archiveUser(), { uid: 70001, gid: 70002 });
+    for (const bad of ["0", "-1", "abc", "4294967295", ""]) {
+      process.env.FILEDECK_ARCHIVE_UID = bad;
+      assert.equal(archiveUser().uid, 65533, `${JSON.stringify(bad)} is refused`);
+    }
+  } finally {
+    for (const [i, k] of ["FILEDECK_ARCHIVE_UID", "FILEDECK_ARCHIVE_GID"].entries()) {
+      if (prev[i] === undefined) delete process.env[k];
+      else process.env[k] = prev[i];
+    }
   }
 });

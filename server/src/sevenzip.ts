@@ -86,6 +86,8 @@ export interface SzSource {
   roots?: Root[];
   /** archive format, for descriptors (no extension to go by) */
   type?: string;
+  /** a working folder (descriptor) the name `arg` is relative to */
+  cwdFd?: number;
   /** run 7-Zip as this user and group (the agent as root parses an untrusted archive as nobody, not as itself) */
   runAs?: { uid: number; gid: number };
 }
@@ -101,15 +103,19 @@ export interface SzAccess {
 }
 
 /**
- * The name and the confinement for reading `src`. Inside the sandbox the archive is opened by name and the kernel rule is attached to the
- * file. In every other mode the open descriptor itself is handed over (kept open through the launcher) and read as /dev/fd/3, so the name
- * can be swapped after it was checked without effect, as before the sandbox.
+ * The name and the confinement for reading `src`.
+ *  - one archive (any mode): the open read-only descriptor, kept open through the launcher and read as /dev/fd/3. It needs no permission
+ *    on the file and no name can be swapped; under Landlock the rule is attached to the same file, so the open of /dev/fd/3 is allowed.
+ *  - a split set: 7-Zip finds the next parts by changing the name, so a descriptor alone cannot work (checked with 7-Zip 25.01: "Cannot
+ *    open the file as archive"). With Landlock each part is a rule on the file itself and 7-Zip opens them by name; without Landlock the
+ *    parts are opened by name after the agent checked them (no kernel rule to hold them: a weaker guarantee, only in `off` and fallback,
+ *    where the tool is unconfined anyway). Extraction of a split set does not come here: it reads private copies by a relative name (`cwdFd`).
  */
 export async function szReadArgs(src: SzSource): Promise<{ arg: string; fd?: number; readOnly: Root[] }> {
   const info = await sandboxInfo();
-  if (info.state === "landlock") return { arg: src.arg, readOnly: [...(src.file !== undefined ? [src.file] : []), ...(src.also ?? []), ...(src.roots ?? [])] };
-  if (src.file !== undefined) return { arg: "/dev/fd/3", fd: src.file, readOnly: [] };
-  return { arg: src.arg, readOnly: [] };
+  const rules: Root[] = info.state === "landlock" ? [...(src.file !== undefined ? [src.file] : []), ...(src.also ?? []), ...(src.roots ?? [])] : [];
+  if (src.file !== undefined && !src.also?.length && !src.roots?.length && !src.cwdFd) return { arg: "/dev/fd/3", fd: src.file, readOnly: rules };
+  return { arg: src.arg, readOnly: rules };
 }
 
 /**
@@ -263,6 +269,7 @@ export async function listSz(real: string | SzSource, password: string | undefin
     signal,
     fd: how.fd,
     readOnly: how.readOnly,
+    cwdFd: src?.cwdFd,
     runAs: src?.runAs,
     onLine: (l) => {
       if (l === "") {
@@ -288,6 +295,6 @@ export async function verifyPassword(real: string | SzSource, entries: SzEntry[]
   const pick = enc.reduce((a, b) => (b.size < a.size ? b : a));
   const src = typeof real === "string" ? null : real;
   const how = src ? await szReadArgs(src) : { arg: real as string, fd: undefined, readOnly: [real as string] };
-  const { code, text } = await (await runSz(["t", "-spd", ...(src?.type ? [`-t${src.type}`] : []), "--", how.arg, pick.name], { password, signal, fd: how.fd, readOnly: how.readOnly, runAs: src?.runAs })).done;
+  const { code, text } = await (await runSz(["t", "-spd", ...(src?.type ? [`-t${src.type}`] : []), "--", how.arg, pick.name], { password, signal, fd: how.fd, readOnly: how.readOnly, cwdFd: src?.cwdFd, runAs: src?.runAs })).done;
   if (code !== 0) szFailure(code, text, password, "cannot read archive");
 }

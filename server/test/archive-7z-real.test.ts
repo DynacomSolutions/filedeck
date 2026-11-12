@@ -9,6 +9,7 @@ import { listArchive, prepareCompress, prepareExtract, runCompress, runExtract }
 import { haveSevenZip } from "../src/sevenzip.ts";
 import type { JobCtl } from "../src/jobs.ts";
 import { useSandbox } from "./sandbox-env.ts";
+import { resetSandbox, sandboxInfo } from "../src/sandbox.ts";
 
 /**
  * Tests with the real 7-Zip (`7zz`); they skip where it is not installed (CI has it). They check that what the
@@ -261,6 +262,50 @@ for (const parts of [64, 200]) {
       const r = await runExtract(plan, LIM, mkCtl());
       assert.ok(r.files >= 1, JSON.stringify(r));
       assert.equal(fs.statSync(path.join(s.root, r.path, "pack/big.bin")).size, parts * 65_536);
+    }
+  });
+}
+
+/* ---- split sets are listed, password-checked and extracted in every sandbox mode; a failure is an error, never a skipped check ---- */
+
+for (const mode of ["landlock", "fallback", "off"] as const) {
+  test(`a split set is listed and password-checked, and a wrong password is a 401, with the sandbox in ${mode} mode`, needSz, async (t) => {
+    if (mode === "landlock" && box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+    try {
+      const s = scene(`split-${mode}`);
+      const pack = path.join(s.src, "pack");
+      fs.mkdirSync(pack);
+      fs.writeFileSync(path.join(pack, "big.bin"), randomBytes(5 * 65_536));
+      const pw = "s3cret";
+      const c = await runCompress(await prepareCompress(s.root, "/src", ["pack"], "7z", "sp", { destDir: "/out", splitBytes: 65_536, level: 0, password: pw, encryptHeaders: true }), LIM, mkCtl());
+      assert.ok((c.volumes ?? 0) >= 4, JSON.stringify(c));
+      if (mode === "off") process.env.FILEDECK_SANDBOX = "off";
+      else if (mode === "fallback") {
+        process.env.FILEDECK_SANDBOX = "auto";
+        process.env.FILEDECK_SANDBOX_HELPER = path.join(tmp, "no-such-launcher");
+      }
+      resetSandbox();
+      assert.equal((await sandboxInfo()).state, mode);
+      const l = await listArchive(s.root, c.path, 5000, pw);
+      assert.ok(l.entries.some((e) => e.name.endsWith("big.bin")), JSON.stringify(l.entries));
+      await assert.rejects(listArchive(s.root, c.path, 5000, "wrong"), (e: { status?: number }) => e.status === 401);
+      await assert.rejects(prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: "wrong" }), (e: { status?: number }) => e.status === 401);
+      const plan = await prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: pw });
+      assert.equal(plan.viaSz, true);
+      const r = await runExtract(plan, LIM, mkCtl());
+      assert.equal(fs.statSync(path.join(s.root, r.path, "pack/big.bin")).size, 5 * 65_536);
+      // a missing middle part is an error, not a skipped check
+      const parts = fs.readdirSync(path.join(s.root, "out")).filter((n) => n.startsWith("sp.7z.")).sort();
+      fs.rmSync(path.join(s.root, "out", parts[1]!));
+      await assert.rejects(listArchive(s.root, c.path, 5000, pw));
+      await assert.rejects(prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: pw }));
+    } finally {
+      for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+        if (prev[i] === undefined) delete process.env[k];
+        else process.env[k] = prev[i];
+      }
+      resetSandbox();
     }
   });
 }

@@ -454,7 +454,7 @@ for (const mode of ["landlock", "fallback", "off"] as const) {
       const [u, g, groups] = r.stdout.split("\n");
       assert.equal(u, "65534", r.stderr);
       assert.equal(g, "65534");
-      if (mode !== "fallback") assert.equal(groups, "65534", "the supplementary groups are cleared when the launcher is there"); // spawn's own uid option cannot clear them
+      assert.equal(groups, "65534", `the supplementary groups are cleared in ${mode} mode (with no launcher it is Node's own spawn that does it: libuv calls setgroups(0) when a gid is given)`);
     } finally {
       for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
         if (prev[i] === undefined) delete process.env[k];

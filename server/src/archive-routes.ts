@@ -27,7 +27,7 @@ const str = (v: unknown, what: string) => {
   return v;
 };
 /** most names a selection may hold (the same bound as the job queue's items) */
-const MAX_NAMES = 10_000;
+const MAX_NAMES = ar.MAX_SELECTED; // one limit for the zip route, the ticket route, compression and the web client
 const strs = (v: unknown, what: string) => {
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || !x)) throw bad(`${what} must be an array of strings`);
   return v as string[];
