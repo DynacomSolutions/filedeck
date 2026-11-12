@@ -329,10 +329,12 @@ export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
  * A time slicer for loops that match many paths: `const tick = timeSlicer(); ... const w = tick(); if (w) await w;`
  * gives the event loop a turn whenever the loop has run for `sliceMs` since its last turn.
  */
+export const sliceStats = { turns: 0 }; // how many turns were given (tests count them: no wall-clock margins)
 export function timeSlicer(sliceMs = 8): () => Promise<void> | null {
   let last = performance.now();
   return () => {
     if (performance.now() - last < sliceMs) return null;
+    sliceStats.turns++;
     return new Promise<void>((r) => setImmediate(() => ((last = performance.now()), r())));
   };
 }

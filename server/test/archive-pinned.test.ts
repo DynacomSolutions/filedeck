@@ -44,6 +44,7 @@ const ENVS = ["FILEDECK_SANDBOX", "FILEDECK_BSDTAR", "FILEDECK_7Z", "FILEDECK_7Z
 before(() => {
   for (const k of ENVS) saved[k] = process.env[k];
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-pinned-"));
+  fs.chmodSync(tmp, 0o755); // an agent that is root runs extraction tools as the unprivileged user: they must be able to reach the stand-ins
   work = path.join(tmp, "work");
   fs.mkdirSync(work, { mode: 0o700 });
   process.env.FILEDECK_WORK_DIR = work;
@@ -87,6 +88,10 @@ function scene(name: string) {
   // every stand-in gives up after 30 s, so a cut-off test never leaves one running
   const wait = `i=0; while [ ! -e '${go}' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done`;
   const seen = path.join(dir, "seen-archive");
+  const extractId = path.join(dir, "extract-id");
+  fs.chmodSync(dir, 0o755);
+  fs.chmodSync(root, 0o755);
+  for (const f of [seen, extractId]) (fs.writeFileSync(f, ""), fs.chmodSync(f, 0o666)); // written by the tool, which may run as another user
   const tar = path.join(dir, "fake-bsdtar.sh");
   fs.writeFileSync(
     tar,
@@ -102,7 +107,7 @@ case "$*" in
 esac
 cat '${path.join(dir, "first.tar")}'
 ${wait}
-case "$*" in *"@-"*) cat > '${seen}';; esac
+case "$*" in *"@-"*) cat > '${seen}'; id -u > '${extractId}';; esac
 cat '${path.join(dir, "rest.tar")}'
 `,
     { mode: 0o755 },
@@ -136,7 +141,7 @@ esac
   process.env.FILEDECK_BSDTAR = tar;
   process.env.FILEDECK_7Z = sz;
   const szmode = path.join(dir, "szmode");
-  return { dir, root, outside, go, seen, szmode, dest: path.join(root, "out"), wd: path.join(root, ".filedeck-work") };
+  return { dir, root, outside, go, seen, extractId, szmode, dest: path.join(root, "out"), wd: path.join(root, ".filedeck-work") };
 }
 
 const mkCtl = () => {
@@ -384,7 +389,7 @@ test("an archive swapped for a link after the request but before the job is refu
   fs.writeFileSync(s.go, "");
   await assert.rejects(runExtract(plan, LIM, mkCtl().ctl));
   assert.deepEqual(fs.readdirSync(s.dest), []);
-  assert.equal(fs.existsSync(s.seen), false);
+  assert.equal(fs.readFileSync(s.seen, "utf8"), "", "the tool never read the swapped-in file");
 });
 
 test("an archive swapped for a link while the job runs is still read from the file that was opened", async () => {
@@ -831,4 +836,15 @@ test("the exclude list file keeps its mode whatever the umask (set on its descri
     process.umask(old);
   }
   assert.match(fs.readFileSync(path.join(s.dir, "szlist"), "utf8"), /^vol\/\.filedeck-work-abc$/m, "the tool could read the list");
+});
+
+test("extraction runs the archive tool as the unprivileged user when the agent is root (checked when root)", async () => {
+  if (!IS_ROOT) return;
+  const s = scene("ext-identity");
+  fs.writeFileSync(path.join(s.root, "a.tar"), "ARCHIVE-BYTES");
+  fs.chmodSync(path.join(s.root, "a.tar"), 0o600); // only root can read it by name: bsdtar is handed it as standard input, whoever it runs as
+  fs.writeFileSync(s.go, "");
+  await runExtract(await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" }), LIM, mkCtl().ctl);
+  assert.equal(fs.readFileSync(s.extractId, "utf8").trim(), "65534");
+  assert.equal(fs.readFileSync(s.seen, "utf8"), "ARCHIVE-BYTES");
 });

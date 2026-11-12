@@ -2,7 +2,7 @@ import { spawnSync, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { FsError } from "./fsops.ts";
-import { sandboxInfo, spawnSandboxed, type Root } from "./sandbox.ts";
+import { isLauncherFailure, sandboxInfo, spawnSandboxed, type Root } from "./sandbox.ts";
 
 /**
  * 7-Zip (`7zz`) backs everything bsdtar cannot do: writing AES-256 zip and 7z
@@ -19,6 +19,18 @@ let have: boolean | undefined;
 export function haveSevenZip(): boolean {
   if (have === undefined || process.env.FILEDECK_7Z_RECHECK) have = spawnSync(sevenZip(), ["--help"], { stdio: "ignore", env: ENV }).error === undefined;
   return have;
+}
+
+/** The sandbox launcher could not start an archive tool (a step failed, too many folders, Landlock gone): never answered by trying another tool. */
+export class SandboxError extends FsError {
+  constructor(detail: string) {
+    console.error("sandbox launcher failed:", detail);
+    super(500, "the sandbox could not start the archive tool");
+  }
+}
+/** Throws a `SandboxError` when the output of a failed start is the launcher's own (the tool did not run). */
+export function failIfLauncher(code: number | null, text: string): void {
+  if (isLauncherFailure(code, text)) throw new SandboxError(text.split("\n").find((l) => l.includes("filedeck-sandbox:")) ?? text.slice(0, 200));
 }
 
 export class PasswordError extends FsError {
@@ -73,6 +85,8 @@ export interface SzSource {
   roots?: Root[];
   /** archive format, for descriptors (no extension to go by) */
   type?: string;
+  /** run 7-Zip as this user and group (the agent as root parses an untrusted archive as nobody, not as itself) */
+  runAs?: { uid: number; gid: number };
 }
 
 /** Where 7-Zip is allowed to go and who it runs as. */
@@ -101,6 +115,8 @@ export async function runSz(
   args: string[],
   opts: SzAccess & {
     cwd?: string;
+    /** the working folder as an open descriptor (exact: see `SandboxOpts.cwdFd`); preferred to `cwd` */
+    cwdFd?: number;
     password?: string;
     signal?: AbortSignal;
     onLine?: (l: string) => void;
@@ -113,6 +129,7 @@ export async function runSz(
   const withThreads = [args[0]!, "-mmt=2", ...args.slice(1)];
   const child = await spawnSandboxed(sevenZip(), withThreads, {
     cwd: opts.cwd,
+    cwdFd: opts.cwdFd !== undefined && opts.cwdFd >= 0 ? opts.cwdFd : undefined,
     env: ENV,
     stdio: opts.fd === undefined ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", opts.fd],
     // /dev/urandom: an AES archive needs a random salt and IV
@@ -159,6 +176,7 @@ export async function runSz(
 
 /** Map a failed 7zz run to the right client-visible error. */
 export function szFailure(code: number | null, text: string, password: string | undefined, what: string): never {
+  failIfLauncher(code, text);
   const t = text.toLowerCase();
   const wants = t.includes("enter password") || t.includes("break signaled") || t.includes("cannot open encrypted archive") || t.includes("wrong password") || t.includes("data error in encrypted") || t.includes("crc failed in encrypted");
   if (wants) {
@@ -237,6 +255,7 @@ export async function listSz(real: string | SzSource, password: string | undefin
     signal,
     fd: how.fd,
     readOnly: how.readOnly,
+    runAs: src?.runAs,
     onLine: (l) => {
       if (l === "") {
         if (buf) push(buf);
@@ -261,6 +280,6 @@ export async function verifyPassword(real: string | SzSource, entries: SzEntry[]
   const pick = enc.reduce((a, b) => (b.size < a.size ? b : a));
   const src = typeof real === "string" ? null : real;
   const how = src ? await szReadArgs(src) : { arg: real as string, fd: undefined, readOnly: [real as string] };
-  const { code, text } = await (await runSz(["t", "-spd", ...(src?.type ? [`-t${src.type}`] : []), "--", how.arg, pick.name], { password, signal, fd: how.fd, readOnly: how.readOnly })).done;
+  const { code, text } = await (await runSz(["t", "-spd", ...(src?.type ? [`-t${src.type}`] : []), "--", how.arg, pick.name], { password, signal, fd: how.fd, readOnly: how.readOnly, runAs: src?.runAs })).done;
   if (code !== 0) szFailure(code, text, password, "cannot read archive");
 }

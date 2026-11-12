@@ -104,6 +104,10 @@ export interface DiffResult {
   hashedFiles: number;
   hashedBytes: number;
   warnings: string[];
+  /** paths left out because the patterns were too expensive to match against them: the count and the first few */
+  skipped: { count: number; paths: string[] };
+  /** some paths were not compared, so "no differences" does not mean identical */
+  incomplete: boolean;
 }
 
 /** Kept for callers of the old name: a side of a compare is anything that can list one folder and hash one file. */
@@ -142,7 +146,7 @@ export async function compareTrees(left: DirSource, right: DirSource, o: DiffOpt
   try {
     await s.run(ctl.signal, ctl.progress);
     const { files, dirs } = s.counts();
-    return { rows: s.rows(), files, dirs, hashedFiles: s.stats.hashed, hashedBytes: s.stats.hashedBytes, warnings: s.warnings };
+    return { rows: s.rows(), files, dirs, hashedFiles: s.stats.hashed, hashedBytes: s.stats.hashedBytes, warnings: s.warnings, skipped: s.skipped, incomplete: s.incomplete };
   } finally {
     s.close();
   }

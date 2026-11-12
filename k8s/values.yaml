@@ -63,6 +63,11 @@ vault:
   maxHours: 24
 
 hub:
+  # Number of reverse proxies (an ingress controller, a load balancer) between users and the hub whose X-Forwarded-For
+  # header the hub may believe, counted from the hub's side: 1 = the last entry was added by your proxy. 0 (the default)
+  # means the hub uses the connection's own address and ignores the header, so a client talking to the hub directly cannot
+  # choose the address recorded in the audit log or used for the per-client search limit. Set it to the real number.
+  trustedProxies: 0
   # Optional NetworkPolicy for the hub pods. Off by default so a plain install keeps working behind any ingress. Anything
   # that can reach the hub has root-level access to every node's files, so for a shared cluster turn it on and list the
   # peers that may connect (your ingress controller, for example). `from` takes standard NetworkPolicy peers; with

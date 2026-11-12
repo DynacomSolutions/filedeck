@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { prepareCompress, prepareExtract, runCompress, runExtract } from "../src/archive.ts";
+import { listArchive, prepareCompress, prepareExtract, runCompress, runExtract } from "../src/archive.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
 import type { JobCtl } from "../src/jobs.ts";
 import { useSandbox } from "./sandbox-env.ts";
@@ -241,6 +241,28 @@ test("password and split archives compress, list and extract inside the sandbox"
   const r = await runExtract(plan, LIM, mkCtl());
   assert.ok(r.files >= 41, JSON.stringify(r));
 });
+
+for (const parts of [64, 200]) {
+  test(`a split set of ${parts} or more parts is listed, checked and extracted inside the sandbox (one grant per part for reading, the private folder for extraction)`, needSz, async () => {
+    const s = scene(`parts-${parts}`);
+    const pack = path.join(s.src, "pack");
+    fs.mkdirSync(pack);
+    fs.writeFileSync(path.join(pack, "big.bin"), randomBytes(parts * 65_536));
+    for (const password of [undefined, "s3cret"]) {
+      const name = password ? `pw${parts}` : `plain${parts}`;
+      const c = await runCompress(await prepareCompress(s.root, "/src", ["pack"], "7z", name, { destDir: "/out", splitBytes: 65_536, level: 0, password }), LIM, mkCtl());
+      assert.ok((c.volumes ?? 0) >= parts, JSON.stringify(c));
+      const l = await listArchive(s.root, c.path, 5000, password);
+      assert.ok(l.entries.some((e) => e.name.endsWith("big.bin")), JSON.stringify(l.entries.slice(0, 3)));
+      const plan = await prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password });
+      assert.equal(plan.viaSz, true);
+      if (password) await assert.rejects(prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: "wrong" }), (e: { status?: number }) => e.status === 401);
+      const r = await runExtract(plan, LIM, mkCtl());
+      assert.ok(r.files >= 1, JSON.stringify(r));
+      assert.equal(fs.statSync(path.join(s.root, r.path, "pack/big.bin")).size, parts * 65_536);
+    }
+  });
+}
 
 test("diagnostic: does 7-Zip open nested paths by name? (recorded in the log; never fails)", needSz, () => {
   const strace = spawnSync("strace", ["-V"], { encoding: "utf8", timeout: 30_000 });

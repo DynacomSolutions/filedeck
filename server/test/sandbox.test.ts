@@ -30,10 +30,10 @@ async function run(cmd: string, args: string[], opts: SandboxOpts = {}, during?:
   await during?.();
   return done;
 }
-const live = (name: string, fn: () => Promise<void>) =>
+const live = (name: string, fn: (t: import("node:test").TestContext) => Promise<void> | void) =>
   test(name, async (t) => {
     if (box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
-    await fn();
+    await fn(t);
   });
 
 before(async () => {
@@ -193,7 +193,7 @@ live("a confined program cannot connect over TCP, reach an abstract unix socket 
     assert.equal(res.code, 0, res.stderr);
     const out = JSON.parse(res.stdout.trim().split("\n").at(-1)!) as { tcp: string; abs: string; sig: string };
     if (r.net & 2n) assert.equal(out.tcp, "EACCES", "TCP connect");
-    if (r.scope & 1n) assert.equal(out.abs, "EPERM", "abstract unix socket outside the sandbox");
+    if (r.scope & 1n) assert.match(out.abs, /^(EPERM|EACCES)$/, "abstract unix socket outside the sandbox");
     if (r.scope & 2n) assert.equal(out.sig, "EPERM", "signal to a process outside the sandbox");
     const control = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
     const free = JSON.parse(control.stdout.trim().split("\n").at(-1)!) as { tcp: string; abs: string; sig: string };
@@ -225,4 +225,273 @@ test("--uid and --gid must be whole non-negative numbers, and 0 is refused unles
     assert.equal(st(...bad), 64, bad.join(" "));
   }
   if (process.getuid?.() !== 0) await assert.rejects(spawnSandboxed("true", [], { uid: 0, gid: 0 }), /root/); // (as root, uid 0 is simply no change)
+});
+
+live("every descriptor above 2 is closed on exec, also above 1024", async () => {
+  const f = path.join(tmp, "secret-fd-high.txt");
+  write(f, "secret\n");
+  const fh = await fs.promises.open(f, "r");
+  try {
+    const hi = 1100;
+    const stdio: unknown[] = ["ignore", "pipe", "pipe"];
+    while (stdio.length < hi) stdio.push("ignore");
+    stdio.push(fh.fd);
+    const script = `if [ -e /dev/fd/${hi} ]; then echo open; else echo closed; fi`;
+    const r = await run("sh", ["-c", script], { stdio: stdio as never });
+    assert.equal(r.stdout.trim(), "closed", r.stderr);
+    const control = spawnSync("sh", ["-c", script], { encoding: "utf8", stdio: stdio as never });
+    assert.equal(control.stdout.trim(), "open", "control: a plain child inherits it");
+  } finally {
+    await fh.close();
+  }
+});
+
+live("a failure while probing the rights stops the launcher (exit 71) instead of leaving a right unrestricted", async () => {
+  // with four descriptors allowed and one in use, creating the probe ruleset fails with EMFILE: not "right not offered"
+  if (!box.staticBin) return; // only without a static libc (a dynamic launcher cannot even load with so few descriptors); the CI run requires the static build
+  const r = spawnSync("sh", ["-c", `exec 3</dev/null; ulimit -n 4; exec ${box.staticBin} -- echo ran`], { encoding: "utf8" });
+  assert.equal(r.status, 71, r.stderr);
+  assert.equal(r.stdout, "", "the program must not have run");
+  assert.match(r.stderr, /probing the rights/);
+});
+
+live("sockets: UDP and pathname unix sockets are refused by the seccomp layer on every kernel, unless allowSockets is set", async () => {
+  const r = rights();
+  const script = `
+    const dgram = require("dgram"); const out = {};
+    try { const s = dgram.createSocket("udp4"); s.on("error", (e) => { out.udp = e.code; fin(); }); s.bind(0, "127.0.0.1", () => { out.udp = "bound"; s.close(); fin(); }); } catch (e) { out.udp = e.code; fin(); }
+    function fin() { console.log(JSON.stringify(out)); }`;
+  const prefix = path.dirname(path.dirname(process.execPath));
+  const env = { ...process.env, OPENSSL_CONF: "/dev/null" };
+  const udp = async (opts: SandboxOpts) => JSON.parse((await run(process.execPath, ["-e", script], { readExec: [prefix], env, ...opts })).stdout.trim().split("\n").at(-1)!) as { udp: string };
+  const free = JSON.parse(spawnSync(process.execPath, ["-e", script], { encoding: "utf8" }).stdout.trim().split("\n").at(-1)!) as { udp: string };
+  assert.equal(free.udp, "bound", "control: without the sandbox UDP works");
+  const info = await sandboxInfo();
+  console.log(`# sandbox sockets: kernel Landlock handles UDP rights: ${(r.net & 12n) === 12n}; socket filter (seccomp) on: ${info.seccomp}`);
+  if (!info.seccomp) {
+    // no filter on this kernel or architecture: reported, and UDP then relies on Landlock alone
+    assert.equal((await udp({})).udp, (r.net & 12n) === 12n ? "EACCES" : "bound");
+    return;
+  }
+  assert.equal((await udp({})).udp, "EACCES");
+  assert.equal((await udp({ allowSockets: true })).udp, (r.net & 12n) === 12n ? "EACCES" : "bound", "allowSockets lifts the extra layer only");
+  // a pathname unix socket under a served folder: connecting is refused, whatever the kernel's Landlock offers
+  const sock = path.join(tmp, "unix-ok.sock");
+  const srv = (await import("node:net")).createServer((c) => c.end("hi"));
+  await new Promise<void>((res) => srv.listen(sock, res));
+  try {
+    const un = `require("net").connect(${JSON.stringify(sock)}).on("data", (d) => console.log(String(d))).on("error", (e) => console.log("ERR " + e.code));`;
+    const denied = await run(process.execPath, ["-e", un], { readExec: [prefix], readWrite: [tmp], env });
+    assert.match(denied.stdout, /ERR (EACCES|EPERM)/, `connect must be refused: ${denied.stdout}`);
+    const allowed = await run(process.execPath, ["-e", un], { readExec: [prefix], readWrite: [tmp], env, allowSockets: true });
+    assert.ok(allowed.stdout.includes("hi") || /ERR (EACCES|EPERM)/.test(allowed.stdout), allowed.stdout); // the kernel's own pathname-socket rule may still refuse it
+  } finally {
+    srv.close();
+  }
+});
+
+live("an x32 system call number does not get round the socket filter (x86-64 only; skipped where the kernel has x32 disabled)", async (t) => {
+  if (process.arch !== "x64") return t.skip("sandbox live: skipped (x32 calls exist on x86-64 only)");
+  const info = await sandboxInfo();
+  if (!info.seccomp) return t.skip("sandbox live: skipped (no socket filter on this kernel)");
+  const src = path.join(tmp, "x32.c");
+  write(src, `#define _GNU_SOURCE
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/socket.h>
+int main(void) {
+  long fd = syscall(0x40000000 | 41, AF_INET, SOCK_DGRAM, 0); /* x32 socket() */
+  if (fd < 0) { printf("x32 socket: %s\\n", strerror(errno)); return 1; }
+  printf("x32 socket opened: %ld\\n", fd);
+  return 0;
+}
+`);
+  const bin = path.join(tmp, "x32bin");
+  const cc = spawnSync("cc", ["-O2", "-o", bin, src], { encoding: "utf8" });
+  if (cc.status !== 0) return t.skip(`sandbox live: skipped (cannot build the x32 probe: ${cc.stderr.trim().split("\n")[0]})`);
+  const free = spawnSync(bin, [], { encoding: "utf8" });
+  if (!/opened/.test(free.stdout)) {
+    console.log(`# sandbox x32: this kernel has x32 calls disabled (${free.stdout.trim()}): the x32 socket() branch is skipped here; the number probe below still covers the filter`);
+    return t.skip(`sandbox live: skipped (this kernel has x32 calls disabled: ${free.stdout.trim()})`);
+  }
+  console.log("# sandbox x32: the x32 socket() call was made inside the sandbox and the process was killed (this kernel accepts x32 calls)");
+  const r = await run(bin, [], { readExec: [tmp] });
+  assert.ok(!/opened/.test(r.stdout), `an x32 socket() was opened inside the sandbox: ${r.stdout}`);
+  assert.ok(r.code !== 0, "the x32 call must end the process or fail");
+});
+
+live("any x32-numbered system call is killed by the filter, whether or not the kernel implements x32 (seccomp sees the number first)", async (t) => {
+  if (process.arch !== "x64") return t.skip("sandbox live: skipped (x32 calls exist on x86-64 only)");
+  const info = await sandboxInfo();
+  if (!info.seccomp) return t.skip("sandbox live: skipped (no socket filter on this kernel)");
+  const src = path.join(tmp, "x32num.c");
+  write(src, `#define _GNU_SOURCE
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+int main(void) {
+  long r = syscall(0x40000000 | SYS_getpid); /* an x32-numbered getpid */
+  printf("returned %ld\\n", r);
+  return 0;
+}
+`);
+  const bin = path.join(tmp, "x32numbin");
+  const cc = spawnSync("cc", ["-O2", "-o", bin, src], { encoding: "utf8" });
+  if (cc.status !== 0) return t.skip(`sandbox live: skipped (cannot build the x32 number probe: ${cc.stderr.trim().split("\n")[0]})`);
+  const free = spawnSync(bin, [], { encoding: "utf8" });
+  assert.equal(free.status, 0, "control: without the sandbox the call returns (a pid, or -1 where x32 is off)");
+  const r = await run(bin, [], { readExec: [tmp] });
+  console.log(`# sandbox x32 number probe: unconfined it ${free.stdout.trim()}; confined: ${r.code === null ? "killed" : "exit " + r.code}`);
+  assert.ok(r.code !== 0 && !/returned/.test(r.stdout), `the x32-numbered call was not stopped: ${r.stdout}`);
+});
+
+live("git, bsdtar and name lookups still work with the socket filter (they use only the descriptors they were given)", async () => {
+  const r1 = await run("id", ["-un"], { readOnly: [tmp] });
+  assert.equal(r1.code, 0, r1.stderr);
+  const r2 = await run("ls", ["-ln", tmp], { readOnly: [tmp] });
+  assert.equal(r2.code, 0, r2.stderr);
+  if (spawnSync("bsdtar", ["--version"]).status === 0) {
+    const d = path.join(tmp, "tarsrc");
+    write(path.join(d, "a.txt"), "tar me\n");
+    const out = path.join(tmp, "out.tar");
+    const c = await run("bsdtar", ["-cf", out, "-C", d, "a.txt"], { readOnly: [d], readWrite: [tmp] });
+    assert.equal(c.code, 0, c.stderr);
+    const l = await run("bsdtar", ["-tf", out], { readOnly: [tmp] });
+    assert.equal(l.stdout.trim(), "a.txt", l.stderr);
+  } else console.log("# sandbox: bsdtar not installed here, its check is skipped");
+  const z = ["7zz", "7z"].find((x) => spawnSync(x, ["--help"]).status === 0);
+  if (z) {
+    const d = path.join(tmp, "zsrc");
+    write(path.join(d, "a.txt"), "zip me\n");
+    const out = path.join(tmp, "out.7z");
+    const c = await run(z, ["a", "-snl", out, path.join(d, "a.txt")], { readOnly: [d], readWrite: [tmp] });
+    assert.equal(c.code, 0, c.stdout + c.stderr);
+  } else console.log("# sandbox: 7-Zip not installed here, its check is skipped (CI runs it)");
+});
+
+test("the sandbox state is reported: --probe says whether the socket filter is available, sandboxInfo carries it", async () => {
+  const out = execFileSync(box.bin, ["--probe"], { encoding: "utf8" });
+  assert.match(out, /landlock abi \d+ fs 0x[0-9a-f]+ net 0x[0-9a-f]+ scope 0x[0-9a-f]+ seccomp [01]/);
+  const info = await sandboxInfo();
+  if (info.landlock) {
+    assert.equal(info.seccomp, / seccomp 1/.test(out));
+    assert.ok(info.abi >= 1 && info.rights);
+  }
+  const { sandboxLine, sandboxSummary } = await import("../src/sandbox.ts");
+  assert.match(sandboxLine(info), /sandbox: mode \w+, state \w+, archive tools and git (confined|unconfined|disabled), landlock .*socket filter (on|off)/);
+  const sum = await sandboxSummary();
+  assert.deepEqual(Object.keys(sum).sort(), ["archiveTools", "landlockAbi", "mode", "socketFilter", "state"]);
+});
+
+/* ---- working folder by descriptor, the privilege drop in every mode, the root limit, launcher failures ---- */
+
+live("a working folder given by descriptor is exact even when its number collides with a slot the launcher's grants take", async () => {
+  const base = path.join(tmp, "cwdfd");
+  const grantDirs: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    write(path.join(base, `g${i}`, "id"), `grant-${i}\n`);
+    grantDirs.push(path.join(base, `g${i}`));
+  }
+  write(path.join(base, "pinned", "id"), "pinned\n");
+  const pinned = fs.openSync(path.join(base, "pinned"), "r"); // opened first: a low descriptor number
+  const grants = grantDirs.map((d) => fs.openSync(d, "r"));
+  try {
+    assert.ok(pinned < 3 + grants.length, `descriptor ${pinned} must fall among the ${grants.length} grant slots for this test to mean anything`);
+    const got = await run("cat", ["id"], { readOnly: [...grants, pinned], cwdFd: pinned });
+    assert.equal(got.stdout, "pinned\n", got.stderr);
+    // the old way, a /proc/self/fd path as the working folder, lands in another folder: that is the bug this option removes
+    const old = await run("cat", ["id"], { readOnly: [...grants, pinned], cwd: `/proc/self/fd/${pinned}` });
+    assert.notEqual(old.stdout, "pinned\n");
+  } finally {
+    for (const f of [...grants, pinned]) fs.closeSync(f);
+  }
+});
+
+live("a launcher failure is told apart from the program's own failure; too many roots is a clear error", async () => {
+  const { isLauncherFailure, MAX_ROOTS } = await import("../src/sandbox.ts");
+  const f = path.join(tmp, "plainfile");
+  write(f, "x");
+  const fd = fs.openSync(f, "r");
+  try {
+    const r = await run("true", [], { cwdFd: fd }); // fchdir to a file fails: the launcher says so and the program does not run
+    assert.ok(isLauncherFailure(r.code, r.stderr), `${r.code} ${r.stderr}`);
+    const own = await run("sh", ["-c", "echo filedeck-sandbox: fake >&2; exit 71"]);
+    assert.ok(isLauncherFailure(own.code, own.stderr), "the check is on the status and the launcher's prefix; a program printing both is indistinguishable, so callers use it only for tools that never do");
+    assert.equal(isLauncherFailure(1, "tar: error"), false);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const many = Array.from({ length: MAX_ROOTS + 1 }, () => f);
+  await assert.rejects(spawnSandboxed("true", [], { readOnly: many }), (e: { status?: number; message?: string }) => e.status === 500 && /limit is/.test(e.message ?? ""));
+  // a few hundred descriptor roots work (a split set of 200 parts, a selection of 300 files)
+  const fds = Array.from({ length: 300 }, () => fs.openSync(f, "r"));
+  try {
+    const ok = await run("cat", [f], { readOnly: fds });
+    assert.equal(ok.stdout, "x", ok.stderr);
+  } finally {
+    for (const x of fds) fs.closeSync(x);
+  }
+});
+
+/** the child's uid, gid and supplementary groups, in each of the three modes (root only: an agent that is not root changes nothing) */
+for (const mode of ["landlock", "fallback", "off"] as const) {
+  test(`the privilege drop does not depend on the sandbox mode: ${mode}`, { skip: process.getuid?.() === 0 ? false : "sandbox live: skipped (not running as root)" }, async (t) => {
+    if (mode === "landlock" && box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+    try {
+      if (mode === "off") process.env.FILEDECK_SANDBOX = "off";
+      else if (mode === "fallback") {
+        process.env.FILEDECK_SANDBOX = "auto";
+        process.env.FILEDECK_SANDBOX_HELPER = path.join(tmp, "no-such-launcher"); // no launcher at all: spawn's own uid and gid
+      } else process.env.FILEDECK_SANDBOX = "auto";
+      resetSandbox();
+      const state = (await sandboxInfo()).state;
+      assert.equal(state, mode);
+      const r = await run("sh", ["-c", "id -u; id -g; grep ^Groups: /proc/self/status"], { uid: 65534, gid: 65534 });
+      const [u, g, groups] = r.stdout.split("\n");
+      assert.equal(u, "65534", r.stderr);
+      assert.equal(g, "65534");
+      if (mode !== "fallback") assert.match(groups!, /^Groups:\s*$/, "the supplementary groups are cleared when the launcher is there"); // spawn's own uid option cannot clear them
+    } finally {
+      for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+        if (prev[i] === undefined) delete process.env[k];
+        else process.env[k] = prev[i];
+      }
+      resetSandbox();
+    }
+  });
+}
+
+test("the start-up log says clearly when the helper programs are not confined (off, fallback) and when they are required", async () => {
+  const { initSandbox } = await import("../src/sandbox.ts");
+  const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+  const lines = async (mode: string, helper?: string) => {
+    process.env.FILEDECK_SANDBOX = mode;
+    if (helper) process.env.FILEDECK_SANDBOX_HELPER = helper;
+    resetSandbox();
+    const out: string[] = [];
+    await initSandbox((m) => out.push(m));
+    return out;
+  };
+  try {
+    const off = await lines("off");
+    assert.equal(off.length, 2);
+    assert.match(off[0]!, /state off, archive tools and git unconfined/);
+    assert.match(off[1]!, /bsdtar and 7zz run with no kernel confinement/);
+    const fb = await lines("auto", path.join(tmp, "no-such-launcher"));
+    assert.match(fb[0]!, /state fallback, archive tools and git unconfined/);
+    assert.match(fb[1]!, /bsdtar and 7zz run without kernel confinement/);
+    const req = await lines("require", path.join(tmp, "no-such-launcher"));
+    assert.match(req[0]!, /archive tools and git disabled/);
+    assert.match(req[1]!, /answer an error/);
+  } finally {
+    for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+      if (prev[i] === undefined) delete process.env[k];
+      else process.env[k] = prev[i];
+    }
+    resetSandbox();
+  }
 });

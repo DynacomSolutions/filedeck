@@ -80,7 +80,17 @@ export function safeRegex(src: string, flags: string): RegExp {
  * search spends waiting for that worker, added up over the whole search, may not pass `regexTotalMs`. Past it, or when
  * the client goes away, the worker is terminated. Only `maxWorkers` such searches run at once. (Mutable for tests.)
  */
-export const searchHooks = { newWorker: (code: string, o: WorkerOptions): Worker => new Worker(code, o) }; // a seam for tests
+/** Seams for tests: how a worker is made, the clock the deadlines read and the timer that checks them, and an event for a released slot. */
+export const searchHooks = {
+  newWorker: (code: string, o: WorkerOptions): Worker => new Worker(code, o),
+  now: (): number => Date.now(),
+  every: (fn: () => void, ms: number): (() => void) => {
+    const t = setInterval(fn, ms);
+    t.unref();
+    return () => clearInterval(t);
+  },
+  onRelease: undefined as (() => void) | undefined,
+};
 export const searchLimits = { regexTotalMs: 20_000, maxWorkers: 4, wallMs: 300_000, stallMs: 20_000 };
 
 /** Matches many strings in one call (a batch of names, the lines of a chunk), so one round trip serves many tests. */
@@ -144,6 +154,7 @@ function workerTester(src: string, flags: string, budget: RegexBudget, signal?: 
     activeWorkers--;
     signal?.removeEventListener("abort", onAbort);
     void worker.terminate();
+    searchHooks.onRelease?.();
   };
   const onAbort = () => fail(new FsError(400, "canceled"));
   signal?.addEventListener("abort", onAbort, { once: true });
@@ -444,6 +455,7 @@ export class SearchGate {
       const left = (this.byClient.get(client) ?? 1) - 1;
       if (left <= 0) this.byClient.delete(client);
       else this.byClient.set(client, left);
+      searchHooks.onRelease?.();
     }
   }
 }
@@ -455,12 +467,12 @@ export class SearchGate {
  * is closed at once. The consumer's next read then gets the error.
  */
 export async function* limitSearch<T, S>(inner: AsyncGenerator<T, S>, abort: () => void, wallMs = searchLimits.wallMs, stallMs = searchLimits.stallMs): AsyncGenerator<T, S> {
-  const start = Date.now();
+  const start = searchHooks.now();
   let atYield = false;
   let yieldedAt = 0;
   let why: string | null = null;
-  const timer = setInterval(() => {
-    const now = Date.now();
+  const stopTimer = searchHooks.every(() => {
+    const now = searchHooks.now();
     if (why) return;
     if (now - start > wallMs) why = "search took too long: narrow it down";
     else if (atYield && now - yieldedAt > stallMs) why = "search stopped: the results were not read in time";
@@ -468,7 +480,6 @@ export async function* limitSearch<T, S>(inner: AsyncGenerator<T, S>, abort: () 
     abort(); // a search that is working notices at its next step
     if (atYield) void inner.return(undefined as S).catch(() => undefined); // one that waits for its reader is closed now: slot and worker are given back
   }, 250);
-  timer.unref();
   try {
     for (;;) {
       let r: IteratorResult<T, S>;
@@ -481,12 +492,12 @@ export async function* limitSearch<T, S>(inner: AsyncGenerator<T, S>, abort: () 
       if (why) throw new FsError(400, why);
       if (r.done) return r.value;
       atYield = true;
-      yieldedAt = Date.now();
+      yieldedAt = searchHooks.now();
       yield r.value;
       atYield = false;
     }
   } finally {
-    clearInterval(timer);
+    stopTimer();
     await inner.return(undefined as S).catch(() => undefined);
   }
 }

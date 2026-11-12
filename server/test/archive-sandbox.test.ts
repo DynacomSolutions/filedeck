@@ -6,8 +6,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { haveSevenZip } from "../src/sevenzip.ts";
-import { listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, zipStream } from "../src/archive.ts";
+import { haveSevenZip, runSz, szReadArgs } from "../src/sevenzip.ts";
+import { MAX_SELECTED, listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, spawnBsdtar, zipStream } from "../src/archive.ts";
 import { resetSandbox, sandboxInfo, spawnSandboxed } from "../src/sandbox.ts";
 import type { JobCtl } from "../src/jobs.ts";
 import { useSandbox } from "./sandbox-env.ts";
@@ -79,7 +79,7 @@ live("a link-following tool given the production grants cannot read through a su
   fs.writeFileSync(path.join(s.src, "sel/keep.txt"), "keep");
   const fd = fs.openSync(s.src, "r");
   try {
-    const grants = await selectionGrants(s.src, fd, ["sel"]);
+    const grants = await selectionGrants(s.src, ["sel"]);
     // the swap, after the grants were taken (the folder is held by descriptor from here on)
     fs.renameSync(path.join(s.src, "sel/z"), path.join(s.src, "sel/z-moved"));
     fs.symlinkSync(s.outside, path.join(s.src, "sel/z"));
@@ -335,4 +335,313 @@ test("the output bound grows with the names: a zip whose names average 900 bytes
   // the configured limit and a volume size still cap it
   assert.equal(outputBounds({ totalBytes, entries, nameBytes, maxBytes: 5000 }).setMax, 5000);
   assert.equal(outputBounds({ totalBytes, entries, nameBytes, maxBytes: 2 ** 40, splitBytes: 65536 }).partMax, 65536);
+});
+
+/* ---- the working folder is exact: many selected folders, a pinned folder on a low descriptor number ---- */
+
+live("a zip download of 45 folders holds every folder's own content (the working folder is given by descriptor)", async () => {
+  const s = scene("zip45");
+  const names: string[] = [];
+  for (let i = 0; i < 45; i++) {
+    names.push(`d${i}`);
+    fs.mkdirSync(path.join(s.src, `d${i}`, `sub${i}`), { recursive: true });
+    fs.writeFileSync(path.join(s.src, `d${i}`, "x"), `x${i}`);
+  }
+  const zip = path.join(s.dir, "dl.zip");
+  await new Promise<void>((resolve, reject) => {
+    const z = zipStream(s.src, names, new AbortController().signal, { root: s.root });
+    const out = fs.createWriteStream(zip);
+    z.on("error", reject);
+    out.on("close", () => resolve());
+    z.pipe(out);
+  });
+  const got = listTar(zip);
+  for (let i = 0; i < 45; i++) assert.ok(got.includes(`d${i}/x`) && got.includes(`d${i}/sub${i}/`), `d${i} missing: ${got.length} entries`);
+  assert.equal(spawnSync("bsdtar", ["-xOf", zip, "d44/x"], { encoding: "utf8" }).stdout, "x44");
+});
+
+live("a compression of 45 folders holds every folder's own content", async () => {
+  const s = scene("comp45");
+  const names: string[] = [];
+  for (let i = 0; i < 45; i++) {
+    names.push(`d${i}`);
+    fs.mkdirSync(path.join(s.src, `d${i}`));
+    fs.writeFileSync(path.join(s.src, `d${i}`, "x"), `x${i}`);
+  }
+  const r = await runCompress(await prepareCompress(s.root, "/src", names, "tar.gz", "c45", { destDir: "/out" }), LIM, mkCtl());
+  const got = listTar(path.join(s.root, r.path));
+  for (let i = 0; i < 45; i++) assert.ok(got.includes(`d${i}/x`), `d${i} missing`);
+  assert.equal(spawnSync("bsdtar", ["-xOf", path.join(s.root, r.path), "d7/x"], { encoding: "utf8" }).stdout, "x7");
+});
+
+/* ---- every selected entry on its own: no read of a FIFO or a device, no limit of 48 ---- */
+
+live("a FIFO in the selection is not opened for reading (it would block) and is stored as a node", async () => {
+  const s = scene("fifo-sel");
+  fs.writeFileSync(path.join(s.src, "a.txt"), "a");
+  assert.equal(spawnSync("mkfifo", [path.join(s.src, "pipe")], { timeout: 30_000 }).status, 0);
+  const t = Date.now();
+  const r = await runCompress(await prepareCompress(s.root, "/src", ["a.txt", "pipe"], "tar.gz", "fifo", { destDir: "/out" }), LIM, mkCtl());
+  assert.ok(Date.now() - t < 20_000, "no wait on the pipe");
+  assert.deepEqual(listTar(path.join(s.root, r.path)).sort(), ["a.txt", "pipe"]);
+  const zip = path.join(s.dir, "f.zip");
+  await new Promise<void>((resolve, reject) => {
+    const z = zipStream(s.src, ["a.txt", "pipe"], new AbortController().signal, { root: s.root });
+    const out = fs.createWriteStream(zip);
+    z.on("error", reject);
+    out.on("close", () => resolve());
+    z.pipe(out);
+  });
+  assert.ok(listTar(zip).includes("a.txt"));
+});
+
+live(
+  "a device node in the selection is not opened (root)",
+  async () => {
+    const s = scene("dev-sel");
+    fs.writeFileSync(path.join(s.src, "a.txt"), "a");
+    const mk = spawnSync("mknod", [path.join(s.src, "null-node"), "c", "1", "3"], { timeout: 30_000 });
+    if (mk.status !== 0) return; // this container cannot make device nodes (it also could not have one in a selection)
+    const r = await runCompress(await prepareCompress(s.root, "/src", ["a.txt", "null-node"], "tar.gz", "dev", { destDir: "/out" }), LIM, mkCtl());
+    assert.ok(listTar(path.join(s.root, r.path)).includes("a.txt"));
+  },
+  { skip: ROOT_ONLY },
+);
+
+live("a selection of 600 files compresses and each is granted on its own; more than the limit is refused clearly", async () => {
+  const s = scene("sel600");
+  const names: string[] = [];
+  for (let i = 0; i < 600; i++) {
+    names.push(`f${i}.txt`);
+    fs.writeFileSync(path.join(s.src, `f${i}.txt`), `n${i}`);
+  }
+  fs.writeFileSync(path.join(s.src, "sibling.txt"), "NOT-SELECTED");
+  const r = await runCompress(await prepareCompress(s.root, "/src", names, "tar.gz", "m600", { destDir: "/out" }), LIM, mkCtl());
+  const got = listTar(path.join(s.root, r.path));
+  assert.equal(got.length, 600);
+  assert.ok(!got.includes("sibling.txt"));
+  const many = Array.from({ length: MAX_SELECTED + 1 }, (_, i) => `x${i}`);
+  await assert.rejects(prepareCompress(s.root, "/src", many, "tar.gz", "m", { destDir: "/out" }), (e: { status?: number; message?: string }) => e.status === 400 && /select between 1 and \d+ items/.test(e.message ?? ""));
+});
+
+/* ---- one test per tool and operation: a path outside its grants is refused under Landlock and works without it ---- */
+
+/** run `fn` under the sandbox (it must report "denied") and again with the sandbox off (it must work) */
+async function sandboxedAndNot(name: string, fn: () => Promise<{ denied: boolean; detail: string }>) {
+  const inBox = await fn();
+  assert.ok(inBox.denied, `${name}: under Landlock this must be refused: ${inBox.detail}`);
+  const prev = process.env.FILEDECK_SANDBOX;
+  process.env.FILEDECK_SANDBOX = "off";
+  resetSandbox();
+  try {
+    const free = await fn();
+    assert.ok(!free.denied, `${name}: without the sandbox this works (so the refusal above is the sandbox's): ${free.detail}`);
+  } finally {
+    if (prev === undefined) delete process.env.FILEDECK_SANDBOX;
+    else process.env.FILEDECK_SANDBOX = prev;
+    resetSandbox();
+  }
+}
+async function finish(child: import("node:child_process").ChildProcess): Promise<{ code: number | null; out: Buffer; err: string }> {
+  const out: Buffer[] = [];
+  let err = "";
+  child.stdout?.on("data", (d) => out.push(d));
+  child.stderr?.on("data", (d) => (err += d));
+  const code = await new Promise<number | null>((r) => child.on("close", r));
+  return { code, out: Buffer.concat(out), err };
+}
+const deniedWith = (r: { code: number | null; err: string }) => r.code !== 0 && r.err.length > 0;
+
+function opScene(name: string) {
+  const s = scene(name);
+  fs.writeFileSync(path.join(s.src, "own.txt"), "own");
+  fs.writeFileSync(path.join(s.src, "sibling.txt"), "SIBLING-SECRET");
+  fs.writeFileSync(path.join(s.outside, "outside.tar"), spawnSync("bsdtar", ["-cf", "-", "-C", s.src, "sibling.txt"], { timeout: 30_000, maxBuffer: 1 << 24 }).stdout);
+  fs.writeFileSync(path.join(s.src, "own.tar"), spawnSync("bsdtar", ["-cf", "-", "-C", s.src, "own.txt"], { timeout: 30_000, maxBuffer: 1 << 24 }).stdout);
+  return s;
+}
+
+live("bsdtar list is told to read an archive outside its grants: refused under Landlock, listed without it", async () => {
+  const s = opScene("op-list");
+  const fd = fs.openSync(path.join(s.src, "own.tar"), "r"); // the archive it was handed, as streamList hands it
+  try {
+    await sandboxedAndNot("bsdtar list", async () => {
+      const r = await finish(await spawnBsdtar(["-tvf", path.join(s.outside, "outside.tar")], { stdin: fd, readOnly: [] }));
+      return { denied: deniedWith(r), detail: `${r.code} ${r.err}` };
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+
+live("bsdtar extract is told (by a hostile archive's @ member) to read a file outside its grants: refused under Landlock", async () => {
+  const s = opScene("op-extract");
+  // the archive it extracts names another archive to include; the extraction command is the production one plus that argument
+  const fd = fs.openSync(path.join(s.src, "own.tar"), "r");
+  try {
+    await sandboxedAndNot("bsdtar extract", async () => {
+      const r = await finish(await spawnBsdtar(["--format=pax", "-cf", "-", "@-", `@${path.join(s.outside, "outside.tar")}`], { stdin: fd }));
+      return { denied: deniedWith(r), detail: `${r.code} ${r.err}` };
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+
+live("bsdtar compress is told to read a sibling that was not selected, and to write outside its scratch folder: refused under Landlock", async () => {
+  const s = opScene("op-compress");
+  const srcFd = fs.openSync(s.src, "r");
+  const scratchDir = path.join(s.dir, "scratch");
+  fs.mkdirSync(scratchDir);
+  const scratchFd = fs.openSync(scratchDir, "r");
+  try {
+    const grants = await selectionGrants(s.src, ["own.txt"]);
+    await sandboxedAndNot("bsdtar compress (read)", async () => {
+      const child = await spawnBsdtar(["--null", "-cf", "-", "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots, scratch: { fd: scratchFd, dir: scratchDir } });
+      child.stdin!.end("own.txt\0sibling.txt\0");
+      const r = await finish(child);
+      return { denied: deniedWith(r) && !r.out.includes("SIBLING-SECRET"), detail: `${r.code} ${r.err}` };
+    });
+    await sandboxedAndNot("bsdtar compress (write)", async () => {
+      const target = path.join(s.outside, `w-${Date.now()}-${Math.random()}.tar`);
+      const child = await spawnBsdtar(["--null", "-cf", target, "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots, scratch: { fd: scratchFd, dir: scratchDir } });
+      child.stdin!.end("own.txt\0");
+      const r = await finish(child);
+      return { denied: deniedWith(r) && !fs.existsSync(target), detail: `${r.code} ${r.err}` };
+    });
+    await grants.close();
+  } finally {
+    fs.closeSync(srcFd);
+    fs.closeSync(scratchFd);
+  }
+});
+
+live("the zip tool is told to read a sibling that was not selected: refused under Landlock", async () => {
+  const s = opScene("op-zip");
+  const srcFd = fs.openSync(s.src, "r");
+  try {
+    const grants = await selectionGrants(s.src, ["own.txt"]);
+    await sandboxedAndNot("zip", async () => {
+      const child = await spawnBsdtar(["--null", "--format", "zip", "-cf", "-", "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots });
+      child.stdin!.end("own.txt\0sibling.txt\0");
+      const r = await finish(child);
+      return { denied: deniedWith(r) && !r.out.includes("SIBLING-SECRET"), detail: `${r.code} ${r.err}` };
+    });
+    await grants.close();
+  } finally {
+    fs.closeSync(srcFd);
+  }
+});
+
+/* ---- the same for 7-Zip (CI: needs 7zz) ---- */
+
+const needSz = { skip: HAVE_BSDTAR && haveSevenZip() ? false : "7-Zip (7zz) or bsdtar not installed" };
+const liveSz = (name: string, fn: () => Promise<void>) =>
+  test(name, { ...needSz, timeout: 120_000 }, async (t) => {
+    if (box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    await fn();
+  });
+const sz = process.env.FILEDECK_7Z || "7zz";
+void sz;
+
+liveSz("7-Zip list is told to read an archive outside its grants: refused under Landlock, listed without it", async () => {
+  const s = opScene("op-sz-list");
+  const archive = path.join(s.outside, "o.7z");
+  assert.equal(spawnSync("7zz", ["a", "-t7z", archive, path.join(s.src, "sibling.txt")], { timeout: 60_000, input: "" }).status, 0);
+  const mine = path.join(s.src, "own.7z");
+  assert.equal(spawnSync("7zz", ["a", "-t7z", mine, path.join(s.src, "own.txt")], { timeout: 60_000, input: "" }).status, 0);
+  const fd = fs.openSync(mine, "r");
+  try {
+    await sandboxedAndNot("7z list", async () => {
+      const how = await szReadArgs({ arg: mine, file: fd });
+      const p = await runSz(["l", "-slt", "-ba", "--", archive], { readOnly: how.readOnly, fd: how.fd });
+      const r = await p.done;
+      return { denied: r.code !== 0 && !/sibling/.test(r.text), detail: `${r.code} ${r.text}` };
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+
+liveSz("7-Zip extract is told to write outside its staging folder and to read a file outside its grants: refused under Landlock", async () => {
+  const s = opScene("op-sz-extract");
+  const mine = path.join(s.src, "own.7z");
+  assert.equal(spawnSync("7zz", ["a", "-t7z", mine, path.join(s.src, "own.txt")], { timeout: 60_000, input: "" }).status, 0);
+  const fd = fs.openSync(mine, "r");
+  const staging = path.join(s.dir, "staging");
+  fs.mkdirSync(staging);
+  const stFd = fs.openSync(staging, "r");
+  try {
+    await sandboxedAndNot("7z extract (write)", async () => {
+      const out = path.join(s.outside, `x-${Date.now()}-${Math.random()}`);
+      const how = await szReadArgs({ arg: mine, file: fd });
+      const p = await runSz(["x", "-aoa", `-o${out}`, "--", how.arg], { cwdFd: stFd, readOnly: how.readOnly, readWrite: [stFd], fd: how.fd });
+      const r = await p.done;
+      return { denied: r.code !== 0 && !fs.existsSync(path.join(out, "own.txt")), detail: `${r.code} ${r.text}` };
+    });
+  } finally {
+    fs.closeSync(fd);
+    fs.closeSync(stFd);
+  }
+});
+
+liveSz("7-Zip compress is told to read a sibling that was not selected and to write outside its folder: refused under Landlock", async () => {
+  const s = opScene("op-sz-compress");
+  const srcFd = fs.openSync(s.src, "r");
+  const outDir = path.join(s.dir, "outdir");
+  fs.mkdirSync(outDir);
+  const outFd = fs.openSync(outDir, "r");
+  try {
+    const grants = await selectionGrants(s.src, ["own.txt"]);
+    await sandboxedAndNot("7z compress (read)", async () => {
+      const p = await runSz(["a", "-t7z", "-snl", "-spd", path.join(outDir, `r-${Date.now()}.7z`), "./own.txt", "./sibling.txt"], { cwdFd: srcFd, readOnly: grants.roots, readWrite: [outFd] });
+      const r = await p.done;
+      const made = fs.readdirSync(outDir).filter((n) => n.startsWith("r-"));
+      const leaked = made.some((n) => spawnSync("7zz", ["l", "-ba", path.join(outDir, n)], { encoding: "utf8", timeout: 60_000, input: "" }).stdout.includes("sibling.txt"));
+      for (const n of made) fs.rmSync(path.join(outDir, n));
+      return { denied: !leaked && r.code !== 0, detail: `${r.code} ${r.text}` };
+    });
+    await sandboxedAndNot("7z compress (write)", async () => {
+      const target = path.join(s.outside, `w-${Date.now()}-${Math.random()}.7z`);
+      const p = await runSz(["a", "-t7z", "-snl", "-spd", target, "./own.txt"], { cwdFd: srcFd, readOnly: grants.roots, readWrite: [outFd] });
+      const r = await p.done;
+      const existed = fs.existsSync(target);
+      if (existed) fs.rmSync(target);
+      return { denied: !existed && r.code !== 0, detail: `${r.code} ${r.text}` };
+    });
+    await grants.close();
+  } finally {
+    fs.closeSync(srcFd);
+    fs.closeSync(outFd);
+  }
+});
+
+/* ---- a launcher failure is reported, never swallowed into another tool ---- */
+
+test("a launcher failure while listing or preparing an extract is a clear error, not a fallback to bsdtar and not a skipped password check", needTool, async () => {
+  const s = scene("launcher-fail");
+  for (const n of ["a.7z", "b.zip", "c.7z.001"]) fs.writeFileSync(path.join(s.src, n), "not really an archive");
+  const fake = path.join(s.dir, "fake-launcher.sh");
+  fs.writeFileSync(fake, '#!/bin/sh\nif [ "$1" = "--probe" ]; then echo "landlock abi 4 fs 0x1 net 0x1 scope 0x0 seccomp 1"; exit 0; fi\necho "filedeck-sandbox: fd:5: Bad file descriptor" >&2\nexit 71\n', { mode: 0o755 });
+  const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER, process.env.FILEDECK_7Z, process.env.FILEDECK_7Z_RECHECK];
+  try {
+    process.env.FILEDECK_SANDBOX = "auto";
+    process.env.FILEDECK_SANDBOX_HELPER = fake;
+    process.env.FILEDECK_7Z = "true"; // any program that starts: 7-Zip counts as installed
+    process.env.FILEDECK_7Z_RECHECK = "1";
+    resetSandbox();
+    assert.equal((await sandboxInfo()).state, "landlock");
+    const is500 = (e: unknown) => (e as { status?: number; message?: string }).status === 500 && /sandbox could not start/.test((e as Error).message);
+    for (const n of ["a.7z", "b.zip", "c.7z.001"]) {
+      await assert.rejects(listArchive(s.root, `/src/${n}`), is500, `list ${n}`);
+      await assert.rejects(prepareExtract(s.root, `/src/${n}`, "/out", false, { password: "pw" }), is500, `prepare ${n}`);
+    }
+    // a plain "this is not an archive" is still the ordinary answer (here the launcher works, the file is just not one)
+  } finally {
+    for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER", "FILEDECK_7Z", "FILEDECK_7Z_RECHECK"].entries()) {
+      if (prev[i] === undefined) delete process.env[k];
+      else process.env[k] = prev[i];
+    }
+    resetSandbox();
+  }
 });
