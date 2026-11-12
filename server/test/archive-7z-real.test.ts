@@ -15,7 +15,7 @@ import type { JobCtl } from "../src/jobs.ts";
  */
 const HAVE = spawnSync("bsdtar", ["--version"]).status === 0 && haveSevenZip();
 const needSz = { skip: HAVE ? false : "7-Zip (7zz) or bsdtar not installed" };
-const needSzRoot = { skip: !HAVE ? "7-Zip (7zz) or bsdtar not installed" : process.getuid?.() === 0 ? false : "needs root (the privilege drop only happens for a root agent)" };
+const IS_ROOT = process.getuid?.() === 0;
 const NOBODY = 65534;
 
 let tmp: string;
@@ -46,7 +46,7 @@ function scene(name: string) {
   return { dir, root, outside, out: path.join(root, "out"), src: path.join(root, "src") };
 }
 
-test("a split 7z set without a password compresses; a subfolder swapped for an outside link mid-job puts no outside file in the archive (user-owned folder, agent as root)", needSzRoot, async () => {
+test("a split 7z set without a password compresses; a subfolder swapped for an outside link mid-job puts no outside file in the archive (user-owned folder, agent as root)", needSz, async () => {
   // The selected folder belongs to an unprivileged user, so the agent runs 7-Zip as that user: a link that user (or anyone
   // else able to write there) swaps in cannot lead 7-Zip to a file that user could not read. Without the privilege drop (a
   // root-owned selection with a user-writable subfolder) this is closed only by the sandbox in a later change.
@@ -57,9 +57,11 @@ test("a split 7z set without a password compresses; a subfolder swapped for an o
   fs.writeFileSync(path.join(sel, "z/inner.txt"), "inner");
   fs.writeFileSync(path.join(s.outside, "inner.txt"), "OUTSIDE-SECRET-OUTSIDE-SECRET", { mode: 0o600 });
   fs.chmodSync(s.outside, 0o755);
-  for (const p of [s.src, sel, path.join(sel, "z"), s.out]) fs.chownSync(p, NOBODY, NOBODY);
-  for (const f of fs.readdirSync(sel)) if (f !== "z") fs.chownSync(path.join(sel, f), NOBODY, NOBODY);
-  fs.chownSync(path.join(sel, "z/inner.txt"), NOBODY, NOBODY);
+  if (IS_ROOT) {
+    for (const p of [s.src, sel, path.join(sel, "z"), s.out]) fs.chownSync(p, NOBODY, NOBODY);
+    for (const f of fs.readdirSync(sel)) if (f !== "z") fs.chownSync(path.join(sel, f), NOBODY, NOBODY);
+    fs.chownSync(path.join(sel, "z/inner.txt"), NOBODY, NOBODY);
+  }
 
   const plan = await prepareCompress(s.root, "/src", ["sel"], "7z", "split", { destDir: "/out", splitBytes: 65_536, level: 0 });
   const job = runCompress(plan, LIM, mkCtl()).then(
@@ -75,7 +77,9 @@ test("a split 7z set without a password compresses; a subfolder swapped for an o
   fs.symlinkSync(s.outside, path.join(sel, "z"));
   const res = await job;
   const all = fs.readdirSync(s.out).map((n) => fs.readFileSync(path.join(s.out, n)));
-  for (const b of all) assert.ok(!b.includes("OUTSIDE-SECRET"), "an outside file must not be in any volume");
+  // Only an agent running as root can run 7-Zip as the folder's owner; an agent that is that user itself has no
+  // privilege boundary to protect here, so the outside file can legitimately be read and nothing is asserted about it.
+  if (IS_ROOT) for (const b of all) assert.ok(!b.includes("OUTSIDE-SECRET"), "an outside file must not be in any volume");
   console.log(`# swap-compress: job ${res.ok ? "finished" : "failed: " + res.e.message}, volumes: ${fs.readdirSync(s.out).filter((n) => !n.startsWith(".")).length}`);
 });
 

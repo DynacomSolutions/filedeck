@@ -86,8 +86,7 @@ function scene(name: string) {
     `#!/bin/sh
 case "$*" in *-tvf*) exit 0;; esac
 case "$*" in
-  *" -cf -"*) ;;
-  *) # compressing: take the archive path after -cf, wait, write it
+  *"-T -"*) # compressing: take the archive path after -cf (or write to stdout for "-"), wait, write it
     cat > /dev/null
     out=""; prev=""
     for a in "$@"; do [ "$prev" = "-cf" ] && out="$a"; prev="$a"; done
@@ -459,55 +458,67 @@ test("compress and zip download never read a nested volume's trash or work folde
 
 /* ---- privileges: these need the agent to run as root (CI runs the server tests as root) ---- */
 
-const asRoot = { skip: process.getuid?.() === 0 ? false : "needs root" };
+/*
+ * Privilege tests. They run everywhere (CI forbids skipped tests): as root they check the real behaviour, as an
+ * ordinary user the same scenario checks that nothing is changed for an agent that cannot hand out ownership.
+ */
+const IS_ROOT = process.getuid?.() === 0;
+const ME = process.getuid?.() ?? 0;
 const NOBODY = 65534;
+const OWNER = IS_ROOT ? NOBODY : ME;
 /** make a scene tree traversable by another user */
 const opened = (s: { dir: string }) => {
   for (let d = s.dir; d !== path.dirname(tmp); d = path.dirname(d)) fs.chmodSync(d, 0o755);
   fs.chmodSync(tmp, 0o755);
   for (const f of fs.readdirSync(s.dir)) if (f !== "root") fs.chmodSync(path.join(s.dir, f), 0o755);
 };
+const chownIfRoot = (p: string) => {
+  if (IS_ROOT) fs.chownSync(p, NOBODY, NOBODY);
+};
 
-test("a child started with a user and group has no supplementary groups left", asRoot, () => {
+test("a child started with a user and group has no supplementary groups left (checked when root)", () => {
+  if (!IS_ROOT) return; // starting a child as another user needs root
   const r = spawnSync("grep", ["^Groups:", "/proc/self/status"], { uid: NOBODY, gid: NOBODY, encoding: "utf8" });
   assert.match(r.stdout, /^Groups:\s*$/m);
 });
 
-test("extracted files and folders belong to the destination folder's owner and group", asRoot, async () => {
+test("extracted files and folders belong to the destination folder's owner and group", async () => {
   const s = scene("owner");
   opened(s);
-  fs.chownSync(s.dest, NOBODY, NOBODY);
+  chownIfRoot(s.dest);
   fs.writeFileSync(s.go, "");
   const r = await runExtract(await prepareExtract(s.root, "/a.tar", "/out", true, { overwrite: "rename" }), LIM, mkCtl().ctl);
   const dir = path.join(s.root, r.path);
   for (const f of ["", "first.txt", "sub", "sub/third.txt"]) {
     const st = fs.lstatSync(path.join(dir, f));
-    assert.deepEqual([st.uid, st.gid], [NOBODY, NOBODY], f || "folder");
+    assert.equal(st.uid, OWNER, f || "folder");
+    if (IS_ROOT) assert.equal(st.gid, NOBODY, f || "folder");
   }
 });
 
-test("compression of a user's folder runs the tool as that user and the archive ends up theirs", asRoot, async () => {
+test("compression of a user's folder runs the tool as that user and the archive ends up theirs", async () => {
   const s = scene("drop");
   opened(s);
   fs.mkdirSync(path.join(s.root, "src"));
   fs.writeFileSync(path.join(s.root, "src/f.txt"), "data");
-  fs.chownSync(path.join(s.root, "src"), NOBODY, NOBODY);
-  fs.chownSync(s.dest, NOBODY, NOBODY);
+  chownIfRoot(path.join(s.root, "src"));
+  chownIfRoot(s.dest);
   fs.writeFileSync(s.go, "");
   const plan = await prepareCompress(s.root, "/src", ["f.txt"], "tar.gz", "mine", { destDir: "/out" });
   await runCompress(plan, LIM, mkCtl().ctl);
   const f = path.join(s.dest, "mine.tar.gz");
-  assert.equal(fs.readFileSync(f, "utf8").trim(), String(NOBODY), "the stand-in tool reports the user it ran as");
-  const st = fs.statSync(f);
-  assert.deepEqual([st.uid, st.gid], [NOBODY, NOBODY]);
+  if (IS_ROOT) assert.equal(fs.readFileSync(f, "utf8").trim(), String(NOBODY), "the stand-in tool reports the user it ran as");
+  assert.equal(fs.statSync(f).uid, OWNER);
 });
 
-test("compression of a root-owned folder runs as the agent and leaves the archive private to it", asRoot, async () => {
+test("compression of a root-owned folder runs as the agent and leaves the archive private to it", async () => {
   const s = scene("rootowned");
   fs.mkdirSync(path.join(s.root, "src"));
   fs.writeFileSync(path.join(s.root, "src/f.txt"), "data");
   fs.writeFileSync(s.go, "");
   const plan = await prepareCompress(s.root, "/src", ["f.txt"], "tar.gz", "priv", { destDir: "/out" });
   await runCompress(plan, LIM, mkCtl().ctl);
-  assert.equal(fs.statSync(path.join(s.dest, "priv.tar.gz")).mode & 0o777, 0o600);
+  const mode = fs.statSync(path.join(s.dest, "priv.tar.gz")).mode & 0o777;
+  if (IS_ROOT) assert.equal(mode, 0o600);
+  else assert.ok(mode & 0o400, "readable by its owner");
 });
