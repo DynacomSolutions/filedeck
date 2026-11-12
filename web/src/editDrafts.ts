@@ -63,6 +63,42 @@ export function splitBom(content: string): { bom: boolean; text: string } {
 
 export const joinBom = (bom: boolean, text: string): string => (bom ? BOM + text : text);
 
+export type EolName = "CRLF" | "LF";
+
+export interface EolInfo {
+  /** line breaks written as CR LF, as LF, and as a lone CR */
+  crlf: number;
+  lf: number;
+  cr: number;
+  /** more than one kind of line break is present, or a lone CR is (the editor cannot keep a lone CR) */
+  mixed: boolean;
+  /** what the editor writes back when it holds this text: Monaco counts a lone CR with CR LF and picks CRLF when those are more than half of all breaks, else LF */
+  written: EolName;
+}
+
+/** Count the line breaks in text as it is on disk. The editor gives every line the same ending, so a file that mixes them changes on save. */
+export function detectEol(text: string): EolInfo {
+  let crlf = 0;
+  let lf = 0;
+  let cr = 0;
+  for (const m of text.matchAll(/\r\n|\r|\n/g)) {
+    if (m[0] === "\r\n") crlf++;
+    else if (m[0] === "\n") lf++;
+    else cr++;
+  }
+  const total = crlf + lf + cr;
+  const kinds = (crlf ? 1 : 0) + (lf ? 1 : 0) + (cr ? 1 : 0);
+  return { crlf, lf, cr, mixed: kinds > 1 || cr > 0, written: crlf + cr > total / 2 ? "CRLF" : "LF" };
+}
+
+/** The notice for a file whose line endings change on save, or "" when they do not. `written` is the ending the editor's model reports. */
+export function eolNotice(info: EolInfo, written: EolName = info.written): string {
+  if (!info.mixed) return "";
+  const kinds = [info.crlf && "Windows (CRLF)", info.lf && "Unix (LF)", info.cr && "old Mac (CR)"].filter(Boolean) as string[];
+  const had = kinds.length > 1 ? `mixes ${kinds.join(" and ")} line endings` : `uses ${kinds[0]} line endings`;
+  return `This file ${had}. A save changes all of them to ${written}.`;
+}
+
 /** A name typed for a new or renamed entry must be one plain path segment. Returns the reason it is not, or "". */
 export function plainNameError(name: string): string {
   if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\0")) return "Enter a plain name without slashes";

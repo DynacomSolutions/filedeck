@@ -152,7 +152,7 @@ async function installFixture(page, opts = {}) {
     if (pathname === '/api/ops/jobs') return json({ jobs: [] });
     if (pathname.endsWith('/api/trash/list')) return json({ volumes: [{ volume: '/', items: trashItems, truncated: false }] });
     if (pathname.endsWith('/api/fs/read')) return route.fulfill({ status: 200, contentType: 'text/markdown; charset=utf-8', body: markdownText });
-    if (pathname.endsWith('/api/fs/text')) return json({ path: url.searchParams.get('path'), content: url.searchParams.get('path')?.endsWith('.md') ? markdownText : 'saved text\n', size: 12, mtime: 1791264000000, etag: 'etag-1' });
+    if (pathname.endsWith('/api/fs/text')) return json({ path: url.searchParams.get('path'), content: url.searchParams.get('path')?.endsWith('.md') ? markdownText : url.searchParams.get('path')?.endsWith('/mixed.txt') ? 'one\r\ntwo\r\nthree\nfour\r\n' : 'saved text\n', size: 12, mtime: 1791264000000, etag: 'etag-1' });
     if (pathname.endsWith('/api/fs/rename') || pathname.endsWith('/api/fs/mkdir')) return json({ ok: true });
     if (pathname.endsWith('/api/archive/list')) return json({ entries: [{ name: 'inside.txt', type: 'file', size: 128, date: '2026-10-06' }], truncated: false, bytes: 128 });
     if (pathname.endsWith('/api/git/refs')) return json({ bare: false, refs: ['main'], prs: [{ n: 12, subject: 'Fixture pull request' }] });
@@ -1537,6 +1537,39 @@ async function verifyUnsavedTextSurvivesResize(browser) {
   }
 }
 
+async function verifyMixedLineEndingsNotice(browser) {
+  const stateFor = (file) => `?s=${encodeURIComponent(JSON.stringify({ t: { i: 'p1', n: nodeName, p: '/work', e: [nodeName, file] }, a: 'p1' }))}`;
+  const expected = 'This file mixes Windows (CRLF) and Unix (LF) line endings. A save changes all of them to CRLF.';
+  for (const [width, height] of [[1365, 900], [390, 844], [320, 760]]) {
+    const { context, page } = await openPage(browser, { viewport: { width, height }, state: stateFor('/work/mixed.txt') });
+    try {
+      const editor = page.getByRole('dialog', { name: 'Editing mixed.txt' });
+      await editor.locator('.monaco-editor .view-lines').waitFor({ state: 'visible', timeout: 20000 });
+      const notice = editor.getByRole('status').filter({ hasText: 'line endings' });
+      await notice.waitFor({ state: 'visible', timeout: 8000 });
+      assert.equal((await notice.innerText()).trim(), expected, `the notice names what a save writes at ${width}px`);
+      const box = await page.evaluate(() => {
+        const n = document.querySelector('.ed .ed-notice').getBoundingClientRect();
+        const body = document.querySelector('.ed .ed-body').getBoundingClientRect();
+        return { noticeBottom: n.bottom, bodyTop: body.top, right: n.right, overflow: document.documentElement.scrollWidth > innerWidth };
+      });
+      assert.ok(box.noticeBottom <= box.bodyTop + 0.5, `the notice does not cover the editor text at ${width}px`);
+      assert.ok(box.right <= width && !box.overflow, `the notice fits the window at ${width}px`);
+    } finally {
+      await context.close();
+    }
+  }
+  const { context, page } = await openPage(browser, { state: stateFor(tracked) });
+  try {
+    const editor = page.getByRole('dialog', { name: 'Editing tracked.txt' });
+    await editor.locator('.monaco-editor .view-lines').waitFor({ state: 'visible', timeout: 20000 });
+    await page.waitForFunction(() => /saved\s*text/.test(document.querySelector('.monaco-editor .view-lines')?.textContent ?? ''), null, { timeout: 20000 });
+    assert.equal((await editor.locator('.ed-notice').innerText()).trim(), '', 'a file with one kind of line ending shows no notice');
+  } finally {
+    await context.close();
+  }
+}
+
 // ---- Runner ---------------------------------------------------------------------------------------------------------
 
 const checks = [
@@ -1560,6 +1593,7 @@ const checks = [
   ['copy and move to another node, vault renewal', verifyOperations],
   ['large listing', verifyLargeListing],
   ['unsaved editor text survives a resize', verifyUnsavedTextSurvivesResize],
+  ['mixed line endings notice', verifyMixedLineEndingsNotice],
   ['address bar targets and keyboard', verifyAddressBar],
   ['Compare toolbar is not clipped', verifyCompareToolbar],
   ['Compare toolbar is compact on a phone', verifyCompareToolbarCompact],

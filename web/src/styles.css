@@ -134,6 +134,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 .ed-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem .8rem;padding:.6rem var(--gutter);border-bottom:1px solid var(--border);background:var(--header-bg);font-size:.82rem}
 .ed-head button{align-self:center}.ed-spacer{flex:1}.ed-pair{overflow-wrap:anywhere}.ed-dirty{color:var(--accent-text)}
 .ed-banner{display:flex;flex-wrap:wrap;gap:.5rem .8rem;align-items:center;padding:.5rem var(--gutter);background:var(--accent-tint);border-bottom:1px solid var(--accent-line);color:var(--fg);font-size:.82rem}.ed-banner.err{border-color:var(--border)}
+.ed-notice:empty{padding:0;border:0}
 .ed-body{flex:1;min-height:0;position:relative}
 .pill{display:inline-flex;align-items:center;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:var(--radius-btn);padding:.1rem .6rem;font-size:.7rem;font-weight:700;letter-spacing:.03em}
 

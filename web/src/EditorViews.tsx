@@ -7,7 +7,7 @@ import { ConflictError, api, fmtSize, type TextFile } from "./api";
 import { gitApi } from "./git";
 import { selectAllGoesToEditor, selectAllInEditor } from "./editorKeys";
 import { languageForPath, modelUri, monacoTheme } from "./monacoSetup";
-import { clearDraft, getDraft, joinBom, splitBom, syncDraft } from "./editDrafts";
+import { clearDraft, detectEol, eolNotice, getDraft, joinBom, splitBom, syncDraft, type EolInfo, type EolName } from "./editDrafts";
 import { ArrowLeftRight } from "lucide-react";
 import * as Ic from "lucide-react";
 
@@ -92,6 +92,13 @@ export const useTheme = () => {
   return t;
 };
 
+const eolOf = (m: MonacoEditor.ITextModel | null | undefined): EolName | null => (m ? (m.getEOL() === "\r\n" ? "CRLF" : "LF") : null);
+
+/** Says that a save changes the line endings of a file that mixes them. Always in the page, so a screen reader announces the text when it appears. */
+function EolNotice({ text }: { text: string }) {
+  return <div className="ed-banner ed-notice" role="status">{text && <span>{text}</span>}</div>;
+}
+
 function Conflict({ onOverwrite, onReload }: { onOverwrite: () => void; onReload: () => void }) {
   return (
     <div className="ed-banner" role="alert">
@@ -112,6 +119,9 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
   /** bumped by every load so a reload replaces the widget's text even when the file is unchanged */
   const [epoch, setEpoch] = useState(0);
   const bomRef = useRef(false);
+  /** the line endings the file had on disk, until a save makes them one kind; `modelEol` is what the editor's model really writes */
+  const [eol, setEol] = useState<EolInfo | null>(null);
+  const [modelEol, setModelEol] = useState<EolName | null>(null);
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
   const [err, setErr] = useState("");
@@ -133,6 +143,8 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
         .then((f) => {
           const { bom, text: body } = splitBom(f.content);
           bomRef.current = bom;
+          setEol(detectEol(body));
+          setModelEol(null);
           setLoaded({ ...f, content: body });
           setEpoch((n) => n + 1);
           const kept = discard ? undefined : getDraft(node, path);
@@ -166,6 +178,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
         const sent = text;
         const r = await api.writeText(node, path, joinBom(bomRef.current, sent), etag);
         setLoaded({ ...loaded, content: sent, etag: r.etag, size: r.size, mtime: r.mtime });
+        setEol(null);
         setConflict(null);
         setErr("");
         onStatus(`Saved ${base(path)}`);
@@ -214,6 +227,7 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
       </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={() => load(true)} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
+      <EolNotice text={eol ? eolNotice(eol, modelEol ?? eol.written) : ""} />
       <div className="ed-body">
         {loaded && (
           <Editor
@@ -224,7 +238,11 @@ export function TextEditor({ file, onClose, onStatus, inline = false, extra }: {
             theme={theme}
             options={OPTS}
             onChange={(v) => setText(v ?? "")}
-            onMount={(e) => { editorRef.current = e; e.focus(); }}
+            onMount={(e) => {
+              editorRef.current = e;
+              setModelEol(eolOf(e.getModel()));
+              e.focus();
+            }}
             loading={<div className="pad muted">Loading editor...</div>}
           />
         )}
@@ -272,6 +290,8 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
   /** what the modified side of the widget was last given (see TextEditor: a save must not reset it) */
   const [modValue, setModValue] = useState("");
   const bomRef = useRef(false);
+  const [eol, setEol] = useState<EolInfo | null>(null);
+  const [modelEol, setModelEol] = useState<EolName | null>(null);
   const rKey = useRef({ node: right.node, path: right.path });
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
@@ -312,6 +332,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
         .then(([a, b]) => {
           const bodyB = splitBom(b.content);
           bomRef.current = bodyB.bom;
+          setEol(detectEol(bodyB.text));
           rKey.current = { node: right.node, path: right.path };
           setL({ ...a, content: splitBom(a.content).text });
           setR({ ...b, content: bodyB.text });
@@ -322,6 +343,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
           // the widget keeps its model across a reload, and the value above may equal the one it was already given
           const model = ed.current?.getModifiedEditor().getModel();
           if (model && model.getValue() !== text) model.setValue(text);
+          if (model) setModelEol(eolOf(model));
           if (kept) {
             if (kept.etag !== b.etag) setConflict(b.etag);
             onStatusRef.current(`Restored unsaved changes to ${base(right.path)}`);
@@ -345,6 +367,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
         const etag = force && conflict ? conflict : r.etag;
         const res = await api.writeText(right.node, right.path, joinBom(bomRef.current, text), etag);
         setR({ ...r, content: text, etag: res.etag, size: res.size, mtime: res.mtime });
+        setEol(null);
         setConflict(null);
         setErr("");
         onStatus(`Saved ${base(right.path)}`);
@@ -405,6 +428,7 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
       </div>
       {conflict !== null && <Conflict onOverwrite={() => void save(true)} onReload={() => load(true)} />}
       {err && <div className="ed-banner err" role="alert">{err}</div>}
+      <EolNotice text={eol ? eolNotice(eol, modelEol ?? eol.written) : ""} />
       <div className="ed-body">
         {l && r && (
           <DiffEditor
@@ -422,7 +446,11 @@ export function DiffViewer({ left, right, onClose, onStatus, overlay, inPane = f
               ed.current = e;
              
               e.getModifiedEditor().focus();
-              e.getModifiedEditor().onDidChangeModelContent(() => setRText(e.getModifiedEditor().getValue()));
+              setModelEol(eolOf(e.getModifiedEditor().getModel()));
+              e.getModifiedEditor().onDidChangeModelContent(() => {
+                setRText(e.getModifiedEditor().getValue());
+                setModelEol(eolOf(e.getModifiedEditor().getModel()));
+              });
             }}
             loading={<div className="pad muted">Loading editor...</div>}
           />
