@@ -9,7 +9,7 @@ rl.on("line", (line) => {
   if (/# SKIP\b/.test(line)) skips.push(line);
 });
 rl.on("close", () => {
-  const allowed = /smb live: skipped \(FILEDECK_TEST_SMB not set\)|fanwatch live: skipped/;
+  const allowed = /smb live: skipped \(FILEDECK_TEST_SMB not set\)|fanwatch live: skipped|sandbox live: skipped \(not running as root\)/;
   const unexpected = skips.filter((line) => !allowed.test(line));
   if (unexpected.length > 0) {
     console.error("Unexpected TAP skips:");
