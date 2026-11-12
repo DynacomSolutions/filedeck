@@ -1,10 +1,11 @@
 import type { MiddlewareHandler } from "hono";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { isRawRoute } from "./request-guard.ts";
 
 /**
  * Write audit log: one JSON line on stdout per state-changing request
  * (`"audit":true`), written after the response so the status is known.
- * It records who asked (client address as forwarded by the ingress), what
+ * It records who asked (`ip`: the last X-Forwarded-For entry, else the socket peer; `forwardedFor` keeps the whole chain, which the caller can write; `peer` the socket address), what
  * (method, route, the paths named in the query or a small JSON body) and the
  * outcome. File contents, upload bodies and credentials are never read.
  */
@@ -29,8 +30,26 @@ export function pick(v: unknown, depth = 0): unknown {
   return out;
 }
 
-/** The audit line of a request the guard refused: status, method, route, query and the origin it claimed; the body is never read. */
-export function auditRefusal(who: string, c: import("hono").Context, status: number, sink: AuditSink = (l) => console.log(l)): void {
+/** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. */
+/** Who asked: the last X-Forwarded-For entry (what the nearest proxy saw), else the socket peer; the chain is kept as the caller can write it. */
+function clientOf(c: import("hono").Context): Record<string, string> {
+  const chain = c.req.header("x-forwarded-for");
+  const fwd = chain?.split(",").pop()?.trim();
+  let peer: string | undefined;
+  try {
+    peer = getConnInfo(c).remote.address;
+  } catch {
+    peer = undefined; // not served over a socket (tests)
+  }
+  const ip = fwd || peer;
+  return {
+    ...(ip ? { ip } : {}),
+    ...(chain && chain.includes(",") ? { forwardedFor: clip(chain) } : {}),
+    ...(peer && fwd && fwd !== peer ? { peer } : {}),
+  };
+}
+
+export function auditRefusal(who: string, c: import("hono").Context, status: number, sink: AuditSink = (l) => console.log(l), aborted = false): void {
   const q: Record<string, string> = {};
   for (const k of QUERY_KEYS) {
     const v = c.req.query(k);
@@ -43,12 +62,13 @@ export function auditRefusal(who: string, c: import("hono").Context, status: num
       audit: true,
       ts: new Date().toISOString(),
       who,
+      ...clientOf(c),
       method: c.req.method,
       route: clip(c.req.path),
       query: Object.keys(q).length ? q : undefined,
       ...(origin ? { origin: clip(origin) } : {}),
       ...(site ? { fetchSite: site } : {}),
-      refused: true,
+      ...(aborted ? { aborted: true } : { refused: true }),
       status,
     }),
   );
@@ -61,12 +81,17 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
     if (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/")) return next();
     const t0 = Date.now();
     let body: unknown;
-    const len = Number(c.req.header("content-length") ?? "0"); // 0 = not declared
-    if (!isRawRoute(m, p) && len <= MAX_BODY) { // whatever the content type; raw uploads are never read
-      try {
-        body = pick(await c.req.raw.clone().json());
-      } catch {
-        body = undefined;
+    // The body was parsed once by the request guard and is shared through the body cache; without it (a bare audit
+    // middleware) only a small declared body is parsed, never one of unknown or large size, whatever its encoding.
+    if (!isRawRoute(m, p)) {
+      const len = Number(c.req.header("content-length") ?? "0");
+      const shared = c.req.bodyCache.json as Promise<unknown> | undefined;
+      if (shared || (len > 0 && len <= MAX_BODY && !c.req.raw.headers.has("transfer-encoding"))) {
+        try {
+          body = pick(await (shared ?? c.req.json()));
+        } catch {
+          body = undefined;
+        }
       }
     }
     await next();
@@ -75,13 +100,12 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
       const v = c.req.query(k);
       if (v !== undefined) q[k] = clip(v);
     }
-    const fwd = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
     sink(
       JSON.stringify({
         audit: true,
         ts: new Date(t0).toISOString(),
         who,
-        ip: fwd || undefined,
+        ...clientOf(c),
         method: m,
         route: clip(p),
         query: Object.keys(q).length ? q : undefined,

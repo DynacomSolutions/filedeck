@@ -69,7 +69,7 @@ test("a row at the top edge is scrolled clear of the sticky header", () => {
   assert.equal(revealDelta(130, 150, 100, 400, 30), 0);
   assert.equal(revealDelta(390, 420, 100, 400, 30), 20);
   assert.equal(revealDelta(150, 170, 100, 400, 0), 0);
-  assert.match(filePanel, /revealRow\(scroller, row\)/);
+  assert.match(filePanel, /revealRow\(sc, row\)/);
 });
 
 test("the list announces its settled state once, not while it streams or loads", () => {
