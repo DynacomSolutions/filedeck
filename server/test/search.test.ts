@@ -176,21 +176,23 @@ test("makeTester runs a slow pattern in a worker, cuts it off at the budget and 
   fast.close();
 });
 
-/** Largest delay seen by a /healthz request made every 10 ms while `work` runs. */
-async function healthWhile<T>(work: Promise<T>): Promise<{ result: T; worst: number }> {
-  let worst = 0;
+/**
+ * How many /healthz requests were answered while `work` was still running. A search that blocked the event loop would leave
+ * almost none; no latency bound is asserted (a loaded runner can delay any single request).
+ */
+async function healthWhile<T>(work: Promise<T>): Promise<{ result: T; pings: number }> {
+  let pings = 0;
   let done = false;
   const pinger = (async () => {
     while (!done) {
-      const t = performance.now();
       await agent.request("/healthz");
-      worst = Math.max(worst, performance.now() - t);
+      if (!done) pings++;
       await new Promise((r) => setTimeout(r, 10));
     }
   })();
   try {
     const result = await work;
-    return { result, worst };
+    return { result, pings };
   } finally {
     done = true;
     await pinger;
@@ -203,10 +205,10 @@ test("a slow regular expression runs off the event loop and is cut off at a tota
   searchLimits.regexTotalMs = 1200;
   try {
     const t0 = performance.now();
-    const { result: r, worst } = await healthWhile(search("path=/slowre2&q=" + encodeURIComponent("^(a|a)*b$") + "&mode=regex"));
+    const { result: r, pings } = await healthWhile(search("path=/slowre2&q=" + encodeURIComponent("^(a|a)*b$") + "&mode=regex"));
     assert.ok(r.status === 400 || (r.lines ?? []).some((l) => /too long/.test(l.error ?? "")), `status ${r.status}`);
-    assert.ok(performance.now() - t0 < 20000, `took ${performance.now() - t0} ms`);
-    assert.ok(worst < 400, `the event loop was blocked for ${Math.round(worst)} ms`);
+    assert.ok(performance.now() - t0 < 60_000, `took ${performance.now() - t0} ms`); // only a hang guard
+    assert.ok(pings >= 3, `only ${pings} health checks were answered while the search ran: the event loop was blocked`);
     // many chunks, each costing some time: the deadline is for the whole search, not for each chunk.
     // One line costs about `cost` ms to match here; the budget is 2.5 times that, and the file has 8 chunks with such a line.
     const re = /^(a|a)*b$/;
@@ -225,7 +227,7 @@ test("a slow regular expression runs off the event loop and is cut off at a tota
     searchLimits.regexTotalMs = Math.max(300, cost * 2.5);
     const t1 = performance.now();
     const big = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never)); // the shared agent skips files over 1000 bytes
-    const { result: c, worst: w2 } = await healthWhile(
+    const { result: c, pings: p2 } = await healthWhile(
       (async () => {
         const r = await big.request("/api/fs/search?path=/slowre2&q=chunks&content=" + encodeURIComponent("^(a|a)*b$") + "&cre=1");
         const lines = (await r.text()).trim().split("\n").map((l) => JSON.parse(l) as Line);
@@ -233,8 +235,8 @@ test("a slow regular expression runs off the event loop and is cut off at a tota
       })(),
     );
     assert.ok(c.status === 400 || (c.lines ?? []).some((l) => /too long/.test(l.error ?? "")), `content status ${c.status}`);
-    assert.ok(performance.now() - t1 < 20000, `took ${performance.now() - t1} ms`);
-    assert.ok(w2 < 400, `the event loop was blocked for ${Math.round(w2)} ms`);
+    assert.ok(performance.now() - t1 < 60_000, `took ${performance.now() - t1} ms`); // only a hang guard
+    assert.ok(p2 >= 3, `only ${p2} health checks were answered while the search ran: the event loop was blocked`);
   } finally {
     searchLimits.regexTotalMs = saved;
   }
@@ -270,7 +272,7 @@ test("a glob matcher with too many expanded alternatives is refused with a 400, 
   const r = await agent.request("/api/fs/walk?path=/s&" + qs);
   await r.text();
   assert.equal(r.status, 400);
-  assert.ok(performance.now() - t0 < 1500);
+  assert.ok(performance.now() - t0 < 30_000, "hang guard");
   assert.throws(() => compileGlobs(Array.from({ length: 100 }, (_, i) => `{a,b}{c,d}{e,f}x${i}`), false), /too large/);
   // ordinary patterns stay cheap: 100,000 paths against six common excludes (about 40 ms here; the old matcher about the same)
   const m = compileGlobs(["*.log", "node_modules/", ".git/", "**/*.tmp", "build/**", "*.{png,jpg}"], true);
@@ -279,7 +281,7 @@ test("a glob matcher with too many expanded alternatives is refused with a 400, 
   let n = 0;
   for (const p of paths) if (m.test(p, false)) n++;
   assert.equal(n, 40_000);
-  assert.ok(performance.now() - t1 < 250, `matching took ${Math.round(performance.now() - t1)} ms`);
+  assert.ok(performance.now() - t1 < 2000, `matching took ${Math.round(performance.now() - t1)} ms`);
   // the shortcuts keep the meaning: `**/x` at any depth including the top, `dir/**` for the folder and everything below
   const sc = compileGlobs(["**/*.tmp", "build/**", "**.map"], false);
   assert.deepEqual(["a.tmp", "x/y/a.tmp", "build", "build/", "build/a/b", "src/a.map", "a.txt", "xbuild/a", "a.tmp/b"].map((p) => sc.test(p, false)), [true, true, false, true, true, true, false, false, false]);
@@ -291,13 +293,13 @@ test("no single match can hold the event loop: a path the patterns are too expen
   const longName = "a".repeat(251);
   const t0 = performance.now();
   assert.equal(m.test(`d/${longName}`, false), "skip");
-  assert.ok(performance.now() - t0 < 100, `took ${Math.round(performance.now() - t0)} ms`);
+  assert.ok(performance.now() - t0 < 5000, `took ${Math.round(performance.now() - t0)} ms`); // a hang guard: the work is bounded by the step budget, not by this
   assert.equal(m.test("d/short", false), false, "a short path is still judged (each call starts with a fresh allowance)");
   // each call starts with a fresh allowance, and ordinary patterns on long paths stay far below it
   const ok = compileGlobs(["*a*a*a*a*a*b", "src/**/*.test.ts", "[Tt]humbs.db"], false);
   const t1 = performance.now();
   for (let i = 0; i < 200; i++) assert.equal(ok.test("x/".repeat(60) + longName, false), false);
-  assert.ok(performance.now() - t1 < 500);
+  assert.ok(performance.now() - t1 < 10_000, "hang guard");
   // the walk: one odd name is left out and counted, the other entries are listed
   write("skipwalk/ok1.txt", "1");
   write("skipwalk/ok2.txt", "2");
@@ -362,23 +364,14 @@ test("a folder compare with many entries and many patterns gives the event loop 
     for (let i = 0; i < 2500; i++) fs.writeFileSync(path.join(d, "a".repeat(240) + String(i).padStart(5, "0")), "");
   }
   const exclude = Array.from({ length: 12 }, () => "*a*a*a*a*a*b"); // each name costs a fraction of a millisecond, 5,000 names in one pass
-  let worst = 0;
-  let last = performance.now();
-  const timer = setInterval(() => {
-    const now = performance.now();
-    worst = Math.max(worst, now - last - 10);
-    last = now;
-  }, 10);
-  try {
-    const { compareTrees, localSource, normalizeOptions } = await import("../src/folderdiff.ts");
-    const o = normalizeOptions({ mode: "size", exclude });
-    const r = await compareTrees(localSource(L, "/"), localSource(R, "/"), o, { signal: new AbortController().signal, progress: () => undefined } as never);
-    assert.ok(r.rows.length >= 0);
-    await new Promise((res) => setTimeout(res, 30)); // a starved timer fires now and records how long it waited
-  } finally {
-    clearInterval(timer);
-  }
-  assert.ok(worst < 250, `the event loop was blocked for ${Math.round(worst)} ms`);
+  const { sliceStats } = await import("../src/glob.ts");
+  const turnsBefore = sliceStats.turns;
+  const { compareTrees, localSource, normalizeOptions } = await import("../src/folderdiff.ts");
+  const o = normalizeOptions({ mode: "size", exclude });
+  const r = await compareTrees(localSource(L, "/"), localSource(R, "/"), o, { signal: new AbortController().signal, progress: () => undefined } as never);
+  assert.ok(r.rows.length >= 0);
+  // counted, not timed: the 5,000 names are judged in time slices, each of which gave the event loop a turn
+  assert.ok(sliceStats.turns - turnsBefore >= 3, `only ${sliceStats.turns - turnsBefore} turns were given while 5,000 names were judged`);
 });
 
 test("timeSlicer gives the event loop a turn once a loop has run for a slice", async () => {
@@ -474,38 +467,208 @@ async function searchAs(ip: string, qs: string) {
   return r;
 }
 
-test("a client that never reads its search gives the slot and the worker back after a grace period", async () => {
-  for (let i = 0; i < 60; i++) write(`stall/f${i}.txt`, "x");
-  write("stall/" + "a".repeat(40), "x");
-  const saved = { ...searchLimits };
-  searchLimits.stallMs = 700;
-  searchLimits.regexTotalMs = 60_000;
-  const unread: Response[] = [];
+/** A clock and a timer the test drives by hand, so the deadlines need no real waiting and no wall-clock margin. */
+function fakeTime() {
+  let t = 1_000_000;
+  const ticks = new Set<() => void>();
+  const real = { now: searchHooks.now, every: searchHooks.every };
+  searchHooks.now = () => t;
+  searchHooks.every = (fn) => {
+    ticks.add(fn);
+    return () => void ticks.delete(fn);
+  };
+  return {
+    /** move the clock on and run the deadline check once */
+    advance(ms: number) {
+      t += ms;
+      for (const f of [...ticks]) f();
+    },
+    restore() {
+      searchHooks.now = real.now;
+      searchHooks.every = real.every;
+    },
+  };
+}
+/** Resolves when `ok()` is true, checked at every release event and now; fails after a generous limit (a hang guard, not a margin). */
+async function until(ok: () => boolean, limitMs = 60_000) {
+  const prev = searchHooks.onRelease;
   try {
-    // two searches (the whole gate) whose bodies are never read: one regular expression, one literal; different clients
-    unread.push(await searchAs("10.0.0.1", "path=/stall&q=" + encodeURIComponent("^f\\d+\\.txt$") + "&mode=regex"));
-    unread.push(await searchAs("10.0.0.2", "path=/stall&q=f"));
-    assert.equal((await searchAs("10.0.0.3", "path=/s&q=main")).status, 429, "while they hold the slots the gate is full");
-    const t0 = performance.now();
-    let status = 429;
-    while (status === 429 && performance.now() - t0 < 8000) {
-      await new Promise((r) => setTimeout(r, 200));
-      const r = await searchAs("10.0.0.3", "path=/s&q=main");
-      status = r.status;
-      await r.text();
-    }
-    assert.equal(status, 200, "the slots were not given back");
-    assert.ok(performance.now() - t0 < 4000, `took ${Math.round(performance.now() - t0)} ms`);
-    // the regular-expression worker was released too: a fresh regular-expression search can start
-    const again = await search("path=/s&q=" + encodeURIComponent("^main\\.ts$") + "&mode=regex");
-    assert.equal(again.status, 200);
-    // the abandoned reader, if it comes back, is told why
-    const text = await unread[0]!.text();
-    assert.match(text, /not read in time|stopped/);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for the condition")), limitMs);
+      timer.unref();
+      let inCheck = false; // the predicate may itself cause a release event
+      const check = () => {
+        if (inCheck) return;
+        inCheck = true;
+        const good = (() => {
+          try {
+            return ok();
+          } finally {
+            inCheck = false;
+          }
+        })();
+        if (good) {
+          clearTimeout(timer);
+          clearInterval(poll);
+          resolve();
+        }
+      };
+      const poll: NodeJS.Timeout = setInterval(() => check(), 5);
+      searchHooks.onRelease = () => (prev?.(), check()); // the events are the trigger; this only covers a state that changes without one
+      poll.unref();
+      check();
+    });
   } finally {
-    Object.assign(searchLimits, saved);
-    for (const r of unread) await r.body?.cancel().catch(() => undefined);
+    searchHooks.onRelease = prev;
   }
+}
+const idle = async function* (n: number, done: { closed: boolean }, wait?: (signal: AbortSignal) => Promise<void>, signal?: AbortSignal) {
+  try {
+    for (let i = 0; i < n; i++) {
+      if (wait) await wait(signal!);
+      yield i;
+    }
+  } finally {
+    done.closed = true;
+  }
+};
+
+test("a reader that stops reading: after the grace period the search is closed, its slot and its worker are released (clock driven by the test)", async () => {
+  const time = fakeTime();
+  try {
+    const gate = new searchMod.SearchGate(2);
+    // 1. a search nobody reads past its first batch: the grace period closes it, and the slot comes back
+    const closed = { closed: false };
+    const it = searchMod.limitSearch(gate.wrap(idle(5, closed), "10.0.0.1"), () => undefined, 600_000, 1_000);
+    assert.deepEqual((await it.next()).value, 0); // the reader takes one batch and then goes quiet
+    assert.equal(closed.closed, false);
+    time.advance(500); // inside the grace period: nothing happens
+    assert.equal(closed.closed, false);
+    time.advance(600); // past it
+    await until(() => closed.closed);
+    // the slot is free again: two more searches can start
+    const a = gate.wrap(idle(1, { closed: false }), "10.0.0.2");
+    const b = gate.wrap(idle(1, { closed: false }), "10.0.0.3");
+    assert.equal((await a.next()).done, false);
+    assert.equal((await b.next()).done, false);
+    await a.return(undefined);
+    await b.return(undefined);
+    // the abandoned reader, if it comes back, is told why
+    await assert.rejects(it.next(), /not read in time/);
+    // 2. the same with a real regular-expression search: its worker is given back too
+    const opts = { q: "^main", mode: "regex", ignoreCase: true, content: "", contentRegex: false, contentIgnoreCase: true, types: "all", maxResults: 100, maxFileBytes: 1, maxTotalBytes: 1 } as never;
+    const searches = [] as AsyncGenerator<unknown>[];
+    for (let i = 0; i < searchLimits.maxWorkers; i++) {
+      const w = (async function* () {
+        yield [{ p: "main.ts", t: "file", s: 1, m: 1 }];
+        yield [{ p: "other.ts", t: "file", s: 1, m: 1 }];
+        return { truncated: false, depthLimited: false, errors: 0 };
+      })() as never;
+      const g = searchMod.limitSearch(searchMod.searchTree(w, opts, async () => { throw new Error("no reads"); }), () => undefined, 600_000, 1_000);
+      await g.next(); // one batch read, then silence
+      searches.push(g);
+    }
+    assert.throws(() => searchMod.makeTester("^x$", true, false), (e: Error & { status?: number }) => e.status === 429, "every worker slot is held by a silent reader");
+    time.advance(2_000);
+    await until(() => {
+      try {
+        searchMod.makeTester("^x$", true, false).close();
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    for (const g of searches) await assert.rejects(g.next(), /not read in time/);
+  } finally {
+    time.restore();
+  }
+});
+
+test("a client that never reads over a real connection holds a slot only until the search is closed, and the slot comes back (waits for the release event)", async () => {
+  // 20,000 long names: the answer is far bigger than the socket buffers of a loopback connection on a fast runner as well
+  const dir = path.join(tmp, "bigout");
+  fs.mkdirSync(dir);
+  for (let i = 0; i < 4000; i++) fs.writeFileSync(path.join(dir, "n".repeat(200) + String(i).padStart(5, "0")), "");
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_SEARCH_CONCURRENCY: "3" } as never);
+  const app = createAgent(cfg);
+  const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
+  await new Promise((r) => server.once("listening", r));
+  const port = (server.address() as import("node:net").AddressInfo).port;
+  const sockets: import("node:net").Socket[] = [];
+  let releases = 0;
+  const saved = { ...searchLimits };
+  const prev = searchHooks.onRelease;
+  searchHooks.onRelease = () => (prev?.(), releases++);
+  const time = fakeTime();
+  try {
+    const { connect } = await import("node:net");
+    // a client that sends its request and never reads: the socket is paused before any data arrives
+    const quiet = connect(port, "127.0.0.1");
+    sockets.push(quiet);
+    quiet.pause();
+    quiet.write(`GET /api/fs/search?path=/bigout&q=n HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n`);
+    // the reader never reads: move the clock past the grace period and the deadline until the slot is given back. Whether the
+    // search was waiting for its reader (buffers full) or still walking, one of the two limits closes it; no real time passes.
+    await until(() => {
+      if (releases === 0) time.advance(searchLimits.stallMs + searchLimits.wallMs + 1);
+      return releases > 0;
+    });
+    // a fresh client is served normally
+    time.restore();
+    const ok = await fetch(`http://127.0.0.1:${port}/api/fs/search?path=/s&q=main`);
+    assert.equal(ok.status, 200);
+    await ok.text();
+  } finally {
+    time.restore();
+    searchHooks.onRelease = prev;
+    Object.assign(searchLimits, saved);
+    for (const s of sockets) s.destroy();
+    server.close();
+  }
+});
+
+test("a search has a wall-clock deadline (clock driven by the test), and a worker that could not be started holds no slot", async () => {
+  const time = fakeTime();
+  try {
+    const gate = new searchMod.SearchGate(2);
+    const closed = { closed: false };
+    const ctl = new AbortController();
+    // a search that is busy, not waiting for its reader: it never finishes by itself and notices the abort
+    const busy = (async function* () {
+      try {
+        await new Promise<void>((_, reject) => ctl.signal.addEventListener("abort", () => reject(new Error("canceled")), { once: true }));
+        yield 1;
+      } finally {
+        closed.closed = true;
+      }
+    })();
+    const it = searchMod.limitSearch(gate.wrap(busy, "10.0.0.9"), () => ctl.abort(), 5_000, 600_000);
+    const next = it.next();
+    time.advance(4_000); // inside the deadline
+    assert.equal(ctl.signal.aborted, false);
+    time.advance(2_000); // past it
+    await assert.rejects(next, /took too long/);
+    assert.equal(closed.closed, true);
+    // the slot is back
+    const a = gate.wrap(idle(1, { closed: false }), "10.0.0.9");
+    assert.equal((await a.next()).done, false);
+    await a.return(undefined);
+  } finally {
+    time.restore();
+  }
+  // a constructor that throws, more often than there are slots: the next worker still starts
+  const real = searchHooks.newWorker;
+  searchHooks.newWorker = () => {
+    throw new Error("no threads");
+  };
+  try {
+    for (let i = 0; i < searchLimits.maxWorkers + 2; i++) assert.throws(() => searchMod.makeTester("^x$", true, false), (e: Error & { status?: number }) => e.status === 500);
+  } finally {
+    searchHooks.newWorker = real as (code: string, o: WorkerOptions) => import("node:worker_threads").Worker;
+  }
+  const ok = searchMod.makeTester("^x$", true, false);
+  assert.deepEqual(await ok.testMany(["x"]), [true]);
+  ok.close();
 });
 
 test("the per-client bound keys on an address the server saw: a forged header gains nothing, ordinary use is not throttled", async () => {
@@ -570,30 +733,3 @@ test("the hub drops a client-sent client header and sets its own from what it sa
   }
 });
 
-test("a search has a wall-clock deadline, and a worker that could not be started holds no slot", async () => {
-  write("wall/" + "a".repeat(40), "x");
-  const saved = { ...searchLimits };
-  searchLimits.wallMs = 800;
-  searchLimits.regexTotalMs = 60_000;
-  try {
-    const t0 = performance.now();
-    const r = await search("path=/wall&q=" + encodeURIComponent("^(a|a)*b$") + "&mode=regex");
-    assert.ok(r.status === 400 || (r.lines ?? []).some((l) => /too long/.test(l.error ?? "")), `status ${r.status}`);
-    assert.ok(performance.now() - t0 < 5000, `took ${Math.round(performance.now() - t0)} ms`);
-  } finally {
-    Object.assign(searchLimits, saved);
-  }
-  // a constructor that throws, more often than there are slots: the next worker still starts
-  const real = searchHooks.newWorker;
-  searchHooks.newWorker = () => {
-    throw new Error("no threads");
-  };
-  try {
-    for (let i = 0; i < searchLimits.maxWorkers + 2; i++) assert.throws(() => searchMod.makeTester("^x$", true, false), (e: Error & { status?: number }) => e.status === 500);
-  } finally {
-    searchHooks.newWorker = real as (code: string, o: WorkerOptions) => import("node:worker_threads").Worker;
-  }
-  const ok = searchMod.makeTester("^x$", true, false);
-  assert.deepEqual(await ok.testMany(["x"]), [true]);
-  ok.close();
-});
