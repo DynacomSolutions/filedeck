@@ -204,6 +204,14 @@ test("a trash restore lands in the folder that was checked, even if it is swappe
 const forceExdevOnce = () => {
   const realRename = fsp.rename.bind(fsp);
   let first = true;
+  const realLink = fsp.link.bind(fsp);
+  mock.method(fsp, "link", async (a: string, b: string) => {
+    if (first) {
+      first = false;
+      throw Object.assign(new Error("EXDEV"), { code: "EXDEV" }); // a file is placed with link(2), which fails across devices as rename(2) does
+    }
+    return realLink(a, b);
+  });
   return mock.method(fsp, "rename", async (a: string, b: string) => {
     if (first) {
       first = false;
@@ -582,4 +590,206 @@ test("a running copy keeps its staging folder's times fresh", async () => {
     mock.timers.reset();
   }
   assert.ok(seen !== undefined && Date.now() - seen < 60_000, "the staging folder was touched while the copy ran");
+});
+
+/* ---- the last steps of a move or copy ---- */
+
+const EXDEV = () => Object.assign(new Error("EXDEV"), { code: "EXDEV" });
+const stageIn = (dir: string) => fs.readdirSync(dir).find((n) => n.startsWith(STAGING_PREFIX));
+
+test("a cross-device move whose source cannot be removed any more says the copy is complete, and keeps the copy", async () => {
+  fresh("move-partial");
+  fs.mkdirSync(path.join(root, "src/tree/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/tree/a.txt"), "a");
+  fs.writeFileSync(path.join(root, "src/tree/sub/b.txt"), "b");
+  fs.mkdirSync(path.join(root, "dst"));
+  forceExdevOnce();
+  const prefixes: string[] = [];
+  const realUnlink = fsp.unlink.bind(fsp);
+  mock.method(fsp, "unlink", async (p: string) => {
+    // the first file of the source goes; then the sub-folder turns out to lie in a read-only prefix (it was swapped in meanwhile)
+    if (path.basename(p) === "a.txt" && p.startsWith("/proc/self/fd/")) prefixes.push("/src/tree/sub");
+    return realUnlink(p);
+  });
+  await withReadOnly(root, prefixes, async () => {
+    const err = await ops.rename(root, "/src/tree", "/dst/tree").then(() => null, (e) => e);
+    assert.ok(err instanceof ops.FsError, String(err));
+    assert.match(err.message, /copy at the destination is complete/);
+    assert.match(err.message, /only be removed in part/);
+    assert.deepEqual(err.extra, { copyComplete: true, sourceRemoved: "partly" });
+  });
+  assert.equal(fs.readFileSync(path.join(root, "dst/tree/a.txt"), "utf8"), "a", "the finished copy is never removed");
+  assert.equal(fs.readFileSync(path.join(root, "dst/tree/sub/b.txt"), "utf8"), "b");
+  assert.equal(fs.existsSync(path.join(root, "src/tree/a.txt")), false, "control: the removal had started");
+  assert.equal(fs.readFileSync(path.join(root, "src/tree/sub/b.txt"), "utf8"), "b");
+});
+
+test("a cross-device move that is refused before the first entry of the source is removed removes nothing and says so", async () => {
+  fresh("move-refused");
+  fs.mkdirSync(path.join(root, "src/tree/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/tree/a.txt"), "a");
+  fs.writeFileSync(path.join(root, "src/tree/sub/b.txt"), "b");
+  fs.mkdirSync(path.join(root, "dst"));
+  const prefixes: string[] = [];
+  const realRename = fsp.rename.bind(fsp);
+  let n = 0;
+  mock.method(fsp, "rename", async (a: string, b: string) => {
+    if (++n === 1) throw EXDEV();
+    await realRename(a, b); // the copy is put in place; now the source turns out to hold a read-only folder
+    prefixes.push("/src/tree/sub");
+  });
+  await withReadOnly(root, prefixes, async () => {
+    const err = await ops.rename(root, "/src/tree", "/dst/tree").then(() => null, (e) => e);
+    assert.ok(err instanceof ops.FsError, String(err));
+    assert.match(err.message, /copy at the destination is complete/);
+    assert.match(err.message, /source was not removed/);
+    assert.deepEqual(err.extra, { copyComplete: true, sourceRemoved: "no" });
+  });
+  assert.equal(fs.readFileSync(path.join(root, "dst/tree/sub/b.txt"), "utf8"), "b");
+  assert.equal(fs.readFileSync(path.join(root, "src/tree/a.txt"), "utf8"), "a");
+  assert.equal(fs.readFileSync(path.join(root, "src/tree/sub/b.txt"), "utf8"), "b");
+});
+
+test("a move without overwrite fails when something appears at the destination after the check, for a file and for a folder, on one device and across", async () => {
+  const exists409 = async (p: Promise<unknown>) => {
+    const e = await p.then(() => null, (x) => x);
+    assert.ok(e, "the move must fail");
+    assert.deepEqual(ops.mapError(e), { status: 409, message: "already exists" });
+  };
+  const planted = (name: string) => fs.readFileSync(path.join(root, name), "utf8");
+  // a file, same device: link(2) refuses a name that is taken
+  fresh("noreplace-file");
+  fs.mkdirSync(path.join(root, "dst"), { recursive: true });
+  fs.writeFileSync(path.join(root, "f.txt"), "mine");
+  const realLink = fsp.link.bind(fsp);
+  mock.method(fsp, "link", async (a: string, b: string) => {
+    fs.writeFileSync(b, "theirs"); // created after the caller's check
+    return realLink(a, b);
+  });
+  await exists409(ops.rename(root, "/f.txt", "/dst/f.txt"));
+  assert.equal(planted("dst/f.txt"), "theirs");
+  assert.equal(planted("f.txt"), "mine");
+  mock.restoreAll();
+  // a file, across devices: the final step of the fallback
+  fs.rmSync(path.join(root, "dst/f.txt"));
+  let calls = 0;
+  mock.method(fsp, "link", async (a: string, b: string) => {
+    if (++calls === 1) throw EXDEV();
+    fs.writeFileSync(b, "theirs");
+    return realLink(a, b);
+  });
+  await exists409(ops.rename(root, "/f.txt", "/dst/f.txt"));
+  assert.equal(planted("dst/f.txt"), "theirs");
+  assert.equal(planted("f.txt"), "mine", "the source stays");
+  assert.deepEqual(fs.readdirSync(path.join(root, "dst")), ["f.txt"], "no staging folder is left");
+  mock.restoreAll();
+  // a folder: a file created at the name is not replaced (rename(2) refuses), same device and across
+  for (const across of [false, true]) {
+    fresh(`noreplace-dir-${across}`);
+    fs.mkdirSync(path.join(root, "src/tree"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src/tree/a.txt"), "a");
+    fs.mkdirSync(path.join(root, "dst"));
+    const realRename = fsp.rename.bind(fsp);
+    let n = 0;
+    mock.method(fsp, "rename", async (a: string, b: string) => {
+      if (across && ++n === 1) throw EXDEV();
+      if (path.basename(b) === "tree") fs.writeFileSync(path.join(root, "dst/tree"), "theirs");
+      return realRename(a, b);
+    });
+    await exists409(ops.rename(root, "/src/tree", "/dst/tree"));
+    assert.equal(planted("dst/tree"), "theirs");
+    assert.equal(fs.readFileSync(path.join(root, "src/tree/a.txt"), "utf8"), "a");
+    mock.restoreAll();
+  }
+});
+
+test("a folder renamed onto a staging name is removed by the sweep once it holds only the staged entry; any other stays", async () => {
+  fresh("planted");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/a.txt"), "a");
+  fs.mkdirSync(path.join(root, "dst/victim"), { recursive: true });
+  fs.chmodSync(path.join(root, "dst/victim"), 0o700);
+  fs.writeFileSync(path.join(root, "dst/victim/staged"), "x");
+  const real = fsp.mkdir.bind(fsp);
+  let done = false;
+  mock.method(fsp, "mkdir", async (p: string, ...r: unknown[]) => {
+    const v = await real(p, ...(r as []));
+    if (!done && path.basename(p).startsWith(STAGING_PREFIX)) {
+      done = true;
+      fs.renameSync(path.join(root, "dst/victim"), p); // onto the fresh, empty staging folder
+    }
+    return v;
+  });
+  await assert.rejects(ops.copy(root, "/src/a.txt", "/dst"), /private work folder/);
+  mock.restoreAll();
+  const planted = stageIn(path.join(root, "dst"))!;
+  assert.ok(planted, "control: the folder stays under its reserved name after the refusal");
+  // the next sweep of that folder (a new place for it: a sweep runs at most once an hour per folder)
+  fs.renameSync(path.join(root, "dst"), path.join(root, "dst2"));
+  fs.mkdirSync(path.join(root, "dst2", `${STAGING_PREFIX}other-run`), { mode: 0o755 }); // not private: never judged
+  fs.writeFileSync(path.join(root, "dst2", `${STAGING_PREFIX}other-run`, "staged"), "y");
+  const old = new Date(Date.now() - 3 * 86400_000);
+  fs.utimesSync(path.join(root, "dst2", `${STAGING_PREFIX}other-run`), old, old);
+  await ops.copy(root, "/src/a.txt", "/dst2");
+  const left = fs.readdirSync(path.join(root, "dst2"));
+  assert.ok(!left.includes(planted), "the planted folder with only the staged entry was removed");
+  assert.ok(left.includes(`${STAGING_PREFIX}other-run`), "a folder that is not private is left alone");
+});
+
+test("a copy or a move whose working folder was removed or replaced meanwhile fails as interrupted, and a move keeps its source", async () => {
+  const interruptedCopy = /stopped for too long/;
+  for (const how of ["removed", "replaced"] as const) {
+    for (const kindOf of ["copy", "move"] as const) {
+      fresh(`interrupted-${how}-${kindOf}`);
+      fs.mkdirSync(path.join(root, "src/tree"), { recursive: true });
+      fs.writeFileSync(path.join(root, "src/tree/a.txt"), "payload");
+      fs.mkdirSync(path.join(root, "dst"));
+      fs.writeFileSync(path.join(root, "dst/keep.txt"), "keep");
+      const realCopy = fsp.copyFile.bind(fsp);
+      let hit = false;
+      mock.method(fsp, "copyFile", async (from: string, to: string, mode?: number) => {
+        if (!hit) {
+          hit = true;
+          const stage = path.join(root, "dst", stageIn(path.join(root, "dst"))!);
+          if (how === "removed") fs.rmSync(stage, { recursive: true }); // as another process's sweep does to a folder that was not refreshed
+          else {
+            fs.renameSync(stage, `${stage}-away`);
+            fs.mkdirSync(stage, { mode: 0o700 });
+          }
+        }
+        return realCopy(from, to, mode);
+      });
+      if (kindOf === "move") forceExdevOnce();
+      const run = kindOf === "copy" ? ops.copy(root, "/src/tree", "/dst") : ops.rename(root, "/src/tree", "/dst/tree");
+      const err = await run.then(() => null, (e) => e);
+      assert.ok(err, `${how} ${kindOf}: it must not report success`);
+      assert.match(ops.mapError(err).message, interruptedCopy, `${how} ${kindOf}: ${err?.message}`);
+      assert.equal(fs.readFileSync(path.join(root, "src/tree/a.txt"), "utf8"), "payload", `${how} ${kindOf}: the source is kept`);
+      assert.equal(fs.existsSync(path.join(root, "dst/tree")), false, `${how} ${kindOf}: nothing was put in place`);
+      assert.equal(fs.readFileSync(path.join(root, "dst/keep.txt"), "utf8"), "keep");
+      mock.restoreAll();
+    }
+  }
+});
+
+test("a copy or a move with overwrite whose working folder is gone does not remove what it was to replace", async () => {
+  for (const kindOf of ["copy", "move"] as const) {
+    fresh(`interrupted-overwrite-${kindOf}`);
+    fs.mkdirSync(path.join(root, "src/tree"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src/tree/a.txt"), "new");
+    fs.mkdirSync(path.join(root, "dst/tree"), { recursive: true });
+    fs.writeFileSync(path.join(root, "dst/tree/old.txt"), "old");
+    const realCopy = fsp.copyFile.bind(fsp);
+    mock.method(fsp, "copyFile", async (from: string, to: string, mode?: number) => {
+      const r = await realCopy(from, to, mode);
+      fs.rmSync(path.join(root, "dst", stageIn(path.join(root, "dst"))!), { recursive: true });
+      return r;
+    });
+    if (kindOf === "move") forceExdevOnce();
+    const run = kindOf === "copy" ? ops.copy(root, "/src/tree", "/dst", { overwrite: true }) : ops.rename(root, "/src/tree", "/dst/tree", true);
+    await assert.rejects(run, /stopped for too long/);
+    assert.equal(fs.readFileSync(path.join(root, "dst/tree/old.txt"), "utf8"), "old", `${kindOf}: the folder to be replaced is untouched`);
+    assert.equal(fs.readFileSync(path.join(root, "src/tree/a.txt"), "utf8"), "new");
+    mock.restoreAll();
+  }
 });

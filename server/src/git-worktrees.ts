@@ -54,11 +54,34 @@ interface Mapper {
   rootReal: string;
   /** git/host path -> real path under the root, or null when it is not reachable */
   real(p: string): Promise<string | null>;
+  /** where a folder is, or would be if it existed (a removed worktree), with links followed; null when that is outside the root */
+  place(p: string): Promise<string | null>;
   virtual(real: string): string;
 }
 
 const within = (root: string, p: string) => p === root || p.startsWith(root === "/" ? "/" : root + path.sep);
 const exists = (p: string) => fs.lstat(p).then(() => true, () => false);
+
+/**
+ * Where `p` really is, with every link on the way followed, when that lies inside `rootReal`; else null. A path that does not exist
+ * (a removed worktree) is judged by its nearest existing ancestor, and the missing tail is added back. Comparing the text of a path
+ * with the root does not do this: a link inside the root can lead out of it.
+ */
+async function settle(rootReal: string, p: string): Promise<string | null> {
+  const tail: string[] = [];
+  for (let cur = p; ; ) {
+    try {
+      const rp = await fs.realpath(cur);
+      return within(rootReal, rp) ? path.join(rp, ...tail.reverse()) : null;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      const up = path.dirname(cur);
+      if ((code !== "ENOENT" && code !== "ENOTDIR") || up === cur) return null;
+      tail.push(path.basename(cur));
+      cur = up;
+    }
+  }
+}
 
 async function makeMapper(root: string): Promise<Mapper> {
   const rootReal = await fs.realpath(root);
@@ -67,21 +90,21 @@ async function makeMapper(root: string): Promise<Mapper> {
     async real(p) {
       if (!path.isAbsolute(p)) return null;
       const n = path.normalize(p);
-      if (within(rootReal, n) && (await exists(n))) return n;
+      if (within(rootReal, n) && (await exists(n))) return settle(rootReal, n);
       const joined = path.join(rootReal, n);
-      if (within(rootReal, joined) && (await exists(joined))) return joined;
+      if (within(rootReal, joined) && (await exists(joined))) return settle(rootReal, joined);
       return null;
+    },
+    async place(p) {
+      if (!path.isAbsolute(p)) return null;
+      const n = path.normalize(p);
+      if (within(rootReal, n)) return settle(rootReal, n);
+      // a host path: it lies under the mount point here, and counts only where the folder above it is there (as for a removed worktree)
+      const joined = path.join(rootReal, n);
+      return within(rootReal, joined) && (await exists(path.dirname(joined))) ? settle(rootReal, joined) : null;
     },
     virtual: (real) => "/" + path.relative(rootReal, real).split(path.sep).filter(Boolean).join("/"),
   };
-}
-
-/** Where a path would be if it existed, even when the directory is gone (for prunable entries). */
-function guess(m: Mapper, p: string): string | null {
-  const n = path.normalize(p);
-  if (within(m.rootReal, n)) return n;
-  const joined = path.join(m.rootReal, n);
-  return within(m.rootReal, joined) ? joined : null;
 }
 
 /** Keeps printable characters only (a folder name is data too). */
@@ -139,12 +162,14 @@ async function privateDirs(m: Mapper, common: string): Promise<{ byReal: Map<str
     const gd = oneLine(await readAdminFile(m.rootReal, common, dir, "gitdir", ADMIN_FILE_MAX), 4096);
     if (!gd) continue;
     // an absolute path is the host's own; a relative one (`worktree.useRelativePaths`, Git 2.48 and newer) is relative to this
-    // private directory. Either way the place must lie inside the served root.
+    // private directory. Either way the place must lie inside the served root, with every link on the way followed (`settle`);
+    // otherwise the worktree is listed without a location.
     const full = path.isAbsolute(gd) ? path.normalize(gd) : path.resolve(dir, gd);
-    if (path.isAbsolute(gd) ? false : !within(m.rootReal, full)) continue;
+    if (!path.isAbsolute(gd) && !within(m.rootReal, full)) continue;
+    const place = await m.place(path.dirname(full));
+    if (!place) continue;
     byListed.set(path.dirname(full), { id, dir });
-    const g = guess(m, path.dirname(full));
-    if (g) out.set(g, dir);
+    out.set(place, dir);
   }
   return { byReal: out, byListed };
 }
@@ -218,7 +243,7 @@ export async function listWorktrees(root: string, virtualDir: string): Promise<W
       const adm = i === 0 ? undefined : byListed.get(r.worktree);
       const trusted = i === 0 || adm !== undefined;
       const real = trusted ? await m.real(r.worktree) : null;
-      const reach = trusted ? (real ?? guess(m, r.worktree)) : null;
+      const reach = trusted ? (real ?? (await m.place(r.worktree))) : null;
       // missing, but its parent folder is reachable (or it is spelled inside the root): the worktree was removed
       const gone = trusted && !bare && real === null && reach !== null && (within(m.rootReal, path.normalize(r.worktree)) || (await exists(path.dirname(reach))));
       const prunable = gone;

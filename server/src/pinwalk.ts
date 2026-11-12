@@ -165,6 +165,10 @@ const TOUCH_MS = 5 * 60 * 1000;
  * Remove staging folders a crash left in the folder `parentAt`, when a copy uses the folder (at most once an hour per folder). Only a folder that is ours (owner,
  * private mode), holds nothing but the entry `staged`, and either carries this run's id (and is not in use) or has not changed
  * for a day is removed, whichever run (or process) made it: nothing else is ever emptied, whatever its name.
+ * A folder somebody renamed onto a staging name is therefore removed once it is private, ours and holds nothing but `staged` (at
+ * the next sweep when it carries this run's id, after the age limit otherwise). One that holds anything else, or is not ours or
+ * not private, is left where it is, hidden by its reserved name: emptying a folder of unknown content would lose data, and the
+ * one who put it there still has it.
  */
 async function sweep(parentAt: string): Promise<void> {
   let loc = parentAt;
@@ -208,8 +212,13 @@ async function sweep(parentAt: string): Promise<void> {
  * onto the name would hold files): whoever may write to `parentAt` can neither enter it nor swap
  * it for something else. Afterwards only the entry that was built is removed, then the folder itself, which fails and is left
  * alone if anything else is in it. Inside it the entry to build is named `staged` (see `stagedEntry`).
+ *
+ * `intact()` tells whether the folder is still the one that was made: still at its name, and (with `needStaged`) still holding the
+ * entry that was built. A copy that was stopped for longer than the age limit stops refreshing the folder's times, and another
+ * process's sweep may then remove it as a leftover; the caller asks before every step that cannot be undone and reports the
+ * interruption instead of going on.
  */
-export async function withStaging<T>(parentAt: string, fn: (stage: string) => Promise<T>): Promise<T> {
+export async function withStaging<T>(parentAt: string, fn: (stage: string, intact: (needStaged?: boolean) => Promise<boolean>) => Promise<T>): Promise<T> {
   await sweep(parentAt);
   const name = `${STAGING_PREFIX}${RUN}-${randomUUID().slice(0, 12)}`;
   const p = path.join(parentAt, name);
@@ -229,11 +238,17 @@ export async function withStaging<T>(parentAt: string, fn: (stage: string) => Pr
       throw new PathError(403, "cannot make a private work folder here");
     }
     ours = true;
+    const [dev, ino] = [s.dev, s.ino];
+    const intact = async (needStaged = false): Promise<boolean> => {
+      const cur = await fs.lstat(p).catch(() => null);
+      if (!cur || !cur.isDirectory() || cur.dev !== dev || cur.ino !== ino) return false; // gone, or another folder under the name
+      return !needStaged || (await fs.lstat(stagedEntry(dirAt(fh!, p))).catch(() => null)) !== null;
+    };
     // A running copy keeps its folder's times fresh, so another process never takes it for a leftover.
     const keep = fh;
     timer = setInterval(() => void keep.utimes(new Date(), new Date()).catch(() => undefined), TOUCH_MS);
     timer.unref();
-    return await fn(dirAt(fh, p));
+    return await fn(dirAt(fh, p), intact);
   } finally {
     if (timer) clearInterval(timer);
     if (fh && ours) await rmTree(stagedEntry(dirAt(fh, p)), { force: true }).catch(() => undefined);

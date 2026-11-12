@@ -24,6 +24,14 @@ function setup() {
 function forceExdev() {
   const real = fsp.rename.bind(fsp);
   let first = true;
+  const realLink = fsp.link.bind(fsp);
+  mock.method(fsp, "link", async (a: string, b: string) => {
+    if (first) {
+      first = false;
+      throw Object.assign(new Error("EXDEV"), { code: "EXDEV" }); // a file is placed with link(2), which fails across devices as rename(2) does
+    }
+    return realLink(a, b);
+  });
   return mock.method(fsp, "rename", async (from: string, to: string) => {
     if (first) {
       first = false;
@@ -42,7 +50,7 @@ test("EXDEV move fallback copies then removes the source", async () => {
     assert.equal(nodeFs.existsSync(path.join(root, "src/tree")), false);
     assert.deepEqual(nodeFs.readdirSync(path.join(root, "dst")), ["tree"]);
   } finally {
-    m.mock.restore();
+    mock.restoreAll();
     nodeFs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -63,7 +71,7 @@ test("EXDEV move fallback cleans up a partial copy and keeps the source", async 
     assert.equal(nodeFs.readFileSync(path.join(root, "src/tree/sub/b.txt"), "utf8"), "b");
   } finally {
     c.mock.restore();
-    m.mock.restore();
+    mock.restoreAll();
     nodeFs.rmSync(root, { recursive: true, force: true });
   }
 });
