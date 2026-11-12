@@ -5,8 +5,8 @@ import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
 import { direntsOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { PathError, TRASH_DIR, assertNotTrash, openChecked, resolveRead, resolveWrite } from "./paths.ts";
-import { MAX_DEPTH, dirAt, pinParentW, walkGuard } from "./pinwalk.ts";
+import { PathError, TRASH_DIR, openChecked, resolveRead, resolveWrite } from "./paths.ts";
+import { MAX_DEPTH, assertMayChange, assertNotReserved, dirAt, isReservedName, openDir, pinParentW, tooDeep, walkGuard } from "./pinwalk.ts";
 import { hitsReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
@@ -175,7 +175,7 @@ export function modeGuard(mode: number, type: Props["type"]): void {
 export async function planPerms(cfg: Config, b: PermsRequest): Promise<PermsPlan> {
   if (typeof b.path !== "string") throw bad("path must be a string");
   const r = resolveWrite(cfg.root, b.path);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw bad("refusing to change permissions of the root");
   if (b.mode === undefined && b.owner === undefined && b.group === undefined) throw bad("nothing to change");
   if (b.mode !== undefined && (!Number.isInteger(b.mode) || b.mode < 0 || b.mode > 0o7777)) throw bad("mode must be an integer between 0 and 07777");
@@ -207,13 +207,13 @@ const swapped = () => new ops.FsError(409, "an entry changed while it was being 
 /**
  * Change one open entry (a file or a folder held by a descriptor). It must be of the kind that was listed, so a folder
  * swapped in for a file never gets a file mode. A file with more than one name is also reachable from outside the tree
- * being changed: its owner is not touched (`false` is returned and the caller counts it as skipped).
+ * being changed: it is left alone, owner and mode (`false` is returned and the caller counts it as skipped).
  */
 async function applyFd(fh: FileHandle, kind: "file" | "dir", plan: PermsPlan): Promise<boolean> {
   const s = await fh.stat();
   if (kind === "dir" ? !s.isDirectory() : !s.isFile()) throw swapped();
   const owner = plan.uid !== undefined || plan.gid !== undefined;
-  if (kind === "file" && owner && s.nlink > 1) return false;
+  if (kind === "file" && s.nlink > 1) return false;
   if (owner) await fh.chown(plan.uid ?? -1, plan.gid ?? -1);
   if (plan.mode !== undefined) await fh.chmod(plan.mode);
   return true;
@@ -238,11 +238,12 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
   const res: PermsResult = { path: plan.virtual, changed: 0, skipped: 0, errors: 0 };
   if (!plan.recursive) {
     const one = (at: string) => applyOne(at, plan.type, plan);
-    const done = plan.virtual === "/" ? await one(plan.real) : await pinParentW(cfg.root, plan.real, one); // the root has no parent inside the root to pin
+    const done = plan.virtual === "/" ? await one(plan.real) : await pinParentW(cfg.root, plan.real, one, false); // the root has no parent inside the root to pin
     if (done) res.changed = 1;
     else res.skipped = 1;
     return res;
   }
+  assertMayChange(cfg.root, plan.virtual, true); // a prefix at or below the target: refuse before anything is changed
   let seen = 0;
   const guard = walkGuard(cfg.root);
   const wants = (t: Props["type"]) => plan.scope === "all" || (plan.scope === "files" ? t !== "dir" : t === "dir");
@@ -278,6 +279,7 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
   const top = await openChecked(cfg.root, plan.real, C.O_RDONLY | C.O_DIRECTORY);
   try {
     const dev = (await top.stat()).dev;
+    await guard(dirAt(top, plan.real)); // where the folder really is, before it is changed
     await doDir(top);
     await walk(top, plan.real, dev, 0);
   } finally {
@@ -290,7 +292,6 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
     if (depth > MAX_DEPTH) throw bad("folders nested too deeply for one recursive change");
     if (ctl?.signal.aborted) throw bad("canceled");
     const at = dirAt(fh, real);
-    await guard(at); // a folder that now resolves into a read-only prefix is refused
     if (ctl) ctl.progress.current = real.slice(cfg.root === "/" ? 0 : cfg.root.length) || "/";
     let batch: Promise<void>[] = [];
     const flush = async () => {
@@ -304,7 +305,7 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
     try {
       for await (const e of direntsOf(at)) {
         const n = e.name;
-        if (n === TRASH_DIR) continue;
+        if (n === TRASH_DIR || isReservedName(n)) continue;
         if (ctl?.signal.aborted) throw bad("canceled");
         if (seen >= cfg.walkMaxEntries) throw bad("too many entries for one recursive change");
         seen++;
@@ -327,8 +328,9 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
         await flush();
         let sub: FileHandle;
         try {
-          sub = await fs.open(child, C.O_RDONLY | C.O_NOFOLLOW | C.O_DIRECTORY);
-        } catch {
+          sub = await openDir(child);
+        } catch (err) {
+          if ((err as Error).message === tooDeep().message) throw err;
           res.errors++; // swapped for something else since it was listed
           continue;
         }
@@ -337,6 +339,7 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
             res.skipped++; // another filesystem: not entered
             continue;
           }
+          await guard(dirAt(sub, child)); // where the folder really is now: a read-only prefix is refused before the folder is changed
           await doDir(sub);
           await walk(sub, path.join(real, n), dev, depth + 1);
         } finally {
@@ -344,6 +347,8 @@ export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Pr
         }
       }
     } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "EMFILE" || code === "ENFILE") throw tooDeep();
       if (!(e instanceof ops.FsError || e instanceof PathError)) {
         res.errors++; // the folder could not be listed or read
       } else throw e;

@@ -4,8 +4,8 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
 import { FsError, exists, tempName } from "./fsops.ts";
-import { assertNotTrash, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
-import { pinDirW } from "./pinwalk.ts";
+import { resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
+import { assertNotReserved, pinDirW } from "./pinwalk.ts";
 
 /**
  * Resumable chunked uploads. The client picks an id (a stable hash of the file's identity) and sends
@@ -38,9 +38,9 @@ const inDir = <T,>(root: string, l: Loc, fn: (at: string, part: string, target: 
 function locate(root: string, dir: string, name: string, id: string): Loc {
   if (!ID_RE.test(id)) throw new FsError(400, "invalid upload id");
   const d = resolveRead(root, dir);
-  assertNotTrash(d.virtual);
+  assertNotReserved(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name)); // validates the name too
-  assertNotTrash(target.virtual); // a file may not take the name of the trash store
+  assertNotReserved(target.virtual); // a file may not take the name of the trash store
   const partName = tempName(name, `.filedeck-up-${id}.part`);
   return { dirReal: d.real, targetName: path.basename(target.real), partName, key: path.join(d.real, partName) };
 }

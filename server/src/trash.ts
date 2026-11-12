@@ -3,8 +3,8 @@ import path from "node:path";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
-import { TRASH_DIR, assertNotTrash, resolveWrite, virtualJoin } from "./paths.ts";
-import { pinDirCreate, pinDirW, rmTree, walkGuard } from "./pinwalk.ts";
+import { TRASH_DIR, resolveWrite, virtualJoin } from "./paths.ts";
+import { assertNotReserved, pinDirCreate, pinDirW, rmTree, walkGuard } from "./pinwalk.ts";
 
 export interface TrashItem extends ops.TrashMeta {
   /** meta.json missing or unreadable: the item can still be deleted but not restored */
@@ -122,7 +122,7 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
       await fs.lstat(data);
       const target = opts.toDir ? virtualJoin(resolveWrite(root, opts.toDir).virtual, meta.name) : meta.originalPath;
       const dest = resolveWrite(root, target);
-      assertNotTrash(dest.virtual);
+      assertNotReserved(dest.virtual);
       if (dest.virtual === "/") throw bad("cannot restore onto the root");
       // The destination folder is created and held one component at a time, and the item is moved out of its own pinned
       // folder, so neither side can be swapped for a link between the checks and the move.

@@ -8,7 +8,6 @@ import type { Readable } from "node:stream";
 import {
   PathError,
   TRASH_DIR,
-  assertNotTrash,
   openChecked,
   pinParent,
   resolveRead,
@@ -16,7 +15,7 @@ import {
   virtualJoin,
   type Resolved,
 } from "./paths.ts";
-import { copyTree, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
+import { assertNotReserved, copyTree, isReservedName, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
 
 export interface Entry {
   name: string;
@@ -126,7 +125,7 @@ export async function list(root: string, p: string, hidden: boolean) {
   let truncated = false;
   const slice: string[] = [];
   for await (const n of direntsOf(r.real)) {
-    if (n.name === TRASH_DIR || (!hidden && n.name.startsWith("."))) continue;
+    if (n.name === TRASH_DIR || isReservedName(n.name) || (!hidden && n.name.startsWith("."))) continue;
     if (slice.length >= MAX_LIST) {
       truncated = true;
       break;
@@ -215,7 +214,7 @@ export async function* listStream(root: string, p: string, hidden: boolean, batc
   };
   let chunk: Dirent[] = [];
   for await (const d of direntsOf(r.real)) {
-    if (d.name === TRASH_DIR || (!hidden && d.name.startsWith("."))) continue;
+    if (d.name === TRASH_DIR || isReservedName(d.name) || (!hidden && d.name.startsWith("."))) continue;
     chunk.push(d);
     if (chunk.length >= 4096) {
       await flush(chunk);
@@ -320,9 +319,9 @@ export function streamFile(f: Pick<Opened, "fh">, range?: { start: number; end: 
 
 export async function mkdir(root: string, p: string) {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(409, "already exists");
-  await pinParentW(root, r.real, (at) => fs.mkdir(at));
+  await pinParentW(root, r.real, (at) => fs.mkdir(at), false);
   return r.virtual;
 }
 
@@ -334,7 +333,7 @@ export async function mkdir(root: string, p: string) {
  */
 export async function symlink(root: string, p: string, target: string, overwrite = false) {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(409, "already exists");
   if (typeof target !== "string" || target === "" || target.includes("\0") || target.length > 4096) throw new FsError(400, "invalid link target");
   await pinParentW(root, r.real, async (at) => {
@@ -350,15 +349,15 @@ export async function symlink(root: string, p: string, target: string, overwrite
       await fs.rm(tmp, { force: true });
       throw e;
     }
-  });
+  }, false);
   return stat(root, r.virtual);
 }
 
 export async function rename(root: string, from: string, to: string, overwrite = false) {
   const a = resolveWrite(root, from);
   const b = resolveWrite(root, to);
-  assertNotTrash(a.virtual);
-  assertNotTrash(b.virtual);
+  assertNotReserved(a.virtual);
+  assertNotReserved(b.virtual);
   if (a.virtual === "/" || b.virtual === "/") throw new FsError(400, "cannot move root");
   if (b.virtual === a.virtual) return b.virtual;
   if (b.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot move into itself");
@@ -468,8 +467,8 @@ export interface CopyOpts {
 export async function copy(root: string, from: string, toDir: string, opts: CopyOpts = {}) {
   const a = resolveWrite(root, from);
   const d = resolveRead(root, toDir);
-  assertNotTrash(a.virtual);
-  assertNotTrash(d.virtual);
+  assertNotReserved(a.virtual);
+  assertNotReserved(d.virtual);
   if (a.virtual === "/") throw new FsError(400, "cannot copy root");
   if (d.virtual === a.virtual || d.virtual.startsWith(a.virtual + "/")) throw new FsError(400, "cannot copy into itself");
   const tree = { times: opts.preserveTimes === true };
@@ -532,7 +531,7 @@ export interface TrashMeta {
 
 export async function trash(root: string, p: string): Promise<TrashMeta> {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "cannot trash root");
   const st = await fs.lstat(r.real);
   const vol = await volumeRoot(path.dirname(r.real), root);
@@ -560,7 +559,7 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
 
 export async function permanentDelete(root: string, p: string) {
   const r = resolveWrite(root, p);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "cannot delete root");
   await pinParentW(root, r.real, (at) => rmTree(at, { guard: walkGuard(root) }));
 }
@@ -575,9 +574,9 @@ export async function upload(
   mtimeMs?: number,
 ) {
   const d = resolveRead(root, dir);
-  assertNotTrash(d.virtual);
+  assertNotReserved(d.virtual);
   const target = resolveWrite(root, virtualJoin(d.virtual, name));
-  assertNotTrash(target.virtual); // a file may not take the name of the trash store
+  assertNotReserved(target.virtual); // a file may not take the name of the trash store
   // Work through the pinned destination folder so it cannot be swapped for a link mid-upload.
   return pinDirW(root, d.real, async (at) => {
     const dest = path.join(at, path.basename(target.real));
@@ -645,7 +644,7 @@ export async function readText(root: string, p: string, maxBytes = MAX_EDIT) {
  */
 export async function writeText(root: string, p: string, body: Buffer, ifMatch: string | null, maxBytes = MAX_EDIT) {
   const r = resolveRead(root, p); // follow a final symlink, confined to root
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw new FsError(400, "is a directory");
   if (body.length > maxBytes) throw new FsError(413, "content too large");
   assertText(body);

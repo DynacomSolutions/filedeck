@@ -8,7 +8,7 @@ import { Readable } from "node:stream";
 import * as ops from "../src/fsops.ts";
 import { uploadChunk } from "../src/chunked.ts";
 import { deleteItems, restoreItems } from "../src/trash.ts";
-import { registerReadOnly } from "../src/pinwalk.ts";
+import { registerReadOnly, STAGING_PREFIX } from "../src/pinwalk.ts";
 import { applyPerms, planPerms } from "../src/props.ts";
 import { loadConfig } from "../src/config.ts";
 
@@ -227,7 +227,7 @@ test("a copy never carries set-user-id or set-group-id bits it was not given an 
   await ops.copy(root, "/src/prog", "/dst");
   await ops.copy(root, "/src/dirg", "/dst");
   assert.equal(fs.statSync(path.join(root, "dst/prog")).mode & 0o7777, 0o755);
-  assert.equal(fs.statSync(path.join(root, "dst/dirg")).mode & 0o7777, 0o755);
+  assert.equal(fs.statSync(path.join(root, "dst/dirg")).mode & 0o7777, 0o2755, "a folder keeps set-group-id, so a shared folder keeps its group inheritance");
 });
 
 test("a cross-device move sets the mode only after the owner, and drops the bits when the owner is refused", async () => {
@@ -392,4 +392,137 @@ test("emptying a trash item never follows a folder swapped for a link", async ()
   assert.ok(swapped, "the swap happened");
   assert.equal(fs.readFileSync(path.join(outside, "secret.txt"), "utf8"), "TOP SECRET");
   assert.ok(!fs.existsSync(path.join(root, ".filedeck-trash", meta.id)));
+});
+
+test("a folder renamed onto the staging name is refused and nothing in it is touched", async () => {
+  fresh("adopt");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/a.txt"), "a");
+  fs.mkdirSync(path.join(root, "dst/victim"), { recursive: true });
+  fs.chmodSync(path.join(root, "dst/victim"), 0o700);
+  fs.writeFileSync(path.join(root, "dst/victim/precious.txt"), "P");
+  const real = fsp.mkdir.bind(fsp);
+  let done = false;
+  mock.method(fsp, "mkdir", async (p: string, ...r: unknown[]) => {
+    const v = await real(p, ...(r as []));
+    if (!done && path.basename(p).startsWith(STAGING_PREFIX)) {
+      done = true;
+      fs.renameSync(path.join(root, "dst/victim"), p); // onto the fresh, empty staging folder
+    }
+    return v;
+  });
+  await assert.rejects(ops.copy(root, "/src/a.txt", "/dst"), /private work folder/);
+  const all = fs.readdirSync(path.join(root, "dst"), { recursive: true }).map(String);
+  assert.ok(all.some((n) => n.endsWith("precious.txt")), `precious.txt must survive: ${all.join(",")}`);
+});
+
+test("a recursive change refuses a read-only prefix inside the target before it changes anything", async () => {
+  fresh("ro-first");
+  fs.mkdirSync(path.join(root, "top/ro/deep"), { recursive: true });
+  fs.writeFileSync(path.join(root, "top/ro/deep/f"), "x");
+  fs.writeFileSync(path.join(root, "top/a.txt"), "a");
+  fs.chmodSync(path.join(root, "top/ro"), 0o755);
+  const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_READONLY: "/top/ro" } as never);
+  registerReadOnly(root, cfg.readOnly);
+  try {
+    const plan = await planPerms(cfg, { path: "/top", mode: 0o700, recursive: true });
+    await assert.rejects(applyPerms(cfg, plan), /read-only/);
+    for (const p of ["top", "top/a.txt", "top/ro", "top/ro/deep", "top/ro/deep/f"]) assert.notEqual(fs.statSync(path.join(root, p)).mode & 0o777, 0o700, `${p} must be untouched`);
+    // a folder that is swapped into a prefix mid-walk is refused before it is changed
+    fs.mkdirSync(path.join(root, "rw/x/a"), { recursive: true });
+    fs.mkdirSync(path.join(root, "srv/backup"), { recursive: true });
+    fs.writeFileSync(path.join(root, "srv/backup/a.txt"), "p");
+    fs.chmodSync(path.join(root, "srv/backup/a.txt"), 0o644);
+    fs.chmodSync(path.join(root, "srv/backup"), 0o755);
+    registerReadOnly(root, ["/srv/backup"]);
+    const plan2 = await planPerms(cfg, { path: "/rw/x", mode: 0o700, recursive: true });
+    const progress: { current?: string } = {};
+    let cur = "";
+    Object.defineProperty(progress, "current", {
+      set(v: string) {
+        cur = v;
+        if (v.endsWith("/rw/x/a")) {
+          fs.renameSync(path.join(root, "rw/x/a"), path.join(root, "rw/a-old"));
+          fs.symlinkSync("../../srv/backup", path.join(root, "rw/x/a"));
+        }
+      },
+      get: () => cur,
+    });
+    await applyPerms(cfg, plan2, { signal: new AbortController().signal, progress } as never);
+    assert.equal(fs.statSync(path.join(root, "srv/backup/a.txt")).mode & 0o777, 0o644);
+    assert.equal(fs.statSync(path.join(root, "srv/backup")).mode & 0o777, 0o755);
+  } finally {
+    registerReadOnly(root, []);
+  }
+});
+
+test("a mode change leaves a file with another name alone and reports it as skipped", async () => {
+  fresh("hl");
+  fs.mkdirSync(path.join(root, "etc"));
+  fs.mkdirSync(path.join(root, "home/u"), { recursive: true });
+  fs.writeFileSync(path.join(root, "etc/shadow"), "s");
+  fs.chmodSync(path.join(root, "etc/shadow"), 0o600);
+  fs.linkSync(path.join(root, "etc/shadow"), path.join(root, "home/u/s"));
+  fs.writeFileSync(path.join(root, "home/u/own"), "o");
+  const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never);
+  const res = await applyPerms(cfg, await planPerms(cfg, { path: "/home/u", mode: 0o755, recursive: true }));
+  assert.equal(fs.statSync(path.join(root, "etc/shadow")).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(root, "home/u/own")).mode & 0o777, 0o755);
+  assert.ok(res.skipped >= 1);
+});
+
+test("a copy leaves out the trash store and working folders, and their names cannot be used", async () => {
+  fresh("reserved");
+  fs.mkdirSync(path.join(root, "src/tree/.filedeck-trash/x"), { recursive: true });
+  fs.mkdirSync(path.join(root, "src/tree/.filedeck-work"), { recursive: true });
+  fs.mkdirSync(path.join(root, `src/tree/${STAGING_PREFIX}abc-123`), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/tree/keep.txt"), "k");
+  fs.mkdirSync(path.join(root, "dst"));
+  await ops.copy(root, "/src/tree", "/dst");
+  assert.deepEqual(fs.readdirSync(path.join(root, "dst/tree")), ["keep.txt"]);
+  await assert.rejects(ops.mkdir(root, "/dst/.filedeck-work"), /reserved/);
+  await assert.rejects(ops.mkdir(root, `/dst/${STAGING_PREFIX}zz`), /reserved/);
+  await assert.rejects(ops.upload(root, "/dst", `${STAGING_PREFIX}up`, Readable.from([Buffer.from("x")]), false, 100), /reserved/);
+  fs.mkdirSync(path.join(root, `dst/${STAGING_PREFIX}listed`));
+  assert.ok(!(await ops.list(root, "/dst", true)).entries.some((e) => e.name.startsWith(STAGING_PREFIX)));
+});
+
+test("a stale staging folder is swept when the folder is next used; a foreign or busy one is not", async () => {
+  fresh("sweep");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/a.txt"), "a");
+  fs.mkdirSync(path.join(root, "dst"));
+  const old = Date.now() - 3 * 86400_000;
+  const mk = (name: string, inner: string[]) => {
+    const d = path.join(root, "dst", name);
+    fs.mkdirSync(d, { mode: 0o700 });
+    for (const n of inner) fs.writeFileSync(path.join(d, n), "x");
+    for (const x of [...inner.map((n) => path.join(d, n)), d]) fs.utimesSync(x, new Date(old), new Date(old));
+  };
+  mk(`${STAGING_PREFIX}deadbeef-stale`, ["staged"]); // idle for days, only the staged entry: swept
+  mk(`${STAGING_PREFIX}deadbeef-other`, ["precious"]); // holds something else: never emptied
+  fs.mkdirSync(path.join(root, `dst/${STAGING_PREFIX}fresh-one`), { mode: 0o700 }); // another run's, recent: left
+  await ops.copy(root, "/src/a.txt", "/dst");
+  const left = fs.readdirSync(path.join(root, "dst")).sort();
+  assert.ok(!left.includes(`${STAGING_PREFIX}deadbeef-stale`));
+  assert.ok(left.includes(`${STAGING_PREFIX}deadbeef-other`));
+  assert.ok(left.includes(`${STAGING_PREFIX}fresh-one`));
+  assert.ok(fs.existsSync(path.join(root, `dst/${STAGING_PREFIX}deadbeef-other/precious`)));
+});
+
+test("running out of descriptors is the same clear error in a copy, a recursive change and a delete", async () => {
+  fresh("emfile");
+  fs.mkdirSync(path.join(root, "t/a/b"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/a/b/f"), "x");
+  fs.mkdirSync(path.join(root, "dst"));
+  const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never);
+  const real = fsp.open.bind(fsp);
+  mock.method(fsp, "open", async (p: string, flags: number, ...r: never[]) => {
+    if (path.basename(p) === "b") throw Object.assign(new Error("EMFILE"), { code: "EMFILE" });
+    return real(p, flags, ...r);
+  });
+  await assert.rejects(ops.copy(root, "/t", "/dst"), /nested too deeply/);
+  const plan = await planPerms(cfg, { path: "/t", mode: 0o750, recursive: true });
+  await assert.rejects(applyPerms(cfg, plan), /nested too deeply/);
+  await assert.rejects(ops.permanentDelete(root, "/t"), /nested too deeply/);
 });
