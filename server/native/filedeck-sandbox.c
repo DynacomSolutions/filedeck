@@ -2,12 +2,15 @@
  * filedeck-sandbox: run a command with access to the listed folders only.
  *
  *   filedeck-sandbox --probe
- *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]
+ *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]
  *
  *   --cwd-fd N  start COMMAND in the directory descriptor N (fchdir, done after every descriptor is in place and before the user
  *               change and the restriction). A working folder given as a /proc/self/fd path can point at the wrong descriptor, because
  *               the caller's spawn moves descriptors into the slots 3, 4, ... first; this option names the folder by the number it has
  *               in this process, which is exact.
+ *   --keep-fd N keep descriptor N open for COMMAND (repeatable): for a descriptor the caller means the command to use, such as an
+ *               archive opened read-only, which it then reads as a file descriptor in every mode. Every other descriptor above 2 is
+ *               closed on exec. Landlock does not restrict a descriptor that is already open: hand over only what COMMAND should use.
  * ROOT is a path, or `fd:N`: the number of a directory descriptor the caller left open for this process (spawn it as an
  * inherited descriptor). The Landlock rule is attached to the opened directory itself, so it follows the directory: renaming
  * the folder or swapping a link at its old name afterwards changes nothing about what is allowed.
@@ -164,7 +167,17 @@ static int parse_id(const char *text, long *out) {
   return 0;
 }
 
-/* every descriptor above 2 close-on-exec: close_range(2) where the kernel has it, else the real list of open descriptors, else a loop up to the limit */
+/* descriptors the caller named with --keep-fd: the command is meant to use them, so they stay open across exec */
+#define MAX_KEEP 64
+static long keep_fds[MAX_KEEP];
+static int nkeep = 0;
+static int kept(long n) {
+  for (int k = 0; k < nkeep; k++)
+    if (keep_fds[k] == n) return 1;
+  return 0;
+}
+
+/* every descriptor above 2 but the kept ones close-on-exec: close_range(2) where the kernel has it, else the real list of open descriptors, else a loop up to the limit */
 static void mark_cloexec(void) {
 #ifndef __NR_close_range
 #define __NR_close_range 436
@@ -172,7 +185,30 @@ static void mark_cloexec(void) {
 #ifndef CLOSE_RANGE_CLOEXEC
 #define CLOSE_RANGE_CLOEXEC (1U << 2)
 #endif
-  if (syscall(__NR_close_range, 3U, ~0U, CLOSE_RANGE_CLOEXEC) == 0) return;
+  {
+    /* close_range over every gap between the kept descriptors (sorted), then make sure the kept ones are inheritable */
+    long sorted[MAX_KEEP];
+    for (int k = 0; k < nkeep; k++) {
+      int j = k;
+      while (j > 0 && sorted[j - 1] > keep_fds[k]) {
+        sorted[j] = sorted[j - 1];
+        j--;
+      }
+      sorted[j] = keep_fds[k];
+    }
+    unsigned int from = 3;
+    int ok = 1;
+    for (int k = 0; k <= nkeep && ok; k++) {
+      unsigned int to = k < nkeep ? (unsigned int)sorted[k] : ~0U;
+      if (k < nkeep && (unsigned int)sorted[k] < from) continue; /* a duplicate */
+      if (k < nkeep ? to > from : 1) ok = syscall(__NR_close_range, from, k < nkeep ? to - 1 : ~0U, CLOSE_RANGE_CLOEXEC) == 0;
+      if (k < nkeep) from = to + 1;
+    }
+    if (ok) {
+      for (int k = 0; k < nkeep; k++) fcntl((int)keep_fds[k], F_SETFD, 0);
+      return;
+    }
+  }
   DIR *d = opendir("/proc/self/fd");
   if (d) {
     int self = dirfd(d);
@@ -180,16 +216,18 @@ static void mark_cloexec(void) {
     while ((e = readdir(d))) {
       char *end;
       long n = strtol(e->d_name, &end, 10);
-      if (*end || end == e->d_name || n < 3 || n == self) continue;
+      if (*end || end == e->d_name || n < 3 || n == self || kept(n)) continue;
       fcntl((int)n, F_SETFD, FD_CLOEXEC);
     }
     closedir(d);
+    for (int k = 0; k < nkeep; k++) fcntl((int)keep_fds[k], F_SETFD, 0);
     return;
   }
   struct rlimit rl;
   long max = 65536;
   if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY && (long)rl.rlim_cur < (1L << 20)) max = (long)rl.rlim_cur;
-  for (long fd = 3; fd < max; fd++) fcntl((int)fd, F_SETFD, FD_CLOEXEC);
+  for (long fd = 3; fd < max; fd++)
+    if (!kept(fd)) fcntl((int)fd, F_SETFD, FD_CLOEXEC);
 }
 
 /* Network layer by seccomp, on every kernel (Landlock covers TCP, and on the newest kernels UDP and pathname unix sockets, but not
@@ -333,7 +371,14 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--no-landlock")) no_landlock = 1;
     else if (!strcmp(argv[i], "--no-system")) no_system = 1;
     else if (!strcmp(argv[i], "--allow-sockets")) allow_sockets = 1;
-    else if (!strcmp(argv[i], "--cwd-fd") && i + 1 < argc) {
+    else if (!strcmp(argv[i], "--keep-fd") && i + 1 < argc) {
+      long n;
+      if (parse_id(argv[++i], &n) < 0 || n < 3 || n > 8191 || nkeep >= MAX_KEEP) {
+        fprintf(stderr, "filedeck-sandbox: --keep-fd needs a descriptor number from 3 to 8191 (at most %d of them)\n", MAX_KEEP);
+        return EXIT_USAGE;
+      }
+      keep_fds[nkeep++] = n;
+    } else if (!strcmp(argv[i], "--cwd-fd") && i + 1 < argc) {
       if (parse_id(argv[++i], &cwd_fd) < 0 || cwd_fd < 3 || cwd_fd > 8191) {
         fprintf(stderr, "filedeck-sandbox: --cwd-fd needs a descriptor number from 3 to 8191\n");
         return EXIT_USAGE;
@@ -377,7 +422,7 @@ int main(int argc, char **argv) {
     return r;
   }
   if (i >= argc) {
-    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]\n");
+    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]\n");
     return EXIT_USAGE;
   }
   if ((uid == 0 || gid == 0) && !allow_root_user) {

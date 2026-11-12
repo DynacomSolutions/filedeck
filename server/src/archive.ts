@@ -1191,7 +1191,7 @@ async function extractViaSz(plan: ExtractPlan, src: Source, work: Work, limits: 
   if (free !== undefined && bytes > free) throw new ArchiveError(507, `not enough room to stage this archive: it needs ${bytes} bytes free in the work folder and has ${free}; set FILEDECK_WORK_DIR to a larger volume`);
   ctl.progress.totalEntries = sizes.size;
   ctl.progress.totalBytes = bytes;
-  const how = await szReadArgs({ ...src.sz, byName: true }); // started with its working folder by descriptor: through the launcher
+  const how = await szReadArgs(src.sz);
   const args = ["x", "-aoa", "-spd", ...(src.sz.type ? [`-t${src.sz.type}`] : []), "-bb1", "-bso1", "-bsp0", ...skip.map((n) => `-x!${n}`), "--", how.arg];
   // 7-Zip writes into its working directory, the pinned private staging folder, and can read only the archive: the kernel allows it
   // nothing beneath the served root (a held descriptor path cannot be passed as -o: the child has no such descriptor)

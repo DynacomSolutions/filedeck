@@ -495,3 +495,47 @@ test("the start-up log says clearly when the helper programs are not confined (o
     resetSandbox();
   }
 });
+
+/* ---- a descriptor kept open for the program: readable in the child, every other descriptor above 2 closed, in each mode ---- */
+
+for (const mode of ["landlock", "fallback", "off"] as const) {
+  test(`keepFds: the archive descriptor is readable in the child and every other descriptor above 2 is closed: ${mode}`, async (t) => {
+    if (mode === "landlock" && box.state !== "landlock") return t.skip(`sandbox live: skipped (${box.why})`);
+    const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER];
+    const kept = path.join(tmp, `kept-${mode}`);
+    const other = path.join(tmp, `other-${mode}`);
+    write(kept, "KEPT-CONTENT");
+    write(other, "OTHER-CONTENT");
+    const keptFd = fs.openSync(kept, "r");
+    const otherFd = fs.openSync(other, "r");
+    try {
+      if (mode === "off") process.env.FILEDECK_SANDBOX = "off";
+      else if (mode === "fallback") {
+        process.env.FILEDECK_SANDBOX = "auto";
+        process.env.FILEDECK_SANDBOX_HELPER = path.join(tmp, "no-such-launcher");
+      } else process.env.FILEDECK_SANDBOX = "auto";
+      resetSandbox();
+      assert.equal((await sandboxInfo()).state, mode);
+      // descriptor 3 is the kept one; the other descriptor is handed over as a Landlock root (descriptor 4 in the child) and must not stay open
+      const r = await run("sh", ["-c", "cat <&3; echo; cat <&4 2>&1; cat <&5 2>&1; exit 0"], { keepFds: [keptFd], readOnly: [otherFd] });
+      const [first, ...rest] = r.stdout.split("\n");
+      assert.equal(first, "KEPT-CONTENT", r.stderr);
+      assert.ok(!r.stdout.includes("OTHER-CONTENT"), "no other descriptor may reach the program");
+      assert.match(r.stderr + rest.join("\n"), /Bad file descriptor|not open|bad fd/i);
+      // and through a user change too (root only): the descriptor is still the program's
+      if (process.getuid?.() === 0) {
+        fs.chmodSync(tmp, 0o755);
+        const u = await run("sh", ["-c", "cat <&3"], { keepFds: [keptFd], uid: 65534, gid: 65534 });
+        assert.equal(u.stdout, "KEPT-CONTENT", u.stderr);
+      }
+    } finally {
+      for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
+        if (prev[i] === undefined) delete process.env[k];
+        else process.env[k] = prev[i];
+      }
+      resetSandbox();
+      fs.closeSync(keptFd);
+      fs.closeSync(otherFd);
+    }
+  });
+}

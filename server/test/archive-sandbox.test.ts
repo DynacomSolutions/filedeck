@@ -573,7 +573,7 @@ liveSz("7-Zip extract is told to write outside its staging folder and to read a 
   try {
     await sandboxedAndNot("7z extract (write)", async () => {
       const out = path.join(s.outside, `x-${Date.now()}-${Math.random()}`);
-      const how = await szReadArgs({ arg: mine, file: fd, byName: true });
+      const how = await szReadArgs({ arg: mine, file: fd });
       const p = await runSz(["x", "-aoa", `-o${out}`, "--", how.arg], { cwdFd: stFd, readOnly: how.readOnly, readWrite: [stFd], fd: how.fd });
       const r = await p.done;
       return { denied: r.code !== 0 && !fs.existsSync(path.join(out, "own.txt")), detail: `${r.code} ${r.text}` };

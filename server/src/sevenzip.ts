@@ -86,8 +86,6 @@ export interface SzSource {
   roots?: Root[];
   /** archive format, for descriptors (no extension to go by) */
   type?: string;
-  /** the caller starts 7-Zip through the launcher (working folder by descriptor): read the archive by name where there is no kernel rule */
-  byName?: boolean;
   /** run 7-Zip as this user and group (the agent as root parses an untrusted archive as nobody, not as itself) */
   runAs?: { uid: number; gid: number };
 }
@@ -102,14 +100,15 @@ export interface SzAccess {
   runAs?: { uid: number; gid: number };
 }
 
-/** The name and the confinement for reading `src`: see `SzSource`. */
+/**
+ * The name and the confinement for reading `src`. Inside the sandbox the archive is opened by name and the kernel rule is attached to the
+ * file. In every other mode the open descriptor itself is handed over (kept open through the launcher) and read as /dev/fd/3, so the name
+ * can be swapped after it was checked without effect, as before the sandbox.
+ */
 export async function szReadArgs(src: SzSource): Promise<{ arg: string; fd?: number; readOnly: Root[] }> {
   const info = await sandboxInfo();
   if (info.state === "landlock") return { arg: src.arg, readOnly: [...(src.file !== undefined ? [src.file] : []), ...(src.also ?? []), ...(src.roots ?? [])] };
-  // No kernel rule here. An open descriptor can be handed over as descriptor 3 only when the program is started directly: through the
-  // launcher (a user change, or a working folder by descriptor) every descriptor above 2 is closed, so then the archive is read by its name
-  // (the weaker guarantee of the fallback: the name could be swapped after it was checked).
-  if (src.file !== undefined && !src.runAs && !src.byName) return { arg: "/dev/fd/3", fd: src.file, readOnly: [] };
+  if (src.file !== undefined) return { arg: "/dev/fd/3", fd: src.file, readOnly: [] };
   return { arg: src.arg, readOnly: [] };
 }
 
@@ -127,7 +126,7 @@ export async function runSz(
     signal?: AbortSignal;
     onLine?: (l: string) => void;
     stdinExtra?: string;
-    /** an open file handed to 7-Zip as descriptor 3 (read it as /dev/fd/3) where there is no kernel confinement */
+    /** an open file handed to 7-Zip as descriptor 3 (read it as /dev/fd/3), kept open through the launcher; only where there is no kernel rule */
     fd?: number;
   } = {},
 ): Promise<SzProc> {
@@ -137,7 +136,8 @@ export async function runSz(
     cwd: opts.cwd,
     cwdFd: opts.cwdFd !== undefined && opts.cwdFd >= 0 ? opts.cwdFd : undefined,
     env: ENV,
-    stdio: opts.fd === undefined ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", opts.fd],
+    stdio: ["pipe", "pipe", "pipe"],
+    keepFds: opts.fd === undefined ? undefined : [opts.fd], // the archive, as descriptor 3 (read as /dev/fd/3) where there is no kernel rule
     // /dev/urandom: an AES archive needs a random salt and IV
     readOnly: [...(opts.readOnly ?? []), "/dev/urandom"],
     // a tool installed outside the system folders (FILEDECK_7Z=/opt/...) must still be startable

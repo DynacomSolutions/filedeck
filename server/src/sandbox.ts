@@ -160,6 +160,12 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
    * Without a launcher (mode `off`, or no launcher installed) the folder's current path is used.
    */
   cwdFd?: number;
+  /**
+   * descriptors of this process the program is meant to use (an archive opened read-only): they become its descriptors 3, 4, ... in this
+   * order, in every mode, and stay open for it; every other descriptor above 2 is closed. Not folders to allow: Landlock does not restrict a
+   * descriptor that is already open, so pass only what the program should read.
+   */
+  keepFds?: number[];
   /** let the program create sockets of any kind (see the UDP note above); TCP stays denied wherever the kernel's Landlock can deny it */
   allowSockets?: boolean;
   /** do not add the system folders, /etc files and /dev/null the launcher allows by default (the program must then be static) */
@@ -186,7 +192,7 @@ async function helperPath(info: SandboxInfo): Promise<string | null> {
  * If the launcher itself exits with `EXIT_LANDLOCK_UNSUPPORTED`, the program did not run: call `resetSandbox()` and treat it as unavailable.
  */
 export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxOpts = {}): Promise<ChildProcess> {
-  const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, allowSockets, cwdFd, stdio, ...rest } = opts;
+  const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, allowSockets, cwdFd, keepFds = [], stdio, ...rest } = opts;
   const info = await sandboxInfo();
   if (info.state === "unavailable") throw sandboxRequiredError();
   if ((uid === 0 || gid === 0) && uid !== process.getuid?.()) throw new FsError(500, "refusing to run a confined program as root");
@@ -196,21 +202,24 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
   const fds: unknown[] = Array.isArray(std) ? [...std] : [std, std, std];
   while (fds.length < 3) fds.push("ignore");
   const addFd = (fd: number): number => (fds.push(fd), fds.length - 1);
+  const kept = keepFds.map(addFd); // first, so the first is descriptor 3 whatever else follows
   // No Landlock rules (state off or fallback): the privilege drop and the working folder still must not depend on the mode, so the
   // launcher, when there is one, runs `--no-landlock` with them (it also clears the supplementary groups, which spawn's uid option does not).
   if (info.state === "off" || info.state === "fallback") {
     const helper = owner || cwdFd !== undefined ? await helperPath(info) : null;
     if (helper) {
       const flags = ["--no-landlock"];
+      for (const k of kept) flags.push("--keep-fd", String(k));
       if (owner) flags.push("--uid", String(owner.uid), "--gid", String(owner.gid));
       if (cwdFd !== undefined) flags.push("--cwd-fd", String(addFd(cwdFd)));
       return spawn(helper, [...flags, "--", cmd, ...args], { ...rest, stdio: fds as SpawnOptions["stdio"] });
     }
-    // no launcher: the folder by its current path, and the drop by spawn's own uid and gid (supplementary groups are not cleared)
+    // no launcher: the folder by its current path, and the drop by spawn's own uid and gid (supplementary groups are not cleared); the kept descriptors are inherited as they are
     const cwd = cwdFd !== undefined ? await fs.readlink(`/proc/self/fd/${cwdFd}`).catch(() => rest.cwd) : rest.cwd;
-    return spawn(cmd, args, { ...rest, ...(cwd !== undefined ? { cwd } : {}), stdio: std, ...(owner ? owner : {}) });
+    return spawn(cmd, args, { ...rest, ...(cwd !== undefined ? { cwd } : {}), stdio: kept.length ? (fds as SpawnOptions["stdio"]) : std, ...(owner ? owner : {}) });
   }
   const flags: string[] = [];
+  for (const k of kept) flags.push("--keep-fd", String(k));
   const add = (flag: string, roots: Root[]) => {
     for (const r of roots) {
       if (typeof r === "number") flags.push(flag, `fd:${addFd(r)}`);
