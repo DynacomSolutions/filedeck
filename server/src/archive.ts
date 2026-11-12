@@ -438,19 +438,33 @@ async function exists(p: string) {
 const LINUX = process.platform === "linux";
 
 /**
+ * Called with the real location of a folder at the moment it is pinned; throws when a job may not write there (read-only
+ * volumes). `contains` asks whether the folder also holds a read-only one (a merge would reach it).
+ */
+export type Guard = (location: string, contains: boolean) => void;
+type PinGuard = (location: string) => void;
+
+/**
  * Run `fn` with a path that names the directory `real` through a held descriptor, so the name
  * cannot be swapped for something else while `fn` works. The entry must be a real directory (a
  * final link is refused) that lives inside the root.
  */
-async function pinned<T>(root: string, real: string, fn: (at: string) => Promise<T>): Promise<T> {
-  if (!LINUX) return fn(real);
+async function pinned<T>(root: string, real: string, fn: (at: string) => Promise<T>, guard?: PinGuard): Promise<T> {
+  if (!LINUX) {
+    guard?.(real);
+    return fn(real);
+  }
   const fh = await openChecked(root, real, C.O_RDONLY | C.O_DIRECTORY);
   try {
+    // where the held descriptor really is, which is what the read-only rules are applied to (never the name that was opened)
+    guard?.(await fs.readlink(`/proc/self/fd/${fh.fd}`));
     return await fn(`/proc/self/fd/${fh.fd}`);
   } finally {
     await fh.close().catch(() => undefined);
   }
 }
+/** Where a pinned path really is. */
+const locationOf = (at: string): Promise<string> => (LINUX && at.startsWith("/proc/self/fd/") ? fs.readlink(at) : Promise.resolve(at));
 
 /* ------------------------------------------------------- private work area */
 
@@ -543,16 +557,18 @@ async function makeTempWorkRoot(): Promise<string> {
 
 /** The per-volume work folder for a destination, or null when the volume cannot have an acceptable one. */
 const volumeWorks = new Map<string, string>();
-async function volumeWork(root: string, destReal: string): Promise<string | null> {
+async function volumeWork(root: string, destReal: string, guard?: Guard): Promise<string | null> {
   let made: string | undefined;
   try {
     const vol = await volumeRoot(destReal, root);
     const hit = volumeWorks.get(vol);
     if (hit) {
+      guard?.(hit, false);
       await privateDir(hit, false); // still acceptable?
       return hit;
     }
     const dir = path.join(vol, WORK_DIR);
+    guard?.(dir, false); // a read-only volume cannot hold one: such a job stages in the temp folder
     if (!(await fs.lstat(dir).then(() => true, () => false))) made = dir;
     const real = await privateDir(dir, true);
     made = undefined;
@@ -630,8 +646,8 @@ interface Work {
  * need (compress: the size of the selection); when staging falls back to the temp volume and it cannot hold that,
  * the job fails at once. A heartbeat file beside the folder is refreshed while the job runs.
  */
-async function makeWork(tag: string, root: string, destReal: string, need?: number): Promise<Work> {
-  let base = await volumeWork(root, destReal);
+async function makeWork(tag: string, root: string, destReal: string, need?: number, guard?: Guard): Promise<Work> {
+  let base = await volumeWork(root, destReal, guard);
   let fallback = false;
   let free: number | undefined;
   if (!base) {
@@ -692,6 +708,8 @@ interface Mv {
   own?: { uid: number; gid: number };
   /** set on placed files (an archive read as root is not left world-readable) */
   mode?: number;
+  /** applied to every destination folder pinned while moving */
+  guard?: Guard;
 }
 /** Owner and group of a pinned folder, when this process can hand ownership out (root). */
 async function ownerOf(at: string): Promise<Mv["own"]> {
@@ -720,7 +738,7 @@ async function fillDir(mv: Mv, from: string, to: string, child: (mv: Mv, from: s
   await pinned(mv.root, to, async (toAt) => {
     if (mv.own) await fs.chown(toAt, mv.own.uid, mv.own.gid).catch(() => undefined); // toAt names the folder itself
     for (const n of await fs.readdir(from)) await child(mv, path.join(from, n), toAt, n);
-  });
+  }, mv.guard && ((loc) => mv.guard!(loc, false)));
   await fs.rmdir(from);
 }
 /** Put the file `from` at `to` without replacing anything: hard link, or an exclusive copy across filesystems; the source is then removed. */
@@ -796,7 +814,7 @@ async function mergeInto(mv: Mv, src: string, dst: string, policy: "overwrite" |
       if (!ts) {
         await moveExcl(mv, s, t);
       } else if (ss.isDirectory() && ts.isDirectory()) {
-        await pinned(mv.root, t, (tAt) => mergeInto(mv, s, tAt, policy, stats));
+        await pinned(mv.root, t, (tAt) => mergeInto(mv, s, tAt, policy, stats), mv.guard && ((loc) => mv.guard!(loc, true))); // a merge reaches what is inside
       } else if (policy === "skip" || ts.isDirectory() || ss.isDirectory()) {
         stats.skippedExisting++; // a file never replaces a folder (or the reverse): that would delete data
       } else {
@@ -880,7 +898,7 @@ const szType = (n: string) => (/\.(zip|jar|war|whl)$/i.test(n) ? "zip" : /\.7z$/
  * are found through the pinned folder, each part opened without following links and checked to be a regular
  * file inside the root, and copied into a private folder (7-Zip finds the other parts by name).
  */
-async function openSource(plan: ExtractPlan): Promise<Source> {
+async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Promise<Source> {
   const real = plan.archiveReal;
   const notFile = () => new ArchiveError(400, "not a regular file");
   if (!SPLIT.test(real)) {
@@ -893,7 +911,7 @@ async function openSource(plan: ExtractPlan): Promise<Source> {
     }
     return { arg: "/dev/fd/3", fd: fh.fd, type: szType(real), done: () => fh.close().catch(() => undefined) };
   }
-  const work = await makeWork("s", plan.root, plan.destReal);
+  const work = await makeWork("s", plan.root, destLoc, undefined, guard);
   try {
     const base = path.basename(real).slice(0, -4);
     await pinned(plan.root, path.dirname(real), async (dirAt) => {
@@ -961,25 +979,26 @@ async function extractViaSz(plan: ExtractPlan, src: Source, staging: string, lim
   return sanitizeTree(staging, limits, selector(plan.entries), { signal, progress: ctl.progress });
 }
 
-export async function runExtract(plan: ExtractPlan, limits: ArchiveLimits, ctl: JobCtl) {
+export async function runExtract(plan: ExtractPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   // The destination is pinned for the whole job: later renames of the folder, or of anything above it, change nothing here.
-  return pinned(plan.root, plan.destReal, (dest) => extractInto(dest, plan, limits, ctl));
+  const merge = plan.overwrite !== "rename";
+  return pinned(plan.root, plan.destReal, (dest) => extractInto(dest, plan, limits, ctl, guard), guard && ((loc) => guard(loc, merge && !plan.subfolder)));
 }
 
-async function extractInto(dest: string, plan: ExtractPlan, limits: ArchiveLimits, ctl: JobCtl) {
-  const src = await openSource(plan);
+async function extractInto(dest: string, plan: ExtractPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
+  const src = await openSource(plan, await locationOf(dest), guard);
   try {
-    return await extractStaged(dest, plan, src, limits, ctl);
+    return await extractStaged(dest, plan, src, limits, ctl, guard);
   } finally {
     await src.done();
   }
 }
 
-async function extractStaged(dest: string, plan: ExtractPlan, src: Source, limits: ArchiveLimits, ctl: JobCtl) {
+async function extractStaged(dest: string, plan: ExtractPlan, src: Source, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   // Staging is in the private work folder, held by descriptor, so nobody who can write to the destination can reach it.
-  const work = await makeWork("x", plan.root, plan.destReal);
+  const work = await makeWork("x", plan.root, await locationOf(dest), undefined, guard);
   const staging = work.at;
-  const mv: Mv = { root: plan.root, own: await ownerOf(dest).catch(() => undefined) };
+  const mv: Mv = { root: plan.root, own: await ownerOf(dest).catch(() => undefined), guard };
   const ac = new AbortController();
   const stop = () => ac.abort();
   ctl.signal.addEventListener("abort", stop, { once: true });
@@ -1028,7 +1047,7 @@ async function extractStaged(dest: string, plan: ExtractPlan, src: Source, limit
       const base = archiveBase(plan.archiveName);
       const existing = plan.overwrite !== "rename" ? await fs.lstat(path.join(dest, base)).catch(() => null) : null;
       if (existing?.isDirectory()) {
-        await pinned(root, path.join(dest, base), (at) => mergeInto(mv, staging, at, plan.overwrite as "overwrite" | "skip", stats));
+        await pinned(root, path.join(dest, base), (at) => mergeInto(mv, staging, at, plan.overwrite as "overwrite" | "skip", stats), guard && ((loc) => guard(loc, true)));
         finalVirtual = virtualJoin(plan.destVirtual, base);
       } else {
         // a new folder made through the pinned destination, then filled from the pinned staging folder
@@ -1036,7 +1055,7 @@ async function extractStaged(dest: string, plan: ExtractPlan, src: Source, limit
         await pinned(root, path.join(dest, name), async (at) => {
           if (mv.own) await fs.chown(at, mv.own.uid, mv.own.gid).catch(() => undefined);
           for (const n of await fs.readdir(staging)) await moveFree(mv, path.join(staging, n), at, n); // fresh folder: a clash can only be a concurrent writer
-        });
+        }, guard && ((loc) => guard(loc, false)));
         finalVirtual = virtualJoin(plan.destVirtual, name);
       }
     } else if (plan.overwrite === "rename") {
@@ -1164,24 +1183,24 @@ async function walkSizes(dirReal: string, rel: string, sizes: Map<string, number
   for await (const e of d) await walkSizes(dirReal, rel + "/" + e.name, sizes, limits, signal);
 }
 
-export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl) {
+export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   // Both the folder being read and the folder the archive lands in are pinned for the whole job.
-  return pinned(plan.root, plan.dirReal, (srcAt) => pinned(plan.root, plan.outReal, (outAt) => compressInto(srcAt, outAt, plan, limits, ctl)));
+  return pinned(plan.root, plan.dirReal, (srcAt) => pinned(plan.root, plan.outReal, (outAt) => compressInto(srcAt, outAt, plan, limits, ctl, guard), guard && ((loc) => guard(loc, false))));
 }
 
-async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl) {
+async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   const sizes = new Map<string, number>();
   for (const n of plan.names) await walkSizes(srcAt, n, sizes, limits, ctl.signal);
   ctl.progress.totalEntries = sizes.size;
   const totalBytes = [...sizes.values()].reduce((a, b) => a + b, 0);
   ctl.progress.totalBytes = totalBytes;
   // Written into the private work folder and moved into place when complete.
-  const work = await makeWork("c", plan.root, plan.outReal, totalBytes);
+  const work = await makeWork("c", plan.root, await locationOf(outAt), totalBytes, guard);
   // When the agent is root and the selected folder belongs to someone else, the tools run as that user (groups cleared):
   // whatever they open by name, they can only open what that user could. Otherwise they run as the agent.
   const srcOwner = await fs.stat(srcAt); // the pinned folder itself
   const runAs = process.getuid?.() === 0 && srcOwner.uid !== 0 ? { uid: srcOwner.uid, gid: srcOwner.gid } : undefined;
-  const mv: Mv = { root: plan.root, own: await ownerOf(outAt).catch(() => undefined), mode: process.getuid?.() === 0 && !runAs ? 0o600 : undefined };
+  const mv: Mv = { root: plan.root, guard, own: await ownerOf(outAt).catch(() => undefined), mode: process.getuid?.() === 0 && !runAs ? 0o600 : undefined };
   // 7-Zip writes its archive (and volumes) by name, so a user-run 7-Zip writes beside the destination under a hidden name, with that user's rights
   // (it cannot be given a descriptor, and the private folder is not reachable to that user); otherwise the private folder holds it.
   const szTmpPrefix = runAs && plan.viaSz ? `.filedeck-tmp-${randomBytes(4).toString("hex")}-` : "";

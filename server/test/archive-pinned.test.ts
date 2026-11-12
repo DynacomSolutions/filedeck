@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { archiveBase, extractTar, prepareCompress, prepareExtract, runCompress, runExtract, sweepWorkArea } from "../src/archive.ts";
 import { assertNotTrash, resolveRead } from "../src/paths.ts";
+import { jobMayWrite } from "../src/readonly.ts";
 import { spawnSync } from "node:child_process";
 import * as ops from "../src/fsops.ts";
 import { Readable } from "node:stream";
@@ -521,4 +522,65 @@ test("compression of a root-owned folder runs as the agent and leaves the archiv
   const mode = fs.statSync(path.join(s.dest, "priv.tar.gz")).mode & 0o777;
   if (IS_ROOT) assert.equal(mode, 0o600);
   else assert.ok(mode & 0o400, "readable by its owner");
+});
+
+/* ---- read-only folders: the pinned locations are checked where they really are ---- */
+
+/** the guard the job routes pass: a folder may be written when it is not under (or, for a merge, holding) a read-only prefix */
+const roGuard = (root: string) => (loc: string, contains: boolean) => {
+  if (!jobMayWrite(root, ["/ro"], loc, { contains })) throw Object.assign(new Error("read-only volume"), { status: 403 });
+};
+function roScene(name: string) {
+  const s = scene(name);
+  fs.mkdirSync(path.join(s.root, "ro"));
+  fs.writeFileSync(path.join(s.root, "ro/protected.txt"), "ORIGINAL");
+  fs.writeFileSync(path.join(s.dir, "first.tar"), entry("ro/protected.txt", "OVERWRITTEN"));
+  fs.writeFileSync(path.join(s.dir, "rest.tar"), Buffer.concat([entry("second.txt", "two"), Buffer.alloc(1024)]));
+  return s;
+}
+const protectedFile = (s: { root: string }) => fs.readFileSync(path.join(s.root, "ro/protected.txt"), "utf8");
+
+for (const policy of ["overwrite", "skip"] as const) {
+  test(`${policy}: a destination swapped for a link to a read-only folder's parent before the job starts is refused`, async () => {
+    const s = roScene(`ro-start-${policy}`);
+    fs.writeFileSync(s.go, "");
+    fs.mkdirSync(path.join(s.root, "d"));
+    const plan = await prepareExtract(s.root, "/a.tar", "/d", false, { overwrite: policy });
+    fs.rmdirSync(path.join(s.root, "d"));
+    fs.symlinkSync(s.root, path.join(s.root, "d")); // the job now resolves to the folder that holds /ro
+    await assert.rejects(runExtract(plan, LIM, mkCtl().ctl, roGuard(s.root)), (e: { status?: number }) => e.status === 403 || /ELOOP|ENOTDIR/.test(String(e)));
+    assert.equal(protectedFile(s), "ORIGINAL");
+    assert.deepEqual(leftovers(s.wd), []);
+  });
+
+  test(`${policy}: a folder merged into that is swapped for a link to a read-only folder's parent mid-job leaves the protected file alone`, async () => {
+    const s = roScene(`ro-merge-${policy}`);
+    fs.mkdirSync(path.join(s.dest, "a"));
+    const plan = await prepareExtract(s.root, "/a.tar", "/out", true, { overwrite: policy });
+    const job = runExtract(plan, LIM, mkCtl().ctl, roGuard(s.root));
+    await until(() => stagingWith(s.wd, "ro/protected.txt"), "the staged files");
+    fs.rmdirSync(path.join(s.dest, "a"));
+    fs.symlinkSync(s.root, path.join(s.dest, "a"));
+    fs.writeFileSync(s.go, "");
+    await job.catch(() => undefined); // it may finish into a new folder or refuse; either way the protected file is untouched
+    assert.equal(protectedFile(s), "ORIGINAL");
+    assert.deepEqual(fs.readdirSync(path.join(s.root, "ro")), ["protected.txt"]);
+  });
+}
+
+test("a destination reached through a swapped parent folder that now leads into a read-only folder is refused (extract and compress)", async () => {
+  const s = roScene("ro-parent");
+  fs.writeFileSync(s.go, "");
+  fs.mkdirSync(path.join(s.root, "d/ro"), { recursive: true });
+  fs.mkdirSync(path.join(s.root, "src"));
+  fs.writeFileSync(path.join(s.root, "src/f.txt"), "data");
+  const ex = await prepareExtract(s.root, "/a.tar", "/d/ro", false, { overwrite: "overwrite" });
+  const co = await prepareCompress(s.root, "/src", ["f.txt"], "tar.gz", "x", { destDir: "/d/ro" });
+  fs.rmSync(path.join(s.root, "d"), { recursive: true });
+  fs.symlinkSync(s.root, path.join(s.root, "d")); // /d/ro now means /ro, which is read-only
+  await assert.rejects(runExtract(ex, LIM, mkCtl().ctl, roGuard(s.root)), (e: { status?: number }) => e.status === 403);
+  await assert.rejects(runCompress(co, LIM, mkCtl().ctl, roGuard(s.root)), (e: { status?: number }) => e.status === 403);
+  assert.deepEqual(fs.readdirSync(path.join(s.root, "ro")), ["protected.txt"]);
+  assert.equal(protectedFile(s), "ORIGINAL");
+  assert.deepEqual(leftovers(s.wd), []);
 });

@@ -22,7 +22,7 @@ import { registerTranscodeRoutes } from "./transcode.ts";
 import { agentAuth } from "./agent-auth.ts";
 import { audit, type AuditSink } from "./audit.ts";
 import { requestGuard } from "./request-guard.ts";
-import { readOnlyGuard, isReadOnly } from "./readonly.ts";
+import { readOnlyGuard, isReadOnly, hitsReadOnly, reachesReadOnly } from "./readonly.ts";
 import type { Config } from "./config.ts";
 
 const SAFE_HEADERS = {
@@ -246,7 +246,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.get("/api/trash/list", async (c) => c.json({ volumes: await trash.listTrash(root, cfg.procMounts) }));
   app.post("/api/trash/restore", async (c) => {
     const b = await json<{ volume: string; ids: string[]; conflict?: "fail" | "rename" | "replace"; toDir?: string }>(c);
-    return c.json({ results: await trash.restoreItems(root, str(b.volume, "volume"), b.ids, { conflict: b.conflict, ...(b.toDir ? { toDir: str(b.toDir, "toDir") } : {}) }) });
+    return c.json({ results: await trash.restoreItems(root, str(b.volume, "volume"), b.ids, { conflict: b.conflict, blocked: (v) => hitsReadOnly(root, cfg.readOnly, v) || reachesReadOnly(root, cfg.readOnly, v), ...(b.toDir ? { toDir: str(b.toDir, "toDir") } : {}) }) });
   });
   app.post("/api/trash/delete", async (c) => {
     const b = await json<{ volume: string; ids: string[] }>(c);
