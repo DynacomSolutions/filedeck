@@ -203,7 +203,7 @@ ETA: 2026-11-12 14:00 ICT
 | 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | done | claude-20261112-rv-compare | rv-compare-trash-views | | | Merged https://github.com/DynacomSolutions/filedeck/pull/189, CI green<br>Checked in a browser at 1440 and 390 px |
 | 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | done | claude-20261112-rv-shell | rv-app-shell | | | Merged https://github.com/DynacomSolutions/filedeck/pull/185, CI green<br>Root error boundary not forced live |
 | 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | done | claude-20261112-rv-components | rv-uploads-tree | | | Merged https://github.com/DynacomSolutions/filedeck/pull/197, CI green |
-| 134 | Breadcrumb target at 320 px, Properties from a breadcrumb kept in the URL, compare toolbar cut-off | in_review | claude-20261112-rv-web-followup | rv-web-followup | 17.128 | 2026-11-12 12:30 ICT | Found by the acceptance checks; listed there as known defects<br>https://github.com/DynacomSolutions/filedeck/pull/209 |
+| 134 | Breadcrumb target at 320 px, Properties from a breadcrumb kept in the URL, compare toolbar cut-off | done | claude-20261112-rv-web-followup | rv-web-followup | 17.128 | | Merged https://github.com/DynacomSolutions/filedeck/pull/209, CI green<br>Compare toolbar on phones: about 311 px to 94 px<br>Acceptance script: 33 checks, no known defects left |
 
 ## 16. Large folders and narrow screens
 Findings from the 12 November 2026 review: very large folders freeze the list, and narrow, landscape and zoomed layouts hide content.
