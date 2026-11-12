@@ -7,6 +7,7 @@ import path from "node:path";
 import { findRepo, runGit, repoArgs } from "../src/git.ts";
 import { selfCheckTools, listArchive, prepareCompress, prepareExtract, runCompress, runExtract } from "../src/archive.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
+import { launchGit } from "../src/git-sandbox.ts";
 import { readerCapability, resetSandbox, spawnSandboxed } from "../src/sandbox.ts";
 import type { JobCtl } from "../src/jobs.ts";
 import { useSandbox } from "./sandbox-env.ts";
@@ -111,7 +112,26 @@ async function diagnose(dir: string, file: string): Promise<string> {
     await new Promise((r) => c.on("close", r));
     return out;
   };
-  return `reader ${cap}\n--- as the archive user with it:\n${await run({ uid: 65533, gid: 65533, ...(cap ? { keepCaps: [cap] } : {}) })}\n--- as the agent without capabilities:\n${await run({})}`;
+  // the same start as the real code makes, with a trivial command, and the launcher's own flags varied, to see which part ends in a signal
+  const trial = async (label: string, run: () => Promise<import("node:child_process").ChildProcess>) => {
+    try {
+      const c = await run();
+      let err = "";
+      c.stderr?.on("data", (d) => (err += d));
+      c.stdout?.resume();
+      const [code, sig] = await new Promise<[number | null, string | null]>((r) => c.on("close", (a, b) => r([a, b])));
+      return `${label}: code ${code} signal ${sig} ${err.trim().slice(0, 200)}\n`;
+    } catch (e) {
+      return `${label}: ${e}\n`;
+    }
+  };
+  let more = "\n--- trials:\n";
+  more += await trial("git --version via launchGit", () => launchGit(dir, ["--version"], ENV, { stdio: ["ignore", "pipe", "pipe"] }, { root: path.dirname(dir), gitDir: dir }));
+  more += await trial("git --version, no root", () => launchGit(dir, ["--version"], ENV, { stdio: ["ignore", "pipe", "pipe"] }, { root: null, gitDir: null }));
+  more += await trial("git --version, spawnSandboxed readOnly dir", () => spawnSandboxed("git", ["--version"], { readOnly: [dir], cwd: dir, env: ENV }));
+  more += await trial("git --version, spawnSandboxed no env", () => spawnSandboxed("git", ["--version"], { readOnly: [dir], cwd: dir }));
+  more += await trial("git --version, noSystem off, no roots", () => spawnSandboxed("git", ["--version"], {}));
+  return `reader ${cap}${more}\n--- as the archive user with it:\n${await run({ uid: 65533, gid: 65533, ...(cap ? { keepCaps: [cap] } : {}) })}\n--- as the agent without capabilities:\n${await run({})}`;
 }
 const live = (name: string, fn: () => Promise<void>) =>
   test(name, { skip: IS_ROOT ? false : "sandbox live: skipped (not running as root)" }, async (t) => {
