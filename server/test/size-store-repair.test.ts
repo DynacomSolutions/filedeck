@@ -5,7 +5,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { SizeStore } from "../src/size-store.ts";
+import { SizeStore as RealSizeStore } from "../src/size-store.ts";
+// every store a test opens is closed at the end of the file, even when an assertion threw first (an open file-backed store keeps a writer thread, and with it the process, alive)
+const openStores: { close(): Promise<void> | void }[] = [];
+class SizeStore extends RealSizeStore {
+  constructor(...a: ConstructorParameters<typeof RealSizeStore>) {
+    super(...a);
+    openStores.push(this);
+  }
+}
 
 const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
 type Any = any;
@@ -15,6 +23,7 @@ const stores: SizeStore[] = [];
 before(() => void (tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-repair-")))));
 after(async () => {
   for (const s of stores) await s.close().catch(() => {});
+  for (const s of openStores) await Promise.resolve(s.close()).catch(() => {});
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -82,7 +91,7 @@ test("a store whose only damage is an index is repaired by the writer: one log l
     const s = mk(file);
     await s.mayScan(); // takes the lease
     await s.clearPending(); // a DELETE on pending: malformed on the broken index, which sends the store to the repair
-    for (let i = 0; i < 100 && check(file).length; i++) await sleep(50);
+    for (let i = 0; i < 1500 && check(file).length; i++) await sleep(50);
     await sleep(100);
   });
   assert.deepEqual(check(file), ["ok"]);

@@ -145,10 +145,20 @@ test("streamList: a listing cut off by the deadline is an error, not a complete 
   resetSandbox();
   try {
     const seen: string[] = [];
-    await assert.rejects(
-      streamList("/dev/null", AbortSignal.timeout(300), (e) => void seen.push(e.name)),
-      (e: { status?: number }) => e.status === 408,
-    );
+    // the deadline passes once the first entry has arrived (a fixed 300 ms can pass before a loaded host has even started the process)
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new DOMException("deadline", "TimeoutError")), 60_000);
+    try {
+      await assert.rejects(
+        streamList("/dev/null", deadline.signal, (e) => {
+          seen.push(e.name);
+          setTimeout(() => deadline.abort(new DOMException("deadline", "TimeoutError")), 50);
+        }),
+        (e: { status?: number }) => e.status === 408,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
     assert.deepEqual(seen, ["a.txt"]);
   } finally {
     if (save === undefined) delete process.env.FILEDECK_BSDTAR;

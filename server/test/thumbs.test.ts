@@ -111,6 +111,8 @@ test("bounded cache: least recently used entries are evicted", { skip: !hasFfmpe
     await t2.get(id, "image", open);
     await new Promise((r) => setTimeout(r, 15));
   }
+  // evict() returns at once while an eviction started by one of the gets above is still running: wait for that one to end, then run it once more
+  for (let i = 0; i < 3000 && (t2 as unknown as { evicting: boolean }).evicting; i++) await new Promise((r) => setTimeout(r, 10));
   await t2.evict();
   const left = fs.readdirSync(dir, { recursive: true }).filter((f) => String(f).endsWith(".jpg"));
   const total = left.reduce((n, f) => n + fs.statSync(path.join(dir, String(f))).size, 0);

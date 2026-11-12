@@ -571,8 +571,8 @@ test("a running copy keeps its staging folder's times fresh", async () => {
     const stage = fs.readdirSync(path.join(root, "dst")).find((n) => n.startsWith(STAGING_PREFIX))!;
     fs.utimesSync(path.join(root, "dst", stage), old, old); // as if the copy had been running for days
     mock.timers.tick(6 * 60_000); // the refresh runs
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
+    // the refresh's utimes runs on the thread pool: wait until it has landed (a loaded host takes longer than a couple of event-loop turns)
+    for (let i = 0; i < 3000 && Date.now() - fs.statSync(path.join(root, "dst", stage)).mtimeMs >= 60_000; i++) await new Promise((r) => setTimeout(r, 10));
     seen = fs.statSync(path.join(root, "dst", stage)).mtimeMs;
     return realCopy(from, to, mode);
   });

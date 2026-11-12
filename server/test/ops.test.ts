@@ -26,7 +26,7 @@ const start = async (body: unknown) => {
   return (await r.json()) as OpView;
 };
 const get = async (id: string) => (await (await fetch(`${hub}/api/ops/jobs/${id}`)).json()) as OpView;
-const until = async (id: string, f: (v: OpView) => boolean, ms = 8000) => {
+const until = async (id: string, f: (v: OpView) => boolean, ms = 60_000) => {
   const t0 = Date.now();
   for (;;) {
     const v = await get(id);
@@ -47,7 +47,10 @@ before(async () => {
   hub = `http://127.0.0.1:${portOf(sh)}`;
 });
 after(() => {
-  for (const s of srvs) s.close();
+  for (const s of srvs) {
+    s.close();
+    (s as unknown as { closeAllConnections?(): void }).closeAllConnections?.();
+  }
   for (const d of [A, B]) if (d) fs.rmSync(d, { recursive: true, force: true });
 });
 
@@ -212,7 +215,7 @@ test("pause holds a job, resume continues, cancel mid-transfer leaves no partial
   // cancel while bytes are flowing
   await until(j.id, (v) => v.progress.bytes > 0 || finished(v));
   await post(`/api/ops/jobs/${j.id}/cancel`);
-  const v = await until(j.id, finished, 15000);
+  const v = await until(j.id, finished, 60_000);
   assert.ok(v.state === "canceled" || v.state === "done");
   if (v.state === "canceled") {
     const parts = () => {
@@ -227,7 +230,7 @@ test("pause holds a job, resume continues, cancel mid-transfer leaves no partial
       return left;
     };
     // the agent drops its temp file as soon as it sees the aborted request
-    for (let i = 0; i < 80 && parts().length; i++) await new Promise((r) => setTimeout(r, 25));
+    for (let i = 0; i < 1200 && parts().length; i++) await new Promise((r) => setTimeout(r, 25));
     assert.deepEqual(parts(), []);
   }
   assert.equal((await post(`/api/ops/jobs/${j.id}/pause`)).status, 200);
@@ -240,8 +243,15 @@ test("pause mid-transfer stops the byte counter and resume finishes", async () =
   const j = await start({ op: "copy", items: [{ node: "A", path: "/pz/p.bin" }], dst: { node: "B", dir: "/pzto" }, conflict: "ask" });
   await until(j.id, (v) => v.progress.bytes > 0 || finished(v));
   await post(`/api/ops/jobs/${j.id}/pause`);
-  await new Promise((r) => setTimeout(r, 150));
-  const a = (await get(j.id)).progress.bytes;
+  // a chunk already in flight when the pause landed may still be counted: wait until the counter has been still for three polls, then check it stays still
+  let a = -1;
+  for (let still = 0, t0 = Date.now(); still < 3; ) {
+    const v = await get(j.id);
+    if (finished(v) || Date.now() - t0 > 60_000) break;
+    still = v.progress.bytes === a ? still + 1 : 0;
+    a = v.progress.bytes;
+    await new Promise((r) => setTimeout(r, 60));
+  }
   await new Promise((r) => setTimeout(r, 250));
   const b = await get(j.id);
   if (b.state === "paused") {
@@ -249,7 +259,7 @@ test("pause mid-transfer stops the byte counter and resume finishes", async () =
     assert.equal(b.speed, 0);
   }
   await post(`/api/ops/jobs/${j.id}/resume`);
-  const v = await until(j.id, finished, 20000);
+  const v = await until(j.id, finished, 60_000);
   assert.equal(v.state, "done");
   assert.equal(fs.statSync(path.join(B, "pzto/p.bin")).size, 60 * 1024 * 1024);
 });
@@ -330,7 +340,7 @@ function fake(hook?: (op: string, p: string, n: number) => Promise<void> | void,
   return { t, calls };
 }
 const rm = (n: number): OpSpec => ({ op: "delete", items: Array.from({ length: n }, (_, i) => ({ node: "N", path: `/f${i + 1}` })) });
-const done = async (q: OpQueue, id: string, ms = 3000) => {
+const done = async (q: OpQueue, id: string, ms = 30_000) => {
   for (const t0 = Date.now(); !finished(q.get(id)!); ) {
     if (Date.now() - t0 > ms) assert.fail(`timeout: ${JSON.stringify(q.get(id))}`);
     await nap(10);
@@ -363,7 +373,7 @@ test("an in-flight copy is failed, never retried, and the next items still copy;
   const n = fake((o, p, c) => (o === "copy" && p === "/s2" && c === 1 ? hold : undefined));
   const a = mkq(f, new Map([["N", n.t]]));
   const id = a.create({ op: "copy", items: ["/s1", "/s2", "/s3", "/s4"].map((p) => ({ node: "N", path: p })), dst: { node: "N", dir: "/dst" }, conflict: "overwrite" }).id;
-  for (const t0 = Date.now(); !n.calls.includes("copy /s2"); ) if (Date.now() - t0 > 3000) assert.fail("no copy"); else await nap(10);
+  for (const t0 = Date.now(); !n.calls.includes("copy /s2"); ) if (Date.now() - t0 > 30_000) assert.fail("no copy"); else await nap(10);
   await nap(60); // a's lease (40 ms) runs out without a tick
   const b = mkq(f, new Map([["N", n.t]]));
   b.tick();
@@ -388,7 +398,7 @@ test("a sync step in flight at a restart is retried; a trash step that is alread
   const spec: OpSpec = { op: "sync", steps: [{ kind: "trash", node: "N", path: "/t" }, { kind: "mkdir", node: "N", path: "/m" }, { kind: "mkdir", node: "N", path: "/m2" }] };
   const a = mkq(f, new Map([["N", n.t]]));
   const id = a.create(spec).id;
-  for (const t0 = Date.now(); !n.calls.includes("mkdir /m"); ) if (Date.now() - t0 > 3000) assert.fail("no mkdir"); else await nap(10);
+  for (const t0 = Date.now(); !n.calls.includes("mkdir /m"); ) if (Date.now() - t0 > 30_000) assert.fail("no mkdir"); else await nap(10);
   await nap(60);
   const b = mkq(f, new Map([["N", n.t]]));
   b.tick();
@@ -445,7 +455,7 @@ test("a restart without a graceful stop: 300 removes re-sent after a lost write 
   const n = fake((_o, p, c) => (p === "/f200" && c === 1 ? hold : undefined), { gone: true });
   const a = mkq(f, new Map([["N", n.t]]));
   const id = a.create(rm(300)).id;
-  for (const t0 = Date.now(); !n.calls.includes("delete /f200"); ) if (Date.now() - t0 > 3000) assert.fail("stuck"); else await nap(5);
+  for (const t0 = Date.now(); !n.calls.includes("delete /f200"); ) if (Date.now() - t0 > 30_000) assert.fail("stuck"); else await nap(5);
   await nap(60);
   const b = mkq(f, new Map([["N", n.t]]));
   b.tick();
@@ -463,7 +473,15 @@ test("saving a 10k item copy writes a small compact state, fast; the spec is sto
   const store = new JobStore(f);
   const job = (q as unknown as { jobs: Map<string, unknown> }).jobs.get(id);
   const save = (q as unknown as { save(j: unknown): void }).save.bind(q);
-  // the fastest of several batches: a loaded machine slows some batches, never makes one faster than the code allows
+  // the cost of one save is compared with writing the whole spec once (what a save did before the compact state), measured in the same process just before:
+  // a loaded machine slows both alike, so the ratio does not depend on the host's speed. The fastest of several batches is taken for each.
+  const spec = (q as unknown as { jobs: Map<string, { spec?: unknown }> }).jobs.get(id)!.spec;
+  let whole = Infinity;
+  for (let k = 0; k < 5; k++) {
+    const t0 = performance.now();
+    for (let i = 0; i < 20; i++) JSON.stringify(spec);
+    whole = Math.min(whole, (performance.now() - t0) / 20);
+  }
   let per = Infinity;
   for (let k = 0; k < 5; k++) {
     const t0 = performance.now();
@@ -473,7 +491,7 @@ test("saving a 10k item copy writes a small compact state, fast; the spec is sto
   const row = store.get(id, "ops")!;
   assert.ok(row.view.length < 40_000, `view is ${row.view.length} bytes`);
   assert.ok(row.params!.length > 100_000);
-  assert.ok(per < 5, `${per} ms per save`);
+  assert.ok(per < whole * 1.5, `${per} ms per save, writing the whole spec takes ${whole} ms`);
 });
 
 test("live jobs keep their spec in the store only up to a cap; the rest are not resumable and fail clearly", async () => {

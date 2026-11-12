@@ -92,28 +92,36 @@ test("webdav: transfers are not capped by a total time, a stalled upload is cut"
     assert.equal((await drain(await b.read("/big.bin"))).length, 300_000);
     const slow = Readable.from(
       (async function* () {
-        for (let i = 0; i < 4; i++) {
-          await sleep(150);
-          yield Buffer.alloc(1000, i);
+        for (let i = 0; i < 5; i++) {
+          await sleep(400);
+          yield Buffer.alloc(800, i);
         }
       })(),
     );
-    davTimeouts.idleMs = 400; // longer than each gap, shorter than the whole upload
+    davTimeouts.idleMs = 1500; // several times each gap (a starved host sleeps late), shorter than the whole upload (2 s)
     assert.equal(await b.write("/slow.bin", slow, { overwrite: true, size: 4000 }), 4000);
     assert.equal(fs.statSync(path.join(tmp, "r", "slow.bin")).size, 4000);
     assert.ok(seen.every((ms) => ms <= 60_000), `no fixed long timeout is armed: ${seen.join(",")}`);
 
     davTimeouts.idleMs = 250;
+    let endStall!: () => void;
+    const stall = new Promise<void>((r) => (endStall = r));
+    let stalledPastTheCut = false;
     const stalled = Readable.from(
       (async function* () {
         yield Buffer.alloc(100);
-        await sleep(3000);
+        await stall; // never ends by itself: only the idle timer can cut the upload
+        stalledPastTheCut = true;
         yield Buffer.alloc(100);
       })(),
     );
-    const t0 = Date.now();
-    await assert.rejects(b.write("/stalled.bin", stalled, { overwrite: true, size: 200 }), (e: unknown) => e instanceof FsError && e.status === 504);
-    assert.ok(Date.now() - t0 < 2500, "cut by the idle timer, not by the end of the stream");
+    try {
+      await assert.rejects(b.write("/stalled.bin", stalled, { overwrite: true, size: 200 }), (e: unknown) => e instanceof FsError && e.status === 504);
+      assert.equal(stalledPastTheCut, false, "cut by the idle timer, not by the end of the stream");
+    } finally {
+      endStall();
+      stalled.destroy();
+    }
   } finally {
     Object.assign(davTimeouts, saved);
     AbortSignal.timeout = orig;

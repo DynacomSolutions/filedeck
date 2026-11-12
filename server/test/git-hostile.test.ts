@@ -94,6 +94,19 @@ function hostileSet() {
   });
 }
 
+/**
+ * The folder listing answers within a time budget and leaves a repository whose status is not ready as "pending" (the computation goes on and fills the cache).
+ * On a loaded host the first answer can be such a partial one, so ask again (from the cache) until the repository has its status.
+ */
+async function settledList(name: string, get: (url: string) => Promise<{ status: number; body: any }>) {
+  let res = await get(`/api/git/status?path=/&fresh=1&budget=5000`);
+  for (let i = 0; i < 120 && res.body?.children?.[name]?.branch === undefined; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    res = await get(`/api/git/status?path=/&budget=5000`);
+  }
+  return res;
+}
+
 /** Every route, on the repository named `name`. Returns status, info and show bodies for the correctness checks. */
 async function allRoutes(name: string) {
   const get = async (url: string) => {
@@ -105,7 +118,7 @@ async function allRoutes(name: string) {
   const head = git(path.join(root, name), "rev-parse", "HEAD");
   const prev = git(path.join(root, name), "rev-parse", "HEAD~1");
   const out = {
-    list: await get(`/api/git/status?path=/&fresh=1`),
+    list: await settledList(name, get),
     inside: await get(`/api/git/status?path=${q("/" + name)}&fresh=1`),
     info: await get(`/api/git/info?path=${q("/" + name + "/a.txt")}&fresh=1`),
     infoDir: await get(`/api/git/info?path=${q("/" + name)}&fresh=1`),

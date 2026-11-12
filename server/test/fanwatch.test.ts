@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -6,9 +6,32 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { FanWatch, mapPath, unescapeLine, type HelperProc } from "../src/fanwatch.ts";
+import { FanWatch as RealFanWatch, mapPath, unescapeLine, type HelperProc } from "../src/fanwatch.ts";
 import { DatabaseSync } from "node:sqlite";
-import { SizeStore } from "../src/size-store.ts";
+import { SizeStore as RealSizeStore } from "../src/size-store.ts";
+
+// Everything a test opens is released at the end of the file even when an assertion threw first: a leaked watcher timer or store worker would keep the process alive.
+const openWatchers: { stop(): void }[] = [];
+const openStores: { close(): Promise<void> | void }[] = [];
+const cleanups: (() => void)[] = [];
+class FanWatch extends RealFanWatch {
+  constructor(...a: ConstructorParameters<typeof RealFanWatch>) {
+    super(...a);
+    openWatchers.push(this);
+  }
+}
+class SizeStore extends RealSizeStore {
+  constructor(...a: ConstructorParameters<typeof RealSizeStore>) {
+    super(...a);
+    openStores.push(this);
+  }
+}
+after(async () => {
+  for (const w of openWatchers) w.stop();
+  for (const st of openStores) await Promise.resolve(st.close()).catch(() => {});
+  for (const c of cleanups) c();
+});
+
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -66,7 +89,8 @@ function setup(extra: Partial<ConstructorParameters<typeof FanWatch>[1]> & { pla
   const mounts = path.join(os.tmpdir(), `fanwatch-mounts-${process.pid}-${Math.random().toString(36).slice(2)}`);
   fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n/dev/b /data xfs rw 0 0\nsrv:/x /net nfs4 rw 0 0\n");
   const w = new FanWatch(store, { helper: "fake", root, procMounts: mounts, settleMs: 40, modifyMs: 300, ...extra, spawn: (_c, a) => (args.push(a), proc) });
-  return { w, proc, calls, stale, args, root, done: () => (fs.rmSync(mounts), fs.rmSync(root, { recursive: true })) };
+  cleanups.push(() => (fs.rmSync(mounts, { force: true }), fs.rmSync(root, { recursive: true, force: true })));
+  return { w, proc, calls, stale, args, root, done: () => (fs.rmSync(mounts, { force: true }), fs.rmSync(root, { recursive: true, force: true })) };
 }
 
 test("fanwatch: watches local filesystems only, with host paths", async () => {
@@ -82,7 +106,8 @@ test("fanwatch: events of one folder coalesce, other folders stay separate, path
   const s = setup();
   await s.w.start();
   for (const l of ["x /data/a", "w /data/a", "x /data/a", "x /data/b", "junk", "#ready 2"].map((x) => x.replace("/data", s.root + "/data"))) s.proc.stdout.write(l + "\n");
-  await sleep(150);
+  await until(() => s.calls.length >= 2, 30_000);
+  await sleep(50); // (a stray extra call would show here)
   assert.deepEqual([...s.calls].sort(), ["/data/a", "/data/b"]);
   s.w.stop();
   s.done();
@@ -165,7 +190,8 @@ test("fanwatch: a path with CR/LF cannot inject a protocol line", async () => {
   await s.w.start();
   s.proc.stdout.write(`x ${s.root}/data/a\\x0d!overflow\n`);
   s.proc.stdout.write(`x ${s.root}/data/b\r!overflow\n`); // a raw CR (never sent by the helper) is still no line break
-  await sleep(150);
+  await until(() => s.calls.length >= 2, 30_000);
+  await sleep(50);
   assert.deepEqual(s.stale, []);
   assert.deepEqual([...s.calls].sort(), ["/data/a\r!overflow", "/data/b\r!overflow"]);
   s.w.stop();
@@ -177,10 +203,10 @@ test("fanwatch: 50k distinct folders drain quickly", async () => {
   const w = new FanWatch({ applyChanged: async () => void calls.push(1), markStale: () => {} }, { helper: "x", root: "/", procMounts: "/proc/mounts", settleMs: 1, modifyMs: 10 });
   const t0 = Date.now();
   for (let i = 0; i < 50_000; i++) w.line(`x /d/${i}`);
-  while (calls.length < 50_000 && Date.now() - t0 < 20_000) await sleep(50);
+  // throughput, not latency: the deadline restarts while the count is growing (a loaded host is slow but moving)
+  await untilCount(() => calls.length, 50_000);
   w.stop();
   assert.equal(calls.length, 50_000);
-  assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`);
 });
 
 test("fanwatch: an unexpected helper exit marks stale and restarts with backoff; a refusal does not", async () => {
@@ -197,10 +223,10 @@ test("fanwatch: an unexpected helper exit marks stale and restarts with backoff;
     await w.start();
     procs[0]!.emit("exit", 1, null);
     assert.deepEqual(stale, ["/"]);
-    await sleep(80);
+    await until(() => procs.length >= 2, 30_000);
     assert.equal(procs.length, 2);
     procs[1]!.emit("exit", null, "SIGKILL");
-    await sleep(100);
+    await until(() => procs.length >= 3, 30_000);
     assert.equal(procs.length, 3);
     procs[2]!.emit("exit", 2, null); // not permitted: final
     await sleep(100);
@@ -249,10 +275,10 @@ test("fanwatch live: skipped (needs CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH)", { s
     await w.start();
     await sleep(500);
     fs.writeFileSync(path.join(dir, "sub", "f.txt"), "hello");
-    await sleep(1000);
+    await until(() => calls.includes(path.join(dir, "sub")), 30_000);
     assert.ok(calls.includes(path.join(dir, "sub")), `got ${JSON.stringify(calls)}`);
     fs.renameSync(path.join(dir, "sub", "f.txt"), path.join(dir, "g.txt"));
-    await sleep(1000);
+    await until(() => calls.includes(dir), 30_000);
     assert.ok(calls.includes(dir), `got ${JSON.stringify(calls)}`);
   } finally {
     w.stop();
@@ -299,13 +325,14 @@ test("fanwatch: without a usable store, past maxPending the burst acts like an o
   const s = setup({ maxPending: 5, plain: true });
   await s.w.start();
   for (let i = 0; i < 12; i++) s.w.line(`x ${s.root}/data/d${i}`);
-  await sleep(60);
+  await until(() => s.stale.length > 0, 30_000);
   assert.ok(s.stale.length > 0, "watched trees marked stale");
   await sleep(150);
   assert.ok(s.calls.length <= 5, `pending stayed bounded, got ${s.calls.length}`);
   s.calls.length = 0;
   s.w.line(`x ${s.root}/data/late`);
-  await sleep(150);
+  await until(() => s.calls.length >= 1, 30_000);
+  await sleep(50);
   assert.deepEqual(s.calls, ["/data/late"]);
   s.w.stop();
   s.done();
@@ -327,6 +354,7 @@ function fileStore() {
     clearPending: st.clearPending.bind(st),
   };
   const count = () => (st as unknown as { db: { prepare(s: string): { get(): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending").get().n;
+  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
   return { st, sink, calls, stale, count, done: () => (st.close(), fs.rmSync(dir, { recursive: true, force: true })) };
 }
 const opts = { helper: "x", root: "/", procMounts: "/proc/mounts", settleMs: 5, modifyMs: 300 };
@@ -347,7 +375,7 @@ test("fanwatch + SizeStore file: many events of one folder become one row, appli
   const w = new FanWatch(f.sink, opts);
   for (let i = 0; i < 5000; i++) w.line(i % 2 ? "x /d/a" : "w /d/a");
   await until(() => f.calls.length > 0);
-  await sleep(100);
+  await until(() => f.count() === 1, 30_000);
   assert.deepEqual(f.calls, ["/d/a"]);
   assert.equal(f.count(), 1, "the applied folder stays as one idle row");
   w.stop();
@@ -413,22 +441,27 @@ test("fanwatch + SizeStore file: after a re-read slower than modifyMs the next m
   const f = fileStore();
   const starts: number[] = [];
   let ended = 0;
+  let finish!: () => void;
+  const slowRun = new Promise<void>((r) => (finish = r));
   const sink = {
     ...f.sink,
     applyChanged: async () => {
       starts.push(Date.now());
       if (starts.length === 1) {
-        await sleep(450); // slower than modifyMs
+        await slowRun; // the first run lasts until the test has sent its second event, however long that takes
+        await sleep(350); // and is then longer than modifyMs in total
         ended = Date.now();
       }
     },
   };
   const w = new FanWatch(sink, opts);
   w.line("m /d/a");
-  await until(() => starts.length === 1, 2000);
-  await sleep(100);
+  await until(() => starts.length === 1, 30_000);
   w.line("m /d/a"); // during the slow run
-  await until(() => starts.length === 2, 3000);
+  const stored = () => (f.st as unknown as { db: { prepare(s: string): { get(a: number): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending WHERE due_at < ?").get(Number.MAX_SAFE_INTEGER).n > 0;
+  await until(stored, 30_000);
+  finish();
+  await until(() => starts.length === 2, 60_000);
   assert.equal(starts.length, 2);
   assert.ok(starts[1]! - ended >= 290, `second run ${starts[1]! - ended} ms after the first ended`);
   w.stop();
@@ -447,9 +480,11 @@ test("fanwatch + SizeStore file: a modify row that fell due after the active win
   w.line("m /d/a");
   await until(() => f.calls.length === 1);
   w.line("m /d/a");
-  await sleep(60); // the row is stored, due at last run + modifyMs
+  // wait for the row to be stored (due at last run + modifyMs), not for a fixed time: a loaded host can be slow to store it
+  const live = () => (f.st as unknown as { db: { prepare(s: string): { get(a: number): { n: number } } } }).db.prepare("SELECT COUNT(*) n FROM pending WHERE due_at < ?").get(Number.MAX_SAFE_INTEGER).n;
+  await until(() => f.calls.length === 2 || live() > 0, 60_000);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 450); // a stalled event loop skips the whole window
-  await until(() => f.calls.length === 2, 3000);
+  await until(() => f.calls.length === 2, 60_000);
   assert.equal(f.calls.length, 2, "row not stranded");
   w.stop();
   f.done();

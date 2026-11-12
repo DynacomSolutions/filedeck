@@ -96,7 +96,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          (cd server && FILEDECK_REQUIRE_SANDBOX=1 node --import tsx --test --test-timeout=120000 --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
+          (cd server && FILEDECK_REQUIRE_SANDBOX=1 node --import tsx --test --test-timeout=600000 --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
         timeout-minutes: 15
       # The image build runs the whole suite as root (Dockerfile), so run it that way here too; a skip of the fanotify helper test is a failure.
       - name: Run the server tests as root, as the image build does

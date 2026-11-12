@@ -224,8 +224,9 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
     const j = (await (await post(`${hub}/api/diff/jobs`, { left: { node: "n1", path: "/cmp" }, right: { node: "nas", path: "/cmp" }, options: opts })).json()) as { id: string };
     let state = "";
     for (let i = 0; i < 100 && state !== "done"; i++) {
-      state = ((await (await fetch(`${hub}/api/diff/jobs/${j.id}`)).json()) as { state: string }).state;
-      if (state === "failed") assert.fail("diff job failed");
+      const view = (await (await fetch(`${hub}/api/diff/jobs/${j.id}`)).json()) as { state: string; error?: string };
+      state = view.state;
+      if (state === "failed") assert.fail("diff job failed: " + JSON.stringify(view));
       if (state !== "done") await new Promise((r) => setTimeout(r, 50));
     }
     const res = (await (await fetch(`${hub}/api/diff/jobs/${j.id}/result`)).json()) as { rows: { p: string; status: string }[] };
@@ -308,7 +309,8 @@ export function defineSourceSuite(type: string, factory: FixtureFactory) {
       assert.equal(r.status, 202, await r.clone().text());
       const { id } = (await r.json()) as { id: string };
       for (let i = 0; i < 400; i++) {
-        const v = (await (await fetch(`${hub}/api/ops/jobs/${id}`)).json()) as { state: string; counts: { failed: number } };
+        // the test's own client (a pooled connection to a test server that closes idle ones after 5 s by default) can meet a reset on a loaded host: ask again once, the job is what is judged
+        const v = (await (await fetch(`${hub}/api/ops/jobs/${id}`).catch(() => fetch(`${hub}/api/ops/jobs/${id}`))).json()) as { state: string; counts: { failed: number } };
         if (["done", "failed", "canceled"].includes(v.state)) {
           assert.equal(v.state, "done");
           assert.equal(v.counts.failed, 0);
