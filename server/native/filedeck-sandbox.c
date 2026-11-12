@@ -30,7 +30,6 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <linux/landlock.h>
-#include <linux/prctl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +39,21 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#ifndef PR_SET_NO_NEW_PRIVS
+#define PR_SET_NO_NEW_PRIVS 38
+#endif
+
+/* the syscall numbers are the same on every architecture that uses the common table; older libc headers may not know them */
+#ifndef __NR_landlock_create_ruleset
+#define __NR_landlock_create_ruleset 444
+#endif
+#ifndef __NR_landlock_add_rule
+#define __NR_landlock_add_rule 445
+#endif
+#ifndef __NR_landlock_restrict_self
+#define __NR_landlock_restrict_self 446
+#endif
 
 #ifndef landlock_create_ruleset
 static inline int ll_create(const struct landlock_ruleset_attr *attr, size_t size, uint32_t flags) { return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags); }
