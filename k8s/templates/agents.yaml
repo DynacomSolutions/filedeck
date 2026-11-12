@@ -89,7 +89,7 @@ spec:
             - name: FILEDECK_INDEX_REVALIDATE_MS
               value: {{ $.Values.agent.indexRevalidateMs | quote }}
             - name: FILEDECK_SANDBOX
-              value: {{ $.Values.agent.sandbox | default "auto" | quote }}
+              value: {{ $.Values.agent.sandbox | default "require" | quote }}
             {{- if $.Values.agent.fanotify.enabled }}
             # Folder sizes follow kernel change notifications (needs CAP_SYS_ADMIN, see securityContext).
             - name: FILEDECK_FANWATCH

@@ -30,6 +30,20 @@ export interface SandboxInfo {
   state: "landlock" | "fallback" | "off" | "unavailable";
 }
 
+/**
+ * What the launcher does NOT restrict (see the comment in server/native/filedeck-sandbox.c for the table). It handles every
+ * Landlock right the running kernel offers: all file system rights, TCP (and UDP where offered) bind and connect, abstract unix
+ * sockets and signals to processes outside the sandbox. On an older kernel what is missing is what each ABI added: ABI 1
+ * lacks cross-directory link/rename control and truncate control (ABI 2, 3), below ABI 4 the network is open, below ABI 5 device
+ * ioctls are, below ABI 6 abstract unix sockets and signals are, below ABI 9 pathname unix sockets are. Landlock never restricts
+ * a descriptor the program already holds: the launcher marks every descriptor above 2 close-on-exec (the root descriptors
+ * included), and callers must not hand a confined program any descriptor it should not use through `stdio` either.
+ * `uid`/`gid` 0 are refused by the launcher.
+ */
+
+/** The user and group unprivileged helper programs run as when the agent is root (the same ones the media tools use). */
+export const UNPRIVILEGED = { uid: 65534, gid: 65534 } as const;
+
 /** The launcher's exit status for "Landlock is not available here"; the command was not run. */
 export const EXIT_LANDLOCK_UNSUPPORTED = 70;
 
@@ -109,6 +123,7 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
   const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, stdio, ...rest } = opts;
   const info = await sandboxInfo();
   if (info.state === "unavailable") throw sandboxRequiredError();
+  if ((uid === 0 || gid === 0) && uid !== process.getuid?.()) throw new FsError(500, "refusing to run a confined program as root");
   const owner = uid !== undefined && gid !== undefined && uid !== process.getuid?.() ? { uid, gid } : null;
   const std: SpawnOptions["stdio"] = stdio ?? ["ignore", "pipe", "pipe"];
   if (info.state === "off") return spawn(cmd, args, { ...rest, stdio: std });

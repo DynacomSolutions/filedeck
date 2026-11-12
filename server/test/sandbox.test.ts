@@ -1,6 +1,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { EXIT_LANDLOCK_UNSUPPORTED, resetSandbox, sandboxInfo, spawnSandboxed, type SandboxOpts } from "../src/sandbox.ts";
@@ -163,4 +165,64 @@ test("as root the program runs as the given uid and gid with no supplementary gr
   const r = await run("sh", ["-c", "id -u; id -g; id -G"], { readOnly: [tmp], uid: 65534, gid: 65534 });
   assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(r.stdout.trim().split("\n"), ["65534", "65534", "65534"]);
+});
+
+const rights = () => {
+  const m = /fs (0x[0-9a-f]+) net (0x[0-9a-f]+) scope (0x[0-9a-f]+)/.exec(execFileSync(box.bin, ["--probe"], { encoding: "utf8" }));
+  return { fs: BigInt(m![1]!), net: BigInt(m![2]!), scope: BigInt(m![3]!) };
+};
+
+live("a confined program cannot connect over TCP, reach an abstract unix socket or signal a process outside (where the kernel's ABI has those rights)", async () => {
+  const r = rights();
+  console.log(`# sandbox rights handled: fs 0x${r.fs.toString(16)} net 0x${r.net.toString(16)} scope 0x${r.scope.toString(16)}`);
+  const tcp = net.createServer((c) => c.destroy());
+  await new Promise<void>((res) => tcp.listen(0, "127.0.0.1", res));
+  const abs = "filedeck-sandbox-test-" + process.pid;
+  const unix = net.createServer((c) => c.destroy());
+  await new Promise<void>((res) => unix.listen("\0" + abs, res));
+  const script = `
+    const net = require("net"); const out = {};
+    const s = net.connect(${(tcp.address() as net.AddressInfo).port}, "127.0.0.1");
+    s.on("error", (e) => { out.tcp = e.code; step2(); });
+    s.on("connect", () => { out.tcp = "connected"; s.destroy(); step2(); });
+    function step2() { const u = net.connect("\\0${abs}"); u.on("error", (e) => { out.abs = e.code; step3(); }); u.on("connect", () => { out.abs = "connected"; u.destroy(); step3(); }); }
+    function step3() { try { process.kill(${process.pid}, 0); out.sig = "allowed"; } catch (e) { out.sig = e.code; } console.log(JSON.stringify(out)); }`;
+  try {
+    const prefix = path.dirname(path.dirname(process.execPath));
+    const res = await run(process.execPath, ["-e", script], { readExec: [prefix], env: { ...process.env, OPENSSL_CONF: "/dev/null" } });
+    assert.equal(res.code, 0, res.stderr);
+    const out = JSON.parse(res.stdout.trim().split("\n").at(-1)!) as { tcp: string; abs: string; sig: string };
+    if (r.net & 2n) assert.equal(out.tcp, "EACCES", "TCP connect");
+    if (r.scope & 1n) assert.equal(out.abs, "EPERM", "abstract unix socket outside the sandbox");
+    if (r.scope & 2n) assert.equal(out.sig, "EPERM", "signal to a process outside the sandbox");
+    const control = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+    const free = JSON.parse(control.stdout.trim().split("\n").at(-1)!) as { tcp: string; abs: string; sig: string };
+    assert.deepEqual([free.tcp, free.abs, free.sig], ["connected", "connected", "allowed"], "control: without the sandbox all three work");
+  } finally {
+    tcp.close();
+    unix.close();
+  }
+});
+
+live("descriptors above the standard three do not reach the program", async () => {
+  const f = path.join(tmp, "secret-fd.txt");
+  write(f, "secret\n");
+  const fh = await fs.promises.open(f, "r");
+  try {
+    const script = "if [ -e /dev/fd/3 ]; then echo open; else echo closed; fi";
+    const r = await run("sh", ["-c", script], { stdio: ["ignore", "pipe", "pipe", fh.fd] });
+    assert.equal(r.stdout.trim(), "closed");
+    const control = spawnSync("sh", ["-c", script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", fh.fd] });
+    assert.equal(control.stdout.trim(), "open", "control: a plain child inherits it");
+  } finally {
+    await fh.close();
+  }
+});
+
+test("--uid and --gid must be whole non-negative numbers, and 0 is refused unless it is explicitly allowed", async () => {
+  const st = (...a: string[]) => spawnSync(box.bin, [...a, "--", "true"], { encoding: "utf8" }).status;
+  for (const bad of [["--uid", "x", "--gid", "1"], ["--uid", "1x", "--gid", "1"], ["--uid", "-1", "--gid", "1"], ["--uid", "", "--gid", "1"], ["--uid", "99999999999", "--gid", "1"], ["--uid", "1", "--gid", "y"], ["--uid", "0", "--gid", "0"], ["--uid", "5", "--gid", "0"], ["--uid", "5"]]) {
+    assert.equal(st(...bad), 64, bad.join(" "));
+  }
+  await assert.rejects(spawnSandboxed("true", [], { uid: 0, gid: 0 }), /root/);
 });

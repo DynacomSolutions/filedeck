@@ -2,23 +2,36 @@
  * filedeck-sandbox: run a command with access to the listed folders only.
  *
  *   filedeck-sandbox --probe
- *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N] [--no-system] [--no-landlock] -- COMMAND [ARG...]
+ *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] -- COMMAND [ARG...]
  *
  * ROOT is a path, or `fd:N`: the number of a directory descriptor the caller left open for this process (spawn it as an
  * inherited descriptor). The Landlock rule is attached to the opened directory itself, so it follows the directory: renaming
- * the folder or swapping a link at its old name afterwards changes nothing about what is allowed. Descriptors given as roots
- * are closed on exec; the command does not inherit them.
+ * the folder or swapping a link at its old name afterwards changes nothing about what is allowed.
  *   --ro ROOT   read files and list folders beneath ROOT
  *   --rx ROOT   the same, and execute files
  *   --rw ROOT   the same, and write, create, remove, rename and link beneath ROOT (not execute)
  * Unless --no-system is given, the folders a program needs to start are readable and executable as well (/usr, /lib,
  * /lib64, /bin, /sbin), a few world-readable files of /etc (loader cache, passwd, group, time zone) are readable, and
  * /dev/null can be read and written. Nothing else can be opened.
- * Before it executes COMMAND the helper drops to --uid/--gid with the supplementary groups cleared (when given), sets
- * no-new-privileges and applies the Landlock ruleset with the best ABI the kernel offers (Linux 5.13 or newer). Anything
- * COMMAND opens through a link that leads outside the listed folders fails with EACCES, whatever was true earlier.
+ * Before it executes COMMAND the helper drops to --uid/--gid with the supplementary groups cleared (when given; both must be
+ * whole non-negative numbers, and 0 is refused unless --allow-root-user is also given), sets no-new-privileges and applies a
+ * Landlock ruleset (Linux 5.13 or newer) that handles EVERY right the running kernel offers, so what is not allowed above is denied:
+ *   ABI 1  file system: execute, read file, read directory, write file, remove file/dir, create any kind of entry
+ *   ABI 2  + linking or renaming across directories (refer)
+ *   ABI 3  + truncate
+ *   ABI 4  + TCP bind and connect
+ *   ABI 5  + ioctl on device files
+ *   ABI 6  + connecting to abstract unix sockets and sending signals outside the sandbox
+ *   ABI 9  + connecting to pathname unix sockets (resolve-unix)
+ *   (UDP bind/connect, where a kernel has them, are handled too.)
+ * What a kernel older than an ABI does NOT restrict is what that row adds: with ABI 1 renames across directories and truncation
+ * are not restricted, below 4 the network is open, below 5 device ioctls are, below 6 abstract unix sockets and signals are,
+ * below 9 pathname unix sockets are. Never restricted by Landlock at all: descriptors that are already open (so every
+ * descriptor above 2 is closed on exec here, the root descriptors included), reading or writing through a mount the
+ * program already is inside, and kernel facilities it does not mediate (ptrace of a same-uid process outside the sandbox is
+ * governed by the system's Yama setting, SysV IPC, raw and packet sockets, ...).
  * --no-landlock skips the ruleset (the caller has decided to run without it; the uid step and no-new-privileges still
- * apply). --probe only reports whether Landlock can be used here. No dependencies;
+ * apply). --probe only reports whether Landlock can be used here and which rights it handles. No dependencies;
  * build: cc -O2 -static -o filedeck-sandbox filedeck-sandbox.c
  *
  * Exit status: 0 for --probe: Landlock works; 70 Landlock is not available (old kernel, not enabled in the kernel's list
@@ -56,7 +69,7 @@
 #endif
 
 #ifndef landlock_create_ruleset
-static inline int ll_create(const struct landlock_ruleset_attr *attr, size_t size, uint32_t flags) { return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags); }
+static inline int ll_create(const void *attr, size_t size, uint32_t flags) { return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags); }
 static inline int ll_add(int fd, enum landlock_rule_type type, const void *attr, uint32_t flags) { return (int)syscall(__NR_landlock_add_rule, fd, type, attr, flags); }
 static inline int ll_restrict(int fd, uint32_t flags) { return (int)syscall(__NR_landlock_restrict_self, fd, flags); }
 #endif
@@ -65,23 +78,43 @@ static inline int ll_restrict(int fd, uint32_t flags) { return (int)syscall(__NR
 #define EXIT_USAGE 64
 #define EXIT_FAILED 71
 
-/* The access rights the given ABI knows, all of them handled (so everything not allowed below is denied). */
-static uint64_t handled_for_abi(int abi) {
-  uint64_t a = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |
-               LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR |
-               LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
-               LANDLOCK_ACCESS_FS_MAKE_SYM;
-#ifdef LANDLOCK_ACCESS_FS_REFER
-  if (abi >= 2) a |= LANDLOCK_ACCESS_FS_REFER;
-#endif
-#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
-  if (abi >= 3) a |= LANDLOCK_ACCESS_FS_TRUNCATE;
-#endif
-#ifdef LANDLOCK_ACCESS_FS_IOCTL_DEV
-  if (abi >= 5) a |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
-#endif
-  (void)abi;
-  return a;
+/* Landlock rights by their kernel bit numbers (so that an older libc header does not matter). A right the running kernel does
+ * not know is found out by asking (`supported`) and is then simply not handled. */
+struct ll_attr { /* the ruleset attribute as of the newest ABI this helper knows; unknown trailing fields are zero for older kernels */
+  uint64_t handled_access_fs;
+  uint64_t handled_access_net;
+  uint64_t scoped;
+};
+#define FS_KNOWN ((1ULL << 17) - 1) /* bits 0..16: execute .. resolve-unix (see the table in the file comment) */
+#define NET_KNOWN ((1ULL << 4) - 1) /* bits 0..3: TCP bind, TCP connect, UDP bind, UDP connect/send */
+#define SCOPE_KNOWN ((1ULL << 2) - 1) /* bits 0..1: abstract unix sockets, signals */
+
+enum ll_kind { KIND_FS, KIND_NET, KIND_SCOPE };
+
+/* does the kernel accept a ruleset that handles this one right? */
+static int supported(enum ll_kind kind, int bit) {
+  struct ll_attr a = {0, 0, 0};
+  uint64_t v = 1ULL << bit;
+  if (kind == KIND_FS) a.handled_access_fs = v;
+  else if (kind == KIND_NET) a.handled_access_net = v;
+  else a.scoped = v;
+  int fd = ll_create(&a, sizeof a, 0);
+  if (fd < 0) return 0;
+  close(fd);
+  return 1;
+}
+
+/* Every right of every kind the running kernel offers (and this helper knows) is handled, so that everything not allowed
+ * explicitly is denied: all file system rights, TCP and UDP bind/connect, abstract unix sockets and signals to processes
+ * outside the sandbox. */
+static void handled_rights(struct ll_attr *h) {
+  h->handled_access_fs = h->handled_access_net = h->scoped = 0;
+  for (int b = 0; b < 64; b++) {
+    uint64_t v = 1ULL << b;
+    if ((FS_KNOWN & v) && supported(KIND_FS, b)) h->handled_access_fs |= v;
+    if ((NET_KNOWN & v) && supported(KIND_NET, b)) h->handled_access_net |= v;
+    if ((SCOPE_KNOWN & v) && supported(KIND_SCOPE, b)) h->scoped |= v;
+  }
 }
 
 /* 0 = usable (ABI in *abi), EXIT_UNSUPPORTED = not available here, EXIT_FAILED = unexpected error */
@@ -94,6 +127,16 @@ static int probe(int *abi) {
   }
   if (v < 1) return EXIT_UNSUPPORTED;
   *abi = v;
+  return 0;
+}
+
+/* a whole non-negative decimal number below 2^32 - 1 (that value means "unchanged" to the kernel) */
+static int parse_id(const char *text, long *out) {
+  char *end = NULL;
+  errno = 0;
+  long v = strtol(text, &end, 10);
+  if (errno || end == text || *end || v < 0 || v > 4294967294L || text[0] == '+' || text[0] == ' ') return -1;
+  *out = v;
   return 0;
 }
 
@@ -156,7 +199,7 @@ int main(int argc, char **argv) {
   struct root_spec roots[MAX_ROOTS];
   int nroots = 0;
   long uid = -1, gid = -1;
-  int no_landlock = 0, no_system = 0, do_probe = 0, i = 1;
+  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, i = 1;
   const uint64_t R = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
   const uint64_t RX = R | LANDLOCK_ACCESS_FS_EXECUTE;
   /* every right except execute: write, create, remove, rename, link (the ABI-specific ones are masked by `handled`) */
@@ -185,8 +228,17 @@ int main(int argc, char **argv) {
       roots[nroots].access = !strcmp(argv[i], "--ro") ? R : !strcmp(argv[i], "--rx") ? RX : RW;
       roots[nroots].spec = argv[++i];
       nroots++;
-    } else if (!strcmp(argv[i], "--uid") && i + 1 < argc) uid = atol(argv[++i]);
-    else if (!strcmp(argv[i], "--gid") && i + 1 < argc) gid = atol(argv[++i]);
+    } else if (!strcmp(argv[i], "--uid") && i + 1 < argc) {
+      if (parse_id(argv[++i], &uid) < 0) {
+        fprintf(stderr, "filedeck-sandbox: --uid needs a whole non-negative number\n");
+        return EXIT_USAGE;
+      }
+    } else if (!strcmp(argv[i], "--gid") && i + 1 < argc) {
+      if (parse_id(argv[++i], &gid) < 0) {
+        fprintf(stderr, "filedeck-sandbox: --gid needs a whole non-negative number\n");
+        return EXIT_USAGE;
+      }
+    } else if (!strcmp(argv[i], "--allow-root-user")) allow_root_user = 1;
     else {
       fprintf(stderr, "filedeck-sandbox: unknown option %s\n", argv[i]);
       return EXIT_USAGE;
@@ -195,11 +247,19 @@ int main(int argc, char **argv) {
   if (do_probe) {
     int abi = 0;
     int r = probe(&abi);
-    if (r == 0) printf("landlock abi %d\n", abi);
+    if (r == 0) {
+      struct ll_attr h;
+      handled_rights(&h);
+      printf("landlock abi %d fs 0x%llx net 0x%llx scope 0x%llx\n", abi, (unsigned long long)h.handled_access_fs, (unsigned long long)h.handled_access_net, (unsigned long long)h.scoped);
+    }
     return r;
   }
   if (i >= argc) {
-    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N] [--no-system] [--no-landlock] -- COMMAND [ARG...]\n");
+    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--uid N --gid N [--allow-root-user]] [--no-system] [--no-landlock] -- COMMAND [ARG...]\n");
+    return EXIT_USAGE;
+  }
+  if ((uid == 0 || gid == 0) && !allow_root_user) {
+    fprintf(stderr, "filedeck-sandbox: uid 0 or gid 0 given: refused unless --allow-root-user says it is meant\n");
     return EXIT_USAGE;
   }
   if ((uid >= 0) != (gid >= 0)) {
@@ -214,8 +274,9 @@ int main(int argc, char **argv) {
   if (!no_landlock) {
     int r = probe(&abi);
     if (r) return r;
-    handled = handled_for_abi(abi);
-    struct landlock_ruleset_attr attr = {.handled_access_fs = handled};
+    struct ll_attr attr;
+    handled_rights(&attr);
+    handled = attr.handled_access_fs;
     rs = ll_create(&attr, sizeof attr, 0);
     if (rs < 0) {
       if (errno == ENOSYS || errno == EOPNOTSUPP || errno == EPERM) return EXIT_UNSUPPORTED;
@@ -280,6 +341,9 @@ int main(int argc, char **argv) {
     close(rs);
   }
 
+  /* Landlock does not restrict descriptors that are already open: nothing but the standard three may reach the command
+   * (the root descriptors were closed-on-exec above already, and so is everything else from here on) */
+  for (int fd = 3; fd < 1024; fd++) fcntl(fd, F_SETFD, FD_CLOEXEC);
   execvp(argv[i], argv + i);
   fprintf(stderr, "filedeck-sandbox: %s: %s\n", argv[i], strerror(errno));
   return 127;

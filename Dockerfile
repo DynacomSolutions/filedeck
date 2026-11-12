@@ -19,11 +19,13 @@ COPY server server
 COPY web web
 RUN npm run typecheck \
  && npm run build \
- && FILEDECK_REQUIRE_SMBCLIENT=1 npm test && npm prune --omit=dev --workspace=server
+ && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SMBCLIENT=1 npm test && npm prune --omit=dev --workspace=server
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # libuv's file pool (4 threads by default) is the limit on parallel stat calls; the size walk keeps up to 32 in flight
 ENV NODE_ENV=production FILEDECK_STATIC=/app/web PORT=8080 UV_THREADPOOL_SIZE=64
+# The image does not fall back to unconfined helper programs: without Landlock the Git features answer an error (see the README, "Sandbox").
+ENV FILEDECK_SANDBOX=require
 WORKDIR /app
 # libarchive's bsdtar does zip/tar.*/7z encode and decode for the archive jobs, 7zip (7zz) the password-protected
 # (AES-256 zip, 7z with header encryption) and split-volume archives;

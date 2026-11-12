@@ -222,3 +222,50 @@ test("repositories are still found and read in the mode that ran here", async ()
   assert.equal((await repoStatus(r!)).summary.branch, "main");
   console.log(`# git sandbox: this run used ${(await sandboxInfo()).state}`);
 });
+
+test("git's own error text never reaches the client (a file Git was made to read is not quoted back)", async () => {
+  const d = mk("quote");
+  const repo = (await findRepo(root, d))!;
+  assert.ok(repo);
+  const outsideFile = path.join(out, "packed.txt");
+  write(outsideFile, "TOP-SECRET-LINE without a newline");
+  // the link appears after the repository was accepted; with the sandbox off Git really reads it
+  process.env.FILEDECK_SANDBOX = "off";
+  resetSandbox();
+  try {
+    fs.symlinkSync(outsideFile, path.join(d, ".git/packed-refs"));
+    let plain = "";
+    try {
+      execFileSync("git", ["status"], { cwd: d, env: ENV, stdio: "pipe" });
+    } catch (e) {
+      plain = String((e as { stderr?: Buffer }).stderr);
+    }
+    assert.match(plain, /TOP-SECRET-LINE/, "control: plain Git quotes the file in its error");
+    await assert.rejects(repoStatus(repo), (e: Error) => /^git status failed$/.test(e.message) && !e.message.includes("TOP-SECRET"));
+    const res = await app.request("/api/git/info?path=/quote&fresh=1");
+    assert.ok(!(await res.text()).includes("TOP-SECRET"));
+    const lst = await app.request("/api/git/status?path=/&fresh=1");
+    assert.ok(!(await lst.text()).includes("TOP-SECRET"));
+  } finally {
+    delete process.env.FILEDECK_SANDBOX;
+    resetSandbox();
+  }
+});
+
+test("without Landlock the git directory is checked again before every command, not once", async () => {
+  process.env.FILEDECK_SANDBOX_HELPER = path.join(box.dir, "missing");
+  delete process.env.FILEDECK_SANDBOX;
+  resetSandbox();
+  try {
+    assert.equal((await sandboxInfo()).state, "fallback");
+    const d = mk("recheck");
+    const repo = (await repoAt(root, d))!;
+    assert.ok(repo, "accepted: no links");
+    assert.equal((await runGit(d, [...repoArgs(repo), "status", "--porcelain"])).code, 0);
+    fs.symlinkSync(path.join(out, "packed.txt"), path.join(d, ".git/objects/late-link")); // after the check
+    await assert.rejects(runGit(d, [...repoArgs(repo), "status", "--porcelain"]), (e: Error & { status?: number }) => e.status === 403 && !/late-link|TOP/.test(e.message));
+  } finally {
+    process.env.FILEDECK_SANDBOX_HELPER = box.bin;
+    resetSandbox();
+  }
+});

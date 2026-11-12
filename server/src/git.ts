@@ -196,7 +196,8 @@ export function whereOf(args: string[]): Launch {
   const { lead } = subcommand(args);
   const i = lead.indexOf("--git-dir");
   const dir = i < 0 ? null : lead[i + 1]!;
-  return { gitDir: dir, root: (dir && validated.get(dir)?.root) || null };
+  const v = dir ? validated.get(dir) : undefined;
+  return { gitDir: dir, root: v?.root ?? null, commonDir: v?.common ?? null };
 }
 
 /** At most this many Git processes at once on a node, so a big listing never floods the host. */
@@ -566,12 +567,22 @@ export class GitError extends FsError {
   }
 }
 
+/**
+ * A failed Git command as the error a client gets: a fixed message. Git's own text can quote the contents of a file it was
+ * made to read (a malformed ref file, a configuration line), so it never leaves the agent; the log gets the command, the exit
+ * status and the repository's path, and no output.
+ */
+export function gitFailed(what: string, res: GitRun, gitDir?: string): GitError {
+  console.error(`git ${what} failed (exit ${res.code}${res.timedOut ? ", timed out" : ""}) in ${gitDir ?? "?"}`);
+  return new GitError(500, `git ${what} failed`);
+}
+
 /** Full status of a repository (bare: only the branch). */
 export async function repoStatus(r: Repo, o: { timeoutMs?: number } = {}): Promise<StatusResult> {
   if (r.kind === "bare") return { summary: await bareSummary(r), files: new Map() };
   const res = await runGit(repoCwd(r), [...repoArgs(r), "status", "--porcelain=v2", "-z", "--branch", "--no-renames", NO_SUBMODULE_RECURSION, "--untracked-files=normal", "--ignored=matching"], { timeoutMs: o.timeoutMs ?? 30_000, maxBytes: 32 * 1024 * 1024 });
   if (res.timedOut) throw new GitError(504, "git status timed out");
-  if (res.code !== 0 && !res.truncated) throw new GitError(500, res.stderr.trim().split("\n")[0] || "git status failed");
+  if (res.code !== 0 && !res.truncated) throw gitFailed("status", res, r.gitDir);
   return parseStatus(r.kind, res.stdout);
 }
 

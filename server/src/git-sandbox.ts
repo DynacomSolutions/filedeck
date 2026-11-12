@@ -2,12 +2,17 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
-import { spawnSandboxed } from "./sandbox.ts";
+import { UNPRIVILEGED, sandboxInfo, spawnSandboxed } from "./sandbox.ts";
 
 /**
- * Git on top of the general sandbox (sandbox.ts): every Git command runs read-only beneath the served root and, when the
- * agent is root, as the owner of the git directory. When Landlock is not usable (`sandboxInfo().state === "fallback"`) the
- * git directory itself is checked instead: `plainGitDir`.
+ * Git on top of the general sandbox (sandbox.ts): every Git command runs read-only beneath the served root. When Landlock is
+ * not usable (`sandboxInfo().state === "fallback"`) the git directory itself is checked instead: `plainGitDir`, run again
+ * immediately before every Git command.
+ *
+ * Who Git runs as, when the agent is root: the owner of the git directory; for a root-owned git directory the unprivileged
+ * user (the one the media tools use) when that user can read the repository (the directory and the work tree are
+ * world-readable and searchable); a root-owned repository that user cannot read runs as root under Landlock, and is refused
+ * without it. An agent that is not root changes nothing.
  */
 
 export interface Launch {
@@ -15,16 +20,42 @@ export interface Launch {
   root: string | null;
   /** the validated git directory: its owner is the identity Git runs as when the agent is root */
   gitDir: string | null;
+  /** the validated common git directory (the same as `gitDir` unless a linked worktree) */
+  commonDir?: string | null;
+}
+
+/** Can any user read `target` (a folder)? It and every folder above it must be searchable by others, and it readable. */
+async function worldReadableDir(target: string): Promise<boolean> {
+  let d = path.resolve(target);
+  const first = await fs.stat(d).catch(() => null);
+  if (!first || (first.mode & 0o005) !== 0o005) return false;
+  for (;;) {
+    const parent = path.dirname(d);
+    if (parent === d) return true;
+    const st = await fs.stat(parent).catch(() => null);
+    if (!st || (st.mode & 0o001) === 0) return false;
+    d = parent;
+  }
 }
 
 /** Starts `git <gitArgs>` confined to the root; see `spawnSandboxed`. */
 export async function launchGit(cwd: string, gitArgs: string[], env: NodeJS.ProcessEnv, spawnOpts: SpawnOptions, where: Launch): Promise<ChildProcess> {
-  // the repository's owner, when this process is root and the owner is not
+  const info = await sandboxInfo();
+  if (info.state === "fallback" && where.gitDir) {
+    // no kernel confinement: look at the git directory again now, not only when the repository was first accepted
+    const ok = (await plainGitDir(where.gitDir)) && (!where.commonDir || where.commonDir === where.gitDir || (await plainGitDir(where.commonDir)));
+    if (!ok) throw new FsError(403, "this git directory cannot be used safely here");
+  }
   let owner: { uid: number; gid: number } | null = null;
   if (process.getuid?.() === 0 && where.gitDir) {
     const st = await fs.stat(where.gitDir).catch(() => null);
     if (!st) throw new FsError(404, "git directory not found");
     if (st.uid !== 0) owner = { uid: st.uid, gid: st.gid };
+    else {
+      if ((await worldReadableDir(where.gitDir)) && (await worldReadableDir(cwd))) owner = { ...UNPRIVILEGED };
+      else if (info.state === "fallback") throw new FsError(403, "this git directory cannot be used safely here");
+      // else: root-owned and not readable by the unprivileged user: it runs as root, confined by Landlock
+    }
   }
   return spawnSandboxed("git", gitArgs, { ...spawnOpts, cwd, env, readOnly: where.root ? [where.root] : [], ...(owner ?? {}) });
 }
