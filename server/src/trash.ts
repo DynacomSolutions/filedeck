@@ -137,7 +137,7 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
           if (policy === "rename") final = await ops.uniqueName(dstAt, base);
           else await ops.trash(root, dest.virtual); // the replaced item stays recoverable
         }
-        await pinDirW(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false));
+        await pinDirW(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false, root));
         await removeItem(root, dir, id);
         return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final) };
       });

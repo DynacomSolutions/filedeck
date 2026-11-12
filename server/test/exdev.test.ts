@@ -1,10 +1,14 @@
-import { test, mock } from "node:test";
+import { test as baseTest, mock } from "node:test";
 import assert from "node:assert/strict";
 import nodeFs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as ops from "../src/fsops.ts";
+import { withoutReadOnly } from "../src/pinwalk.ts";
+
+// These tests call the operations directly, outside a request: they run in an explicit scope with no read-only prefixes.
+const test = (name: string, fn: (t: never) => unknown) => baseTest(name, (t) => withoutReadOnly(() => fn(t as never)) as never);
 
 function setup() {
   const root = nodeFs.realpathSync(nodeFs.mkdtempSync(path.join(os.tmpdir(), "filedeck-exdev-")));

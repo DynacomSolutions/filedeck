@@ -61,14 +61,19 @@ export async function openListedDir(p: string, listed: { dev: number; ino: numbe
  * The read-only prefixes of the agent that is serving the request. The agent opens this scope around every request, so
  * two agents on one root (as in tests) never see each other's prefixes, and a helper called outside any request sees none.
  */
-const SCOPE = new AsyncLocalStorage<{ root: string; prefixes: string[] }>();
+const SCOPE = new AsyncLocalStorage<{ root: string | null; prefixes: string[] }>();
 
 /** Run `fn` (and everything it awaits) with `prefixes` (FILEDECK_READONLY) as the read-only prefixes of `root`. */
 export const withReadOnly = <T>(root: string, prefixes: string[], fn: () => T): T => SCOPE.run({ root, prefixes }, fn);
 
+/** Run `fn` for a caller that has no read-only prefixes at all (tests, tools): an explicit, empty scope for any root. */
+export const withoutReadOnly = <T>(fn: () => T): T => SCOPE.run({ root: null, prefixes: [] }, fn);
+
+/** The prefixes in force, or none. Without a scope for this root the answer is unknown, and unknown is refused: a caller that forgets the scope fails closed. */
 const readOnlyOf = (root: string): string[] | undefined => {
   const sc = SCOPE.getStore();
-  return sc && sc.root === root && sc.prefixes.length ? sc.prefixes : undefined;
+  if (!sc || (sc.root !== null && sc.root !== root)) throw new PathError(403, "read-only state unknown: the operation was not run in a read-only scope");
+  return sc.prefixes.length ? sc.prefixes : undefined;
 };
 
 /**
@@ -162,20 +167,22 @@ export function assertNotReserved(virtual: string): void {
 /** Random for this run of the process, never derived from the process id: a folder carrying it was made by this run. */
 const RUN = randomBytes(6).toString("hex");
 const ACTIVE = new Set<string>();
-const SWEPT = new Set<string>();
+const SWEPT = new Map<string, number>(); // folder -> when it was last swept
+const SWEEP_EVERY_MS = 3600 * 1000;
 const IDLE_MS = 24 * 3600 * 1000;
+const TOUCH_MS = 5 * 60 * 1000;
 
 /**
- * Remove staging folders a crash left in the folder `parentAt`, once per folder and run. Only a folder that is ours (owner,
+ * Remove staging folders a crash left in the folder `parentAt`, when a copy uses the folder (at most once an hour per folder). Only a folder that is ours (owner,
  * private mode), holds nothing but the entry `staged`, and either carries this run's id (and is not in use) or has not changed
- * for a day is removed: nothing else is ever emptied, whatever its name.
+ * for a day is removed, whichever run (or process) made it: nothing else is ever emptied, whatever its name.
  */
 async function sweep(parentAt: string): Promise<void> {
   let loc = parentAt;
   if (LINUX) loc = await fs.readlink(parentAt).catch(() => "");
-  if (!loc || SWEPT.has(loc)) return;
+  if (!loc || Date.now() - (SWEPT.get(loc) ?? 0) < SWEEP_EVERY_MS) return;
   if (SWEPT.size > 1000) SWEPT.clear();
-  SWEPT.add(loc);
+  SWEPT.set(loc, Date.now());
   const uid = process.getuid?.();
   try {
     for await (const e of direntsOf(parentAt)) {
@@ -224,6 +231,7 @@ export async function withStaging<T>(parentAt: string, fn: (stage: string) => Pr
   });
   let fh: FileHandle | undefined;
   let ours = false;
+  let timer: NodeJS.Timeout | undefined;
   try {
     fh = await openDir(p);
     const s = await fh.stat();
@@ -232,8 +240,13 @@ export async function withStaging<T>(parentAt: string, fn: (stage: string) => Pr
       throw new PathError(403, "cannot make a private work folder here");
     }
     ours = true;
+    // A running copy keeps its folder's times fresh, so another process never takes it for a leftover.
+    const keep = fh;
+    timer = setInterval(() => void keep.utimes(new Date(), new Date()).catch(() => undefined), TOUCH_MS);
+    timer.unref();
     return await fn(dirAt(fh, p));
   } finally {
+    if (timer) clearInterval(timer);
     if (fh && ours) await rmTree(stagedEntry(dirAt(fh, p)), { force: true }).catch(() => undefined);
     await fs.rmdir(p).catch(() => undefined); // not empty means it was never ours: left alone
     await fh?.close().catch(() => undefined);
@@ -251,6 +264,8 @@ export interface CopyTreeOpts {
   times?: boolean;
   /** give every entry the owner and group of its source (needs privilege; where it is refused the set-id bits are dropped) */
   owner?: boolean;
+  /** receives the path of every working folder or trash store with content that the copy left out */
+  skipped?: string[];
 }
 
 /**
@@ -298,7 +313,10 @@ export async function copyTree(src: string, dst: string, o: CopyTreeOpts = {}, d
         let batch: Promise<void>[] = [];
         try {
           for (const e of await fs.readdir(s, { withFileTypes: true })) {
-            if (e.name === TRASH_DIR || isReservedName(e.name)) continue;
+            if (e.name === TRASH_DIR || isReservedName(e.name)) {
+              if (o.skipped && (!e.isDirectory() || (await fs.readdir(path.join(s, e.name)).catch(() => ["?"])).length > 0)) o.skipped.push(path.join(s, e.name));
+              continue;
+            }
             const [from, to] = [path.join(s, e.name), path.join(d, e.name)];
             if (e.isDirectory()) {
               await Promise.all(batch);

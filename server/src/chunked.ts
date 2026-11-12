@@ -5,7 +5,7 @@ import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
 import { FsError, exists, tempName } from "./fsops.ts";
 import { resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
-import { assertNotReserved, pinDirW } from "./pinwalk.ts";
+import { assertNotReserved, assertWritableAt, pinDirW } from "./pinwalk.ts";
 
 /**
  * Resumable chunked uploads. The client picks an id (a stable hash of the file's identity) and sends
@@ -145,7 +145,8 @@ export async function uploadChunk(root: string, dir: string, name: string, id: s
   }
   busy.add(l.key);
   try {
-    return await inDir(root, l, async (_at, part, target) => {
+    return await inDir(root, l, async (at, part, target) => {
+      await assertWritableAt(root, at, l.targetName, false); // the file the last chunk may replace, where it really is
       const cur = await partSize(part);
       if (offset !== cur) {
         body.resume();

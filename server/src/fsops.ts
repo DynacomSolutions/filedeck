@@ -15,7 +15,7 @@ import {
   virtualJoin,
   type Resolved,
 } from "./paths.ts";
-import { assertNotReserved, copyTree, isReservedName, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
+import { assertNotReserved, assertWritableAt, copyTree, isReservedName, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
 
 export interface Entry {
   name: string;
@@ -367,7 +367,7 @@ export async function rename(root: string, from: string, to: string, overwrite =
     if (!(await isCaseChange(a.real, b.real))) throw new FsError(409, "destination exists");
     caseOnly = true;
   }
-  await pinParentW(root, a.real, (from) => pinParentW(root, b.real, (to) => (caseOnly ? moveCaseOnly(from, to) : moveReal(from, to, overwrite))));
+  await pinParentW(root, a.real, (from) => pinParentW(root, b.real, (to) => (caseOnly ? moveCaseOnly(from, to) : moveReal(from, to, overwrite, root))));
   return b.virtual;
 }
 
@@ -396,7 +396,7 @@ async function moveCaseOnly(from: string, to: string) {
 }
 
 /** rename(2), falling back to copy-beside + swap + remove when source and destination are on different devices. */
-export async function moveReal(from: string, to: string, overwrite: boolean) {
+export async function moveReal(from: string, to: string, overwrite: boolean, root: string) {
   try {
     await fs.rename(from, to);
   } catch (e) {
@@ -406,13 +406,20 @@ export async function moveReal(from: string, to: string, overwrite: boolean) {
     // deleted once the copy is complete and in place.
     // Built in a private staging folder beside the destination and moved into place with one rename. A move keeps owner and
     // times of every entry, as rename(2) does. `from` and `to` have pinned parents; the walks hold every folder they enter.
+    const guard = walkGuard(root);
     await withStaging(path.dirname(to), async (stage) => {
       const built = stagedEntry(stage);
-      await copyTree(from, built, { times: true, owner: true });
-      if (overwrite) await rmTree(to, { force: true });
+      const left: string[] = [];
+      await copyTree(from, built, { times: true, owner: true, skipped: left });
+      // What the copy leaves out (another volume's trash store, a working folder in use) would be lost with the source: keep the source instead.
+      if (left.length) throw new FsError(409, "cannot be moved to another volume: it holds a trash store or working folder with content");
+      if (overwrite) {
+        await assertWritableAt(root, path.dirname(to), path.basename(to), true); // where `to` really is, and what it holds
+        await rmTree(to, { force: true, guard });
+      }
       await fs.rename(built, to);
     });
-    await rmTree(from, { force: true });
+    await rmTree(from, { force: true, guard });
   }
 }
 
@@ -484,6 +491,7 @@ export async function copy(root: string, from: string, toDir: string, opts: Copy
         if (!opts.overwrite) {
           for (let attempt = 0; ; attempt++) {
             const name = await uniqueName(dstAt, name0);
+            await assertWritableAt(root, dstAt, name, false);
             try {
               await placeNew(built, path.join(dstAt, name));
               return virtualJoin(d.virtual, name);
@@ -493,8 +501,10 @@ export async function copy(root: string, from: string, toDir: string, opts: Copy
           }
         }
         const dest = path.join(dstAt, name0);
+        // The entry that is replaced, where it really is now: it may be, or hold, a read-only folder (the destination folder could have been swapped for a link after the request was checked).
+        await assertWritableAt(root, dstAt, name0, true);
         const [src, cur] = [await fs.lstat(built), await fs.lstat(dest).catch(() => null)];
-        if (cur && !(src.isFile() && cur.isFile())) await rmTree(dest, { force: true });
+        if (cur && !(src.isFile() && cur.isFile())) await rmTree(dest, { force: true, guard: walkGuard(root) });
         await fs.rename(built, dest);
         return virtualJoin(d.virtual, name0);
       }),
@@ -551,7 +561,7 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   try {
     await pinParentW(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));
   } catch (e) {
-    await fs.rm(path.join(dir, id), { recursive: true, force: true }).catch(() => undefined); // no ghost item without data
+    await pinDirW(root, dir, (at) => rmTree(path.join(at, id), { force: true })).catch(() => undefined); // no ghost item without data
     throw e;
   }
   return meta;
@@ -579,6 +589,7 @@ export async function upload(
   assertNotReserved(target.virtual); // a file may not take the name of the trash store
   // Work through the pinned destination folder so it cannot be swapped for a link mid-upload.
   return pinDirW(root, d.real, async (at) => {
+    await assertWritableAt(root, at, path.basename(target.real), false); // the file that may be replaced, where it really is
     const dest = path.join(at, path.basename(target.real));
     if (!overwrite && (await exists(dest))) {
       body.resume();
@@ -649,6 +660,7 @@ export async function writeText(root: string, p: string, body: Buffer, ifMatch: 
   if (body.length > maxBytes) throw new FsError(413, "content too large");
   assertText(body);
   return pinDirW(root, path.dirname(r.real), async (dir) => {
+    await assertWritableAt(root, dir, path.basename(r.real), false);
     const at = path.join(dir, path.basename(r.real));
     let cur: Awaited<ReturnType<typeof fs.stat>> | null = null;
     try {

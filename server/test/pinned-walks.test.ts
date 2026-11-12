@@ -1,4 +1,4 @@
-import { test, mock, before, after, afterEach } from "node:test";
+import { test as baseTest, mock, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -11,6 +11,10 @@ import { deleteItems, restoreItems } from "../src/trash.ts";
 import { STAGING_PREFIX, withReadOnly } from "../src/pinwalk.ts";
 import { applyPerms, planPerms } from "../src/props.ts";
 import { loadConfig } from "../src/config.ts";
+import { withoutReadOnly } from "../src/pinwalk.ts";
+
+// These tests call the operations directly, outside a request: they run in an explicit scope with no read-only prefixes.
+const test = (name: string, fn: (t: never) => unknown) => baseTest(name, (t) => withoutReadOnly(() => fn(t as never)) as never);
 
 // Each test swaps a folder for a link to a folder outside the root at the moment between "the folder was looked at"
 // and "the folder is used", and then checks that nothing outside was read, written or changed.
@@ -518,4 +522,64 @@ test("running out of descriptors is the same clear error in a copy, a recursive 
   const plan = await planPerms(cfg, { path: "/t", mode: 0o750, recursive: true });
   await assert.rejects(applyPerms(cfg, plan), /nested too deeply/);
   await assert.rejects(ops.permanentDelete(root, "/t"), /nested too deeply/);
+});
+
+test("copy with overwrite, move onto and upload with overwrite never replace or empty a read-only folder or file", async () => {
+  fresh("overwrite");
+  fs.mkdirSync(path.join(root, "data/ro"), { recursive: true });
+  fs.writeFileSync(path.join(root, "data/ro/keep.txt"), "K");
+  fs.writeFileSync(path.join(root, "data/ro.txt"), "R");
+  fs.mkdirSync(path.join(root, "src/ro"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/ro/new.txt"), "N");
+  fs.writeFileSync(path.join(root, "src/ro.txt"), "N");
+  const refused = /read-only/;
+  // the destination folder, as it is after it was swapped for a link into /data
+  await withReadOnly(root, ["/data/ro", "/data/ro.txt"], async () => {
+    await assert.rejects(ops.copy(root, "/src/ro", "/data", { overwrite: true }), refused);
+    await assert.rejects(ops.copy(root, "/src/ro.txt", "/data", { overwrite: true }), refused);
+    await assert.rejects(ops.rename(root, "/src/ro", "/data/ro", true), refused);
+    await assert.rejects(ops.upload(root, "/data", "ro.txt", Readable.from([Buffer.from("x")]), true, 100), refused);
+    await assert.rejects(uploadChunk(root, "/data", "ro.txt", "d".repeat(32), 0, Readable.from([Buffer.from("x")]), { total: 1, overwrite: true, maxBytes: 100 }), refused);
+    await assert.rejects(ops.permanentDelete(root, "/data"), refused);
+  });
+  assert.equal(fs.readFileSync(path.join(root, "data/ro/keep.txt"), "utf8"), "K");
+  assert.equal(fs.readFileSync(path.join(root, "data/ro.txt"), "utf8"), "R");
+});
+
+test("a cross-device move keeps the source when the tree holds a trash store with content", async () => {
+  fresh("nested-trash");
+  fs.mkdirSync(path.join(root, "src/tree/sub/.filedeck-trash/item"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/tree/sub/.filedeck-trash/item/data"), "kept");
+  fs.writeFileSync(path.join(root, "src/tree/a.txt"), "a");
+  fs.mkdirSync(path.join(root, "dst"));
+  forceExdevOnce();
+  await assert.rejects(ops.rename(root, "/src/tree", "/dst/tree"), /trash store or working folder/);
+  assert.equal(fs.readFileSync(path.join(root, "src/tree/sub/.filedeck-trash/item/data"), "utf8"), "kept");
+  assert.deepEqual(fs.readdirSync(path.join(root, "dst")), [], "nothing is left at the destination, staging included");
+});
+
+test("a running copy keeps its staging folder's times fresh", async () => {
+  fresh("touch");
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/a.txt"), "payload");
+  fs.mkdirSync(path.join(root, "dst"));
+  const old = new Date(Date.now() - 3 * 86400_000);
+  mock.timers.enable({ apis: ["setInterval"] });
+  const realCopy = fsp.copyFile.bind(fsp);
+  let seen: number | undefined;
+  mock.method(fsp, "copyFile", async (from: string, to: string, mode?: number) => {
+    const stage = fs.readdirSync(path.join(root, "dst")).find((n) => n.startsWith(STAGING_PREFIX))!;
+    fs.utimesSync(path.join(root, "dst", stage), old, old); // as if the copy had been running for days
+    mock.timers.tick(6 * 60_000); // the refresh runs
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    seen = fs.statSync(path.join(root, "dst", stage)).mtimeMs;
+    return realCopy(from, to, mode);
+  });
+  try {
+    await ops.copy(root, "/src/a.txt", "/dst");
+  } finally {
+    mock.timers.reset();
+  }
+  assert.ok(seen !== undefined && Date.now() - seen < 60_000, "the staging folder was touched while the copy ran");
 });
