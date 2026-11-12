@@ -167,6 +167,7 @@ async function installFixture(page, opts = {}) {
       stats: { dirsScanned: 1, dirsQueued: 0, entries: 3, hashed: 0, hashQueued: 0, hashedBytes: 0, cacheHits: 0, cacheMisses: 0, startedAt: Date.now() - 100, finishedAt: Date.now(), rev: 1, warnings: [] },
       files: { identical: 1, different: 1, leftOnly: 1, rightOnly: 0, error: 0 }, dirs: { identical: 0, different: 0, leftOnly: 0, rightOnly: 0, error: 0 },
     });
+    if (pathname === '/api/diff/jobs/diff-fixture/rows' && opts.manyRows) return json({ rel: url.searchParams.get('rel') || '', listed: true, status: 'different', rev: 1, rows: Array.from({ length: 40 }, (_, i) => ({ p: `entry-${String(i).padStart(2, '0')}.txt`, status: i % 3 === 0 ? 'different' : 'identical', l: diffSide(128), r: diffSide(i % 3 === 0 ? 256 : 128) })) });
     if (pathname === '/api/diff/jobs/diff-fixture/rows') return json({ rel: url.searchParams.get('rel') || '', listed: true, status: 'different', rev: 1, rows: [
       { p: 'tracked.txt', status: 'different', l: diffSide(128), r: diffSide(256), newer: 'right' },
       { p: 'same.txt', status: 'identical', l: diffSide(), r: diffSide() },
@@ -1268,6 +1269,69 @@ async function verifyAxeViews(browser) {
   assert.deepEqual(failures, [], `axe-core reports no ${AXE_TAGS.join(', ')} violations in ${views.length} views x 2 colour schemes`);
 }
 
+// A compact Compare toolbar on a phone: at most two rows (100 px) and enough compared rows stay in view; every moved action is
+// reachable with the keyboard and the menu gives focus back to its button.
+async function verifyCompareToolbarCompact(browser) {
+  const split = { i: 'p3', d: 'v', k: [{ i: 'p1', n: nodeName, p: '/work' }, { i: 'p2', n: nodeName, p: '/work' }] };
+  const state = stateOf(split, { g: { l: [nodeName, '/work'], r: [nodeName, '/work'], a: 'p1', b: 'p2' } });
+  const failures = [];
+  for (const [width, height] of [[390, 844], [320, 568]]) {
+    const { context, page } = await openPage(browser, { viewport: { width, height }, state, fixture: { manyRows: true } });
+    try {
+      await page.getByText('entry-01.txt').first().waitFor({ state: 'visible', timeout: 10000 });
+      await page.waitForTimeout(300);
+      const m = await page.evaluate(() => {
+        const bar = document.querySelector('.cmp-bar');
+        const fp = bar.closest('.fp');
+        const pr = fp.getBoundingClientRect();
+        const rows = [...fp.querySelectorAll('.cmp-row[role=row]')].filter((r) => !r.classList.contains('up') && !r.classList.contains('skel'));
+        const scroller = fp.querySelector('.cmp-scroll').getBoundingClientRect();
+        const full = rows.filter((r) => { const x = r.getBoundingClientRect(); return x.height > 0 && x.top >= scroller.top - .5 && x.bottom <= Math.min(scroller.bottom, pr.bottom, innerHeight) + .5; }).length;
+        return { barHeight: Math.round(bar.getBoundingClientRect().height), full, panel: Math.round(pr.height) };
+      });
+      if (m.barHeight > 100) failures.push(`${width}x${height}: the Compare toolbar is ${m.barHeight} px tall (limit 100)`);
+      if (width === 390 && m.full < 8) failures.push(`${width}x${height}: only ${m.full} compared rows fully visible (need 8; panel ${m.panel} px)`);
+      if (width === 390) {
+        // Keyboard: Filter and More open with Enter, every item has a name, Escape returns focus to the button.
+        for (const name of ['Filter', 'More']) {
+          const button = page.locator('.cmp-bar').first().getByRole('button', { name: new RegExp(`^${name}`) });
+          await button.focus();
+          await page.keyboard.press('Enter');
+          const menu = page.getByRole('menu').last();
+          await menu.waitFor({ state: 'visible' });
+          const names = await menu.getByRole(name === 'Filter' ? 'menuitemcheckbox' : 'menuitem').evaluateAll((els) => els.map((e) => e.textContent.trim()));
+          const want = name === 'Filter' ? 3 : 6;
+          if (names.length < want || names.some((x) => !x)) failures.push(`${name} menu items: ${JSON.stringify(names)}`);
+          await page.keyboard.press('Escape');
+          await menu.waitFor({ state: 'detached' });
+          const focused = await page.evaluate(() => document.activeElement?.textContent?.trim() || '');
+          if (!focused.startsWith(name)) failures.push(`after closing the ${name} menu focus is on "${focused}"`);
+        }
+        // a moved action works from the keyboard: Select differing from More enables Clear selection
+        const more = page.locator('.cmp-bar').first().getByRole('button', { name: /^More/ });
+        await more.focus();
+        await page.keyboard.press('Enter');
+        await page.getByRole('menuitem', { name: 'Select differing' }).focus();
+        await page.keyboard.press('Enter');
+        await page.getByText(/^[1-9][0-9]* selected$/).first().waitFor({ state: 'visible', timeout: 5000 });
+      }
+    } finally {
+      await context.close();
+    }
+  }
+  // wide window: the full toolbar fits on one row once the panel is wide enough
+  const { context, page } = await openPage(browser, { viewport: { width: 2200, height: 900 }, state });
+  try {
+    await page.getByText('only-left.txt').first().waitFor({ state: 'visible', timeout: 10000 });
+    await page.waitForTimeout(300);
+    const h = await page.evaluate(() => [...document.querySelectorAll('.cmp-bar')].map((b) => ({ h: Math.round(b.getBoundingClientRect().height), compact: b.classList.contains('compact') })));
+    if (h.some((x) => x.h > 60 || x.compact)) failures.push(`2200px: toolbar should be one full row, got ${JSON.stringify(h)}`);
+  } finally {
+    await context.close();
+  }
+  assert.deepEqual(failures, [], 'the compact Compare toolbar');
+}
+
 // Address bar: every control is at least 24x24 CSS px with no overlap (2.5.8), 44 px tall, the last breadcrumb segment stays
 // visible, and focusing "Edit address" with the keyboard does not start editing (Enter or Space does).
 async function verifyAddressBar(browser) {
@@ -1280,11 +1344,11 @@ async function verifyAddressBar(browser) {
       await page.waitForTimeout(300);
       const report = await page.evaluate(() => {
         const addr = document.querySelector('.addr').getBoundingClientRect();
-        const nodes = [...document.querySelectorAll('.addr button, .addr .addr-fill')].map((e) => ({ name: e.getAttribute('aria-label') || e.textContent.trim(), r: e.getBoundingClientRect() })).filter((x) => x.r.width > 0);
+        const nodes = [...document.querySelectorAll('.addr button, .addr .addr-fill')].map((e) => ({ name: e.getAttribute('aria-label') || e.textContent.trim(), r: e.getBoundingClientRect() })).filter((x) => x.r.width > 0 || x.name.startsWith('Edit address'));
         const bad = [];
         for (const { name, r } of nodes) {
           if (r.height < 43.5) bad.push(`${name}: ${Math.round(r.height)} px tall`);
-          if (!name.startsWith('Edit address') && (r.width < 24 || r.height < 24)) bad.push(`${name}: ${r.width}x${r.height} is under 24x24`);
+          if ((r.width < 24 || r.height < 24)) bad.push(`${name}: ${r.width}x${r.height} is under 24x24`);
           if (r.left < addr.left - .5 || r.right > addr.right + .5) bad.push(`${name}: outside the address bar`);
         }
         for (const [i, a] of nodes.entries()) for (const b of nodes.slice(i + 1)) {
@@ -1465,6 +1529,7 @@ const checks = [
   ['unsaved editor text survives a resize', verifyUnsavedTextSurvivesResize],
   ['address bar targets and keyboard', verifyAddressBar],
   ['Compare toolbar is not clipped', verifyCompareToolbar],
+  ['Compare toolbar is compact on a phone', verifyCompareToolbarCompact],
   ['no horizontal overflow', verifyNoHorizontalOverflow],
   ['rows visible in a short window', verifyShortWindowRows],
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],

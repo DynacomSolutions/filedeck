@@ -416,6 +416,10 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 .cmp-bar>*{flex:none}.cmp-bar>.fd-toggles,.cmp-bar>.fd-sync{flex:0 1 auto;min-width:0}
 .cmp-bar button{min-height:0;padding:.1rem .45rem;font-size:.78rem;white-space:nowrap}.cmp-bar button{display:inline-flex;align-items:center;gap:.25rem}.cmp-bar .fd-sync{display:inline-flex;gap:.3rem;flex-wrap:wrap}.cmp-bar .fd-toggles{display:inline-flex;gap:.3rem;flex-wrap:wrap}
 .cmp-badge{font-weight:700;color:var(--accent-text)}
+/* compact toolbar (phone layout, or a panel too narrow for one row): Filter, Compare by, the primary action and a More menu; two rows at most */
+.cmp-bar.compact{gap:.15rem .4rem;padding:.1rem .5rem}.cmp-bar.compact .cmp-with:empty,.cmp-bar.compact .cmp-badge{display:none}.cmp-bar.compact .cmp-exit{margin-left:auto}
+.cmp-bar .cmp-by{min-width:0;width:auto;max-width:9rem;height:36px;min-height:36px!important;font-size:.78rem}
+.cmp-bar .cmp-filter.open,.cmp-bar .cmp-more.open{background:var(--surface-3)}
 .cmp-with{display:block;max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmp-exit{margin-left:auto}
 .cmp-pop{position:absolute;top:100%;left:0;right:0;z-index:30;padding:.6rem .8rem;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius);box-shadow:var(--shadow);font-size:.78rem}
@@ -948,7 +952,7 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .fp-row{height:88px;flex-wrap:wrap;align-content:flex-start;row-gap:0}
   .fp-row .addr{order:5;flex:1 1 100%;min-width:0}
 }
-.addr>.tip:has(.addr-fill){flex:1 1000 24px!important;min-width:0!important}.addr-fill{flex:1 1000 24px!important;min-width:0!important}
+.addr>.tip:has(.addr-fill){flex:1 1000 24px!important;min-width:24px!important}.addr-fill{flex:1 1000 24px!important;min-width:24px!important}
 .pv-code{flex:1;min-height:0;width:100%;align-self:stretch;height:100%}
 .pv-code .monaco-editor,.pv-code .monaco-editor-background,.pv-code .monaco-editor .margin{background:var(--surface)}
 .pv-mdwrap .pv-code{height:auto}
