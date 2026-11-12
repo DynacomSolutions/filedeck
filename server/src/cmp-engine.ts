@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { FsError } from "./fsops.ts";
-import { compileGlobs } from "./glob.ts";
+import { GLOB_SKIP, GLOB_SKIP_REASON, compileGlobs, timeSlicer } from "./glob.ts";
 import { dropSpill, openDb } from "./index-cache.ts";
 import { isReservedName } from "./paths.ts";
 import type { Progress } from "./jobs.ts";
@@ -280,9 +280,13 @@ export class CompareSession {
     if (e.n === "." || e.n === ".." || isReservedName(e.n)) return false;
     if (this.o.ignoreHidden && e.n.startsWith(".")) return false;
     const isDir = e.t === "dir";
-    if (this.exclude.test(rel, isDir)) return false;
-    if (!isDir && this.include && !this.include.test(rel, false)) return false;
-    return true;
+    const ex = this.exclude.test(rel, isDir);
+    const inc = ex || isDir || !this.include ? true : this.include.test(rel, false);
+    if (ex === GLOB_SKIP || inc === GLOB_SKIP) {
+      this.warnSet.add(`Some paths were left out, ${GLOB_SKIP_REASON.replace(/^skipped: /, "")}`); // the compare goes on without that path
+      return false;
+    }
+    return !ex && inc === true;
   }
 
   private async listOne(id: number, signal: AbortSignal) {
@@ -317,7 +321,8 @@ export class CompareSession {
       if (!r.fin) this.finish(id, BIT.error, e.message || "could not read folder");
       return;
     }
-    const kids = this.children(r, L, R);
+    const kids = await this.children(r, L, R); // may yield: cancelled or dropped meanwhile means nothing more is written
+    if (signal.aborted || this.closed || !this.q.byId!.get(id)) return;
     let pend = 0;
     let mask = 0;
     let newDirs = 0;
@@ -348,16 +353,23 @@ export class CompareSession {
   }
 
   /** The child rows a folder should have for two listings (classified; folders and equal-size files queued). */
-  private children(r: DbRow, L: LsEntry[], R: LsEntry[]): Kid[] {
+  private async children(r: DbRow, L: LsEntry[], R: LsEntry[]): Promise<Kid[]> {
+    const tick = timeSlicer(); // many entries against many patterns: give the event loop a turn now and then
     const hasR = r.rt === "dir";
     const rightRel = r.rp ?? r.p;
     const join = (base: string, n: string) => (base ? `${base}/${n}` : n);
     const rmap = new Map<string, LsEntry>();
-    for (const e of R) if (this.wanted(join(rightRel, e.n), e) && !rmap.has(this.key(e.n))) rmap.set(this.key(e.n), e);
+    for (const e of R) {
+      const w = tick();
+      if (w) await w;
+      if (this.wanted(join(rightRel, e.n), e) && !rmap.has(this.key(e.n))) rmap.set(this.key(e.n), e);
+    }
     const side = (e: LsEntry): Side => ({ t: e.t, s: e.s, m: e.m, ...(e.l !== undefined ? { l: e.l } : {}) });
     const out: Kid[] = [];
     const seen = new Set<string>();
     for (const l of L) {
+      const w = tick();
+      if (w) await w;
       const p = join(r.p, l.n);
       if (!this.wanted(p, l)) continue;
       const k = this.key(l.n);
@@ -517,6 +529,10 @@ export class CompareSession {
     }
     const cur = this.q.byId!.get(id) as unknown as DbRow | undefined;
     if (this.closed || !cur || cur.job !== J.DONE) return;
+    const kids = await this.children(cur, L, R); // may yield: the rows are read afterwards, in one go with the transaction
+    if (signal.aborted || this.closed) return;
+    const cur2 = this.q.byId!.get(id) as unknown as DbRow | undefined;
+    if (this.closed || !cur2 || cur2.job !== J.DONE) return;
     const have = new Map((this.q.kids!.all(id) as unknown as (DbRow & { k?: string })[]).map((x) => [this.key(x.p.slice(x.p.lastIndexOf("/") + 1)), x]));
     const same = (h: DbRow, c: Kid) => {
       const eq = (t: string | null, sz: number | null, m: number | null, l: string | null, e: LsEntry | null) =>
@@ -526,7 +542,7 @@ export class CompareSession {
     let changed = false;
     this.db.exec("BEGIN");
     try {
-      for (const c of this.children(cur, L, R)) {
+      for (const c of kids) {
         // match on the stored name's key (rows written before keep their spelling)
         const h = have.get(c.k);
         have.delete(c.k);

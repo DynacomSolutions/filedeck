@@ -6,7 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { findRepo, runGit } from "../src/git.ts";
+import { findRepo, repoAt, repoArgs, runGit, showFile } from "../src/git.ts";
+import { resetSandbox } from "../src/sandbox.ts";
+import { useSandbox } from "./sandbox-env.ts";
 
 /**
  * work-item: a repository's own configuration must never make the agent run a command. Every repository here tries a
@@ -22,7 +24,14 @@ const marked = () => fs.readdirSync(marks);
 const reset = () => fs.readdirSync(marks).forEach((f) => fs.rmSync(path.join(marks, f)));
 const stale = (p: string) => fs.utimesSync(p, new Date(Date.now() + 5000), new Date(Date.now() + 5000)); // stat data now differs from the index
 
-before(() => {
+before(async () => {
+  // These repositories are hostile in ways the path checks admit (include files, filters, hooks): the sandbox state is the
+  // one the kernel allows. Without Landlock the fallback would refuse some of them outright, so the checks run unsandboxed.
+  const box = await useSandbox();
+  if (box.state !== "landlock") {
+    process.env.FILEDECK_SANDBOX = "off";
+    resetSandbox();
+  }
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-hostile-")));
   root = path.join(tmp, "host");
   marks = path.join(tmp, "marks");
@@ -225,4 +234,237 @@ test("runGit overrides drivers whose names contain dots, and fails closed when i
   assert.deepEqual(marked(), []);
   const bad = await runGit(path.join(tmp, "marks"), ["--git-dir", path.join(tmp, "nonexistent"), "status"]);
   assert.notEqual(bad.code, 0);
+});
+
+test("signature and program settings in a repository's config never run a program (stash list, log, show)", async () => {
+  reset();
+  const d = path.join(root, "signed");
+  fs.mkdirSync(d);
+  git(d, "init", "-q");
+  write(path.join(d, "a.txt"), "alpha\n");
+  git(d, "add", "-A");
+  git(d, "commit", "-qm", "first");
+  const head = git(d, "rev-parse", "HEAD");
+  const tree = git(d, "rev-parse", "HEAD^{tree}");
+  // a commit that carries a (fake) signature header, so that showing signatures makes Git call the verifier
+  const raw = `tree ${tree}\nparent ${head}\nauthor t <t@example.test> 1700000000 +0000\ncommitter t <t@example.test> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n abcd\n -----END PGP SIGNATURE-----\n\nWIP on main\n`;
+  const sha = execFileSync("git", ["hash-object", "-t", "commit", "-w", "--stdin"], { cwd: d, env: ENV, input: raw, encoding: "utf8" }).trim();
+  git(d, "update-ref", "--create-reflog", "-m", "WIP on main", "refs/stash", sha);
+  const prog = path.join(tmp, "verifier.sh");
+  write(prog, `#!/bin/sh\ntouch ${marks}/verifier\n`);
+  fs.chmodSync(prog, 0o755);
+  cfg(d, "log.showSignature", "true", "gpg.program", prog, "gpg.openpgp.program", prog, "gpg.x509.program", prog, "gpg.ssh.program", prog, "core.sshCommand", prog, "core.editor", prog, "core.askPass", prog, "credential.helper", `!${prog}`);
+  git(d, "config", "gpg.format", "openpgp");
+  // the control: plain Git with this config does call the program
+  execFileSync("git", ["-c", "safe.directory=*", "stash", "list"], { cwd: d, env: ENV, stdio: "ignore" });
+  execFileSync("git", ["-c", "safe.directory=*", "log", "-1", "refs/stash"], { cwd: d, env: ENV, stdio: "ignore" });
+  assert.deepEqual(marked(), ["verifier"], "control: plain Git runs the verifier");
+  reset();
+  for (const url of ["/api/git/info?path=/signed&fresh=1", "/api/git/info?path=/signed/a.txt&fresh=1", "/api/git/status?path=/signed&fresh=1"]) {
+    const r = await app.request(url);
+    assert.equal(r.status, 200, url);
+  }
+  const r = await runGit(d, ["--git-dir", path.join(d, ".git"), "--work-tree", d, "stash", "list"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /WIP on main/);
+  await runGit(d, ["--git-dir", path.join(d, ".git"), "--work-tree", d, "log", "-1", "refs/stash"]);
+  await runGit(d, ["--git-dir", path.join(d, ".git"), "--work-tree", d, "show", "refs/stash"]);
+  assert.deepEqual(marked(), [], "a repository-configured program ran");
+});
+
+test("a relative gitdir or commondir that leaves the root is not a repository", async () => {
+  const outside = path.join(tmp, "outside-repo");
+  fs.mkdirSync(outside);
+  git(outside, "init", "-q");
+  // a work tree under the root whose `.git` file points, relatively, at a repository outside it
+  const a = path.join(root, "escape-gitdir");
+  fs.mkdirSync(a);
+  write(path.join(a, ".git"), `gitdir: ${path.relative(a, path.join(outside, ".git"))}\n`);
+  assert.equal(await repoAt(root, a), null);
+  // an admin directory inside the root whose commondir leaves it
+  const admin = path.join(root, "escape-admin");
+  fs.mkdirSync(admin, { recursive: true });
+  write(path.join(admin, "HEAD"), "ref: refs/heads/main\n");
+  write(path.join(admin, "commondir"), `${path.relative(admin, path.join(outside, ".git"))}\n`);
+  const b = path.join(root, "escape-commondir");
+  fs.mkdirSync(b);
+  write(path.join(b, ".git"), `gitdir: ${path.relative(b, admin)}\n`);
+  assert.equal(await repoAt(root, b), null);
+  // a relative gitdir that stays inside the root still works
+  const ok = path.join(root, "inside-ok");
+  fs.mkdirSync(ok);
+  git(ok, "init", "-q", "--separate-git-dir", path.join(root, "inside-ok-git"));
+  write(path.join(ok, ".git"), `gitdir: ../inside-ok-git\n`);
+  assert.equal((await repoAt(root, ok))?.gitDir, path.join(root, "inside-ok-git"));
+});
+
+const plainGit = (cwd: string, ...args: string[]) => {
+  try {
+    execFileSync("git", ["-c", "safe.directory=*", "-c", "protocol.ext.allow=always", ...args], { cwd, env: { ...ENV, GIT_OPTIONAL_LOCKS: "0" }, stdio: "ignore" });
+  } catch {
+    // a failing command is fine: only the marks matter
+  }
+};
+
+test("a partial clone's lazy fetch never runs a program named by the repository (uploadpack, ext transport)", async () => {
+  reset();
+  const src = path.join(tmp, "lazysrc");
+  fs.mkdirSync(src);
+  git(src, "init", "-q");
+  git(src, "config", "uploadpack.allowFilter", "true");
+  git(src, "config", "uploadpack.allowAnySHA1InWant", "true");
+  write(path.join(src, "a.txt"), "alpha\n");
+  git(src, "add", "-A");
+  git(src, "commit", "-qm", "one");
+  const prog = path.join(tmp, "uploadpack.sh");
+  write(prog, `#!/bin/sh\ntouch ${marks}/uploadpack\nexec git-upload-pack "$@"\n`);
+  fs.chmodSync(prog, 0o755);
+  const extProg = path.join(tmp, "extprog.sh");
+  write(extProg, `#!/bin/sh\ntouch ${marks}/ext\nexec git-upload-pack "$1"\n`);
+  fs.chmodSync(extProg, 0o755);
+  // a partial clone without its blobs: reading a file makes Git fetch it from the remote, with the remote's configured program
+  const clone = (d: string, kind: string) => {
+    git(tmp, "clone", "-q", "--no-checkout", "--filter=blob:none", `file://${src}`, d);
+    if (kind === "uploadpack") git(d, "config", "remote.origin.uploadpack", prog);
+    else {
+      git(d, "config", "remote.origin.url", `ext::${extProg} ${src}`);
+      git(d, "config", "protocol.allow", "always");
+    }
+  };
+  for (const kind of ["uploadpack", "ext"]) {
+    clone(path.join(tmp, `control-${kind}`), kind);
+    plainGit(path.join(tmp, `control-${kind}`), "cat-file", "-p", "HEAD:a.txt");
+    assert.deepEqual(marked(), [kind], `control: plain Git runs the ${kind} program`);
+    reset();
+    const d = path.join(root, `lazy-${kind}`);
+    clone(d, kind);
+    const repo = await findRepo(root, d);
+    assert.ok(repo);
+    assert.equal(await showFile(repo!, "HEAD", "a.txt", 1024), null, "the blob is not fetched");
+    const head = git(d, "rev-parse", "HEAD");
+    for (const url of [`/api/git/show?path=/lazy-${kind}/a.txt&rev=HEAD`, `/api/git/blob?path=/lazy-${kind}&sha=${head}&file=a.txt`, `/api/git/status?path=/lazy-${kind}&fresh=1`]) await app.request(url);
+    assert.deepEqual(marked(), [], `${kind}: a program ran`);
+  }
+});
+
+test("a .gitmodules override of the submodule ignore setting does not make status enter the submodule", async () => {
+  reset();
+  const sub = path.join(tmp, "subsrc2");
+  fs.mkdirSync(sub);
+  git(sub, "init", "-q");
+  write(path.join(sub, "s.txt"), "s\n");
+  write(path.join(sub, ".gitattributes"), "s.txt filter=x\n");
+  git(sub, "add", "-A");
+  git(sub, "commit", "-qm", "sub");
+  const d = path.join(root, "super2");
+  fs.mkdirSync(d);
+  git(d, "init", "-q");
+  write(path.join(d, "t.txt"), "t\n");
+  git(d, "add", "-A");
+  git(d, "commit", "-qm", "super");
+  git(d, "submodule", "add", "-q", sub, "mod");
+  git(d, "commit", "-qm", "add sub");
+  git(path.join(d, "mod"), "config", "filter.x.clean", cmd("submodule-ignore"));
+  fs.appendFileSync(path.join(d, ".gitmodules"), "\tignore = none\n");
+  stale(path.join(d, "mod/s.txt"));
+  plainGit(d, "status", "--porcelain");
+  assert.deepEqual(marked(), ["submodule-ignore"], "control: plain Git runs the submodule's filter");
+  reset();
+  stale(path.join(d, "mod/s.txt"));
+  assert.equal((await app.request("/api/git/status?path=/super2&fresh=1")).status, 200);
+  assert.equal((await app.request("/api/git/info?path=/super2&fresh=1")).status, 200);
+  assert.deepEqual(marked(), [], "the submodule's clean filter ran");
+});
+
+test("a repository whose objects reach outside the root through alternates or links is refused", async () => {
+  const out = path.join(tmp, "alt-outside");
+  fs.mkdirSync(out);
+  git(out, "init", "-q");
+  write(path.join(out, "key.txt"), "outside secret\n");
+  git(out, "add", "-A");
+  git(out, "commit", "-qm", "outside");
+  const outHead = git(out, "rev-parse", "HEAD");
+  const mk = (name: string) => {
+    const d = path.join(root, name);
+    fs.mkdirSync(d);
+    git(d, "init", "-q");
+    return d;
+  };
+  const a = mk("alt-file");
+  write(path.join(a, ".git/objects/info/alternates"), path.join(out, ".git/objects") + "\n");
+  assert.equal(git(a, "show", `${outHead.slice(0, 5)}:key.txt`), "outside secret", "control: Git reads the outside object through the alternate");
+  assert.equal(await repoAt(root, a), null, "alternates leading outside");
+  const body = await (await app.request(`/api/git/show?path=/alt-file/key.txt&rev=${outHead.slice(0, 7)}`)).text();
+  assert.ok(!body.includes("outside secret"));
+  // nested: an alternate inside the root whose own alternates lead out
+  const mid = mk("alt-mid");
+  write(path.join(mid, ".git/objects/info/alternates"), path.join(out, ".git/objects") + "\n");
+  const b = mk("alt-nested");
+  write(path.join(b, ".git/objects/info/alternates"), path.join(mid, ".git/objects") + "\n");
+  assert.equal(await repoAt(root, b), null, "nested alternates leading outside");
+  // an alternate inside the root is fine
+  const c = mk("alt-ok");
+  mk("alt-ok-src");
+  write(path.join(c, ".git/objects/info/alternates"), "../../../alt-ok-src/.git/objects\n");
+  assert.ok(await repoAt(root, c));
+  // symlinked entries
+  for (const entry of ["objects", "refs", "packed-refs"]) {
+    const d = mk(`link-${entry}`);
+    const target = path.join(out, ".git", entry);
+    if (!fs.existsSync(target)) write(target, "");
+    fs.rmSync(path.join(d, ".git", entry), { recursive: true, force: true });
+    fs.symlinkSync(target, path.join(d, ".git", entry));
+    assert.equal(await repoAt(root, d), null, `${entry} linked outside`);
+  }
+});
+
+test("git is told the validated git and common directories, so a commondir file swapped afterwards is not followed", async () => {
+  const main = path.join(root, "pin-main");
+  fs.mkdirSync(main);
+  git(main, "init", "-q");
+  write(path.join(main, "f.txt"), "f\n");
+  git(main, "add", "-A");
+  git(main, "commit", "-qm", "one");
+  const wt = path.join(root, "pin-wt");
+  git(main, "worktree", "add", "-q", wt);
+  // the agent's view: no host paths, so the work tree points at its admin directory relatively
+  write(path.join(wt, ".git"), "gitdir: ../pin-main/.git/worktrees/pin-wt\n");
+  write(path.join(main, ".git/worktrees/pin-wt/commondir"), "../..\n");
+  const other = path.join(tmp, "pin-other");
+  fs.mkdirSync(other);
+  git(other, "init", "-q");
+  const repo = (await findRepo(root, wt))!;
+  assert.equal(repo.kind, "linked");
+  const adminDir = repo.gitDir;
+  const want = fs.realpathSync(path.join(main, ".git"));
+  const common = async () => (await runGit(wt, [...repoArgs(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
+  assert.equal(await common(), want);
+  fs.writeFileSync(path.join(adminDir, "commondir"), path.join(other, ".git") + "\n"); // swapped after the check
+  assert.equal(await common(), want, "git re-read the commondir file");
+  // an absolute commondir is checked re-based onto the root, and must be used the same way
+  fs.writeFileSync(path.join(adminDir, "commondir"), "/pin-main/.git\n");
+  assert.equal(await common(), want);
+});
+
+test("a commondir file that appears after the check is not followed, also in a repository that has none (bare, plain work tree)", async () => {
+  const other = path.join(tmp, "late-other");
+  fs.mkdirSync(other);
+  git(other, "init", "-q");
+  git(other, "commit", "-q", "--allow-empty", "-m", "elsewhere");
+  const bare = path.join(root, "late-bare.git");
+  git(tmp, "init", "-q", "--bare", bare);
+  const plain = path.join(root, "late-plain");
+  fs.mkdirSync(plain);
+  git(plain, "init", "-q");
+  for (const [dir, gitDir] of [[bare, bare], [plain, path.join(plain, ".git")]] as const) {
+    const repo = (await findRepo(root, dir))!;
+    assert.ok(repo);
+    const want = fs.realpathSync(gitDir);
+    const common = async () => (await runGit(dir, [...repoArgs(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
+    assert.equal(await common(), want);
+    fs.writeFileSync(path.join(gitDir, "commondir"), path.join(other, ".git") + "\n"); // created after the check
+    assert.equal(await common(), want, `${dir}: git read a commondir file that did not exist when the repository was checked`);
+    const isBare = (await runGit(dir, [...repoArgs(repo), "rev-parse", "--is-bare-repository"])).stdout.trim();
+    assert.equal(isBare, repo.kind === "bare" ? "true" : "false");
+  }
 });

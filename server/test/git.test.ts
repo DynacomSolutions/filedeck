@@ -8,6 +8,8 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { parseStatus, runGit, safeRev, stripUserInfo } from "../src/git.ts";
 import type { ListingStatus } from "../src/git-routes.ts";
+import { useSandboxOrOff } from "./sandbox-env.ts";
+await useSandboxOrOff(); // Git runs through the sandbox where the kernel has Landlock
 
 /** The agent's root is a folder of its own, like a node's /host: repositories live at <root>/home/... and are named /home/... */
 let tmp: string, root: string, app: ReturnType<typeof createAgent>;

@@ -1,11 +1,12 @@
-import fs from "node:fs/promises";
+import fs, { type FileHandle } from "node:fs/promises";
 import { constants as C } from "node:fs";
 import path from "node:path";
 import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
-import { namesOf } from "./dirnames.ts";
+import { direntsOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { isReservedName, assertNotReserved, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
+import { PathError, assertNotReserved, isReservedName, openChecked, resolveRead, resolveWrite } from "./paths.ts";
+import { MAX_DEPTH, assertMayChange, dirAt, openDir, pinParentW, tooDeep, walkGuard, withReadOnly } from "./pinwalk.ts";
 import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
@@ -175,7 +176,7 @@ export function modeGuard(mode: number, type: Props["type"]): void {
 export async function planPerms(cfg: Config, b: PermsRequest): Promise<PermsPlan> {
   if (typeof b.path !== "string") throw bad("path must be a string");
   const r = resolveWrite(cfg.root, b.path);
-  assertNotTrash(r.virtual);
+  assertNotReserved(r.virtual);
   if (r.virtual === "/") throw bad("refusing to change permissions of the root");
   if (b.mode === undefined && b.owner === undefined && b.group === undefined) throw bad("nothing to change");
   if (b.mode !== undefined && (!Number.isInteger(b.mode) || b.mode < 0 || b.mode > 0o7777)) throw bad("mode must be an integer between 0 and 07777");
@@ -201,87 +202,166 @@ export async function planPerms(cfg: Config, b: PermsRequest): Promise<PermsPlan
   };
 }
 
-/** Change one entry through an fd opened with O_NOFOLLOW, so a link swapped in at the last moment is never followed. */
-async function applyOne(real: string, type: Props["type"], plan: PermsPlan): Promise<void> {
+/** The entry that was listed was swapped for something of another kind. */
+const swapped = () => new ops.FsError(409, "an entry changed while it was being processed");
+
+/**
+ * Change one open entry (a file or a folder held by a descriptor). It must be of the kind that was listed, so a folder
+ * swapped in for a file never gets a file mode. A file with more than one name is also reachable from outside the tree
+ * being changed: it is left alone, owner and mode (`false` is returned and the caller counts it as skipped).
+ */
+async function applyFd(fh: FileHandle, kind: "file" | "dir", plan: PermsPlan): Promise<boolean> {
+  const s = await fh.stat();
+  if (kind === "dir" ? !s.isDirectory() : !s.isFile()) throw swapped();
+  const owner = plan.uid !== undefined || plan.gid !== undefined;
+  if (kind === "file" && s.nlink > 1) return false;
+  if (owner) await fh.chown(plan.uid ?? -1, plan.gid ?? -1);
+  if (plan.mode !== undefined) await fh.chmod(plan.mode);
+  return true;
+}
+
+/** Change one entry through an fd opened with O_NOFOLLOW (never a link, never blocking on a pipe). `real` must have a pinned parent. */
+async function applyOne(real: string, type: Props["type"], plan: PermsPlan): Promise<boolean> {
   if (type === "symlink") {
     if (plan.uid !== undefined || plan.gid !== undefined) await fs.lchown(real, plan.uid ?? -1, plan.gid ?? -1);
-    return;
+    return true;
   }
-  const fh = await fs.open(real, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+  if (type === "other") return false; // devices, pipes and sockets are never opened
+  const fh = await fs.open(real, C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK | (type === "dir" ? C.O_DIRECTORY : 0));
   try {
-    const s = await fh.stat();
-    if (!s.isFile() && !s.isDirectory()) return;
-    if (plan.uid !== undefined || plan.gid !== undefined) await fh.chown(plan.uid ?? -1, plan.gid ?? -1);
-    if (plan.mode !== undefined) await fh.chmod(plan.mode);
+    return await applyFd(fh, type, plan);
   } finally {
     await fh.close();
   }
 }
 
-export async function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise<PermsResult> {
+export function applyPerms(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise<PermsResult> {
+  // the pinned steps re-check the read-only prefixes of this agent wherever the job runs from
+  return withReadOnly(cfg.root, cfg.readOnly, () => applyPermsIn(cfg, plan, ctl));
+}
+
+async function applyPermsIn(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise<PermsResult> {
   const res: PermsResult = { path: plan.virtual, changed: 0, skipped: 0, errors: 0 };
   if (!plan.recursive) {
-    await applyOne(plan.real, plan.type, plan);
-    res.changed = 1;
+    const one = (at: string) => applyOne(at, plan.type, plan);
+    const done = plan.virtual === "/" ? await one(plan.real) : await pinParentW(cfg.root, plan.real, one, false); // the root has no parent inside the root to pin
+    if (done) res.changed = 1;
+    else res.skipped = 1;
     return res;
   }
-  const stat0 = await fs.lstat(plan.real);
-  const dev = stat0.dev;
-  const stack = [plan.real];
+  assertMayChange(cfg.root, plan.real, true); // a prefix at or below the target: refuse before anything is changed
   let seen = 0;
+  const guard = walkGuard(cfg.root);
   const wants = (t: Props["type"]) => plan.scope === "all" || (plan.scope === "files" ? t !== "dir" : t === "dir");
-  const doOne = async (real: string, t: Props["type"]) => {
-    if (!wants(t)) return void res.skipped++;
-    // The mode of links and special files is not changed; ownership of links is (lchown).
-    const mode = t === "symlink" || t === "other" ? undefined : plan.mode;
-    if (t === "other" || (mode === undefined && plan.uid === undefined && plan.gid === undefined)) return void res.skipped++;
+  // The mode of links and special files is not changed; ownership of links is (lchown); devices, pipes and sockets are left alone and not opened.
+  const modeFor = (t: Props["type"]) => (t === "symlink" || t === "other" ? undefined : plan.mode);
+  const nothing = (t: Props["type"]) => t === "other" || (modeFor(t) === undefined && plan.uid === undefined && plan.gid === undefined);
+  const check = (t: Props["type"]) => {
+    const mode = modeFor(t);
     if (mode !== undefined && t === "dir" && (mode & 0o500) !== 0o500) throw bad("a folder must keep owner read and execute, otherwise even its owner is locked out");
+  };
+  const count = (ok: boolean) => void (ok ? res.changed++ : res.skipped++);
+  // A file or link at `child` (a path with a pinned parent); never throws for one entry.
+  const doPath = async (child: string, t: Props["type"]) => {
+    if (!wants(t) || nothing(t)) return void res.skipped++;
     try {
-      await applyOne(real, t, { ...plan, mode });
-      res.changed++;
-    } catch (e) {
-      if ((e as Error).message.includes("locked out")) throw e;
+      count(await applyOne(child, t, { ...plan, mode: modeFor(t) }));
+    } catch {
       res.errors++;
     }
   };
-  await doOne(plan.real, "dir");
-  while (stack.length) {
-    if (ctl?.signal.aborted) throw bad("canceled");
-    const dir = stack.pop()!;
-    if (ctl) ctl.progress.current = dir.slice(cfg.root === "/" ? 0 : cfg.root.length) || "/";
-    for await (const batch of namesOf(dir, 256, undefined, () => res.errors++)) await visit(dir, batch);
+  // The folder held by `fh`.
+  const doDir = async (fh: FileHandle) => {
+    if (!wants("dir") || nothing("dir")) return void res.skipped++;
+    check("dir");
+    try {
+      count(await applyFd(fh, "dir", { ...plan, mode: modeFor("dir") }));
+    } catch {
+      res.errors++;
+    }
+  };
+  // Every folder is entered through a descriptor opened without following links (and so is a folder, as listed), and its
+  // children are reached through that descriptor: a folder swapped for a link mid-walk is never entered. Kinds come from the listing.
+  const top = await openChecked(cfg.root, plan.real, C.O_RDONLY | C.O_DIRECTORY);
+  try {
+    const dev = (await top.stat()).dev;
+    await guard(dirAt(top, plan.real)); // where the folder really is, before it is changed
+    await doDir(top);
+    await walk(top, plan.real, dev, 0);
+  } finally {
+    await top.close().catch(() => undefined);
   }
   if (ctl) ctl.progress.entries = seen;
   return res;
 
-  async function visit(dir: string, names: string[]) {
-    for (const n of names) {
-      if (isReservedName(n)) continue;
-      if (ctl?.signal.aborted) throw bad("canceled");
-      if (seen >= cfg.walkMaxEntries) throw bad("too many entries for one recursive change");
-      seen++;
-      const real = path.join(dir, n);
-      let s;
-      try {
-        s = await fs.lstat(real);
-      } catch {
-        res.errors++;
-        continue;
-      }
-      const t = kindOf(s);
-      if (t === "dir") {
-        if (s.dev !== dev) {
-          res.skipped++;
-          continue;
-        }
-        stack.push(real);
-      }
-      await doOne(real, t);
-      if (ctl && seen % 64 === 0) {
+  async function walk(fh: FileHandle, real: string, dev: number, depth: number) {
+    if (depth > MAX_DEPTH) throw bad("folders nested too deeply for one recursive change");
+    if (ctl?.signal.aborted) throw bad("canceled");
+    const at = dirAt(fh, real);
+    if (ctl) ctl.progress.current = real.slice(cfg.root === "/" ? 0 : cfg.root.length) || "/";
+    let batch: Promise<void>[] = [];
+    const flush = async () => {
+      await Promise.all(batch);
+      batch = [];
+      if (ctl) {
         ctl.progress.entries = seen;
         await tick();
       }
+    };
+    try {
+      for await (const e of direntsOf(at)) {
+        const n = e.name;
+        if (isReservedName(n)) continue;
+        if (ctl?.signal.aborted) throw bad("canceled");
+        if (seen >= cfg.walkMaxEntries) throw bad("too many entries for one recursive change");
+        seen++;
+        const child = path.join(at, n);
+        const known = e.isDirectory() || e.isFile() || e.isSymbolicLink();
+        let t: Props["type"] = e.isDirectory() ? "dir" : e.isFile() ? "file" : e.isSymbolicLink() ? "symlink" : "other";
+        if (!known && !(e.isFIFO() || e.isSocket() || e.isBlockDevice() || e.isCharacterDevice())) {
+          try {
+            t = kindOf(await fs.lstat(child)); // the filesystem did not give a kind
+          } catch {
+            res.errors++;
+            continue;
+          }
+        }
+        if (t !== "dir") {
+          batch.push(doPath(child, t));
+          if (batch.length >= 32) await flush();
+          continue;
+        }
+        await flush();
+        let sub: FileHandle;
+        try {
+          sub = await openDir(child);
+        } catch (err) {
+          if ((err as Error).message === tooDeep().message) throw err;
+          res.errors++; // swapped for something else since it was listed
+          continue;
+        }
+        try {
+          if ((await sub.stat()).dev !== dev) {
+            res.skipped++; // another filesystem: not entered
+            continue;
+          }
+          await guard(dirAt(sub, child)); // where the folder really is now: a read-only prefix is refused before the folder is changed
+          await doDir(sub);
+          await walk(sub, path.join(real, n), dev, depth + 1);
+        } finally {
+          await sub.close().catch(() => undefined);
+        }
+      }
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "EMFILE" || code === "ENFILE") throw tooDeep();
+      if (!(e instanceof ops.FsError || e instanceof PathError)) {
+        res.errors++; // the folder could not be listed or read
+      } else throw e;
+    } finally {
+      await Promise.all(batch).catch(() => undefined);
     }
+    await flush();
   }
 }
 

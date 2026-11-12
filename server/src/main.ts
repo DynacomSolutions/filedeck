@@ -2,10 +2,12 @@ import type { Server } from "node:http";
 import { serve } from "@hono/node-server";
 import { createAgent } from "./agent.ts";
 import { loadConfig } from "./config.ts";
+import { initSandbox } from "./sandbox.ts";
 import { createHub } from "./hub.ts";
 import { installShutdown } from "./shutdown.ts";
 
 const cfg = loadConfig();
+if (cfg.mode === "agent") void initSandbox(); // says once at start-up when helper programs are not confined by the kernel
 const app = cfg.mode === "hub" ? createHub(cfg) : createAgent(cfg);
 const server = serve({ fetch: app.fetch, port: cfg.port }, (i) => {
   console.log(`filedeck ${cfg.mode} listening on :${i.port}` + (cfg.mode === "agent" ? ` root=${cfg.root} node=${cfg.node}` : ` nodes=${cfg.nodes.map((n) => n.name).join(",")}`));

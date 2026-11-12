@@ -698,3 +698,40 @@ test("stat, properties and git refuse the reserved folders", async () => {
   }
   await (app as unknown as { close(): Promise<void> }).close();
 });
+
+/* ---- queued jobs run outside the request that made them: they open their own read-only scope ---- */
+
+test("extract and compress jobs from the queue still work with read-only prefixes configured", needTool, async () => {
+  const { createAgent } = await import("../src/agent.ts");
+  const { loadConfig } = await import("../src/config.ts");
+  const root = path.join(tmp, "queued");
+  fs.mkdirSync(path.join(root, "ro"), { recursive: true });
+  fs.mkdirSync(path.join(root, "src"));
+  fs.mkdirSync(path.join(root, "out"));
+  fs.writeFileSync(path.join(root, "src/f.txt"), "queued-data");
+  delete process.env.FILEDECK_BSDTAR; // the real tool
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "q", FILEDECK_READONLY: "/ro" } as never));
+  const post = (u: string, b: unknown) => app.request(u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+  const finish = async (id: string) => {
+    for (let i = 0; i < 400; i++) {
+      const v = (await (await app.request(`/api/jobs/${id}`)).json()) as { state: string; error?: string };
+      if (["done", "failed", "canceled"].includes(v.state)) return v;
+      await sleep(25);
+    }
+    throw new Error("job did not finish");
+  };
+  const c = await post("/api/jobs/compress", { dir: "/src", names: ["f.txt"], format: "tar.gz", name: "q", destDir: "/out" });
+  assert.equal(c.status, 202, await c.clone().text());
+  const cj = await finish(((await c.json()) as { id: string }).id);
+  assert.equal(cj.state, "done", JSON.stringify(cj));
+  assert.ok(fs.existsSync(path.join(root, "out/q.tar.gz")));
+  const x = await post("/api/jobs/extract", { path: "/out/q.tar.gz", destDir: "/src", subfolder: true, overwrite: "overwrite" });
+  assert.equal(x.status, 202, await x.clone().text());
+  const xj = await finish(((await x.json()) as { id: string }).id);
+  assert.equal(xj.state, "done", JSON.stringify(xj));
+  assert.equal(fs.readFileSync(path.join(root, "src/q/f.txt"), "utf8"), "queued-data");
+  // and a job aimed at the read-only prefix is still refused
+  const bad = await post("/api/jobs/extract", { path: "/out/q.tar.gz", destDir: "/ro", subfolder: false, overwrite: "overwrite" });
+  assert.equal(bad.status, 403);
+  await (app as unknown as { close(): Promise<void> }).close();
+});

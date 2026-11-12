@@ -32,7 +32,7 @@ export function pick(v: unknown, depth = 0): unknown {
 
 /** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. */
 /** Who asked: the last X-Forwarded-For entry (what the nearest proxy saw), else the socket peer; the chain is kept as the caller can write it. */
-function clientOf(c: import("hono").Context): Record<string, string> {
+export function clientOf(c: import("hono").Context): Record<string, string> {
   const chain = c.req.header("x-forwarded-for");
   const fwd = chain?.split(",").pop()?.trim();
   let peer: string | undefined;

@@ -7,6 +7,8 @@ import { execFileSync } from "node:child_process";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { parseNameStatus, parseNumstat, resolveRef } from "../src/git-diff.ts";
+import { useSandboxOrOff } from "./sandbox-env.ts";
+await useSandboxOrOff(); // Git runs through the sandbox where the kernel has Landlock
 
 // A work tree (work/) and a bare mirror of it (mirror.git/) with a fake refs/pull/1/head.
 let tmp: string, app: ReturnType<typeof createAgent>;

@@ -1,4 +1,4 @@
-import { test, before, after } from "node:test";
+import { test as baseTest, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,6 +7,10 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { PathError, openChecked, pinDir, pinParent } from "../src/paths.ts";
 import * as ops from "../src/fsops.ts";
+import { withoutReadOnly } from "../src/pinwalk.ts";
+
+// These tests call the operations directly, outside a request: they run in an explicit scope with no read-only prefixes.
+const test = (name: string, fn: (t: never) => unknown) => baseTest(name, (t) => withoutReadOnly(() => fn(t as never)) as never);
 
 let tmp: string, root: string, outside: string;
 before(() => {

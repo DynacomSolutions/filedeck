@@ -8,6 +8,8 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { decodeState, leaves } from "../../web/src/urlState.ts";
 import { parsePorcelain } from "../src/git-worktrees.ts";
+import { useSandboxOrOff } from "./sandbox-env.ts";
+await useSandboxOrOff(); // Git runs through the sandbox where the kernel has Landlock
 
 let tmp: string, app: ReturnType<typeof createAgent>;
 const g = (cwd: string, ...a: string[]) =>

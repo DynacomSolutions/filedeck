@@ -128,6 +128,13 @@ agent:
   # If the kernel or runtime refuses, the agent logs it once and carries on as without.
   fanotify:
     enabled: false
+  # How helper programs that run on repositories (Git: status, details, diffs) are confined. Repositories are other people's data: a link inside a git
+  # directory can lead anywhere. With Landlock (Linux 5.13 or newer, enabled in the kernel and not blocked by the
+  # container's seccomp profile) those programs can only read beneath the served folder. require (the default): without
+  # Landlock the features that start them answer an error. auto: use Landlock when present, otherwise use only repositories
+  # whose git directory has no symbolic links and no include settings (a weaker check; the agent logs once that the sandbox
+  # is unavailable). off: no sandbox and no extra checks (development).
+  sandbox: require
   # Roll the agents one at a time under Argo CD: agent N gets sync wave N+1 (in the order of `nodes`), so Argo waits for
   # it to be Ready before it touches the next one. Plain Helm ignores the annotation. Set false to roll them together.
   stagger: true

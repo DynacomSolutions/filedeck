@@ -6,7 +6,7 @@ import path from "node:path";
 import * as ops from "../fsops.ts";
 import { FsError, MAX_LIST, mimeFor, parseRange, type Entry } from "../fsops.ts";
 import { cleanVirtual, virtualJoin } from "../paths.ts";
-import { compileGlobs } from "../glob.ts";
+import { GLOB_SKIP, compileGlobs, timeSlicer } from "../glob.ts";
 import { Semaphore, type WalkEntry, type WalkOpts, type WalkSummary } from "../walk.ts";
 import { walkResponse } from "../diff-routes.ts";
 import { IndexCache, spillPath, type IdxEntry } from "../index-cache.ts";
@@ -411,6 +411,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     await mustDir(start);
     const exclude = compileGlobs(w.exclude, w.ignoreCase);
     const include = w.include.length ? compileGlobs(w.include, w.ignoreCase) : null;
+    const tick = timeSlicer();
     const summary: WalkSummary = { truncated: false, depthLimited: false, errors: 0 };
     let total = 0;
     const stack: { virtual: string; rel: string; depth: number }[] = [{ virtual: start, rel: "", depth: 1 }];
@@ -431,8 +432,15 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
         if (it.name === "." || it.name === ".." || (!w.hidden && it.name.startsWith("."))) continue;
         const rel = dir.rel ? `${dir.rel}/${it.name}` : it.name;
         const isDir = it.type === "dir";
-        if (exclude.test(rel, isDir)) continue;
-        if (!isDir && include && !include.test(rel, false)) continue;
+        const turn = tick();
+        if (turn) await turn;
+        const ex = exclude.test(rel, isDir);
+        const inc = ex || isDir || !include ? true : include.test(rel, false);
+        if (ex === GLOB_SKIP || inc === GLOB_SKIP) {
+          summary.errors++; // too expensive to match: left out and counted
+          continue;
+        }
+        if (ex || !inc) continue;
         if (total >= w.max) {
           summary.truncated = true;
           break;

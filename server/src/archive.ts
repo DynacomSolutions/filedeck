@@ -12,7 +12,7 @@ import { FsError, volumeRoot } from "./fsops.ts";
 import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
 import { direntsOf } from "./dirnames.ts";
 import type { JobCtl } from "./jobs.ts";
-import { TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
+import { STAGING_PREFIX, TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, haveSevenZip, listSz, runSz, szFailure, validPassword, verifyPassword } from "./sevenzip.ts";
 
@@ -82,7 +82,7 @@ export function archiveBase(n: string): string {
 }
 
 /** Never read into an archive: another volume's trash store or work folder (a selected folder can be a mount root). */
-const RESERVED_EXCLUDES = [TRASH_DIR, WORK_DIR];
+const RESERVED_EXCLUDES = [TRASH_DIR, WORK_DIR, `${STAGING_PREFIX}*`];
 
 function tool(
   args: string[],
@@ -1215,7 +1215,8 @@ export async function prepareCompress(root: string, dir: string, names: string[]
   }
   const viaSz = !!password || o.splitBytes !== undefined;
   if (viaSz && !haveSevenZip()) throw new ArchiveError(501, "7-Zip is not installed in this image");
-  if (viaSz && exclude.length && uniq.some((n) => /[*?]/.test(n))) throw new ArchiveError(400, "exclude patterns cannot be combined with names containing * or ? for password or split archives; rename the items");
+  // 7-Zip is run with wildcards on (the reserved-name excludes need them), so a selected name must not contain any
+  if (viaSz && uniq.some((n) => /[*?]/.test(n))) throw new ArchiveError(400, "names containing * or ? cannot be used for password or split archives; rename the items");
   const out = o.destDir ? resolveRead(root, o.destDir) : d;
   assertNotTrash(out.virtual);
   if (!(await fs.stat(out.real)).isDirectory()) throw new ArchiveError(400, "destination is not a directory");
@@ -1312,9 +1313,8 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     if (plan.viaSz) {
       const type = plan.format === "7z" ? "7z" : "zip";
       // -snl stores symlinks as links (as bsdtar does) instead of archiving whatever they point at
-      // -spd (literal file names) also turns off wildcards in -xr! patterns, so it is only used without excludes
-      // (prepareCompress refuses wildcard characters in the selection when excludes are given)
-      const args = ["a", `-t${type}`, "-snl", ...(plan.exclude.length ? [] : ["-spd"]), "-bb1", "-bso1", "-bsp0", ...(plan.level !== undefined ? [`-mx=${plan.level}`] : [])];
+      // wildcards stay on (the reserved-name excludes use one); prepareCompress refuses wildcard characters in the selection
+      const args = ["a", `-t${type}`, "-snl", "-bb1", "-bso1", "-bsp0", ...(plan.level !== undefined ? [`-mx=${plan.level}`] : [])];
       if (plan.password) {
         args.push("-p");
         if (plan.format === "zip") args.push("-mem=AES256");
