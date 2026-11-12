@@ -6,7 +6,7 @@ import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, assertNotTrash, resolveRead, resolveWrite } from "./paths.ts";
-import { hitsReadOnly } from "./readonly.ts";
+import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { SizeStore, type DuEntry } from "./size-store.ts";
@@ -494,17 +494,24 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (plan.recursive) {
       const what = [plan.mode !== undefined ? `mode ${plan.mode.toString(8)}` : "", plan.uid !== undefined || plan.gid !== undefined ? "owner" : ""].filter(Boolean).join(" and ");
       const { path: p, mode, owner, group, recursive, scope } = req; // allowlist, never the raw body
-      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => applyPerms(cfg, plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope } });
+      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope } });
       return c.json(job, 202);
     }
     return c.json(await applyPerms(cfg, plan));
   });
+  // A queued change is checked again when it starts, on where its target really is by then (a folder may have been swapped for a link meanwhile).
+  const runPerms = (plan: PermsPlan, ctl: Parameters<typeof applyPerms>[2]) => {
+    if (!jobMayWrite(cfg.root, cfg.readOnly, plan.real, { contains: plan.recursive, follow: plan.recursive })) return Promise.reject(new ops.FsError(403, "read-only volume"));
+    return applyPerms(cfg, plan, ctl);
+  };
   // Planned again, so confinement and read-only checks apply to the moment of the restart; a refusal fails the job with its message.
   jobs.register("perms", async (p) => {
     try {
-      if (hitsReadOnly(cfg.root, cfg.readOnly, (p as PermsRequest).path)) throw new ops.FsError(403, "read-only volume");
+      const req = p as PermsRequest;
+      // a recursive change reaches everything below: an ancestor of a read-only prefix is refused too (also for a job stored before the prefix was configured)
+      if (hitsReadOnly(cfg.root, cfg.readOnly, req.path) || (req.recursive === true && reachesReadOnly(cfg.root, cfg.readOnly, req.path, true))) throw new ops.FsError(403, "read-only volume");
       const plan = await planPerms(cfg, p as PermsRequest);
-      return { run: (ctl) => applyPerms(cfg, plan, ctl) };
+      return { run: (ctl) => runPerms(plan, ctl) };
     } catch (e) {
       return { run: async () => Promise.reject(e) };
     }

@@ -76,6 +76,16 @@ test("an adopted perms job is planned again: a path that became read-only or lef
   await a.close();
 });
 
+test("an adopted recursive perms job on an ancestor of a read-only prefix is refused on restart", async () => {
+  const a = agent({ FILEDECK_READONLY: "/tree/sub" });
+  const j = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o755, recursive: true }, "p-anc").id);
+  assert.equal(j.state, "failed");
+  assert.match(j.error!, /read-only/);
+  const flat = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o755, recursive: false }, "p-flat").id);
+  assert.equal(flat.state, "done", flat.error);
+  await a.close();
+});
+
 test("passworded compress and extract are failed as interrupted; the password is never stored", async () => {
   const a = agent();
   if (haveSevenZip()) {

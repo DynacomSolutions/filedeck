@@ -57,6 +57,8 @@ export interface Config {
   readOnly: string[];
   /** shared hub-to-agent secret; empty = agents are unauthenticated (NetworkPolicy only) */
   agentToken: string | undefined;
+  /** Host header values the hub answers to (host or host:port); empty = any */
+  allowedHosts: string[];
   /** hub: read-only token for the `filedeck du` CLI (FILEDECK_API_TOKEN or the file FILEDECK_API_TOKEN_FILE); unset = off */
   apiToken: string | undefined;
   /** hub: name -> agent base URL */
@@ -154,6 +156,7 @@ export function loadConfig(env = process.env): Config {
     brand: parseBrand(env.FILEDECK_BRAND),
     readOnly: parseReadOnly(env.FILEDECK_READONLY),
     agentToken: env.FILEDECK_AGENT_TOKEN || undefined,
+    allowedHosts: (env.FILEDECK_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
     apiToken: mode === "hub" ? readSecret(env, "FILEDECK_API_TOKEN") : undefined,
     nodes: parseNodes(env.NODES),
     sources: parseSources(env.FILEDECK_SOURCES),
