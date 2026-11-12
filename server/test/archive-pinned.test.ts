@@ -117,7 +117,7 @@ case "$1" in
      case "$(cat '${path.join(dir, "szmode")}' 2>/dev/null)" in
        dir) mkdir "$out"; echo x > "$out/inner"; exit 0;;
        sparse) printf 7Z > "$out"; truncate -s 300M "$out"; exit 0;;
-       args) printf '%s\n' "$@" > '${path.join(dir, "szargs")}'; for a in "$@"; do case "$a" in -x@*) cp "$(printf %s "$a" | cut -c4-)" '${path.join(dir, "szlist")}';; esac; done; printf 7Z > "$out"; exit 0;;
+       args) printf '%s\n' "$@" > '${path.join(dir, "szargs")}'; for a in "$@"; do case "$a" in -x@*) f="$(printf %s "$a" | cut -c4-)"; { cat "$f" 2>&1 || echo "cannot read $f as $(id -u)"; } > '${path.join(dir, "szlist")}';; esac; done; printf 7Z > "$out"; exit 0;;
        hardlink) ln '${path.join(dir, "outside", "secret.bin")}' "$out"; exit 0;;
        *) printf 7Z > "$out"; exit 0;;
      esac;;
