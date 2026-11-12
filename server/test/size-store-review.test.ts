@@ -623,8 +623,7 @@ test("A-return an acquire whose write fails once is tried again: the fast path c
 });
 
 test("L11a a walk whose root commit fails busy leaves no walking row behind; L11b a missed beat does not lose the lease or turn later rows into ver 0", async () => {
-  const { s, db } = fixture("l11", { leaseMs: 60_000 });
-  // (a lease of a few hundred ms can lapse on a starved host before the test gets to its missed beat; one missed beat is what is under test, not the lease length)
+  const { s, db } = fixture("l11", { leaseMs: 60_000 }); // one missed beat is under test: the lease must not lapse by itself on a starved host
   await s.scan("/");
   const a = s as Any;
   const orig = a.send.bind(s);
@@ -643,7 +642,9 @@ test("L11a a walk whose root commit fails busy leaves no walking row behind; L11
   } finally {
     console.error = quiet;
   }
-  for (let i = 0; i < 1500 && rows(db, "SELECT COUNT(*) n FROM walking")[0].n !== 0; i++) await sleep(20);
+  // the scan queues the delete of the walking row and then the stale mark, without waiting for either: the delete can be visible before the mark is, so wait for both
+  await a.barrier();
+  for (let i = 0; i < 1500 && (rows(db, "SELECT COUNT(*) n FROM walking")[0].n !== 0 || !rows(db, "SELECT 1 FROM stale_trees").length); i++) await sleep(20);
   assert.equal(rows(db, "SELECT COUNT(*) n FROM walking")[0].n, 0, "the walking row was removed (the tree is marked stale instead)");
   assert.ok(rows(db, "SELECT COUNT(*) n FROM stale_trees")[0].n >= 1);
   // a beat that cannot get the database
