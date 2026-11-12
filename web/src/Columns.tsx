@@ -210,6 +210,7 @@ export function HeaderRow({ s, cols, git, sort, onSort, onMenu }: {
   return (
     <tr
       role="row"
+      aria-rowindex={1}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
