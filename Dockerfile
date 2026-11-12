@@ -9,6 +9,8 @@ RUN apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
 RUN apk add --no-cache gcc musl-dev linux-headers
 COPY server/native server/native
 RUN gcc -O2 -Wall -static -o /usr/local/bin/filedeck-fanwatch server/native/filedeck-fanwatch.c
+# The launcher that confines helper programs (git, archive tools) to the folders they are given (Landlock, server/src/sandbox.ts).
+RUN gcc -O2 -Wall -static -o /usr/local/bin/filedeck-sandbox server/native/filedeck-sandbox.c
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY server/package.json server/
 COPY web/package.json web/
@@ -34,6 +36,8 @@ WORKDIR /app
 RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
 # fanotify helper: only started when the chart's agent.fanotify.enabled sets FILEDECK_FANWATCH (it needs CAP_SYS_ADMIN).
 COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwatch
+# Sandbox launcher: used for every Git command when the kernel has Landlock (FILEDECK_SANDBOX, default auto).
+COPY --from=build /usr/local/bin/filedeck-sandbox /usr/local/bin/filedeck-sandbox
 COPY --from=build /src/node_modules node_modules
 # Dependencies npm could not hoist to the root (a version the web workspace does not share) live beside the server.
 COPY --from=build /src/server/node_modules server/node_modules

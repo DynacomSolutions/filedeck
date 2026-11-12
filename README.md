@@ -74,11 +74,21 @@ Agents run as root with the node's `/` mounted read-write, and there are no user
 
 ## Configuration (environment)
 
-Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDECK_MAX_EDIT`, `FILEDECK_READONLY` (comma separated virtual prefixes), `FILEDECK_AGENT_TOKEN`, `FILEDECK_TRANSCODE_CONCURRENCY`, `FILEDECK_THUMB_DIR`, archive, search and hash limits (see `server/src/config.ts`).
+Agent: `FILEDECK_ROOT`, `FILEDECK_NODE`, `PORT`, `FILEDECK_MAX_UPLOAD`, `FILEDECK_MAX_EDIT`, `FILEDECK_READONLY` (comma separated virtual prefixes), `FILEDECK_AGENT_TOKEN`, `FILEDECK_TRANSCODE_CONCURRENCY`, `FILEDECK_THUMB_DIR`, `FILEDECK_SANDBOX` (`auto` default, `require`, `off`; see "Sandbox"), archive, search and hash limits (see `server/src/config.ts`).
 
 Hub: `NODES` (`name=http://agent:8080,...`), `FILEDECK_STATIC`, `FILEDECK_AGENT_TOKEN`, `FILEDECK_API_TOKEN` or `FILEDECK_API_TOKEN_FILE` (read-only `filedeck du` token, see below), `FILEDECK_SOURCES` (network sources, credentials from mounted files in `FILEDECK_SOURCE_SECRETS`), `FILEDECK_BRAND`.
 
 `FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help).
+
+### Sandbox
+
+Repositories (and archives) are other people's data, so the helper programs the agent runs on them go through a small launcher, `filedeck-sandbox` (built from `server/native`, installed beside `filedeck-fanwatch` in the image; `FILEDECK_SANDBOX_HELPER` names it). Today that is every Git command (status, details, diffs). The launcher drops to the owner of the git directory when the agent runs as root, sets no-new-privileges and applies a Linux Landlock ruleset: the program can read files beneath the served folder and the system folders it needs to start, and nothing else, and it can write nothing at all. A link inside a repository that leads outside the served folder therefore fails when Git opens it.
+
+`FILEDECK_SANDBOX` says what happens when Landlock is not usable (kernel older than 5.13, Landlock not enabled, or blocked by the container's seccomp profile):
+
+- `auto` (default): Landlock when present. Without it Git still runs, but only for a repository whose git directory holds no symbolic link at any depth and no `include` or `includeIf` setting (at most 50,000 entries are checked; more is a refusal), as the repository's owner. The agent logs once at start-up that the sandbox is unavailable.
+- `require`: without Landlock the features that start helper programs answer a 503 error.
+- `off`: no launcher and no extra checks, only the path checks in `server/src/git.ts`. For development.
 
 ## `filedeck du`
 

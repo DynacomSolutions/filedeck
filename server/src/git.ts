@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
 import { resolveRead } from "./paths.ts";
+import { launchGit, plainGitDir, type Launch } from "./git-sandbox.ts";
+import { EXIT_LANDLOCK_UNSUPPORTED, resetSandbox, sandboxInfo, sandboxRequiredError } from "./sandbox.ts";
 
 /**
  * Read-only Git plumbing for the agent. Everything here only reads: `GIT_OPTIONAL_LOCKS=0` stops `git status` from
@@ -53,6 +54,7 @@ export const BASE_ARGS = [
   // Nothing here may reach a remote: a partial clone's lazy fetch, a `url` using a command transport and a
   // `remote.<name>.uploadpack` program all start a process. No transport is allowed, and lazy fetching is off in the
   // environment (`GIT_NO_LAZY_FETCH`, see `gitEnv`); each of the two alone stops it, both are kept.
+  "-c", "core.excludesFile=/dev/null", "-c", "core.attributesFile=/dev/null", // nothing from the user's home folder: it is outside the sandbox
   "-c", "protocol.allow=never", "-c", "submodule.recurse=false", "-c", "fetch.recurseSubmodules=false",
 ];
 
@@ -77,9 +79,9 @@ function subcommand(args: string[]): { lead: string[]; sub: string } {
 }
 
 /** Runs a tiny Git command and collects its output (no filters involved: it only reads configuration). */
-function probe(cwd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
+async function probe(cwd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number, where: Launch): Promise<{ code: number | null; out: string }> {
+  const child = await launchGit(cwd, [...BASE_ARGS, ...args], env, { stdio: ["ignore", "pipe", "ignore"] }, where);
   return new Promise((resolve) => {
-    const child = spawn("git", [...BASE_ARGS, ...args], { cwd, stdio: ["ignore", "pipe", "ignore"], env });
     const chunks: Buffer[] = [];
     let size = 0;
     let done = false;
@@ -94,7 +96,7 @@ function probe(cwd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: n
       finish(null);
     }, timeoutMs);
     timer.unref();
-    child.stdout.on("data", (d: Buffer) => {
+    child.stdout!.on("data", (d: Buffer) => {
       size += d.length;
       if (size <= 1024 * 1024) chunks.push(d);
     });
@@ -116,7 +118,7 @@ function probe(cwd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: n
 export async function filterNeutralisedEnv(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv | null> {
   const { lead, sub } = subcommand(args);
   if (OBJECT_ONLY.has(sub)) return env;
-  const r = await probe(cwd, [...lead, "config", "-z", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$"], env, 5000);
+  const r = await probe(cwd, [...lead, "config", "-z", "--get-regexp", "^filter\\..*\\.(clean|smudge|process)$"], env, 5000, whereOf(args));
   // 1: no such key. 128 and the like: not a repository, the real command fails the same way (and no filter can apply)
   if (r.code === null) return null;
   if (r.code !== 0) return env;
@@ -168,27 +170,33 @@ export function gitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
  * Git is told both places through `GIT_DIR` (`--git-dir`) and `GIT_COMMON_DIR`, so it never reads a `commondir` file
  * (which could be swapped after the check, or hold an absolute host path that was only checked re-based).
  */
-const validated = new Map<string, string>();
-function remember(gitDir: string, commonDir: string): void {
+const validated = new Map<string, { common: string; root: string }>();
+function remember(gitDir: string, commonDir: string, root: string): void {
   if (validated.size > 20_000) validated.clear();
-  validated.set(gitDir, commonDir);
-  validated.set(commonDir, commonDir);
+  validated.set(gitDir, { common: commonDir, root });
+  validated.set(commonDir, { common: commonDir, root });
 }
 
 /**
- * Environment that pins the git directory named by the leading `--git-dir` to its validated common directory. `{}` when
- * the arguments name no git directory (discovery from the working directory); null when they name one that was not
- * validated, which the caller must refuse to run.
+ * Environment that pins the git directory named by the leading `--git-dir` to its validated common directory:
+ * `GIT_COMMON_DIR` is always set, also when the common directory is the git directory itself, so a `commondir` file
+ * that appears after the check is never read. `{}` when the arguments name no git directory (discovery from the working
+ * directory); null when they name one that was not validated, which the caller must refuse to run.
  */
 export function gitDirEnv(args: string[]): NodeJS.ProcessEnv | null {
   const { lead } = subcommand(args);
   const i = lead.indexOf("--git-dir");
   if (i < 0) return {};
-  const dir = lead[i + 1]!;
-  const common = validated.get(dir);
-  if (!common) return null;
-  // a git directory that is its own common directory has no `commondir` file (`confined` refuses one that does)
-  return common === dir ? {} : { GIT_COMMON_DIR: common };
+  const v = validated.get(lead[i + 1]!);
+  return v ? { GIT_COMMON_DIR: v.common } : null;
+}
+
+/** The root and git directory a command's leading `--git-dir` belongs to (for the sandbox). */
+export function whereOf(args: string[]): Launch {
+  const { lead } = subcommand(args);
+  const i = lead.indexOf("--git-dir");
+  const dir = i < 0 ? null : lead[i + 1]!;
+  return { gitDir: dir, root: (dir && validated.get(dir)?.root) || null };
 }
 
 /** At most this many Git processes at once on a node, so a big listing never floods the host. */
@@ -214,13 +222,14 @@ export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<Gi
     const pin = gitDirEnv(args);
     const env = pin ? await filterNeutralisedEnv(cwd, args, gitEnv(pin)) : null;
     if (!env) return { code: null, stdout: "", stderr: "git configuration could not be read", timedOut: true, truncated: false, buf: Buffer.alloc(0) };
+    let child;
+    try {
+      child = await launchGit(cwd, [...BASE_ARGS, ...args], env, { stdio: ["ignore", "pipe", "pipe"], detached: true /* its own process group, so a timeout takes helper processes (aliases, filters) down too */ }, whereOf(args));
+    } catch (e) {
+      if (e instanceof FsError) throw e;
+      return { code: null, stdout: "", stderr: String((e as Error).message), timedOut: false, truncated: false, buf: Buffer.alloc(0) };
+    }
     return await new Promise<GitRun & { buf: Buffer }>((resolve) => {
-        const child = spawn("git", [...BASE_ARGS, ...args], {
-          cwd,
-          stdio: ["ignore", "pipe", "pipe"],
-          detached: true, // its own process group, so a timeout takes helper processes (aliases, filters) down too
-          env,
-        });
         const out: Buffer[] = [];
         let size = 0;
         let errText = "";
@@ -239,7 +248,7 @@ export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<Gi
           killTree();
         }, timeoutMs);
         timer.unref();
-        child.stdout.on("data", (d: Buffer) => {
+        child.stdout!.on("data", (d: Buffer) => {
           size += d.length;
           if (size > maxBytes) {
             if (!truncated) {
@@ -250,7 +259,7 @@ export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<Gi
           }
           out.push(d);
         });
-        child.stderr.on("data", (d: Buffer) => {
+        child.stderr!.on("data", (d: Buffer) => {
           if (errText.length < 4096) errText += d.toString("utf8");
         });
         const finish = (code: number | null) => {
@@ -258,6 +267,12 @@ export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<Gi
           done = true;
           clearTimeout(timer);
           const buf = Buffer.concat(out);
+          if (code === EXIT_LANDLOCK_UNSUPPORTED && child.spawnfile !== "git") {
+            // the helper could not apply Landlock after all (the kernel changed its mind, a seccomp profile): Git did not run
+            resetSandbox();
+            resolve({ code: null, stdout: "", stderr: "git sandbox unavailable: Landlock could not be applied", timedOut: false, truncated: false, buf: Buffer.alloc(0) });
+            return;
+          }
           resolve({ code, stdout: o.raw ? "" : buf.toString("utf8"), stderr: errText, timedOut, truncated, buf });
         };
         child.on("error", (e) => {
@@ -387,6 +402,10 @@ async function confined(root: string, r: Repo): Promise<Repo | null> {
     return null;
   }
   if (r.gitDir === r.commonDir && (await exists(path.join(r.gitDir, "commondir")))) return null;
+  const sb = await sandboxInfo();
+  if (sb.state === "unavailable") throw sandboxRequiredError();
+  // without kernel confinement only plain git directories are used: no links at any depth, no include settings
+  if (sb.state === "fallback" && !((await plainGitDir(r.gitDir)) && (r.commonDir === r.gitDir || (await plainGitDir(r.commonDir))))) return null;
   const dirs = [...new Set([r.gitDir, r.commonDir])];
   for (const d of dirs) {
     for (const name of GIT_DIR_ENTRIES) {
@@ -401,7 +420,7 @@ async function confined(root: string, r: Repo): Promise<Repo | null> {
     if (!inside(rootReal, await fs.realpath(d).catch(() => "/"))) return null;
   }
   if (!(await alternatesInside(rootReal, path.join(r.commonDir, "objects")))) return null;
-  remember(r.gitDir, r.commonDir);
+  remember(r.gitDir, r.commonDir, rootReal);
   return r;
 }
 
@@ -454,7 +473,8 @@ export async function findRepo(root: string, dir: string): Promise<Repo | null> 
 }
 
 /** Arguments that point Git at a repository, to precede the subcommand. */
-export const repoArgs = (r: Repo): string[] => (r.kind === "bare" ? ["--git-dir", r.gitDir] : ["--git-dir", r.gitDir, "--work-tree", r.workDir]);
+// `--bare` after `--git-dir`: with `GIT_COMMON_DIR` set Git would otherwise take a bare repository for a work tree
+export const repoArgs = (r: Repo): string[] => (r.kind === "bare" ? ["--git-dir", r.gitDir, "--bare"] : ["--git-dir", r.gitDir, "--work-tree", r.workDir]);
 export const repoCwd = (r: Repo) => r.workDir;
 
 export interface RepoSummary {
@@ -541,7 +561,7 @@ async function bareSummary(r: Repo): Promise<RepoSummary> {
 }
 
 export class GitError extends FsError {
-  constructor(status: 400 | 404 | 413 | 500 | 504, message: string) {
+  constructor(status: 400 | 404 | 413 | 500 | 503 | 504, message: string) {
     super(status, message);
   }
 }

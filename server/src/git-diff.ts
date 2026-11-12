@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
-import { BASE_ARGS, NO_SUBMODULE_RECURSION, filterNeutralisedEnv, gitDirEnv, gitEnv } from "./git.ts";
+import { BASE_ARGS, NO_SUBMODULE_RECURSION, filterNeutralisedEnv, gitDirEnv, gitEnv, whereOf } from "./git.ts";
+import { launchGit } from "./git-sandbox.ts";
+import { EXIT_LANDLOCK_UNSUPPORTED, resetSandbox } from "./sandbox.ts";
 
 /**
  * Read-only git for the pull request diff view. Everything here runs `git` next to the data (a work tree or a bare
@@ -35,8 +36,8 @@ export async function runGit(cwd: string, args: string[], o: RunOpts = {}): Prom
   if (!pin) throw new FsError(404, "not a known git repository");
   const env = await filterNeutralisedEnv(cwd, args, gitEnv({ ...extra, ...pin }));
   if (!env) throw new FsError(504, "git configuration could not be read");
+  const p = await launchGit(cwd, [...BASE_ARGS, ...args], env, { stdio: ["ignore", "pipe", "pipe"] }, whereOf(args));
   return new Promise((resolve, reject) => {
-    const p = spawn("git", [...BASE_ARGS, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     let n = 0;
     let truncated = false;
@@ -47,7 +48,7 @@ export async function runGit(cwd: string, args: string[], o: RunOpts = {}): Prom
       p.kill("SIGKILL");
       reject(new FsError(504, "git timed out"));
     }, timeoutMs);
-    p.stdout.on("data", (b: Buffer) => {
+    p.stdout!.on("data", (b: Buffer) => {
       if (truncated) return;
       if (n + b.length > maxBytes) {
         chunks.push(b.subarray(0, maxBytes - n));
@@ -59,7 +60,7 @@ export async function runGit(cwd: string, args: string[], o: RunOpts = {}): Prom
       chunks.push(b);
       n += b.length;
     });
-    p.stderr.resume();
+    p.stderr!.resume();
     p.on("error", (e) => {
       if (done) return;
       done = true;
@@ -70,6 +71,11 @@ export async function runGit(cwd: string, args: string[], o: RunOpts = {}): Prom
       if (done) return;
       done = true;
       clearTimeout(timer);
+      if (code === EXIT_LANDLOCK_UNSUPPORTED && p.spawnfile !== "git") {
+        resetSandbox(); // the helper could not apply Landlock: Git did not run
+        reject(new FsError(503, "git sandbox unavailable: Landlock could not be applied"));
+        return;
+      }
       resolve({ code: truncated ? 0 : (code ?? 1), out: Buffer.concat(chunks), truncated });
     });
   });

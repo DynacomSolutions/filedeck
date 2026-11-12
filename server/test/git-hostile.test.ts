@@ -7,6 +7,8 @@ import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { findRepo, repoAt, repoArgs, runGit, showFile } from "../src/git.ts";
+import { resetSandbox } from "../src/sandbox.ts";
+import { useSandbox } from "./sandbox-env.ts";
 
 /**
  * work-item: a repository's own configuration must never make the agent run a command. Every repository here tries a
@@ -22,7 +24,14 @@ const marked = () => fs.readdirSync(marks);
 const reset = () => fs.readdirSync(marks).forEach((f) => fs.rmSync(path.join(marks, f)));
 const stale = (p: string) => fs.utimesSync(p, new Date(Date.now() + 5000), new Date(Date.now() + 5000)); // stat data now differs from the index
 
-before(() => {
+before(async () => {
+  // These repositories are hostile in ways the path checks admit (include files, filters, hooks): the sandbox state is the
+  // one the kernel allows. Without Landlock the fallback would refuse some of them outright, so the checks run unsandboxed.
+  const box = await useSandbox();
+  if (box.state !== "landlock") {
+    process.env.FILEDECK_SANDBOX = "off";
+    resetSandbox();
+  }
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-hostile-")));
   root = path.join(tmp, "host");
   marks = path.join(tmp, "marks");
@@ -435,4 +444,27 @@ test("git is told the validated git and common directories, so a commondir file 
   // an absolute commondir is checked re-based onto the root, and must be used the same way
   fs.writeFileSync(path.join(adminDir, "commondir"), "/pin-main/.git\n");
   assert.equal(await common(), want);
+});
+
+test("a commondir file that appears after the check is not followed, also in a repository that has none (bare, plain work tree)", async () => {
+  const other = path.join(tmp, "late-other");
+  fs.mkdirSync(other);
+  git(other, "init", "-q");
+  git(other, "commit", "-q", "--allow-empty", "-m", "elsewhere");
+  const bare = path.join(root, "late-bare.git");
+  git(tmp, "init", "-q", "--bare", bare);
+  const plain = path.join(root, "late-plain");
+  fs.mkdirSync(plain);
+  git(plain, "init", "-q");
+  for (const [dir, gitDir] of [[bare, bare], [plain, path.join(plain, ".git")]] as const) {
+    const repo = (await findRepo(root, dir))!;
+    assert.ok(repo);
+    const want = fs.realpathSync(gitDir);
+    const common = async () => (await runGit(dir, [...repoArgs(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
+    assert.equal(await common(), want);
+    fs.writeFileSync(path.join(gitDir, "commondir"), path.join(other, ".git") + "\n"); // created after the check
+    assert.equal(await common(), want, `${dir}: git read a commondir file that did not exist when the repository was checked`);
+    const isBare = (await runGit(dir, [...repoArgs(repo), "rev-parse", "--is-bare-repository"])).stdout.trim();
+    assert.equal(isBare, repo.kind === "bare" ? "true" : "false");
+  }
 });
