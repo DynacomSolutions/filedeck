@@ -441,6 +441,8 @@ export interface TrashResult {
   path?: string;
   error?: string;
   conflict?: boolean;
+  /** the item was restored, but something is left to do (its copy in the trash could not be removed) */
+  warning?: string;
 }
 export type TrashConflict = "fail" | "rename" | "replace";
 const trashPost = <T,>(node: string, op: string, body: unknown) =>

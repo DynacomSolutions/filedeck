@@ -6,7 +6,7 @@ import { FileIcon } from "./FileIcon";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 import { useDialogFocus } from "./dialogFocus";
-import { trashKey } from "./trashNav";
+import { trashKey, trashSummary } from "./trashNav";
 
 type Dlg =
   | { k: "del"; ids: string[] }
@@ -77,11 +77,7 @@ export function TrashBrowser({ node, volume, onVolume, onClose, onStatus }: { no
     }
   };
 
-  const summarise = (label: string, rs: TrashResult[]) => {
-    const ok = rs.filter((r) => r.ok).length;
-    const bad = rs.filter((r) => !r.ok && !r.conflict);
-    onStatus(`${label}: ${ok} done${bad.length ? `, ${bad.length} failed (${bad[0]!.error})` : ""}`);
-  };
+  const summarise = (label: string, rs: TrashResult[]) => onStatus(trashSummary(label, rs));
   const vol = current?.volume ?? "/";
   const restore = async (ids: string[], o: { conflict?: "fail" | "rename" | "replace"; toDir?: string } = {}) => {
     setBusy(true);

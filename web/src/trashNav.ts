@@ -47,3 +47,13 @@ export function trashKey(ids: readonly string[], s: TrashNav, key: string, o: { 
       return null;
   }
 }
+
+/** The status line after a restore or a permanent delete: how many were done, the first failure, and the first warning of a done item. */
+export function trashSummary(label: string, rs: readonly { ok: boolean; conflict?: boolean; error?: string; warning?: string }[]): string {
+  const ok = rs.filter((r) => r.ok).length;
+  const bad = rs.filter((r) => !r.ok && !r.conflict);
+  const warned = rs.filter((r) => r.ok && r.warning);
+  const failed = bad.length ? `, ${bad.length} failed (${bad[0]!.error})` : "";
+  const warn = warned.length ? `. ${warned.length > 1 ? `${warned.length} items need attention. First: ` : ""}${warned[0]!.warning}` : "";
+  return `${label}: ${ok} done${failed}${warn}`;
+}
