@@ -1124,9 +1124,9 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
     });
   }
   const work = await makeWork("s", plan.root, destLoc, undefined, guard);
-  const who = await toolIdentity();
+  // The copies of the parts are opened by name, inside the agent's 0700 work folder, which the unprivileged user cannot reach: a split set
+  // is therefore extracted by 7-Zip as the agent itself, still inside the sandbox (read: the parts folder; write: the staging folder).
   try {
-    if (who) await fs.chown(work.at, who.uid, who.gid);
     const base = path.basename(real).slice(0, -4);
     await pinned(plan.root, path.dirname(real), async (dirAt) => {
       const dirSt = await fs.stat(dirAt);
@@ -1142,7 +1142,6 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
         try {
           const copyTo = path.join(work.dir, name);
           await fs.copyFile(LINUX ? `/proc/self/fd/${opened.fh.fd}` : path.join(dirAt, name), copyTo, C.COPYFILE_EXCL);
-          if (who) await fs.chown(copyTo, who.uid, who.gid); // the private folder is the agent's alone: the tool user is given its own copy to read
         } finally {
           await opened.fh.close().catch(() => undefined);
         }
@@ -1153,7 +1152,7 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
     throw e;
   }
   const copy = path.join(work.dir, path.basename(real));
-  return { arg: copy, sz: { arg: copy, roots: [work.fd], runAs: who }, done: work.done };
+  return { arg: copy, sz: { arg: copy, roots: [work.fd] }, done: work.done };
 }
 
 /**

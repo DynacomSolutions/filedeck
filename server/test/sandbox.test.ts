@@ -450,11 +450,11 @@ for (const mode of ["landlock", "fallback", "off"] as const) {
       resetSandbox();
       const state = (await sandboxInfo()).state;
       assert.equal(state, mode);
-      const r = await run("sh", ["-c", "id -u; id -g; grep ^Groups: /proc/self/status"], { uid: 65534, gid: 65534 });
+      const r = await run("sh", ["-c", "id -u; id -g; id -G"], { uid: 65534, gid: 65534 }); // /proc is not readable inside Landlock
       const [u, g, groups] = r.stdout.split("\n");
       assert.equal(u, "65534", r.stderr);
       assert.equal(g, "65534");
-      if (mode !== "fallback") assert.match(groups!, /^Groups:\s*$/, "the supplementary groups are cleared when the launcher is there"); // spawn's own uid option cannot clear them
+      if (mode !== "fallback") assert.equal(groups, "65534", "the supplementary groups are cleared when the launcher is there"); // spawn's own uid option cannot clear them
     } finally {
       for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER"].entries()) {
         if (prev[i] === undefined) delete process.env[k];
