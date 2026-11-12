@@ -164,9 +164,12 @@ async function installFixture(page, opts = {}) {
     if (pathname.endsWith('/api/diff/jobs') && req.method() === 'POST') return json({ id: 'diff-fixture', kind: 'diff', title: 'Compare', state: 'running', progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: '' }, createdAt: Date.now() });
     if (pathname === '/api/diff/jobs/diff-fixture') return json({
       id: 'diff-fixture', kind: 'diff', title: 'Compare', state: 'done', progress: { bytes: 0, totalBytes: 0, entries: 3, totalEntries: 3, current: '' }, createdAt: Date.now(),
-      stats: { dirsScanned: 1, dirsQueued: 0, entries: 3, hashed: 0, hashQueued: 0, hashedBytes: 0, cacheHits: 0, cacheMisses: 0, startedAt: Date.now() - 100, finishedAt: Date.now(), rev: 1, warnings: [] },
+      stats: { dirsScanned: 1, dirsQueued: 0, entries: 3, hashed: 0, hashQueued: 0, hashedBytes: 0, cacheHits: 0, cacheMisses: 0, startedAt: Date.now() - 100, finishedAt: Date.now(), rev: 1,
+        warnings: opts.skipped ? ['2 paths were left out because the include/exclude patterns are too expensive to match against them (the comparison is incomplete), for example: deep/odd-name-one, deep/odd-name-two'] : [],
+        ...(opts.skipped ? { incomplete: true, skipped: { count: 2, paths: ['deep/odd-name-one', 'deep/odd-name-two'] } } : {}) },
       files: { identical: 1, different: 1, leftOnly: 1, rightOnly: 0, error: 0 }, dirs: { identical: 0, different: 0, leftOnly: 0, rightOnly: 0, error: 0 },
     });
+    if (pathname === '/api/diff/jobs/diff-fixture/rows' && opts.skipped) return json({ rel: url.searchParams.get('rel') || '', listed: true, status: 'identical', rev: 1, rows: [] });
     if (pathname === '/api/diff/jobs/diff-fixture/rows' && opts.manyRows) return json({ rel: url.searchParams.get('rel') || '', listed: true, status: 'different', rev: 1, rows: Array.from({ length: 40 }, (_, i) => ({ p: `entry-${String(i).padStart(2, '0')}.txt`, status: i % 3 === 0 ? 'different' : 'identical', l: diffSide(128), r: diffSide(i % 3 === 0 ? 256 : 128) })) });
     if (pathname === '/api/diff/jobs/diff-fixture/rows') return json({ rel: url.searchParams.get('rel') || '', listed: true, status: 'different', rev: 1, rows: [
       { p: 'tracked.txt', status: 'different', l: diffSide(128), r: diffSide(256), newer: 'right' },
@@ -1332,6 +1335,36 @@ async function verifyCompareToolbarCompact(browser) {
   assert.deepEqual(failures, [], 'the compact Compare toolbar');
 }
 
+// A compare that left paths out reports them: the count and the first paths show in the warning area (full and compact toolbar
+// layouts), and the view never presents the result as complete ("Comparison done", "Nothing to show ... with the current filters").
+async function verifyCompareSkippedPaths(browser) {
+  const split = { i: 'p3', d: 'v', k: [{ i: 'p1', n: nodeName, p: '/work' }, { i: 'p2', n: nodeName, p: '/work' }] };
+  const state = stateOf(split, { g: { l: [nodeName, '/work'], r: [nodeName, '/work'], a: 'p1', b: 'p2' } });
+  const failures = [];
+  for (const [width, height] of [[1365, 900], [390, 844]]) {
+    const { context, page } = await openPage(browser, { viewport: { width, height }, state, fixture: { skipped: true } });
+    try {
+      const warn = page.locator('.side-cmp-warn').filter({ hasText: /2 paths skipped: comparison incomplete/ }).first();
+      await warn.waitFor({ state: 'visible', timeout: 10000 });
+      const full = await warn.evaluate((el) => el.parentElement?.getAttribute('aria-label') || el.closest('[data-tip]')?.getAttribute('data-tip') || '');
+      void full;
+      await warn.hover();
+      await page.getByText(/odd-name-one, deep\/odd-name-two/).first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => failures.push(`${width}px: the skipped paths are not named in the warning`));
+      const box = await warn.boundingBox();
+      if (!box || box.x < 0 || box.x + box.width > width + 1) failures.push(`${width}px: the warning is outside the window ${JSON.stringify(box)}`);
+      const text = await page.evaluate(() => document.body.innerText);
+      if (/Nothing to show here with the current filters/.test(text)) failures.push(`${width}px: the empty state says there is nothing to show with the current filters`);
+      if (!/comparison is incomplete|some paths were skipped/.test(text + '\n' + (await page.locator('[role=status]').allTextContents()).join('\n'))) failures.push(`${width}px: nothing says the comparison is incomplete`);
+      const status = (await page.locator('p.visually-hidden[role=status]').allTextContents()).join(' | ');
+      if (/Comparison done(?!, incomplete)/.test(status)) failures.push(`${width}px: the status says "Comparison done" for an incomplete compare: ${status}`);
+      if (!/incomplete/.test(status)) failures.push(`${width}px: the status does not say incomplete: ${status}`);
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'a compare that skipped paths says so');
+}
+
 // Address bar: every control is at least 24x24 CSS px with no overlap (2.5.8), 44 px tall, the last breadcrumb segment stays
 // visible, and focusing "Edit address" with the keyboard does not start editing (Enter or Space does).
 async function verifyAddressBar(browser) {
@@ -1530,6 +1563,7 @@ const checks = [
   ['address bar targets and keyboard', verifyAddressBar],
   ['Compare toolbar is not clipped', verifyCompareToolbar],
   ['Compare toolbar is compact on a phone', verifyCompareToolbarCompact],
+  ['a compare with skipped paths is marked incomplete', verifyCompareSkippedPaths],
   ['no horizontal overflow', verifyNoHorizontalOverflow],
   ['rows visible in a short window', verifyShortWindowRows],
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],
