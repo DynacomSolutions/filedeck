@@ -8,42 +8,42 @@ import { Readable } from "node:stream";
  * of a very large file) and the job queue has its own cancel and pause, so a call ends when the agent answers, the caller
  * aborts, or the connection breaks. Keep-alive is on so the short calls of a listing reuse connections.
  */
-const plain = new http.Agent({ keepAlive: true });
-const secure = new https.Agent({ keepAlive: true });
-
 /**
- * A pooled connection the server has just closed fails the next request with a reset. That race is made rare twice over: the servers keep an idle
- * connection longer than this (see `SERVER_KEEP_ALIVE_MS`), and this side drops an idle one after `CLIENT_IDLE_MS`. It is closed completely by the retry in
- * `agentFetch`.
+ * A pooled connection the server has just closed fails the next request with a reset. That race is made rare in two ways: the servers keep an idle connection
+ * longer than this (see `SERVER_KEEP_ALIVE_MS`), and this side drops an idle one after `CLIENT_IDLE_MS`, or sooner when the server announces a shorter
+ * `Keep-Alive: timeout=` (Node's agent honours the announced value when it is below its own). Neither closes the race completely, so a read is also repeated (below).
  */
 export const CLIENT_IDLE_MS = 30_000;
 export const SERVER_KEEP_ALIVE_MS = 65_000;
-const dropWhenIdle = new WeakSet<object>();
-const busy = new WeakSet<object>();
-for (const a of [plain, secure]) {
-  a.on("free", (socket) => {
-    // only while the connection waits in the pool: a call in progress may stay silent as long as the work takes (the timeout is cleared when a request takes the socket)
-    socket.setTimeout(CLIENT_IDLE_MS);
-    if (dropWhenIdle.has(socket)) return;
-    dropWhenIdle.add(socket);
-    socket.on("timeout", () => {
-      if (!busy.has(socket)) socket.destroy();
-    });
-  });
-}
+const plain = new http.Agent({ keepAlive: true, timeout: CLIENT_IDLE_MS });
+const secure = new https.Agent({ keepAlive: true, timeout: CLIENT_IDLE_MS });
 
 const RESET = new Set(["ECONNRESET", "EPIPE"]);
 
-/** Fetch for the hub's calls to an agent; a call that fails on a reused pooled connection before any answer is repeated once on a new one when its body can be sent again. */
-export async function agentFetch(url: string, init?: RequestInit): Promise<Response> {
-  const body = init?.body;
-  const replayable = body === undefined || body === null || typeof body === "string" || body instanceof Uint8Array;
+/**
+ * `replay: false` for a GET that has an effect on the agent (the one-use zip ticket): it is never repeated.
+ * A request with a body of its own kind is never repeated either; see `agentFetch`.
+ */
+export type AgentFetchInit = RequestInit & { replay?: boolean };
+
+/**
+ * Fetch for the hub's calls to an agent.
+ *
+ * Only a GET or HEAD is repeated, once, on a new connection, when it fails with a reset on a reused pooled connection before any answer. From this side "the
+ * server had already closed the idle connection" and "the server read the request, started the work and the connection was cut" look the same (a write to a
+ * socket the peer closed succeeds), so a request that changes something (POST, PUT, DELETE, PATCH) could be carried out twice: it is never repeated, and the
+ * caller sees the error. A streamed body cannot be sent again at all, and so it does not use the pool: it gets a connection of its own (a request without a
+ * body, which is how the proxy forwards a bodiless POST, uses the pool like a GET).
+ */
+export async function agentFetch(url: string, init?: AgentFetchInit): Promise<Response> {
+  const method = (init?.method ?? "GET").toUpperCase();
   try {
     return await agentFetchOnce(url, init, false);
   } catch (e) {
     const err = e as { code?: string; message?: string; reusedSocket?: boolean };
     const reset = RESET.has(err.code ?? "") || err.message === "socket hang up";
-    if (replayable && reset && err.reusedSocket === true && !init?.signal?.aborted) return agentFetchOnce(url, init, true);
+    const safe = (method === "GET" || method === "HEAD") && init?.replay !== false && (init?.body === undefined || init.body === null);
+    if (safe && reset && err.reusedSocket === true && !init?.signal?.aborted) return agentFetchOnce(url, init, true);
     throw e;
   }
 }
@@ -78,11 +78,8 @@ function agentFetchOnce(url: string, init: RequestInit | undefined, fresh: boole
     });
     const onAbort = () => req.destroy(signal?.reason instanceof Error ? signal.reason : new DOMException("aborted", "AbortError"));
     signal?.addEventListener("abort", onAbort, { once: true });
-    req.on("socket", (socket) => {
-      busy.add(socket);
-      socket.setTimeout(0);
-      req.once("close", () => busy.delete(socket));
-    });
+    // the agent's idle timeout belongs to a connection waiting in the pool; a call in progress may stay silent as long as the work takes
+    req.on("socket", (socket) => socket.setTimeout(0));
     req.on("error", (e) => {
       signal?.removeEventListener("abort", onAbort);
       if (!signal?.aborted && req.reusedSocket) (e as { reusedSocket?: boolean }).reusedSocket = true;

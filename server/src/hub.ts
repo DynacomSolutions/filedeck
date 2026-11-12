@@ -14,7 +14,7 @@ import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
 import { withAgentToken } from "./agent-auth.ts";
-import { agentFetch } from "./agent-fetch.ts";
+import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
@@ -284,12 +284,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const url = new URL(c.req.url);
     // the node segment is matched as sent: its decoded form can have another length
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
-    const hasBody = !["GET", "HEAD"].includes(c.req.method);
-    const init: RequestInit & { duplex?: string } = {
+    // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
+    const len0 = c.req.header("content-length");
+    const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
+    const init: AgentFetchInit & { duplex?: string } = {
       method: c.req.method,
       headers: clean(c.req.raw.headers, false),
       signal: c.req.raw.signal,
       redirect: "manual",
+      // the zip download that redeems a one-use ticket must not be sent twice
+      ...(c.req.method === "GET" && rest === "/api/fs/zip" && url.searchParams.has("ticket") ? { replay: false } : {}),
     };
     stripBrowserContext(init.headers as Headers); // judged above; the agent sees a hub call
     // who is asking, as this hub saw it (the last hop of the forwarded chain behind a proxy, else the socket's peer: what the audit log records)
