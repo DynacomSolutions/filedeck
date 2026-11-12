@@ -481,8 +481,7 @@ export async function moveReal(from: string, to: string, overwrite: boolean, roo
       await assertIntact(true); // before anything at the destination is removed
       if (overwrite) {
         await assertWritableAt(root, path.dirname(to), path.basename(to), true); // where `to` really is, and what it holds
-        await rmTree(to, { force: true, guard });
-        oldRemoved();
+        await rmTree(to, { force: true, guard, removed: oldRemoved }); // the message says "removed" only if something really was
         await assertIntact(true); // too late to spare the old item, but the answer must say what happened
         await fs.rename(built, to);
       } else {
@@ -616,8 +615,7 @@ export async function copy(root: string, from: string, toDir: string, opts: Copy
         await assertWritableAt(root, dstAt, name0, true);
         const [src, cur] = [await fs.lstat(built), await fs.lstat(dest).catch(() => null)];
         if (cur && !(src.isFile() && cur.isFile())) {
-          await rmTree(dest, { force: true, guard: walkGuard(root) });
-          oldRemoved();
+          await rmTree(dest, { force: true, guard: walkGuard(root), removed: oldRemoved });
         }
         await assertIntact(true);
         await fs.rename(built, dest);

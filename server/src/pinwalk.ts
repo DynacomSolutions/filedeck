@@ -223,6 +223,18 @@ async function sweep(parentAt: string): Promise<void> {
           }
           const mine = path.join(parentAt, `${STAGING_PREFIX}swept-${randomUUID().slice(0, 12)}`);
           await fs.rename(p, mine); // out of the name a stopped copy looks for, before anything is removed
+          const back = () => fs.rename(mine, p).catch(() => undefined);
+          // by name, so make sure it is the folder the checks were made on, and that it has not been refreshed since (a stopped copy that
+          // resumed refreshes its folder's times through its own descriptor): otherwise put it back untouched
+          const now = await fs.lstat(mine).catch(() => null);
+          if (!now || now.dev !== st.dev || now.ino !== st.ino) {
+            await back();
+            continue;
+          }
+          if (!e.name.startsWith(STAGING_PREFIX + RUN + "-") && (await fh.stat()).mtimeMs >= cutoff) {
+            await back();
+            continue;
+          }
           p = mine;
           if (inner.length) await rmTree(path.join(dirAt(fh, p), "staged"), { force: true });
         } finally {
@@ -273,6 +285,8 @@ export async function withStaging<T>(parentAt: string, fn: (stage: string, intac
     ours = true;
     const [dev, ino] = [s.dev, s.ino];
     const intact = async (needStaged = false): Promise<boolean> => {
+      // first say that the folder is in use (a sweep that has taken it by name looks at these times and puts it back)
+      await fh!.utimes(new Date(), new Date()).catch(() => undefined);
       const cur = await fs.lstat(p).catch(() => null);
       if (!cur || !cur.isDirectory() || cur.dev !== dev || cur.ino !== ino) return false; // gone, or another folder under the name
       return !needStaged || (await fs.lstat(stagedEntry(dirAt(fh!, p))).catch(() => null)) !== null;

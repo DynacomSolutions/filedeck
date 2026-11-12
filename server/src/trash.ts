@@ -107,6 +107,8 @@ export interface TrashResult {
   error?: string;
   /** the destination exists (retry with a conflict policy) */
   conflict?: boolean;
+  /** the item was restored, but something is left to do (its copy in the trash could not be removed) */
+  warning?: string;
 }
 
 /** Remove one item folder of the trash store, entering it through descriptors (nothing inside is followed). */
@@ -137,9 +139,18 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
           if (policy === "rename") final = await ops.uniqueName(dstAt, base);
           else await ops.trash(root, dest.virtual); // the replaced item stays recoverable
         }
-        await pinDirW(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false, root));
-        await removeItem(root, dir, id);
-        return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final) };
+        let warning: string | undefined;
+        try {
+          await pinDirW(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false, root));
+        } catch (e) {
+          if (!(e instanceof ops.FsError && e.extra?.copyComplete === true)) throw e;
+          // The item is back in place and its trash copy could not be removed (it was linked or copied, not renamed). The item stays in the
+          // list for as long as its data is on disk; try once more to clear it, else say so.
+          warning = `The item is restored. Its copy in the trash could not be removed: ${String(e.extra.reason)}. It is still listed in the trash; delete it there.`;
+        }
+        if (warning) await removeItem(root, dir, id).then(() => (warning = undefined), () => undefined);
+        else await removeItem(root, dir, id);
+        return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final), ...(warning ? { warning } : {}) };
       });
       out.push(res);
     } catch (e) {

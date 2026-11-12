@@ -893,3 +893,88 @@ test("the sweep takes a leftover out of its name before it empties it, and judge
   assert.equal(fs.readFileSync(path.join(root, "dst", `${STAGING_PREFIX}aaaa-live`, "staged/deep/g"), "utf8"), "written just now");
   assert.equal(nameThere, false, "the folder had left its name when the first entry was removed, so a stopped copy sees it gone");
 });
+
+const sweepScene = (name: string) => {
+  fresh(name);
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/a.txt"), "a");
+  fs.mkdirSync(path.join(root, "dst"));
+  const old = new Date(Date.now() - 3 * 86400_000);
+  const cand = path.join(root, "dst", `${STAGING_PREFIX}cccc-old`);
+  fs.mkdirSync(path.join(cand, "staged"), { recursive: true });
+  fs.writeFileSync(path.join(cand, "staged/f"), "data");
+  fs.chmodSync(cand, 0o700);
+  for (const x of [path.join(cand, "staged/f"), path.join(cand, "staged"), cand]) fs.utimesSync(x, old, old);
+  return cand;
+};
+
+test("a sweep that finds another folder under the name it just renamed puts that folder back", async () => {
+  const cand = sweepScene("sweep-swapped");
+  const real = fsp.rename.bind(fsp);
+  mock.method(fsp, "rename", async (a: string, b: string) => {
+    if (path.basename(a) === path.basename(cand) && path.basename(b).includes("swept-")) {
+      fs.renameSync(cand, `${cand}-aside`); // the name is swapped after the checks were made
+      fs.mkdirSync(cand, { mode: 0o755 });
+      fs.writeFileSync(path.join(cand, "users-file.txt"), "theirs");
+    }
+    return real(a, b);
+  });
+  await ops.copy(root, "/src/a.txt", "/dst");
+  assert.equal(fs.readFileSync(path.join(cand, "users-file.txt"), "utf8"), "theirs", "the swapped-in folder is back under its name");
+  assert.ok(!fs.readdirSync(path.join(root, "dst")).some((n) => n.includes("swept-")), "nothing is left under the sweep's name");
+});
+
+test("a sweep backs out of a candidate whose times became fresh after the age check", async () => {
+  const cand = sweepScene("sweep-refreshed");
+  const real = fsp.rename.bind(fsp);
+  mock.method(fsp, "rename", async (a: string, b: string) => {
+    await real(a, b);
+    if (path.basename(a) === path.basename(cand) && path.basename(b).includes("swept-")) fs.utimesSync(b, new Date(), new Date()); // the stopped copy resumed and refreshed its folder
+  });
+  await ops.copy(root, "/src/a.txt", "/dst");
+  assert.equal(fs.readFileSync(path.join(cand, "staged/f"), "utf8"), "data", "put back with its content");
+  assert.ok(!fs.readdirSync(path.join(root, "dst")).some((n) => n.includes("swept-")));
+});
+
+test("the message about the item to replace says removed only when something was removed, and when removal stopped partway", async () => {
+  // nothing at the destination: nothing was removed
+  fresh("late-none");
+  fs.mkdirSync(path.join(root, "src/item"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/item/a.txt"), "new");
+  fs.mkdirSync(path.join(root, "dst"));
+  const realLstat = fsp.lstat.bind(fsp);
+  mock.method(fsp, "lstat", async (p: string, ...r: never[]) => {
+    if (path.basename(String(p)) === "tree" && String(p).startsWith("/proc/self/fd/")) fs.rmSync(path.join(root, "dst", stageIn(path.join(root, "dst"))!), { recursive: true });
+    return realLstat(p, ...r);
+  });
+  forceExdevOnce();
+  let err = await ops.rename(root, "/src/item", "/dst/tree", true).then(() => null, (e) => e);
+  assert.ok(err, "no success");
+  assert.match(err.message, /Nothing was moved or replaced/);
+  assert.doesNotMatch(err.message, /already been removed/);
+  mock.restoreAll();
+  // removal stops partway: one file is gone, the next fails and the working folder is gone too
+  for (const kindOf of ["copy", "move"] as const) {
+    fresh(`late-part-${kindOf}`);
+    fs.mkdirSync(path.join(root, "src/tree"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src/tree/n.txt"), "new");
+    fs.mkdirSync(path.join(root, "dst/tree"), { recursive: true });
+    fs.writeFileSync(path.join(root, "dst/tree/a.txt"), "old");
+    fs.writeFileSync(path.join(root, "dst/tree/b.txt"), "old");
+    const realUnlink = fsp.unlink.bind(fsp);
+    mock.method(fsp, "unlink", async (p: string) => {
+      if (path.basename(p) === "b.txt" && p.startsWith("/proc/self/fd/")) {
+        for (let i = 0; i < 500 && fs.existsSync(path.join(root, "dst/tree/a.txt")); i++) await new Promise((r) => setTimeout(r, 10)); // a.txt goes first
+        fs.rmSync(path.join(root, "dst", stageIn(path.join(root, "dst"))!), { recursive: true });
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      }
+      return realUnlink(p);
+    });
+    if (kindOf === "move") forceExdevOnce();
+    const run = kindOf === "copy" ? ops.copy(root, "/src/tree", "/dst", { overwrite: true }) : ops.rename(root, "/src/tree", "/dst/tree", true);
+    err = await run.then(() => null, (e) => e);
+    assert.ok(err, `${kindOf}: no success`);
+    assert.match(err.message, /already been removed/, `${kindOf}: ${err.message}`);
+    mock.restoreAll();
+  }
+});
