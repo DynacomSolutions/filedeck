@@ -98,7 +98,7 @@ after(() => {
 });
 
 const live = (name: string, fn: () => Promise<void>) =>
-  test(name, { skip: IS_ROOT ? false : "chart capability set: skipped (not running as root)" }, async (t) => {
+  test(name, { skip: IS_ROOT ? false : "sandbox live: skipped (not running as root)" }, async (t) => {
     if (box.state !== "landlock") return t.skip(`skipped (${box.why})`);
     await fn();
   });
