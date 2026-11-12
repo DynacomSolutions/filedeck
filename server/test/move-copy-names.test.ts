@@ -24,6 +24,14 @@ const OLD = new Date("2001-02-03T04:05:06Z");
 function forceExdevOnce() {
   const real = fsp.rename.bind(fsp);
   let first = true;
+  const realLink = fsp.link.bind(fsp);
+  mock.method(fsp, "link", async (a: string, b: string) => {
+    if (first) {
+      first = false;
+      throw Object.assign(new Error("EXDEV"), { code: "EXDEV" }); // a file is placed with link(2), which fails across devices as rename(2) does
+    }
+    return realLink(a, b);
+  });
   return mock.method(fsp, "rename", async (from: string, to: string) => {
     if (first) {
       first = false;

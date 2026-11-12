@@ -19,6 +19,8 @@ COPY server server
 # the chart's capability list, which a launcher test reads so that the test and the chart cannot drift
 COPY k8s/templates/agents.yaml k8s/templates/agents.yaml
 COPY web web
+# the skip gate, which its own test runs
+COPY scripts/check-test-skips.mjs scripts/check-test-skips.mjs
 RUN npm run typecheck \
  && npm run build \
  && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SMBCLIENT=1 npm test && npm prune --omit=dev --workspace=server

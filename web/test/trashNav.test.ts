@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { trashKey, type TrashNav } from "../src/trashNav.ts";
+import { trashKey, trashSummary, type TrashNav } from "../src/trashNav.ts";
 
 const ids = ["a", "b", "c", "d"];
 const none: TrashNav = { focus: null, anchor: null, sel: new Set() };
@@ -35,4 +35,18 @@ test("Ctrl+Arrow moves focus only, Ctrl+A selects all, other keys are not used",
   assert.equal(trashKey(ids, s0, "a", plain), null);
   assert.equal(trashKey(ids, s0, "Enter", plain), null);
   assert.equal(trashKey([], none, "ArrowDown", plain), null);
+});
+
+test("the summary of a restore shows the warning of an item that was restored with something left to do", () => {
+  assert.equal(trashSummary("Restore", [{ ok: true }, { ok: true }]), "Restore: 2 done");
+  assert.equal(trashSummary("Restore", [{ ok: true }, { ok: false, error: "Not found" }]), "Restore: 1 done, 1 failed (Not found)");
+  assert.equal(trashSummary("Restore", [{ ok: false, conflict: true }]), "Restore: 0 done");
+  assert.equal(
+    trashSummary("Restore", [{ ok: true, warning: "The item is restored. Its copy in the trash could not be removed: an entry is in use." }]),
+    "Restore: 1 done. The item is restored. Its copy in the trash could not be removed: an entry is in use.",
+  );
+  assert.equal(
+    trashSummary("Restore", [{ ok: true, warning: "First." }, { ok: true, warning: "Second." }, { ok: false, error: "Not found" }]),
+    "Restore: 2 done, 1 failed (Not found). 2 items need attention. First: First.",
+  );
 });

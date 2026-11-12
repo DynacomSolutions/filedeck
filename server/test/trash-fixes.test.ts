@@ -9,7 +9,7 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import * as ops from "../src/fsops.ts";
 import { uploadChunk } from "../src/chunked.ts";
-import { emptyTrash, listTrash } from "../src/trash.ts";
+import { deleteItems, emptyTrash, listTrash, restoreItems } from "../src/trash.ts";
 import { withoutReadOnly } from "../src/pinwalk.ts";
 
 // These tests call the operations directly, outside a request: they run in an explicit scope with no read-only prefixes.
@@ -76,4 +76,29 @@ test("trash on a volume the drive list hides is still listed", async () => {
   const hit = v.find((x) => x.volume === "/hiddenvol");
   assert.ok(hit);
   assert.equal(hit.items.length, 1);
+});
+
+test("a restore whose trash copy cannot be removed reports the item as restored, with the reason, and the item stays listed", async () => {
+  const dir = path.join(tmp, "restore-two");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "f.txt"), "content");
+  const meta = await ops.trash(tmp, "/restore-two/f.txt");
+  const realUnlink = fsp.unlink.bind(fsp);
+  mock.method(fsp, "unlink", async (p: string) => {
+    if (path.basename(p) === "data" && p.startsWith("/proc/self/fd/")) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    return realUnlink(p);
+  });
+  try {
+    const [r] = await restoreItems(tmp, "/", [meta.id]);
+    assert.equal(r!.ok, true, JSON.stringify(r));
+    assert.match(r!.warning ?? "", /restored.*could not be removed/);
+    assert.equal(fs.readFileSync(path.join(dir, "f.txt"), "utf8"), "content");
+    const listed = (await listTrash(tmp, "")).flatMap((v) => v.items).find((i) => i.id === meta.id);
+    assert.ok(listed, "its data is still in the trash, so it is still listed");
+    assert.notEqual(listed.orphan, true, "the item keeps its record, so the list still shows which item it is");
+    assert.equal(listed.originalPath, "/restore-two/f.txt");
+  } finally {
+    mock.restoreAll();
+  }
+  await deleteItems(tmp, "/", [meta.id]);
 });
