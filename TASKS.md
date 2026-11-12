@@ -128,7 +128,7 @@ ETA: 2026-10-31 17:00 ICT
 | 77 | After clicking a column header (sort and similar), keyboard navigation focuses the file list again | done | claude-20261031-rename-sort-focus | rename-sort-focus | | 2026-10-31 17:00 ICT | https://github.com/DynacomSolutions/filedeck/pull/138<br>CI green; web tests 105/105; checked in headless Chromium with mocked data. |
 
 ## 11. Background size jobs
-ETA: 2026-11-12 17:00 ICT
+ETA: 2026-11-12 19:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 78 | Find why size jobs for .worktrees and DynacomSolutions keep running | done | claude-20261031-size-jobs | | | 2026-10-31 16:00 ICT | Watcher overflow marks whole watched trees stale, so du rescans 5M+ files.<br>Size commits take up to 3 h.<br>Every /api/du call is a visible job, queued behind overlapping scans. |
@@ -152,7 +152,7 @@ ETA: 2026-11-12 17:00 ICT
 | 100 | Release v0.3.35 | done | claude-20261101-release-v0335 | release-v0335 | 11.97, 11.98, 11.99 | | Ships 11.97 to 11.99 and the /metrics gauges<br>v0.3.34 build failed: multi-line damaged-store log, fixed in https://github.com/DynacomSolutions/filedeck/pull/166<br>Live 17:11 ICT; gauges in VictoriaMetrics, all 4 agents available 1, damaged 0 |
 | 101 | 300k-children tree test is flaky under load | done | claude-20261101-flakes | flake-300k-tree | | | https://github.com/DynacomSolutions/filedeck/pull/173 merged, CI green<br>Cause: slow-read timing note logged under load; assertion ignores only that format<br>20 of 20 under load |
 | 102 | Make size-store and watcher tests pass under heavy host load | done | claude-20261101-flakes | flake-load-tests | | | https://github.com/DynacomSolutions/filedeck/pull/176 merged, CI green<br>Causes: fixed time limits in tests; now wait on events<br>Each file 10 of 10 under load; full suite 2 of 2 |
-| 135 | Timing-dependent server tests made deterministic; a hung test fails by name | in_progress | claude-20261112-rv-test-flakes | rv-test-flakes | | 2026-11-12 17:00 ICT | Seen on 12 Nov: size-store-fresh killed-walk test stalls a CI step; four others failed once under load |
+| 135 | Timing-dependent server tests made deterministic; a hung test fails by name | in_review | claude-20261112-rv-test-flakes | rv-test-flakes | | 2026-11-12 19:00 ICT | Stall cause: an uncleared cancel timer after a failed assertion in size-store-fresh<br>https://github.com/DynacomSolutions/filedeck/pull/211 |
 
 ## 12. Preview, editor and mobile layout
 ETA: 2026-11-01 01:00 ICT
@@ -165,7 +165,7 @@ ETA: 2026-11-01 01:00 ICT
 
 ## 13. Request and filesystem hardening
 Findings from the 12 November 2026 review: request handling, read-only volumes, git and search inputs, and operations that must stay inside the root.
-ETA: 2026-11-12 18:00 ICT
+ETA: 2026-11-12 20:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | done | claude-20261112-rv-hub | rv-request-guard | | | Merged https://github.com/DynacomSolutions/filedeck/pull/188, CI green, independent review clean on second pass<br>JSON bodies capped at 16 MiB; refused requests are audited |
@@ -179,7 +179,7 @@ ETA: 2026-11-12 18:00 ICT
 | 111 | Chart, workflow and dependency hardening: token text, hub network policy, pinned actions, updates | done | claude-20261112-rv-chart | rv-chart-workflows | | | Merged https://github.com/DynacomSolutions/filedeck/pull/184, CI green on re-run<br>Hub network policy and generated agent token are opt-in values |
 | 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | done | claude-20261112-rv-sources | rv-smb-followup | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/204, CI green<br>Listing cap is 100,000 entries<br>Image build stage not exercised until 13.131 |
 | 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | done | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | | Merged https://github.com/DynacomSolutions/filedeck/pull/206, CI green<br>Found and fixed: final image lacked server dependencies and crashed at start<br>Cold build 4m31s |
-| 132 | Archive tools run inside the read sandbox, limited to the pinned source folder | in_review | claude-20261112-rv-archives | rv-archive-sandbox | 13.106, 13.108 | 2026-11-12 18:00 ICT | From the reviews of 13.108<br>https://github.com/DynacomSolutions/filedeck/pull/210 |
+| 132 | Archive tools run inside the read sandbox, limited to the pinned source folder | in_review | claude-20261112-rv-archives | rv-archive-sandbox | 13.106, 13.108 | 2026-11-12 20:00 ICT | From the reviews of 13.108<br>https://github.com/DynacomSolutions/filedeck/pull/210 |
 | 133 | Git and search follow-ups: worktree lock text, launcher errors, search gate, compare skips | done | claude-20261112-rv-search-git | rv-git-search-followup | 13.106, 13.107 | | Merged https://github.com/DynacomSolutions/filedeck/pull/208, CI green, four review passes<br>Sandbox also refuses sockets; forwarded addresses need FILEDECK_TRUSTED_PROXIES<br>Default search gate is 3 |
 
 ## 14. Data-safe file operations
@@ -215,7 +215,7 @@ ETA: 2026-11-12 15:00 ICT
 
 ## 17. Keyboard and screen reader access
 Findings from the 12 November 2026 accessibility review against WCAG 2.2 A and AA.
-ETA: 2026-11-12 19:00 ICT
+ETA: 2026-11-12 21:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 124 | File list exposes current and selected items; focus returns after actions; Tab stays in the panel | done | claude-20261112-rv-panel | rv-list-access | 15.118 | | Merged https://github.com/DynacomSolutions/filedeck/pull/203, CI green<br>Panels switch with Alt+PageDown and Alt+PageUp; F6 unchanged<br>Not checked with a screen reader |
