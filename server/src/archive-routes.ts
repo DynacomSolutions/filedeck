@@ -109,7 +109,8 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
       "X-Content-Type-Options": "nosniff",
     };
     if (c.req.method === "HEAD") return new Response(null, { headers });
-    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal);
+    await ar.assertSandboxUsable();
+    const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root });
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
   });
   app.post("/api/fs/zip-ticket", async (c) => {

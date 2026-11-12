@@ -14,7 +14,8 @@ import { direntsOf } from "./dirnames.ts";
 import type { JobCtl } from "./jobs.ts";
 import { STAGING_PREFIX, TRASH_DIR, WORK_DIR, isReservedName, assertNotTrash, openChecked, resolveRead, resolveWrite, virtualJoin } from "./paths.ts";
 import { readTar, TarError, type TarHeader } from "./tar.ts";
-import { PasswordError, haveSevenZip, listSz, runSz, szFailure, validPassword, verifyPassword } from "./sevenzip.ts";
+import { PasswordError, haveSevenZip, listSz, runSz, szFailure, szReadArgs, validPassword, verifyPassword, type SzSource } from "./sevenzip.ts";
+import { sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root } from "./sandbox.ts";
 
 /**
  * Archive support. bsdtar (libarchive) does format decoding/encoding for zip,
@@ -84,26 +85,40 @@ export function archiveBase(n: string): string {
 /** Never read into an archive: another volume's trash store or work folder (a selected folder can be a mount root). */
 const RESERVED_EXCLUDES = [TRASH_DIR, WORK_DIR, `${STAGING_PREFIX}*`];
 
-function tool(
+/**
+ * Start bsdtar inside the sandbox (see sandbox.ts): it can read and write only what it is given and the system folders it needs to
+ * start. What it reads comes in as standard input (the archive) or through `readOnly` roots (a pinned source folder, the selected
+ * entries); what it writes goes to standard output (a file or pipe this process holds). The roots are descriptors of this process,
+ * so renaming or replacing a name afterwards changes nothing. With the sandbox required and unusable this throws a 503.
+ */
+async function spawnBsdtar(
   args: string[],
   opts: {
     cwd?: string;
-    stdin?: boolean;
-    /** an open file handed to the tool as descriptor 3 (read it as /dev/fd/3) */
-    fd?: number;
+    /** "pipe" (the caller writes to it), "ignore", or an open file the tool reads (a descriptor of this process) */
+    stdin?: "pipe" | "ignore" | number;
     /** an open file the tool writes its standard output to (so it needs no write access by name) */
     out?: number;
+    readOnly?: Root[];
+    /** a private folder the tool may write (the 7zip writer keeps a temporary file): its descriptor and its path (TMPDIR) */
+    scratch?: { fd: number; dir: string };
     /** run as this user and group, supplementary groups cleared (only effective when the agent is root) */
     runAs?: { uid: number; gid: number };
   } = {},
-): ChildProcess {
-  const child = spawn(bsdtar(), args, {
+): Promise<ChildProcess> {
+  return spawnSandboxed(bsdtar(), args, {
     cwd: opts.cwd,
-    env: ENV,
-    stdio: [opts.stdin ? "pipe" : "ignore", opts.out ?? "pipe", "pipe", ...(opts.fd === undefined ? [] : [opts.fd])],
+    env: opts.scratch ? { ...ENV, TMPDIR: opts.scratch.dir } : ENV,
+    stdio: [opts.stdin ?? "ignore", opts.out ?? "pipe", "pipe"],
+    readOnly: opts.readOnly,
+    readWrite: opts.scratch && opts.scratch.fd >= 0 ? [opts.scratch.fd] : undefined,
     ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid } : {}),
   });
-  return child;
+}
+
+/** An archive tool that cannot run because the sandbox is required and unavailable answers the same 503 everywhere. */
+export async function assertSandboxUsable(): Promise<void> {
+  if ((await sandboxInfo()).state === "unavailable") throw sandboxRequiredError();
 }
 
 /** Collect the tail of a child's stderr and resolve on exit. */
@@ -291,17 +306,33 @@ export function parseListLine(line: string): ListedEntry | null {
   return { name, type, size: Number(size), date, link };
 }
 
-/** Stream archive listing; `onEntry` returns false to stop early. */
+/** A new open file description of the file a descriptor holds (a tool reads it from its own start and offset). */
+async function reopenFd(fd: number, real: string): Promise<import("node:fs/promises").FileHandle> {
+  return fs.open(LINUX ? `/proc/self/fd/${fd}` : real, C.O_RDONLY);
+}
+
+/**
+ * Stream archive listing; `onEntry` returns false to stop early. With `fd` (an open descriptor of the archive, checked by the
+ * caller) the tool reads a fresh copy of that open file as its standard input and is given no file to open; without it the tool
+ * is given the one file `real` to read.
+ */
 export async function streamList(
   real: string,
   signal: AbortSignal,
   onEntry: (e: ListedEntry) => boolean | void,
-  /** read the archive from this open file (as /dev/fd/3) instead of by name */
   fd?: number,
 ): Promise<{ stopped: boolean }> {
-  const child = tool(["-tvf", fd === undefined ? real : "/dev/fd/3"], { fd });
+  const input = fd === undefined ? undefined : await reopenFd(fd, real);
+  let child: ChildProcess;
+  try {
+    child = await spawnBsdtar(["-tvf", input ? "-" : real], { stdin: input ? input.fd : "ignore", readOnly: input ? [] : [real] });
+  } catch (e) {
+    await input?.close().catch(() => undefined);
+    throw e;
+  }
   killOnAbort(child, signal);
   const done = watch(child);
+  void done.then(() => input?.close().catch(() => undefined));
   let stopped = false;
   const rl = createInterface({ input: child.stdout as Readable });
   // A killed child's destroyed stdout never ends, so readline would wait for ever: close it on abort.
@@ -329,16 +360,72 @@ const SZ_EXT = [".zip", ".7z", ".7z.001", ".zip.001", ".jar", ".war", ".whl"];
 /** Formats whose entries 7-Zip can encrypt and that bsdtar cannot read when encrypted. */
 const szCapable = (name: string) => SZ_EXT.some((e) => name.toLowerCase().endsWith(e)) && haveSevenZip();
 
+/** The archive (and every part of a split set) opened for the tools: no link followed, no pipe waited on, regular files inside the root. */
+interface OpenedArchive {
+  /** for 7-Zip */
+  sz: SzSource;
+  /** the archive's own descriptor (the first part of a set) */
+  fd: number;
+  close(): Promise<void>;
+}
+async function openArchiveFiles(root: string, real: string): Promise<OpenedArchive> {
+  const handles: import("node:fs/promises").FileHandle[] = [];
+  const close = async () => {
+    for (const h of handles.splice(0)) await h.close().catch(() => undefined);
+  };
+  const open1 = async (p: string) => {
+    const fh = await openChecked(root, p, C.O_RDONLY | C.O_NONBLOCK).catch((e) => {
+      const code = (e as NodeJS.ErrnoException).code;
+      throw code === "ELOOP" || code === "ENXIO" || code === "EISDIR" ? new ArchiveError(400, "not a regular file") : e;
+    });
+    handles.push(fh);
+    if (!(await fh.stat()).isFile()) throw new ArchiveError(400, "not a regular file");
+    return fh;
+  };
+  try {
+    if (!SPLIT.test(real)) {
+      const fh = await open1(real);
+      return { sz: { arg: real, file: fh.fd, type: szType(real) }, fd: fh.fd, close };
+    }
+    const base = path.basename(real).slice(0, -4);
+    await pinned(root, path.dirname(real), async (dirAt) => {
+      for (let i = 1; ; i++) {
+        try {
+          await open1(path.join(dirAt, `${base}.${String(i).padStart(3, "0")}`));
+        } catch (e) {
+          if (i > 1 && (e as NodeJS.ErrnoException).code === "ENOENT") return;
+          throw e;
+        }
+      }
+    });
+    const [first, ...more] = handles;
+    return { sz: { arg: real, file: first!.fd, also: more.map((h) => h.fd) }, fd: first!.fd, close };
+  } catch (e) {
+    await close();
+    throw e;
+  }
+}
+
 export async function listArchive(root: string, p: string, limit = 5000, password?: string) {
+  await assertSandboxUsable();
   const r = resolveRead(root, p);
   const st = await fs.stat(r.real);
   if (!st.isFile()) throw new ArchiveError(400, "not a regular file");
+  const arch = await openArchiveFiles(root, r.real);
+  try {
+    return await listOpened(r, arch, limit, password);
+  } finally {
+    await arch.close();
+  }
+}
+
+async function listOpened(r: { real: string; virtual: string }, arch: OpenedArchive, limit: number, password?: string) {
   const signal = AbortSignal.timeout(30_000);
   if (szCapable(r.real)) {
     try {
-      const l = await listSz(r.real, password, signal, limit);
+      const l = await listSz(arch.sz, password, signal, limit);
       // a supplied password for an encrypted archive is checked now, so a wrong one is a clear 401 (and a right one can be saved)
-      if (l.encrypted && password) await verifyPassword(r.real, l.entries, password, signal);
+      if (l.encrypted && password) await verifyPassword(arch.sz, l.entries, password, signal);
       let total = 0;
       const entries: ListedEntry[] = l.entries.map((e) => {
         if (e.type === "file") total += e.size;
@@ -347,6 +434,7 @@ export async function listArchive(root: string, p: string, limit = 5000, passwor
       return { path: r.virtual, entries, truncated: l.truncated, bytes: total, encrypted: l.encrypted, passwordUsed: l.encrypted && !!password };
     } catch (e) {
       if (e instanceof PasswordError) throw e; // else: let bsdtar try (and report) the format
+      if (e instanceof FsError && e.status === 503) throw e;
       if (signal.aborted) throw new ArchiveError(408, "listing the archive took too long");
     }
   }
@@ -356,7 +444,7 @@ export async function listArchive(root: string, p: string, limit = 5000, passwor
     if (entries.length >= limit) return false;
     entries.push(e);
     total += e.type === "file" ? e.size : 0;
-  });
+  }, arch.fd);
   return { path: r.virtual, entries, truncated: stopped, bytes: total, encrypted: false, passwordUsed: false };
 }
 
@@ -399,6 +487,7 @@ export function selector(entries: string[] | undefined): ((name: string) => bool
 }
 
 export async function prepareExtract(root: string, archive: string, destDir: string, subfolder: boolean, o: ExtractOptions = {}): Promise<ExtractPlan> {
+  await assertSandboxUsable();
   const a = resolveRead(root, archive);
   assertNotTrash(a.virtual);
   const st = await fs.stat(a.real);
@@ -418,15 +507,20 @@ export async function prepareExtract(root: string, archive: string, destDir: str
   if (split) viaSz = true;
   if (szCapable(a.real)) {
     const signal = AbortSignal.timeout(60_000);
-    let l;
+    const arch = await openArchiveFiles(root, a.real);
     try {
-      l = await listSz(a.real, o.password, signal, 2000);
-    } catch (e) {
-      if (e instanceof PasswordError) throw e;
-    }
-    if (l?.encrypted) {
-      await verifyPassword(a.real, l.entries, o.password, signal);
-      viaSz = true;
+      let l;
+      try {
+        l = await listSz(arch.sz, o.password, signal, 2000);
+      } catch (e) {
+        if (e instanceof PasswordError || (e instanceof FsError && e.status === 503)) throw e;
+      }
+      if (l?.encrypted) {
+        await verifyPassword(arch.sz, l.entries, o.password, signal);
+        viaSz = true;
+      }
+    } finally {
+      await arch.close();
     }
   }
   const usePassword = viaSz && !!o.password;
@@ -450,16 +544,16 @@ type PinGuard = (location: string) => void;
  * cannot be swapped for something else while `fn` works. The entry must be a real directory (a
  * final link is refused) that lives inside the root.
  */
-async function pinned<T>(root: string, real: string, fn: (at: string) => Promise<T>, guard?: PinGuard): Promise<T> {
+async function pinned<T>(root: string, real: string, fn: (at: string, fd: number) => Promise<T>, guard?: PinGuard): Promise<T> {
   if (!LINUX) {
     guard?.(real);
-    return fn(real);
+    return fn(real, -1);
   }
   const fh = await openChecked(root, real, C.O_RDONLY | C.O_DIRECTORY);
   try {
     // where the held descriptor really is, which is what the read-only rules are applied to (never the name that was opened)
     guard?.(await fs.readlink(`/proc/self/fd/${fh.fd}`));
-    return await fn(`/proc/self/fd/${fh.fd}`);
+    return await fn(`/proc/self/fd/${fh.fd}`, fh.fd);
   } finally {
     await fh.close().catch(() => undefined);
   }
@@ -659,6 +753,8 @@ interface Work {
   dir: string;
   /** the folder through a held descriptor */
   at: string;
+  /** that descriptor's number (-1 where there is none): a sandbox root */
+  fd: number;
   /** true when this is the temp fallback (data will be copied into the destination) */
   fallback: boolean;
   /** free bytes in the fallback folder; undefined for a per-volume folder */
@@ -704,7 +800,7 @@ async function makeWork(tag: string, root: string, destReal: string, need?: numb
       fh = await fs.open(dir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
       at = `/proc/self/fd/${fh.fd}`;
     }
-    return { dir, at, fallback, free, done };
+    return { dir, at, fd: fh ? fh.fd : -1, fallback, free, done };
   } catch (e) {
     await done();
     throw e;
@@ -958,12 +1054,12 @@ async function sanitizeTree(base: string, limits: ArchiveLimits, filter: ((n: st
 
 /** What the extraction tools read: the archive as an open file (checked when the job starts), or a private copy of a split set's parts. */
 interface Source {
-  /** the name to give the tool */
+  /** the archive's name (a split set: its first part's copy in the private folder) */
   arg: string;
-  /** descriptor to hand over as 3 (arg is then /dev/fd/3) */
+  /** descriptor of the archive when it is one file: bsdtar reads a fresh copy of it as standard input */
   fd?: number;
-  /** 7-Zip format for a descriptor (no extension to go by) */
-  type?: string;
+  /** what 7-Zip may read: the archive's own file, or the private folder holding the parts */
+  sz: SzSource;
   done: () => Promise<void>;
 }
 const SPLIT = /\.(7z|zip)\.001$/i;
@@ -995,7 +1091,7 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
   if (!SPLIT.test(real)) {
     return pinned(plan.root, path.dirname(real), async (dirAt) => {
       const { fh } = await openPlain(dirAt, await fs.stat(dirAt), path.basename(real));
-      return { arg: "/dev/fd/3", fd: fh.fd, type: szType(real), done: () => fh.close().catch(() => undefined) } as Source;
+      return { arg: real, fd: fh.fd, sz: { arg: real, file: fh.fd, type: szType(real) }, done: () => fh.close().catch(() => undefined) } as Source;
     });
   }
   const work = await makeWork("s", plan.root, destLoc, undefined, guard);
@@ -1023,7 +1119,8 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
     await work.done();
     throw e;
   }
-  return { arg: path.join(work.dir, path.basename(real)), done: work.done };
+  const copy = path.join(work.dir, path.basename(real));
+  return { arg: copy, sz: { arg: copy, roots: [work.fd] }, done: work.done };
 }
 
 /**
@@ -1041,9 +1138,9 @@ function readableBy(st: { uid: number; gid: number; mode: number; nlink: number 
 }
 
 /** Extract an encrypted zip/7z with 7-Zip into `staging`; names and links are vetted from the listing first. */
-async function extractViaSz(plan: ExtractPlan, src: Source, staging: string, limits: ArchiveLimits, ctl: JobCtl, signal: AbortSignal, free?: number): Promise<ExtractResult> {
-  const via = src.fd === undefined ? undefined : { fd: src.fd, type: src.type };
-  const l = await listSz(src.arg, plan.password, signal, Infinity, via);
+async function extractViaSz(plan: ExtractPlan, src: Source, work: Work, limits: ArchiveLimits, ctl: JobCtl, signal: AbortSignal, free?: number): Promise<ExtractResult> {
+  const staging = work.at;
+  const l = await listSz(src.sz, plan.password, signal, Infinity);
   const sizes = new Map<string, number>();
   const skip: string[] = [];
   let bytes = 0;
@@ -1059,11 +1156,15 @@ async function extractViaSz(plan: ExtractPlan, src: Source, staging: string, lim
   if (free !== undefined && bytes > free) throw new ArchiveError(507, `not enough room to stage this archive: it needs ${bytes} bytes free in the work folder and has ${free}; set FILEDECK_WORK_DIR to a larger volume`);
   ctl.progress.totalEntries = sizes.size;
   ctl.progress.totalBytes = bytes;
-  const args = ["x", "-aoa", "-spd", ...(via?.type ? [`-t${via.type}`] : []), "-bb1", "-bso1", "-bsp0", ...skip.map((n) => `-x!${n}`), "--", src.arg];
-  // 7-Zip writes into its working directory, which is the pinned staging folder (a held descriptor path cannot be passed as -o: the child has no such descriptor)
-  const proc = runSz(args, {
+  const how = await szReadArgs(src.sz);
+  const args = ["x", "-aoa", "-spd", ...(src.sz.type ? [`-t${src.sz.type}`] : []), "-bb1", "-bso1", "-bsp0", ...skip.map((n) => `-x!${n}`), "--", how.arg];
+  // 7-Zip writes into its working directory, the pinned private staging folder, and can read only the archive: the kernel allows it
+  // nothing beneath the served root (a held descriptor path cannot be passed as -o: the child has no such descriptor)
+  const proc = await runSz(args, {
     cwd: staging,
-    fd: src.fd,
+    fd: how.fd,
+    readOnly: how.readOnly,
+    readWrite: work.fd >= 0 ? [work.fd] : undefined,
     password: plan.password,
     signal,
     onLine: (line) => {
@@ -1106,7 +1207,7 @@ async function extractStaged(dest: string, plan: ExtractPlan, src: Source, limit
   try {
     let result: ExtractResult;
     if (plan.viaSz) {
-      result = await extractViaSz(plan, src, staging, limits, ctl, ac.signal, work.free);
+      result = await extractViaSz(plan, src, work, limits, ctl, ac.signal, work.free);
     } else {
       // Totals for the progress bar come from a parallel listing; extraction
       // itself never trusts them.
@@ -1122,9 +1223,19 @@ async function extractStaged(dest: string, plan: ExtractPlan, src: Source, limit
           return false;
         }
       }, src.fd).catch(() => undefined);
-      const child = tool(["--format=pax", "-cf", "-", "@" + src.arg], { fd: src.fd });
+      // bsdtar reads a fresh copy of the archive's open file as its standard input and is granted nothing else: no file below the
+      // served root can be opened by it, whatever the archive holds; the pax stream it writes is parsed here
+      const input = await reopenFd(src.fd!, plan.archiveReal);
+      let child: ChildProcess;
+      try {
+        child = await spawnBsdtar(["--format=pax", "-cf", "-", "@-"], { stdin: input.fd });
+      } catch (e) {
+        await input.close().catch(() => undefined);
+        throw e;
+      }
       killOnAbort(child, ac.signal);
       const done = watch(child);
+      void done.then(() => input.close().catch(() => undefined));
       try {
         result = await extractTar(child.stdout as Readable, staging, limits, { signal: ac.signal, progress: ctl.progress }, selector(plan.entries));
       } catch (e) {
@@ -1226,6 +1337,7 @@ export async function prepareSelection(root: string, dir: string, names: string[
 
 const MIN_VOLUME = 64 * 1024;
 export async function prepareCompress(root: string, dir: string, names: string[], format: string, name?: string, o: CompressOptions = {}): Promise<CompressPlan> {
+  await assertSandboxUsable();
   if (!(format in FORMATS)) throw new ArchiveError(400, "unsupported format");
   const f = format as Format;
   const spec = FORMATS[f];
@@ -1296,7 +1408,56 @@ async function walkSizes(dirReal: string, rel: string, sizes: Map<string, number
 
 export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   // Both the folder being read and the folder the archive lands in are pinned for the whole job.
-  return pinned(plan.root, plan.dirReal, (srcAt) => pinned(plan.root, plan.outReal, (outAt) => compressInto(srcAt, outAt, plan, limits, ctl, guard), guard && ((loc) => guard(loc, false))));
+  return pinned(plan.root, plan.dirReal, (srcAt, srcFd) => pinned(plan.root, plan.outReal, (outAt) => compressInto(srcAt, srcFd, outAt, plan, limits, ctl, guard), guard && ((loc) => guard(loc, false))));
+}
+
+/** Most selected entries that are given to bsdtar one by one; a longer selection is given the pinned source folder as a whole. */
+const MAX_ENTRY_GRANTS = 48;
+
+/**
+ * What a compression tool may read, as descriptors of this process: each selected entry on its own (nothing else in the source
+ * folder, so a sibling, and a name swapped in afterwards, cannot be opened), or the pinned source folder when the selection is too
+ * long to list. A selected link needs no grant: the tool stores the link itself and reads nothing through it. Folders inside an entry
+ * cannot be taken out of its grant (Landlock allows by hierarchy), so folders of Filedeck's own found by the scan are kept out by the
+ * tool's exclude patterns and the kernel does not hide them (see the README).
+ */
+export async function selectionGrants(srcAt: string, srcFd: number, names: string[]): Promise<{ roots: number[]; close: () => Promise<void> }> {
+  const handles: import("node:fs/promises").FileHandle[] = [];
+  const close = async () => {
+    for (const h of handles.splice(0)) await h.close().catch(() => undefined);
+  };
+  if (!LINUX || names.length > MAX_ENTRY_GRANTS) return { roots: srcFd >= 0 ? [srcFd] : [], close };
+  try {
+    for (const n of names) {
+      let fh;
+      try {
+        fh = await fs.open(path.join(srcAt, n), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === "ELOOP" || code === "ENOENT" || code === "ENXIO") continue; // a link (stored as itself), or gone
+        throw e;
+      }
+      const st = await fh.stat();
+      if (st.isFile() || st.isDirectory()) handles.push(fh);
+      else await fh.close();
+    }
+  } catch (e) {
+    await close();
+    throw e;
+  }
+  return { roots: handles.map((h) => h.fd), close };
+}
+
+/** Write a small file for a tool (an exclude list): created exclusively, mode set on the descriptor so no umask matters, owned by the tool's user. */
+async function writeToolFile(file: string, text: string, owner?: { uid: number; gid: number }): Promise<void> {
+  const fh = await fs.open(file, "wx", 0o600);
+  try {
+    await fh.chmod(0o600);
+    if (owner) await fh.chown(owner.uid, owner.gid);
+    await fh.writeFile(text);
+  } finally {
+    await fh.close();
+  }
 }
 
 /** Run `rm -rf` as `user`, so whatever a user's tool or the user left in their folder is removed with that user's rights only. */
@@ -1308,7 +1469,19 @@ function removeAsUser(dir: string, user: { uid: number; gid: number }): Promise<
   });
 }
 
-async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
+/**
+ * What the output of a compression may be: the selection's size plus room for the container (a margin of an eighth, 1 MiB, and per
+ * entry its headers: they hold the name more than once, a zip twice and a 7z in UTF-16, so the margin follows the real name
+ * lengths), never more than the configured archive limit, and for volumes never more than a volume each. A user can grow a file
+ * their tool wrote at no cost, so nothing larger is taken.
+ */
+export function outputBounds(o: { totalBytes: number; entries: number; nameBytes: number; maxBytes: number; splitBytes?: number }): { setMax: number; partMax: number } {
+  const overhead = Math.ceil(o.totalBytes / 8) + 1024 * 1024 + o.entries * 512 + o.nameBytes * 4;
+  const setMax = Math.min(o.totalBytes + overhead, o.maxBytes);
+  return { setMax, partMax: Math.min(o.splitBytes ?? Infinity, setMax) };
+}
+
+async function compressInto(srcAt: string, srcFd: number, outAt: string, plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   const sizes = new Map<string, number>();
   const reserved: string[] = [];
   for (const n of plan.names) await walkSizes(srcAt, n, sizes, limits, ctl.signal, reserved);
@@ -1318,7 +1491,9 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
   // Written into the private work folder and moved into place when complete.
   const work = await makeWork("c", plan.root, await locationOf(outAt), totalBytes, guard);
   let userDir: string | undefined;
+  let userDirFh: import("node:fs/promises").FileHandle | undefined;
   let runAs: { uid: number; gid: number } | undefined;
+  let grants: Awaited<ReturnType<typeof selectionGrants>> | undefined;
   const parts: import("node:fs/promises").FileHandle[] = [];
   const placed: string[] = [];
   try {
@@ -1337,17 +1512,16 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     // owned by that user, mode 0700, under the temp directory) and writes files there. The agent never walks it: it opens the
     // folder and each produced file without following links, requires plain files that the user owns, and copies them through
     // those descriptors into the pinned output folder.
-    if (runAs && plan.viaSz) {
+    if (runAs) {
       userDir = await fs.mkdtemp(path.join(os.tmpdir(), "filedeck-out-"));
-      const dfh = await fs.open(userDir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
-      try {
-        await dfh.chown(runAs.uid, runAs.gid);
-        await dfh.chmod(0o700);
-      } finally {
-        await dfh.close().catch(() => undefined);
-      }
+      userDirFh = await fs.open(userDir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
+      await userDirFh.chown(runAs.uid, runAs.gid);
+      await userDirFh.chmod(0o700);
     }
-    const tmp = path.join(userDir ?? work.dir, plan.outName);
+    // Both tools write by name into one folder that only they and the agent can reach: the tool user's own (made here) when it runs as
+    // someone else, else the private work folder. The agent takes the parts out through descriptors (see below).
+    const outputInUserDir = !!userDir;
+    const tmp = path.join(outputInUserDir ? userDir! : work.dir, plan.outName);
     const note = (rel: string) => {
       ctl.progress.entries++;
       ctl.progress.bytes += sizes.get(rel) ?? 0;
@@ -1375,14 +1549,17 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
         // a long list goes in a file, not on the command line (deep trees must not exceed the argument size limit)
         if (reserved.some((r) => /[\r\n]/.test(r))) throw new ArchiveError(400, "a folder name inside the selection contains a line break, which cannot be excluded safely");
         const list = path.join(userDir ?? work.dir, ".excludes");
-        await fs.writeFile(list, reserved.join("\n") + "\n", { mode: 0o600 });
-        if (runAs) await fs.chown(list, runAs.uid, runAs.gid);
+        await writeToolFile(list, reserved.join("\n") + "\n", runAs);
         args.push(`-x@${list}`);
       }
       args.push("--", tmp, ...plan.names.map((n) => "./" + n));
-      const proc = runSz(args, {
+      // 7-Zip reads beneath the pinned source folder and writes only into the one private folder it is given (it writes by name). It may
+      // list the working folder (wildcards), so it gets the folder, not just the entries; the tool is confined by the kernel to those two.
+      const proc = await runSz(args, {
         cwd: srcAt,
         runAs,
+        readOnly: srcFd >= 0 ? [srcFd] : undefined,
+        readWrite: userDirFh ? [userDirFh.fd] : work.fd >= 0 ? [work.fd] : undefined,
         password: plan.password,
         signal: ctl.signal,
         onLine: (l) => {
@@ -1395,17 +1572,13 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     } else {
       const opt = levelOptions(plan.format, plan.level);
       // -T lists are not subject to the "@archive" syntax, so literal names are safe.
-      // As another user the tool writes to our open file on its standard output and needs no write access at all.
-      const outFh = runAs ? await fs.open(tmp, "wx", 0o600) : undefined;
-      const args = ["--null", "-v", ...FORMATS[plan.format].args, ...(opt ? ["--options", opt] : []), ...plan.exclude.map((x) => `--exclude=${x}`), ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", outFh ? "-" : tmp, "-T", "-"];
-      let child: ChildProcess;
-      try {
-        child = tool(args, { cwd: srcAt, stdin: true, out: outFh?.fd, runAs });
-      } catch (e) {
-        await outFh?.close();
-        throw e;
-      }
-      child.on("close", () => void outFh?.close().catch(() => undefined));
+      // The archive is written by name (a file named by `-cf` is written exactly, where standard output would be padded to a block): into the
+      // private scratch folder below, the only place the tool may write. It reads only the selected entries.
+      const args = ["--null", "-v", ...FORMATS[plan.format].args, ...(opt ? ["--options", opt] : []), ...plan.exclude.map((x) => `--exclude=${x}`), ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", tmp, "-T", "-"];
+      grants = await selectionGrants(srcAt, srcFd, plan.names);
+      // its scratch folder is the one that belongs to its user (when it runs as one), else the private work folder
+      const scratch = userDirFh ? { fd: userDirFh.fd, dir: userDir! } : { fd: work.fd, dir: work.dir };
+      const child = await spawnBsdtar(args, { cwd: srcAt, stdin: "pipe", readOnly: grants.roots, scratch, runAs });
       killOnAbort(child, ctl.signal);
       const done = watch(child, (l) => {
         if (l.startsWith("a ")) note(l.slice(2).replace(/^\.\//, "").replace(/\/$/, ""));
@@ -1420,13 +1593,13 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     const isPart = (n: string) => n === plan.outName || n.startsWith(plan.outName + ".");
     // What the output may be: the selection's size plus room for the container (headers per entry, and a margin), never more than the
     // configured archive limit, and for volumes never more than a volume each. A user can grow a file their tool wrote at no cost.
-    const overhead = Math.ceil(totalBytes / 8) + 1024 * 1024 + sizes.size * 1024;
-    const setMax = Math.min(totalBytes + overhead, limits.maxBytes);
-    const partMax = Math.min(plan.splitBytes ?? Infinity, setMax);
+    let nameBytes = 0;
+    for (const k of sizes.keys()) nameBytes += Buffer.byteLength(k);
+    const { setMax, partMax } = outputBounds({ totalBytes, entries: sizes.size, nameBytes, maxBytes: limits.maxBytes, splitBytes: plan.splitBytes });
     const tooBig = (what: string, n: number, max: number) => new ArchiveError(413, `${what} is ${n} bytes, over the limit of ${max} bytes for this archive`);
-    const found: { suffix: string; from?: string; fh?: import("node:fs/promises").FileHandle; st?: Stats }[] = [];
-    if (userDir) {
-      const dh = await fs.open(userDir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
+    const found: { suffix: string; from?: string; size?: number; fh?: import("node:fs/promises").FileHandle; st?: Stats }[] = [];
+    if (outputInUserDir) {
+      const dh = userDirFh!;
       try {
         const dst = await dh.stat();
         if (dst.uid !== runAs!.uid) throw new ArchiveError(500, "compression output folder was replaced");
@@ -1441,17 +1614,18 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
           found.push({ suffix: n.slice(plan.outName.length), fh, st });
         }
       } finally {
-        await dh.close().catch(() => undefined);
+        /* the folder's descriptor is closed with the job */
       }
     } else {
       for (const n of (await fs.readdir(work.dir)).filter(isPart)) {
         const from = path.join(work.dir, n);
         const size = (await fs.lstat(from)).size;
         if (size > partMax) throw tooBig(`output ${n}`, size, partMax);
-        found.push({ suffix: n.slice(plan.outName.length), from });
+        found.push({ suffix: n.slice(plan.outName.length), from, size });
       }
     }
-    const sumSize = found.reduce((t, f) => t + (f.st?.size ?? 0), 0);
+    // the limit applies to the whole set, whoever made it
+    const sumSize = found.reduce((t, f) => t + (f.size ?? f.st?.size ?? 0), 0);
     if (sumSize > setMax) throw tooBig("the archive", sumSize, setMax);
     if (!found.length) throw new ArchiveError(500, "compression produced no archive");
     const out = await freeSetName(outAt, plan.outName, found.map((f) => f.suffix));
@@ -1476,6 +1650,8 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     throw e;
   } finally {
     for (const fh of parts) await fh.close().catch(() => undefined);
+    await grants?.close();
+    await userDirFh?.close().catch(() => undefined);
     if (userDir) {
       if (runAs) await removeAsUser(userDir, runAs); // whatever its shape, with the user's own rights
       await fs.rmdir(userDir).catch(() => undefined);
@@ -1502,28 +1678,50 @@ async function freeSetName(dir: string, name: string, suffixes: string[]): Promi
 
 /* ------------------------------------------------------- streamed download */
 
-/** `bsdtar --format zip` to stdout: streamed (data descriptors), nothing buffered on disk. */
-export function zipStream(dirReal: string, names: string[], signal: AbortSignal): Readable {
-  const child = tool(["--null", "--format", "zip", ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", "-", "-T", "-"], { cwd: dirReal, stdin: true });
-  killOnAbort(child, signal);
-  const src = child.stdout as Readable;
-  const done = watch(child);
-  (child.stdin as import("node:stream").Writable).on("error", () => undefined);
-  (child.stdin as import("node:stream").Writable).end(names.map((n) => n + "\0").join(""));
+/**
+ * `bsdtar --format zip` to stdout: streamed (data descriptors), nothing buffered on disk. The folder is pinned by descriptor for the
+ * whole stream, the tool starts in it through that descriptor (never by name) and, inside the sandbox, may read only the selected
+ * entries (or that folder) and write nothing; when the agent is root and the folder belongs to someone else it runs as that owner
+ * (groups cleared). `opts.root` is the served root the folder must lie in; `opts.afterPin` runs once the folder is held (tests).
+ */
+export function zipStream(dirReal: string, names: string[], signal: AbortSignal, opts: { root?: string; afterPin?: () => void | Promise<void> } = {}): Readable {
   // The body must not end before bsdtar has exited: a failure after the last byte would otherwise
   // look like a complete download. The consumer sees the end only after a clean exit, an error otherwise.
   const out = new PassThrough();
-  src.pipe(out, { end: false });
-  src.on("end", () => {
-    void done.then(({ code, err }) => {
-      if (code === 0 || signal.aborted) out.end();
-      else out.destroy(new Error(err || "zip failed")); // truncated body: the browser shows a failed download
-    });
-  });
-  src.on("error", (e) => out.destroy(e));
-  src.on("close", () => {
-    if (!src.readableEnded) out.destroy(new Error("zip stream interrupted")); // killed or destroyed before its end
-  });
-  out.on("close", () => terminate(child));
+  void (async () => {
+    try {
+      await pinned(opts.root ?? "/", dirReal, async (at, fd) => {
+        await opts.afterPin?.();
+        const st = await fs.stat(at); // the pinned folder itself
+        const runAs = process.getuid?.() === 0 && st.uid !== 0 ? { uid: st.uid, gid: st.gid } : undefined;
+        const grants = await selectionGrants(at, fd, names);
+        try {
+          const child = await spawnBsdtar(["--null", "--format", "zip", ...RESERVED_EXCLUDES.map((x) => `--exclude=${x}`), "-cf", "-", "-T", "-"], { cwd: at, stdin: "pipe", readOnly: grants.roots, runAs });
+          killOnAbort(child, signal);
+          const src = child.stdout as Readable;
+          const done = watch(child);
+          (child.stdin as import("node:stream").Writable).on("error", () => undefined);
+          (child.stdin as import("node:stream").Writable).end(names.map((n) => n + "\0").join(""));
+          src.pipe(out, { end: false });
+          src.on("end", () => {
+            void done.then(({ code, err }) => {
+              if (code === 0 || signal.aborted) out.end();
+              else out.destroy(new Error(err || "zip failed")); // truncated body: the browser shows a failed download
+            });
+          });
+          src.on("error", (e) => out.destroy(e));
+          src.on("close", () => {
+            if (!src.readableEnded) out.destroy(new Error("zip stream interrupted")); // killed or destroyed before its end
+          });
+          out.on("close", () => terminate(child));
+          await done; // the folder stays pinned until the tool has finished
+        } finally {
+          await grants.close();
+        }
+      });
+    } catch (e) {
+      out.destroy(e as Error);
+    }
+  })();
   return out;
 }

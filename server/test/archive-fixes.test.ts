@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { Readable } from "node:stream";
+import { resetSandbox } from "../src/sandbox.ts";
 import { extractTar, prepareExtract, streamList, zipStream } from "../src/archive.ts";
 
 const HAVE_BSDTAR = spawnSync("bsdtar", ["--version"]).status === 0;
@@ -139,6 +140,9 @@ test("streamList: a listing cut off by the deadline is an error, not a complete 
   fs.writeFileSync(fake, "#!/bin/sh\necho '-rw-r--r--  0 u g 1 Jan  1 00:00 a.txt'\nexec sleep 30\n", { mode: 0o755 });
   const save = process.env.FILEDECK_BSDTAR;
   process.env.FILEDECK_BSDTAR = fake;
+  const saveSb = process.env.FILEDECK_SANDBOX;
+  process.env.FILEDECK_SANDBOX = "off"; // a shell-script stand-in in a temp folder cannot run inside the sandbox
+  resetSandbox();
   try {
     const seen: string[] = [];
     await assert.rejects(
@@ -149,6 +153,9 @@ test("streamList: a listing cut off by the deadline is an error, not a complete 
   } finally {
     if (save === undefined) delete process.env.FILEDECK_BSDTAR;
     else process.env.FILEDECK_BSDTAR = save;
+    if (saveSb === undefined) delete process.env.FILEDECK_SANDBOX;
+    else process.env.FILEDECK_SANDBOX = saveSb;
+    resetSandbox();
   }
 });
 

@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import { prepareCompress, prepareExtract, runCompress, runExtract } from "../src/archive.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
 import type { JobCtl } from "../src/jobs.ts";
+import { useSandbox } from "./sandbox-env.ts";
 
 /**
  * Tests with the real 7-Zip (`7zz`); they skip where it is not installed (CI has it). They check that what the
@@ -19,13 +20,17 @@ const IS_ROOT = process.getuid?.() === 0;
 const NOBODY = 65534;
 
 let tmp: string;
-before(() => {
+let box: Awaited<ReturnType<typeof useSandbox>>;
+before(async () => {
+  box = await useSandbox(); // 7-Zip runs inside the real sandbox where the kernel has Landlock
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-7z-"));
   fs.chmodSync(tmp, 0o755);
   process.env.FILEDECK_WORK_DIR = path.join(tmp, "workdir");
   fs.mkdirSync(process.env.FILEDECK_WORK_DIR, { mode: 0o700 });
 });
 after(() => {
+  fs.rmSync(box.dir, { recursive: true, force: true });
+  delete process.env.FILEDECK_SANDBOX_HELPER;
   delete process.env.FILEDECK_WORK_DIR;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -179,6 +184,62 @@ test("with wildcard matching off, -xr!NAME excludes that exact name at any depth
   assert.match(list, /keep\.txt/);
   assert.match(list, /odd\?\.txt/);
   assert.doesNotMatch(list, /\.filedeck-(work|trash)/);
+});
+
+test("the privilege-dropped 7-Zip reads a list file naming a staging-prefix folder and that folder is absent from the archive", needSz, async () => {
+  const s = userScene("list-file");
+  const nested = path.join(s.sel, "z", ".filedeck-work-abc");
+  fs.mkdirSync(nested);
+  fs.writeFileSync(path.join(nested, "staged.bin"), "STAGED-CONTENT");
+  if (IS_ROOT) {
+    fs.chownSync(nested, NOBODY, NOBODY);
+    fs.chownSync(path.join(nested, "staged.bin"), NOBODY, NOBODY);
+  }
+  // an umask that would hide the list file from its reader is irrelevant: the file's mode is set on its descriptor
+  const old = process.umask(0o777);
+  let r;
+  try {
+    r = await runCompress(await prepareCompress(s.root, "/src", ["sel"], "7z", "listed", { destDir: "/out", splitBytes: 65_536, level: 0 }), LIM, mkCtl());
+  } finally {
+    process.umask(old);
+  }
+  const list = list7z(path.join(s.root, r.path));
+  assert.match(list, /inner\.txt/);
+  assert.doesNotMatch(list, /\.filedeck-work-abc|staged\.bin/);
+});
+
+test("a reserved folder with an exact name that appears after the scan is left out by 7-Zip's own pattern", needSz, async () => {
+  const s = userScene("late-exact");
+  const plan = await prepareCompress(s.root, "/src", ["sel"], "7z", "late", { destDir: "/out", splitBytes: 65_536, level: 0 });
+  let made = false;
+  const guard = () => {
+    if (made) return;
+    made = true; // after the scan
+    for (const r of [".filedeck-work", ".filedeck-trash"]) {
+      fs.mkdirSync(path.join(s.sel, "z", r));
+      fs.writeFileSync(path.join(s.sel, "z", r, "staged.bin"), "STAGED-CONTENT");
+      if (IS_ROOT) {
+        fs.chownSync(path.join(s.sel, "z", r), NOBODY, NOBODY);
+        fs.chownSync(path.join(s.sel, "z", r, "staged.bin"), NOBODY, NOBODY);
+      }
+    }
+  };
+  const r = await runCompress(plan, LIM, mkCtl(), guard);
+  assert.ok(made);
+  const list = list7z(path.join(s.root, r.path));
+  assert.match(list, /inner\.txt/);
+  assert.doesNotMatch(list, /\.filedeck-(work|trash)|staged\.bin/);
+});
+
+test("password and split archives compress, list and extract inside the sandbox", needSz, async () => {
+  const s = userScene("pw-split");
+  const c = await runCompress(await prepareCompress(s.root, "/src", ["sel"], "7z", "pw", { destDir: "/out", password: "s3cret", splitBytes: 65_536, level: 0 }), LIM, mkCtl());
+  assert.ok((c.volumes ?? 0) > 1, JSON.stringify(c));
+  const { prepareExtract, runExtract } = await import("../src/archive.ts");
+  const plan = await prepareExtract(s.root, c.path, "/out", true, { overwrite: "rename", password: "s3cret" });
+  assert.equal(plan.viaSz, true);
+  const r = await runExtract(plan, LIM, mkCtl());
+  assert.ok(r.files >= 41, JSON.stringify(r));
 });
 
 test("diagnostic: does 7-Zip open nested paths by name? (recorded in the log; never fails)", needSz, () => {

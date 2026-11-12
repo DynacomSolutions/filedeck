@@ -8,6 +8,7 @@ import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
+import { useSandbox } from "./sandbox-env.ts";
 import { haveSevenZip, passwordFromHeader, scrub, validPassword } from "../src/sevenzip.ts";
 import { levelOptions, selector } from "../src/archive.ts";
 
@@ -17,6 +18,7 @@ const needSz = { skip: HAVE_BSDTAR && haveSevenZip() ? false : "7-Zip (7zz) not 
 
 let work: string;
 let tmp: string;
+let box: Awaited<ReturnType<typeof useSandbox>>;
 let srv: ReturnType<typeof serve>;
 let base: string;
 const audit: string[] = [];
@@ -43,6 +45,7 @@ const listOf = async (p: string, pw?: string) => fetch(`${base}/api/archive/list
 const names = async (p: string, pw?: string) => ((await j(await listOf(p, pw))).entries as { name: string }[]).map((e) => e.name).sort();
 
 before(async () => {
+  box = await useSandbox(); // the real tools run inside the real sandbox where the kernel has Landlock
   work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-archopt-")));
   tmp = path.join(work, "root");
   fs.mkdirSync(path.join(tmp, "src/sub/deep"), { recursive: true });
@@ -64,6 +67,8 @@ before(async () => {
 after(() => {
   srv.close();
   fs.rmSync(work, { recursive: true, force: true });
+  fs.rmSync(box.dir, { recursive: true, force: true });
+  delete process.env.FILEDECK_SANDBOX_HELPER;
 });
 
 test("levelOptions maps 0-9 per format", () => {
