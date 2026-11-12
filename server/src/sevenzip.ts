@@ -1,4 +1,5 @@
 import { spawnSync, type ChildProcess } from "node:child_process";
+import path from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { FsError } from "./fsops.ts";
@@ -85,6 +86,8 @@ export interface SzSource {
   roots?: Root[];
   /** archive format, for descriptors (no extension to go by) */
   type?: string;
+  /** the caller starts 7-Zip through the launcher (working folder by descriptor): read the archive by name where there is no kernel rule */
+  byName?: boolean;
   /** run 7-Zip as this user and group (the agent as root parses an untrusted archive as nobody, not as itself) */
   runAs?: { uid: number; gid: number };
 }
@@ -103,7 +106,10 @@ export interface SzAccess {
 export async function szReadArgs(src: SzSource): Promise<{ arg: string; fd?: number; readOnly: Root[] }> {
   const info = await sandboxInfo();
   if (info.state === "landlock") return { arg: src.arg, readOnly: [...(src.file !== undefined ? [src.file] : []), ...(src.also ?? []), ...(src.roots ?? [])] };
-  if (src.file !== undefined) return { arg: "/dev/fd/3", fd: src.file, readOnly: [] };
+  // No kernel rule here. An open descriptor can be handed over as descriptor 3 only when the program is started directly: through the
+  // launcher (a user change, or a working folder by descriptor) every descriptor above 2 is closed, so then the archive is read by its name
+  // (the weaker guarantee of the fallback: the name could be swapped after it was checked).
+  if (src.file !== undefined && !src.runAs && !src.byName) return { arg: "/dev/fd/3", fd: src.file, readOnly: [] };
   return { arg: src.arg, readOnly: [] };
 }
 
@@ -134,6 +140,8 @@ export async function runSz(
     stdio: opts.fd === undefined ? ["pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", opts.fd],
     // /dev/urandom: an AES archive needs a random salt and IV
     readOnly: [...(opts.readOnly ?? []), "/dev/urandom"],
+    // a tool installed outside the system folders (FILEDECK_7Z=/opt/...) must still be startable
+    readExec: path.isAbsolute(sevenZip()) ? [sevenZip()] : undefined,
     readWrite: opts.readWrite,
     ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid } : {}),
   });

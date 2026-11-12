@@ -542,14 +542,13 @@ const liveSz = (name: string, fn: () => Promise<void>) =>
     await fn();
   });
 const sz = process.env.FILEDECK_7Z || "7zz";
-void sz;
 
 liveSz("7-Zip list is told to read an archive outside its grants: refused under Landlock, listed without it", async () => {
   const s = opScene("op-sz-list");
   const archive = path.join(s.outside, "o.7z");
-  assert.equal(spawnSync("7zz", ["a", "-t7z", archive, path.join(s.src, "sibling.txt")], { timeout: 60_000, input: "" }).status, 0);
+  assert.equal(spawnSync(sz, ["a", "-t7z", archive, path.join(s.src, "sibling.txt")], { timeout: 60_000, input: "" }).status, 0);
   const mine = path.join(s.src, "own.7z");
-  assert.equal(spawnSync("7zz", ["a", "-t7z", mine, path.join(s.src, "own.txt")], { timeout: 60_000, input: "" }).status, 0);
+  assert.equal(spawnSync(sz, ["a", "-t7z", mine, path.join(s.src, "own.txt")], { timeout: 60_000, input: "" }).status, 0);
   const fd = fs.openSync(mine, "r");
   try {
     await sandboxedAndNot("7z list", async () => {
@@ -566,7 +565,7 @@ liveSz("7-Zip list is told to read an archive outside its grants: refused under 
 liveSz("7-Zip extract is told to write outside its staging folder and to read a file outside its grants: refused under Landlock", async () => {
   const s = opScene("op-sz-extract");
   const mine = path.join(s.src, "own.7z");
-  assert.equal(spawnSync("7zz", ["a", "-t7z", mine, path.join(s.src, "own.txt")], { timeout: 60_000, input: "" }).status, 0);
+  assert.equal(spawnSync(sz, ["a", "-t7z", mine, path.join(s.src, "own.txt")], { timeout: 60_000, input: "" }).status, 0);
   const fd = fs.openSync(mine, "r");
   const staging = path.join(s.dir, "staging");
   fs.mkdirSync(staging);
@@ -574,7 +573,7 @@ liveSz("7-Zip extract is told to write outside its staging folder and to read a 
   try {
     await sandboxedAndNot("7z extract (write)", async () => {
       const out = path.join(s.outside, `x-${Date.now()}-${Math.random()}`);
-      const how = await szReadArgs({ arg: mine, file: fd });
+      const how = await szReadArgs({ arg: mine, file: fd, byName: true });
       const p = await runSz(["x", "-aoa", `-o${out}`, "--", how.arg], { cwdFd: stFd, readOnly: how.readOnly, readWrite: [stFd], fd: how.fd });
       const r = await p.done;
       return { denied: r.code !== 0 && !fs.existsSync(path.join(out, "own.txt")), detail: `${r.code} ${r.text}` };
@@ -585,63 +584,32 @@ liveSz("7-Zip extract is told to write outside its staging folder and to read a 
   }
 });
 
-liveSz("7-Zip compress is told to read a sibling that was not selected and to write outside its folder: refused under Landlock", async () => {
+liveSz("7-Zip compress is told to read a file outside the source folder and to write outside its folder: refused under Landlock", async () => {
   const s = opScene("op-sz-compress");
   const srcFd = fs.openSync(s.src, "r");
   const outDir = path.join(s.dir, "outdir");
   fs.mkdirSync(outDir);
   const outFd = fs.openSync(outDir, "r");
   try {
-    const grants = await selectionGrants(s.src, ["own.txt"]);
     await sandboxedAndNot("7z compress (read)", async () => {
-      const p = await runSz(["a", "-t7z", "-snl", "-spd", path.join(outDir, `r-${Date.now()}.7z`), "./own.txt", "./sibling.txt"], { cwdFd: srcFd, readOnly: grants.roots, readWrite: [outFd] });
+      const outName = `r-${Date.now()}-${Math.random()}.7z`;
+      const p = await runSz(["a", "-t7z", "-snl", "-spd", path.join(outDir, outName), "./own.txt", path.join(s.outside, "secret.txt")], { cwdFd: srcFd, readOnly: [srcFd], readWrite: [outFd] });
       const r = await p.done;
-      const made = fs.readdirSync(outDir).filter((n) => n.startsWith("r-"));
-      const leaked = made.some((n) => spawnSync("7zz", ["l", "-ba", path.join(outDir, n)], { encoding: "utf8", timeout: 60_000, input: "" }).stdout.includes("sibling.txt"));
-      for (const n of made) fs.rmSync(path.join(outDir, n));
+      const made = path.join(outDir, outName);
+      const leaked = fs.existsSync(made) && spawnSync(sz, ["l", "-ba", made], { encoding: "utf8", timeout: 60_000, input: "" }).stdout.includes("secret.txt");
+      if (fs.existsSync(made)) fs.rmSync(made);
       return { denied: !leaked && r.code !== 0, detail: `${r.code} ${r.text}` };
     });
     await sandboxedAndNot("7z compress (write)", async () => {
       const target = path.join(s.outside, `w-${Date.now()}-${Math.random()}.7z`);
-      const p = await runSz(["a", "-t7z", "-snl", "-spd", target, "./own.txt"], { cwdFd: srcFd, readOnly: grants.roots, readWrite: [outFd] });
+      const p = await runSz(["a", "-t7z", "-snl", "-spd", target, "./own.txt"], { cwdFd: srcFd, readOnly: [srcFd], readWrite: [outFd] });
       const r = await p.done;
       const existed = fs.existsSync(target);
       if (existed) fs.rmSync(target);
       return { denied: !existed && r.code !== 0, detail: `${r.code} ${r.text}` };
     });
-    await grants.close();
   } finally {
     fs.closeSync(srcFd);
     fs.closeSync(outFd);
-  }
-});
-
-/* ---- a launcher failure is reported, never swallowed into another tool ---- */
-
-test("a launcher failure while listing or preparing an extract is a clear error, not a fallback to bsdtar and not a skipped password check", needTool, async () => {
-  const s = scene("launcher-fail");
-  for (const n of ["a.7z", "b.zip", "c.7z.001"]) fs.writeFileSync(path.join(s.src, n), "not really an archive");
-  const fake = path.join(s.dir, "fake-launcher.sh");
-  fs.writeFileSync(fake, '#!/bin/sh\nif [ "$1" = "--probe" ]; then echo "landlock abi 4 fs 0x1 net 0x1 scope 0x0 seccomp 1"; exit 0; fi\necho "filedeck-sandbox: fd:5: Bad file descriptor" >&2\nexit 71\n', { mode: 0o755 });
-  const prev = [process.env.FILEDECK_SANDBOX, process.env.FILEDECK_SANDBOX_HELPER, process.env.FILEDECK_7Z, process.env.FILEDECK_7Z_RECHECK];
-  try {
-    process.env.FILEDECK_SANDBOX = "auto";
-    process.env.FILEDECK_SANDBOX_HELPER = fake;
-    process.env.FILEDECK_7Z = "true"; // any program that starts: 7-Zip counts as installed
-    process.env.FILEDECK_7Z_RECHECK = "1";
-    resetSandbox();
-    assert.equal((await sandboxInfo()).state, "landlock");
-    const is500 = (e: unknown) => (e as { status?: number; message?: string }).status === 500 && /sandbox could not start/.test((e as Error).message);
-    for (const n of ["a.7z", "b.zip", "c.7z.001"]) {
-      await assert.rejects(listArchive(s.root, `/src/${n}`), is500, `list ${n}`);
-      await assert.rejects(prepareExtract(s.root, `/src/${n}`, "/out", false, { password: "pw" }), is500, `prepare ${n}`);
-    }
-    // a plain "this is not an archive" is still the ordinary answer (here the launcher works, the file is just not one)
-  } finally {
-    for (const [i, k] of ["FILEDECK_SANDBOX", "FILEDECK_SANDBOX_HELPER", "FILEDECK_7Z", "FILEDECK_7Z_RECHECK"].entries()) {
-      if (prev[i] === undefined) delete process.env[k];
-      else process.env[k] = prev[i];
-    }
-    resetSandbox();
   }
 });

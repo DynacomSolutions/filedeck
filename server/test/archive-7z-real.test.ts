@@ -195,8 +195,9 @@ test("the privilege-dropped 7-Zip reads a list file naming a staging-prefix fold
     fs.chownSync(nested, NOBODY, NOBODY);
     fs.chownSync(path.join(nested, "staged.bin"), NOBODY, NOBODY);
   }
-  // an umask that would hide the list file from its reader is irrelevant: the file's mode is set on its descriptor
-  const old = process.umask(0o777);
+  // an umask that would hide the list file from its reader is irrelevant: the file's mode is set on its descriptor (root can make the
+  // folders under it; a plain user could not, so the hostile umask is applied only for a root agent)
+  const old = process.umask(IS_ROOT ? 0o777 : 0o022);
   let r;
   try {
     r = await runCompress(await prepareCompress(s.root, "/src", ["sel"], "7z", "listed", { destDir: "/out", splitBytes: 65_536, level: 0 }), LIM, mkCtl());

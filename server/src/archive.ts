@@ -114,6 +114,8 @@ export async function spawnBsdtar(
     env: opts.scratch ? { ...ENV, TMPDIR: opts.scratch.dir } : ENV,
     stdio: [opts.stdin ?? "ignore", opts.out ?? "pipe", "pipe"],
     readOnly: opts.readOnly,
+    // a tool installed outside the system folders (FILEDECK_BSDTAR=/opt/...) must still be startable
+    readExec: path.isAbsolute(bsdtar()) ? [bsdtar()] : undefined,
     readWrite: opts.scratch && opts.scratch.fd >= 0 ? [opts.scratch.fd] : undefined,
     ...(opts.runAs ? { uid: opts.runAs.uid, gid: opts.runAs.gid } : {}),
   });
@@ -1189,7 +1191,7 @@ async function extractViaSz(plan: ExtractPlan, src: Source, work: Work, limits: 
   if (free !== undefined && bytes > free) throw new ArchiveError(507, `not enough room to stage this archive: it needs ${bytes} bytes free in the work folder and has ${free}; set FILEDECK_WORK_DIR to a larger volume`);
   ctl.progress.totalEntries = sizes.size;
   ctl.progress.totalBytes = bytes;
-  const how = await szReadArgs(src.sz);
+  const how = await szReadArgs({ ...src.sz, byName: true }); // started with its working folder by descriptor: through the launcher
   const args = ["x", "-aoa", "-spd", ...(src.sz.type ? [`-t${src.sz.type}`] : []), "-bb1", "-bso1", "-bsp0", ...skip.map((n) => `-x!${n}`), "--", how.arg];
   // 7-Zip writes into its working directory, the pinned private staging folder, and can read only the archive: the kernel allows it
   // nothing beneath the served root (a held descriptor path cannot be passed as -o: the child has no such descriptor)
@@ -1595,13 +1597,12 @@ async function compressInto(srcAt: string, srcFd: number, outAt: string, plan: C
         args.push(`-x@${list}`);
       }
       args.push("--", tmp, ...plan.names.map((n) => "./" + n));
-      // 7-Zip reads beneath the pinned source folder and writes only into the one private folder it is given (it writes by name). It may
-      // list the working folder (wildcards), so it gets the folder, not just the entries; the tool is confined by the kernel to those two.
-      grants = await selectionGrants(srcAt, plan.names);
+            // 7-Zip lists its working folder to find the names it is given (given only the entries it fails with "Permission denied" on "./"),
+      // so unlike bsdtar it is granted the pinned source folder itself; unselected siblings are then readable by it but never archived
       const proc = await runSz(args, {
         ...cwdOf(srcFd, srcAt),
         runAs,
-        readOnly: grants.roots,
+        readOnly: srcFd >= 0 ? [srcFd] : undefined,
         readWrite: userDirFh ? [userDirFh.fd] : work.fd >= 0 ? [work.fd] : undefined,
         password: plan.password,
         signal: ctl.signal,
