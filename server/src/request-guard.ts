@@ -216,7 +216,14 @@ export function requestGuard(o: GuardOptions = {}): MiddlewareHandler {
       if (c.req.raw.body) c.req.raw = new Request(c.req.raw, { body: capStream(c.req.raw.body, cap), duplex: "half" } as RequestInit);
       return next();
     }
-    const buf = await readCapped(c.req.raw, cap);
+    let buf: Buffer | undefined;
+    try {
+      buf = await readCapped(c.req.raw, cap);
+    } catch {
+      // the client went away while sending: nothing was acted on, and it is said so in the audit log
+      if (o.audit) auditRefusal(o.audit.who, c, 499, o.audit.sink, true);
+      return new Response(null, { status: 499 });
+    }
     if (!buf) return refuse(c, 413, "request body too large");
     // parse once; everything after this (read-only guard, audit, the route) gets this value from the body cache
     const parsed = new Promise<unknown>((resolve, reject) => {

@@ -13,6 +13,9 @@ import { loadConfig } from "../src/config.ts";
 import { readOnlyGuard } from "../src/readonly.ts";
 import { audit } from "../src/audit.ts";
 import { MAX_JSON_BODY, MAX_SMALL_JSON, isBulkRoute, matchesHostList, requestGuard } from "../src/request-guard.ts";
+import { topLevelString } from "../src/vault-proxy.ts";
+import { execFileSync } from "node:child_process";
+import { webWriteRoutes } from "./web-routes.ts";
 
 const listen = (app: { fetch: never }) =>
   new Promise<ReturnType<typeof serve>>((res) => {
@@ -368,33 +371,80 @@ test("the hub forwards a proxied body it does not need to read: the agent is the
   }
 });
 
-test("every route the web app posts a list to takes a body at the server's item limit", async () => {
-  // Discovered from the client, so a new list route cannot be added there without being sorted here.
-  const src = fs.readFileSync(path.join(import.meta.dirname, "../../web/src/api.ts"), "utf8");
-  const found = new Set<string>();
-  for (const m of src.matchAll(/\bpost\(node, "(\w+)"/g)) found.add(`/api/fs/${m[1]}`);
-  for (const m of src.matchAll(/\bpostJob\(node, "(\w+)"/g)) found.add(`/api/jobs/${m[1]}`);
-  for (const m of src.matchAll(/\btrashPost<[^>]*>\(node, "(\w+)"/g)) found.add(`/api/trash/${m[1]}`);
-  for (const m of src.matchAll(/opReq\("([^"]*)", "POST"/g)) found.add(`/api/ops/jobs${m[1]}`.replace(/\/\$\{[^}]*\}/g, "/:x"));
-  for (const m of src.matchAll(/fetch\(`?"?((?:\$\{nodeBase\(node\)\})?\/api\/[^`"?]*)[`"?][^\n]*method: "POST"/g)) found.add(m[1]!.replace("${nodeBase(node)}", "").replace(/\$\{[^}]*\}/g, ":x"));
+test("every state-changing request the web client can make is classified, and the hub takes a list route's body at the item limit", async () => {
+  // Found by reading web/src with the TypeScript compiler (see web-routes.ts), so a new route cannot be added there unnoticed.
+  const { routes, unresolved } = webWriteRoutes(path.join(import.meta.dirname, "../../web/src"));
+  assert.deepEqual(unresolved, [], "a request whose URL cannot be worked out must be taught to web-routes.ts or classified by hand");
   const list = new Set(["/api/fs/move", "/api/fs/copy", "/api/fs/trash", "/api/fs/delete", "/api/fs/zip-ticket", "/api/jobs/compress", "/api/jobs/extract", "/api/trash/restore", "/api/trash/delete", "/api/ops/jobs", "/api/diff/jobs", "/api/diff/jobs/:x/focus", "/api/diff/jobs/:x/subtree"]);
-  const small = new Set(["/api/fs/mkdir", "/api/fs/symlink", "/api/fs/rename", "/api/fs/perms", "/api/jobs/size", "/api/trash/empty", "/api/ops/jobs/:x/pause", "/api/ops/jobs/:x/resolve", "/api/vault/forget", "/api/transfer", "/api/jobs/:x/cancel", "/api/vault/:x/extend", "/api/diff/jobs/:x/cancel"]);
-  found.delete("/api/trash/:x"); // the helper behind trashPost, whose operations are found above
-  assert.ok(found.size > 15, [...found].join(" "));
-  for (const r of found) assert.ok(list.has(r) || small.has(r) || /\/(?:cancel|extend|pause|resume)$/.test(r), `a POST route the client uses is not classified: ${r}`);
-  // the guard agrees with the table, at a body of 10,000 entries of 200 characters (about 2 MiB)
-  const app = new Hono();
-  app.use("*", requestGuard());
-  app.all("/*", (c) => c.json({ ok: true }));
+  const small = new Set(["/api/fs/mkdir", "/api/fs/symlink", "/api/fs/rename", "/api/fs/perms", "/api/jobs/size", "/api/trash/empty", "/api/transfer", "/api/vault/forget", "/api/vault/:x/extend", "/api/vault", "/api/vault/:x", "/api/ops/jobs/:x", "/api/ops/jobs/:x/:x", "/api/ops/jobs/:x/resolve", "/api/diff/jobs/:x", "/api/diff/jobs/:x/cancel", "/api/jobs/:x", "/api/jobs/:x/cancel"]);
+  const rawRoutes = new Set(["/api/fs/upload", "/api/fs/write", "/api/upload", "/api/upload/chunk"]);
+  assert.ok(routes.size > 25, [...routes].join(" "));
+  for (const r of routes) assert.ok(list.has(r) || small.has(r) || rawRoutes.has(r), `a state-changing route the client uses is not classified: ${r}`);
+  for (const r of list) assert.ok(routes.has(r), `classified as a list route but the client no longer uses it: ${r}`);
+  // end to end through the hub, at 10,000 entries of 200 characters (about 2 MiB, past the small-body cap)
+  const hubOwned = (r: string) => /^\/api\/(?:ops|diff|vault)\//.test(r) || r === "/api/transfer";
   const body = JSON.stringify({ items: Array.from({ length: 10_000 }, (_, i) => `/${"d".repeat(200)}/${i}`) });
   assert.ok(body.length > MAX_SMALL_JSON && body.length < MAX_JSON_BODY);
+  const send = (r: string) => raw("POST", `${hub}${hubOwned(r) ? "" : "/api/nodes/t"}${r.replace(/:x/g, "abc")}`, { ...J, "content-length": String(Buffer.byteLength(body)) }, body);
   for (const r of list) {
-    const url = r.replace(":x", "abc");
-    assert.equal(isBulkRoute(url), true, r);
-    assert.equal((await app.request(url, { method: "POST", headers: J, body })).status, 200, r);
-    assert.equal(isBulkRoute(`/api/nodes/t${url}`), true, `through the hub: ${r}`);
+    assert.equal(isBulkRoute(r), true, r);
+    const res = await send(r);
+    assert.ok(res.status !== 413 && res.status !== 415 && res.status < 500, `${r}: ${res.status} ${res.text.slice(0, 80)}`);
   }
-  for (const r of small) assert.equal((await app.request(r.replace(":x", "abc"), { method: "POST", headers: J, body })).status, 413, r);
+  for (const r of small) assert.equal((await send(r)).status, 413, `${r} takes small bodies only`);
+});
+
+test("an extract that names 10,000 entries goes through the hub's password proxy end to end", async () => {
+  fs.mkdirSync(path.join(tmp, "xt/src"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "xt/src/a.txt"), "a");
+  execFileSync("tar", ["-cf", path.join(tmp, "xt/a.tar"), "-C", path.join(tmp, "xt/src"), "a.txt"]);
+  fs.mkdirSync(path.join(tmp, "xt/out"));
+  const entries = Array.from({ length: 10_000 }, (_, i) => `${"e".repeat(150)}/${i}.txt`);
+  const body = JSON.stringify({ path: "/xt/a.tar", destDir: "/xt/out", entries });
+  assert.ok(body.length > 1.5 * MAX_SMALL_JSON);
+  const r = await raw("POST", `${hub}/api/nodes/t/api/jobs/extract`, { ...J, "content-length": String(Buffer.byteLength(body)) }, body);
+  assert.equal(r.status, 202, r.text.slice(0, 120));
+  // over the largest allowance it is still refused
+  const huge = JSON.stringify({ path: "/xt/a.tar", destDir: "/xt/out", pad: "x".repeat(MAX_JSON_BODY) });
+  assert.equal((await raw("POST", `${hub}/api/nodes/t/api/jobs/extract`, { ...J, "content-length": String(Buffer.byteLength(huge)) }, huge)).status, 413);
+});
+
+test("the password proxy finds `path` in a body by scanning it, as JSON.parse would (the last of repeated keys, strings with escapes, nested keys ignored)", () => {
+  const cases: [string, string | undefined][] = [
+    ['{"path":"/a.zip","destDir":"/x"}', "/a.zip"],
+    ['\uFEFF {"destDir":"/x", "path" : "/b\\"q\\u00e9.zip"}', '/b"qé.zip'],
+    ['{"entries":[{"path":"/nested"}],"path":"/top"}', "/top"],
+    ['{"path":"/first","x":1,"path":"/last"}', "/last"],
+    ['{"o":{"path":"/nested"}}', undefined],
+    ['{"path":5}', undefined],
+    ['{"path":"/a","path":5}', undefined],
+    ['{"s":"a \\" path \\" b","path":"/ok"}', "/ok"],
+    ["not json", undefined],
+    ['{"path":"/unterminated', undefined],
+  ];
+  for (const [text, want] of cases) assert.equal(topLevelString(text, "path"), want, text);
+  const big = '{"entries":[' + '"e",'.repeat(2_000_000) + '"e"],"path":"/late"}';
+  assert.equal(topLevelString(big, "path"), "/late");
+});
+
+test("a client that goes away while sending a body leaves an audit line saying so", async () => {
+  const lines: string[] = [];
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "ab" } as never), (l) => lines.push(l));
+  const srv = await listen(app as never);
+  try {
+    const port = (srv.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => {
+      const req = http.request({ method: "POST", host: "127.0.0.1", port, path: "/api/fs/delete", headers: { ...J, "content-length": "100000" }, agent: false });
+      req.on("error", () => resolve());
+      req.write('{"paths":["/x"],"pad":"');
+      setTimeout(() => (req.destroy(), resolve()), 50);
+    });
+    for (let i = 0; i < 100 && !lines.length; i++) await new Promise((r) => setTimeout(r, 20));
+    const row = JSON.parse(lines[0] ?? "{}") as { aborted?: boolean; status?: number; route?: string; method?: string; who?: string };
+    assert.deepEqual([row.aborted, row.status, row.route, row.method, row.who], [true, 499, "/api/fs/delete", "POST", "agent:ab"]);
+  } finally {
+    srv.close();
+  }
 });
 
 test("zip-ticket takes at most 10,000 names", async () => {

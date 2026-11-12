@@ -30,7 +30,7 @@ export function pick(v: unknown, depth = 0): unknown {
   return out;
 }
 
-/** The audit line of a request the guard refused: status, method, route, query and the origin it claimed; the body is never read. */
+/** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. */
 /** Who asked: the last X-Forwarded-For entry (what the nearest proxy saw), else the socket peer; the chain is kept as the caller can write it. */
 function clientOf(c: import("hono").Context): Record<string, string> {
   const chain = c.req.header("x-forwarded-for");
@@ -49,7 +49,7 @@ function clientOf(c: import("hono").Context): Record<string, string> {
   };
 }
 
-export function auditRefusal(who: string, c: import("hono").Context, status: number, sink: AuditSink = (l) => console.log(l)): void {
+export function auditRefusal(who: string, c: import("hono").Context, status: number, sink: AuditSink = (l) => console.log(l), aborted = false): void {
   const q: Record<string, string> = {};
   for (const k of QUERY_KEYS) {
     const v = c.req.query(k);
@@ -68,7 +68,7 @@ export function auditRefusal(who: string, c: import("hono").Context, status: num
       query: Object.keys(q).length ? q : undefined,
       ...(origin ? { origin: clip(origin) } : {}),
       ...(site ? { fetchSite: site } : {}),
-      refused: true,
+      ...(aborted ? { aborted: true } : { refused: true }),
       status,
     }),
   );
