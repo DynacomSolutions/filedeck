@@ -649,7 +649,7 @@ test("a user-run 7-Zip that leaves a hard link to someone else's file is refused
 const mkfifo = (p: string) => assert.equal(spawnSync("mkfifo", [p]).status, 0);
 const within = <T,>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error("blocked")), ms))]);
 
-test("a pipe swapped in for the archive is refused at once instead of blocking the open", async () => {
+test("a pipe swapped in for the archive is refused at once instead of blocking the open", { timeout: 60_000 }, async () => {
   const s = scene("fifo");
   const plan = await prepareExtract(s.root, "/a.tar", "/out", false, { overwrite: "rename" });
   fs.rmSync(path.join(s.root, "a.tar"));
@@ -657,7 +657,7 @@ test("a pipe swapped in for the archive is refused at once instead of blocking t
   await assert.rejects(within(runExtract(plan, LIM, mkCtl().ctl), 5000), (e: Error) => e.message !== "blocked" && /regular file/.test(e.message));
 });
 
-test("a pipe swapped in for a split part is refused at once", async () => {
+test("a pipe swapped in for a split part is refused at once", { timeout: 60_000 }, async () => {
   const s = scene("fifo-split");
   fs.writeFileSync(path.join(s.root, "set.7z.001"), "one");
   const plan = await prepareExtract(s.root, "/set.7z.001", "/out", false, { overwrite: "rename" });

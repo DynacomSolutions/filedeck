@@ -14,7 +14,7 @@ import type { JobCtl } from "../src/jobs.ts";
  * agent promises about 7-Zip holds for the real program, not only for the stand-ins used elsewhere.
  */
 const HAVE = spawnSync("bsdtar", ["--version"]).status === 0 && haveSevenZip();
-const needSz = { skip: HAVE ? false : "7-Zip (7zz) or bsdtar not installed" };
+const needSz = { skip: HAVE ? false : "7-Zip (7zz) or bsdtar not installed", timeout: 180_000 }; // a hang fails the test instead of the whole run
 const IS_ROOT = process.getuid?.() === 0;
 const NOBODY = 65534;
 
@@ -125,19 +125,43 @@ test("the real 7-Zip extracts a split set without a password; swapping the desti
   assert.deepEqual(fs.readdirSync(path.join(s.root, ".filedeck-work")).filter((n) => !n.endsWith(".alive")), [], "no staging left behind");
 });
 
-test("7-Zip compression leaves a nested volume's reserved folders out of the archive", needSz, async () => {
-  const s = scene("reserved");
+test("7-Zip compression with a password and as split volumes keeps names with ? and * and leaves nested reserved folders out", needSz, async () => {
+  const s = scene("odd-names");
+  fs.writeFileSync(path.join(s.src, "a?b.txt"), "question");
+  fs.writeFileSync(path.join(s.src, "c*d.txt"), "star");
+  fs.writeFileSync(path.join(s.src, "other.txt"), "other");
   const vol = path.join(s.src, "vol");
-  fs.mkdirSync(path.join(vol, ".filedeck-work"), { recursive: true });
+  fs.mkdirSync(path.join(vol, "deep", ".filedeck-work-abc"), { recursive: true });
+  fs.mkdirSync(path.join(vol, ".filedeck-work"));
   fs.mkdirSync(path.join(vol, ".filedeck-trash"));
   fs.writeFileSync(path.join(vol, "keep.txt"), "k");
+  fs.writeFileSync(path.join(vol, "deep", "deeper.txt"), "d");
+  for (const r of [".filedeck-work-abc"]) fs.writeFileSync(path.join(vol, "deep", r, "staged"), "s");
   fs.writeFileSync(path.join(vol, ".filedeck-work/staged"), "s");
   fs.writeFileSync(path.join(vol, ".filedeck-trash/item"), "t");
-  const r = await runCompress(await prepareCompress(s.root, "/src", ["vol"], "7z", "vol", { destDir: "/out", splitBytes: 65_536 }), LIM, mkCtl());
-  const first = path.join(s.root, r.path);
-  const list = spawnSync(process.env.FILEDECK_7Z || "7zz", ["l", "-slt", "-ba", first], { encoding: "utf8" }).stdout;
-  assert.match(list, /keep\.txt/);
-  assert.doesNotMatch(list, /\.filedeck-(work|trash)/);
+  const names = ["a?b.txt", "c*d.txt", "vol"];
+  for (const [label, opts] of [
+    ["password", { password: "pw", destDir: "/out" }],
+    ["split", { splitBytes: 65_536, destDir: "/out" }],
+  ] as const) {
+    const r = await runCompress(await prepareCompress(s.root, "/src", names, "7z", `odd-${label}`, opts), LIM, mkCtl());
+    const list = list7z(path.join(s.root, r.path));
+    assert.match(list, /Path = a\?b\.txt/, label);
+    assert.match(list, /Path = c\*d\.txt/, label);
+    assert.match(list, /keep\.txt/, label);
+    assert.match(list, /deeper\.txt/, label);
+    assert.doesNotMatch(list, /other\.txt/, `${label}: only the selection is archived`);
+    assert.doesNotMatch(list, /\.filedeck-(work|trash)/, `${label}: reserved folders are left out`);
+  }
+});
+
+test("exclude patterns with names containing * or ? are refused with a reason, for password and split archives", needSz, () => {
+  fs.mkdirSync(path.join(tmp, "refuse/root/src"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "refuse/root/src/a?b.txt"), "x");
+  return assert.rejects(
+    prepareCompress(path.join(tmp, "refuse/root"), "/src", ["a?b.txt"], "7z", "x", { password: "pw", exclude: ["*.log"] }),
+    (e: { status?: number; message?: string }) => e.status === 400 && /read those names as patterns/.test(e.message ?? ""),
+  );
 });
 
 test("diagnostic: does 7-Zip open nested paths by name? (recorded in the log; never fails)", needSz, () => {

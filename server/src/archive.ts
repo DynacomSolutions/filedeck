@@ -1215,8 +1215,8 @@ export async function prepareCompress(root: string, dir: string, names: string[]
   }
   const viaSz = !!password || o.splitBytes !== undefined;
   if (viaSz && !haveSevenZip()) throw new ArchiveError(501, "7-Zip is not installed in this image");
-  // 7-Zip is run with wildcards on (the reserved-name excludes need them), so a selected name must not contain any
-  if (viaSz && uniq.some((n) => /[*?]/.test(n))) throw new ArchiveError(400, "names containing * or ? cannot be used for password or split archives; rename the items");
+  // with exclude patterns 7-Zip matches wildcards (without them it takes names literally), so a name containing * or ? would be read as a pattern
+  if (viaSz && exclude.length && uniq.some((n) => /[*?]/.test(n))) throw new ArchiveError(400, "exclude patterns cannot be combined with names containing * or ? for password or split archives (7-Zip would read those names as patterns); rename the items");
   const out = o.destDir ? resolveRead(root, o.destDir) : d;
   assertNotTrash(out.virtual);
   if (!(await fs.stat(out.real)).isDirectory()) throw new ArchiveError(400, "destination is not a directory");
@@ -1246,14 +1246,22 @@ export async function prepareCompress(root: string, dir: string, names: string[]
   };
 }
 
-async function walkSizes(dirReal: string, rel: string, sizes: Map<string, number>, limits: ArchiveLimits, signal: AbortSignal) {
+async function walkSizes(dirReal: string, rel: string, sizes: Map<string, number>, limits: ArchiveLimits, signal: AbortSignal, reserved: string[]) {
   if (signal.aborted) throw new Error("canceled");
   const st = await fs.lstat(path.join(dirReal, rel));
   sizes.set(rel, st.isFile() ? st.size : 0);
   if (sizes.size > limits.maxEntries) throw new ArchiveError(413, `selection has more than ${limits.maxEntries} entries`);
   if (!st.isDirectory()) return;
   const d = await fs.opendir(path.join(dirReal, rel));
-  for await (const e of d) await walkSizes(dirReal, rel + "/" + e.name, sizes, limits, signal);
+  for await (const e of d) {
+    if (isReservedName(e.name)) {
+      // never archived (another volume's trash store, work folder or staging folder): kept out by an exact exclude, not counted
+      if (reserved.length >= 5000) throw new ArchiveError(400, "the selection holds too many of Filedeck's own folders");
+      reserved.push(rel + "/" + e.name);
+      continue;
+    }
+    await walkSizes(dirReal, rel + "/" + e.name, sizes, limits, signal, reserved);
+  }
 }
 
 export async function runCompress(plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
@@ -1272,7 +1280,8 @@ function removeAsUser(dir: string, user: { uid: number; gid: number }): Promise<
 
 async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, limits: ArchiveLimits, ctl: JobCtl, guard?: Guard) {
   const sizes = new Map<string, number>();
-  for (const n of plan.names) await walkSizes(srcAt, n, sizes, limits, ctl.signal);
+  const reserved: string[] = [];
+  for (const n of plan.names) await walkSizes(srcAt, n, sizes, limits, ctl.signal, reserved);
   ctl.progress.totalEntries = sizes.size;
   const totalBytes = [...sizes.values()].reduce((a, b) => a + b, 0);
   ctl.progress.totalBytes = totalBytes;
@@ -1313,8 +1322,9 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     if (plan.viaSz) {
       const type = plan.format === "7z" ? "7z" : "zip";
       // -snl stores symlinks as links (as bsdtar does) instead of archiving whatever they point at
-      // wildcards stay on (the reserved-name excludes use one); prepareCompress refuses wildcard characters in the selection
-      const args = ["a", `-t${type}`, "-snl", "-bb1", "-bso1", "-bsp0", ...(plan.level !== undefined ? [`-mx=${plan.level}`] : [])];
+      // -spd (literal file names) also turns off wildcards in -xr! patterns, so it is only used without excludes
+      // (prepareCompress refuses wildcard characters in the selection when excludes are given)
+      const args = ["a", `-t${type}`, "-snl", ...(plan.exclude.length ? [] : ["-spd"]), "-bb1", "-bso1", "-bsp0", ...(plan.level !== undefined ? [`-mx=${plan.level}`] : [])];
       if (plan.password) {
         args.push("-p");
         if (plan.format === "zip") args.push("-mem=AES256");
@@ -1322,7 +1332,8 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
       }
       if (plan.splitBytes) args.push(`-v${plan.splitBytes}b`);
       for (const x of plan.exclude) args.push(`-xr!${x}`);
-      for (const x of RESERVED_EXCLUDES) args.push(`-xr!${x}`); // another volume's trash or work folder inside the selection
+      // another volume's trash or work folders inside the selection, found while it was scanned: exact paths, no wildcards
+      for (const r of reserved) args.push(`-x!${r}`);
       args.push("--", tmp, ...plan.names.map((n) => "./" + n));
       const proc = runSz(args, {
         cwd: srcAt,
