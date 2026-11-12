@@ -763,6 +763,7 @@ test("an archive named like a reserved folder is refused", async () => {
 
 test("7-Zip gets the fixed reserved names as patterns and the scanned paths in a list file, not on the command line", async () => {
   const s = szCompressScene("sz-args", "args");
+  for (const f of ["szargs", "szlist"]) fs.writeFileSync(path.join(s.dir, f), "", { mode: 0o666 }), fs.chmodSync(path.join(s.dir, f), 0o666); // the stand-in may run as another user
   fs.mkdirSync(path.join(s.root, "src/vol/deep/.filedeck-work-abc"), { recursive: true });
   fs.writeFileSync(path.join(s.root, "src/vol/deep/.filedeck-work-abc/x"), "x");
   const plan = await prepareCompress(s.root, "/src", ["vol"], "7z", "x", { destDir: "/out", splitBytes: 65_536 });
