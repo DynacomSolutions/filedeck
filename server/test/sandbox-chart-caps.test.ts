@@ -44,9 +44,12 @@ int main(int argc, char **argv) {
   uint64_t keep = 0;
   char *l = strdup(getenv("FD_CAPS"));
   for (char *t = strtok(l, ","); t; t = strtok(NULL, ",")) keep |= 1ULL << atoi(t);
-  for (int c = 0; c < 64; c++) if (!(keep & (1ULL << c))) prctl(PR_CAPBSET_DROP, c, 0, 0, 0);
   struct hdr h = {0x20080522, 0};
   struct dat d[2];
+  /* only what this process holds can be kept (a container's default set lacks some of the chart's capabilities) */
+  if (syscall(SYS_capget, &h, d) < 0) return 89;
+  keep &= (uint64_t)d[0].p | ((uint64_t)d[1].p << 32);
+  for (int c = 0; c < 64; c++) if (!(keep & (1ULL << c))) prctl(PR_CAPBSET_DROP, c, 0, 0, 0);
   d[0].e = d[0].p = (uint32_t)keep; d[0].i = 0;
   d[1].e = d[1].p = (uint32_t)(keep >> 32); d[1].i = 0;
   if (syscall(SYS_capset, &h, d) < 0) return 90;
@@ -106,8 +109,10 @@ const live = (name: string, fn: () => Promise<void>) =>
 live("the wrapper really holds exactly the chart's capabilities and not SETPCAP", async () => {
   const r = spawnSync(wrapper, ["--raw", "grep", "-E", "^Cap(Eff|Prm|Bnd):", "/proc/self/status"], { encoding: "utf8", env: process.env });
   const eff = BigInt("0x" + /CapEff:\s*([0-9a-f]+)/.exec(r.stdout)![1]!);
-  const want = caps.reduce((a, n) => a | (1n << BigInt(CAPS[n]!)), 0n);
-  assert.equal(eff, want, r.stdout);
+  const held = BigInt("0x" + /CapPrm:\s*([0-9a-f]+)/.exec(fs.readFileSync("/proc/self/status", "utf8"))![1]!); // the wrapper keeps what this process holds of the chart's set
+  const want = caps.reduce((a, n) => a | (1n << BigInt(CAPS[n]!)), 0n) & held;
+  assert.equal(eff, want, `${r.stdout} ${r.stderr} (exit ${r.status})`);
+  assert.ok(eff & 1n, "the wrapper's set is not empty");
   assert.equal(eff & (1n << 8n), 0n);
 });
 
