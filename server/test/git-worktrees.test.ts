@@ -294,3 +294,33 @@ for (const form of ["absolute", "relative"] as const) {
     }
   });
 }
+
+for (const form of ["absolute", "relative"] as const) {
+  test(`a worktree whose ${form} gitdir is spelled through a link that leads nowhere is listed unplaced`, async () => {
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-wt-dng-")));
+    const main = path.join(tmp, "work/main");
+    const real = path.join(outside, "real");
+    const link = path.join(tmp, `work/dng-${form}`);
+    g(main, "worktree", "add", "-b", `dng${form}`, real);
+    g(main, "worktree", "lock", "--reason", "behind a dangling link", real);
+    fs.symlinkSync(path.join(outside, "missing"), link); // inside the root by its text; its target is outside and absent
+    const admin = fs.readdirSync(path.join(main, ".git/worktrees")).map((id) => path.join(main, ".git/worktrees", id)).find((d) => fs.readFileSync(path.join(d, "gitdir"), "utf8").trim() === path.join(real, ".git"))!;
+    const gdFile = path.join(admin, "gitdir");
+    const orig = fs.readFileSync(gdFile);
+    try {
+      fs.writeFileSync(gdFile, (form === "absolute" ? `/work/dng-${form}/real/.git` : `../../../../dng-${form}/real/.git`) + "\n");
+      const w = (await list("/work/main")).body.worktrees.find((x) => x.branch === `dng${form}`)!;
+      assert.ok(w, "still listed");
+      assert.equal(w.path, null);
+      assert.equal(w.prunable, false, "not offered for pruning as if it were a removed folder in the root");
+      assert.equal(w.dirty, null);
+      assert.equal(w.lockReason, undefined);
+    } finally {
+      fs.writeFileSync(gdFile, orig);
+      g(main, "worktree", "unlock", real);
+      g(main, "worktree", "remove", "--force", real);
+      fs.rmSync(link, { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+}

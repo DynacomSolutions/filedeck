@@ -161,14 +161,39 @@ const SWEEP_EVERY_MS = 3600 * 1000;
 const IDLE_MS = 24 * 3600 * 1000;
 const TOUCH_MS = 5 * 60 * 1000;
 
+/** True when `at` or anything below it (links are not followed) was changed at or after `cutoff`; stops at the first such entry. */
+async function changedSince(at: string, cutoff: number): Promise<boolean> {
+  const todo = [at];
+  while (todo.length) {
+    const dir = todo.pop()!;
+    let names: Dirent[];
+    try {
+      names = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return true; // cannot be looked at: not judged old
+    }
+    for (const n of names) {
+      const full = path.join(dir, n.name);
+      const st = await fs.lstat(full).catch(() => null);
+      if (!st || st.mtimeMs >= cutoff) return true;
+      if (st.isDirectory()) todo.push(full);
+    }
+  }
+  return false;
+}
+
 /**
- * Remove staging folders a crash left in the folder `parentAt`, when a copy uses the folder (at most once an hour per folder). Only a folder that is ours (owner,
- * private mode), holds nothing but the entry `staged`, and either carries this run's id (and is not in use) or has not changed
- * for a day is removed, whichever run (or process) made it: nothing else is ever emptied, whatever its name.
- * A folder somebody renamed onto a staging name is therefore removed once it is private, ours and holds nothing but `staged` (at
- * the next sweep when it carries this run's id, after the age limit otherwise). One that holds anything else, or is not ours or
- * not private, is left where it is, hidden by its reserved name: emptying a folder of unknown content would lose data, and the
- * one who put it there still has it.
+ * Remove staging folders a crash left in the folder `parentAt`, when a copy uses the folder (at most once an hour per folder).
+ * Exactly this is removed: a folder named like a staging folder that is a directory of ours (owner), private (no group or other
+ * permission), not in use by this process, and holds nothing but the entry `staged`, and that either
+ * - carries this run's id (a leftover of this process: removed at once), or
+ * - was made by another run or process and nothing in it has changed for a day: the folder, `staged` and everything below `staged`
+ *   (a copy that is only stopped refreshes the folder's times, a crashed one does not).
+ * Then the whole of `staged` is removed, whatever it holds: that is the leftover. A folder somebody renamed onto a staging name is
+ * handled the same way; one that holds anything else, or is not ours or not private, is left where it is, hidden by its reserved
+ * name, because it cannot be told from a user's own folder.
+ * The candidate is first renamed to another reserved name, so that a copy of another process that was only stopped finds its
+ * folder gone (`intact` in withStaging) before the first entry is removed, instead of going on with a half-emptied folder.
  */
 async function sweep(parentAt: string): Promise<void> {
   let loc = parentAt;
@@ -180,7 +205,7 @@ async function sweep(parentAt: string): Promise<void> {
   try {
     for await (const e of direntsOf(parentAt)) {
       if (!e.name.startsWith(STAGING_PREFIX) || ACTIVE.has(e.name) || !e.isDirectory()) continue;
-      const p = path.join(parentAt, e.name);
+      let p = path.join(parentAt, e.name);
       try {
         const fh = await openDir(p);
         try {
@@ -188,10 +213,18 @@ async function sweep(parentAt: string): Promise<void> {
           if ((uid !== undefined && st.uid !== uid) || (st.mode & 0o077) !== 0) continue;
           const inner = await fs.readdir(dirAt(fh, p));
           if (inner.some((n) => n !== "staged")) continue;
-          const staged = inner.length ? await fs.lstat(path.join(dirAt(fh, p), "staged")).catch(() => null) : null;
-          const last = Math.max(st.mtimeMs, staged?.mtimeMs ?? 0);
-          if (!e.name.startsWith(STAGING_PREFIX + RUN + "-") && Date.now() - last < IDLE_MS) continue;
-          if (staged) await rmTree(path.join(dirAt(fh, p), "staged"), { force: true });
+          const cutoff = Date.now() - IDLE_MS;
+          if (!e.name.startsWith(STAGING_PREFIX + RUN + "-")) {
+            if (st.mtimeMs >= cutoff) continue;
+            if (inner.length) {
+              const staged = await fs.lstat(path.join(dirAt(fh, p), "staged")).catch(() => null);
+              if (staged && (staged.mtimeMs >= cutoff || (staged.isDirectory() && (await changedSince(path.join(dirAt(fh, p), "staged"), cutoff))))) continue;
+            }
+          }
+          const mine = path.join(parentAt, `${STAGING_PREFIX}swept-${randomUUID().slice(0, 12)}`);
+          await fs.rename(p, mine); // out of the name a stopped copy looks for, before anything is removed
+          p = mine;
+          if (inner.length) await rmTree(path.join(dirAt(fh, p), "staged"), { force: true });
         } finally {
           await fh.close().catch(() => undefined);
         }
@@ -399,7 +432,7 @@ const kindOf = async (e: Dirent, at: string): Promise<"dir" | "other"> => {
 };
 
 /** Remove everything inside the folder `at` (a descriptor path); nothing is followed. */
-async function emptyDir(at: string, guard?: Guard, depth = 0): Promise<void> {
+async function emptyDir(at: string, guard?: Guard, depth = 0, removed?: () => void): Promise<void> {
   if (depth > MAX_DEPTH) throw tooDeep();
   for (;;) {
     const { entries } = await readEntries(at, 32768);
@@ -410,7 +443,7 @@ async function emptyDir(at: string, guard?: Guard, depth = 0): Promise<void> {
     for (let i = 0; i < files.length; i += 64) {
       await Promise.all(
         files.slice(i, i + 64).map((n) =>
-          fs.unlink(path.join(at, n)).catch((err: NodeJS.ErrnoException) => {
+          fs.unlink(path.join(at, n)).then(removed, (err: NodeJS.ErrnoException) => {
             if (err.code !== "ENOENT") throw err;
           }),
         ),
@@ -426,6 +459,7 @@ async function emptyDir(at: string, guard?: Guard, depth = 0): Promise<void> {
         if (code === "ENOENT") continue;
         if (code === "ELOOP" || code === "ENOTDIR") {
           await fs.unlink(child); // swapped for a link or a file since it was listed: remove that, never enter it
+          removed?.();
           continue;
         }
         throw e;
@@ -433,11 +467,11 @@ async function emptyDir(at: string, guard?: Guard, depth = 0): Promise<void> {
       try {
         const sub = dirAt(fh, child);
         await guard?.(sub);
-        await emptyDir(sub, guard, depth + 1);
+        await emptyDir(sub, guard, depth + 1, removed);
       } finally {
         await fh.close().catch(() => undefined);
       }
-      await fs.rmdir(child).catch((err: NodeJS.ErrnoException) => {
+      await fs.rmdir(child).then(removed, (err: NodeJS.ErrnoException) => {
         if (err.code !== "ENOENT") throw err;
       });
     }
@@ -448,19 +482,20 @@ async function emptyDir(at: string, guard?: Guard, depth = 0): Promise<void> {
  * Remove the entry at `p` (parent pinned) and everything below it, entering folders through descriptors; links are
  * removed, never followed. Folders on other filesystems are entered like any other (as `rm -r` does).
  */
-export async function rmTree(p: string, o: { force?: boolean; guard?: Guard } = {}): Promise<void> {
+export async function rmTree(p: string, o: { force?: boolean; guard?: Guard; removed?: () => void } = {}): Promise<void> {
   try {
     const st = await fs.lstat(p);
-    if (!st.isDirectory()) return await fs.unlink(p);
+    if (!st.isDirectory()) return await fs.unlink(p).then(() => o.removed?.());
     const fh = await openListedDir(p, st);
     try {
       const at = dirAt(fh, p);
       await o.guard?.(at);
-      await emptyDir(at, o.guard);
+      await emptyDir(at, o.guard, 0, o.removed);
     } finally {
       await fh.close().catch(() => undefined);
     }
     await fs.rmdir(p);
+    o.removed?.();
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT" && o.force) return;
     throw e;

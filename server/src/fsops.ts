@@ -399,31 +399,57 @@ async function moveCaseOnly(from: string, to: string) {
   }
 }
 
+/** What went wrong, in words for the person who must act on it. */
+function reasonOf(e: unknown): string {
+  if (e instanceof PathError || e instanceof FsError) return e.message;
+  const code = (e as NodeJS.ErrnoException)?.code;
+  if (code === "EBUSY") return "an entry is in use";
+  if (code === "EIO") return "an input/output error";
+  if (code === "EPERM") return "an entry is protected or may not be removed";
+  const m = mapError(e).message;
+  return m === "internal error" ? `error ${code ?? "unknown"}` : m;
+}
+
 /** The error for a move whose source could not be removed after the copy was put in place; the state is part of the answer (`extra`). */
-const sourceNotRemoved = (partly: boolean) =>
+const sourceNotRemoved = (partly: boolean, why: string) =>
   new FsError(
     409,
     partly
-      ? "The copy at the destination is complete. The source could only be removed in part, because it changed while it was removed. Check the source and remove what is left of it."
-      : "The copy at the destination is complete. The source was not removed, because it changed while it was moved. Check the source and remove it.",
-    { copyComplete: true, sourceRemoved: partly ? "partly" : "no" },
+      ? `The copy at the destination is complete. The source could only be removed in part: ${why}. Check the source and remove what is left of it.`
+      : `The copy at the destination is complete. The source was not removed: ${why}. Check the source and remove it.`,
+    { copyComplete: true, sourceRemoved: partly ? "partly" : "no", reason: why },
   );
 
-const interrupted = () => new FsError(409, "The operation was stopped for too long, so its working folder was removed. Nothing was moved or replaced. Start the operation again.", { interrupted: true });
+const interrupted = (oldRemoved: boolean) =>
+  new FsError(
+    409,
+    oldRemoved
+      ? "The operation was stopped for too long, so its working folder was removed. The item it was to replace has already been removed and nothing was put in its place. The source is kept. Start the operation again."
+      : "The operation was stopped for too long, so its working folder was removed. Nothing was moved or replaced. Start the operation again.",
+    { interrupted: true, oldRemoved },
+  );
 
 /**
  * `withStaging` where a working folder that is gone or replaced (a sweep took it while the operation was stopped) is reported as
- * an interruption, never as a missing file, and where the steps that cannot be undone ask first (`assertIntact`).
+ * an interruption, never as a missing file, and where the steps that cannot be undone ask first (`assertIntact`). The check comes
+ * before the item to be replaced is removed; `oldRemoved()` tells that it has been, so that a later failure says so truthfully.
  */
-function withStagingChecked<T>(parentAt: string, fn: (stage: string, assertIntact: (needStaged?: boolean) => Promise<void>) => Promise<T>): Promise<T> {
+function withStagingChecked<T>(parentAt: string, fn: (stage: string, assertIntact: (needStaged?: boolean) => Promise<void>, oldRemoved: () => void) => Promise<T>): Promise<T> {
   return withStaging(parentAt, async (stage, intact) => {
+    let removedOld = false;
     try {
-      return await fn(stage, async (needStaged = false) => {
-        if (!(await intact(needStaged))) throw interrupted();
-      });
+      return await fn(
+        stage,
+        async (needStaged = false) => {
+          if (!(await intact(needStaged))) throw interrupted(removedOld);
+        },
+        () => {
+          removedOld = true;
+        },
+      );
     } catch (e) {
       if (e instanceof FsError && e.extra?.interrupted) throw e;
-      if (!(await intact(false))) throw interrupted();
+      if (!(await intact(false))) throw interrupted(removedOld);
       throw e;
     }
   });
@@ -437,7 +463,7 @@ function withStagingChecked<T>(parentAt: string, fn: (stage: string, assertIntac
 export async function moveReal(from: string, to: string, overwrite: boolean, root: string) {
   try {
     if (overwrite) await fs.rename(from, to);
-    else await placeNew(from, to);
+    else await placeNew(from, to, true);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
     // Copy beside the destination first so a failure midway leaves nothing
@@ -446,7 +472,7 @@ export async function moveReal(from: string, to: string, overwrite: boolean, roo
     // Built in a private staging folder beside the destination and moved into place with one rename. A move keeps owner and
     // times of every entry, as rename(2) does. `from` and `to` have pinned parents; the walks hold every folder they enter.
     const guard = walkGuard(root);
-    await withStagingChecked(path.dirname(to), async (stage, assertIntact) => {
+    await withStagingChecked(path.dirname(to), async (stage, assertIntact, oldRemoved) => {
       const built = stagedEntry(stage);
       const left: string[] = [];
       await copyTree(from, built, { times: true, owner: true, skipped: left });
@@ -456,7 +482,8 @@ export async function moveReal(from: string, to: string, overwrite: boolean, roo
       if (overwrite) {
         await assertWritableAt(root, path.dirname(to), path.basename(to), true); // where `to` really is, and what it holds
         await rmTree(to, { force: true, guard });
-        await assertIntact(true);
+        oldRemoved();
+        await assertIntact(true); // too late to spare the old item, but the answer must say what happened
         await fs.rename(built, to);
       } else {
         await placeNew(built, to);
@@ -465,18 +492,18 @@ export async function moveReal(from: string, to: string, overwrite: boolean, roo
     // The copy is in place. From here on a failure must say so: the finished copy is never removed.
     // The refusals that can be known now are made before the first entry of the source is removed; one that only shows during the
     // removal (a folder swapped in meanwhile) leaves the source partly removed, and the error says that.
-    let entered = false;
+    let removed = false;
     try {
       await assertWritableAt(root, path.dirname(from), path.basename(from), true);
       await rmTree(from, {
         force: true,
-        guard: async (at) => {
-          await guard(at);
-          entered = true;
+        guard,
+        removed: () => {
+          removed = true;
         },
       });
     } catch (err) {
-      throw Object.assign(sourceNotRemoved(entered), { cause: err });
+      throw Object.assign(sourceNotRemoved(removed, reasonOf(err)), { cause: err });
     }
   }
 }
@@ -511,7 +538,7 @@ export async function uniqueName(dirReal: string, name: string): Promise<string>
  *   EEXIST. The one case Node cannot rule out is an EMPTY folder created at `dest` in the instant between the check and the rename: rename(2)
  *   replaces an empty folder. Nothing but that empty folder can be lost; closing it needs a native renameat2 helper, which is not built.
  */
-async function placeNew(tmp: string, dest: string): Promise<void> {
+async function placeNew(tmp: string, dest: string, isSource = false): Promise<void> {
   const st = await fs.lstat(tmp);
   const taken = () => Object.assign(new Error("exists"), { code: "EEXIST" });
   if (st.isDirectory()) {
@@ -535,7 +562,16 @@ async function placeNew(tmp: string, dest: string): Promise<void> {
     await fs.rename(tmp, dest);
     return;
   }
-  await fs.unlink(tmp);
+  try {
+    await fs.unlink(tmp);
+  } catch (e) {
+    if (!isSource) throw e;
+    // The file is at the destination and the source name could not be removed: it has two names now. Say so, with the state.
+    throw Object.assign(
+      new FsError(409, `The file is at the destination. The source name could not be removed: ${reasonOf(e)}. The file now has two names; remove the source name.`, { copyComplete: true, sourceRemoved: "no", reason: reasonOf(e) }),
+      { cause: e },
+    );
+  }
 }
 
 export interface CopyOpts {
@@ -559,7 +595,7 @@ export async function copy(root: string, from: string, toDir: string, opts: Copy
   return pinDirW(root, d.real, (dstAt) =>
     pinParent(root, a.real, (srcPath) =>
       // Built in a private staging folder inside the destination folder and moved into place whole: a failed copy leaves nothing under the real name.
-      withStagingChecked(dstAt, async (stage, assertIntact) => {
+      withStagingChecked(dstAt, async (stage, assertIntact, oldRemoved) => {
         const built = stagedEntry(stage);
         await copyTree(srcPath, built, tree);
         await assertIntact(true);
@@ -579,7 +615,10 @@ export async function copy(root: string, from: string, toDir: string, opts: Copy
         // The entry that is replaced, where it really is now: it may be, or hold, a read-only folder (the destination folder could have been swapped for a link after the request was checked).
         await assertWritableAt(root, dstAt, name0, true);
         const [src, cur] = [await fs.lstat(built), await fs.lstat(dest).catch(() => null)];
-        if (cur && !(src.isFile() && cur.isFile())) await rmTree(dest, { force: true, guard: walkGuard(root) });
+        if (cur && !(src.isFile() && cur.isFile())) {
+          await rmTree(dest, { force: true, guard: walkGuard(root) });
+          oldRemoved();
+        }
         await assertIntact(true);
         await fs.rename(built, dest);
         return virtualJoin(d.virtual, name0);

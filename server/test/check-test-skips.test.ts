@@ -25,5 +25,6 @@ test("the skip gate refuses a text that only contains a listed text", () => {
   ]) {
     const r = gate(`ok 1 - a # SKIP ${text}`);
     assert.equal(r.status, 1, text);
+    assert.match(r.stderr, /Unexpected TAP skips/, text); // the gate's own verdict, not a missing script
   }
 });

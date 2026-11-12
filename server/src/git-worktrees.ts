@@ -77,6 +77,8 @@ async function settle(rootReal: string, p: string): Promise<string | null> {
       const code = (e as NodeJS.ErrnoException).code;
       const up = path.dirname(cur);
       if ((code !== "ENOENT" && code !== "ENOTDIR") || up === cur) return null;
+      // a link that leads nowhere also gives ENOENT: it is not a missing tail, and where it points cannot be shown to be inside the root
+      if ((await fs.lstat(cur).catch(() => null))?.isSymbolicLink()) return null;
       tail.push(path.basename(cur));
       cur = up;
     }
