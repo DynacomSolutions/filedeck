@@ -22,7 +22,8 @@ test("audit log records writes, never reads, never contents", async () => {
     assert.equal(mk.method, "POST");
     assert.equal(mk.route, "/api/fs/mkdir");
     assert.equal(mk.body.path, "/made");
-    assert.equal(mk.ip, "100.64.0.9");
+    assert.equal(mk.ip, "10.0.0.1", "the last hop, not what the caller wrote first");
+    assert.equal(mk.forwardedFor, "100.64.0.9, 10.0.0.1");
     assert.equal(mk.status, 201);
     assert.deepEqual(up.query, { dir: "/", name: "secret.txt" });
     assert.equal(up.status, 201);

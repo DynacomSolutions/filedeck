@@ -245,7 +245,7 @@ export function readOnlyGuard(root: string, prefixes: string[]): MiddlewareHandl
     if (!isRawRoute(c.req.method, c.req.path) && c.req.method === "POST" && BODY_ROUTES.has(c.req.path)) {
       if (Number(c.req.header("content-length") ?? "0") > MAX_JSON_BODY) return c.json({ error: "request body too large" }, 413);
       try {
-        const j = await c.req.raw.clone().json();
+        const j = await c.req.json(); // parsed once by the request guard when it runs first
         if (!j || typeof j !== "object" || Array.isArray(j)) throw new Error("not an object");
         body = j as Record<string, unknown>;
       } catch {
