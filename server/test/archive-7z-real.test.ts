@@ -164,6 +164,23 @@ test("exclude patterns with names containing * or ? are refused with a reason, f
   );
 });
 
+test("with wildcard matching off, -xr!NAME excludes that exact name at any depth, including a folder created after the scan", needSz, () => {
+  const d = path.join(tmp, "xr-exact");
+  fs.mkdirSync(path.join(d, "t/a/.filedeck-work"), { recursive: true });
+  fs.mkdirSync(path.join(d, "t/a/.filedeck-trash"));
+  fs.writeFileSync(path.join(d, "t/a/keep.txt"), "k");
+  fs.writeFileSync(path.join(d, "t/a/.filedeck-work/x"), "x");
+  fs.writeFileSync(path.join(d, "t/a/.filedeck-trash/y"), "y");
+  fs.writeFileSync(path.join(d, "t/a/odd?.txt"), "o");
+  const z = process.env.FILEDECK_7Z || "7zz";
+  const r = spawnSync(z, ["a", "-t7z", "-snl", "-spd", "-xr!.filedeck-trash", "-xr!.filedeck-work", path.join(d, "o.7z"), "./t"], { cwd: d, encoding: "utf8", timeout: 60_000, input: "" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const list = list7z(path.join(d, "o.7z"));
+  assert.match(list, /keep\.txt/);
+  assert.match(list, /odd\?\.txt/);
+  assert.doesNotMatch(list, /\.filedeck-(work|trash)/);
+});
+
 test("diagnostic: does 7-Zip open nested paths by name? (recorded in the log; never fails)", needSz, () => {
   const strace = spawnSync("strace", ["-V"], { encoding: "utf8", timeout: 30_000 });
   if (strace.status !== 0) {

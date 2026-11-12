@@ -766,23 +766,46 @@ async function fillDir(mv: Mv, from: string, to: string, child: (mv: Mv, from: s
   }, mv.guard && ((loc) => mv.guard!(loc, false)));
   await fs.rmdir(from);
 }
+/** Bounds for copying a file a user's tool wrote: its size when it was opened must be within `max`, and it must not change while it is copied. */
+interface CopyBound {
+  /** most bytes the file may hold */
+  max: number;
+  /** its size as recorded when it was opened (fstat) */
+  size: number;
+}
+
 /**
  * Copy an open file into a new file `to` (exclusive create, no link followed) in a pinned folder: owner, mode and times are set
- * through the descriptor of the new file. `st` is the source's stat; `mode` overrides its permission bits.
+ * through the descriptor of the new file. `st` is the source's stat; `mode` overrides its permission bits. With a bound (a file
+ * a user could grow) the copy refuses a file over `max`, checks the free space first, gives the new file its owner before any
+ * data is written (so the owner's quota applies while it is written), copies exactly the recorded size and fails when the source
+ * changed or holds more.
  */
-async function copyFd(mv: Mv, src: import("node:fs/promises").FileHandle, to: string, st: { mode: number; atime: Date; mtime: Date }, mode?: number): Promise<void> {
+async function copyFd(mv: Mv, src: import("node:fs/promises").FileHandle, to: string, st: { mode: number; atime: Date; mtime: Date }, mode?: number, bound?: CopyBound): Promise<void> {
+  if (bound) {
+    if (bound.size > bound.max) throw new ArchiveError(413, `the archive grew beyond its limit (${bound.size} bytes, limit ${bound.max})`);
+    const sf = await fs.statfs(path.dirname(to)).catch(() => null);
+    if (sf && bound.size > sf.bavail * sf.bsize) throw new ArchiveError(507, `not enough free space for the archive (${bound.size} bytes needed)`);
+  }
   const dst = await fs.open(to, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o600); // EEXIST is the caller's
   try {
+    if (mv.own) await dst.chown(mv.own.uid, mv.own.gid).catch(() => undefined); // empty file first: quota is charged to the owner
     const buf = Buffer.allocUnsafe(1 << 20);
-    for (let pos = 0; ; ) {
-      const { bytesRead } = await src.read(buf, 0, buf.length, pos);
+    const limit = bound ? bound.size : Infinity;
+    let pos = 0;
+    while (pos < limit) {
+      const { bytesRead } = await src.read(buf, 0, Math.min(buf.length, limit - pos), pos);
       if (!bytesRead) break;
       let off = 0;
       while (off < bytesRead) off += (await dst.write(buf, off, bytesRead - off)).bytesWritten;
       pos += bytesRead;
     }
-    if (mv.own) await dst.chown(mv.own.uid, mv.own.gid).catch(() => undefined);
-    await dst.chmod(mode ?? mv.mode ?? (st.mode & 0o777)).catch(() => undefined);
+    if (bound) {
+      const now = await src.stat();
+      const more = (await src.read(Buffer.alloc(1), 0, 1, pos)).bytesRead > 0;
+      if (pos !== bound.size || now.size !== bound.size || more) throw new ArchiveError(500, "the archive changed while it was being copied");
+    }
+    await dst.chmod(mode ?? mv.mode ?? (bound ? 0o644 : st.mode & 0o777)).catch(() => undefined);
     await dst.utimes(st.atime, st.mtime).catch(() => undefined);
   } catch (e) {
     await dst.close().catch(() => undefined);
@@ -1003,8 +1026,14 @@ async function openSource(plan: ExtractPlan, destLoc: string, guard?: Guard): Pr
   return { arg: path.join(work.dir, path.basename(real)), done: work.done };
 }
 
-/** Whether the owner and group of `dir` could read the file `st` (its owner, its group, or everyone). */
-function readableBy(st: { uid: number; gid: number; mode: number }, dir: { uid: number; gid: number }): boolean {
+/**
+ * Whether an archive in a folder is taken as that folder's own. The folder owner must be able to read it (owner, group or everyone),
+ * and a file with more than one link is accepted only when a non-root folder owner owns it: in a root-owned folder (or for a file
+ * someone else owns) a hard link could be a planted second name for a file only root can read (possible where hard-link protection
+ * is off), so such an archive must have link count 1.
+ */
+function readableBy(st: { uid: number; gid: number; mode: number; nlink: number }, dir: { uid: number; gid: number }): boolean {
+  if (st.nlink > 1 && (dir.uid === 0 || st.uid !== dir.uid)) return false;
   if (dir.uid === 0) return true;
   if (st.uid === dir.uid) return (st.mode & 0o400) !== 0;
   if (st.gid === dir.gid) return (st.mode & 0o040) !== 0;
@@ -1228,6 +1257,7 @@ export async function prepareCompress(root: string, dir: string, names: string[]
   const ext = spec.ext;
   if (!base.toLowerCase().endsWith(ext)) base += ext;
   virtualJoin(out.virtual, base);
+  if (isReservedName(base) || isReservedName(base.slice(0, base.length - ext.length))) throw new ArchiveError(400, "that archive name is reserved for the file manager's own use");
   return {
     root,
     dirReal: d.real,
@@ -1298,7 +1328,11 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     // Otherwise they run as the agent.
     const srcOwner = await fs.stat(srcAt); // the pinned folder itself
     runAs = process.getuid?.() === 0 && srcOwner.uid !== 0 ? { uid: srcOwner.uid, gid: srcOwner.gid } : undefined;
-    const mv: Mv = { root: plan.root, guard, own: await ownerOf(outAt).catch(() => undefined), mode: process.getuid?.() === 0 && !runAs ? 0o600 : undefined };
+    const own = await ownerOf(outAt).catch(() => undefined);
+    // One rule for the mode of what is produced: 0600 when the content was read with more privilege than the destination's owner has
+    // (the agent as root, or a tool running as someone other than that owner); 0644 when it ran as the destination's owner; otherwise the tool's own.
+    const privileged = process.getuid?.() === 0 && (!runAs || runAs.uid !== own?.uid);
+    const mv: Mv = { root: plan.root, guard, own, mode: privileged ? 0o600 : runAs ? 0o644 : undefined };
     // 7-Zip writes its archive (and volumes) by name, so a user-run 7-Zip gets a folder only it and the agent can reach (made here,
     // owned by that user, mode 0700, under the temp directory) and writes files there. The agent never walks it: it opens the
     // folder and each produced file without following links, requires plain files that the user owns, and copies them through
@@ -1332,8 +1366,19 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
       }
       if (plan.splitBytes) args.push(`-v${plan.splitBytes}b`);
       for (const x of plan.exclude) args.push(`-xr!${x}`);
-      // another volume's trash or work folders inside the selection, found while it was scanned: exact paths, no wildcards
-      for (const r of reserved) args.push(`-x!${r}`);
+      // Filedeck's own folders at any depth. The exact names are excluded by name wherever they are (with wildcard matching off these are
+      // literal names); with wildcards on (user excludes given) the staging prefix is a pattern too. With wildcards off the staging prefix
+      // cannot be written as a pattern, so those folders are excluded by the exact paths found while the selection was scanned.
+      args.push(`-xr!${TRASH_DIR}`, `-xr!${WORK_DIR}`);
+      if (plan.exclude.length) args.push(`-xr!${STAGING_PREFIX}*`);
+      if (reserved.length) {
+        // a long list goes in a file, not on the command line (deep trees must not exceed the argument size limit)
+        if (reserved.some((r) => /[\r\n]/.test(r))) throw new ArchiveError(400, "a folder name inside the selection contains a line break, which cannot be excluded safely");
+        const list = path.join(userDir ?? work.dir, ".excludes");
+        await fs.writeFile(list, reserved.join("\n") + "\n", { mode: 0o600 });
+        if (runAs) await fs.chown(list, runAs.uid, runAs.gid);
+        args.push(`-x@${list}`);
+      }
       args.push("--", tmp, ...plan.names.map((n) => "./" + n));
       const proc = runSz(args, {
         cwd: srcAt,
@@ -1373,6 +1418,12 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
     }
     // Volumes are name.7z.001, .002 ...: pick a base that is free for the whole set.
     const isPart = (n: string) => n === plan.outName || n.startsWith(plan.outName + ".");
+    // What the output may be: the selection's size plus room for the container (headers per entry, and a margin), never more than the
+    // configured archive limit, and for volumes never more than a volume each. A user can grow a file their tool wrote at no cost.
+    const overhead = Math.ceil(totalBytes / 8) + 1024 * 1024 + sizes.size * 1024;
+    const setMax = Math.min(totalBytes + overhead, limits.maxBytes);
+    const partMax = Math.min(plan.splitBytes ?? Infinity, setMax);
+    const tooBig = (what: string, n: number, max: number) => new ArchiveError(413, `${what} is ${n} bytes, over the limit of ${max} bytes for this archive`);
     const found: { suffix: string; from?: string; fh?: import("node:fs/promises").FileHandle; st?: Stats }[] = [];
     if (userDir) {
       const dh = await fs.open(userDir, C.O_RDONLY | C.O_DIRECTORY | C.O_NOFOLLOW);
@@ -1386,21 +1437,29 @@ async function compressInto(srcAt: string, outAt: string, plan: CompressPlan, li
           const st = await fh.stat();
           // a plain file the user's tool wrote: not a folder, a link, a device, or a hard link to something else
           if (!st.isFile() || st.uid !== runAs!.uid || st.nlink !== 1) throw new ArchiveError(500, "compression produced an unexpected output");
+          if (st.size > partMax) throw tooBig(`output ${n}`, st.size, partMax);
           found.push({ suffix: n.slice(plan.outName.length), fh, st });
         }
       } finally {
         await dh.close().catch(() => undefined);
       }
     } else {
-      for (const n of (await fs.readdir(work.dir)).filter(isPart)) found.push({ suffix: n.slice(plan.outName.length), from: path.join(work.dir, n) });
+      for (const n of (await fs.readdir(work.dir)).filter(isPart)) {
+        const from = path.join(work.dir, n);
+        const size = (await fs.lstat(from)).size;
+        if (size > partMax) throw tooBig(`output ${n}`, size, partMax);
+        found.push({ suffix: n.slice(plan.outName.length), from });
+      }
     }
+    const sumSize = found.reduce((t, f) => t + (f.st?.size ?? 0), 0);
+    if (sumSize > setMax) throw tooBig("the archive", sumSize, setMax);
     if (!found.length) throw new ArchiveError(500, "compression produced no archive");
     const out = await freeSetName(outAt, plan.outName, found.map((f) => f.suffix));
     let size = 0;
     for (const f of found) {
       const to = path.join(outAt, out + f.suffix);
       try {
-        if (f.fh) await copyFd(mv, f.fh, to, f.st!, 0o644); // never replaces a file that appeared meanwhile
+        if (f.fh) await copyFd(mv, f.fh, to, f.st!, undefined, { max: partMax, size: f.st!.size }); // never replaces a file that appeared meanwhile
         else await moveExcl(mv, f.from!, to);
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new ArchiveError(409, "the archive name was taken while it was being written");

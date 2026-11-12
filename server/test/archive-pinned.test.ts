@@ -116,6 +116,8 @@ case "$1" in
      for a in "$@"; do [ "$prev" = "--" ] && out="$a"; prev="$a"; done
      case "$(cat '${path.join(dir, "szmode")}' 2>/dev/null)" in
        dir) mkdir "$out"; echo x > "$out/inner"; exit 0;;
+       sparse) printf 7Z > "$out"; truncate -s 300M "$out"; exit 0;;
+       args) printf '%s\n' "$@" > '${path.join(dir, "szargs")}'; for a in "$@"; do case "$a" in -x@*) cp "$(printf %s "$a" | cut -c4-)" '${path.join(dir, "szlist")}';; esac; done; printf 7Z > "$out"; exit 0;;
        hardlink) ln '${path.join(dir, "outside", "secret.bin")}' "$out"; exit 0;;
        *) printf 7Z > "$out"; exit 0;;
      esac;;
@@ -734,4 +736,64 @@ test("extract and compress jobs from the queue still work with read-only prefixe
   const bad = await post("/api/jobs/extract", { path: "/out/q.tar.gz", destDir: "/ro", subfolder: false, overwrite: "overwrite" });
   assert.equal(bad.status, 403);
   await (app as unknown as { close(): Promise<void> }).close();
+});
+
+/* ---- bounds on what a user's tool writes, the output name, the mode rule and the exclude list ---- */
+
+test("a tiny selection whose tool leaves a huge sparse output is refused before anything is copied", async () => {
+  const s = szCompressScene("sz-sparse", "sparse");
+  const before = outDirs().length;
+  await assert.rejects(runCompress(await szPlan(s), LIM, mkCtl().ctl), (e: { status?: number; message?: string }) => e.status === 413 && /over the limit/.test(e.message ?? ""));
+  assert.deepEqual(fs.readdirSync(s.dest), [], "nothing was written to the output folder");
+  assert.equal(outDirs().length, before);
+});
+
+test("the produced archive is held to the configured archive size limit", async () => {
+  const s = szCompressScene("sz-limit", "ok");
+  await assert.rejects(runCompress(await szPlan(s), { maxEntries: 100, maxBytes: 1 }, mkCtl().ctl), (e: { status?: number }) => e.status === 413);
+  assert.deepEqual(fs.readdirSync(s.dest), []);
+});
+
+test("an archive named like a reserved folder is refused", async () => {
+  const s = szCompressScene("sz-name", "ok");
+  for (const n of [".filedeck-work-abc", ".filedeck-work", ".filedeck-trash"]) {
+    await assert.rejects(prepareCompress(s.root, "/src", ["f.txt"], "tar.gz", n, { destDir: "/out" }), (e: { status?: number }) => e.status === 400, n);
+  }
+});
+
+test("7-Zip gets the fixed reserved names as patterns and the scanned paths in a list file, not on the command line", async () => {
+  const s = szCompressScene("sz-args", "args");
+  fs.mkdirSync(path.join(s.root, "src/vol/deep/.filedeck-work-abc"), { recursive: true });
+  fs.writeFileSync(path.join(s.root, "src/vol/deep/.filedeck-work-abc/x"), "x");
+  const plan = await prepareCompress(s.root, "/src", ["vol"], "7z", "x", { destDir: "/out", splitBytes: 65_536 });
+  await runCompress(plan, LIM, mkCtl().ctl);
+  const args = fs.readFileSync(path.join(s.dir, "szargs"), "utf8");
+  assert.match(args, /^-xr!\.filedeck-trash$/m);
+  assert.match(args, /^-xr!\.filedeck-work$/m);
+  assert.doesNotMatch(args, /deep\/\.filedeck-work-abc/, "scanned paths are not arguments");
+  assert.match(fs.readFileSync(path.join(s.dir, "szlist"), "utf8"), /^vol\/deep\/\.filedeck-work-abc$/m);
+});
+
+test("the mode of a produced archive follows one rule: private when read with more privilege than the destination's owner", async () => {
+  const s = szCompressScene("sz-mode", "ok");
+  const r = await runCompress(await szPlan(s), LIM, mkCtl().ctl);
+  void r;
+  const mode = fs.statSync(path.join(s.dest, "x.7z")).mode & 0o777;
+  // the tool ran as the destination's owner (or the agent is that user): world-readable like any file the owner makes
+  assert.equal(mode & 0o600, 0o600);
+  const t = await prepareCompress(s.root, "/src", ["f.txt"], "tar.gz", "t", { destDir: "/out" });
+  await runCompress(t, LIM, mkCtl().ctl);
+  const tm = fs.statSync(path.join(s.dest, "t.tar.gz")).mode & 0o777;
+  assert.equal(IS_ROOT ? tm : tm & 0o600, IS_ROOT ? 0o644 : 0o600, "the bsdtar path follows the same rule");
+});
+
+test("an archive that is a second name for a file in a root-owned folder is refused (checked when root)", async () => {
+  if (!IS_ROOT) return;
+  const s = scene("hl-root");
+  opened(s);
+  fs.writeFileSync(path.join(s.outside, "p.tar"), "x", { mode: 0o644 });
+  fs.chmodSync(s.root, 0o777);
+  fs.linkSync(path.join(s.outside, "p.tar"), path.join(s.root, "planted.tar"));
+  const plan = await prepareExtract(s.root, "/planted.tar", "/out", false, { overwrite: "rename" });
+  await assert.rejects(runExtract(plan, LIM, mkCtl().ctl), (e: { status?: number }) => e.status === 403);
 });
