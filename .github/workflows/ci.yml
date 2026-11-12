@@ -128,6 +128,90 @@ jobs:
       - run: npm run build -w web
         timeout-minutes: 10
 
+  # Drives the built app in Chromium (web/test/browser): keyboard, focus, axe-core A and AA rules, layouts and a large listing.
+  # The hub serves the static build; the script answers /api/** itself from a deterministic fixture, so no agent is needed.
+  browser:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      FILEDECK_URL: http://127.0.0.1:18581
+      FILEDECK_EVIDENCE_DIR: ${{ github.workspace }}/web/test/browser/evidence
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+        timeout-minutes: 5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/test/browser/package-lock.json
+        timeout-minutes: 5
+      - run: npm ci --no-audit --no-fund
+        timeout-minutes: 5
+      - run: npm ci --no-audit --no-fund
+        working-directory: web/test/browser
+        timeout-minutes: 5
+      - run: npm run build
+        timeout-minutes: 10
+      - name: Cache the Playwright browser
+        id: playwright-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/test/browser/package-lock.json') }}
+        timeout-minutes: 5
+      - name: Install Chromium for Playwright
+        working-directory: web/test/browser
+        run: |
+          if [[ "${{ steps.playwright-cache.outputs.cache-hit }}" == true ]]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+        shell: bash
+        timeout-minutes: 5
+      - name: Start the hub on the static build
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILEDECK_MODE=hub FILEDECK_STATIC="$GITHUB_WORKSPACE/web/dist" PORT=18581 FILEDECK_VAULT_FILE="$RUNNER_TEMP/vault/vault.sqlite" \
+            nohup node server/dist/main.js > "$RUNNER_TEMP/hub.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/hub.pid"
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18581/healthz > /dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/hub.log" >&2
+          exit 1
+        timeout-minutes: 2
+      - name: Run the browser acceptance checks
+        run: npm run check
+        working-directory: web/test/browser
+        timeout-minutes: 10
+      - name: Stop the hub
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/hub.pid" ]]; then kill "$(cat "$RUNNER_TEMP/hub.pid")" 2>/dev/null || true; fi
+          if [[ -f "$RUNNER_TEMP/hub.log" ]]; then tail -n 20 "$RUNNER_TEMP/hub.log"; fi
+        timeout-minutes: 2
+      - name: Upload screenshots and reports
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-acceptance-evidence
+          path: web/test/browser/evidence
+          if-no-files-found: ignore
+          retention-days: 7
+        timeout-minutes: 5
+
   chart:
     needs: changes
     if: needs.changes.outputs.chart == 'true'
@@ -188,7 +272,7 @@ jobs:
 
   aggregate:
     if: always()
-    needs: [changes, server, web, chart, image]
+    needs: [changes, server, web, browser, chart, image]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -199,9 +283,10 @@ jobs:
           echo "changes=${{ needs.changes.result }}"
           echo "server=${{ needs.server.result }}"
           echo "web=${{ needs.web.result }}"
+          echo "browser=${{ needs.browser.result }}"
           echo "chart=${{ needs.chart.result }}"
           echo "image=${{ needs.image.result }}"
-          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.web.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}"; do
+          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.web.result }}" "${{ needs.browser.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}"; do
             if [[ "$result" == failure || "$result" == cancelled ]]; then
               exit 1
             fi
