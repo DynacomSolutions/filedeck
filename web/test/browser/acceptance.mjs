@@ -265,6 +265,8 @@ async function verifyPresentation(browser) {
       const control = controls.nth(i);
       await control.scrollIntoViewIfNeeded();
       clippedAtMaxSize.push(...await control.evaluate((e) => {
+        // A native radio or checkbox may be visually hidden behind its card: the label is what the user sees and presses.
+        if (e instanceof HTMLInputElement && ['radio', 'checkbox'].includes(e.type) && e.labels?.[0]) { e = e.labels[0]; e.scrollIntoView({ block: 'nearest' }); }
         const r = e.getBoundingClientRect();
         const failures = [];
         for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
@@ -287,6 +289,7 @@ async function verifyPresentation(browser) {
               if (axes.length) reachableScrollports.push({ ancestor: a.className?.toString?.() || a.tagName, axes, scrollLeft: a.scrollLeft, scrollTop: a.scrollTop, maxScrollLeft: a.scrollWidth - a.clientWidth, maxScrollTop: a.scrollHeight - a.clientHeight });
             }
             failures.push({
+              html: e.outerHTML.slice(0, 200),
               label: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 40),
               ancestor: p.className?.toString?.() || p.tagName,
               overflow: { x: s.overflowX, y: s.overflowY },
@@ -708,6 +711,8 @@ async function verifyKeyboardAndConfirmation(browser) {
     await page.keyboard.press('?');
     await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).waitFor({ state: 'visible' });
   }
+  // After history Back/Forward the dialog is a fresh node: make sure it holds focus before Escape is sent.
+  await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).focus();
   await page.keyboard.press('Escape');
   await page.getByRole('dialog', { name: 'Keyboard shortcuts' }).waitFor({ state: 'detached' });
   // Modal opener restoration is checked before history Back/Forward above, when
