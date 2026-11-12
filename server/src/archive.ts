@@ -244,7 +244,7 @@ function watch(child: ChildProcess, onLine?: (l: string) => void) {
       const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
       resolve({ code: -1, err: missing ? "archive tools are not installed in this image" : e.message });
     });
-    child.on("close", (code) => setImmediate(() => resolve({ code, err: tail.trim() })));
+    child.on("close", (code, signal) => setImmediate(() => resolve({ code, err: tail.trim() || (code === null && signal ? `terminated by ${signal}` : "") })));
   });
   return done;
 }

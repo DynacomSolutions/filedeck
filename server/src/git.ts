@@ -280,7 +280,10 @@ export function runGit(cwd: string, args: string[], o: GitOpts = {}): Promise<Gi
           errText += String(e.message);
           finish(null);
         });
-        child.on("close", (code) => finish(code));
+        child.on("close", (code, signal) => {
+          if (code === null && signal && !timedOut && !truncated) errText += `git was terminated by ${signal}`;
+          finish(code);
+        });
     });
   });
 }
