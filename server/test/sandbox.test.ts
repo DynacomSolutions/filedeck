@@ -224,5 +224,5 @@ test("--uid and --gid must be whole non-negative numbers, and 0 is refused unles
   for (const bad of [["--uid", "x", "--gid", "1"], ["--uid", "1x", "--gid", "1"], ["--uid", "-1", "--gid", "1"], ["--uid", "", "--gid", "1"], ["--uid", "99999999999", "--gid", "1"], ["--uid", "1", "--gid", "y"], ["--uid", "0", "--gid", "0"], ["--uid", "5", "--gid", "0"], ["--uid", "5"]]) {
     assert.equal(st(...bad), 64, bad.join(" "));
   }
-  await assert.rejects(spawnSandboxed("true", [], { uid: 0, gid: 0 }), /root/);
+  if (process.getuid?.() !== 0) await assert.rejects(spawnSandboxed("true", [], { uid: 0, gid: 0 }), /root/); // (as root, uid 0 is simply no change)
 });

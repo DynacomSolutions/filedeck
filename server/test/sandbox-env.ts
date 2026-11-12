@@ -29,3 +29,16 @@ export async function useSandbox(): Promise<{ state: "landlock" | "fallback"; di
   console.log(`# sandbox mode: ${info.state}${why ? ` (${why})` : ""}`);
   return { state: info.state === "landlock" ? "landlock" : "fallback", dir, bin, why };
 }
+
+/**
+ * For tests that are not about the sandbox but use Git on repositories made in a temporary folder (which may be owned by root
+ * and not world-readable, as when the suite runs as root): the real sandbox where the kernel has Landlock, otherwise the sandbox
+ * off, since the fallback would refuse such repositories.
+ */
+export async function useSandboxOrOff(): Promise<void> {
+  const box = await useSandbox();
+  if (box.state !== "landlock") {
+    process.env.FILEDECK_SANDBOX = "off";
+    resetSandbox();
+  }
+}
