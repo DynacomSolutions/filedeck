@@ -155,7 +155,9 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
   const octOk = (v: string) => /^[0-7]{3,4}$/.test(v);
   /** Send one permission change (or, for a folder, the whole set to its contents) and reload what the node now reports. */
   const apply = async (field: NonNullable<typeof busy>, body: { mode?: number; owner?: string; group?: string }, tree = false) => {
-    if (!p) return;
+    if (!p || busy !== null) return;
+    // a control that is disabled while the request runs drops keyboard focus: give it back afterwards
+    const had = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setBusy(field);
     setPermErr("");
     try {
@@ -177,6 +179,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
       setGroup(origGroup);
     } finally {
       setBusy(null);
+      setTimeout(() => had?.isConnected && !had.matches(":disabled") && document.activeElement === document.body && had.focus(), 0);
     }
   };
   /** Octal box: Enter or its Apply button applies a valid 3-4 digit value. */
@@ -255,7 +258,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
     tabRefs.current[tab]?.focus();
   };
   return (
-    <div className="pp" aria-busy={!p && !basic && !err}>
+    <div className="pp" role="region" aria-label={`Properties of ${path.slice(path.lastIndexOf("/") + 1) || "/"}`} aria-busy={!p && !basic && !err}>
       {err && <div className="fp-err" role="alert">{err}</div>}
       {!p && !basic && !err && <SkeletonLines lines={7} />}
       <div className="props-tabs" role="tablist" aria-label="Properties sections">
@@ -322,7 +325,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
       )}
       {p && p.type !== "other" && (
         <section id={`${tabBase}-permissions-panel`} className="props-tabpanel" role="tabpanel" aria-labelledby={`${tabBase}-permissions-tab`} tabIndex={0} hidden={activeTab !== "permissions"}>
-        <fieldset className="perm" disabled={busy !== null}>
+        <fieldset className="perm" aria-busy={busy !== null}>
           <legend>Permissions</legend>
           <table className="perm-grid">
             <thead>
@@ -334,7 +337,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
                   <th scope="row">{who}</th>
                   {bits.map((b, i) => (
                     <td key={b}>
-                      <input type="checkbox" aria-label={`${who} ${["read", "write", "execute"][i]}`} disabled={p.type === "symlink"} checked={(mode & b) !== 0} onChange={(e) => (setOct(null), setMode((m) => (e.target.checked ? m | b : m & ~b)))} />
+                      <input type="checkbox" aria-label={`${who} ${["read", "write", "execute"][i]}`} disabled={p.type === "symlink" || busy !== null} checked={(mode & b) !== 0} onChange={(e) => (setOct(null), setMode((m) => (e.target.checked ? m | b : m & ~b)))} />
                     </td>
                   ))}
                 </tr>
@@ -353,6 +356,8 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
                 value={oct ?? octal(mode)}
                 aria-invalid={oct !== null && !octOk(oct)}
                 disabled={p.type === "symlink"}
+                readOnly={busy !== null}
+                aria-describedby={permErr ? `${tabBase}-perm-err` : undefined}
                 onFocus={(e) => e.currentTarget.select()}
                 onChange={(e) => {
                   const v = e.target.value;
@@ -387,7 +392,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
               {SPECIAL.map(([l, b, tip]) => (
                 <Tip key={l} label={tip}>
                   <label className="chk">
-                    <input type="checkbox" disabled={p.type === "symlink"} checked={(mode & b) !== 0} onChange={(e) => (setOct(null), setMode((m) => (e.target.checked ? m | b : m & ~b)))} /> {l}
+                    <input type="checkbox" disabled={p.type === "symlink" || busy !== null} checked={(mode & b) !== 0} onChange={(e) => (setOct(null), setMode((m) => (e.target.checked ? m | b : m & ~b)))} /> {l}
                   </label>
                 </Tip>
               ))}
@@ -397,7 +402,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
             <div className="perm-name">
               <label htmlFor={`${tabBase}-owner`}>Owner</label>
               <span className="perm-field">
-                <input id={`${tabBase}-owner`} value={owner} onChange={(e) => (setOwner(e.target.value), setOwnerDraft(true))} onKeyDown={nameKeys("owner")} />
+                <input id={`${tabBase}-owner`} aria-describedby={permErr ? `${tabBase}-perm-err` : undefined} readOnly={busy !== null} value={owner} onChange={(e) => (setOwner(e.target.value), setOwnerDraft(true))} onKeyDown={nameKeys("owner")} />
                 {slot("owner")}
               </span>
               <button type="button" aria-label="Apply owner" disabled={!ownerDraft || !owner.trim() || busy !== null} onClick={() => (setOwnerDraft(false), commitName("owner"))}>Apply</button>
@@ -405,7 +410,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
             <div className="perm-name">
               <label htmlFor={`${tabBase}-group`}>Group</label>
               <span className="perm-field">
-                <input id={`${tabBase}-group`} value={group} onChange={(e) => (setGroup(e.target.value), setGroupDraft(true))} onKeyDown={nameKeys("group")} />
+                <input id={`${tabBase}-group`} aria-describedby={permErr ? `${tabBase}-perm-err` : undefined} readOnly={busy !== null} value={group} onChange={(e) => (setGroup(e.target.value), setGroupDraft(true))} onKeyDown={nameKeys("group")} />
                 {slot("group")}
               </span>
               <button type="button" aria-label="Apply group" disabled={!groupDraft || !group.trim() || busy !== null} onClick={() => (setGroupDraft(false), commitName("group"))}>Apply</button>
@@ -430,7 +435,7 @@ export function PropertiesPanel({ node, path, entry, onChanged, onStatus, gitTic
               {slot("tree")}
             </div>
           )}
-          {permErr && <div className="fp-err" role="alert">{permErr}</div>}
+          {permErr && <div className="fp-err" id={`${tabBase}-perm-err`} role="alert">{permErr}</div>}
           {permJob.job && live(permJob.job) && (
             <div className="muted">
               Applying... {permJob.job.progress.entries.toLocaleString()} entries <button type="button" onClick={permJob.cancel}><Ic.X /> Cancel</button>
@@ -449,7 +454,7 @@ export function PropertiesMulti({ entries }: { entries: Entry[] }) {
   const files = entries.filter((e) => e.type === "file").length;
   const bytes = entries.reduce((n, e) => (e.type === "file" ? n + e.size : n), 0);
   return (
-    <div className="pp">
+    <div className="pp" role="region" aria-label={`Properties of ${entries.length.toLocaleString()} items`}>
       <dl className="props">
         <div><dt>Selected</dt><dd>{entries.length.toLocaleString()} items</dd></div>
         <div><dt>Files</dt><dd>{files.toLocaleString()} · {fmtSize(bytes)} ({bytes.toLocaleString()} bytes)</dd></div>

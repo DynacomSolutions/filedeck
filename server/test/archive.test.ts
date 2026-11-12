@@ -370,19 +370,25 @@ test("multi-file/folder download streams a valid zip", needTool, async () => {
   await one.arrayBuffer();
 });
 
-test("zip download also accepts the name list in a JSON body", needTool, async () => {
+test("a long selection is downloaded through a one-use ticket", needTool, async () => {
   const many = [...Array(1200)].map((_, i) => `missing-${i}-${"x".repeat(40)}`);
-  assert.equal((await post("/api/fs/zip", { dir: "/src", names: many })).status, 404, "a long list is not limited by URL length");
-  const r = await post("/api/fs/zip", { dir: "/src", names: ["a.txt", "sub"] });
+  assert.equal((await post("/api/fs/zip-ticket", { dir: "/src", names: many })).status, 404, "a bad selection is refused when the ticket is requested");
+  assert.equal((await post("/api/fs/zip-ticket", { dir: "/src", names: ["../etc"] })).status, 400);
+  assert.equal((await post("/api/fs/zip-ticket", { dir: "/src" })).status, 400);
+  const t = await post("/api/fs/zip-ticket", { dir: "/src", names: ["a.txt", "sub"] });
+  assert.equal(t.status, 201);
+  const { id } = (await t.json()) as { id: string };
+  assert.match(id, /^[0-9a-f]{48}$/);
+  assert.equal((await fetch(`${base}/api/fs/zip?ticket=${id}`, { method: "HEAD" })).status, 200, "HEAD does not use the ticket");
+  const r = await fetch(`${base}/api/fs/zip?ticket=${id}`);
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("content-type"), "application/zip");
-  const f = path.join(work, "dl-post.zip");
+  const f = path.join(work, "dl-ticket.zip");
   fs.writeFileSync(f, Buffer.from(await r.arrayBuffer()));
   const names = spawnSync("bsdtar", ["-tf", f]).stdout.toString().trim().split("\n").sort();
   assert.deepEqual(names, ["a.txt", "sub/", "sub/b c.txt"]);
-  assert.equal((await post("/api/fs/zip", { dir: "/src", names: ["..%2Fetc"] })).status, 404);
-  assert.equal((await post("/api/fs/zip", { dir: "/src", names: ["../etc"] })).status, 400);
-  assert.equal((await post("/api/fs/zip", { dir: "/src" })).status, 400);
+  assert.equal((await fetch(`${base}/api/fs/zip?ticket=${id}`)).status, 410, "the ticket works once");
+  assert.equal((await fetch(`${base}/api/fs/zip?ticket=${"0".repeat(48)}`)).status, 410);
 });
 
 test("download and compress reject traversal and non-children", async () => {

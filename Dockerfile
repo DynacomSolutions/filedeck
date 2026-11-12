@@ -2,8 +2,9 @@
 # or FILEDECK_MODE=hub (serves the SPA and proxies to the agents).
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 WORKDIR /src
-# bsdtar (libarchive), 7zip and qpdf are needed by the archive and PDF integration tests too; ffmpeg by the thumbnail tests; git by the pull request diff tests.
-RUN apk add --no-cache libarchive-tools 7zip qpdf ffmpeg git
+# bsdtar (libarchive), 7zip and qpdf are needed by the archive and PDF integration tests too; ffmpeg by the thumbnail tests; git by the pull request diff tests;
+# samba-client by the test that runs the real smbclient with the options the code passes (the same package the final image ships).
+RUN apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
 # gcc, musl and the kernel headers build the static fanotify helper (server/native).
 RUN apk add --no-cache gcc musl-dev linux-headers
 COPY server/native server/native
@@ -16,7 +17,7 @@ COPY server server
 COPY web web
 RUN npm run typecheck \
  && npm run build \
- && npm test && npm prune --omit=dev --workspace=server
+ && FILEDECK_REQUIRE_SMBCLIENT=1 npm test && npm prune --omit=dev --workspace=server
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # libuv's file pool (4 threads by default) is the limit on parallel stat calls; the size walk keeps up to 32 in flight
@@ -34,6 +35,8 @@ RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samb
 # fanotify helper: only started when the chart's agent.fanotify.enabled sets FILEDECK_FANWATCH (it needs CAP_SYS_ADMIN).
 COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwatch
 COPY --from=build /src/node_modules node_modules
+# Dependencies npm could not hoist to the root (a version the web workspace does not share) live beside the server.
+COPY --from=build /src/server/node_modules server/node_modules
 COPY --from=build /src/server/package.json server/package.json
 COPY --from=build /src/server/dist server/dist
 COPY --from=build /src/web/dist web

@@ -39,7 +39,6 @@ export function SavedPasswords() {
   const entries = v?.entries ?? [];
   const expiringSoon = entries.filter((e) => e.expiresAt !== null && e.expiresAt > now && e.expiresAt - now <= 60_000);
   const atLifetimeLimit = (e: VaultEntry) => Boolean(v && e.createdAt + v.maxHours * 3_600_000 <= now + 60_000);
-  const remaining = (e: VaultEntry) => Math.max(1, Math.ceil((e.expiresAt! - now) / 1000));
   return (
     <section className="set-sec vault-sec" aria-labelledby="set-pw">
       <h2 id="set-pw">Saved passwords</h2>
@@ -53,7 +52,7 @@ export function SavedPasswords() {
       {expiringSoon.length > 0 && (
         <div className="vault-warning" role="alert">
           <Ic.TriangleAlert />
-          <span>{expiringSoon.length === 1 ? `A saved password expires in about ${remaining(expiringSoon[0]!)} seconds.` : `${expiringSoon.length} saved passwords expire within the next minute.`} {expiringSoon.some((e) => !atLifetimeLimit(e)) ? "Use “Keep active” to renew the idle timeout where the maximum lifetime allows." : "Re-enter the password after it expires."}</span>
+          <span>{expiringSoon.length === 1 ? "A saved password expires within the next minute." : `${expiringSoon.length} saved passwords expire within the next minute.`} {expiringSoon.some((e) => !atLifetimeLimit(e)) ? "Use “Keep active” to renew the idle timeout where the maximum lifetime allows." : "Re-enter the password after it expires."}</span>
         </div>
       )}
       <div className="vault-bar">
@@ -62,7 +61,7 @@ export function SavedPasswords() {
         <span className="muted vault-count">{v ? `${entries.length} saved` : "Loading..."}</span>
       </div>
       {err && <div className="ad-err" role="alert">{err}</div>}
-      <div className="vault-wrap">
+      <div className="vault-wrap" role="region" aria-label="Saved passwords table" tabIndex={0}>
         <table className="ft vault-table">
           <thead>
             <tr>

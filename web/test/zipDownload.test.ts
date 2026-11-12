@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dispositionName, fsChanged, noteSources, onFsChanged, onOpFinished, zipFitsInUrl, zipPost, ZIP_URL_LIMIT } from "../src/api.ts";
+import { fsChanged, noteSources, onFsChanged, onOpFinished, zipFitsInUrl, zipTicketUrl, ZIP_URL_LIMIT } from "../src/api.ts";
 
 test("zip download: short selections stay in the URL, long ones do not", () => {
   assert.equal(zipFitsInUrl("n", "/d", ["a", "b"]), true);
@@ -9,29 +9,22 @@ test("zip download: short selections stay in the URL, long ones do not", () => {
   assert.ok(ZIP_URL_LIMIT <= 8000);
 });
 
-test("dispositionName prefers the UTF-8 name", () => {
-  assert.equal(dispositionName(`attachment; filename="a_b.zip"; filename*=UTF-8''a%20b.zip`, "x"), "a b.zip");
-  assert.equal(dispositionName(`attachment; filename="plain.zip"`, "x"), "plain.zip");
-  assert.equal(dispositionName(null, "files.zip"), "files.zip");
-});
-
-test("zipPost sends the names as a JSON body", async () => {
+test("a long selection posts its names for a ticket and downloads from a plain GET", async () => {
   const real = globalThis.fetch;
   let seen: { url: string; init: RequestInit } | undefined;
   globalThis.fetch = (async (url: string, init: RequestInit) => {
     seen = { url, init };
-    return new Response("zipbytes", { headers: { "content-disposition": `attachment; filename="d.zip"` } });
+    return new Response(JSON.stringify({ id: "abc123" }), { status: 201 });
   }) as typeof fetch;
   try {
-    const r = await zipPost("n", "/d", ["a", "b"]);
-    assert.equal(r.name, "d.zip");
-    assert.equal(await r.blob.text(), "zipbytes");
+    const url = await zipTicketUrl("n", "/d", ["a", "b"]);
+    assert.match(url, /\/api\/fs\/zip\?ticket=abc123$/);
+    assert.match(seen?.url ?? "", /\/api\/fs\/zip-ticket$/);
     assert.equal(seen?.init.method, "POST");
     assert.equal((seen?.init.headers as Record<string, string>)["content-type"], "application/json");
     assert.deepEqual(JSON.parse(String(seen?.init.body)), { dir: "/d", names: ["a", "b"] });
-    assert.match(seen?.url ?? "", /\/api\/fs\/zip$/);
     globalThis.fetch = (async () => new Response(JSON.stringify({ error: "nope" }), { status: 404 })) as typeof fetch;
-    await assert.rejects(zipPost("n", "/d", ["a"]), /nope/);
+    await assert.rejects(zipTicketUrl("n", "/d", ["a"]), /nope/);
   } finally {
     globalThis.fetch = real;
   }
