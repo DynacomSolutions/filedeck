@@ -167,6 +167,7 @@ async function installFixture(page, opts = {}) {
       stats: { dirsScanned: 1, dirsQueued: 0, entries: 3, hashed: 0, hashQueued: 0, hashedBytes: 0, cacheHits: 0, cacheMisses: 0, startedAt: Date.now() - 100, finishedAt: Date.now(), rev: 1, warnings: [] },
       files: { identical: 1, different: 1, leftOnly: 1, rightOnly: 0, error: 0 }, dirs: { identical: 0, different: 0, leftOnly: 0, rightOnly: 0, error: 0 },
     });
+    if (pathname === '/api/diff/jobs/diff-fixture/rows' && opts.manyRows) return json({ rel: url.searchParams.get('rel') || '', listed: true, status: 'different', rev: 1, rows: Array.from({ length: 40 }, (_, i) => ({ p: `entry-${String(i).padStart(2, '0')}.txt`, status: i % 3 === 0 ? 'different' : 'identical', l: diffSide(128), r: diffSide(i % 3 === 0 ? 256 : 128) })) });
     if (pathname === '/api/diff/jobs/diff-fixture/rows') return json({ rel: url.searchParams.get('rel') || '', listed: true, status: 'different', rev: 1, rows: [
       { p: 'tracked.txt', status: 'different', l: diffSide(128), r: diffSide(256), newer: 'right' },
       { p: 'same.txt', status: 'identical', l: diffSide(), r: diffSide() },
@@ -478,9 +479,7 @@ async function verifyOutsideGit(browser) {
 // (so it cannot rot) and it is listed in the output; once the defect is fixed the run fails until the entry is removed.
 const knownDefects = [];
 // axe findings that are reported to the owner of the component and not yet fixed; matched by rule, window width and target.
-const knownAxe = [
-  { id: 'target-size', width: 320, target: 'Folders in', label: 'target-size: the breadcrumb "Folders in <path>" button (.crumb-sep) is 24 px wide and overlapped by the Recent locations button (AddressBar), so its target spacing is under 24 px' },
-];
+const knownAxe = [];
 async function expectKnownDefect(id, description, check) {
   let failure = null;
   try { await check(); } catch (error) { failure = error; }
@@ -524,11 +523,12 @@ async function verifyGitWorktrees(browser) {
     }
     assert.ok(!await nestedPage.locator('.wt-name', { hasText: 'nested-unrelated' }).count(), 'breadcrumb Properties must list the parent repository, not the nested current-folder repository');
     assert.ok(worktreeRequests.includes('/parent-repo'), 'the Git section repository root should be the worktrees API context');
-    await expectKnownDefect('breadcrumb-properties-reload', 'Properties opened from a breadcrumb folder is not kept in the URL, so a reload shows the selected file instead', async () => {
-      await nestedPage.reload();
-      await nestedPage.getByRole('tab', { name: 'Git', exact: true }).waitFor({ state: 'visible' });
-      await nestedPage.locator('.wt-name', { hasText: 'parent-main' }).waitFor({ state: 'visible', timeout: 4000 });
-    });
+    // The folder named from the breadcrumb is part of the URL: a reload shows its repository, not the selected file's.
+    assert.ok(nestedPage.url().includes('%22wp%22'), 'the breadcrumb folder must be kept in the URL (wp)');
+    await nestedPage.reload();
+    await nestedPage.getByRole('tab', { name: 'Git', exact: true }).waitFor({ state: 'visible' });
+    await nestedPage.locator('.wt-name', { hasText: 'parent-main' }).waitFor({ state: 'visible', timeout: 4000 });
+    assert.ok(!await nestedPage.locator('.wt-name', { hasText: 'nested-unrelated' }).count(), 'after a reload the Git tab still lists the breadcrumb folder\'s repository');
   } finally {
     await nestedContext.close();
   }
@@ -1269,6 +1269,155 @@ async function verifyAxeViews(browser) {
   assert.deepEqual(failures, [], `axe-core reports no ${AXE_TAGS.join(', ')} violations in ${views.length} views x 2 colour schemes`);
 }
 
+// A compact Compare toolbar on a phone: at most two rows (100 px) and enough compared rows stay in view; every moved action is
+// reachable with the keyboard and the menu gives focus back to its button.
+async function verifyCompareToolbarCompact(browser) {
+  const split = { i: 'p3', d: 'v', k: [{ i: 'p1', n: nodeName, p: '/work' }, { i: 'p2', n: nodeName, p: '/work' }] };
+  const state = stateOf(split, { g: { l: [nodeName, '/work'], r: [nodeName, '/work'], a: 'p1', b: 'p2' } });
+  const failures = [];
+  for (const [width, height] of [[390, 844], [320, 568]]) {
+    const { context, page } = await openPage(browser, { viewport: { width, height }, state, fixture: { manyRows: true } });
+    try {
+      await page.getByText('entry-01.txt').first().waitFor({ state: 'visible', timeout: 10000 });
+      await page.waitForTimeout(300);
+      const m = await page.evaluate(() => {
+        const bar = document.querySelector('.cmp-bar');
+        const fp = bar.closest('.fp');
+        const pr = fp.getBoundingClientRect();
+        const rows = [...fp.querySelectorAll('.cmp-row[role=row]')].filter((r) => !r.classList.contains('up') && !r.classList.contains('skel'));
+        const scroller = fp.querySelector('.cmp-scroll').getBoundingClientRect();
+        const full = rows.filter((r) => { const x = r.getBoundingClientRect(); return x.height > 0 && x.top >= scroller.top - .5 && x.bottom <= Math.min(scroller.bottom, pr.bottom, innerHeight) + .5; }).length;
+        return { barHeight: Math.round(bar.getBoundingClientRect().height), full, panel: Math.round(pr.height) };
+      });
+      if (m.barHeight > 100) failures.push(`${width}x${height}: the Compare toolbar is ${m.barHeight} px tall (limit 100)`);
+      if (width === 390 && m.full < 8) failures.push(`${width}x${height}: only ${m.full} compared rows fully visible (need 8; panel ${m.panel} px)`);
+      if (width === 390) {
+        // Keyboard: Filter and More open with Enter, every item has a name, Escape returns focus to the button.
+        for (const name of ['Filter', 'More']) {
+          const button = page.locator('.cmp-bar').first().getByRole('button', { name: new RegExp(`^${name}`) });
+          await button.focus();
+          await page.keyboard.press('Enter');
+          const menu = page.getByRole('menu').last();
+          await menu.waitFor({ state: 'visible' });
+          const names = await menu.getByRole(name === 'Filter' ? 'menuitemcheckbox' : 'menuitem').evaluateAll((els) => els.map((e) => e.textContent.trim()));
+          const want = name === 'Filter' ? 3 : 6;
+          if (names.length < want || names.some((x) => !x)) failures.push(`${name} menu items: ${JSON.stringify(names)}`);
+          await page.keyboard.press('Escape');
+          await menu.waitFor({ state: 'detached' });
+          const focused = await page.evaluate(() => document.activeElement?.textContent?.trim() || '');
+          if (!focused.startsWith(name)) failures.push(`after closing the ${name} menu focus is on "${focused}"`);
+        }
+        // a moved action works from the keyboard: Select differing from More enables Clear selection
+        const more = page.locator('.cmp-bar').first().getByRole('button', { name: /^More/ });
+        await more.focus();
+        await page.keyboard.press('Enter');
+        await page.getByRole('menuitem', { name: 'Select differing' }).focus();
+        await page.keyboard.press('Enter');
+        await page.getByText(/^[1-9][0-9]* selected$/).first().waitFor({ state: 'visible', timeout: 5000 });
+      }
+    } finally {
+      await context.close();
+    }
+  }
+  // wide window: the full toolbar fits on one row once the panel is wide enough
+  const { context, page } = await openPage(browser, { viewport: { width: 3000, height: 900 }, state });
+  try {
+    await page.getByText('only-left.txt').first().waitFor({ state: 'visible', timeout: 10000 });
+    await page.waitForTimeout(300);
+    const h = await page.evaluate(() => [...document.querySelectorAll('.cmp-bar')].map((b) => ({ h: Math.round(b.getBoundingClientRect().height), compact: b.classList.contains('compact') })));
+    if (h.some((x) => x.h > 60 || x.compact)) failures.push(`3000px: toolbar should be one full row, got ${JSON.stringify(h)}`);
+  } finally {
+    await context.close();
+  }
+  assert.deepEqual(failures, [], 'the compact Compare toolbar');
+}
+
+// Address bar: every control is at least 24x24 CSS px with no overlap (2.5.8), 44 px tall, the last breadcrumb segment stays
+// visible, and focusing "Edit address" with the keyboard does not start editing (Enter or Space does).
+async function verifyAddressBar(browser) {
+  const nested = `?s=${encodeURIComponent(JSON.stringify({ t: { i: 'p1', n: nodeName, p: '/work/subdir/deep', s: tracked }, a: 'p1' }))}`;
+  const failures = [];
+  for (const [width, height] of [[1365, 900], [390, 844], [320, 568]]) {
+    const { context, page } = await openPage(browser, { viewport: { width, height }, state: nested });
+    try {
+      await page.locator('.addr nav.crumbs').waitFor({ state: 'visible' });
+      await page.waitForTimeout(300);
+      const report = await page.evaluate(() => {
+        const addr = document.querySelector('.addr').getBoundingClientRect();
+        const nodes = [...document.querySelectorAll('.addr button, .addr .addr-fill')].map((e) => ({ name: e.getAttribute('aria-label') || e.textContent.trim(), r: e.getBoundingClientRect() })).filter((x) => x.r.width > 0 || x.name.startsWith('Edit address'));
+        const bad = [];
+        for (const { name, r } of nodes) {
+          if (r.height < 43.5) bad.push(`${name}: ${Math.round(r.height)} px tall`);
+          if ((r.width < 24 || r.height < 24)) bad.push(`${name}: ${r.width}x${r.height} is under 24x24`);
+          if (r.left < addr.left - .5 || r.right > addr.right + .5) bad.push(`${name}: outside the address bar`);
+        }
+        for (const [i, a] of nodes.entries()) for (const b of nodes.slice(i + 1)) {
+          const ox = Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left), oy = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top);
+          if (ox > .05 && oy > .05) bad.push(`${a.name} overlaps ${b.name} by ${ox.toFixed(1)} px`);
+        }
+        const last = document.querySelector('.addr .crumb.last button');
+        const lr = last?.getBoundingClientRect();
+        if (!last || !lr || lr.width < 24 || lr.right > addr.right + .5) bad.push('the last breadcrumb segment is not visible');
+        return { bad, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+      });
+      for (const b of report.bad) failures.push(`${width}px: ${b}`);
+      if (report.overflow > 1) failures.push(`${width}px: the document scrolls horizontally by ${report.overflow} px`);
+    } finally {
+      await context.close();
+    }
+  }
+  const { context, page } = await openPage(browser, { viewport: { width: 1365, height: 900 }, state: nested });
+  try {
+    const edit = page.getByRole('button', { name: 'Edit address' });
+    await edit.focus();
+    await page.waitForTimeout(150);
+    assert.equal(await page.getByRole('combobox', { name: 'Address' }).count(), 0, 'focusing Edit address with the keyboard must not start editing');
+    await page.keyboard.press('Enter');
+    await page.getByRole('combobox', { name: 'Address' }).waitFor({ state: 'visible' });
+    await page.keyboard.press('Escape');
+    await page.getByRole('combobox', { name: 'Address' }).waitFor({ state: 'detached' });
+    await page.getByRole('button', { name: 'Edit address' }).focus();
+    await page.keyboard.press('Space');
+    await page.getByRole('combobox', { name: 'Address' }).waitFor({ state: 'visible' });
+  } finally {
+    await context.close();
+  }
+  assert.deepEqual(failures, [], 'address bar targets');
+}
+
+// Compare toolbar: every action stays inside its panel and readable at the common widths (it wraps instead of scrolling sideways).
+async function verifyCompareToolbar(browser) {
+  const split = { i: 'p3', d: 'v', k: [{ i: 'p1', n: nodeName, p: '/work' }, { i: 'p2', n: nodeName, p: '/work' }] };
+  const state = stateOf(split, { g: { l: [nodeName, '/work'], r: [nodeName, '/work'], a: 'p1', b: 'p2' } });
+  const failures = [];
+  for (const [width, height] of [[1365, 900], [1280, 800], [1024, 768], [390, 844], [320, 568]]) {
+    const { context, page } = await openPage(browser, { viewport: { width, height }, state });
+    try {
+      await page.getByText('only-left.txt').first().waitFor({ state: 'visible', timeout: 10000 });
+      await page.waitForTimeout(200);
+      const report = await page.evaluate(() => [...document.querySelectorAll('.cmp-bar')].map((bar) => {
+        const panel = bar.closest('.fp').getBoundingClientRect();
+        const wrap = bar.parentElement.getBoundingClientRect();
+        const bad = [];
+        for (const b of bar.querySelectorAll('button')) {
+          const r = b.getBoundingClientRect();
+          const name = b.textContent.trim() || b.getAttribute('aria-label') || 'button';
+          if (r.left < panel.left - .5 || r.right > panel.right + .5 || r.top < wrap.top - .5 || r.bottom > wrap.bottom + .5) bad.push(`${name} outside the panel ${JSON.stringify([r.left, r.right, r.top, r.bottom].map(Math.round))}`);
+          else if (b.scrollWidth > b.clientWidth + 1) bad.push(`${name} text cut (${b.scrollWidth} > ${b.clientWidth})`);
+        }
+        if (bar.scrollWidth > bar.clientWidth + 1) bad.push(`toolbar scrolls sideways (${bar.scrollWidth} > ${bar.clientWidth})`);
+        return { bad, wrapHeight: Math.round(wrap.height), buttons: bar.querySelectorAll('button').length };
+      }));
+      assert.ok(report.length >= 1 && report.every((x) => x.buttons >= 1), `the Compare toolbar renders at ${width}px`);
+      for (const x of report) for (const b of x.bad) failures.push(`${width}px: ${b}`);
+      if (report.length === 2 && report[0].wrapHeight !== report[1].wrapHeight) failures.push(`${width}px: the two toolbars differ in height (${report[0].wrapHeight} and ${report[1].wrapHeight}), so the rows below do not line up`);
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'no Compare toolbar action is clipped by its panel');
+}
+
 // No horizontal scrolling of the document at any supported window size; the phone layout in a short window still lists files.
 async function verifyNoHorizontalOverflow(browser) {
   const sizes = [[1440, 900], [1024, 768], [768, 1024], [390, 844], [320, 568], [844, 390], [320, 256]];
@@ -1378,6 +1527,9 @@ const checks = [
   ['copy and move to another node, vault renewal', verifyOperations],
   ['large listing', verifyLargeListing],
   ['unsaved editor text survives a resize', verifyUnsavedTextSurvivesResize],
+  ['address bar targets and keyboard', verifyAddressBar],
+  ['Compare toolbar is not clipped', verifyCompareToolbar],
+  ['Compare toolbar is compact on a phone', verifyCompareToolbarCompact],
   ['no horizontal overflow', verifyNoHorizontalOverflow],
   ['rows visible in a short window', verifyShortWindowRows],
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],

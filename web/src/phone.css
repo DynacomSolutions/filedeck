@@ -13,3 +13,6 @@
   .site-header .drawer-btn{min-height:32px;height:32px}
   .main{padding:.15rem}
 }
+
+/* Compare on a phone: the toolbar already names both sides and holds the "Compare by" choice, so the notes under the list keep only the run summary and Options (more compared rows stay in view). */
+.phone-foot .side-cmp>h2,.phone-foot .side-cmp-roots,.phone-foot .side-cmp-cap,.phone-foot .cmp-seg{display:none}
