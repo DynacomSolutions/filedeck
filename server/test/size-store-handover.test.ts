@@ -8,7 +8,15 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { FanWatch, type HelperProc } from "../src/fanwatch.ts";
-import { SizeStore } from "../src/size-store.ts";
+import { SizeStore as RealSizeStore } from "../src/size-store.ts";
+// every store a test opens is closed at the end of the file, even when an assertion threw first (an open file-backed store keeps a writer thread, and with it the process, alive)
+const openStores: { close(): Promise<void> | void }[] = [];
+class SizeStore extends RealSizeStore {
+  constructor(...a: ConstructorParameters<typeof RealSizeStore>) {
+    super(...a);
+    openStores.push(this);
+  }
+}
 
 /** every test here starts agents, helpers and workers: a leak must fail the test, not hang the runner */
 const test = ((name: string, fn: (t: never) => unknown) => nodeTest(name, { timeout: 120_000 }, fn as never)) as typeof nodeTest;
@@ -33,6 +41,7 @@ let tmp: string;
 const things: { close(): Promise<void> | void }[] = [];
 before(() => void (tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-handover-")))));
 after(async () => {
+  for (const s of openStores) things.push(s);
   for (const t of things) await Promise.race([Promise.resolve(t.close()).catch(() => undefined), new Promise((r) => setTimeout(r, 15_000))]);
   fs.rmSync(tmp, { recursive: true, force: true });
 });

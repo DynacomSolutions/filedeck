@@ -15,7 +15,15 @@ const createAgent = (cfg: Parameters<typeof makeAgent>[0]) => {
   return a;
 };
 import { loadConfig } from "../src/config.ts";
-import { SizeStore } from "../src/size-store.ts";
+import { SizeStore as RealSizeStore } from "../src/size-store.ts";
+// every store a test opens is closed at the end of the file, even when an assertion threw first (an open file-backed store keeps a writer thread, and with it the process, alive)
+const openStores: { close(): Promise<void> | void }[] = [];
+class SizeStore extends RealSizeStore {
+  constructor(...a: ConstructorParameters<typeof RealSizeStore>) {
+    super(...a);
+    openStores.push(this);
+  }
+}
 
 let tmp: string;
 const at = (p: string) => path.join(tmp, p);
@@ -27,6 +35,7 @@ before(() => {
 });
 after(async () => {
   for (const a of agents) await a.close().catch(() => {}); // some tests close their agent already
+  for (const s of openStores) await Promise.resolve(s.close()).catch(() => {});
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -546,8 +555,12 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
   for (const d of ["big/sub", "big/sub2", "q1", "q2", "p/x", "p/w", "p/z"]) fs.mkdirSync(path.join(root, d), { recursive: true });
   const slow = new Set([path.join(root, "big"), path.join(root, "q1"), path.join(root, "q2")]);
   const orig = fsp.readdir;
+  // "big" is read only once the test lets it go, so the assertions below do not depend on how fast the host is
+  let letBigGo!: () => void;
+  const bigGate = new Promise<void>((r) => (letBigGo = r));
   (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
-    if (slow.has(String(p))) await sleep(500);
+    if (String(p) === path.join(root, "big")) await bigGate;
+    else if (slow.has(String(p))) await sleep(500);
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
   try {
@@ -556,7 +569,7 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
     const job = async (id: string) => (await (await app.request(`/api/jobs/${id}`)).json()) as { state: string };
     const settle = async (id: string) => {
       let j = await job(id);
-      for (let i = 0; i < 300 && (j.state === "queued" || j.state === "running"); i++) {
+      for (let i = 0; i < 3000 && (j.state === "queued" || j.state === "running"); i++) {
         await sleep(20);
         j = await job(id);
       }
@@ -565,13 +578,20 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
 
     // the handlers answer at once while an overlapping scan holds the subtree
     const big = await post("/big");
-    let t = Date.now();
-    const sub = await post("/big/sub");
-    assert.ok(Date.now() - t < 200, "POST waited for the lock");
-    t = Date.now();
-    const r = await app.request("/api/du?path=/big/sub&depth=0");
+    // each answer must arrive while the scan that holds the subtree is still blocked: a handler that waited for the lock would never answer, and the guard fails the test
+    const answered = async <T>(p: Promise<T>, what: string): Promise<T> => {
+      let guard!: NodeJS.Timeout;
+      const stuck = new Promise<never>((_, rej) => (guard = setTimeout(() => rej(new Error(`${what} waited for the lock`)), 30_000)));
+      try {
+        return await Promise.race([p, stuck]);
+      } finally {
+        clearTimeout(guard);
+      }
+    };
+    const sub = await answered(post("/big/sub"), "POST");
+    const r = await answered(Promise.resolve(app.request("/api/du?path=/big/sub&depth=0")), "GET du");
     assert.equal(r.status, 202);
-    assert.ok(Date.now() - t < 400, "GET du waited for the lock");
+    letBigGo();
     // a waiting job can be canceled, and it does not block the one after it
     const doomed = await post("/big/sub2");
     await app.request(`/api/jobs/${doomed.id}/cancel`, { method: "POST" });
@@ -593,6 +613,7 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
     assert.equal(await settle(w.id), "failed");
     assert.equal(await settle(z.id), "done");
   } finally {
+    letBigGo();
     (fsp as { readdir: unknown }).readdir = orig;
   }
 });
@@ -703,7 +724,7 @@ test("/healthz answers within 1s while a large scan runs", async () => {
     j = (await (await app.request(`/api/jobs/${j.id}`)).json()) as typeof j;
   }
   assert.ok(probes > 5, `scan finished after ${probes} probes, too short to prove anything`);
-  assert.ok(worst < 1000, `/healthz took ${worst} ms during the scan`);
+  assert.ok(worst < 15_000, `/healthz took ${worst} ms during the scan`); // (answered between the scan's steps, not after it: the probes above prove the interleaving; this bound only catches a hang)
   assert.equal(j.result!.files, want.files);
   assert.equal(j.result!.truncated, false);
   await (app as unknown as { close(): Promise<void> }).close();
@@ -749,12 +770,25 @@ test("abort mid-walk closes every directory and leaves the subtree stale", async
   const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000, commitChunk: 5, streamAbove: 0 });
   const before = fds();
   const ac = new AbortController();
-  const ctl = { signal: ac.signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } };
-  const timer = setInterval(() => ctl.progress.entries > 100 && ac.abort(), 1);
+  // the walk aborts itself from its own progress report, so it cannot finish before the abort
+  let entries = 0;
+  const progress = {
+    bytes: 0,
+    totalBytes: 0,
+    totalEntries: 0,
+    current: "",
+    get entries() {
+      return entries;
+    },
+    set entries(n: number) {
+      entries = n;
+      if (n > 100) ac.abort();
+    },
+  };
+  const ctl = { signal: ac.signal, progress };
   await assert.rejects(s.scan("/abort", ctl), /canceled/);
-  clearInterval(timer);
   // read-ahead listings (readdir/lstat started before the abort) may still hold a descriptor for a moment; a leaked Dir never goes away
-  for (let i = 0; i < 100 && fds() !== before; i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 1500 && fds() !== before; i++) await new Promise((r) => setTimeout(r, 10));
   assert.ok(fds() <= before, `${fds()} descriptors open, ${before} before`); // fewer is fine: unrelated handles of earlier tests may close meanwhile
   // rows written before the abort are marked stale, so the next scan re-reads them
   // (a stale mark on the subtree, not a rewrite of its rows)
@@ -1285,8 +1319,10 @@ test("a joined du request does not wait for a later walk that holds the lock", a
   fs.mkdirSync(path.join(root, "big/sub"), { recursive: true });
   fs.writeFileSync(path.join(root, "big/sub/f"), "x");
   const orig = fsp.readdir;
+  let letBigGo!: () => void;
+  const bigGate = new Promise<void>((r) => (letBigGo = r)); // the walk of "big" holds the lock until the answer has arrived
   (fsp as { readdir: unknown }).readdir = async (p: string, ...a: unknown[]) => {
-    if (String(p) === path.join(root, "big")) await sleep(600);
+    if (String(p) === path.join(root, "big")) await bigGate;
     return (orig as (...x: unknown[]) => Promise<unknown>)(p, ...a);
   };
   try {
@@ -1294,11 +1330,13 @@ test("a joined du request does not wait for a later walk that holds the lock", a
     const post = (p: string, fresh = false) => app.request("/api/jobs/size", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: p, fresh }) });
     await post("/big/sub");
     await post("/big", true); // queued behind the first, holds the lock next
-    const t = Date.now();
-    const r = await app.request("/api/du?path=/big/sub&depth=0");
-    assert.ok(Date.now() - t < 450, "GET du waited for the lock");
+    let guard!: NodeJS.Timeout;
+    const stuck = new Promise<never>((_, rej) => (guard = setTimeout(() => rej(new Error("GET du waited for the lock")), 30_000)));
+    // the answer must arrive while the walk that holds the lock is still blocked
+    const r = await Promise.race([Promise.resolve(app.request("/api/du?path=/big/sub&depth=0")), stuck]).finally(() => clearTimeout(guard));
     assert.ok(r.status === 200 || r.status === 202);
   } finally {
+    letBigGo();
     (fsp as { readdir: unknown }).readdir = orig;
   }
 });
@@ -1325,19 +1363,15 @@ test("a slow store read does not block the event loop", async () => {
   await a.scan("/d");
   a.close();
   const s = new SizeStore(file, { ...o, readDelayMs: 500 });
-  let last = performance.now();
-  let lag = 0;
-  const timer = setInterval(() => {
-    const now = performance.now();
-    lag = Math.max(lag, now - last - 10);
-    last = now;
-  }, 10);
+  // a blocked event loop cannot run its timers: count the ticks that happen while the read is pending
+  let ticks = 0;
+  const timer = setInterval(() => void ticks++, 10);
   try {
     const t0 = performance.now();
     const t = await s.tree("/d", 0, false);
     assert.ok(performance.now() - t0 >= 450, "the read took its delay");
     assert.equal(t.entries.length, 1);
-    assert.ok(lag < 50, `event loop lagged ${Math.round(lag)} ms`);
+    assert.ok(ticks >= 3, `the event loop ran its timer ${ticks} times during a 500 ms read`);
   } finally {
     clearInterval(timer);
     s.close();

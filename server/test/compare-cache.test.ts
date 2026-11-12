@@ -84,14 +84,21 @@ test("a semaphore passes a free slot on when the waiter that was woken has been 
 
 test("an aborted waiter leaves the queue at once", async () => {
   const sem = new Semaphore(1);
-  const holder = sem.run(() => wait(200));
+  let letGo!: () => void;
+  const holder = sem.run(() => new Promise<void>((r) => (letGo = r))); // holds the slot until the test releases it
   const ac = new AbortController();
   const w = sem.run(async () => 1, ac.signal).catch((e: Error) => e.message);
   await wait(5);
-  const t0 = Date.now();
   ac.abort();
-  assert.equal(await w, "canceled");
-  assert.ok(Date.now() - t0 < 100, "no wait for the holder");
+  let guard!: NodeJS.Timeout;
+  const stuck = new Promise<string>((r) => (guard = setTimeout(() => r("waited for the holder"), 30_000)));
+  try {
+    // the waiter must settle while the holder still holds the slot
+    assert.equal(await Promise.race([w, stuck]), "canceled", "no wait for the holder");
+  } finally {
+    clearTimeout(guard);
+    letGo();
+  }
   await holder;
 });
 

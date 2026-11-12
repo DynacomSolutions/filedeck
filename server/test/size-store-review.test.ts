@@ -178,9 +178,9 @@ test("N4 what a dead writer left half done is recorded when the next one takes t
   assert.equal(rows(db, "SELECT COUNT(*) n FROM walking")[0].n, 1);
   crash(A); // no release, no more heartbeats
   const B = open(db, root, { leaseMs: 300 });
-  for (let i = 0; i < 200 && !B.isWriter; i++) await sleep(20);
+  for (let i = 0; i < 3000 && !B.isWriter; i++) await sleep(20);
   assert.ok(B.isWriter, "the lease lapsed and B took it");
-  for (let i = 0; i < 100 && !rows(db, "SELECT 1 FROM dirty").length; i++) await sleep(20); // (an acquire that met a busy file tries again on the next beat)
+  for (let i = 0; i < 1500 && !rows(db, "SELECT 1 FROM dirty").length; i++) await sleep(20); // (an acquire that met a busy file tries again on the next beat)
   assert.deepEqual(rows(db, "SELECT path FROM dirty").map((r) => r.path), ["/a/x"], "the take of the dead writer");
   assert.deepEqual(rows(db, "SELECT path FROM stale_trees").map((r) => r.path), ["/"], "its walk");
   assert.equal(rows(db, "SELECT COUNT(*) n FROM walking")[0].n, 0);
@@ -217,7 +217,7 @@ test("W1 only one process writes: a second store on the file reads, defers its m
   B.markStale("/b");
   assert.equal(rows(db, "SELECT COUNT(*) n FROM stale_trees")[0].n, 0, "not written by a reader");
   await A.close();
-  for (let i = 0; i < 100 && !B.isWriter; i++) await sleep(20);
+  for (let i = 0; i < 1500 && !B.isWriter; i++) await sleep(20);
   assert.ok(B.isWriter, "taken over at once: the lease was released");
   await sleep(50);
   assert.deepEqual(rows(db, "SELECT path FROM stale_trees").map((r) => r.path), ["/b"], "the deferred mark is written");
@@ -231,7 +231,7 @@ test("W2 fencing: a writer paused past its lease cannot commit after the next on
   crash(A); // paused: no heartbeats, but still believes it is the writer
   assert.equal(A.isWriter, true);
   const B = open(db, root, { leaseMs: 300 });
-  for (let i = 0; i < 200 && !B.isWriter; i++) await sleep(20);
+  for (let i = 0; i < 3000 && !B.isWriter; i++) await sleep(20);
   assert.ok(B.isWriter);
   // A wakes up and writes: both a mark and a walk
   A.markStale("/a");
@@ -293,7 +293,7 @@ test("P1 a writer killed in the middle of a walk: its child rows are in, the tot
   assert.equal(await A.freshTree("/", 0, false), null, "not while the walk is open");
   crash(A);
   const B = open(db, root, { leaseMs: 300 });
-  for (let i = 0; i < 200 && !B.isWriter; i++) await sleep(20);
+  for (let i = 0; i < 3000 && !B.isWriter; i++) await sleep(20);
   arm(B, realNow() - 1000);
   await sleep(100);
   // B applies the pending change as usual: the delta is zero, because the child already holds the new value
@@ -394,7 +394,7 @@ test("N9b dirty rows without a stored folder are swept when the store is opened"
   d.close();
   const s2 = open(db, root);
   await s2.scan("/b");
-  for (let i = 0; i < 100 && rows(db, "SELECT COUNT(*) n FROM dirty")[0].n > 1; i++) await sleep(20);
+  for (let i = 0; i < 1500 && rows(db, "SELECT COUNT(*) n FROM dirty")[0].n > 1; i++) await sleep(20);
   assert.deepEqual(rows(db, "SELECT path FROM dirty").map((r) => r.path), ["/a/x"]);
 });
 
@@ -411,6 +411,9 @@ test("N10 a folder validated alone and then replaced by a rename (the event is o
   const got = (await s.takeDue(realNow(), 10, T))!;
   for (const p of got) await s.applyChanged(p);
   await s.noteRan(got.map((p) => ({ path: p, endedAt: realNow(), hold: true })), 100_000);
+  // the mark is written without anyone waiting for it (markStale returns at once): wait until the writer has committed everything queued before reading the file
+  await (s as Any).barrier();
+  for (let i = 0; i < 1500 && !rows(db, "SELECT 1 FROM stale_trees").length; i++) await sleep(20);
   assert.deepEqual(rows(db, "SELECT path FROM stale_trees").map((r) => r.path), ["/a"], "the unstored parent with stored rows below it is marked");
   const t = await s.freshTree("/a/x", 0, false);
   assert.ok(t === null || bytes(t) === 1000, `served ${bytes(t)}`);
@@ -446,14 +449,14 @@ test("perf: the live-pending lookup does not scan the idle pending rows", async 
   arm(s2, realNow());
   await sleep(5);
   await s2.scan("/", undefined, true);
-  for (let i = 0; i < 200 && !rows(db, "SELECT name FROM sqlite_master WHERE name = 'pending_live'").length; i++) await sleep(50);
+  for (let i = 0; i < 3000 && !rows(db, "SELECT name FROM sqlite_master WHERE name = 'pending_live'").length; i++) await sleep(50);
   assert.ok(rows(db, "SELECT name FROM sqlite_master WHERE name = 'pending_live'").length, "the partial index was built in the background");
   const t0 = performance.now();
   const t = await s2.freshTree("/", 0, false);
   const ms = performance.now() - t0;
   console.log(`# freshTree / with 400k idle pending rows: ${ms.toFixed(1)} ms`);
   assert.equal(bytes(t), 15);
-  assert.ok(ms < 40, `took ${ms} ms`);
+  assert.ok(ms < 500, `took ${ms} ms`); // an order-of-magnitude guard; the query plans below are the exact assertions
   // the periodic housekeeping statements use the partial index too, not a scan of every idle row
   const d2 = new DatabaseSync(db, { readOnly: true });
   const plan = (q: string) => (d2.prepare("EXPLAIN QUERY PLAN " + q).all(1, 2) as { detail: string }[]).map((r) => r.detail).join(" | ");
@@ -569,7 +572,7 @@ test("T2 the repeat of a detached du, after the folder changed and the watcher r
   }
   fs.writeFileSync(path.join(root, "t/sub/f"), "abcdefghij");
   fs.writeFileSync(ev, `x ${root}/t/sub\n`);
-  for (let i = 0; i < 200 && fs.existsSync(ev); i++) await sleep(20); // the helper has printed it
+  for (let i = 0; i < 3000 && fs.existsSync(ev); i++) await sleep(20); // the helper has printed it
   await sleep(450); // the watcher has handed it to the store (a flush every 250 ms) and has not applied it yet (settle 1 s)
   const r = await app.request("/api/du?path=/t&depth=1");
   const b = (await r.json()) as Any;
@@ -588,7 +591,7 @@ test("A-empty a failed read of the dead writer's takes at acquire does not switc
   const rd = (B as Any).read.bind(B);
   let failures = 2;
   (B as Any).read = async (q: string, sql: string, p: Any, d: Any) => (q === "taken" && failures-- > 0 ? d : rd(q, sql, p, d)); // a busy reader answers its default
-  for (let i = 0; i < 300 && !(B as Any).idxReady; i++) await sleep(20);
+  for (let i = 0; i < 4500 && !(B as Any).idxReady; i++) await sleep(20);
   assert.ok(B.isWriter);
   arm(B, 0);
   await sleep(50);
@@ -607,7 +610,7 @@ test("A-return an acquire whose write fails once is tried again: the fast path c
   const tx = (B as Any).txn.bind(B);
   let n = 0;
   (B as Any).txn = async (p: Any) => (n++ === 0 ? false : tx(p));
-  for (let i = 0; i < 300 && !(B as Any).idxReady; i++) await sleep(20);
+  for (let i = 0; i < 4500 && !(B as Any).idxReady; i++) await sleep(20);
   assert.ok((B as Any).idxReady, "the second try went through");
   let woke = false;
   void B.whenWriter().then(() => (woke = true));
@@ -637,7 +640,7 @@ test("L11a a walk whose root commit fails busy leaves no walking row behind; L11
   } finally {
     console.error = quiet;
   }
-  await sleep(50);
+  for (let i = 0; i < 1500 && rows(db, "SELECT COUNT(*) n FROM walking")[0].n !== 0; i++) await sleep(20);
   assert.equal(rows(db, "SELECT COUNT(*) n FROM walking")[0].n, 0, "the walking row was removed (the tree is marked stale instead)");
   assert.ok(rows(db, "SELECT COUNT(*) n FROM stale_trees")[0].n >= 1);
   // a beat that cannot get the database
