@@ -21,6 +21,8 @@ const IS_ROOT = process.getuid?.() === 0;
 const NOBODY = 65534;
 
 let tmp: string;
+let ownTmp: string;
+let tmpBefore: string | undefined;
 let box: Awaited<ReturnType<typeof useSandbox>>;
 before(async () => {
   box = await useSandbox(); // 7-Zip runs inside the real sandbox where the kernel has Landlock
@@ -28,8 +30,16 @@ before(async () => {
   fs.chmodSync(tmp, 0o755);
   process.env.FILEDECK_WORK_DIR = path.join(tmp, "workdir");
   fs.mkdirSync(process.env.FILEDECK_WORK_DIR, { mode: 0o700 });
+  // the tool users' private folders go to a temp folder of this file's own: other test files run at the same time and make such folders too
+  tmpBefore = process.env.TMPDIR;
+  ownTmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-tmpdir-"));
+  fs.chmodSync(ownTmp, 0o1777);
+  process.env.TMPDIR = ownTmp;
 });
 after(() => {
+  if (tmpBefore === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = tmpBefore;
+  fs.rmSync(ownTmp, { recursive: true, force: true });
   fs.rmSync(box.dir, { recursive: true, force: true });
   delete process.env.FILEDECK_SANDBOX_HELPER;
   delete process.env.FILEDECK_WORK_DIR;

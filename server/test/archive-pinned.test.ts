@@ -38,6 +38,8 @@ function entry(name: string, data: string): Buffer {
 }
 
 let tmp: string;
+let ownTmp: string;
+let tmpBefore: string | undefined;
 let work: string;
 const saved: Record<string, string | undefined> = {};
 const ENVS = ["FILEDECK_SANDBOX", "FILEDECK_BSDTAR", "FILEDECK_7Z", "FILEDECK_7Z_RECHECK", "FILEDECK_WORK_DIR"];
@@ -53,8 +55,16 @@ before(() => {
   // the pinning and the moves around the tools. archive-sandbox.test.ts runs the real tools in the real sandbox.
   process.env.FILEDECK_SANDBOX = "off";
   resetSandbox();
+  // the tool users' private folders go to a temp folder of this file's own: other test files run at the same time and make such folders too
+  tmpBefore = process.env.TMPDIR;
+  ownTmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-tmpdir-"));
+  fs.chmodSync(ownTmp, 0o1777);
+  process.env.TMPDIR = ownTmp;
 });
 after(() => {
+  if (tmpBefore === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = tmpBefore;
+  fs.rmSync(ownTmp, { recursive: true, force: true });
   for (const k of ENVS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
