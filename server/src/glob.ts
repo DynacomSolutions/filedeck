@@ -86,9 +86,16 @@ function tokenise(g: string): Tok[] | null {
   return out;
 }
 
-/** Most rules (after brace expansion) and tokens in one matcher: more is refused (400), so the cost per path stays bounded. */
-export const MAX_RULES = 512;
-export const MAX_TOTAL_TOKENS = 2048;
+/** Most rules (after brace expansion) and tokens in one matcher: more is refused (400). */
+export const MAX_RULES = 256;
+export const MAX_TOTAL_TOKENS = 1024;
+/**
+ * Automaton steps (live states summed over the characters) one `test()` call may spend over all its rules: about 2 ms at the
+ * very worst. Ordinary patterns need a few dozen steps; a call that would need more answers 400 (a pattern set that is
+ * too expensive for this path) instead of holding the event loop, however long the path or the patterns.
+ */
+export const MAX_STEPS_PER_TEST = 40_000;
+let stepsLeft = MAX_STEPS_PER_TEST;
 
 const LIT = 0, ONE = 1, CLS = 2, STAR = 3, DSTAR = 4, DSA = 5, DSB = 6;
 
@@ -160,60 +167,61 @@ function inClass(items: [string, string][], ch: string, ic: boolean): boolean {
  * like, and for ordinary patterns one or two states are alive, so it is close to a plain comparison.
  * (A backtracking matcher can take exponential or high-polynomial time on patterns such as `*a*a*a*b`.)
  */
+/** Adds state i to `list` and what it reaches without consuming a character; returns the new length. */
+function addState(p: Prog, list: Int32Array, n: number, i: number, stamp: number): number {
+  const { kind, seen, m } = p;
+  for (;;) {
+    if (seen[i] === stamp) return n;
+    seen[i] = stamp;
+    list[n++] = i;
+    if (i >= m) return n;
+    const k = kind[i]!;
+    if (k === STAR || k === DSTAR) i += 1;
+    else if (k === DSA) i += 2;
+    else return n;
+  }
+}
+
 function run(p: Prog, text: string): boolean {
-  const { m, kind, lit, tab, cls, neg, seen, ic } = p;
+  const { m, kind, lit, tab, cls, neg, ic } = p;
   let cur = p.a;
   let nxt = p.b;
-  let nc = 0;
-  let nn = 0;
   let stamp = ++p.stamp;
-  // adds state i and what it reaches without consuming a character
-  const add = (list: Int32Array, n: number, i: number): number => {
-    for (;;) {
-      if (seen[i] === stamp) return n;
-      seen[i] = stamp;
-      list[n++] = i;
-      const k = kind[i]!;
-      if (i >= m) return n;
-      if (k === STAR || k === DSTAR) i += 1;
-      else if (k === DSA) i += 2;
-      else return n;
-    }
-  };
-  nc = add(cur, 0, 0);
+  let nc = addState(p, cur, 0, 0, stamp);
   for (let pos = 0; pos < text.length; pos++) {
     const ch = text[pos] as string;
     const code = text.charCodeAt(pos);
     stamp = ++p.stamp;
-    nn = 0;
+    let nn = 0;
+    if ((stepsLeft -= nc) < 0) throw new FsError(400, "the glob patterns are too expensive to match against this path: use simpler or fewer patterns");
     for (let j = 0; j < nc; j++) {
       const i = cur[j]!;
       if (i >= m) continue;
       switch (kind[i]) {
         case LIT:
-          if (lit[i] === ch) nn = add(nxt, nn, i + 1);
+          if (lit[i] === ch) nn = addState(p, nxt, nn, i + 1, stamp);
           break;
         case ONE:
-          if (ch !== "/") nn = add(nxt, nn, i + 1);
+          if (ch !== "/") nn = addState(p, nxt, nn, i + 1, stamp);
           break;
         case CLS: {
           const hit = code < 128 ? tab[i]![code] === 1 : inClass(cls[i]!, ch, ic) !== (neg[i] === 1);
-          if (hit) nn = add(nxt, nn, i + 1);
+          if (hit) nn = addState(p, nxt, nn, i + 1, stamp);
           break;
         }
         case STAR:
-          if (ch !== "/") nn = add(nxt, nn, i);
+          if (ch !== "/") nn = addState(p, nxt, nn, i, stamp);
           break;
         case DSTAR:
-          nn = add(nxt, nn, i);
+          nn = addState(p, nxt, nn, i, stamp);
           break;
         case DSA: // first character of the run: enter it
-          nn = add(nxt, nn, i + 1);
-          if (ch === "/") nn = add(nxt, nn, i + 2);
+          nn = addState(p, nxt, nn, i + 1, stamp);
+          if (ch === "/") nn = addState(p, nxt, nn, i + 2, stamp);
           break;
         case DSB:
-          nn = add(nxt, nn, i);
-          if (ch === "/") nn = add(nxt, nn, i + 1);
+          nn = addState(p, nxt, nn, i, stamp);
+          if (ch === "/") nn = addState(p, nxt, nn, i + 1, stamp);
           break;
       }
     }
@@ -226,7 +234,7 @@ function run(p: Prog, text: string): boolean {
 }
 
 /** Patterns made of plain text with at most one `*` at an end are compared directly. */
-type Fast = { f: "eq" | "prefix" | "suffix"; lit: string };
+type Fast = { f: "eq" | "prefix" | "suffix" | "prefixAny" | "suffixAny"; lit: string };
 function fastOf(toks: Tok[], ic: boolean): Fast | null {
   const plain = (ts: Tok[]) => ts.every((t) => t.k === "lit");
   const text = (ts: Tok[]) => ts.map((t) => (t as { c: string }).c).join("");
@@ -234,6 +242,9 @@ function fastOf(toks: Tok[], ic: boolean): Fast | null {
   if (plain(toks)) return { f: "eq", lit: fold(text(toks)) };
   if (toks[0]!.k === "star" && plain(toks.slice(1))) return { f: "suffix", lit: fold(text(toks.slice(1))) };
   if (toks.at(-1)!.k === "star" && plain(toks.slice(0, -1))) return { f: "prefix", lit: fold(text(toks.slice(0, -1))) };
+  // `dir/**`: `**` may cross "/", so only the start matters; `**.ext` likewise for the end
+  if (toks.at(-1)!.k === "dstar" && plain(toks.slice(0, -1))) return { f: "prefixAny", lit: fold(text(toks.slice(0, -1))) };
+  if (toks[0]!.k === "dstar" && plain(toks.slice(1))) return { f: "suffixAny", lit: fold(text(toks.slice(1))) };
   return null;
 }
 
@@ -257,16 +268,23 @@ export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
     if (!raw) continue;
     const base = !anchored && !raw.includes("/");
     for (const g of expandBraces(raw)) {
-      const toks = tokenise(g);
+      let toks = tokenise(g);
       if (!toks || !toks.length) continue;
+      let ruleBase = base;
+      // `**/name-pattern` with no "/" left in it matches the base name at any depth, like a pattern without "/"
+      if (!ruleBase && toks[0]!.k === "dsa" && toks.length > 2 && toks.slice(2).every((t) => (t.k === "lit" ? t.c !== "/" : t.k === "cls" ? inClass(t.items, "/", ignoreCase) === t.neg : t.k !== "dstar" && t.k !== "dsa" && t.k !== "dsb"))) {
+        toks = toks.slice(2);
+        ruleBase = true;
+      }
       tokens += toks.length;
       if (rules.length >= MAX_RULES || tokens > MAX_TOTAL_TOKENS) throw new FsError(400, "the glob patterns are too large: use fewer patterns or fewer {alternatives}");
-      rules.push({ prog: buildProg(toks, ignoreCase), fast: fastOf(toks, ignoreCase), base, dirOnly });
+      rules.push({ prog: buildProg(toks, ignoreCase), fast: fastOf(toks, ignoreCase), base: ruleBase, dirOnly });
     }
   }
   return {
     test(rel, isDir) {
       if (!rules.length) return false;
+      stepsLeft = MAX_STEPS_PER_TEST;
       const name = rel.slice(rel.lastIndexOf("/") + 1);
       let lname: string | null = null;
       let lrel: string | null = null;
@@ -279,7 +297,9 @@ export function compileGlobs(patterns: string[], ignoreCase: boolean): Matcher {
         if (f) {
           if (f.f === "eq") hit = t === f.lit;
           else if (f.f === "suffix") hit = t.endsWith(f.lit) && (r.base || !t.slice(0, t.length - f.lit.length).includes("/"));
-          else hit = t.startsWith(f.lit) && (r.base || !t.slice(f.lit.length).includes("/"));
+          else if (f.f === "prefix") hit = t.startsWith(f.lit) && (r.base || !t.slice(f.lit.length).includes("/"));
+          else if (f.f === "prefixAny") hit = t.startsWith(f.lit);
+          else hit = t.endsWith(f.lit);
         } else hit = run(r.prog, t);
         if (hit) return true;
       }
