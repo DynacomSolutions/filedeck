@@ -342,13 +342,16 @@ test("shutdown aborts a running compress and leaves no staging folder", needTool
   const d = path.join(tmp, "bulk");
   fs.mkdirSync(d);
   for (let i = 0; i < 30; i++) fs.writeFileSync(path.join(d, `f${i}`), randomBytes(1 << 20));
+  // staging is in the volume's private work folder, never in a served folder
+  const wd = path.join(tmp, ".filedeck-work");
   const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
   await app.request("/api/jobs/compress", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir: "/", names: ["bulk"], format: "tar.gz", name: "bulk" }) });
-  const staged = () => fs.readdirSync(tmp).filter((n) => n.startsWith(".filedeck-archive-"));
+  const staged = () => (fs.existsSync(wd) ? fs.readdirSync(wd) : []).filter((n) => /\.c\.[A-Za-z0-9]{6}$/.test(n));
   for (let i = 0; i < 400 && !staged().length; i++) await new Promise((r) => setTimeout(r, 5));
   assert.equal(staged().length, 1, "the job should be mid-flight");
   await (app as unknown as { close(): Promise<void> }).close();
   assert.deepEqual(staged(), []);
+  assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.startsWith(".filedeck-") && n !== ".filedeck-work"), []);
   assert.equal(fs.existsSync(path.join(tmp, "bulk.tar.gz")), false);
 });
 

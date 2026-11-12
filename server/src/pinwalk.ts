@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { direntsOf } from "./dirnames.ts";
-import { PathError, TRASH_DIR, assertNotTrash, openChecked, pinDir } from "./paths.ts";
+import { PathError, STAGING_PREFIX, TRASH_DIR, assertNotReserved, assertNotTrash, isReservedName, openChecked, pinDir } from "./paths.ts";
 import { jobMayWrite } from "./readonly.ts";
 
 /**
@@ -148,19 +148,8 @@ export async function pinDirCreate<T>(root: string, real: string, fn: (at: strin
 
 /* ---- reserved names ---- */
 
-/** Prefix of the private staging folders made for copies. */
-export const STAGING_PREFIX = ".filedeck-work-";
-/** Name reserved for a per-volume private work folder. */
-const WORK_DIR = ".filedeck-work";
-
-/** Names of the agent's own working folders: never listed, copied, searched or used as a target (the trash store has its own check in paths.ts). */
-export const isReservedName = (name: string): boolean => name === WORK_DIR || name.startsWith(STAGING_PREFIX);
-
-/** `assertNotTrash` plus the working folders: no path may go through one. */
-export function assertNotReserved(virtual: string): void {
-  assertNotTrash(virtual);
-  if (virtual.split("/").some(isReservedName)) throw new PathError(403, "this name is reserved for the file manager's own use");
-}
+// One helper for everything that walks or targets a tree lives in paths.ts; re-exported here for the callers of this module.
+export { STAGING_PREFIX, assertNotReserved, isReservedName };
 
 /* ---- a private staging folder for building a copy ---- */
 
@@ -313,7 +302,7 @@ export async function copyTree(src: string, dst: string, o: CopyTreeOpts = {}, d
         let batch: Promise<void>[] = [];
         try {
           for (const e of await fs.readdir(s, { withFileTypes: true })) {
-            if (e.name === TRASH_DIR || isReservedName(e.name)) {
+            if (isReservedName(e.name)) {
               if (o.skipped && (!e.isDirectory() || (await fs.readdir(path.join(s, e.name)).catch(() => ["?"])).length > 0)) o.skipped.push(path.join(s, e.name));
               continue;
             }

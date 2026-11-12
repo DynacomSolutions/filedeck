@@ -12,7 +12,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
-import { resolveRead } from "./paths.ts";
+import { openChecked, resolveRead } from "./paths.ts";
 import { NO_SUBMODULE_RECURSION, confineGitDir, findRepo, runGit } from "./git.ts";
 import type { Config } from "./config.ts";
 
@@ -23,7 +23,7 @@ const MAX_WORKTREES = 200;
 export interface WorktreeInfo {
   /** virtual path on this node; null when the worktree is outside the agent root (shown, not navigable) */
   path: string | null;
-  /** the path git reports (host path) */
+  /** a label for the worktree: its virtual path, or just its folder name when it lies outside the root (host paths git reports are not passed on) */
   gitPath: string;
   name: string;
   main: boolean;
@@ -84,6 +84,9 @@ function guess(m: Mapper, p: string): string | null {
   return within(m.rootReal, joined) ? joined : null;
 }
 
+/** Keeps printable characters only (a folder name is data too). */
+const printable = (s: string) => s.replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "?").slice(0, 255);
+
 const read = (p: string) => fs.readFile(p, "utf8").catch(() => null);
 
 interface Rec {
@@ -93,7 +96,6 @@ interface Rec {
   detached: boolean;
   bare: boolean;
   locked: boolean;
-  lockReason?: string;
   prunable: boolean;
 }
 
@@ -109,28 +111,80 @@ export function parsePorcelain(text: string): Rec[] {
       else if (l.startsWith("branch ")) r.branch = l.slice(7).replace(/^refs\/heads\//, "");
       else if (l === "detached") r.detached = true;
       else if (l === "bare") r.bare = true;
-      else if (l === "locked" || l.startsWith("locked ")) {
-        r.locked = true;
-        if (l.length > 7) r.lockReason = l.slice(7);
-      } else if (l === "prunable" || l.startsWith("prunable ")) r.prunable = true;
+      else if (l === "locked" || l.startsWith("locked ")) r.locked = true; // the reason is read from the file, see `lockReasonOf` else if (l === "prunable" || l.startsWith("prunable ")) r.prunable = true;
     }
     out.push(r);
   }
   return out;
 }
 
-/** Private git directories of the linked worktrees, keyed by the real worktree path they record. */
-async function privateDirs(m: Mapper, common: string): Promise<Map<string, string>> {
+interface Admin {
+  /** the folder name under `worktrees/`: the worktree's own id, never text from git */
+  id: string;
+  dir: string;
+}
+
+/**
+ * Private git directories of the linked worktrees, keyed by the real worktree path they record and by the path as recorded
+ * (what git lists). Each `gitdir` file is read through `readAdminFile`; one that is a link, too big or not a single path
+ * (absolute, or relative to the private directory) is not trusted, and the worktree is then listed without a location.
+ */
+async function privateDirs(m: Mapper, common: string): Promise<{ byReal: Map<string, string>; byListed: Map<string, Admin> }> {
   const out = new Map<string, string>();
+  const byListed = new Map<string, Admin>();
   const base = path.join(common, "worktrees");
   const ids = await fs.readdir(base).catch(() => [] as string[]);
   for (const id of ids) {
-    const gd = (await read(path.join(base, id, "gitdir")))?.trim();
+    const dir = path.join(base, id);
+    const gd = oneLine(await readAdminFile(m.rootReal, common, dir, "gitdir", ADMIN_FILE_MAX), 4096);
     if (!gd) continue;
-    const g = guess(m, path.dirname(gd));
-    if (g) out.set(g, path.join(base, id));
+    // an absolute path is the host's own; a relative one (`worktree.useRelativePaths`, Git 2.48 and newer) is relative to this
+    // private directory. Either way the place must lie inside the served root.
+    const full = path.isAbsolute(gd) ? path.normalize(gd) : path.resolve(dir, gd);
+    if (path.isAbsolute(gd) ? false : !within(m.rootReal, full)) continue;
+    byListed.set(path.dirname(full), { id, dir });
+    const g = guess(m, path.dirname(full));
+    if (g) out.set(g, dir);
   }
-  return out;
+  return { byReal: out, byListed };
+}
+
+const ADMIN_FILE_MAX = 4096;
+const LOCK_REASON_MAX = 512;
+
+/**
+ * A small text file of a linked worktree's private directory (`worktrees/<id>/<file>`), read here and not taken from git's
+ * output: opened without following a link, proven to be inside the git directory, a regular file of at most `max` bytes.
+ * Anything else gives null.
+ */
+async function readAdminFile(rootReal: string, common: string, adminDir: string, file: string, max: number): Promise<string | null> {
+  try {
+    const [base, admin] = await Promise.all([fs.lstat(path.join(common, "worktrees")), fs.lstat(adminDir)]);
+    if (!base.isDirectory() || !admin.isDirectory()) return null; // a link in the way
+    const fh = await openChecked(rootReal, path.join(adminDir, file));
+    try {
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > max) return null;
+      const [loc, gitReal] = await Promise.all([fs.readlink(`/proc/self/fd/${fh.fd}`), fs.realpath(common)]);
+      if (!loc.startsWith(gitReal + path.sep)) return null;
+      return await fh.readFile({ encoding: "utf8" });
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** One line of printable text (no control characters, no line breaks), else undefined. */
+const oneLine = (text: string | null, n: number): string | undefined => {
+  const t = (text ?? "").replace(/\r?\n$/, "");
+  return t && /^[^\p{C}\p{Zl}\p{Zp}]+$/u.test(t) ? t.slice(0, n) : undefined;
+};
+
+/** The reason a worktree is locked: the `locked` file of its private directory (see `readAdminFile`), printable text only. */
+async function lockReasonOf(rootReal: string, common: string, adminDir: string): Promise<string | undefined> {
+  return oneLine(await readAdminFile(rootReal, common, adminDir, "locked", LOCK_REASON_MAX), 200);
 }
 
 async function dirtyOf(root: string, gitDir: string, workTree: string): Promise<boolean | null> {
@@ -154,30 +208,44 @@ export async function listWorktrees(root: string, virtualDir: string): Promise<W
   if (ls.code !== 0) throw new FsError(502, ls.timedOut ? "git timed out" : "git could not list the worktrees");
   const recs = parsePorcelain(ls.stdout);
   const truncated = recs.length > MAX_WORKTREES;
-  const priv = await privateDirs(m, common);
+  const { byReal: priv, byListed } = await privateDirs(m, common);
+  const labels = new Set<string>();
   const worktrees = await Promise.all(
     recs.slice(0, MAX_WORKTREES).map(async (r, i): Promise<WorktreeInfo> => {
       const bare = r.bare;
-      const real = await m.real(r.worktree);
-      const reach = real ?? guess(m, r.worktree);
+      // a linked worktree is placed only when its private directory's own `gitdir` file (read here) says where it is; what git
+      // printed for it may have come through a link
+      const adm = i === 0 ? undefined : byListed.get(r.worktree);
+      const trusted = i === 0 || adm !== undefined;
+      const real = trusted ? await m.real(r.worktree) : null;
+      const reach = trusted ? (real ?? guess(m, r.worktree)) : null;
       // missing, but its parent folder is reachable (or it is spelled inside the root): the worktree was removed
-      const gone = !bare && real === null && reach !== null && (within(m.rootReal, path.normalize(r.worktree)) || (await exists(path.dirname(reach))));
+      const gone = trusted && !bare && real === null && reach !== null && (within(m.rootReal, path.normalize(r.worktree)) || (await exists(path.dirname(reach))));
       const prunable = gone;
       const info: WorktreeInfo = {
         path: real ? m.virtual(real) : gone && reach ? m.virtual(reach) : null,
-        gitPath: r.worktree,
-        name: path.basename(r.worktree),
+        gitPath: "",
+        name: adm ? printable(adm.id) : i === 0 ? printable(path.basename(bare ? common : path.dirname(common))) : "(unknown worktree)",
         main: i === 0,
         bare,
         branch: r.branch,
         detached: r.detached,
         head: r.head.slice(0, 8).replace(/^0+$/, ""),
         locked: r.locked,
-        ...(r.lockReason ? { lockReason: r.lockReason } : {}),
+
         prunable,
         dirty: null,
         current: !!real && within(real, here),
       };
+      // a label that is not a host path: the virtual path, else the folder name (made unique)
+      let label = info.path ?? info.name;
+      for (let n = 2; labels.has(label); n++) label = `${info.path ?? info.name} (${n})`;
+      labels.add(label);
+      info.gitPath = label;
+      if (r.locked) {
+        const reason = adm ? await lockReasonOf(m.rootReal, common, adm.dir) : undefined;
+        if (reason) info.lockReason = reason;
+      }
       if (!bare && real && !prunable) {
         const gitDir = i === 0 ? common : priv.get(real);
         if (gitDir) info.dirty = await dirtyOf(m.rootReal, gitDir, real);

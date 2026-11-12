@@ -20,7 +20,7 @@ import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
 import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
-import { audit, clientOf, type AuditSink } from "./audit.ts";
+import { audit, clientOf, trustProxies, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
 
@@ -53,6 +53,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       return c.json({ error: "unknown host" }, 421);
     });
   }
+  app.use("*", trustProxies(cfg.trustedProxies));
   app.use("*", webHeaders());
   app.use("*", textCompression());
   // editor saves are limited by the agent that takes them (its own maxEdit), not here

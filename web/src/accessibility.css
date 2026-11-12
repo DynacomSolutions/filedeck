@@ -1,6 +1,6 @@
 /* WCAG AAA text contrast and clear control boundaries in both bundled themes. */
 :root:not([data-theme="light"]) {
-  --muted: #b8b8c2;
+  --muted: #bbbbc5;
   --fg-soft: #d8d8dd;
   --accent-text: #a7c7ff;
   --a11y-action-fill: #143b80;

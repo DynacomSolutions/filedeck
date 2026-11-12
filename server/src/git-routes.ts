@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Hono } from "hono";
 import * as ops from "./fsops.ts";
-import { resolveRead, resolveWrite } from "./paths.ts";
+import { assertNotReserved, resolveRead, resolveWrite } from "./paths.ts";
 import type { Config } from "./config.ts";
 import { GitError, findRepo, lastCommit, relIn, remotes, repoAt, repoArgs, repoCwd, repoStatus, runGit, showFile, stashCount, type Commit, type Repo, type RepoSummary, type StatusResult } from "./git.ts";
 
@@ -153,6 +153,7 @@ export function registerGitRoutes(app: Hono, cfg: Config): void {
   /** Details for the Properties panel. `path` is a file or a folder inside a repository, or a repository root. */
   app.get("/api/git/info", async (c) => {
     const r = resolveWrite(root, c.req.query("path") ?? "/");
+    assertNotReserved(r.virtual);
     const st = await fs.lstat(r.real);
     const isDir = st.isDirectory();
     const repo = await findRepo(root, isDir ? r.real : path.dirname(r.real));
@@ -204,6 +205,7 @@ export function registerGitRoutes(app: Hono, cfg: Config): void {
   /** A file as of a revision, shaped like /api/fs/text so the diff viewer can use it as one side. */
   app.get("/api/git/show", async (c) => {
     const r = resolveWrite(root, c.req.query("path") ?? "");
+    assertNotReserved(r.virtual);
     const repo = await findRepo(root, path.dirname(r.real));
     if (!repo || repo.kind === "bare") throw new ops.FsError(404, "not in a Git work tree");
     const rev = c.req.query("rev") ?? "HEAD";

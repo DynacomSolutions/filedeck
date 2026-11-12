@@ -38,7 +38,7 @@ WORKDIR /app
 RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
 # fanotify helper: only started when the chart's agent.fanotify.enabled sets FILEDECK_FANWATCH (it needs CAP_SYS_ADMIN).
 COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwatch
-# Sandbox launcher: used for every Git command when the kernel has Landlock (FILEDECK_SANDBOX, default auto).
+# Sandbox launcher: used for every Git command when the kernel has Landlock (FILEDECK_SANDBOX, set to require below).
 COPY --from=build /usr/local/bin/filedeck-sandbox /usr/local/bin/filedeck-sandbox
 COPY --from=build /src/node_modules node_modules
 # Dependencies npm could not hoist to the root (a version the web workspace does not share) live beside the server.

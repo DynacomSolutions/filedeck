@@ -31,7 +31,7 @@ function contrast(foreground: string, background: string): number {
 test("dark AAA muted token wins over the dark-theme legacy override", () => {
   const darkSelector = ':root:not([data-theme="light"])';
   assert.match(styles, /:root:not\(\[data-theme="light"\]\)\s*\{[^}]*--muted:\s*#8c8c8c/s);
-  assert.equal(declaration(accessibility, darkSelector, "--muted"), "#b8b8c2");
+  assert.equal(declaration(accessibility, darkSelector, "--muted"), "#bbbbc5");
 
   const backgrounds = [
     declaration(theme, ":root", "--surface"),
@@ -39,8 +39,11 @@ test("dark AAA muted token wins over the dark-theme legacy override", () => {
     declaration(theme, ":root", "--surface-3"),
   ];
   for (const background of backgrounds) {
-    assert.ok(contrast("#b8b8c2", background) >= 7, `muted text must reach 7:1 on ${background}`);
+    assert.ok(contrast("#bbbbc5", background) >= 7, `muted text must reach 7:1 on ${background}`);
   }
+  // the size and modified cells of a selected row sit on the selection tint (accent at 12% over the surface)
+  const tint = (fg: string, bg: string, a: number) => "#" + [1, 3, 5].map((i) => Math.round(parseInt(fg.slice(i, i + 2), 16) * a + parseInt(bg.slice(i, i + 2), 16) * (1 - a)).toString(16).padStart(2, "0")).join("");
+  assert.ok(contrast("#bbbbc5", tint("#4f8cff", declaration(theme, ":root", "--surface")!, 0.12)) >= 7, "muted text must reach 7:1 on the selected row");
 });
 
 test("address edit target keeps its 44px minimum when breadcrumbs shrink", () => {

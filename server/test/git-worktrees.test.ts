@@ -19,7 +19,7 @@ const commit = (cwd: string, file: string, text: string) => {
   g(cwd, "add", file);
   g(cwd, "commit", "-m", `edit ${file}`);
 };
-interface W { path: string | null; name: string; main: boolean; bare: boolean; branch: string | null; detached: boolean; head: string; locked: boolean; lockReason?: string; prunable: boolean; dirty: boolean | null; current: boolean }
+interface W { path: string | null; gitPath: string; name: string; main: boolean; bare: boolean; branch: string | null; detached: boolean; head: string; locked: boolean; lockReason?: string; prunable: boolean; dirty: boolean | null; current: boolean }
 interface L { repo: string | null; bare: boolean; worktrees: W[] }
 const list = async (p: string, a = app) => {
   const r = await a.request(`/api/git/worktrees?path=${encodeURIComponent(p)}`);
@@ -61,7 +61,7 @@ after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 test("porcelain parser", () => {
   const r = parsePorcelain("worktree /a\nHEAD abc\nbranch refs/heads/x\n\nworktree /b\nHEAD def\ndetached\nlocked why\n\nworktree /c.git\nbare\n");
-  assert.deepEqual(r.map((x) => [x.worktree, x.branch, x.detached, x.locked, x.lockReason, x.bare]), [["/a", "x", false, false, undefined, false], ["/b", null, true, true, "why", false], ["/c.git", null, false, false, undefined, true]]);
+  assert.deepEqual(r.map((x) => [x.worktree, x.branch, x.detached, x.locked, x.bare]), [["/a", "x", false, false, false], ["/b", null, true, true, false], ["/c.git", null, false, false, true]]);
 });
 
 test("main work tree lists itself and every linked worktree", async () => {
@@ -171,4 +171,90 @@ test("legacy Worktrees side-panel URLs restore the repository Git tab", () => {
   const leaf = leaves(back!.tree)[0]!;
   assert.deepEqual(leaf.pv, { dock: "left", size: 35, tab: "props" });
   assert.equal(leaf.pt, "git");
+});
+
+test("the lock reason is read from the lock file with a checked open, never from git's output; no host path is passed on", async () => {
+  const main = path.join(tmp, "work/main");
+  const admin = path.join(main, ".git/worktrees/lck");
+  const lock = path.join(admin, "locked");
+  const secret = path.join(tmp, "secret-first-line.txt");
+  fs.writeFileSync(secret, "TOP-SECRET-FIRST-LINE\nmore\n");
+  const reason = async () => ((await list("/work/main")).body.worktrees.find((w) => w.name === "lck")!.lockReason);
+  assert.equal(await reason(), "on a usb stick");
+  const orig = fs.readFileSync(lock);
+  try {
+    fs.rmSync(lock);
+    fs.symlinkSync(secret, lock); // git itself follows the link and lists its first line
+    assert.match(g(main, "worktree", "list", "--porcelain"), /TOP-SECRET-FIRST-LINE/, "control: git quotes the linked file");
+    const r = await list("/work/main");
+    assert.equal(r.status, 200);
+    assert.equal(JSON.stringify(r.body).includes("TOP-SECRET"), false, "a linked lock file gave a reason");
+    for (const bad of ["x".repeat(600), "a\u0000b", "line one\nline two", "\u001b[31mred"]) {
+      fs.rmSync(lock);
+      fs.writeFileSync(lock, bad);
+      assert.equal(await reason(), undefined, JSON.stringify(bad.slice(0, 12)));
+    }
+  } finally {
+    fs.rmSync(lock, { force: true });
+    fs.writeFileSync(lock, orig);
+  }
+  assert.equal(await reason(), "on a usb stick");
+  const body = (await list("/work/main")).body;
+  for (const w of body.worktrees) assert.ok(!w.gitPath.startsWith("/") || w.gitPath === w.path, `${w.name}: a host path was passed on: ${w.gitPath}`);
+});
+
+test("a worktree's name comes from its private directory's id, and a linked gitdir file puts nothing of another file in the list", async () => {
+  const main = path.join(tmp, "work/main");
+  g(main, "worktree", "add", "-b", "namelink", path.join(tmp, "work/namelink"));
+  const gd = path.join(main, ".git/worktrees/namelink/gitdir");
+  const orig = fs.readFileSync(gd);
+  const secret = path.join(tmp, "secret-gitdir-line.txt");
+  fs.writeFileSync(secret, "TOP-SECRET-GITDIR-LINE\nmore\n");
+  try {
+    const ok = (await list("/work/main")).body.worktrees.find((w) => w.name === "namelink");
+    assert.ok(ok, "listed under its private directory's id");
+    fs.rmSync(gd);
+    fs.symlinkSync(secret, gd);
+    assert.match(g(main, "worktree", "list", "--porcelain"), /TOP-SECRET-GITDIR-LINE/, "control: git prints the linked file's first line as the path");
+    const r = await list("/work/main");
+    assert.equal(r.status, 200);
+    assert.equal(JSON.stringify(r.body).includes("TOP-SECRET"), false, "a linked gitdir file leaked into the list");
+    for (const w of r.body.worktrees) {
+      assert.ok(!/TOP-SECRET/.test(`${w.name}${w.gitPath}`));
+      if (w.path === null) assert.equal(w.dirty, null);
+    }
+  } finally {
+    fs.rmSync(gd, { force: true });
+    fs.writeFileSync(gd, orig);
+  }
+});
+
+test("a worktree made with relative paths (Git 2.48 and newer) is placed, with its dirty state and lock reason", async (t) => {
+  const v = /(\d+)\.(\d+)/.exec(g(tmp, "--version"));
+  if (!v || Number(v[1]) < 2 || (Number(v[1]) === 2 && Number(v[2]) < 48)) return t.skip(`git ${v?.[0] ?? "?"} has no --relative-paths (needs 2.48)`);
+  const main = path.join(tmp, "work/main");
+  const wt = path.join(tmp, "work/relwt");
+  g(main, "worktree", "add", "--relative-paths", "-b", "relwt", wt);
+  const gd = fs.readFileSync(path.join(main, ".git/worktrees/relwt/gitdir"), "utf8").trim();
+  assert.ok(!path.isAbsolute(gd), `control: the gitdir file holds a relative path (${gd})`);
+  g(main, "worktree", "lock", "--reason", "carried on a stick", wt);
+  fs.writeFileSync(path.join(wt, "a.txt"), "changed\n");
+  const w = (await list("/work/main")).body.worktrees.find((x) => x.name === "relwt");
+  assert.ok(w, "listed under its id");
+  assert.equal(w.path, "/work/relwt");
+  assert.equal(w.dirty, true, "a tracked file was edited");
+  assert.equal(w.locked, true);
+  assert.equal(w.lockReason, "carried on a stick");
+  // a relative path that leads out of the served root is not placed
+  const gdFile = path.join(main, ".git/worktrees/relwt/gitdir");
+  const orig = fs.readFileSync(gdFile);
+  try {
+    fs.writeFileSync(gdFile, "../../../../../../../../../../tmp/elsewhere/.git\n");
+    const out = (await list("/work/main")).body.worktrees.find((x) => x.name !== "main" && x.path === null && x.dirty === null && x.locked);
+    void out;
+    const again = (await list("/work/main")).body.worktrees.find((x) => x.path === "/work/relwt");
+    assert.equal(again, undefined, "a relative gitdir leaving the root must not place the worktree");
+  } finally {
+    fs.writeFileSync(gdFile, orig);
+  }
 });

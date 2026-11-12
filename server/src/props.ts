@@ -5,8 +5,8 @@ import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
 import { direntsOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { PathError, TRASH_DIR, openChecked, resolveRead, resolveWrite } from "./paths.ts";
-import { MAX_DEPTH, assertMayChange, assertNotReserved, dirAt, isReservedName, openDir, pinParentW, tooDeep, walkGuard, withReadOnly } from "./pinwalk.ts";
+import { PathError, assertNotReserved, isReservedName, openChecked, resolveRead, resolveWrite } from "./paths.ts";
+import { MAX_DEPTH, assertMayChange, dirAt, openDir, pinParentW, tooDeep, walkGuard, withReadOnly } from "./pinwalk.ts";
 import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
@@ -61,6 +61,7 @@ const kindOf = (st: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(
 
 export async function props(cfg: Config, p: string): Promise<Props> {
   const r = resolveWrite(cfg.root, p); // lstat semantics for the final component
+  assertNotReserved(r.virtual);
   const st = await fs.lstat(r.real);
   const [users, groups] = await Promise.all([nameTable(cfg.root, "passwd"), nameTable(cfg.root, "group")]);
   const out: Props = {
@@ -310,7 +311,7 @@ async function applyPermsIn(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise
     try {
       for await (const e of direntsOf(at)) {
         const n = e.name;
-        if (n === TRASH_DIR || isReservedName(n)) continue;
+        if (isReservedName(n)) continue;
         if (ctl?.signal.aborted) throw bad("canceled");
         if (seen >= cfg.walkMaxEntries) throw bad("too many entries for one recursive change");
         seen++;
