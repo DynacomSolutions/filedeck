@@ -202,6 +202,7 @@ ETA: 2026-11-12 14:00 ICT
 | 119 | Compare and Trash views: sync plan scope, range selection, keyboard selection, double submit | done | claude-20261112-rv-compare | rv-compare-trash-views | | | Merged https://github.com/DynacomSolutions/filedeck/pull/189, CI green<br>Checked in a browser at 1440 and 390 px |
 | 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | done | claude-20261112-rv-shell | rv-app-shell | | | Merged https://github.com/DynacomSolutions/filedeck/pull/185, CI green<br>Root error boundary not forced live |
 | 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | done | claude-20261112-rv-components | rv-uploads-tree | | | Merged https://github.com/DynacomSolutions/filedeck/pull/197, CI green |
+| 134 | Breadcrumb target at 320 px, Properties from a breadcrumb kept in the URL, compare toolbar cut-off | in_progress | claude-20261112-rv-web-followup | rv-web-followup | 17.128 | 2026-11-12 12:00 ICT | Found by the acceptance checks; listed there as known defects |
 
 ## 16. Large folders and narrow screens
 Findings from the 12 November 2026 review: very large folders freeze the list, and narrow, landscape and zoomed layouts hide content.
@@ -220,5 +221,5 @@ ETA: 2026-11-12 12:00 ICT
 | 125 | Menus and dialogs: fit the screen, return focus, keep focus when content changes | done | claude-20261112-rv-menus | rv-menus-dialogs | | | Merged https://github.com/DynacomSolutions/filedeck/pull/200, CI green<br>Checked at 1366x768 and 390 px |
 | 126 | Contrast, focus rings, selected marks, target sizes and forced colours | done | claude-20261112-rv-css | rv-contrast-targets | | | Merged https://github.com/DynacomSolutions/filedeck/pull/186, CI green<br>Ratio table in the PR |
 | 127 | Component roles, names and announcements | done | claude-20261112-rv-components | rv-aria-announce | 15.121 | | Merged https://github.com/DynacomSolutions/filedeck/pull/202, CI green<br>Long selections download through a one-use ticket<br>axe clean at 1440 and 390 px |
-| 128 | Browser acceptance checks repaired and run in CI; audit document updated | in_review | claude-20261112-rv-acceptance | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | 2026-11-12 11:00 ICT | Found in review: two of three scopes fail on main<br>https://github.com/DynacomSolutions/filedeck/pull/207 |
+| 128 | Browser acceptance checks repaired and run in CI; audit document updated | done | claude-20261112-rv-acceptance | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Merged https://github.com/DynacomSolutions/filedeck/pull/207, CI green<br>30 checks in about 70 s; browser job 2m09s<br>Three defects it found are 15.134 |
 | 129 | Release v0.3.36 with the review fixes | todo | | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | After every row above is merged |
