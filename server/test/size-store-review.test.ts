@@ -573,7 +573,9 @@ test("T2 the repeat of a detached du, after the folder changed and the watcher r
   fs.writeFileSync(path.join(root, "t/sub/f"), "abcdefghij");
   fs.writeFileSync(ev, `x ${root}/t/sub\n`);
   for (let i = 0; i < 3000 && fs.existsSync(ev); i++) await sleep(20); // the helper has printed it
-  await sleep(450); // the watcher has handed it to the store (a flush every 250 ms) and has not applied it yet (settle 1 s)
+  // wait until the watcher has handed the event to the store (it flushes every 250 ms, later on a busy host); settle is 1 s, so it is not applied yet
+  // (if a slow host applied it first, the answer carries the new size, which the assertion below accepts too)
+  for (let i = 0; i < 3000 && !rows(path.join(aux, "sizes-t.db"), "SELECT 1 FROM pending").length; i++) await sleep(20);
   const r = await app.request("/api/du?path=/t&depth=1");
   const b = (await r.json()) as Any;
   assert.ok(r.status !== 200 || b.stale === true || b.entries[0].bytes === 10, "old size with no stale flag");
