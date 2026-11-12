@@ -346,7 +346,7 @@ test("shutdown aborts a running compress and leaves no staging folder", needTool
   const wd = path.join(tmp, ".filedeck-work");
   const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
   await app.request("/api/jobs/compress", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir: "/", names: ["bulk"], format: "tar.gz", name: "bulk" }) });
-  const staged = () => (fs.existsSync(wd) ? fs.readdirSync(wd) : []).filter((n) => /^\d+-c-/.test(n));
+  const staged = () => (fs.existsSync(wd) ? fs.readdirSync(wd) : []).filter((n) => /\.c\.[A-Za-z0-9]{6}$/.test(n));
   for (let i = 0; i < 400 && !staged().length; i++) await new Promise((r) => setTimeout(r, 5));
   assert.equal(staged().length, 1, "the job should be mid-flight");
   await (app as unknown as { close(): Promise<void> }).close();

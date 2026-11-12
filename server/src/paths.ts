@@ -100,7 +100,10 @@ export function resolveInRoot(
 
 /** Resolve for reading: symlinks are followed, clamped at the root. */
 export function resolveRead(root: string, input: string): Resolved {
-  return resolveInRoot(root, input, { followFinal: true });
+  const r = resolveInRoot(root, input, { followFinal: true });
+  // Filedeck's own folders (trash store, work folders) are not readable through the file API; the trash routes reach the trash directly.
+  if (r.virtual.split("/").some(isReservedName)) throw new PathError(403, "this folder is managed by Filedeck");
+  return r;
 }
 
 /**
