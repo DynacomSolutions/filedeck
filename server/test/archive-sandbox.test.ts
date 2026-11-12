@@ -9,7 +9,7 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { haveSevenZip, runSz, szReadArgs } from "../src/sevenzip.ts";
 import { GRANT_LIMIT, MAX_SELECTED, archiveUser, grantHooks, zipLimits, listArchive, outputBounds, prepareCompress, prepareExtract, runCompress, runExtract, selectionGrants, spawnBsdtar, zipStream } from "../src/archive.ts";
-import { resetSandbox, sandboxInfo, spawnSandboxed } from "../src/sandbox.ts";
+import { readerCapability, resetSandbox, sandboxInfo, spawnSandboxed } from "../src/sandbox.ts";
 import type { JobCtl } from "../src/jobs.ts";
 import { ToolGate, toolGate } from "../src/tool-gate.ts";
 import { useSandbox } from "./sandbox-env.ts";
@@ -823,6 +823,7 @@ async function until(f: () => boolean, what: string, ms = 20_000) {
 
 live("as root, root-only files and folders are archived, listed and extracted by tools that hold only the read-search capability", async () => {
   const s = scene("root-only");
+  console.log(`# reader capability chosen: ${(await readerCapability()) ?? "none (tools run as the agent with no capability)"}`);
   const body = randomBytes(200_000);
   fs.mkdirSync(path.join(s.src, "pick"));
   fs.chmodSync(path.join(s.src, "pick"), 0o700);

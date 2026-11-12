@@ -165,7 +165,10 @@ const sayOnce = (msg: string) => {
 async function readerIdentity(): Promise<RunAs | undefined> {
   if (process.getuid?.() !== 0) return undefined;
   const cap = (await launcherAvailable()) ? await readerCapability() : null; // no launcher: nothing can hand a capability over
-  if (cap) return { ...archiveUser(), keepCaps: [cap] };
+  if (cap) {
+    sayOnce(`archive tools: tools that must read what only root can read run as the archive user with the ${cap === "dac_read_search" ? "read-search" : "override (weaker: this process lacks read-search; Landlock and the metadata filter still confine it)"} capability only`);
+    return { ...archiveUser(), keepCaps: [cap] };
+  }
   sayOnce("archive tools: this process holds neither the read-search nor the override capability, so a tool that must read what only root can read runs as the agent's own user (with no capabilities) instead of the archive user");
   return undefined;
 }

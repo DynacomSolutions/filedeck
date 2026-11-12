@@ -595,6 +595,7 @@ liveRoot("a program run as root keeps no capability: every set is empty, also th
 
 liveRoot("with a user change and keepCaps the program holds exactly the one named capability, in every set", async () => {
   const cap = await readerCapability();
+  console.log(`# reader capability chosen: ${cap ?? "none (the tool would run as the agent with no capability)"}`);
   assert.ok(cap, "the agent holds the read-search or the override capability (container defaults hold the latter)");
   const bit = cap === "dac_read_search" ? 4n : 2n;
   const r = await run("cat", ["/proc/self/status"], { readOnly: ["/proc"], uid: 65533, gid: 65533, keepCaps: [cap] });
