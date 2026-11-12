@@ -93,8 +93,10 @@ test("a restore whose trash copy cannot be removed reports the item as restored,
     assert.equal(r!.ok, true, JSON.stringify(r));
     assert.match(r!.warning ?? "", /restored.*could not be removed/);
     assert.equal(fs.readFileSync(path.join(dir, "f.txt"), "utf8"), "content");
-    const listed = (await listTrash(tmp, "")).flatMap((v) => v.items.map((i) => i.id));
-    assert.ok(listed.includes(meta.id), "its data is still in the trash, so it is still listed");
+    const listed = (await listTrash(tmp, "")).flatMap((v) => v.items).find((i) => i.id === meta.id);
+    assert.ok(listed, "its data is still in the trash, so it is still listed");
+    assert.notEqual(listed.orphan, true, "the item keeps its record, so the list still shows which item it is");
+    assert.equal(listed.originalPath, "/restore-two/f.txt");
   } finally {
     mock.restoreAll();
   }

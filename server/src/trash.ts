@@ -148,8 +148,17 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
           // list for as long as its data is on disk; try once more to clear it, else say so.
           warning = `The item is restored. Its copy in the trash could not be removed: ${String(e.extra.reason)}. It is still listed in the trash; delete it there.`;
         }
-        if (warning) await removeItem(root, dir, id).then(() => (warning = undefined), () => undefined);
-        else await removeItem(root, dir, id);
+        if (warning) {
+          // One more try, the data first: when it still cannot go, `meta.json` is untouched and the item stays listed under its own name.
+          const gone = await pinDirW(root, path.join(dir, id), (itemAt) => rmTree(path.join(itemAt, "data"), { force: true, guard: walkGuard(root) })).then(
+            () => true,
+            () => false,
+          );
+          if (gone) {
+            await removeItem(root, dir, id);
+            warning = undefined;
+          }
+        } else await removeItem(root, dir, id);
         return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final), ...(warning ? { warning } : {}) };
       });
       out.push(res);
