@@ -165,7 +165,7 @@ ETA: 2026-11-01 01:00 ICT
 
 ## 13. Request and filesystem hardening
 Findings from the 12 November 2026 review: request handling, read-only volumes, git and search inputs, and operations that must stay inside the root.
-ETA: 2026-11-13 06:00 ICT
+ETA: 2026-11-13 06:30 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | done | claude-20261112-rv-hub | rv-request-guard | | | Merged https://github.com/DynacomSolutions/filedeck/pull/188, CI green, independent review clean on second pass<br>JSON bodies capped at 16 MiB; refused requests are audited |
@@ -181,7 +181,7 @@ ETA: 2026-11-13 06:00 ICT
 | 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | done | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | | Merged https://github.com/DynacomSolutions/filedeck/pull/206, CI green<br>Found and fixed: final image lacked server dependencies and crashed at start<br>Cold build 4m31s |
 | 132 | Archive tools run inside the read sandbox, limited to the pinned source folder | done | claude-20261112-rv-archives | rv-archive-sandbox | 13.106, 13.108 | | Merged https://github.com/DynacomSolutions/filedeck/pull/210, CI green, five independent review rounds<br>Tools run without root capabilities; a default chart install is tested<br>7-Zip compression can read the whole source folder |
 | 133 | Git and search follow-ups: worktree lock text, launcher errors, search gate, compare skips | done | claude-20261112-rv-search-git | rv-git-search-followup | 13.106, 13.107 | | Merged https://github.com/DynacomSolutions/filedeck/pull/208, CI green, four review passes<br>Sandbox also refuses sockets; forwarded addresses need FILEDECK_TRUSTED_PROXIES<br>Default search gate is 3 |
-| 136 | Review follow-ups: interrupted move and copy, rename without replace, worktree paths in root | in_review | claude-20261113-rv-fsops-notes | rv-fsops-notes | 13.109, 13.133 | 2026-11-13 06:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/213, CI running<br>Security review before merge |
+| 136 | Review follow-ups: interrupted move and copy, rename without replace, worktree paths in root | in_progress | claude-20261113-rv-fsops-notes | rv-fsops-notes | 13.109, 13.133 | 2026-11-13 06:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/213<br>Review: fix first. The image build lacks the skip gate script, plus six smaller points<br>Rework in progress, then a second review |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
@@ -205,7 +205,7 @@ ETA: 2026-11-13 05:30 ICT
 | 120 | App shell: error boundary, local times, URL size cap, Back per panel, job announcements | done | claude-20261112-rv-shell | rv-app-shell | | | Merged https://github.com/DynacomSolutions/filedeck/pull/185, CI green<br>Root error boundary not forced live |
 | 121 | Uploads, many-file download, sidebar tree refresh and office preview limits | done | claude-20261112-rv-components | rv-uploads-tree | | | Merged https://github.com/DynacomSolutions/filedeck/pull/197, CI green |
 | 134 | Breadcrumb target at 320 px, Properties from a breadcrumb kept in the URL, compare toolbar cut-off | done | claude-20261112-rv-web-followup | rv-web-followup | 17.128 | | Merged https://github.com/DynacomSolutions/filedeck/pull/209, CI green<br>Compare toolbar on phones: about 311 px to 94 px<br>Acceptance script: 33 checks, no known defects left |
-| 137 | Editor: tell the user before a save changes mixed line endings | in_review | claude-20261113-rv-mixed-endings | rv-mixed-endings | 15.118 | 2026-11-13 05:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/212, CI running |
+| 137 | Editor: tell the user before a save changes mixed line endings | done | claude-20261113-rv-mixed-endings | rv-mixed-endings | 15.118 | | Merged https://github.com/DynacomSolutions/filedeck/pull/212, CI green<br>A notice names the line ending that a save writes; files with one kind of line ending do not change<br>Measured: more CRLF gives CRLF, more LF or equal counts give LF, a lone CR gives CRLF |
 
 ## 16. Large folders and narrow screens
 Findings from the 12 November 2026 review: very large folders freeze the list, and narrow, landscape and zoomed layouts hide content.
