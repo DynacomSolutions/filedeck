@@ -179,7 +179,7 @@ ETA: 2026-11-12 12:00 ICT
 | 130 | SMB overwrite falls back only when replace is unsupported; leftover helper files; client check | done | claude-20261112-rv-sources | rv-smb-followup | 13.110 | | Merged https://github.com/DynacomSolutions/filedeck/pull/204, CI green<br>Listing cap is 100,000 entries<br>Image build stage not exercised until 13.131 |
 | 131 | CI builds the image without pushing, so the Dockerfile and in-image tests run before a release | done | claude-20261112-rv-chart | rv-ci-image-build | 13.130 | | Merged https://github.com/DynacomSolutions/filedeck/pull/206, CI green<br>Found and fixed: final image lacked server dependencies and crashed at start<br>Cold build 4m31s |
 | 132 | Archive tools run inside the read sandbox, limited to the pinned source folder | todo | | rv-archive-sandbox | 13.106, 13.108 | | From the second review of 13.108: compression can follow a swapped subfolder |
-| 133 | Git and search follow-ups: worktree lock text, launcher errors, search gate, compare skips | in_progress | claude-20261112-rv-search-git | rv-git-search-followup | 13.106, 13.107 | 2026-11-12 11:30 ICT | Non-blocking notes from the fourth review of 13.106 and 13.107 |
+| 133 | Git and search follow-ups: worktree lock text, launcher errors, search gate, compare skips | in_review | claude-20261112-rv-search-git | rv-git-search-followup | 13.106, 13.107 | 2026-11-12 12:00 ICT | Non-blocking notes from the fourth review of 13.106 and 13.107<br>https://github.com/DynacomSolutions/filedeck/pull/208 |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
