@@ -4,6 +4,7 @@ import { FsError } from "./fsops.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
 import { Vault, type Scope } from "./vault.ts";
 import type { Target } from "./hub.ts";
+import { MAX_JSON_BODY } from "./request-guard.ts";
 
 /**
  * Hub side of the vault: lists/forgets entries, and wraps the proxied requests
@@ -27,7 +28,62 @@ const ROUTES: { method: string; rest: string; from: "query" | "body" }[] = [
 ];
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
-const MAX_BODY = 1024 * 1024;
+const MAX_BODY = MAX_JSON_BODY; // an extract names up to 10,000 entries
+
+/**
+ * The value of the top-level string member `key` of a JSON object text, found by scanning it (no parse tree is built,
+ * so a large body costs its text only). Like JSON.parse, the last of repeated keys wins, so this and the agent agree
+ * on which path is meant.
+ */
+export function topLevelString(text: string, key: string): string | undefined {
+  const n = text.length;
+  const ws = (k: number) => {
+    while (k < n && (text[k] === " " || text[k] === "\n" || text[k] === "\r" || text[k] === "\t")) k++;
+    return k;
+  };
+  const end = (from: number) => {
+    let j = from + 1;
+    while (j < n && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+    return j;
+  };
+  let depth = 0;
+  let found: string | undefined;
+  for (let i = 0; i < n; ) {
+    const ch = text[i];
+    if (ch === '"') {
+      const j = end(i);
+      if (j >= n) return found;
+      if (depth === 1) {
+        const k = ws(j + 1);
+        if (text[k] === ":") {
+          let name: unknown;
+          try {
+            name = JSON.parse(text.slice(i, j + 1));
+          } catch {
+            return found;
+          }
+          if (name === key) {
+            const v = ws(k + 1);
+            if (text[v] === '"') {
+              const e = end(v);
+              try {
+                found = e < n ? (JSON.parse(text.slice(v, e + 1)) as string) : undefined;
+              } catch {
+                found = undefined;
+              }
+            } else found = undefined; // not a string: the agent sees a body without a usable path
+          }
+        }
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === "{" || ch === "[") depth++;
+    else if (ch === "}" || ch === "]") depth--;
+    i++;
+  }
+  return found;
+}
 const jsonErr = (status: number, error: string) => new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json" } });
 
 export const isPasswordRoute = (method: string, rest: string) => ROUTES.some((r) => r.method === method && r.rest === rest);
@@ -81,12 +137,7 @@ export async function proxyWithVault(o: {
       }
     }
     bodyText = Buffer.concat(chunks).toString("utf8");
-    try {
-      const j = JSON.parse(bodyText) as { path?: unknown };
-      if (typeof j.path === "string") file = j.path;
-    } catch {
-      /* the agent reports the bad body */
-    }
+    file = topLevelString(bodyText, "path"); // the agent parses the body and reports a bad one itself
   }
 
   let typed: string | undefined;
