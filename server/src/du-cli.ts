@@ -107,10 +107,13 @@ export const blocks = (bytes: number) => Math.ceil(bytes / 1024);
 
 export interface DuEntryJson {
   path: string;
+  /** "mount": a mount point below the folder (another filesystem), never counted in it; sizes from its own scan when `scannedAt` is set */
   type: string;
   bytes: number;
   diskBytes: number;
   scannedAt?: number;
+  /** a folder a scan has entered and not finished: what it counted so far */
+  partial?: boolean;
 }
 export interface DuAnswer {
   path: string;
@@ -123,6 +126,10 @@ export interface DuAnswer {
    * the walk reused rows on their age while the change watcher was running, or a change was reported after the scan
    */
   stale?: boolean;
+  /** some folders are not finished by a scan (running, or stopped by an agent restart): their sizes are what it counted so far */
+  partial?: boolean;
+  /** the agent could not read the whole answer (the entries before it are good) */
+  error?: string;
 }
 
 /** The API lists folders level by level; du lists children before their parent, in path order. */
@@ -146,11 +153,19 @@ export function postOrder(entries: DuEntryJson[]): DuEntryJson[] {
   return out;
 }
 
+/** A mount point never scanned on its own has no size to print: it is only named on stderr (see `mountNotes`). */
 export function formatLines(node: string, ans: DuAnswer, o: Pick<DuOptions, "human" | "apparent">): string[] {
-  return postOrder(ans.entries).map((e) => {
+  return postOrder(ans.entries.filter((e) => e.type !== "mount" || e.scannedAt !== undefined)).map((e) => {
     const b = o.apparent ? e.bytes : e.diskBytes;
     return `${o.human ? humanSize(b) : blocks(b)}\t${node}:${e.path}`;
   });
+}
+
+/** One stderr line per mount point in the answer: like du -x, another filesystem is not counted in the folder above it. */
+export function mountNotes(node: string, ans: DuAnswer): string[] {
+  return ans.entries
+    .filter((e) => e.type === "mount")
+    .map((e) => `filedeck du: ${node}:${e.path}: another filesystem (mount point), not counted in the folders above it${e.scannedAt === undefined ? `; run filedeck du ${node}:${e.path} for its size` : "; its line shows its own stored size"}`);
 }
 
 export interface RunIo {
@@ -298,7 +313,10 @@ export async function run(argv: string[], env: Record<string, string | undefined
       const ans = (await r.json()) as DuAnswer;
       if (o.json) io.out(JSON.stringify({ node: t.node, ...ans }) + "\n");
       else for (const l of formatLines(t.node, ans, o)) io.out(l + "\n");
-      if (ans.truncated) io.err(`filedeck du: ${label}: scan hit the entry limit, sizes are partial\n`);
+      for (const l of mountNotes(t.node, ans)) io.err(l + "\n");
+      if (ans.partial) io.err(`filedeck du: ${label}: a scan has not finished some of these folders (it is running, or an agent restart stopped it); their sizes count only what it has finished so far\n`);
+      if (ans.error) throw new Error(`the answer is incomplete: ${ans.error}`);
+      if (ans.truncated) io.err(`filedeck du: ${label}: the answer hit the entry limit, not every folder is listed\n`);
       if (ans.stale) io.err(`filedeck du: ${label}: sizes may be out of date (another scan or a deploy is running, or rows older than the change watcher were reused); run the command again in a moment, or use --fresh to re-read\n`);
       // A repeat after our own job is cached by contract, but that scan just ran: only say so when nobody scanned for us.
       if (ans.cached && !polled) {

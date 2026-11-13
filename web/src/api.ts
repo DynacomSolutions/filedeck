@@ -576,9 +576,14 @@ export const api = {
       .then((r) => ({ nodes: [...r.nodes.map((n) => ({ ...n, kind: "node" as const })), ...(r.sources ?? []).map((s) => ({ ...s, kind: "source" as const }))] }))
       .then((r) => (noteSources(r.nodes), r)),
   mounts: (node: string) => fetch(`${nodeBase(node)}/api/mounts`).then((r) => j<{ mounts: Mount[] }>(r)),
-  /** Stored sizes of a folder and its sub-folders; null (204) when the store has nothing. Never starts a scan. */
+  /**
+   * Stored sizes of a folder and its sub-folders; null (204) when the store has nothing. Never starts a scan. Mount points below the folder are left out:
+   * another filesystem is not part of the folder's total (its size is not a share of it).
+   */
   duCached: (node: string, path: string) =>
-    fetch(`${nodeBase(node)}/api/du?path=${enc(path)}&depth=1&cachedOnly=1`).then((r) => (r.status === 204 ? null : j<{ entries: { path: string; bytes: number; diskBytes: number; files: number; dirs: number; scannedAt?: number }[] }>(r).then((x) => x.entries))),
+    fetch(`${nodeBase(node)}/api/du?path=${enc(path)}&depth=1&cachedOnly=1`).then((r) =>
+      r.status === 204 ? null : j<{ entries: { path: string; type?: string; bytes: number; diskBytes: number; files: number; dirs: number; scannedAt?: number }[] }>(r).then((x) => x.entries.filter((e) => e.type !== "mount")),
+    ),
   list: (node: string, path: string, hidden: boolean, signal?: AbortSignal) =>
     fetch(`${nodeBase(node)}/api/fs/list?path=${enc(path)}${hidden ? "&hidden=1" : ""}`, { signal }).then((r) =>
       j<{ path: string; entries: Entry[]; truncated: boolean }>(r),

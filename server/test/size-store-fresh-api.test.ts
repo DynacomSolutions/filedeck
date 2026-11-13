@@ -350,8 +350,9 @@ test("R4 in the window between SIGTERM and the lease release a size job is refus
 });
 
 let hookTree: (() => Promise<void>) | undefined;
-const origTree = SizeStore.prototype.tree;
-SizeStore.prototype.tree = async function (this: Any, ...a: Any[]) {
+// (the answer's rows are read by treeEach, streamed: the hook runs once the read has begun)
+const origTree = SizeStore.prototype.treeEach;
+SizeStore.prototype.treeEach = async function (this: Any, ...a: Any[]) {
   const h = hookTree;
   hookTree = undefined; // once
   if (h) await h();
@@ -363,7 +364,7 @@ for (const qs of ["fresh=1", "all=0"]) {
     const w = quittingAgent("w1" + qs.slice(0, 3), { FILEDECK_HANDOVER_MS: "100" });
     const a = w.start();
     await sleep(300);
-    // the job's reply tree read is slow: the folder changes and the watcher overflows meanwhile
+    // the reply tree read is slow: the folder changes and the watcher overflows meanwhile
     hookTree = async () => {
       fs.writeFileSync(path.join(w.root, "t/sub/f"), "abcdefghij");
       fs.writeFileSync(w.ev, "!overflow\n");

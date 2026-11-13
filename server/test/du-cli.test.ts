@@ -89,7 +89,7 @@ test("cached answer says so on stderr; truncated warns", async () => {
   assert.equal(await run(["n:/d"], env, h.io), 0);
   const e = h.err.join("");
   assert.match(e, /answered from stored sizes \(oldest folder scanned 5 min ago\); changes since may be missing, use --fresh/);
-  assert.match(e, /partial/);
+  assert.match(e, /hit the entry limit, not every folder is listed/);
 });
 
 test("errors: failed job, HTTP error, 401, network, missing env; other targets still run", async () => {
@@ -256,4 +256,26 @@ test("a failure while our job still runs says so and exits non-zero", async () =
   const h = harness((u) => (u.includes("/jobs/") ? j({}, 500) : j({ jobId: "J" }, 202)));
   assert.equal(await run(["-s", "n:/u"], env, h.io), 1);
   assert.match(h.err.join(""), /job J keeps running on the server; run the same command again to rejoin it/);
+});
+
+test("mount points: a stored one prints its own size, every one is named on stderr as not counted; partial and incomplete answers say so", async () => {
+  const h = harness(() =>
+    j({
+      path: "/",
+      entries: [{ ...E("/", 4096), partial: true }, { ...E("/srv/projects", 8192, 8192, "mount"), scannedAt: 1 }, E("/mnt/usb", 0, 0, "mount")],
+      cached: true,
+      truncated: false,
+      watched: false,
+      partial: true,
+    }),
+  );
+  assert.equal(await run(["n:/"], env, h.io), 0);
+  assert.equal(h.out.join(""), "8\tn:/srv/projects\n4\tn:/\n");
+  const e = h.err.join("");
+  assert.match(e, /n:\/srv\/projects: another filesystem \(mount point\), not counted in the folders above it; its line shows its own stored size/);
+  assert.match(e, /n:\/mnt\/usb: another filesystem \(mount point\), not counted in the folders above it; run filedeck du n:\/mnt\/usb for its size/);
+  assert.match(e, /a scan has not finished some of these folders/);
+  const x = harness(() => j({ path: "/", entries: [E("/", 1)], cached: false, truncated: true, watched: false, error: "the size store is busy; try again" }));
+  assert.equal(await run(["n:/"], env, x.io), 1);
+  assert.match(x.err.join(""), /the answer is incomplete: the size store is busy/);
 });

@@ -26,7 +26,9 @@ filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached] [--json
 - `--apparent-size` report file length instead of disk usage.
 - `--fresh` force a rescan (see below).
 - `--cached` answer from stored sizes only. It never starts a scan; a folder
-  that is not stored is reported on stderr and the exit code is 1.
+  that is not stored is reported on stderr and the exit code is 1. While a scan
+  runs, the folders it has not finished answer with what it has counted so far
+  (a stderr note says the sizes are partial).
 - `--json` machine-readable output.
 - `--timeout SECONDS` give up and exit 1 after this long (default: 600; `0` means no cap; the server job keeps running after a timeout, rerun the same command to rejoin).
 - Paths are `node:/path`, for example `node1:/srv/data`.
@@ -54,6 +56,11 @@ filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached] [--json
   go to stderr with the age of the oldest folder. Use `--fresh` only when you need
   current numbers, for example right after deleting or writing a lot of data.
 - Hard links are counted once per link, unlike `du`. Totals can exceed `du`.
+- Like `du -x`, a scan stays on the filesystem of its path. A mount point below
+  it is named on stderr and not counted; its own size (when it was scanned on its
+  own) is printed on its line. Run `filedeck du node:/mount/point` for it.
+- A scan that an agent restart stopped goes on from the folders it had finished
+  when it runs again: rerun the same command.
 
 ## Examples
 

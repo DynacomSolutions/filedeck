@@ -302,7 +302,31 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
       await sizes.releaseLease();
     })());
   (app as unknown as { leave: () => Promise<void> }).leave = leave;
+
+  // Trash retention: every volume's trash loses what is older than the age limit, then its oldest items while it is over its cap. A minute after start,
+  // then on a timer; one sweep at a time.
+  let sweeping = false;
+  const sweepTrash = async () => {
+    if (sweeping || leaving) return;
+    sweeping = true;
+    try {
+      const policy = { maxAgeDays: cfg.trashMaxAgeDays, maxPercent: cfg.trashMaxPercent, maxBytes: cfg.trashMaxBytes, blocked: (v: string) => hitsReadOnly(root, cfg.readOnly, v) || reachesReadOnly(root, cfg.readOnly, v) };
+      // (outside a request: the pinned removals check read-only prefixes in a scope of their own, like a job)
+      for (const r of await withReadOnly(root, cfg.readOnly, () => trash.applyRetention(root, cfg.procMounts, policy))) console.error(JSON.stringify({ trashRetention: r.volume, removed: r.removed, freedBytes: r.freed, failed: r.failed }));
+    } catch (e) {
+      console.error(JSON.stringify({ trashRetention: "failed", error: String((e as Error)?.message ?? e) }));
+    } finally {
+      sweeping = false;
+    }
+  };
+  const retentionOn = cfg.trashSweepMs > 0 && (cfg.trashMaxAgeDays > 0 || cfg.trashMaxPercent > 0 || cfg.trashMaxBytes > 0);
+  const firstSweep = retentionOn ? setTimeout(() => void sweepTrash(), Math.min(60_000, cfg.trashSweepMs)).unref() : undefined;
+  const sweepTimer = retentionOn ? setInterval(() => void sweepTrash(), cfg.trashSweepMs).unref() : undefined;
+  (app as unknown as { sweepTrash: () => Promise<void> }).sweepTrash = sweepTrash;
+
   (app as unknown as { close: () => Promise<void> }).close = async () => {
+    clearTimeout(firstSweep);
+    clearInterval(sweepTimer);
     await leave();
     index.close();
     sizes.close();
