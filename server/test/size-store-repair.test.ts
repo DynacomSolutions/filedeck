@@ -307,9 +307,11 @@ test("a repair fenced because the lease lapsed during the first check does not s
   x.close();
   // a busy database ("database is locked", a loaded host holding a connection longer) is not a repair either: the next failure of the store tries again
   const second = await capture(async () => {
-    for (let i = 0; i < 20 && !(A as Any).repaired; i++) {
+    // tries spread over up to 15 s: back to back, all of them can fall in one busy moment of a loaded build host (seen in the image build)
+    for (const end = Date.now() + 15_000; !(A as Any).repaired && Date.now() < end; ) {
       (A as Any).giveUp(malformed());
       await (A as Any).repairing;
+      if (!(A as Any).repaired) await new Promise((r) => setTimeout(r, 100));
     }
   });
   assert.deepEqual(integrity(file), ["ok"], second.lines.join("\n"));
