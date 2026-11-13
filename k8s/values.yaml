@@ -127,6 +127,13 @@ agent:
   # Beyond the watch budget (or after a restart) a stored listing is reused while the folder's mtime is unchanged,
   # for at most this long; then it is read again in full. Hashes are always checked against a fresh stat.
   indexRevalidateMs: "1800000"
+  # Trash retention: each volume's .filedeck-trash loses items deleted more than maxAgeDays ago, then its oldest items while it is
+  # bigger than maxPercent of the volume (and than maxBytes, when set). 0 turns a rule off. Applied a minute after start, then every sweepMs.
+  trash:
+    maxAgeDays: 7
+    maxPercent: 10
+    maxBytes: 0
+    sweepMs: 3600000
   # Keep the cached folder sizes (du) current from kernel change notifications (fanotify) instead of waiting for the
   # revalidation age. Off by default: it adds the SYS_ADMIN capability to the agent container (DAC_READ_SEARCH is
   # already there). Folder changes are re-read after ~1 s, a file that is still being written at most every 30 s.

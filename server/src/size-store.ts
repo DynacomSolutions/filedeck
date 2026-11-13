@@ -5,6 +5,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { openDb } from "./index-cache.ts";
+import { memcgRelief } from "./memcg.ts";
 import { FsError } from "./fsops.ts";
 import { isReservedName, resolveRead, virtualJoin } from "./paths.ts";
 import type { JobCtl } from "./jobs.ts";
@@ -64,6 +65,10 @@ interface Node extends Row {
   touch?: boolean;
   /** the folder this one rolls up into */
   up?: Node;
+  /** `tot` already holds `own` (a reused folder from the start, a read one once its last entry was counted) */
+  ownIn?: boolean;
+  /** child folders on another device found when the folder was read (path, device): written with its row */
+  mnts?: [string, number][];
 }
 
 /** A child folder handed out by a frame; `stored` = its row when the frame already read it (null = not stored), undefined = not read yet. */
@@ -92,13 +97,16 @@ interface Walk {
 
 export interface DuEntry {
   path: string;
-  type: "dir" | "file" | "symlink" | "other";
+  /** "mount": a mount point below the folder, another filesystem: listed, never counted in the folder (sizes of its own scan, absent `scannedAt` = never scanned) */
+  type: "dir" | "file" | "symlink" | "other" | "mount";
   bytes: number;
   diskBytes: number;
   files: number;
   dirs: number;
   /** folders only */
   scannedAt?: number;
+  /** a folder a scan has entered and not finished (running, or stopped by a restart): its sizes are what it counted so far */
+  partial?: boolean;
 }
 
 /** folders written per transaction when a scan is stored */
@@ -138,12 +146,25 @@ export function limiter(n: number) {
     });
   return Object.assign(lim, { get queued() { return line.length; } });
 }
+/** shared by all walks of the process */
+const relief = memcgRelief();
 /** folders read ahead at once, and how many may wait before further read-ahead is dropped */
 const AHEAD = 32;
 const AHEAD_QUEUE = 256;
 const AHEAD_NAMES = 64;
 /** taken at load: read-ahead listings are not the walk's own reads (tests count those on `fs.readdir`) */
-const listAhead = fs.readdir;
+const openAhead = fs.opendir;
+/** The first `n` names of a folder, never its whole listing (a folder can hold millions of names). */
+async function firstNames(real: string, n: number): Promise<string[]> {
+  const dir = await openAhead(real, { bufferSize: n });
+  const out: string[] = [];
+  try {
+    for (let e; out.length < n && (e = await dir.read()); ) out.push(e.name);
+  } finally {
+    await dir.close().catch(() => undefined);
+  }
+  return out;
+}
 const tick = () => new Promise<void>((r) => setImmediate(r));
 /** commits that may be in flight while the walk goes on (the walk waits for the oldest one only when this many are queued) */
 const COMMITS_IN_FLIGHT = 2;
@@ -163,6 +184,11 @@ const SQL = {
   get: `SELECT s.*, ${DIRTY} FROM sizes s WHERE s.path = ?`,
   kidPage: `SELECT s.*, ${KIDS}, ${DIRTY} FROM sizes s WHERE s.parent = ? AND s.dev = ? AND s.path > ? ORDER BY s.path LIMIT ?`,
   getKids: `SELECT s.*, ${KIDS}, ${DIRTY} FROM sizes s WHERE s.path = ?`,
+  /** a page of rows of a subtree in path order for a streamed tree (no counts: nothing is decided on them): after a path, or from one (a jump) */
+  treeAfter: "SELECT * FROM sizes WHERE path > ? AND path < ? ORDER BY path LIMIT ?",
+  treeFrom: "SELECT * FROM sizes WHERE path >= ? AND path < ? ORDER BY path LIMIT ?",
+  /** the mount points below a folder, with the totals of their own scan when there is one */
+  mountsOf: "SELECT m.path, s.scanned_at, s.tot_bytes, s.tot_disk, s.tot_files, s.tot_dirs FROM mountpoints m LEFT JOIN sizes s ON s.path = m.path AND s.dev = m.dev WHERE m.parent = ? ORDER BY m.path LIMIT ?",
   getMany: (n: number) => `SELECT s.*, ${KIDS}, ${DIRTY} FROM sizes s WHERE s.path IN (${Array(n).fill("?").join(",")})`,
 };
 const SCHEMA = `
@@ -190,7 +216,21 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS walking (path TEXT PRIMARY KEY, epoch INTEGER NOT NULL, started INTEGER NOT NULL) WITHOUT ROWID;
   -- one row per watcher run (see FanWatch): \`since\` is the time from which the changes of the watched filesystems were seen without a gap
   CREATE TABLE IF NOT EXISTS watch_sessions (id INTEGER PRIMARY KEY, mounts_hash TEXT NOT NULL, ready_at INTEGER NOT NULL, since INTEGER NOT NULL, beat INTEGER NOT NULL, ended_at INTEGER, clean INTEGER NOT NULL DEFAULT 0, min_epoch INTEGER);
+  -- the folders a running walk has entered and not finished (at most one per level): what it has counted so far, \`walk\` = the start folder.
+  -- A folder's row here goes when its real row is written; the walk's rows go when it ends. Answers \`du --cached\` while a scan runs.
+  CREATE TABLE IF NOT EXISTS partial (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL, walk TEXT NOT NULL, at INTEGER NOT NULL, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}) WITHOUT ROWID;
+  -- child folders on another device (mount points) of a folder that was read: never entered or counted, listed by \`tree\` as entries of their own
+  CREATE TABLE IF NOT EXISTS mountpoints (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS mountpoints_parent ON mountpoints(parent);
 `;
+/** a scan job resumed within this time of its start keeps the rows it had written, whatever their age (see `walk`) */
+const RESUME_MAX_MS = 24 * 3600_000;
+/** mount points remembered per folder (a folder with more lists the first ones) */
+const MOUNTS_PER_DIR = 256;
+/** a running walk writes what it has finished (and its partial totals) at least this often, even before a chunk is full */
+const FLUSH_MS = 5000;
+const PARTIAL_COLS = ["path", "parent", "dev", "walk", "at", ...METRICS.map((m) => `tot_${m}`)];
+const PUT_PARTIAL = `INSERT OR REPLACE INTO partial (${PARTIAL_COLS.join(",")}) VALUES (${PARTIAL_COLS.map(() => "?").join(",")})`;
 /** subtree stale marks kept; past this they collapse into one mark on "/" */
 const MARKS_MAX = 256;
 /** dirty folders one walk remembers to clear when it ends (the rest stay dirty and are re-read once more by the next walk) */
@@ -246,7 +286,7 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers } = workerData;
+const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers, putPartial } = workerData;
 const fs = require("node:fs");
 const db = new DatabaseSync(file);
 db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
@@ -269,7 +309,21 @@ const get = db.prepare("SELECT * FROM sizes WHERE path = ?");
 const delTreeRows = db.prepare("DELETE FROM sizes WHERE path = ? OR (path > ? AND path < ?)");
 // prepared on first use: the table may not exist yet when this worker starts (the "schema" op creates it on a store of an older version)
 let delDirty;
-const delTree = { run: (p, lo, hi) => { delTreeRows.run(p, lo, hi); (delDirty ??= db.prepare("DELETE FROM dirty WHERE path = ? OR (path > ? AND path < ?)")).run(p, lo, hi); } };
+let delMounts, delPartials;
+const delTree = { run: (p, lo, hi) => {
+  delTreeRows.run(p, lo, hi);
+  (delDirty ??= db.prepare("DELETE FROM dirty WHERE path = ? OR (path > ? AND path < ?)")).run(p, lo, hi);
+  (delMounts ??= db.prepare("DELETE FROM mountpoints WHERE path = ? OR (path > ? AND path < ?)")).run(p, lo, hi);
+  (delPartials ??= db.prepare("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)")).run(p, lo, hi);
+} };
+// (prepared on first use, like delDirty: the tables come with the "schema" op)
+let mountsOfStmt, mountPutStmt, partialDelStmt, partialPutStmt;
+const setMounts = (parent, list) => {
+  (mountsOfStmt ??= db.prepare("DELETE FROM mountpoints WHERE parent = ?")).run(parent);
+  for (const [p, dev] of list) (mountPutStmt ??= db.prepare("INSERT OR REPLACE INTO mountpoints (path, parent, dev) VALUES (?, ?, ?)")).run(p, parent, dev);
+};
+const partialDone = (p) => (partialDelStmt ??= db.prepare("DELETE FROM partial WHERE path = ?")).run(p);
+const partialPut = (row) => (partialPutStmt ??= db.prepare(putPartial)).run(...row);
 const parentOf = (p) => (p === "/" ? "" : p.slice(0, p.lastIndexOf("/")) || "/");
 const below = (p) => { const pre = p === "/" ? "/" : p + "/"; return [pre, pre.slice(0, -1) + "0"]; };
 // Fencing: every write transaction first checks that this connection still holds the writer lease (the same transaction, so a holder that was paused
@@ -334,7 +388,7 @@ const acquire = ({ owner, leaseMs }) => {
   fence = epoch ? { epoch, owner } : null;
   return epoch;
 };
-const commit = ({ items, last, walkStart, walkEnd }) => {
+const commit = ({ items, last, walkStart, walkEnd, spine }) => {
   inTx(() => {
     if (walkStart) db.prepare("INSERT OR REPLACE INTO walking (path, epoch, started) VALUES (?, ?, ?)").run(walkStart.path, fence.epoch, walkStart.started);
     const old = last ? get.get(last.path) : undefined;
@@ -342,7 +396,10 @@ const commit = ({ items, last, walkStart, walkEnd }) => {
       if (it.touch != null) { touch.run(it.touch, it.path); continue; }
       if (it.purge != null) for (let after = "";;) { const r = stale.all(it.path, it.dev, it.purge, after); if (!r.length) break; for (const k of r) delTree.run(k.path, ...below(k.path)); after = r[r.length - 1].path; }
       put.run(...it.row);
+      if (it.mounts) setMounts(it.path, it.mounts);
+      partialDone(it.path);
     }
+    if (spine) for (const row of spine) partialPut(row);
     if (old) {
       const anc = [];
       for (let a = parentOf(last.path); a; a = parentOf(a)) { const r = get.get(a); if (!r) continue; if (Number(r.dev) !== last.dev) break; anc.push(a); }
@@ -351,7 +408,10 @@ const commit = ({ items, last, walkStart, walkEnd }) => {
         db.prepare("UPDATE sizes SET " + set + " WHERE path IN (" + anc.map(() => "?").join(",") + ")").run(...anc);
       }
     }
-    if (walkEnd) db.prepare("DELETE FROM walking WHERE path = ?").run(walkEnd);
+    if (walkEnd) {
+      db.prepare("DELETE FROM walking WHERE path = ?").run(walkEnd);
+      db.prepare("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)").run(walkEnd, ...below(walkEnd));
+    }
   });
 };
 const prepared = new Map();
@@ -402,7 +462,7 @@ export class SizeStore {
   private q!: Record<"get" | "put" | "kidPage" | "getKids" | "touch" | "delTree" | "delDirty", StatementSync>;
   /** deepest frame stack of the latest walk (tests: memory follows depth, not width) */
   lastWalkFrames = 0;
-  private held: { path: string; done: Promise<void> }[] = [];
+  private held: { path: string; probe?: boolean; done: Promise<void> }[] = [];
   private file = ":memory:";
   private writer?: Worker;
   private reader?: Worker;
@@ -441,7 +501,7 @@ export class SizeStore {
 
   constructor(
     file: string,
-    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; /** tests: every read on the worker sleeps this long, to show the main thread is not held */ readDelayMs?: number; walLimitBytes?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number; /** the writer lease lapses after this long without a heartbeat */ leaseMs?: number },
+    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; /** tests: every read on the worker sleeps this long, to show the main thread is not held */ readDelayMs?: number; walLimitBytes?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number; /** the writer lease lapses after this long without a heartbeat */ leaseMs?: number; /** tests: a walk writes what it has (and its partial totals) at least this often */ flushMs?: number },
   ) {
     this.file = file;
     if (file === ":memory:") this.epoch = 1;
@@ -558,17 +618,26 @@ export class SizeStore {
     this.acquiring = true; // (the first lease attempt is what is running: its own writes must not wait for it)
     try {
       // a read that failed (busy) must not look like "nothing to recover": the next tick tries again
-      const w = await this.read("walking", "SELECT path FROM walking WHERE epoch < ?", [e], null);
+      const w = await this.read("walking", "SELECT path, started FROM walking WHERE epoch < ?", [e], null);
       const t = await this.read("taken", "SELECT path FROM pending WHERE taker IS NOT NULL LIMIT ?", [PENDING_BATCH], null);
       if (!w || !t || !(await this.refreshMarks())) return this.loseLease();
-      const walking = w.map((r) => r.path as string);
       const taken = t.map((r) => r.path as string);
       const at = this.nextAt();
+      // A walk that died (the process was killed) wrote the folders it finished: each such row was complete when written, at or after the walk began. What it had
+      // not finished (the folders it was in, the start folder, the totals above it) keeps rows from before it. So the subtree is stale from just before the walk
+      // began, not from now: a scan that runs again keeps what the dead walk finished instead of starting from zero. (A walk of unknown start: from now.)
+      const walking = w.map((r) => [r.path as string, Math.min(at, r.started == null ? at : Number(r.started) - 1)] as const);
       const parts: { sql: string; rows: (string | number)[][] }[] = [];
-      for (const p of walking) this.marks.set(p, Math.max(this.marks.get(p) ?? 0, at));
-      const marks = new Map([...walking.map((p) => [p, at] as const), ...this.unsaved]);
+      const marks = new Map(this.unsaved);
+      for (const [p, a] of walking) {
+        if ((this.marks.get(p) ?? -1) >= a) continue; // a newer mark is there already
+        this.marks.set(p, a);
+        marks.set(p, Math.max(marks.get(p) ?? 0, a));
+      }
       if (marks.size) parts.push({ sql: MARK_SQL, rows: [...marks] });
       if (walking.length) parts.push({ sql: "DELETE FROM walking WHERE epoch < ?", rows: [[e]] });
+      // what the dead walks had counted of their unfinished folders: no longer being added to (a scan that runs again writes its own)
+      for (const [p] of walking) parts.push({ sql: "DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", rows: [[p, ...below(p)]] });
       if (taken.length) parts.push({ sql: DIRTY_SQL, rows: taken.map((p) => [p, parentOf(p), at]) }, { sql: "UPDATE pending SET taker = NULL WHERE taker IS NOT NULL", rows: [[]] });
       if (parts.length && !(await this.txn(parts))) return this.loseLease(); // (`unsaved` is kept for the next try)
       this.unsaved.clear();
@@ -802,7 +871,7 @@ export class SizeStore {
     if (this.closed) return Promise.resolve(undefined);
     let w = read ? this.reader : this.writer;
     if (!w) {
-      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, putPartial: PUT_PARTIAL, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
       const fail = (e: Error) => {
         if (this.writer === nw) this.writer = undefined;
         if (this.reader === nw) this.reader = undefined;
@@ -875,14 +944,32 @@ export class SizeStore {
    * Arrival order keeps a long scan from starving while small changes keep re-taking an overlapping lock.
    * The returned function releases the lock (more than once is harmless). A wait ends with an error when `signal` aborts.
    */
-  async lock(virtual: string, signal?: AbortSignal): Promise<() => void> {
+  /** Locks asked for (counter, and the latest ones): an answer read without the lock can tell whether a walk of an overlapping folder came meanwhile (`lockedSince`). */
+  private lockSeq = 0;
+  private recentLocks: { seq: number; path: string; probe?: boolean }[] = [];
+  lockMark(): number {
+    return this.lockSeq;
+  }
+  /**
+   * Is a lock overlapping `virtual` held or waited for now, or was one asked for since `mark` (or are there too many since to tell)? Probe locks (an answer
+   * that only waits for walks ahead of it, then lets go) change nothing and do not count: two answers of one folder never make each other stale.
+   */
+  lockedSince(virtual: string, mark: number): boolean {
+    const overlaps = (p: string) => p === virtual || p === "/" || virtual === "/" || p.startsWith(virtual + "/") || virtual.startsWith(p + "/");
+    if (this.held.some((h) => !h.probe && overlaps(h.path))) return true;
+    if (this.lockSeq - mark > this.recentLocks.length) return true;
+    return this.recentLocks.some((l) => l.seq > mark && !l.probe && overlaps(l.path));
+  }
+  async lock(virtual: string, signal?: AbortSignal, /** only waits for the walks ahead (see `lockedSince`) */ probe = false): Promise<() => void> {
     const overlaps = (h: { path: string }) => h.path === virtual || h.path === "/" || virtual === "/" || h.path.startsWith(virtual + "/") || virtual.startsWith(h.path + "/");
     const canceled = () => new FsError(400, "canceled");
     if (signal?.aborted) throw canceled();
     let release!: () => void;
-    const h = { path: virtual, done: new Promise<void>((r) => (release = r)) };
+    const h = { path: virtual, probe, done: new Promise<void>((r) => (release = r)) };
     const ahead = this.held.filter(overlaps);
     this.held.push(h);
+    this.recentLocks.push({ seq: ++this.lockSeq, path: virtual, ...(probe ? { probe } : {}) });
+    if (this.recentLocks.length > 256) this.recentLocks.shift();
     const free = () => {
       const i = this.held.indexOf(h);
       if (i >= 0) this.held.splice(i, 1);
@@ -955,23 +1042,6 @@ export class SizeStore {
     const r = (await this.read("get", SQL.get, [p], []))?.[0];
     return r && this.toRow(r);
   }
-  /**
-   * Stored child folders (same device as their parent: a row of another device is a scanned mount point, not part of the folder) of the folders `ps`,
-   * grouped by parent, at most `max` rows in all: a folder with millions of children is never loaded at once.
-   */
-  private async levelKids(ps: string[], max: number): Promise<Map<string, Row[]>> {
-    const out = new Map<string, Row[]>();
-    for (let i = 0; i < ps.length && max > 0; i += 1000) {
-      const chunk = ps.slice(i, i + 1000);
-      const sql = `SELECT k.* FROM sizes k JOIN sizes p ON p.path = k.parent AND p.dev = k.dev WHERE k.parent IN (${chunk.map(() => "?").join(",")}) ORDER BY k.parent, k.path LIMIT ?`;
-      for (const r of (await this.read("levelKids", sql, [...chunk, max], [])) ?? []) {
-        const k = this.toRow(r);
-        out.get(k.parent)?.push(k) ?? out.set(k.parent, [k]);
-        max--;
-      }
-    }
-    return out;
-  }
   /** Up to `PAGE` stored child folders on device `dev` after path `after` (keyset paging, so a folder with millions never loads at once). */
   /** null when the read failed (a busy database): not the same as "no more rows" */
   private async kidPage(p: string, dev: number, after: string): Promise<Row[] | null> {
@@ -1003,6 +1073,8 @@ export class SizeStore {
   private delTree(p: string) {
     this.q.delTree.run(p, ...below(p));
     this.q.delDirty.run(p, ...below(p)); // a folder that is gone is not dirty
+    this.db!.prepare("DELETE FROM mountpoints WHERE path = ? OR (path > ? AND path < ?)").run(p, ...below(p));
+    this.db!.prepare("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)").run(p, ...below(p));
   }
   /** Add `d` to the totals of the stored ancestors of `p`, up to the first one on another device (a mount point's parent does not contain it). */
   private addToAncestors(p: string, d: Sums, dev: number) {
@@ -1032,9 +1104,12 @@ export class SizeStore {
    * A walk that fails after rows were written marks the subtree stale so the next scan re-reads it (parents above would
    * otherwise keep totals from before).
    */
-  private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** a rescan resumed: rows written at or after this time are kept */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
+  private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** when the scan (job) began: rows written since are its own and are kept when it runs again after a restart, whatever their age (a rescan keeps only those) */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
     await this.reopen();
     if (!(await this.mayScan())) throw new FsError(503, "another process holds the size store writer lease");
+    // A job resumed long after it began (the agent was down for days) does not keep its own rows on that ground: changes made while nothing
+    // watched could be in them. Then only the usual age and watcher checks apply.
+    const since = mode.since !== undefined && Date.now() - mode.since < RESUME_MAX_MS ? mode.since : undefined;
     const dev = Number(st.dev);
     // A walk of a whole tree (not the watcher's re-read of one changed folder) begins at a barrier: every dirty mark and stale mark written before it is
     // committed and visible to the reads below, so what the walk clears at its end is only what it could see. (Marks of other processes are not merged
@@ -1080,23 +1155,38 @@ export class SizeStore {
       if (fenced) throw new FsError(503, "lost the size store writer lease");
     };
 
+    let lastFlush = Date.now();
+    const flushMs = this.o.flushMs ?? FLUSH_MS;
+    /** time to write what is finished (and the partial totals of the open folders) although the chunk is not full: a slow disk still shows progress, a kill loses little */
+    const due = () => buf.length >= chunk || Date.now() - lastFlush >= flushMs;
+    /** The folders the walk is in, with what they have counted so far (rows of `partial`); none once the start folder is done. */
+    const spine = (last: Node | null): (string | number)[][] | undefined => {
+      if (last && !last.up) return undefined;
+      const at = Date.now();
+      return frames.map(({ node: n }) => {
+        const t = n.ownIn ? n.tot : { ...n.tot };
+        if (!n.ownIn) addTo(t, n.own);
+        return [n.path, n.parent, n.dev, virtual, at, ...METRICS.map((m) => t[m])];
+      });
+    };
     const flush = async (last: Node | null) => {
       const part = buf;
       buf = [];
+      lastFlush = Date.now();
       if (this.db) {
-        if (this.file === ":memory:") this.safe(() => this.commitInline(last, part), false);
+        if (this.file === ":memory:") this.safe(() => this.commitInline(last, part, virtual, spine(last)), false);
         else {
           // a file-backed store writes on the worker thread: the main thread only reads, so a stalled disk cannot hold the event loop
           const items = part.map((n) =>
             n.touch
               ? { path: n.path, dev: n.dev, touch: n.seen_at }
-              : { path: n.path, dev: n.dev, purge: n.purge ? n.seen_at : null, row: [n.path, n.parent, n.ino, n.dev, n.mtime_ms, n.scanned_at, n.seen_at, n.ver, ...METRICS.map((m) => n.own[m]), ...METRICS.map((m) => n.tot[m])] },
+              : { path: n.path, dev: n.dev, purge: n.purge ? n.seen_at : null, mounts: n.reused ? undefined : (n.mnts ?? []), row: [n.path, n.parent, n.ino, n.dev, n.mtime_ms, n.scanned_at, n.seen_at, n.ver, ...METRICS.map((m) => n.own[m]), ...METRICS.map((m) => n.tot[m])] },
           );
           const t0 = performance.now();
           const first = !walkStarted;
           walkStarted = true;
           inflight.push(
-            this.send({ op: "commit", items, last: last ? { path: last.path, dev: last.dev, tot: last.tot } : null, walkStart: first ? { path: virtual, started: now } : undefined, walkEnd: last && !last.up ? virtual : undefined }).then(
+            this.send({ op: "commit", items, last: last ? { path: last.path, dev: last.dev, tot: last.tot } : null, walkStart: first ? { path: virtual, started: now } : undefined, walkEnd: last && !last.up ? virtual : undefined, spine: spine(last) }).then(
               () => {
                 if (last && !last.up) walkClosed = true;
                 if (performance.now() - t0 > SLOW_SEND_MS) slowLog("size-commit", performance.now() - t0, virtual);
@@ -1138,7 +1228,7 @@ export class SizeStore {
           firstPages.set(v, p);
           kids = await p;
         }
-        const names = kids?.length ? kids.map((k) => path.posix.basename(k.path)) : ((await listAhead(r)) as string[]).slice(0, AHEAD_NAMES);
+        const names = kids?.length ? kids.map((k) => path.posix.basename(k.path)) : await firstNames(r, AHEAD_NAMES);
         await Promise.all(names.map((n) => fs.lstat(path.join(r, n)).catch(() => undefined)));
       }).catch(() => undefined);
     };
@@ -1149,7 +1239,7 @@ export class SizeStore {
       const up = n.up;
       if (up) addTo(up.tot, n.tot);
       else root = n;
-      if (!up || buf.length >= chunk) {
+      if (!up || due()) {
         await flush(up ? null : n);
         if (up) await tick();
       }
@@ -1171,6 +1261,7 @@ export class SizeStore {
       const end = async () => {
         ended = true;
         addTo(node.tot, node.own);
+        node.ownIn = true;
         await close();
       };
       return {
@@ -1211,9 +1302,12 @@ export class SizeStore {
               const disk = Number(g.s.blocks) * 512;
               if (g.s.isDirectory()) {
                 node.own.dirs++;
-                node.own.disk += disk;
-                if (Number(g.s.dev) !== dev) node.own.mounts++;
-                else {
+                if (Number(g.s.dev) !== dev) {
+                  // a mount point: another filesystem, like du -x neither entered nor counted (not even its root folder); remembered to be listed on its own
+                  node.own.mounts++;
+                  if ((node.mnts ??= []).length < MOUNTS_PER_DIR) node.mnts.push([virtualJoin(vpath, g.n), Number(g.s.dev)]);
+                } else {
+                  node.own.disk += disk;
                   const v = virtualJoin(vpath, g.n);
                   const prior = mode.trust && isRoot ? await getRow(v) : undefined;
                   // a folder deleted and recreated under the same name is not the stored one, even with the same inode number (freed inodes are reused at once); its mtime tells
@@ -1240,7 +1334,7 @@ export class SizeStore {
             ctl.progress.entries = seen;
             ctl.progress.bytes = bytes;
             if (eof) await end(); // after the tally: the folder's totals are final
-            if (buf.length >= chunk) await flush(null);
+            if (due()) await flush(null);
             await tick();
           }
           return batch[i++]!;
@@ -1310,7 +1404,7 @@ export class SizeStore {
       // (a plain du stays cheap), but a walk that reused one cannot vouch for the tree when it ends.
       const watchedTrust = !!stored && stored.ver > 0 && stored.scanned_at >= this.ready() && this.covers(t.virtual);
       if (stored?.dirty !== undefined && seenDirty.length < DIRTY_SEEN_MAX) seenDirty.push([t.virtual, stored.dirty]);
-      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && stored.dirty === undefined && stored.scanned_at > marked && (watchedTrust || now - stored.scanned_at < this.o.ttlMs) && storedKids === stored.own.dirs - stored.own.mounts;
+      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && stored.dirty === undefined && stored.scanned_at > marked && (watchedTrust || now - stored.scanned_at < this.o.ttlMs || stored.scanned_at >= (since ?? Infinity)) && storedKids === stored.own.dirs - stored.own.mounts;
       let first: { page: Row[]; ks: (Stats | null)[]; complete: boolean } | undefined;
       if (reusable) {
         // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
@@ -1341,7 +1435,7 @@ export class SizeStore {
       }
       if (reusable) {
         if (!watchedTrust) untrusted = true;
-        const node: Node = { ...stored!, tot: { ...stored!.own }, seen_at: stamp, reused: true, up: t.up };
+        const node: Node = { ...stored!, tot: { ...stored!.own }, seen_at: stamp, reused: true, up: t.up, ownIn: true };
         seen += node.own.files + node.own.symlinks + node.own.other + node.own.dirs;
         bytes += node.own.bytes;
         ctl.progress.entries = seen;
@@ -1377,6 +1471,8 @@ export class SizeStore {
       if (first) frames.push(first);
       while (frames.length) {
         canceled();
+        // the kernel's dentry and inode cache of what was stat-ed must not fill the cgroup (see memcg.ts); close to the limit the walk waits for the reclaim
+        for (let n = 0; relief() && n < 40; n++) await new Promise((r) => setTimeout(r, 25));
         const f = frames[frames.length - 1]!;
         const c = await f.next();
         if (c) {
@@ -1399,15 +1495,19 @@ export class SizeStore {
     } catch (e) {
       await drain();
       // A resumable rescan keeps the folders it finished (rows stamped since it began are final); everything older is marked stale.
-      if (written) this.markStale(virtual, mode.since !== undefined ? mode.since - 1 : Math.max(Date.now(), now));
+      if (written) this.markStale(virtual, since !== undefined ? since - 1 : Math.max(Date.now(), now));
       if (walkStarted && !fenced) void this.write("DELETE FROM walking WHERE path = ?", [virtual]); // marked stale above
+      if (written && !fenced) void this.write("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]); // counts of a walk that stopped
       throw e;
     } finally {
       for (const f of frames) await f.close();
     }
     await drain();
     // the root commit failed (busy): its `walking` row is still there, and the tree is marked stale below
-    if (walkStarted && !walkClosed && !fenced && this.db) void this.write("DELETE FROM walking WHERE path = ?", [virtual]);
+    if (walkStarted && !walkClosed && !fenced && this.db) {
+      void this.write("DELETE FROM walking WHERE path = ?", [virtual]);
+      void this.write("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]); // else nothing would ever clear them
+    }
     if (dirty && this.db) this.markStale(virtual, Math.max(this.nextAt(), now));
     else if (this.db) {
       // The walk ended cleanly: every row is committed. What it re-read is no longer dirty (only the mark it saw: a newer one stays); marks it
@@ -1432,10 +1532,11 @@ export class SizeStore {
   }
 
   /** The writer worker's `commit` (WRITER_WORKER) for a store that has no file: one transaction. `last` = the start folder, whose change is added to the ancestors. */
-  private commitInline(last: Row | null, part: Node[]): boolean {
+  private commitInline(last: Row | null, part: Node[], walk: string, spine?: (string | number)[][]): boolean {
     const db = this.db!;
     db.exec("BEGIN");
     try {
+      const between = (sql: string, p: string) => db.prepare(sql).run(p, ...below(p));
       const old = last ? this.getInline(last.path) : undefined;
       for (const n of part) {
         if (n.touch) {
@@ -1450,12 +1551,19 @@ export class SizeStore {
           }
         }
         this.put(n);
+        if (!n.reused) {
+          db.prepare("DELETE FROM mountpoints WHERE parent = ?").run(n.path);
+          for (const [p, d] of n.mnts ?? []) db.prepare("INSERT OR REPLACE INTO mountpoints (path, parent, dev) VALUES (?, ?, ?)").run(p, n.path, d);
+        }
+        db.prepare("DELETE FROM partial WHERE path = ?").run(n.path);
       }
+      for (const row of spine ?? []) db.prepare(PUT_PARTIAL).run(...row);
       if (last && old) {
         const d = { ...last.tot };
         addTo(d, old.tot, -1);
         this.addToAncestors(last.path, d, last.dev);
       }
+      if (last && !(last as Node).up) between("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", walk);
       db.exec("COMMIT");
     } catch (e) {
       db.exec("ROLLBACK");
@@ -1508,7 +1616,7 @@ export class SizeStore {
    * `release` is a lock from `lock(virtual)` the caller already holds; it is released when the scan ends.
    * `after` runs once the scan is stored, still under the lock, so it never sees a half-written scan.
    */
-  async scanRead<T = undefined>(virtual: string, ctl: JobCtl = noCtl(), fresh: boolean | number = false, release?: () => void, after?: () => Promise<T>): Promise<{ res: SizeResult; read: number; untrusted: boolean; extra?: T }> {
+  async scanRead<T = undefined>(virtual: string, ctl: JobCtl = noCtl(), fresh: boolean | number = false, release?: () => void, after?: () => Promise<T>, /** when the scan's job began (see `walk`) */ since?: number): Promise<{ res: SizeResult; read: number; untrusted: boolean; extra?: T }> {
     release ??= await this.lock(resolveRead(this.o.root, virtual).virtual);
     try {
       const r = resolveRead(this.o.root, virtual);
@@ -1530,7 +1638,7 @@ export class SizeStore {
         ctl.progress.totalEntries = prev.tot.files + prev.tot.dirs + prev.tot.symlinks + prev.tot.other;
         ctl.progress.totalBytes = prev.tot.bytes;
       }
-      const w = await this.walk(r.virtual, r.real, st, ctl, { fresh: !!fresh, since: typeof fresh === "number" ? fresh : undefined });
+      const w = await this.walk(r.virtual, r.real, st, ctl, { fresh: !!fresh, since: typeof fresh === "number" ? fresh : since });
       return { res: this.result(w.root), read: w.read, untrusted: w.untrusted, ...(after ? { extra: await after() } : {}) };
     } finally {
       release();
@@ -1884,7 +1992,14 @@ export class SizeStore {
    * Checked before and after the stored rows are read; each check is a few key lookups whatever the size of the store. `all` (every file listed from disk) is not answered here.
    */
   async freshTree(virtual: string, depth: number, all: boolean): Promise<{ entries: DuEntry[]; truncated: boolean } | null> {
-    if (all || !this.db || !this.isWriter || !this.idxReady || !this.covers(virtual)) return null;
+    if (all || !(await this.vouches(virtual))) return null;
+    const t = await this.tree(virtual, depth, all);
+    return t.entries.length && (await this.vouches(virtual)) ? t : null;
+  }
+
+  /** The test of `freshTree` alone (no rows read): may the stored rows of `virtual` be answered as current? A streamed answer checks it before and after. */
+  async vouches(virtual: string): Promise<boolean> {
+    if (!this.db || !this.isWriter || !this.idxReady || !this.covers(virtual)) return false;
     const chain: string[] = [];
     for (let a = virtual; a; a = parentOf(a)) chain.push(a);
     const [lo, hi] = below(virtual);
@@ -1919,44 +2034,156 @@ export class SizeStore {
         !(await this.changesWaiting(virtual))
       );
     };
-    if (!(await ok())) return null;
-    const t = await this.tree(virtual, depth, all);
-    return t.entries.length && (await ok()) ? t : null;
+    return ok();
   }
 
-  /** The folder and its folder descendants down to `depth`; with `all`, also the files of the folders above that depth. */
-  async tree(virtual: string, depth: number, all: boolean): Promise<{ entries: DuEntry[]; truncated: boolean }> {
-    await this.reopen();
+  /** The folder and its folder descendants down to `depth`; with `all`, also the files of the folders above that depth. (Collected from `treeEach`: for tests and small answers.) */
+  async tree(virtual: string, depth: number, all: boolean): Promise<{ entries: DuEntry[]; truncated: boolean; partial?: boolean }> {
     const entries: DuEntry[] = [];
+    const r = await this.treeEach(virtual, depth, all, (e) => void entries.push(e));
+    return { entries, truncated: r.truncated, ...(r.partial ? { partial: true } : {}) };
+  }
+
+  /** The stored row of `virtual`, else what a running (or killed) walk has counted of it so far (`partial`), else undefined. */
+  async treeTop(virtual: string): Promise<(Row & { partial?: boolean }) | undefined> {
+    await this.reopen();
+    if (!this.db) return [...this.walks].reverse().find((w) => w.has(virtual))?.get(virtual);
+    const row = await this.get(virtual);
+    if (row) return row;
+    const p = (await this.read("partialRow", "SELECT * FROM partial WHERE path = ?", [virtual], null))?.[0];
+    return p && this.partialRow(p);
+  }
+
+  private partialRow(r: Record<string, unknown>): Row & { partial: true } {
+    const tot = zero();
+    for (const m of METRICS) tot[m] = Number(r[`tot_${m}`]);
+    return { path: r.path as string, parent: r.parent as string, ino: 0, dev: Number(r.dev), mtime_ms: 0, scanned_at: Number(r.at), seen_at: 0, ver: 0, own: zero(), tot, partial: true };
+  }
+
+  /**
+   * `tree`, streamed: the folder, then depth first each folder followed by its files (with `all`), its mount points and its child folders, down to `depth`; at most
+   * `maxEntries` entries (then `truncated`). Memory is one page of rows per level whatever the size of the answer: rows are read a page at a time (keyset on the
+   * parent index) and handed to `emit` (awaited: a slow reader holds the walk, not a buffer). Folders a running walk has entered and not finished have no row yet:
+   * what it counted so far stands in for them (`partial: true` on the entry and in the result). Mount points are entries of type "mount" with the size of their own
+   * scan when there is one; they are never part of a folder's totals.
+   */
+  async treeEach(virtual: string, depth: number, all: boolean, emit: (e: DuEntry) => void | Promise<void>): Promise<{ found: boolean; truncated: boolean; partial: boolean }> {
+    const top = await this.treeTop(virtual);
+    if (!top) return { found: false, truncated: false, partial: false };
     let budget = this.o.maxEntries;
-    let truncated = false;
-    const asEntry = (r: Row): DuEntry => ({ path: r.path, type: "dir", bytes: r.tot.bytes, diskBytes: r.tot.disk, files: r.tot.files, dirs: r.tot.dirs, scannedAt: r.scanned_at });
-    const walk = this.db ? undefined : [...this.walks].reverse().find((w) => w.has(virtual));
-    const top = this.db ? await this.get(virtual) : walk?.get(virtual);
-    if (!top) return { entries, truncated };
-    let level = [top];
-    for (let d = 0; level.length; d++) {
-      const next: Row[] = [];
-      // children beyond what the budget still allows (plus one, to see the cut) are never read
-      const kids = walk || d >= depth ? undefined : await this.levelKids(level.map((r) => r.path), budget - level.length + 1);
-      for (const r of level) {
-        if (budget-- <= 0) {
-          truncated = true;
-          return { entries, truncated };
+    let partial = false;
+    const FULL = Symbol("full");
+    const out = async (e: DuEntry) => {
+      if (budget-- <= 0) throw FULL;
+      if (e.partial) partial = true;
+      await emit(e);
+    };
+    const asEntry = (r: Row & { partial?: boolean }): DuEntry => ({ path: r.path, type: "dir", bytes: r.tot.bytes, diskBytes: r.tot.disk, files: r.tot.files, dirs: r.tot.dirs, scannedAt: r.scanned_at, ...(r.partial ? { partial: true } : {}) });
+    try {
+      await out(asEntry(top));
+      if (!this.db) {
+        // the store is unusable: the rows remembered from the latest walks (bounded, see FALLBACK_ROWS)
+        const walk = [...this.walks].reverse().find((w) => w.has(virtual))!;
+        let level: Row[] = [top];
+        for (let d = 0; d < depth && level.length; d++) {
+          const next: Row[] = [];
+          for (const r of level) {
+            if (all) await this.filesEach(r.path, out);
+            for (const k of walk.values()) if (k.parent === r.path && k.dev === r.dev) next.push(k);
+          }
+          for (const k of next) await out(asEntry(k));
+          level = next;
         }
-        entries.push(asEntry(r));
-        if (d >= depth) continue;
-        for (const k of walk ? walk.values() : kids!.get(r.path) ?? []) if (!walk || (k.parent === r.path && k.dev === r.dev)) next.push(k);
-        if (all) {
-          const left = await this.filesOf(r.path, budget);
-          budget -= left.entries.length;
-          truncated ||= left.truncated;
-          for (const e of left.entries) entries.push(e);
+        return { found: true, truncated: false, partial };
+      }
+      // One range scan of the subtree in path order (the table's key), a page at a time: a folder comes before everything below it, but not always right before
+      // it (names such as "x-1" sort between "x" and "x/..."). A row is part of the answer when its parent was taken (same device: a row of another device is a
+      // mount point scanned on its own, never part of it) and it is no deeper than `depth`. `open` holds the folders taken whose subtree, [p + "/", p + "0"), is
+      // still ahead of the scan: a few per level.
+      const [lo, hi] = below(virtual);
+      const open = new Map<string, Row & { partial?: boolean }>([[top.path, top]]);
+      const base = virtual === "/" ? 0 : virtual.split("/").length - 1;
+      const levels = (p: string) => p.split("/").length - 1 - base;
+      // unfinished folders of running walks (at most one per level of each walk) take part in the same order; a stored row of the same path wins
+      const unfinished = ((await this.read("partialBelow", "SELECT * FROM partial WHERE path > ? AND path < ? ORDER BY path LIMIT 4096", [lo, hi], [])) ?? []).map((r) => this.partialRow(r));
+      let u = 0;
+      // Jumps only save reading; what is taken is decided row by row. The subtree of a row that is not taken is jumped over when the scan reaches it
+      // (`skips`, innermost last); the subtree of a folder at the deepest level asked for, as soon as a row below it comes.
+      const skips: string[] = [];
+      let jump: string | undefined;
+      let swept = "";
+      const take = async (r: Row & { partial?: boolean }) => {
+        // folders whose subtree the scan has passed can have no more children
+        if (open.size > 8 && r.path > swept) {
+          for (const k of open.keys()) if (k !== top.path && r.path >= k + "0") open.delete(k);
+          swept = r.path;
+        }
+        const d = levels(r.path);
+        if (d > depth) {
+          const a = r.path.split("/").slice(0, base + depth + 1).join("/");
+          if (open.has(a)) jump = a + "0";
+          return;
+        }
+        const up = open.get(r.parent);
+        if (!up || r.dev !== up.dev) {
+          if (skips.length < 64) skips.push(r.path);
+          return;
+        }
+        open.set(r.path, r); // (one at the deepest level is kept too: the rows below it are jumped over)
+        await out(asEntry(r));
+        if (d < depth) await extras(r);
+      };
+      const extras = async (r: Row & { partial?: boolean }) => {
+        if (all) await this.filesEach(r.path, out);
+        if (r.partial || r.own.mounts > 0) {
+          const ms = (await this.read("mountsOf", SQL.mountsOf, [r.path, MOUNTS_PER_DIR], [])) ?? [];
+          for (const m of ms)
+            await out({
+              path: m.path as string,
+              type: "mount",
+              bytes: Number(m.tot_bytes ?? 0),
+              diskBytes: Number(m.tot_disk ?? 0),
+              files: Number(m.tot_files ?? 0),
+              dirs: Number(m.tot_dirs ?? 0),
+              ...(m.scanned_at != null ? { scannedAt: Number(m.scanned_at) } : {}),
+            });
+        }
+      };
+      if (depth > 0) await extras(top);
+      /** where the next page starts: after the last row read, or from a jump target */
+      let after = lo;
+      let from: string | undefined;
+      for (let more = depth > 0; more; ) {
+        const rows = await this.read(from ? "treeFrom" : "treeAfter", from ? SQL.treeFrom : SQL.treeAfter, [from ?? after, hi, PAGE], null);
+        if (!rows) throw new FsError(503, "the size store is busy; try again"); // never a silently short answer
+        more = rows.length === PAGE;
+        from = undefined;
+        for (const x of rows) {
+          const p = x.path as string;
+          for (; u < unfinished.length && unfinished[u]!.path <= p; u++) if (unfinished[u]!.path < p) await take(unfinished[u]!);
+          while (skips.length && p >= skips[skips.length - 1]! + "0") skips.pop();
+          if (jump === undefined && skips.length && p.startsWith(skips[skips.length - 1]! + "/")) jump = skips.pop()! + "0";
+          else if (jump === undefined || !p.startsWith(jump.slice(0, -1) + "/")) await take(this.toRow(x));
+          after = p;
+          if (jump !== undefined) {
+            const j = jump;
+            jump = undefined;
+            if (j > after) {
+              // everything up to the target is inside the subtree jumped over: the unfinished folders there too
+              while (u < unfinished.length && unfinished[u]!.path < j) u++;
+              from = j;
+              more = true;
+              break;
+            }
+          }
         }
       }
-      level = next;
+      for (; u < unfinished.length; u++) await take(unfinished[u]!);
+      return { found: true, truncated: false, partial };
+    } catch (e) {
+      if (e === FULL) return { found: true, truncated: true, partial };
+      throw e;
     }
-    return { entries, truncated };
   }
 
   // ---- watcher sessions (see FanWatch): a rolling deploy hands the watched time over without a gap, so nothing has to be re-read ----
@@ -2004,14 +2231,14 @@ export class SizeStore {
   }
 
   /** Non-folder children of one folder, straight from disk (rows are per folder, not per file). */
-  private async filesOf(virtual: string, max: number): Promise<{ entries: DuEntry[]; truncated: boolean }> {
-    const out: DuEntry[] = [];
+  /** The entries of `virtual` that are not folders, one at a time (a folder can hold millions). */
+  private async filesEach(virtual: string, out: (e: DuEntry) => Promise<void>): Promise<void> {
     const real = resolveRead(this.o.root, virtual).real;
     let dir: Dir;
     try {
       dir = await fs.opendir(real, { bufferSize: 64 });
     } catch {
-      return { entries: out, truncated: false };
+      return;
     }
     try {
       for (let e = await dir.read().catch(() => null); e; e = await dir.read().catch(() => null)) {
@@ -2024,13 +2251,12 @@ export class SizeStore {
           continue;
         }
         if (s.isDirectory()) continue;
-        if (out.length >= max) return { entries: out, truncated: true };
         const type = s.isSymbolicLink() ? "symlink" : s.isFile() ? "file" : "other";
-        out.push({ path: virtualJoin(virtual, n), type, bytes: type === "file" ? Number(s.size) : 0, diskBytes: Number(s.blocks) * 512, files: type === "file" ? 1 : 0, dirs: 0 });
+        await out({ path: virtualJoin(virtual, n), type, bytes: type === "file" ? Number(s.size) : 0, diskBytes: Number(s.blocks) * 512, files: type === "file" ? 1 : 0, dirs: 0 });
       }
     } finally {
       await dir.close().catch(() => undefined);
     }
-    return { entries: out, truncated: false };
   }
+
 }

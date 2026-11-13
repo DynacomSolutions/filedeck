@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants as fsc } from "node:fs";
 import path from "node:path";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
@@ -70,24 +71,162 @@ async function readItem(dir: string, id: string): Promise<TrashItem> {
   }
 }
 
-/** Every volume of this node that has a trash store: the root plus each real mount point. */
-export async function listTrash(root: string, procMounts: string): Promise<TrashVolume[]> {
+/** Every volume of this node that has a trash store (the root plus each real mount point), with its trash directory. */
+async function trashVolumes(root: string, procMounts: string): Promise<{ volume: string; dir: string; real: string }[]> {
   const text = await readMountTable(root, procMounts); // "" when unreadable: root only
   const cands = new Set<string>(["/"]);
   // Every real filesystem, not only the ones the drive list shows: an item trashed on a hidden volume lives there.
   for (const m of parseMounts(text, { all: true })) cands.add(m.mountpoint);
-  const out: TrashVolume[] = [];
+  const out: { volume: string; dir: string; real: string }[] = [];
   for (const volume of [...cands].sort()) {
     try {
       const v = resolveWrite(root, volume);
       const net = [...parseMounts(text, { all: true })].find((m) => m.mountpoint === volume);
       const dir = path.join(v.real, TRASH_DIR);
       const st = await (net && networkKind(net.fstype) ? withTimeout(fs.lstat(dir), 2000) : fs.lstat(dir));
-      if (!st.isDirectory()) continue;
-      out.push({ volume, ...(await readItems(dir)) });
+      if (st.isDirectory()) out.push({ volume, dir, real: v.real });
     } catch {
       /* no trash here, or an unreachable mount */
     }
+  }
+  return out;
+}
+
+/** Every volume of this node that has a trash store: the root plus each real mount point. */
+export async function listTrash(root: string, procMounts: string): Promise<TrashVolume[]> {
+  const out: TrashVolume[] = [];
+  for (const { volume, dir } of await trashVolumes(root, procMounts)) {
+    try {
+      out.push({ volume, ...(await readItems(dir)) });
+    } catch {
+      /* gone meanwhile */
+    }
+  }
+  return out;
+}
+
+/**
+ * Disk usage of one trash item, measured once and kept in its meta.json (an item never changes while it is in the trash). The walk holds one open folder
+ * per level and never enters another device, so a huge item costs time, not memory.
+ */
+async function itemUsage(dir: string, id: string): Promise<{ id: string; deletedAt: number; disk: number }> {
+  const item = path.join(dir, id);
+  const metaFile = path.join(item, "meta.json");
+  let meta: (ops.TrashMeta & { diskBytes?: number }) | undefined;
+  try {
+    meta = JSON.parse(await fs.readFile(metaFile, "utf8"));
+  } catch {
+    /* orphan: measured every time, never written */
+  }
+  const deletedAt = Number(meta?.deletedAt) || (await fs.lstat(item).catch(() => null))?.mtimeMs || 0;
+  if (meta && typeof meta.diskBytes === "number") return { id, deletedAt, disk: meta.diskBytes };
+  let disk = 0;
+  const top = await fs.lstat(item);
+  const dev = top.dev;
+  // a file with more than one link is counted once (the inodes seen are kept only for those: few, except in hard-linked snapshot trees)
+  const linked = new Set<number | bigint>();
+  const walk = async (d: string, depth: number): Promise<void> => {
+    const h = await fs.opendir(d, { bufferSize: 64 }).catch(() => null);
+    if (!h) return;
+    try {
+      for (let e; (e = await h.read()); ) {
+        const st = await fs.lstat(path.join(d, e.name)).catch(() => null);
+        if (!st || st.dev !== dev) continue;
+        if (!st.isDirectory() && st.nlink > 1) {
+          if (linked.has(st.ino)) continue;
+          linked.add(st.ino);
+        }
+        disk += Number(st.blocks) * 512;
+        if (st.isDirectory() && depth < 256) await walk(path.join(d, e.name), depth + 1);
+      }
+    } finally {
+      await h.close().catch(() => undefined);
+    }
+  };
+  disk += Number(top.blocks) * 512;
+  await walk(item, 0);
+  if (meta) {
+    // a new file renamed over the old one: a failed or cut-short write never leaves an empty meta.json (the item could not be restored),
+    // and a reader sees the old file or the new one. O_EXCL: never through a link put in its place.
+    const tmpFile = path.join(item, `.meta-${process.pid}-${Date.now()}.json`);
+    try {
+      const fh = await fs.open(tmpFile, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
+      try {
+        await fh.writeFile(JSON.stringify({ ...meta, diskBytes: disk }));
+      } finally {
+        await fh.close();
+      }
+      await fs.rename(tmpFile, metaFile);
+    } catch {
+      await fs.rm(tmpFile, { force: true }).catch(() => undefined); // measured again next time
+    }
+  }
+  return { id, deletedAt, disk };
+}
+
+export interface RetentionPolicy {
+  /** items deleted longer ago than this are purged (0 = never by age) */
+  maxAgeDays: number;
+  /** cap on a volume's trash, as a percent of the volume's size and in bytes (0 = none; with both, the smaller) */
+  maxPercent: number;
+  maxBytes: number;
+  /** volumes the agent may not change (read-only prefixes) */
+  blocked?: (volume: string) => boolean;
+}
+
+/**
+ * Automatic trash retention, for every volume's trash: items older than `maxAgeDays` go, then, while the trash is bigger than its cap, the oldest go first.
+ * The names are read a batch at a time; only the age and size of each item are kept for the cap (a few dozen bytes per item).
+ */
+export async function applyRetention(root: string, procMounts: string, p: RetentionPolicy): Promise<{ volume: string; removed: number; freed: number; failed: number }[]> {
+  const out: { volume: string; removed: number; freed: number; failed: number }[] = [];
+  for (const { volume, dir, real } of await trashVolumes(root, procMounts)) {
+    if (p.blocked?.(volume)) continue;
+    const r = { volume, removed: 0, freed: 0, failed: 0 };
+    try {
+      r.failed += await clearPurged(root, dir);
+      if (p.maxAgeDays > 0) {
+        const e = await emptyTrash(root, volume, p.maxAgeDays);
+        r.removed += e.removed;
+        r.failed += e.failed;
+      }
+      let cap = p.maxBytes > 0 ? p.maxBytes : Infinity;
+      if (p.maxPercent > 0) {
+        const sf = await fs.statfs(real);
+        cap = Math.min(cap, (sf.blocks * sf.bsize * p.maxPercent) / 100);
+      }
+      if (cap !== Infinity) {
+        const items: { id: string; deletedAt: number; disk: number }[] = [];
+        let total = 0;
+        for await (const names of namesOf(dir, 256, (n) => ID.test(n)))
+          for (const id of names) {
+            const u = await itemUsage(dir, id).catch(() => null);
+            if (!u) continue;
+            items.push(u);
+            total += u.disk;
+          }
+        if (total > cap) {
+          items.sort((a, b) => a.deletedAt - b.deletedAt);
+          for (const it of items) {
+            if (total <= cap) break;
+            try {
+              await removeItem(root, dir, it.id);
+              total -= it.disk;
+              r.removed++;
+              r.freed += it.disk;
+            } catch {
+              // Oldest first, and never past an item that cannot go: else one undeletable old item would empty the rest of the trash,
+              // newest included, at every sweep. It is tried again next time (its remains are a purge folder now).
+              r.failed++;
+              break;
+            }
+          }
+        }
+      }
+    } catch {
+      r.failed++;
+    }
+    if (r.removed || r.failed) out.push(r);
   }
   return out;
 }
@@ -111,8 +250,46 @@ export interface TrashResult {
   warning?: string;
 }
 
-/** Remove one item folder of the trash store, entering it through descriptors (nothing inside is followed). */
-const removeItem = (root: string, dir: string, id: string) => pinDirW(root, dir, (at) => rmTree(path.join(at, id), { force: true, guard: walkGuard(root) }));
+/**
+ * Items that a restore or a removal works on now (`<trash dir>/<id>`). A second operation on the same item is refused instead of run alongside: a removal
+ * that deletes through open folder handles would carry on inside data that a restore has just moved back to its place.
+ */
+const busy = new Set<string>();
+async function withItem<T>(dir: string, id: string, fn: () => Promise<T>): Promise<T> {
+  const key = dir + "/" + id;
+  if (busy.has(key)) throw new ops.FsError(409, "the item is being restored or removed");
+  busy.add(key);
+  try {
+    return await fn();
+  } finally {
+    busy.delete(key);
+  }
+}
+/** prefix of an item that is being removed: renamed out of the list first, so a removal cut short leaves nothing that looks restorable */
+const PURGE = ".purge-";
+
+/** Remove one item folder of the trash store, entering it through descriptors (nothing inside is followed). The caller holds the item (`withItem`). */
+const removeHeld = (root: string, dir: string, id: string) =>
+  pinDirW(root, dir, async (at) => {
+    const doomed = path.join(at, PURGE + id);
+    try {
+      await fs.rename(path.join(at, id), doomed);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // gone already (as rmTree with force said before)
+      throw e;
+    }
+    await rmTree(doomed, { force: true, guard: walkGuard(root) });
+  });
+const removeItem = (root: string, dir: string, id: string) => withItem(dir, id, () => removeHeld(root, dir, id));
+
+/** Removals cut short (a crash, an entry that could not be deleted): tried again by every sweep. */
+async function clearPurged(root: string, dir: string): Promise<number> {
+  let failed = 0;
+  for await (const names of namesOf(dir, 256, (n) => n.startsWith(PURGE) && ID.test(n.slice(PURGE.length))))
+    for (const n of names)
+      await pinDirW(root, dir, (at) => rmTree(path.join(at, n), { force: true, guard: walkGuard(root) })).catch(() => failed++);
+  return failed;
+}
 
 export async function restoreItems(root: string, volume: string, ids: unknown, opts: RestoreOpts = {}): Promise<TrashResult[]> {
   const dir = await trashDir(root, volume);
@@ -121,6 +298,17 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
   const out: TrashResult[] = [];
   for (const id of checkIds(ids)) {
     try {
+      out.push(await withItem(dir, id, () => restoreHeld(root, dir, id, policy, opts)));
+    } catch (e) {
+      out.push({ id, ok: false, error: ops.mapError(e).message });
+    }
+  }
+  return out;
+}
+
+async function restoreHeld(root: string, dir: string, id: string, policy: string, opts: RestoreOpts): Promise<TrashResult> {
+  {
+    {
       const meta = JSON.parse(await fs.readFile(path.join(dir, id, "meta.json"), "utf8")) as ops.TrashMeta;
       const data = path.join(dir, id, "data");
       await fs.lstat(data);
@@ -155,18 +343,15 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
             () => false,
           );
           if (gone) {
-            await removeItem(root, dir, id);
+            await removeHeld(root, dir, id);
             warning = undefined;
           }
-        } else await removeItem(root, dir, id);
+        } else await removeHeld(root, dir, id);
         return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final), ...(warning ? { warning } : {}) };
       });
-      out.push(res);
-    } catch (e) {
-      out.push({ id, ok: false, error: ops.mapError(e).message });
+      return res;
     }
   }
-  return out;
 }
 
 export async function deleteItems(root: string, volume: string, ids: unknown): Promise<TrashResult[]> {

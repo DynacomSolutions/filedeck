@@ -30,6 +30,13 @@ export interface Config {
   jobsFile: string;
   /** compare index: trust an unwatched listing with an unchanged directory mtime for this long */
   indexRevalidateMs: number;
+  /** trash retention (agent): items deleted longer ago than this are purged (0 = never by age) */
+  trashMaxAgeDays: number;
+  /** per-volume trash cap: past it the oldest items are purged; percent of the volume's size and bytes (0 = no cap; with both set the smaller wins) */
+  trashMaxPercent: number;
+  trashMaxBytes: number;
+  /** how often the agent applies the retention (0 = never) */
+  trashSweepMs: number;
   /** fanotify helper binary that keeps folder sizes current; empty = off */
   fanwatch: string;
   /** `GET /api/du` answers 202 with a job id when its scan takes longer than this */
@@ -141,6 +148,10 @@ export function loadConfig(env = process.env): Config {
           : ""),
     indexWatches: Number(env.FILEDECK_INDEX_WATCHES ?? 32768),
     indexRevalidateMs: Number(env.FILEDECK_INDEX_REVALIDATE_MS ?? 30 * 60_000),
+    trashMaxAgeDays: Number(env.FILEDECK_TRASH_MAX_AGE_DAYS ?? 7),
+    trashMaxPercent: Number(env.FILEDECK_TRASH_MAX_PERCENT ?? 10),
+    trashMaxBytes: Number(env.FILEDECK_TRASH_MAX_BYTES ?? 0),
+    trashSweepMs: Number(env.FILEDECK_TRASH_SWEEP_MS ?? 3_600_000),
     fanwatch: env.FILEDECK_FANWATCH ?? "",
     duWaitMs: Number(env.FILEDECK_DU_WAIT_MS ?? 10_000),
     duAbandonMs: Number(env.FILEDECK_DU_ABANDON_MS ?? 120_000),

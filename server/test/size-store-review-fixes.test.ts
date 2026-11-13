@@ -72,8 +72,9 @@ test("a mount point scanned on its own does not leak into its parent's totals or
     await sleep(30);
     fs.writeFileSync(at("m/mnt/d/x/g"), "1".repeat(5000));
     await s.scan("/mnt/d", undefined, true);
+    // the mount point is listed on its own (its own scan's size), never counted in /mnt
     const top = (await s.tree("/mnt", 1, false)).entries;
-    assert.deepEqual(top.map((e) => `${e.path}=${e.bytes}`), ["/mnt=2"]);
+    assert.deepEqual(top.map((e) => `${e.path}=${e.bytes}:${e.type}`), ["/mnt=2:dir", "/mnt/d=5100:mount"]);
     assert.equal((await s.tree("/mnt/d", 0, false)).entries[0]!.bytes, 5100);
     await s.scan("/mnt", undefined, true);
     assert.equal((await s.tree("/mnt/d", 0, false)).entries.length, 1);
