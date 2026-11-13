@@ -310,7 +310,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
     if (sweeping || leaving) return;
     sweeping = true;
     try {
-      const policy = { maxAgeDays: cfg.trashMaxAgeDays, maxPercent: cfg.trashMaxPercent, maxBytes: cfg.trashMaxBytes, blocked: (v: string) => hitsReadOnly(root, cfg.readOnly, v) || reachesReadOnly(root, cfg.readOnly, v) };
+      const policy = { maxAgeDays: cfg.trashMaxAgeDays, maxPercent: cfg.trashMaxPercent, maxBytes: cfg.trashMaxBytes, blocked: (v: string) => hitsReadOnly(root, cfg.readOnly, v) }; // only a read-only volume: its trash folder sits at its top, never in a read-only folder below it (each removal checks that too)
       // (outside a request: the pinned removals check read-only prefixes in a scope of their own, like a job)
       for (const r of await withReadOnly(root, cfg.readOnly, () => trash.applyRetention(root, cfg.procMounts, policy))) console.error(JSON.stringify({ trashRetention: r.volume, removed: r.removed, freedBytes: r.freed, failed: r.failed }));
     } catch (e) {

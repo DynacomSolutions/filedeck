@@ -235,3 +235,35 @@ test("mount points below a folder are listed on their own, never counted in it, 
     (fsp as Any).stat = st;
   }
 });
+
+test("an answer's probe lock never makes another answer stale; a walk's lock does", async () => {
+  const s = new SizeStore(":memory:", { root: tmp, ttlMs: 60_000, maxEntries: 100_000 });
+  try {
+    const mark = s.lockMark();
+    (await s.lock("/q", undefined, true))();
+    assert.equal(s.lockedSince("/q", mark), false);
+    const held = await s.lock("/q", undefined, true);
+    assert.equal(s.lockedSince("/q", mark), false, "held by another answer");
+    held();
+    (await s.lock("/q/sub"))();
+    assert.equal(s.lockedSince("/q", mark), true);
+  } finally {
+    s.close();
+  }
+});
+
+test("a scan job resumed more than a day after it began keeps no rows on that ground", async () => {
+  for (let i = 0; i < 5; i++) fs.mkdirSync(at(`old/d${i}`), { recursive: true });
+  const s = new SizeStore(":memory:", { root: tmp, ttlMs: 1, maxEntries: 100_000 });
+  try {
+    await s.scan("/old");
+    await new Promise((r) => setTimeout(r, 5));
+    const recent = await s.scanRead("/old", undefined, false, undefined, undefined, Date.now() - 3600_000);
+    assert.equal(recent.read, 0, "within a day: its own rows are kept");
+    await new Promise((r) => setTimeout(r, 5));
+    const old = await s.scanRead("/old", undefined, false, undefined, undefined, Date.now() - 2 * 86400_000);
+    assert.equal(old.read, 6, "two days later: everything is read again (the age limit is 1 ms)");
+  } finally {
+    s.close();
+  }
+});

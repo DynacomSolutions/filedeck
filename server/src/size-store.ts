@@ -223,6 +223,8 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS mountpoints (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS mountpoints_parent ON mountpoints(parent);
 `;
+/** a scan job resumed within this time of its start keeps the rows it had written, whatever their age (see `walk`) */
+const RESUME_MAX_MS = 24 * 3600_000;
 /** mount points remembered per folder (a folder with more lists the first ones) */
 const MOUNTS_PER_DIR = 256;
 /** a running walk writes what it has finished (and its partial totals) at least this often, even before a chunk is full */
@@ -460,7 +462,7 @@ export class SizeStore {
   private q!: Record<"get" | "put" | "kidPage" | "getKids" | "touch" | "delTree" | "delDirty", StatementSync>;
   /** deepest frame stack of the latest walk (tests: memory follows depth, not width) */
   lastWalkFrames = 0;
-  private held: { path: string; done: Promise<void> }[] = [];
+  private held: { path: string; probe?: boolean; done: Promise<void> }[] = [];
   private file = ":memory:";
   private writer?: Worker;
   private reader?: Worker;
@@ -944,26 +946,29 @@ export class SizeStore {
    */
   /** Locks asked for (counter, and the latest ones): an answer read without the lock can tell whether a walk of an overlapping folder came meanwhile (`lockedSince`). */
   private lockSeq = 0;
-  private recentLocks: { seq: number; path: string }[] = [];
+  private recentLocks: { seq: number; path: string; probe?: boolean }[] = [];
   lockMark(): number {
     return this.lockSeq;
   }
-  /** Is a lock overlapping `virtual` held or waited for now, or was one asked for since `mark` (or are there too many since to tell)? */
+  /**
+   * Is a lock overlapping `virtual` held or waited for now, or was one asked for since `mark` (or are there too many since to tell)? Probe locks (an answer
+   * that only waits for walks ahead of it, then lets go) change nothing and do not count: two answers of one folder never make each other stale.
+   */
   lockedSince(virtual: string, mark: number): boolean {
     const overlaps = (p: string) => p === virtual || p === "/" || virtual === "/" || p.startsWith(virtual + "/") || virtual.startsWith(p + "/");
-    if (this.held.some((h) => overlaps(h.path))) return true;
+    if (this.held.some((h) => !h.probe && overlaps(h.path))) return true;
     if (this.lockSeq - mark > this.recentLocks.length) return true;
-    return this.recentLocks.some((l) => l.seq > mark && overlaps(l.path));
+    return this.recentLocks.some((l) => l.seq > mark && !l.probe && overlaps(l.path));
   }
-  async lock(virtual: string, signal?: AbortSignal): Promise<() => void> {
+  async lock(virtual: string, signal?: AbortSignal, /** only waits for the walks ahead (see `lockedSince`) */ probe = false): Promise<() => void> {
     const overlaps = (h: { path: string }) => h.path === virtual || h.path === "/" || virtual === "/" || h.path.startsWith(virtual + "/") || virtual.startsWith(h.path + "/");
     const canceled = () => new FsError(400, "canceled");
     if (signal?.aborted) throw canceled();
     let release!: () => void;
-    const h = { path: virtual, done: new Promise<void>((r) => (release = r)) };
+    const h = { path: virtual, probe, done: new Promise<void>((r) => (release = r)) };
     const ahead = this.held.filter(overlaps);
     this.held.push(h);
-    this.recentLocks.push({ seq: ++this.lockSeq, path: virtual });
+    this.recentLocks.push({ seq: ++this.lockSeq, path: virtual, ...(probe ? { probe } : {}) });
     if (this.recentLocks.length > 256) this.recentLocks.shift();
     const free = () => {
       const i = this.held.indexOf(h);
@@ -1102,6 +1107,9 @@ export class SizeStore {
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** when the scan (job) began: rows written since are its own and are kept when it runs again after a restart, whatever their age (a rescan keeps only those) */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
     await this.reopen();
     if (!(await this.mayScan())) throw new FsError(503, "another process holds the size store writer lease");
+    // A job resumed long after it began (the agent was down for days) does not keep its own rows on that ground: changes made while nothing
+    // watched could be in them. Then only the usual age and watcher checks apply.
+    const since = mode.since !== undefined && Date.now() - mode.since < RESUME_MAX_MS ? mode.since : undefined;
     const dev = Number(st.dev);
     // A walk of a whole tree (not the watcher's re-read of one changed folder) begins at a barrier: every dirty mark and stale mark written before it is
     // committed and visible to the reads below, so what the walk clears at its end is only what it could see. (Marks of other processes are not merged
@@ -1396,7 +1404,7 @@ export class SizeStore {
       // (a plain du stays cheap), but a walk that reused one cannot vouch for the tree when it ends.
       const watchedTrust = !!stored && stored.ver > 0 && stored.scanned_at >= this.ready() && this.covers(t.virtual);
       if (stored?.dirty !== undefined && seenDirty.length < DIRTY_SEEN_MAX) seenDirty.push([t.virtual, stored.dirty]);
-      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (mode.since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && stored.dirty === undefined && stored.scanned_at > marked && (watchedTrust || now - stored.scanned_at < this.o.ttlMs || stored.scanned_at >= (mode.since ?? Infinity)) && storedKids === stored.own.dirs - stored.own.mounts;
+      let reusable = (!mode.fresh || (!!stored && stored.scanned_at >= (since ?? Infinity))) && !(t.root && mode.force) && !!stored && stored.ino === ino && stored.dev === dev && stored.mtime_ms === s.mtimeMs && stored.scanned_at > 0 && stored.dirty === undefined && stored.scanned_at > marked && (watchedTrust || now - stored.scanned_at < this.o.ttlMs || stored.scanned_at >= (since ?? Infinity)) && storedKids === stored.own.dirs - stored.own.mounts;
       let first: { page: Row[]; ks: (Stats | null)[]; complete: boolean } | undefined;
       if (reusable) {
         // every stored child folder must still be a folder on this device, otherwise this folder's counts are stale
@@ -1487,7 +1495,7 @@ export class SizeStore {
     } catch (e) {
       await drain();
       // A resumable rescan keeps the folders it finished (rows stamped since it began are final); everything older is marked stale.
-      if (written) this.markStale(virtual, mode.since !== undefined ? mode.since - 1 : Math.max(Date.now(), now));
+      if (written) this.markStale(virtual, since !== undefined ? since - 1 : Math.max(Date.now(), now));
       if (walkStarted && !fenced) void this.write("DELETE FROM walking WHERE path = ?", [virtual]); // marked stale above
       if (written && !fenced) void this.write("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]); // counts of a walk that stopped
       throw e;
@@ -1496,7 +1504,10 @@ export class SizeStore {
     }
     await drain();
     // the root commit failed (busy): its `walking` row is still there, and the tree is marked stale below
-    if (walkStarted && !walkClosed && !fenced && this.db) void this.write("DELETE FROM walking WHERE path = ?", [virtual]);
+    if (walkStarted && !walkClosed && !fenced && this.db) {
+      void this.write("DELETE FROM walking WHERE path = ?", [virtual]);
+      void this.write("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]); // else nothing would ever clear them
+    }
     if (dirty && this.db) this.markStale(virtual, Math.max(this.nextAt(), now));
     else if (this.db) {
       // The walk ended cleanly: every row is committed. What it re-read is no longer dirty (only the mark it saw: a newer one stays); marks it

@@ -35,6 +35,9 @@ export function memcgRelief(o: { /** checks at most this often */ everyMs?: numb
       if (cur < max - room) return false;
       // more than the room left: only a charge that would pass the limit makes the kernel reclaim (about as much as it is over), at most 64 MiB
       const want = Math.min(64 << 20, max - cur + (16 << 20));
+      // ... and only when the cgroup holds at least twice that much cache the kernel can free (slab it may reclaim, file pages): else the charge
+      // itself, with memory that cannot be freed (the heap, a child process in the same cgroup), would be the out-of-memory kill
+      if (reclaimable(dir) < 2 * Math.max(0, cur + want - max)) return false;
       const ab = new ArrayBuffer(want);
       const u = new Uint8Array(ab);
       for (let i = 0; i < want; i += 4096) u[i] = 1; // one write per page: each one is a charge
@@ -46,6 +49,16 @@ export function memcgRelief(o: { /** checks at most this often */ everyMs?: numb
       return false; // no cgroup files here: nothing to do
     }
   };
+}
+
+/** Bytes of the cgroup's memory the kernel can free on demand: reclaimable slab (dentries, inodes) and file pages. */
+function reclaimable(dir: string): number {
+  let n = 0;
+  for (const l of fs.readFileSync(dir + "/memory.stat", "utf8").split("\n")) {
+    const [k, v] = l.split(" ");
+    if (k === "slab_reclaimable" || k === "active_file" || k === "inactive_file") n += Number(v) || 0;
+  }
+  return n;
 }
 
 /** The memory cgroup of this process (cgroup v2): the namespace root in a container, the process's own group elsewhere. */

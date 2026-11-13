@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as ops from "../src/fsops.ts";
-import { applyRetention, listTrash } from "../src/trash.ts";
+import { applyRetention, listTrash, deleteItems, restoreItems } from "../src/trash.ts";
 import { TRASH_DIR } from "../src/paths.ts";
 import { withReadOnly, withoutReadOnly } from "../src/pinwalk.ts";
 
@@ -62,6 +62,81 @@ test("trash retention: over the size cap the oldest items go first, until the tr
     // the measured size is kept with the item
     const kept = fs.readdirSync(path.join(root, TRASH_DIR)).map((id) => JSON.parse(fs.readFileSync(path.join(root, TRASH_DIR, id, "meta.json"), "utf8")));
     assert.ok(kept.every((m) => m.diskBytes >= 64 * 1024));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trash retention: an old item that cannot be removed stops the cap purge; newer items are never deleted past it", async () => {
+  if (process.getuid?.() === 0) return; // root deletes in a read-only folder
+  const { root, age, ids } = setup();
+  let locked = "";
+  try {
+    const big = "z".repeat(64 * 1024);
+    fs.mkdirSync(path.join(root, "stuck/ro"), { recursive: true });
+    fs.writeFileSync(path.join(root, "stuck/ro/f"), big);
+    const s = await ops.trash(root, "/stuck");
+    age(s.id, 5);
+    for (const [n, days] of [["b", 2], ["c", 1]] as const) {
+      fs.writeFileSync(path.join(root, n), big);
+      age((await ops.trash(root, "/" + n)).id, days);
+    }
+    locked = path.join(root, TRASH_DIR, s.id, "data", "ro");
+    fs.chmodSync(locked, 0o555); // its file cannot be unlinked
+    const r = await sweep(root, { maxAgeDays: 0, maxPercent: 0, maxBytes: 70 * 1024 });
+    assert.deepEqual([r[0]!.removed, r[0]!.failed >= 1], [0, true]);
+    assert.deepEqual(await ids(), ["b", "c"], "the stuck item left the list (renamed for removal); the newer ones stay");
+    fs.chmodSync(path.join(root, TRASH_DIR, ".purge-" + s.id, "data", "ro"), 0o755);
+    locked = "";
+    await sweep(root, { maxAgeDays: 0, maxPercent: 0, maxBytes: 0 });
+    assert.ok(!fs.readdirSync(path.join(root, TRASH_DIR)).some((n) => n.startsWith(".purge-")), "the next sweep clears what was left");
+  } finally {
+    if (locked) fs.chmodSync(locked, 0o755);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trash retention: hard links in an item are counted once", async () => {
+  const { root } = setup();
+  try {
+    fs.mkdirSync(path.join(root, "snap"));
+    fs.writeFileSync(path.join(root, "snap/one"), "z".repeat(256 * 1024));
+    for (let i = 0; i < 9; i++) fs.linkSync(path.join(root, "snap/one"), path.join(root, `snap/link${i}`));
+    await ops.trash(root, "/snap");
+    // ten names, one copy on disk: a 400 KiB cap holds it
+    assert.deepEqual(await sweep(root, { maxAgeDays: 0, maxPercent: 0, maxBytes: 400 * 1024 }), []);
+    const meta = fs.readdirSync(path.join(root, TRASH_DIR)).map((id) => JSON.parse(fs.readFileSync(path.join(root, TRASH_DIR, id, "meta.json"), "utf8")));
+    assert.ok(meta[0].diskBytes < 400 * 1024 && meta[0].diskBytes >= 256 * 1024, `diskBytes ${meta[0].diskBytes}`);
+    assert.ok(!fs.readdirSync(path.join(root, TRASH_DIR, fs.readdirSync(path.join(root, TRASH_DIR))[0]!)).some((n) => n.startsWith(".meta-")), "no temp file left");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trash: a restore and a removal of the same item never run together", async () => {
+  const { root } = setup();
+  try {
+    fs.mkdirSync(path.join(root, "keep"));
+    fs.writeFileSync(path.join(root, "keep/f"), "precious");
+    const t = await ops.trash(root, "/keep");
+    const [del, res] = await Promise.all([deleteItems(root, "/", [t.id]), restoreItems(root, "/", [t.id])]);
+    const oks = [del[0]!.ok, res[0]!.ok];
+    assert.equal(oks.filter(Boolean).length, 1, JSON.stringify([del, res]));
+    if (res[0]!.ok) assert.equal(fs.readFileSync(path.join(root, "keep/f"), "utf8"), "precious", "a restored item is whole");
+    else assert.match(res[0]!.error ?? "", /being restored or removed|no such|not found/i);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trash retention: a read-only folder elsewhere does not stop the sweep of the root volume", async () => {
+  const { root, age, ids } = setup();
+  try {
+    fs.writeFileSync(path.join(root, "old"), "x");
+    age((await ops.trash(root, "/old")).id, 30);
+    fs.mkdirSync(path.join(root, "archive"));
+    await withReadOnly(root, ["/archive"], () => applyRetention(root, "", { maxAgeDays: 7, maxPercent: 0, maxBytes: 0 }));
+    assert.deepEqual(await ids(), []);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

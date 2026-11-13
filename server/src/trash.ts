@@ -123,6 +123,8 @@ async function itemUsage(dir: string, id: string): Promise<{ id: string; deleted
   let disk = 0;
   const top = await fs.lstat(item);
   const dev = top.dev;
+  // a file with more than one link is counted once (the inodes seen are kept only for those: few, except in hard-linked snapshot trees)
+  const linked = new Set<number | bigint>();
   const walk = async (d: string, depth: number): Promise<void> => {
     const h = await fs.opendir(d, { bufferSize: 64 }).catch(() => null);
     if (!h) return;
@@ -130,6 +132,10 @@ async function itemUsage(dir: string, id: string): Promise<{ id: string; deleted
       for (let e; (e = await h.read()); ) {
         const st = await fs.lstat(path.join(d, e.name)).catch(() => null);
         if (!st || st.dev !== dev) continue;
+        if (!st.isDirectory() && st.nlink > 1) {
+          if (linked.has(st.ino)) continue;
+          linked.add(st.ino);
+        }
         disk += Number(st.blocks) * 512;
         if (st.isDirectory() && depth < 256) await walk(path.join(d, e.name), depth + 1);
       }
@@ -140,9 +146,20 @@ async function itemUsage(dir: string, id: string): Promise<{ id: string; deleted
   disk += Number(top.blocks) * 512;
   await walk(item, 0);
   if (meta) {
-    // never through a link put in its place
-    const fh = await fs.open(metaFile, fsc.O_WRONLY | fsc.O_TRUNC | fsc.O_NOFOLLOW).catch(() => null);
-    if (fh) await fh.writeFile(JSON.stringify({ ...meta, diskBytes: disk })).finally(() => fh.close());
+    // a new file renamed over the old one: a failed or cut-short write never leaves an empty meta.json (the item could not be restored),
+    // and a reader sees the old file or the new one. O_EXCL: never through a link put in its place.
+    const tmpFile = path.join(item, `.meta-${process.pid}-${Date.now()}.json`);
+    try {
+      const fh = await fs.open(tmpFile, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
+      try {
+        await fh.writeFile(JSON.stringify({ ...meta, diskBytes: disk }));
+      } finally {
+        await fh.close();
+      }
+      await fs.rename(tmpFile, metaFile);
+    } catch {
+      await fs.rm(tmpFile, { force: true }).catch(() => undefined); // measured again next time
+    }
   }
   return { id, deletedAt, disk };
 }
@@ -167,6 +184,7 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
     if (p.blocked?.(volume)) continue;
     const r = { volume, removed: 0, freed: 0, failed: 0 };
     try {
+      r.failed += await clearPurged(root, dir);
       if (p.maxAgeDays > 0) {
         const e = await emptyTrash(root, volume, p.maxAgeDays);
         r.removed += e.removed;
@@ -197,7 +215,10 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
               r.removed++;
               r.freed += it.disk;
             } catch {
+              // Oldest first, and never past an item that cannot go: else one undeletable old item would empty the rest of the trash,
+              // newest included, at every sweep. It is tried again next time (its remains are a purge folder now).
               r.failed++;
+              break;
             }
           }
         }
@@ -229,8 +250,46 @@ export interface TrashResult {
   warning?: string;
 }
 
-/** Remove one item folder of the trash store, entering it through descriptors (nothing inside is followed). */
-const removeItem = (root: string, dir: string, id: string) => pinDirW(root, dir, (at) => rmTree(path.join(at, id), { force: true, guard: walkGuard(root) }));
+/**
+ * Items that a restore or a removal works on now (`<trash dir>/<id>`). A second operation on the same item is refused instead of run alongside: a removal
+ * that deletes through open folder handles would carry on inside data that a restore has just moved back to its place.
+ */
+const busy = new Set<string>();
+async function withItem<T>(dir: string, id: string, fn: () => Promise<T>): Promise<T> {
+  const key = dir + "/" + id;
+  if (busy.has(key)) throw new ops.FsError(409, "the item is being restored or removed");
+  busy.add(key);
+  try {
+    return await fn();
+  } finally {
+    busy.delete(key);
+  }
+}
+/** prefix of an item that is being removed: renamed out of the list first, so a removal cut short leaves nothing that looks restorable */
+const PURGE = ".purge-";
+
+/** Remove one item folder of the trash store, entering it through descriptors (nothing inside is followed). The caller holds the item (`withItem`). */
+const removeHeld = (root: string, dir: string, id: string) =>
+  pinDirW(root, dir, async (at) => {
+    const doomed = path.join(at, PURGE + id);
+    try {
+      await fs.rename(path.join(at, id), doomed);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // gone already (as rmTree with force said before)
+      throw e;
+    }
+    await rmTree(doomed, { force: true, guard: walkGuard(root) });
+  });
+const removeItem = (root: string, dir: string, id: string) => withItem(dir, id, () => removeHeld(root, dir, id));
+
+/** Removals cut short (a crash, an entry that could not be deleted): tried again by every sweep. */
+async function clearPurged(root: string, dir: string): Promise<number> {
+  let failed = 0;
+  for await (const names of namesOf(dir, 256, (n) => n.startsWith(PURGE) && ID.test(n.slice(PURGE.length))))
+    for (const n of names)
+      await pinDirW(root, dir, (at) => rmTree(path.join(at, n), { force: true, guard: walkGuard(root) })).catch(() => failed++);
+  return failed;
+}
 
 export async function restoreItems(root: string, volume: string, ids: unknown, opts: RestoreOpts = {}): Promise<TrashResult[]> {
   const dir = await trashDir(root, volume);
@@ -239,6 +298,17 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
   const out: TrashResult[] = [];
   for (const id of checkIds(ids)) {
     try {
+      out.push(await withItem(dir, id, () => restoreHeld(root, dir, id, policy, opts)));
+    } catch (e) {
+      out.push({ id, ok: false, error: ops.mapError(e).message });
+    }
+  }
+  return out;
+}
+
+async function restoreHeld(root: string, dir: string, id: string, policy: string, opts: RestoreOpts): Promise<TrashResult> {
+  {
+    {
       const meta = JSON.parse(await fs.readFile(path.join(dir, id, "meta.json"), "utf8")) as ops.TrashMeta;
       const data = path.join(dir, id, "data");
       await fs.lstat(data);
@@ -273,18 +343,15 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
             () => false,
           );
           if (gone) {
-            await removeItem(root, dir, id);
+            await removeHeld(root, dir, id);
             warning = undefined;
           }
-        } else await removeItem(root, dir, id);
+        } else await removeHeld(root, dir, id);
         return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final), ...(warning ? { warning } : {}) };
       });
-      out.push(res);
-    } catch (e) {
-      out.push({ id, ok: false, error: ops.mapError(e).message });
+      return res;
     }
   }
-  return out;
 }
 
 export async function deleteItems(root: string, volume: string, ids: unknown): Promise<TrashResult[]> {

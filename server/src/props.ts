@@ -484,6 +484,8 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
             if (s.aborted) throw new ops.FsError(400, "canceled");
           }
         });
+        // the folder's rows went between the check before the answer and its read (a change removed them): never an empty answer that looks complete
+        if (first) throw new ops.FsError(404, "the sizes of this folder were removed while the answer was read; ask again");
         const stale = head.stale || (o.recheck ? !(await o.recheck()) : false);
         tail = { truncated: r.truncated, ...(r.partial ? { partial: true } : {}), ...(stale ? { stale: true } : {}) };
       } catch (e) {
@@ -574,12 +576,13 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       // The answer is read from the store under the folder's lock (never a half-written scan), streamed, and the lock released when the last entry is out.
       // The wait for the lock is bounded like the job wait: a later walk queued ahead can hold it.
       let rel: () => void;
-      const mark = sizes.lockMark() + 1; // (the lock taken just below is this answer's own)
+      const mark = sizes.lockMark();
+      const t0 = Date.now(); // before the lock: a stale mark made while it waits or while the top row is read is seen too
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), Math.max(0, arrived + cfg.duWaitMs - Date.now()));
       signal.addEventListener("abort", () => ac.abort(), { once: true });
       try {
-        rel = await sizes.lock(r.virtual, ac.signal);
+        rel = await sizes.lock(r.virtual, ac.signal, true);
         rel(); // no walk is half done now; one that starts while the answer is streamed makes it `stale` (a slow reader must never hold up a scan)
       } catch (e) {
         if (!ac.signal.aborted) throw e;
@@ -597,7 +600,6 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         // (a stale mark made after the job ended: an overflow or a helper exit loses events and leaves only that)
         const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && ((sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual))) || sizes.markedSince(r.virtual, v!.startedAt ?? v!.createdAt)));
         const cached = (replay || (run.out ? run.out.read : jr.read ?? -1) === 0) && sizes.persistent;
-        const t0 = Date.now();
         // stale too when, while the answer was read, a walk of an overlapping folder came or the watcher lost changes (an overflow leaves only a stale mark)
         return answerTree(c, r.virtual, depth, all, { cached, watched: sizes.covers(r.virtual), stale }, { recheck: async () => !sizes.lockedSince(r.virtual, mark) && !sizes.markedSince(r.virtual, t0) });
       }
