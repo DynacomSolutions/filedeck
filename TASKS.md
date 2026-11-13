@@ -226,3 +226,13 @@ ETA: 2026-11-13 06:30 ICT
 | 127 | Component roles, names and announcements | done | claude-20261112-rv-components | rv-aria-announce | 15.121 | | Merged https://github.com/DynacomSolutions/filedeck/pull/202, CI green<br>Long selections download through a one-use ticket<br>axe clean at 1440 and 390 px |
 | 128 | Browser acceptance checks repaired and run in CI; audit document updated | done | claude-20261112-rv-acceptance | rv-acceptance-ci | 17.124, 17.125, 17.126, 17.127 | | Merged https://github.com/DynacomSolutions/filedeck/pull/207, CI green<br>30 checks in about 70 s; browser job 2m09s<br>Three defects it found are 15.134 |
 | 129 | Release v0.3.36 with the review fixes | done | claude-20261113-release-v0336 | release-v0336 | 13.103, 13.106, 14.112, 15.118, 17.124 | | Released v0.3.36: https://github.com/DynacomSolutions/filedeck/releases/tag/v0.3.36<br>Merged https://github.com/DynacomSolutions/filedeck/pull/214; CI green on the merge commit; Release workflow green<br>Local run on the release branch: typecheck, build, 235 web tests, 913 server tests, 0 failed<br>Holds pull requests 180 to 213 |
+
+## 18. Scans with bounded memory
+Owner report, 14 November 2026: `filedeck du -h -d 2 --timeout 0` of a 6.4 TB root killed the agent (out of memory at 512 MiB) after about 6 million entries, and the scan then started again from zero.
+ETA: 2026-11-14 12:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 138 | Agent memory stays flat whatever the tree size: du answers stream from the store, and a restarted scan resumes from the folders it already committed | in progress | claude-20261114-scan-bounded-memory | scan-bounded-memory | | 2026-11-14 10:00 ICT | Cause: a du answer read every row at once (52,000 entries raised RSS by 220 MB), and crash recovery marked the whole walked tree stale |
+| 139 | du stays on the path's filesystem; mount points below it are listed as their own entries, not summed in | in progress | claude-20261114-scan-bounded-memory | scan-bounded-memory | | 2026-11-14 10:00 ICT | |
+| 140 | `du --cached` during a scan answers with the partial sizes committed so far | in progress | claude-20261114-scan-bounded-memory | scan-bounded-memory | | 2026-11-14 10:00 ICT | |
+| 141 | Release with 18.138 to 18.140 | todo | claude-20261114-scan-bounded-memory | scan-bounded-memory | 18.138, 18.139, 18.140 | 2026-11-14 12:00 ICT | |
