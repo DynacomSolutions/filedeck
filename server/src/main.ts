@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { createAgent } from "./agent.ts";
 import { loadConfig } from "./config.ts";
 import { initSandbox } from "./sandbox.ts";
+import { noReplaceWarning } from "./noreplace.ts";
 import { selfCheckTools } from "./archive.ts";
 import { createHub } from "./hub.ts";
 import { SERVER_KEEP_ALIVE_MS } from "./agent-fetch.ts";
@@ -10,6 +11,7 @@ import { installShutdown } from "./shutdown.ts";
 
 const cfg = loadConfig();
 if (cfg.mode === "agent") void initSandbox().then(() => selfCheckTools()); // says once at start-up when helper programs are not confined by the kernel
+if (cfg.mode === "agent") void noReplaceWarning().then((w) => w && console.warn(w)); // says once at start-up when the rename helper is missing
 const app = cfg.mode === "hub" ? createHub(cfg) : createAgent(cfg);
 const server = serve({ fetch: app.fetch, port: cfg.port }, (i) => {
   console.log(`filedeck ${cfg.mode} listening on :${i.port}` + (cfg.mode === "agent" ? ` root=${cfg.root} node=${cfg.node}` : ` nodes=${cfg.nodes.map((n) => n.name).join(",")}`));

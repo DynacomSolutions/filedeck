@@ -18,6 +18,7 @@ import {
   virtualJoin,
   type Resolved,
 } from "./paths.ts";
+import { renameNoReplace } from "./noreplace.ts";
 import { assertWritableAt, copyTree, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
 
 export interface Entry {
@@ -530,18 +531,34 @@ export async function uniqueName(dirReal: string, name: string): Promise<string>
 
 /**
  * Move `tmp` to `dest` only if nothing is at `dest`: EEXIST otherwise, also when something appeared there after the caller looked.
- * Plain Node has no renameat2(RENAME_NOREPLACE), so the two kinds are done as follows.
- * - Not a folder: `link` then `unlink`. link(2) never replaces, so this is atomic and exact. Where the filesystem has no hard links
- *   (FAT, some network mounts) it falls back to check-then-rename, and the window between the two steps remains there.
- * - A folder: rename(2) onto a name that holds a file fails (ENOTDIR) and onto a non-empty folder fails (ENOTEMPTY); both are reported as
- *   EEXIST. The one case Node cannot rule out is an EMPTY folder created at `dest` in the instant between the check and the rename: rename(2)
- *   replaces an empty folder. Nothing but that empty folder can be lost; closing it needs a native renameat2 helper, which is not built.
+ * Plain Node cannot call renameat2(RENAME_NOREPLACE); the native helper `filedeck-rename` can (`renameNoReplace` in noreplace.ts,
+ * given the descriptors of the two pinned parent folders), and with it the kernel refuses to replace anything of any kind.
+ * Starting it costs far more than the copy of a small file (200 single-file copies took about five times as long with it), so it
+ * is used only where Node has no exact step of its own. The two kinds are done as follows.
+ * - Not a folder: `link` then `unlink`. link(2) never replaces, so this is atomic and exact, and no helper is started. Where the
+ *   filesystem has no hard links (FAT, some network mounts) the helper does the rename.
+ * - A folder: the helper does the rename (one start per placed folder, not per entry in it).
+ * Without the helper (not built or installed, not Linux), or where it answers "not supported" (the filesystem or the kernel does
+ * not have the flag), the steps Node allows are used, as before, and these windows remain:
+ * - a file on a filesystem without hard links: check, then rename. A file created at `dest` between the two steps is replaced.
+ * - a folder: check, then rename. rename(2) onto a name that holds a file fails (ENOTDIR) and onto a non-empty folder fails
+ *   (ENOTEMPTY); both are reported as EEXIST. An EMPTY folder created at `dest` in the instant between the check and the rename is
+ *   replaced: rename(2) replaces an empty folder. Nothing but that empty folder can be lost.
+ * A different device is EXDEV from every one of these steps, so that `moveReal` takes its copy path.
  */
 async function placeNew(tmp: string, dest: string, isSource = false): Promise<void> {
   const st = await fs.lstat(tmp);
   const taken = () => Object.assign(new Error("exists"), { code: "EEXIST" });
+  /** True when the helper placed the entry; false when the caller must use Node's own steps ("unsupported" or "absent"). */
+  const viaHelper = async (): Promise<boolean> => {
+    const r = await renameNoReplace(tmp, dest);
+    if (r === "exists") throw taken();
+    if (r === "xdev") throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
+    return r === "done";
+  };
   if (st.isDirectory()) {
-    if (await exists(dest)) throw taken();
+    if (await exists(dest)) throw taken(); // the early, plain answer; the helper closes the window after it
+    if (await viaHelper()) return;
     try {
       await fs.rename(tmp, dest);
     } catch (e) {
@@ -556,8 +573,9 @@ async function placeNew(tmp: string, dest: string, isSource = false): Promise<vo
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === "EEXIST" || code === "EXDEV") throw e; // EXDEV: the caller falls back to a copy
-    // no hard links on this filesystem (FAT, some network mounts): check, then rename
+    // no hard links on this filesystem (FAT, some network mounts): the helper, or else check, then rename
     if (await exists(dest)) throw taken();
+    if (await viaHelper()) return;
     await fs.rename(tmp, dest);
     return;
   }
