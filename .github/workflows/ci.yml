@@ -76,7 +76,7 @@ jobs:
         timeout-minutes: 5
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient
+          sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2
           if ! command -v 7zz >/dev/null 2>&1; then
             sudo ln -s "$(command -v 7z)" /usr/local/bin/7zz
           fi
@@ -86,6 +86,9 @@ jobs:
           command -v ffmpeg
           command -v git
           command -v smbclient
+          # real servers for the network source suites (server/test/sftp-openssh.test.ts, webdav-apache.test.ts); each test starts its own copy
+          test -x /usr/sbin/sshd
+          test -x /usr/sbin/apache2
       - run: npm ci --no-audit --no-fund
         timeout-minutes: 5
       - run: npm run typecheck -w server
@@ -96,7 +99,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          (cd server && FILEDECK_REQUIRE_SANDBOX=1 node --import tsx --test --test-timeout=600000 --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
+          (cd server && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SSHD=1 FILEDECK_REQUIRE_APACHE=1 node --import tsx --test --test-timeout=600000 --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
         timeout-minutes: 15
       # The image build runs the whole suite as root (Dockerfile), so run it that way here too; a skip of the fanotify helper test is a failure.
       - name: Run the server tests as root, as the image build does
