@@ -68,8 +68,9 @@ export const EXIT_LANDLOCK_UNSUPPORTED = 70;
 const DEFAULT_HELPER = "/usr/local/bin/filedeck-sandbox";
 /**
  * Where `npm run build` puts the helpers it compiles (server/scripts/build-native.mjs): server/dist/native, which is the same
- * place from src/ (development) and from dist/ (built). It is a fixed place beside the running code, never a folder that is
- * served, and `PATH` is never searched.
+ * place from src/ (development) and from dist/ (built). It is a fixed place beside the running code and `PATH` is never searched.
+ * It is as trusted as that code: in the image the served folder is mounted elsewhere, and a development start that serves a folder
+ * which holds its own checkout already lets every client change the code it runs.
  */
 export const BUILT_NATIVE_DIR = path.resolve(import.meta.dirname, "../dist/native");
 
