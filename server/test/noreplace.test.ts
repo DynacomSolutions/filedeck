@@ -307,8 +307,9 @@ test("the helper gets the two pinned folders as descriptors 3 and 4, the two nam
   const handedDown = new Map<number, string>();
   for (const fd of fs.readdirSync("/proc/self/fd").map(Number)) {
     try {
+      // 02000000 is O_CLOEXEC in the flags line of fdinfo
       const flags = parseInt(/^flags:\s+(\d+)/m.exec(fs.readFileSync(`/proc/self/fdinfo/${fd}`, "utf8"))![1]!, 8);
-      if (!(flags & fs.constants.O_CLOEXEC)) handedDown.set(fd, fs.readlinkSync(`/proc/self/fd/${fd}`));
+      if (!(flags & 0o2000000)) handedDown.set(fd, fs.readlinkSync(`/proc/self/fd/${fd}`));
     } catch {
       /* closed meanwhile */
     }
