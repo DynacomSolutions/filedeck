@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { COLUMNS, clampWidth, isShown, totalWidth, parseColumns, resetColumns, resetWidth, serialiseColumns, setWidth, toggleColumn, visibleColumns, widthOf } from "../src/columns.ts";
 
@@ -88,4 +89,12 @@ test("the table width is the sum of the visible column widths, so widening one g
 
 test("header alignment: only Size is right aligned", () => {
   assert.deepEqual(COLUMNS.filter((c) => c.align === "end").map((c) => c.id), ["size"]);
+});
+
+test("narrow layout: the Name column keeps room for its icon and the 44 px Up control, so text-spacing overrides cannot squeeze it to nothing", () => {
+  const css = readFileSync(new URL("../src/columns.css", import.meta.url), "utf8");
+  const narrow = css.match(/@media\(max-width:700px\)[^{]*\{((?:[^{}]*\{[^}]*\})*)\s*\}/s)?.[1] ?? "";
+  assert.match(narrow, /\.ft\.cols\{table-layout:auto/);
+  // 16px icon + .5rem gap + 44px control + 2 x .9rem cell padding (cells are border-box)
+  assert.match(narrow, /\.ft\.cols td\.name\{min-width:calc\(60px \+ 2\.3rem\)\}/);
 });

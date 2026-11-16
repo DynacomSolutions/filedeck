@@ -132,3 +132,11 @@ export function fuzzy(q: string, s: string): number {
 
 /** The URI a suggestion inserts: `node:/dir/name` with a trailing slash for folders. */
 export const itemUri = (node: string, dir: string, name: string, isDir: boolean) => `${node}:${dir === "/" ? "" : dir}/${name}${isDir ? "/" : ""}`;
+
+/**
+ * True when the breadcrumb segments are wider than the box that holds them. The widths are fractional CSS pixels
+ * (from getBoundingClientRect). `scrollWidth` and `clientWidth` are whole numbers, and each browser engine rounds
+ * them in its own way: a path that is about one pixel too wide can pass a whole-number test in one engine, and then
+ * the path does not fold and its last control is cut.
+ */
+export const crumbsOverflow = (contentWidth: number, boxWidth: number): boolean => contentWidth - boxWidth > 0.05;

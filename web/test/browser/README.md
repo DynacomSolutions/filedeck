@@ -1,6 +1,6 @@
 # Browser acceptance checks
 
-These checks drive the built Filedeck web app in Chromium with Playwright against a deterministic fake API. They run in CI on every change under `web/` (the `browser` job in `.github/workflows/ci.yml`) and never call a live Filedeck API: the script intercepts every `/api/**` request in the browser and answers it from fixtures in `acceptance.mjs`, so the server only has to serve the built static files.
+These checks drive the built Filedeck web app in Chromium and in Firefox with Playwright against a deterministic fake API. They run in CI on every change under `web/` (the `browser` job in `.github/workflows/ci.yml`, one run in each browser) and never call a live Filedeck API: the script intercepts every `/api/**` request in the browser and answers it from fixtures in `acceptance.mjs`, so the server only has to serve the built static files.
 
 There is one run, no scopes. It makes these checks, in order (the names are what the output prints):
 
@@ -21,22 +21,26 @@ A check that has found a defect the component's owner has not yet fixed is liste
 
 ## Running it locally
 
-From this directory install the test dependencies and a Chromium once:
+From this directory install the test dependencies and the two browsers once:
 
 ```sh
 npm ci
-npx playwright install chromium
+npm run install-browser
 ```
 
 Serve a built app (`npm run build` at the repository root, then start the hub with `FILEDECK_MODE=hub FILEDECK_STATIC=<repository>/web/dist PORT=<port> node server/dist/main.js`; no agent is needed) and point the script at that origin:
 
 ```sh
 FILEDECK_URL=http://127.0.0.1:<port> npm run check
+FILEDECK_URL=http://127.0.0.1:<port> npm run check:firefox
 ```
 
+The first command uses Chromium, the second Firefox. The two runs make the same 35 checks: no check is skipped or relaxed for one browser. A check must not depend on how one engine rounds a size or scrolls a focused element; when the two browsers disagree, find out which one shows a defect a user can see and correct the product.
+
 - `FILEDECK_URL` is required; the script contains no deployment or machine-specific address.
-- `CHROMIUM_PATH` selects a system Chromium instead of the Playwright download.
+- `BROWSER` selects the browser: `chromium` (the default) or `firefox`. `npm run check:firefox` sets it.
+- `CHROMIUM_PATH` selects a system Chromium instead of the Playwright download. Firefox always uses the Playwright download: Playwright cannot drive a system Firefox.
 - `FILEDECK_EVIDENCE_DIR` is where screenshots and reports go (default `./evidence`, ignored by git). Each measurement run writes a screenshot and a JSON report there, and a failed check writes the last screenshot of each of its pages as `fail-<check>-<n>.png`. CI uploads the folder as the `browser-acceptance-evidence` artifact when the job fails.
 - `FILEDECK_ONLY` runs only the checks whose name contains one of the comma-separated words, for example `FILEDECK_ONLY="focus returns,Trash"`. It is a debugging aid; CI runs everything.
 
-The run takes two to three minutes.
+A run takes two to three minutes in each browser.

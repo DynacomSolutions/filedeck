@@ -134,7 +134,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
     env:
@@ -160,24 +160,26 @@ jobs:
         timeout-minutes: 5
       - run: npm run build
         timeout-minutes: 10
-      - name: Cache the Playwright browser
+      # The key names both browsers: a cache saved with Chromium only must not count as a hit.
+      - name: Cache the Playwright browsers
         id: playwright-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('web/test/browser/package-lock.json') }}
+          key: playwright-chromium-firefox-${{ runner.os }}-${{ hashFiles('web/test/browser/package-lock.json') }}
         timeout-minutes: 5
-      - name: Install Chromium for Playwright
+      - name: Install Chromium and Firefox for Playwright
         working-directory: web/test/browser
         run: |
           if [[ "${{ steps.playwright-cache.outputs.cache-hit }}" == true ]]; then
-            npx playwright install-deps chromium
+            npx playwright install-deps chromium firefox
           else
-            npx playwright install --with-deps chromium
+            npx playwright install --with-deps chromium firefox
           fi
         shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 8
       - name: Start the hub on the static build
+        id: hub
         shell: bash
         run: |
           set -euo pipefail
@@ -191,9 +193,17 @@ jobs:
           cat "$RUNNER_TEMP/hub.log" >&2
           exit 1
         timeout-minutes: 2
-      - name: Run the browser acceptance checks
+      - name: Run the browser acceptance checks in Chromium
         run: npm run check
         working-directory: web/test/browser
+        timeout-minutes: 10
+      # Firefox runs also when the Chromium run failed, so one job shows the result for both engines.
+      - name: Run the browser acceptance checks in Firefox
+        if: ${{ !cancelled() && steps.hub.outcome == 'success' }}
+        run: npm run check:firefox
+        working-directory: web/test/browser
+        env:
+          FILEDECK_EVIDENCE_DIR: ${{ github.workspace }}/web/test/browser/evidence/firefox
         timeout-minutes: 10
       - name: Stop the hub
         if: always()

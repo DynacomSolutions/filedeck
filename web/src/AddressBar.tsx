@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { File as FileIcon, Folder, History, Server, Star, TriangleAlert, type LucideIcon } from "lucide-react";
 import { api, parent, stat, type NodeInfo } from "./api";
 import { fetchNodes, NODES_KEY, swrCache } from "./data";
-import { addressBase, baseRemainder, fmtAddr, fuzzy, itemUri, parseAddress, resolveBasePath, splitTyped, type AddressBase, type Where } from "./address";
+import { addressBase, baseRemainder, crumbsOverflow, fmtAddr, fuzzy, itemUri, parseAddress, resolveBasePath, splitTyped, type AddressBase, type Where } from "./address";
 import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
 import { Tip } from "./Tooltip";
@@ -509,7 +509,9 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
   }, [segKey]);
   useLayoutEffect(() => {
     const nav = navRef.current;
-    if (editing || !nav || nav.scrollWidth <= nav.clientWidth + 1) return;
+    const first = nav?.firstElementChild, last = nav?.lastElementChild;
+    if (editing || !nav || !first || !last) return;
+    if (!crumbsOverflow(last.getBoundingClientRect().right - first.getBoundingClientRect().left, nav.getBoundingClientRect().width)) return;
     if (folded < maxFold) setFolded(folded + 1);
     else if (!tight) setTight(true);
   });
