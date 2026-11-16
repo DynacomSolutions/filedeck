@@ -128,7 +128,7 @@ export function openDb(file: string, cacheKiB = 8192, scratch = false): Database
   const db = new s.DatabaseSync(file);
   // A scratch file (compare spill) is thrown away on restart: no journal, no syncs. A cache keeps WAL (a process crash cannot
   // corrupt it) without syncs (an OS crash might; IndexCache then starts a fresh file).
-  db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;`);
+  db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`);
   db.exec(`PRAGMA temp_store=FILE; PRAGMA cache_size=-${cacheKiB};`);
   return db;
 }
@@ -518,7 +518,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { file, old, max } = workerData;
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const db = new DatabaseSync(file);
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=2000; PRAGMA cache_size=-4096");
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=2000; PRAGMA cache_size=-4096"); // (NORMAL: an OS crash never breaks the file)
 const entDel = db.prepare("DELETE FROM ents WHERE dir = ?");
 const dirDel = db.prepare("DELETE FROM dirs WHERE path = ?");
 let removed = 0;
