@@ -61,5 +61,5 @@ test("build step with a compiler builds every helper", (t) => {
   const out = path.join(tmp, "withcc");
   const r = spawnSync(process.execPath, [path.resolve(import.meta.dirname, "../scripts/build-native.mjs"), out], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
-  for (const n of ["filedeck-sandbox", "filedeck-fanwatch"]) fs.accessSync(path.join(out, n), fs.constants.X_OK);
+  for (const n of ["filedeck-sandbox", "filedeck-fanwatch", "filedeck-rename"]) fs.accessSync(path.join(out, n), fs.constants.X_OK);
 });

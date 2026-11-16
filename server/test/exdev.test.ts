@@ -6,6 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import * as ops from "../src/fsops.ts";
 import { withoutReadOnly } from "../src/pinwalk.ts";
+import { noRenameHelper } from "./noreplace-env.ts";
+
+// The tests here stand in for another device (or for a name taken meanwhile) by making Node's rename and link fail, so they run the steps without the rename helper; test/noreplace.test.ts covers the helper.
+noRenameHelper();
 
 // These tests call the operations directly, outside a request: they run in an explicit scope with no read-only prefixes.
 const test = (name: string, fn: (t: never) => unknown) => baseTest(name, (t) => withoutReadOnly(() => fn(t as never)) as never);

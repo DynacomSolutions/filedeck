@@ -1,5 +1,5 @@
 // Builds the native helpers in server/native into server/dist/native (or the folder given as the first argument), so a
-// development start finds them beside the compiled code (see `locateHelper` in src/sandbox.ts). The image builds the same
+// development start finds them beside the compiled code (see `locateHelper` in src/native.ts). The image builds the same
 // sources itself, statically, into /usr/local/bin (Dockerfile).
 //
 // Each helper is linked statically where the toolchain allows it, and dynamically otherwise (many glibc machines have no
