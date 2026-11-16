@@ -302,6 +302,17 @@ test("the helper gets the two pinned folders as descriptors 3 and 4, the two nam
   // the last line replaces the shell by `ls`, which lists its own descriptors: what the helper was started with, and nothing a shell adds
   const me = script([`cat /proc/$$/environ > '${out}.env'`, `echo "$#|$1|$2|$PWD" > '${out}.args'`, `exec ls -l /proc/self/fd > '${out}.fds'`].join("\n"));
   useRenameHelper(me);
+  // What this test process was itself started with and would pass on to any program (not close-on-exec): a test runner or a CI
+  // step may hand such descriptors down. They are not the agent's, and the real helper closes them first; here they are set aside.
+  const handedDown = new Map<number, string>();
+  for (const fd of fs.readdirSync("/proc/self/fd").map(Number)) {
+    try {
+      const flags = parseInt(/^flags:\s+(\d+)/m.exec(fs.readFileSync(`/proc/self/fdinfo/${fd}`, "utf8"))![1]!, 8);
+      if (!(flags & fs.constants.O_CLOEXEC)) handedDown.set(fd, fs.readlinkSync(`/proc/self/fd/${fd}`));
+    } catch {
+      /* closed meanwhile */
+    }
+  }
   // descriptors of this process that the helper must not see: a file and a folder inside the root, held open during the copy
   const held = [await fsp.open(at("src/f.txt"), "r"), await fsp.open(at("src"), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)];
   try {
@@ -317,9 +328,10 @@ test("the helper gets the two pinned folders as descriptors 3 and 4, the two nam
   assert.match(seen.get(3) ?? "", new RegExp(`^${at("dst")}/\\.filedeck-work-[^/]+$`), "3 is the working folder that holds the finished copy");
   assert.equal(seen.get(4), at("dst"), "4 is the destination folder");
   // besides those five, only the handle `ls` itself holds on the folder it lists (and the script file, should a shell pass it on)
-  const rest = fds.filter(([fd, target]) => fd > 4 && target !== me && !/^\/proc\/\d+\/fd$/.test(target));
+  const rest = fds.filter(([fd, target]) => fd > 4 && target !== me && !/^\/proc\/\d+\/fd$/.test(target) && handedDown.get(fd) !== target);
   assert.deepEqual(rest, [], `no other descriptor reaches the helper: ${JSON.stringify(fds)}`);
   assert.equal(fds.filter(([fd]) => fd <= 4).length, 5, "the five it is given are all there");
+  for (const [fd, target] of fds) assert.ok(fd <= 4 || (target !== at("src/f.txt") && target !== at("src")), `a descriptor the agent's process opened reached the helper: ${fd} ${target}`);
   assert.equal(fs.readFileSync(`${out}.env`).length, 0, "the environment is empty");
   assert.equal(fs.readFileSync(`${out}.args`, "utf8").trim(), "2|staged|tree|/");
 });

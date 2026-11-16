@@ -3,6 +3,7 @@
  *
  *   filedeck-rename FROM_NAME TO_NAME      the directory of FROM_NAME is the inherited descriptor 3, that of TO_NAME descriptor 4
  *
+ * Every other descriptor the program was started with, above 4, is closed first.
  * Both names must be single path components: an empty name, "." , ".." and any name holding a "/" are refused. The program takes
  * no paths, reads no environment and prints nothing but one short error line on stderr. The caller (server/src/noreplace.ts) holds
  * the two directories open and passes those descriptors, so what is renamed is decided by the descriptors and not by a path
@@ -65,8 +66,23 @@ static int single_component(const char *s)
 	return s[0] != '\0' && strcmp(s, ".") != 0 && strcmp(s, "..") != 0 && strchr(s, '/') == NULL;
 }
 
+/*
+ * Close every descriptor but the standard three and the two folders. The agent opens all of its own as close-on-exec, so this is
+ * for what the agent's own process was started with and passes on to every program it starts.
+ */
+static void close_others(void)
+{
+#ifdef SYS_close_range
+	if (syscall(SYS_close_range, (unsigned int)(TO_FD + 1), ~0U, 0U) == 0) return;
+#endif
+	long max = sysconf(_SC_OPEN_MAX); /* a kernel older than 5.9 */
+	if (max < 0 || max > 65536) max = 65536;
+	for (int fd = TO_FD + 1; fd < max; fd++) close(fd);
+}
+
 int main(int argc, char **argv)
 {
+	close_others();
 	if (argc != 3) {
 		fputs("filedeck-rename: usage: filedeck-rename FROM_NAME TO_NAME\n", stderr);
 		return 2;

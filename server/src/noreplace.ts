@@ -16,7 +16,8 @@ import { executable, locateHelper } from "./native.ts";
  * The child is started directly: not through a shell and not through the sandbox launcher (it needs the agent's own rights on the
  * two folders, as the agent's rename would have). It gets an empty environment, `/` as its working folder, no input, and nothing
  * but the two folders besides its standard streams: every descriptor Node opens is close-on-exec, and only the ones listed in
- * `stdio` are handed over.
+ * `stdio` are handed over. A descriptor the agent's own process was started with (Node marks only the low ones close-on-exec)
+ * would still pass, so the helper closes everything above 4 before it does anything else.
  *
  * One start of the helper per call.
  */
