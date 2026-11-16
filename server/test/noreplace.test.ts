@@ -299,31 +299,25 @@ test("any other failure of the helper is the error rename(2) would have given, a
 test("the helper gets the two pinned folders as descriptors 3 and 4, the two names, an empty environment and no other descriptor", async () => {
   fresh();
   const out = path.join(base, `seen-${++n}`);
-  const me = script(
-    [
-      `ls -l /proc/$$/fd > '${out}.fds'`, // the shell's own descriptors, listed by a child: the shell opens none for this line
-      `cat /proc/$$/environ > '${out}.env'`,
-      `echo "$#|$1|$2|$PWD" > '${out}.args'`,
-      `exit 3`,
-    ].join("\n"),
-  );
+  // the last line replaces the shell by `ls`, which lists its own descriptors: what the helper was started with, and nothing a shell adds
+  const me = script([`cat /proc/$$/environ > '${out}.env'`, `echo "$#|$1|$2|$PWD" > '${out}.args'`, `exec ls -l /proc/self/fd > '${out}.fds'`].join("\n"));
   useRenameHelper(me);
   // descriptors of this process that the helper must not see: a file and a folder inside the root, held open during the copy
   const held = [await fsp.open(at("src/f.txt"), "r"), await fsp.open(at("src"), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)];
   try {
-    await ops.copy(root, "/src/tree", "/dst").catch(() => undefined); // answered "exists" every time: the copy gives up, which is not the point here
+    await ops.copy(root, "/src/tree", "/dst").catch(() => undefined); // the stand-in places nothing; what the copy then answers is not the point here
   } finally {
     for (const h of held) await h.close();
   }
   const fds = [...fs.readFileSync(`${out}.fds`, "utf8").matchAll(/(\d+) -> (.+)$/gm)].map((m) => [Number(m[1]), m[2]!] as const);
   const seen = new Map(fds);
   assert.equal(seen.get(0), "/dev/null");
-  assert.equal(seen.get(1), "/dev/null");
+  assert.equal(seen.get(1), `${out}.fds`, "the listing itself; the helper is started with /dev/null there (the next test of the helper's own output shows it prints nothing)");
   assert.match(seen.get(2) ?? "", /^(?:pipe|socket):/, "the one error line goes to a pipe of the agent");
   assert.match(seen.get(3) ?? "", new RegExp(`^${at("dst")}/\\.filedeck-work-[^/]+$`), "3 is the working folder that holds the finished copy");
   assert.equal(seen.get(4), at("dst"), "4 is the destination folder");
-  // besides those the shell may hold one more: the script file it reads
-  const rest = fds.filter(([fd, target]) => fd > 4 && target !== me);
+  // besides those five, only the handle `ls` itself holds on the folder it lists (and the script file, should a shell pass it on)
+  const rest = fds.filter(([fd, target]) => fd > 4 && target !== me && !/^\/proc\/\d+\/fd$/.test(target));
   assert.deepEqual(rest, [], `no other descriptor reaches the helper: ${JSON.stringify(fds)}`);
   assert.equal(fds.filter(([fd]) => fd <= 4).length, 5, "the five it is given are all there");
   assert.equal(fs.readFileSync(`${out}.env`).length, 0, "the environment is empty");
