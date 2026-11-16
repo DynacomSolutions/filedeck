@@ -32,6 +32,7 @@ The repository contains the application, generic Helm chart and public build wor
 ```sh
 npm ci
 npm run typecheck && npm test        # server tests (some need ffmpeg, bsdtar and 7zz, and skip without them)
+                                     # with sshd or Apache (mod_dav) installed, the SFTP and WebDAV suites also run against them
 npm run build                        # also compiles the native helpers into server/dist/native when a C compiler is present
 FILEDECK_ROOT=$HOME npm run dev:agent      # agent on :8080
 HUB_URL=http://127.0.0.1:8080 npm run dev:web   # Vite dev server, /api proxied
