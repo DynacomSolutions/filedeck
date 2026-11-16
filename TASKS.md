@@ -243,9 +243,9 @@ What the 12 November 2026 review report left open: checks that were not made, an
 ETA: 2026-11-16 20:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 143 | Live check of main after the releases: request checks, layout at five window sizes, the new notices | in_progress | claude-20261116-rv-postcheck | rv-postcheck | | 2026-11-16 14:00 ICT | Covers the pull requests merged after the last live check |
-| 144 | Soak run for the diff job failure between a node and a network source that was seen once under load | todo | | rv-postcheck | | | |
+| 143 | Live check of main after the releases: request checks, layout at five window sizes, the new notices | done | claude-20261116-rv-postcheck | rv-postcheck | | | Checked main at a2147e4 (after v0.3.37) with a live hub and agent<br>Request checks: cross-site and read-only deletes refused, headers present, dead agent answers 502<br>Browser: acceptance script 35 of 35; no overflow and no console error at six window sizes, light and dark<br>The sandbox reports fallback in a development start: row 19.148 |
+| 144 | Soak run for the diff job failure between a node and a network source that was seen once under load | in_progress | claude-20261116-rv-postcheck | rv-postcheck | | 2026-11-16 15:00 ICT | 30 rounds of 6 parallel runs of the network source tests on current main |
 | 145 | Network sources checked against real servers that can run on the test machine | todo | | rv-real-sources | | | SFTP against OpenSSH first; WebDAV, S3 and SMB if a real server can be run |
 | 146 | Browser acceptance checks pass in Firefox | todo | | rv-firefox | | | |
-| 147 | A move or copy into place without overwrite uses an atomic no-replace call | todo | | rv-noreplace | | | Closes the window in which an empty folder created at the same instant is replaced |
-| 148 | The development build also builds the sandbox launcher | todo | | rv-dev-launcher | | | A local start reports the fallback mode today |
+| 147 | A move or copy into place without overwrite uses an atomic no-replace call | in_progress | claude-20261116-rv-postcheck | rv-noreplace | | 2026-11-16 17:00 ICT | Closes the window in which an empty folder created at the same instant is replaced<br>Native helper in progress |
+| 148 | The development build also builds the sandbox launcher | in_review | claude-20261116-rv-postcheck | rv-dev-launcher | | 2026-11-16 14:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/220, CI running<br>A development start now reports the Landlock sandbox on a machine that has it |
