@@ -967,6 +967,13 @@ async function verifyAccessibility(browser, viewport, colorScheme) {
     await control.scrollIntoViewIfNeeded();
     spacingClips.push(...await control.evaluate((e) => {
     if (e.closest('.sr-only, .visually-hidden')) return []; // visually hidden on purpose
+    // The scroll into view above also moves the content of a box whose overflow is hidden or clipped. A user cannot scroll such a
+    // box, so put it back where it starts before measuring: a control that is only visible after that move is cut off for the user.
+    for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
+      const s = getComputedStyle(p);
+      if (['hidden', 'clip'].includes(s.overflowX) && p.scrollLeft !== 0) p.scrollLeft = 0;
+      if (['hidden', 'clip'].includes(s.overflowY) && p.scrollTop !== 0) p.scrollTop = 0;
+    }
     const r = e.getBoundingClientRect();
     const scrollports = [];
     for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) {
