@@ -236,4 +236,16 @@ ETA: 2026-11-14 12:00 ICT
 | 139 | du stays on the path's filesystem; mount points below it are listed as their own entries, not summed in | done | claude-20261114-scan-bounded-memory | scan-bounded-memory | | | Merged https://github.com/DynacomSolutions/filedeck/pull/215 (83c94bd), CI green |
 | 140 | `du --cached` during a scan answers with the partial sizes committed so far | done | claude-20261114-scan-bounded-memory | scan-bounded-memory | | | Merged https://github.com/DynacomSolutions/filedeck/pull/215 (83c94bd), CI green |
 | 142 | Trash retention: each volume's trash loses items older than 7 days, then its oldest items while it is over its cap (10% of the volume by default); chart values `agent.trash.*` | done | claude-20261114-scan-bounded-memory | scan-bounded-memory | | | Merged https://github.com/DynacomSolutions/filedeck/pull/215 (83c94bd), CI green. Review fixes: restore and removal never run together, the cap purge stops at an item it cannot remove |
-| 141 | Release with 18.138 to 18.140 and 18.142 | done | claude-20261114-scan-bounded-memory | scan-bounded-memory | 18.138, 18.139, 18.140, 18.142 |  | Released v0.3.37: https://github.com/DynacomSolutions/filedeck/pull/216 (f48f7cc), stable moved, running on all agents. Flaky repair test on the main image build fixed in https://github.com/DynacomSolutions/filedeck/pull/218 |
+| 141 | Release with 18.138 to 18.140 and 18.142 | done | claude-20261114-scan-bounded-memory | scan-bounded-memory | 18.138, 18.139, 18.140, 18.142 | | Released v0.3.37: https://github.com/DynacomSolutions/filedeck/pull/216 (f48f7cc), stable moved, running on all agents. Flaky repair test on the main image build fixed in https://github.com/DynacomSolutions/filedeck/pull/218 |
+
+## 19. Review follow-up: checks and remaining limits
+What the 12 November 2026 review report left open: checks that were not made, and limits that can be removed in code.
+ETA: 2026-11-16 20:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 143 | Live check of main after the releases: request checks, layout at five window sizes, the new notices | in_progress | claude-20261116-rv-postcheck | rv-postcheck | | 2026-11-16 14:00 ICT | Covers the pull requests merged after the last live check |
+| 144 | Soak run for the diff job failure between a node and a network source that was seen once under load | todo | | rv-postcheck | | | |
+| 145 | Network sources checked against real servers that can run on the test machine | todo | | rv-real-sources | | | SFTP against OpenSSH first; WebDAV, S3 and SMB if a real server can be run |
+| 146 | Browser acceptance checks pass in Firefox | todo | | rv-firefox | | | |
+| 147 | A move or copy into place without overwrite uses an atomic no-replace call | todo | | rv-noreplace | | | Closes the window in which an empty folder created at the same instant is replaced |
+| 148 | The development build also builds the sandbox launcher | todo | | rv-dev-launcher | | | A local start reports the fallback mode today |
