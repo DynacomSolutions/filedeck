@@ -242,7 +242,7 @@ ETA: 2026-11-14 12:00 ICT
 
 ## 19. Review follow-up: checks and remaining limits
 What the 12 November 2026 review report left open: checks that were not made, and limits that can be removed in code.
-ETA: 2026-11-16 16:30 ICT
+ETA: 2026-11-16 17:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 143 | Live check of main after the releases: request checks, layout at five window sizes, the new notices | done | claude-20261116-rv-postcheck | rv-postcheck | | | Checked main at a2147e4 (after v0.3.37) with a live hub and agent<br>Request checks: cross-site and read-only deletes refused, headers present, dead agent answers 502<br>Browser: acceptance script 35 of 35; no overflow and no console error at six window sizes, light and dark<br>The sandbox reports fallback in a development start: row 19.148 |
@@ -253,3 +253,4 @@ ETA: 2026-11-16 16:30 ICT
 | 148 | The development build also builds the sandbox launcher | done | claude-20261116-rv-postcheck | rv-dev-launcher | | | Merged https://github.com/DynacomSolutions/filedeck/pull/220, CI green<br>The build compiles the native helpers when a C compiler is present; the image is unchanged<br>A development start reported the Landlock sandbox with confined archive tools in a live check |
 | 151 | The text-spacing check cannot pass by scrolling content inside a box that a user cannot scroll | done | claude-20261116-rv-postcheck | rv-spacing-check | 19.146 | | Merged https://github.com/DynacomSolutions/filedeck/pull/226, CI green in Chromium and Firefox<br>With the Name column fix taken out the check now fails in Chromium, where it passed before |
 | 152 | Release v0.3.39 with 19.146 to 19.148 | in_review | claude-20261116-release-v0339 | release-v0339 | 19.146, 19.147, 19.148, 19.151 | 2026-11-16 16:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/227, CI running<br>After the merge: the tag and the Release workflow |
+| 153 | The resumed-scan test waits for the lease without ending its own process early | in_progress | claude-20261116-rv-postcheck | rv-scan-test-wait | | 2026-11-16 16:00 ICT | Found in the local run before the release: four tests of one file cancelled in two full runs on a loaded machine<br>The wait depends on a timer that does not keep the test process alive |
