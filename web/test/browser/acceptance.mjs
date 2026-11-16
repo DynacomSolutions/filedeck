@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { chromium, firefox } from 'playwright';
 import { isEnhancedContrastFailure } from './contrast.mjs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
@@ -1605,7 +1605,12 @@ const checks = [
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
 
-const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--no-sandbox'] });
+// BROWSER=firefox runs the same checks in Playwright's Firefox; the default is Chromium.
+const engineName = process.env.BROWSER || 'chromium';
+if (!['chromium', 'firefox'].includes(engineName)) throw new Error(`BROWSER must be chromium or firefox, not ${engineName}`);
+const browser = engineName === 'firefox'
+  ? await firefox.launch({ headless: true })
+  : await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--no-sandbox'] });
 const started = Date.now();
 const failed = [];
 const results = [];
