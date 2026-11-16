@@ -41,6 +41,8 @@ body.col-resizing,body.col-resizing *{cursor:col-resize!important;user-select:no
 @media(max-width:700px),(max-height:500px) and (max-width:1000px){
   .ft.cols{table-layout:auto;min-width:0!important}
   .ft.cols col{width:auto!important}
+  /* Name keeps room for its icon (16px), the gap (.5rem), one 44px control (the "Up" row) and the cell padding (2 x .9rem; cells are border-box). When the other columns need more (larger text spacing), the list scrolls sideways; the name is not cut to nothing. */
+  .ft.cols td.name{min-width:calc(60px + 2.3rem)}
   .colh-handle,.ft .c-fill,.ft .c-type,.ft .c-mode,.ft .colh-fill{display:none}
   .ft th.colh .colh-txt,.ft th.colh button.colh-btn{padding-left:.6rem;padding-right:.6rem}
 }

@@ -53,8 +53,12 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onRestore, anchor, labe
     setPos({ x: Math.max(4, Math.min(left, window.innerWidth - r.width - 4)), y: Math.max(4, Math.min(top, window.innerHeight - r.height - 4)) });
   }, [x, y, items, anchor]);
   useLayoutEffect(() => {
-    if (cur < 0) ref.current?.focus();
-    else ref.current?.querySelector<HTMLElement>(`[data-menu-index="${cur}"]`)?.focus();
+    if (cur < 0) return void ref.current?.focus();
+    const item = ref.current?.querySelector<HTMLElement>(`[data-menu-index="${cur}"]`);
+    item?.focus();
+    // focus() alone does not show the whole item in every browser: Firefox leaves an item that is partly below the
+    // edge of a scrolling menu where it is. The menu is position:fixed, so only the menu itself can scroll here.
+    item?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [cur]);
 
   const run = (it: Item) => {

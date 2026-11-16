@@ -98,3 +98,14 @@ test("a list rebuilt while the menu was open is found again by its label and rol
   assert.equal(liveReturnTarget(alive, () => [fresh]), alive);
   assert.equal(liveReturnTarget(null, () => [fresh]), null);
 });
+
+test("the context menu scrolls the item it focuses into view (focus alone does not show a partly hidden item in every browser)", () => {
+  const menu = src("ContextMenu.tsx");
+  assert.match(menu, /item\?\.focus\(\);[\s\S]{0,400}item\?\.scrollIntoView\?\.\(\{ block: "nearest", inline: "nearest" \}\)/);
+});
+
+test("the address bar folds its path from fractional widths, not from the rounded scrollWidth", () => {
+  const bar = src("AddressBar.tsx");
+  assert.match(bar, /crumbsOverflow\(last\.getBoundingClientRect\(\)\.right - first\.getBoundingClientRect\(\)\.left, nav\.getBoundingClientRect\(\)\.width\)/);
+  assert.doesNotMatch(bar, /nav\.scrollWidth/);
+});

@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "check": "node acceptance.mjs",
-    "install-browser": "playwright install chromium"
+    "check:firefox": "BROWSER=firefox node acceptance.mjs",
+    "install-browser": "playwright install chromium firefox"
   },
   "devDependencies": {
     "axe-core": "^4.10.3",
