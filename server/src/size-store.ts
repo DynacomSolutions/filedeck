@@ -289,7 +289,8 @@ const { DatabaseSync } = require("node:sqlite");
 const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers, putPartial } = workerData;
 const fs = require("node:fs");
 const db = new DatabaseSync(file);
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
+// NORMAL, not OFF: with WAL an OS crash or power cut then loses at most the last commits, never the file (OFF left a broken freelist after a node crash)
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
 // the reader worker only runs "read" ops: a second connection, so a read never waits behind a commit (WAL) and the main thread never waits for the disk
 // A reader holding a snapshot stops the automatic (passive) checkpoint from restarting the WAL, which then grows without bound and slows every read and commit.
 // Past the limit, wait briefly for readers and truncate; a busy attempt is skipped and tried again 2 s later, so a pinned snapshot costs the writer at most 0.5 s in 2.5.
@@ -741,7 +742,8 @@ export class SizeStore {
   /** After a real failure, open the store again (30 s, then doubling to 10 min between tries) so one bad moment does not last until restart. */
   private reopening?: Promise<void>;
   private reopen(): Promise<void> | undefined {
-    if (this.db || this.file === ":memory:" || !this.retryAt || Date.now() < this.retryAt) return;
+    // a file found damaged beyond repair is never opened again by this process: writes would spread the damage (an operator moves it aside and restarts)
+    if (this.db || this.damaged || this.file === ":memory:" || !this.retryAt || Date.now() < this.retryAt) return;
     return (this.reopening ??= (async () => {
       try {
         // the schema is checked on the writer thread; the main handle is then only a liveness flag (an empty in-memory one): every read and write goes to the workers

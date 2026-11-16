@@ -138,6 +138,18 @@ test("real table damage is left alone: the file is kept as it is and the store s
   const after = fs.readFileSync(file);
   assert.equal(after.subarray((root - 1) * size, root * size).compare(bytes.subarray((root - 1) * size, root * size)), 0, "the damaged table page is untouched");
   assert.notDeepEqual(check(file), ["ok"]);
+  // the retries that follow (30 s, then up to 10 min apart) never open the damaged file again: writing into it would spread the damage, and the
+  // metric would say "not damaged" (seen: a store with a broken freelist reopened, failed and reopened every few minutes)
+  const s = stores.at(-1) as Any;
+  const again = await capture(async () => {
+    for (let i = 0; i < 3; i++) {
+      s.retryAt = 1;
+      await (s.reopen() ?? Promise.resolve());
+      await s.clearPending().catch(() => undefined);
+    }
+  });
+  assert.ok(!again.lines.some((l) => /size store back/.test(l)), again.lines.join("|"));
+  assert.deepEqual(s.health(), { available: false, damaged: true });
 });
 
 const malformed = () => Object.assign(new Error("database disk image is malformed"), { errcode: 11 });
