@@ -193,6 +193,9 @@ test("a scan whose process was killed is resumed from the folders it had finishe
   // the next process takes the lease over (the dead one's lapses), and the job runs again with its start time: what was finished is kept,
   // although the rows are older than the store's age limit (1 ms here)
   const s = new SizeStore(file, { root, ttlMs: 1, maxEntries: 100_000, leaseMs: 300 });
+  // The store's lease timer does not keep a process alive (an agent has its server for that). While this test waits for the dead
+  // process's lease to lapse nothing else of its own is running, so it holds a timer: without one the process can end during the wait.
+  const alive = setInterval(() => undefined, 1000);
   try {
     await s.whenWriter();
     const r = await s.scanRead("/r", undefined, false, undefined, undefined, since);
@@ -201,6 +204,7 @@ test("a scan whose process was killed is resumed from the folders it had finishe
     assert.ok(r.read <= 151 - done + 31, `${r.read} folders read again, ${done} were finished`);
     assert.ok(r.read < 151, "not from zero");
   } finally {
+    clearInterval(alive);
     await s.close();
   }
 });
