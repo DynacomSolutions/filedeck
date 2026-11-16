@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { FsError } from "./fsops.ts";
 
 /**
@@ -17,7 +18,8 @@ import { FsError } from "./fsops.ts";
  *                   checks (`sandboxInfo().state === "fallback"`); logged once at start-up
  *   require         `spawnSandboxed` throws 503
  *   off             no launcher, no confinement, nothing extra: only the caller's own checks (development)
- * `FILEDECK_SANDBOX_HELPER` names the launcher (default /usr/local/bin/filedeck-sandbox).
+ * `FILEDECK_SANDBOX_HELPER` names the launcher. When it is not set the launcher is /usr/local/bin/filedeck-sandbox (the image), or
+ * else the one `npm run build` compiled beside this code (server/dist/native, see `locateHelper`).
  */
 
 export type SandboxMode = "auto" | "require" | "off";
@@ -64,6 +66,27 @@ export const UNPRIVILEGED = { uid: 65534, gid: 65534 } as const;
 export const EXIT_LANDLOCK_UNSUPPORTED = 70;
 
 const DEFAULT_HELPER = "/usr/local/bin/filedeck-sandbox";
+/**
+ * Where `npm run build` puts the helpers it compiles (server/scripts/build-native.mjs): server/dist/native, which is the same
+ * place from src/ (development) and from dist/ (built). It is a fixed place beside the running code and `PATH` is never searched.
+ * It is as trusted as that code: in the image the served folder is mounted elsewhere, and a development start that serves a folder
+ * which holds its own checkout already lets every client change the code it runs.
+ */
+export const BUILT_NATIVE_DIR = path.resolve(import.meta.dirname, "../dist/native");
+
+const executable = (p: string): Promise<boolean> => fs.access(p, fs.constants.X_OK).then(() => true, () => false);
+
+/**
+ * The launcher (or another native helper) to use. `fromEnv` (the variable's value) when it is set: used as given, with no fallback,
+ * so a wrong value is seen as a missing launcher. Otherwise the installed one (`installed`, as in the image), otherwise the one built
+ * beside the code (`builtDir`). Returns the first candidate even when none can be run, so the caller reports what it looked for.
+ */
+export async function locateHelper(name: string, fromEnv: string | undefined, installed = `/usr/local/bin/${name}`, builtDir = BUILT_NATIVE_DIR): Promise<string> {
+  if (fromEnv !== undefined) return fromEnv;
+  if (await executable(installed)) return installed;
+  const built = path.join(builtDir, name);
+  return (await executable(built)) ? built : installed;
+}
 let cached: Promise<SandboxInfo> | null = null;
 
 function modeFromEnv(): SandboxMode {
@@ -104,8 +127,8 @@ export function sandboxInfo(): Promise<SandboxInfo> {
   cached ??= (async () => {
     const mode = modeFromEnv();
     if (mode === "off") return { mode, helper: null, landlock: false, abi: 0, rights: null, seccomp: false, caps: false, state: "off" as const };
-    const helper = process.env.FILEDECK_SANDBOX_HELPER ?? DEFAULT_HELPER;
-    const usable = await fs.access(helper, fs.constants.X_OK).then(() => true, () => false);
+    const helper = await locateHelper("filedeck-sandbox", process.env.FILEDECK_SANDBOX_HELPER, DEFAULT_HELPER);
+    const usable = await executable(helper);
     const probe = usable ? await probeHelperInfo(helper) : NO_PROBE;
     const landlock = probe.ok;
     return { mode, helper: usable ? helper : null, landlock, abi: probe.abi, rights: probe.rights, seccomp: probe.seccomp, caps: probe.caps, state: landlock ? ("landlock" as const) : mode === "require" ? ("unavailable" as const) : ("fallback" as const) };
@@ -202,8 +225,8 @@ export const isLauncherFailure = (code: number | null, stderrText: string): bool
 
 async function helperPath(info: SandboxInfo): Promise<string | null> {
   if (info.helper) return info.helper;
-  const h = process.env.FILEDECK_SANDBOX_HELPER ?? DEFAULT_HELPER;
-  return (await fs.access(h, fs.constants.X_OK).then(() => true, () => false)) ? h : null;
+  const h = await locateHelper("filedeck-sandbox", process.env.FILEDECK_SANDBOX_HELPER, DEFAULT_HELPER);
+  return (await executable(h)) ? h : null;
 }
 
 /**

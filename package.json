@@ -17,7 +17,7 @@
   "scripts": {
     "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
     "test": "npm test -w server",
-    "build": "npm run build -w server && npm run build -w web",
+    "build": "npm run build -w server && npm run build:native -w server && npm run build -w web",
     "dev:agent": "FILEDECK_MODE=agent FILEDECK_ROOT=${FILEDECK_ROOT:-$HOME} npm run dev -w server",
     "dev:web": "npm run dev -w web",
     "check:neutral": "python3 scripts/check-chart-defaults.py"
