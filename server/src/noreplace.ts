@@ -65,7 +65,7 @@ function pinnedEntry(p: string): { fd: number; name: string } | null {
  * Move `from` to `to` (both of the form `/proc/self/fd/<n>/<name>`, the folders still held by the caller) only if nothing is at
  * `to`. Answers "done", "exists" (something is there, of any kind, also when it appeared an instant ago), "xdev" (different
  * devices), "unsupported" (the kernel or the filesystem does not have the flag: nothing was done), or "absent" (no helper here,
- * or a path of another form: nothing was done). Any other failure throws an error whose `code` is the errno name the helper
+ * a helper that could not be started, or a path of another form: nothing was done). Any other failure throws an error whose `code` is the errno name the helper
  * printed (ENOENT, EACCES, ENOSPC, ...), as rename(2) would have thrown.
  *
  * "unsupported" is asked again on the next call (the same answer, EINVAL, is also what a folder moved into itself gets, so it
@@ -89,7 +89,12 @@ function run(helper: string, fromName: string, toName: string, fromFd: number, t
     child.stderr!.on("data", (d: string) => {
       if (err.length < 512) err += d;
     });
-    child.on("error", reject); // the helper could not be started
+    // The helper could not be started (removed since it was located, or no process could be made): nothing was done, and the
+    // caller keeps its own steps, as where there is no helper. It is located again on the next call.
+    child.on("error", () => {
+      located = null;
+      resolve("absent");
+    });
     child.on("close", (code) => {
       if (code === EXIT.done) return resolve("done");
       if (code === EXIT.exists) return resolve("exists");

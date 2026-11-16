@@ -275,6 +275,28 @@ test("a helper that answers not supported leaves the placement to the old steps,
   }
 });
 
+test("something that appears while a helper that answers not supported was asked is kept: the old steps look again first", async () => {
+  fresh();
+  // the stand-in makes an empty folder at the destination (its descriptor 4), then says the filesystem does not have the flag
+  useRenameHelper(script(`mkdir "/proc/self/fd/4/$2"\necho 'filedeck-rename: EINVAL' >&2\nexit 4`));
+  await exists409(ops.rename(root, "/src/tree", "/dst/tree"));
+  assert.deepEqual(names("dst"), ["tree"]);
+  assert.deepEqual(names("dst/tree"), [], "the folder that appeared is still there, empty");
+  assert.equal(fs.existsSync(at("src/tree/a.txt")), true, "the source stays");
+});
+
+test("a helper that can no longer be started leaves the placement to the old steps", async () => {
+  fresh();
+  const gone = script(`mv "/proc/self/fd/3/$1" "/proc/self/fd/4/$2"`); // a stand-in that does place the entry
+  useRenameHelper(gone);
+  await ops.rename(root, "/src/tree", "/dst/first"); // locates the helper
+  fs.mkdirSync(at("src", "second"));
+  fs.rmSync(gone);
+  await ops.rename(root, "/src/second", "/dst/second");
+  assert.equal(fs.existsSync(at("dst/second")), true, "placed by the old steps, not answered as an error");
+  assert.equal(fs.existsSync(at("src/second")), false);
+});
+
 test("any other failure of the helper is the error rename(2) would have given, and nothing is placed", async () => {
   fresh();
   useRenameHelper(script(`echo 'filedeck-rename: EACCES' >&2\nexit 1`));

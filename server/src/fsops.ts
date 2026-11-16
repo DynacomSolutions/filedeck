@@ -559,6 +559,7 @@ async function placeNew(tmp: string, dest: string, isSource = false): Promise<vo
   if (st.isDirectory()) {
     if (await exists(dest)) throw taken(); // the early, plain answer; the helper closes the window after it
     if (await viaHelper()) return;
+    if (await exists(dest)) throw taken(); // asking the helper took a process start: look again, so the window is as short as before
     try {
       await fs.rename(tmp, dest);
     } catch (e) {
@@ -576,6 +577,7 @@ async function placeNew(tmp: string, dest: string, isSource = false): Promise<vo
     // no hard links on this filesystem (FAT, some network mounts): the helper, or else check, then rename
     if (await exists(dest)) throw taken();
     if (await viaHelper()) return;
+    if (await exists(dest)) throw taken(); // as for a folder: look again after the helper was asked
     await fs.rename(tmp, dest);
     return;
   }
