@@ -22,6 +22,8 @@ import {
   keyFolder,
   landlockRoots,
   removeArea,
+  ownArea,
+  removeOldAreas,
   removeOldIndexDirs,
   trashFolder,
   virtKeyDir,
@@ -333,7 +335,6 @@ export function makeWorkerSpecs(
   } = {},
 ): WorkerSpecs {
   const log = o.log ?? ((s) => console.error(s));
-  // (an area left by an agent that was killed stays: it is root's and 0711, and removing it safely would need its accounts)
   // The workers get their folders as paths below the temporary folder (as a real path, so a worker can check that its TMPDIR is no
   // link): nobody else may rename the area there (`workersParent`), else no area is made and every start is refused.
   let top = "";
@@ -345,7 +346,9 @@ export function makeWorkerSpecs(
     unsafe = `workers are refused: the temporary folder ${os.tmpdir()}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`;
     log(unsafe);
   }
-  const base = unsafe ? "" : fsc.mkdtempSync(path.join(top, "filedeck-workers-"));
+  // (named with this agent's pid: an area whose agent no longer runs is removed at the next start, `removeOldAreas`)
+  const base = unsafe ? "" : fsc.mkdtempSync(path.join(top, `filedeck-workers-${process.pid}-`));
+  if (base) ownArea(base);
   // held from here on: the area is only used through this (a second guard, should the area be renamed and a link put in its place)
   const areaFd = unsafe ? -1 : fsc.openSync(base, OPEN_DIR);
   if (!unsafe) fsc.fchmodSync(areaFd, process.getuid?.() === 0 ? 0o711 : 0o700);
@@ -356,6 +359,7 @@ export function makeWorkerSpecs(
   // Thumbnail caches: no worker runs yet, so every account's cache left by an earlier agent is emptied (as the account); a worker's own
   // cache is emptied once it stops. So at most the running workers' caches hold anything, each within its share (`accountThumbMax`).
   const sweep = emptyCaches(cfg.thumbDir, () => true, log);
+  const oldAreas = unsafe ? Promise.resolve() : removeOldAreas(top, base, log, o.onEmpty);
   /** per uid, the emptying of its thumbnail cache in progress: a start for the uid waits for it */
   const emptying = new Map<number, Promise<unknown>>();
   /** per key folder and uid, the folders once made */
@@ -435,7 +439,7 @@ export function makeWorkerSpecs(
   };
   let closing: Promise<void> | undefined;
   const close = () =>
-    (closing ??= Promise.all([sweep, ...emptying.values()]).then(() => (unsafe ? undefined : removeArea(base, log, o.onRootList, o.onEmpty, areaFd))).finally(() => {
+    (closing ??= Promise.all([sweep, oldAreas, ...emptying.values()]).then(() => (unsafe ? undefined : removeArea(base, log, o.onRootList, o.onEmpty, areaFd))).finally(() => {
       if (unsafe) return;
       try {
         fsc.closeSync(areaFd);

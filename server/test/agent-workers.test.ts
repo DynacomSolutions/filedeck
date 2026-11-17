@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -475,6 +476,43 @@ test("removal: a folder the account's removal cannot empty is left, logged, and 
   assert.ok(fs.existsSync(path.join(stuck, "f")), "root did not remove it");
   assert.ok(logs.some((l) => l.includes("left")), logs.join("\n"));
   fs.rmSync(specs.base, { recursive: true, force: true });
+});
+
+test("old workers' areas: an area of an agent that no longer runs is removed at start the safe way; others are left", async () => {
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never);
+  const top = os.tmpdir();
+  const dead = spawnSync("true").pid!; // (it has exited)
+  const old = path.join(top, `filedeck-workers-${dead}-aaaaaa`);
+  const live = path.join(top, `filedeck-workers-${process.ppid}-bbbbbb`);
+  const link = path.join(top, `filedeck-workers-${dead}-cccccc`);
+  const open = path.join(top, `filedeck-workers-${dead}-dddddd`);
+  // (an earlier process with this process's pid, as after a container restart: not one this process made)
+  const samePid = path.join(top, `filedeck-workers-${process.pid}-eeeeee`);
+  const outside = fs.mkdtempSync(path.join(top, "filedeck-outside-"));
+  fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
+  const uid = fakeAccountUid();
+  for (const a of [old, live, samePid]) {
+    fs.mkdirSync(path.join(a, `u${uid}`, "tmp"), { recursive: true });
+    fs.writeFileSync(path.join(a, `u${uid}`, "tmp/f"), "x");
+    if (IS_ROOT) chownForTest(path.join(a, `u${uid}`));
+    fs.chmodSync(a, IS_ROOT ? 0o711 : 0o700);
+  }
+  fs.symlinkSync(outside, link);
+  fs.mkdirSync(open);
+  fs.chmodSync(open, 0o777);
+  const emptied: string[] = [];
+  const specs = makeWorkerSpecs(cfg, { onEmpty: (d) => emptied.push(d) });
+  try {
+    await specs.close();
+    assert.ok(!fs.existsSync(old), "the area of an agent that no longer runs is gone");
+    assert.ok(!fs.existsSync(samePid), "an earlier process's area with this pid is gone too");
+    assert.ok(fs.existsSync(path.join(live, `u${uid}`, "tmp/f")), "a running agent's area is left");
+    assert.ok(fs.lstatSync(link).isSymbolicLink() && fs.existsSync(path.join(outside, "keep.txt")), "a link is left, and nothing behind it touched");
+    assert.ok(fs.existsSync(open), "a folder others may write to is not an area of ours");
+    if (IS_ROOT) assert.ok(emptied.some((d) => path.basename(d) === `u${uid}`), "the account's folder was emptied as the account");
+  } finally {
+    for (const d of [live, link, open, outside, old, samePid]) fs.rmSync(d, { recursive: true, force: true });
+  }
 });
 
 test("thumbnail caches: each account gets its share of the limit", async () => {

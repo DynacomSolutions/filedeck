@@ -450,6 +450,60 @@ export async function removeArea(dir: string, log: (s: string) => void, onList?:
   });
 }
 
+/** `filedeck-workers-<pid>-<6 characters>`: a workers' area (`mkdtemp`), with the pid of the agent that made it */
+export const AREA_NAME = /^filedeck-workers-([0-9]{1,10})-[A-Za-z0-9]{6}$/;
+
+/** the areas this process has made (`ownArea`): an area with this process's pid that is not one of them is an earlier process's */
+const ownAreas = new Set<string>();
+/** Notes an area this process has made, so that `removeOldAreas` never takes it. */
+export const ownArea = (p: string): void => void ownAreas.add(p);
+
+const running = (pid: number): boolean => {
+  // (an earlier process with this process's own pid, as after a container restart, has stopped)
+  if (pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/**
+ * At agent start: removes the workers' areas in `top` (the temporary folder) that agents which no longer run have left (a killed agent never
+ * removes its own), other than `keep` and those this process has made. Only a real folder (not a link), this process's own and not writable by group or others, is taken,
+ * and it is removed through its descriptor by `removeArea` (an account's folder in it is emptied as the account, never walked by root).
+ * Never throws; what is left is logged.
+ */
+export async function removeOldAreas(top: string, keep: string, log: (s: string) => void, onEmpty?: (dir: string) => void): Promise<void> {
+  let names: string[];
+  try {
+    names = await fs.readdir(top);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    const m = AREA_NAME.exec(n);
+    const p = path.join(top, n);
+    if (!m || p === keep || ownAreas.has(p) || running(Number(m[1]))) continue;
+    let fd: number;
+    try {
+      fd = fsc.openSync(p, OPEN_DIR);
+    } catch {
+      continue; // (a link, or gone)
+    }
+    try {
+      const st = fsc.fstatSync(fd);
+      if (st.uid !== myUid() || (st.mode & 0o022) !== 0) continue;
+      await removeArea(p, log, undefined, onEmpty, fd);
+    } catch (e) {
+      log(`workers' area: ${p}: ${(e as Error).message}; left`);
+    } finally {
+      fsc.closeSync(fd);
+    }
+  }
+}
+
 /**
  * Removes the index folders of a virtual account's earlier grants (`v-<owner>-<hash>` in `<indexDir>/accounts`, other than `keep`), unless
  * `inUse` says a worker still uses one. The parent is held by descriptor (`accountsParent`) and every step goes through it; each folder is
