@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -186,6 +186,22 @@ test("worker killed mid-request", async () => {
   assert.notEqual(pidOf(p, "sys:killed"), pid);
 });
 
+/** Reads a worker's /proc file. Root without CAP_SYS_PTRACE (a container build) may not read another user's environ or fdinfo, so
+ *  on EACCES the read is done again as the worker's own user, which needs no capability. */
+function procRead(pid: number, name: string): string {
+  const file = `/proc/${pid}/${name}`;
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EACCES" || process.getuid?.() !== 0) throw e;
+    const ids = /^Uid:\s+(\d+)[\s\S]*^Gid:\s+(\d+)/m.exec(fs.readFileSync(`/proc/${pid}/status`, "utf8"));
+    assert.ok(ids, `no ids for ${pid}`);
+    const r = spawnSync(process.execPath, ["-e", "process.stdout.write(require('fs').readFileSync(process.argv[1]))", file], { uid: Number(ids[1]), gid: Number(ids[2]), encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  }
+}
+
 test("no secrets", async () => {
   const saved = { a: process.env.FILEDECK_AGENT_TOKEN, v: process.env.FILEDECK_VAULT_KEY };
   process.env.FILEDECK_AGENT_TOKEN = "t0k3n";
@@ -195,8 +211,8 @@ test("no secrets", async () => {
     const s = spec("sys:secrets", { FILEDECK_AGENT_TOKEN: "t0k3n", FILEDECK_VAULT_KEY: "v4ult" });
     await ok(await stat(p, s));
     const pid = pidOf(p, "sys:secrets");
-    const environ = fs.readFileSync(`/proc/${pid}/environ`, "utf8");
-    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    const environ = procRead(pid, "environ");
+    const cmdline = procRead(pid, "cmdline");
     const init = JSON.stringify(s.init);
     for (const secret of ["t0k3n", "v4ult"]) {
       assert.ok(!environ.includes(secret), `${secret} in the environment`);
@@ -368,7 +384,7 @@ test("a worker that dies soon after READY with nothing open: back-off, then a ne
 test("the worker's socket is closed on exec", async () => {
   const p = pool();
   await ok(await stat(p, spec("sys:cloexec")));
-  const info = fs.readFileSync(`/proc/${pidOf(p, "sys:cloexec")}/fdinfo/3`, "utf8");
+  const info = procRead(pidOf(p, "sys:cloexec"), "fdinfo/3");
   const flags = /^flags:\s*([0-7]+)$/m.exec(info)?.[1];
   assert.ok(flags && (parseInt(flags, 8) & 0o2000000) !== 0, info);
 });

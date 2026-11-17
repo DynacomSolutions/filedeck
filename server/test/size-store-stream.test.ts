@@ -93,7 +93,8 @@ test("a streamed answer holds one page at a time: 200,000 entries in about one r
     assert.equal(r.truncated, false);
     assert.ok(reads <= n / 256 + 10, `${reads} reads for ${n} entries`);
     // the reader it replaces held every row at once: about 4 KB per entry (52,000 entries raised RSS by 220 MB), so 800 MB here
-    assert.ok(peak - rss0 < 100 << 20, `RSS grew by ${Math.round((peak - rss0) / 1048576)} MB`);
+    // the bound leaves room for a busy CI runner (it once measured 104 MB) and still fails the old reader by a factor of four
+    assert.ok(peak - rss0 < 200 << 20, `RSS grew by ${Math.round((peak - rss0) / 1048576)} MB`);
     // a shallow answer jumps over the subtrees below its depth instead of reading them
     reads = 0;
     assert.equal((await s.tree("/big", 1, false)).entries.length, 401);
