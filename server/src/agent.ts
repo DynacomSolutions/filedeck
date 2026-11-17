@@ -13,7 +13,7 @@ import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
 import { makeResolver, type AccountResolver } from "./local-accounts.ts";
 import { WorkerPool, type StartWorker } from "./worker-pool.ts";
-import { makeWorkerSpec, workerGate } from "./agent-workers.ts";
+import { makeWorkerSpecs, workerGate, type WorkerSpecs } from "./agent-workers.ts";
 
 export interface AgentOptions {
   /** the account lookup (sign-in on); default: `makeResolver` */
@@ -31,10 +31,12 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const app = new Hono();
   let pool: WorkerPool | undefined;
   let accounts: AccountResolver | undefined;
+  let specs: WorkerSpecs | undefined;
   if (cfg.auth) {
     const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : makeResolver(cfg, (s) => console.error(s)).then((r) => r.resolver);
     found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
+    specs = makeWorkerSpecs(cfg);
     pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker });
   }
   app.use("*", trustProxies(cfg.trustedProxies));
@@ -44,9 +46,10 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
   app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
-  // sign-in on: from here on, only the root process's own routes are served in this process (the root-side checks above still apply)
-  if (pool && accounts) app.use("*", workerGate(cfg, { pool, accounts, spec: makeWorkerSpec(cfg) }));
-  (app as unknown as { pool?: WorkerPool }).pool = pool;
+  // sign-in on: from here on, only the root process's own routes are served in this process. The checks above still run as root first
+  // (so `readOnlyGuard` answers for read-only volumes before the worker is asked; see workerGate).
+  if (pool && accounts && specs) app.use("*", workerGate(cfg, { pool, accounts, spec: specs.spec }));
+  Object.assign(app, { pool, workerBase: specs?.base });
   const root = cfg.root;
 
   app.onError(agentError);
@@ -120,6 +123,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     await leave();
     files.close();
     sizes.close();
+    specs?.close(); // (the pool has stopped every worker in `leave`)
   };
 
   return app;

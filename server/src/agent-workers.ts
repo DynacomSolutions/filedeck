@@ -6,8 +6,8 @@ import path from "node:path";
 import type { MiddlewareHandler } from "hono";
 import { USER_HEADER, type UserClaim } from "./auth/identity.ts";
 import { workerConfig, type Config } from "./config.ts";
-import { validSystemName, type AccountResolver, type LocalAccount } from "./local-accounts.ts";
-import { PoolFull, type WorkerPool, type WorkerSpec } from "./worker-pool.ts";
+import { type AccountResolver, type LocalAccount } from "./local-accounts.ts";
+import { PoolFull, StaleEpoch, type WorkerPool, type WorkerSpec } from "./worker-pool.ts";
 import { WorkerGone } from "./worker-proto.ts";
 import { JOBS_HEADER } from "./worker.ts";
 
@@ -48,7 +48,7 @@ const json = (error: string, status: number, headers?: Record<string, string>) =
 
 /**
  * The worker's answer as the client gets it. A worker is not trusted: its status must be 200-599 (else 502), and the headers above
- * (also every header that its `connection` header names) are dropped. A body that fails after the head ends with an error that holds
+ * (also every header that its `connection` header names) are dropped, and so is a `content-length` that is not a plain number. A body that fails after the head ends with an error that holds
  * none of the worker's text; the text is logged (not when `signal`, the client's, has aborted: then the client ended it).
  */
 export function clientResponse(res: Response, key: string, log: (s: string) => void, signal?: AbortSignal): Response {
@@ -57,18 +57,28 @@ export function clientResponse(res: Response, key: string, log: (s: string) => v
     log(`worker ${key}: answer with status ${res.status}`);
     return json("bad answer from the worker", 502);
   }
+  // a length the worker states is kept only when it is a plain number; the body is then held to it (more or less ends it with an error)
+  const cl = res.headers.get("content-length");
+  const length = cl !== null && /^\d{1,15}$/.test(cl) ? Number(cl) : undefined;
   const named = new Set((res.headers.get("connection") ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean));
   const headers = new Headers();
   for (const [k, v] of res.headers) if (!DROP_RESPONSE.has(k) && !k.startsWith("proxy-") && !named.has(k)) headers.append(k, v);
+  if (length === undefined) headers.delete("content-length");
   if (NULL_BODY.has(res.status) || !res.body) {
     void res.body?.cancel().catch(() => {});
     return new Response(null, { status: res.status, headers });
   }
   const reader = res.body.getReader();
+  let sent = 0;
   const body = new ReadableStream<Uint8Array>({
     async pull(ctl) {
       try {
         const { done, value } = await reader.read();
+        if (!done) sent += value.length;
+        if (length !== undefined && (done ? sent !== length : sent > length)) {
+          void reader.cancel().catch(() => {});
+          throw new Error(`the body has ${done ? "" : "more than "}${sent} bytes; it said ${length}`);
+        }
         if (done) ctl.close();
         else ctl.enqueue(value);
       } catch (e) {
@@ -94,7 +104,12 @@ export function clientResponse(res: Response, key: string, log: (s: string) => v
  *
  * Answers of its own: 401 `account changed`, 403 `no account on this machine` (unknown, or root), 503 `account lookup failed; try
  * again` (the lookup failed: never 403), 503 `too many people are using this machine; try again` with `Retry-After: 5` (`PoolFull`),
- * 503 `worker stopped` (`WorkerGone` before the head), and 500 `worker error` for any other failure (its text only in the log).
+ * 503 `worker stopped` (`WorkerGone` before the head), 503 `worker folders are not safe` (`UnsafeFolders`), and 500 `worker error` for
+ * any other failure (its text only in the log).
+ *
+ * The agent mounts it after `readOnlyGuard`, which runs as root before a request is forwarded. So with read-only prefixes set, a person
+ * can learn whether a path they cannot reach (a folder they may not pass through) is on a read-only volume: a write there gets
+ * `read-only volume` instead of the worker's `permission denied`. Accepted; the docs say so.
  */
 export function workerGate(
   _cfg: Config,
@@ -108,6 +123,22 @@ export function workerGate(
   const log = o.log ?? ((s) => console.error(s));
   /** per `kind:name`, the highest epoch seen */
   const epochs = new Map<string, number>();
+  /** per key, the fresh lookup in progress (one at a time per key; the requests that come meanwhile share it) */
+  const fresh = new Map<string, Promise<LocalAccount | null>>();
+  /** fresh when no worker runs for the key (a start then uses the account as it is now), else from the resolver's cache */
+  const lookup = (key: string, name: string): Promise<LocalAccount | null> => {
+    if (o.pool.list().some((w) => w.key === key)) return o.accounts.resolve(name, false);
+    let p = fresh.get(key);
+    if (!p) {
+      p = o.accounts.resolve(name, true);
+      fresh.set(key, p);
+      const done = () => {
+        if (fresh.get(key) === p) fresh.delete(key);
+      };
+      p.then(done, done);
+    }
+    return p;
+  };
   return async (c, next) => {
     if (isRootRoute(c.req.method, c.req.path)) return next();
     const claim = c.get("user") as UserClaim | undefined;
@@ -119,13 +150,14 @@ export function workerGate(
     if (seen === undefined || claim.epoch > seen) {
       epochs.set(who, claim.epoch); // (before the wait, so a second request at the new epoch does not stop the account again)
       // the pool takes the old workers out of its map at once, so this request cannot reach one; a new start waits for their exit
-      if (seen !== undefined) await o.pool.stopAccount(claim.kind, claim.name);
+      // (with the epoch, so a request at the old one that already waits inside the pool for a start is refused there too)
+      if (seen !== undefined) await o.pool.stopAccount(claim.kind, claim.name, claim.epoch);
     }
     const key = workerKey(claim);
     const name = claim.kind === "sys" ? claim.name : claim.runAs;
     let account: LocalAccount | null;
     try {
-      account = typeof name === "string" ? await o.accounts.resolve(name, !o.pool.list().some((w) => w.key === key)) : null;
+      account = typeof name === "string" ? await lookup(key, name) : null;
     } catch (e) {
       log(`worker ${key}: account lookup failed: ${e instanceof Error ? e.message : String(e)}`);
       return json("account lookup failed; try again", 503);
@@ -136,7 +168,7 @@ export function workerGate(
       spec = await o.spec(claim, account);
     } catch (e) {
       log(`worker ${key}: not started: ${e instanceof Error ? e.message : String(e)}`);
-      return json("worker failed to start", 503);
+      return json(e instanceof UnsafeFolders ? "worker folders are not safe" : "worker failed to start", 503);
     }
     // the epoch may have risen while this request waited above: it must not start (or reach) a worker for the old one
     if (epochs.get(who) !== claim.epoch) return json("account changed", 401);
@@ -150,6 +182,7 @@ export function workerGate(
     try {
       res = await o.pool.fetch(spec, req);
     } catch (e) {
+      if (e instanceof StaleEpoch) return json("account changed", 401);
       if (e instanceof PoolFull) return json("too many people are using this machine; try again", 503, { "retry-after": "5" });
       if (e instanceof WorkerGone) return json("worker stopped", 503);
       if (raw.signal.aborted) return new Response(null, { status: 499 });
@@ -160,53 +193,112 @@ export function workerGate(
   };
 }
 
+/** A worker folder that this process did not make just now is not the account's own and private, or is not a folder at all. */
+export class UnsafeFolders extends Error {
+  constructor(why: string) {
+    super(why);
+    this.name = "UnsafeFolders";
+  }
+}
+
+const OPEN_DIR = fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY | fsc.constants.O_NOFOLLOW;
+
 /**
- * Makes `<dir>` a folder (not a link) with `mode`, owned by `owner` when this process is root (else by this process, and one that
- * belongs to someone else is refused). Done through a descriptor opened without following a link, so a link put in its place is never
- * followed and something that is not a folder is refused.
+ * One folder of an account below the workers' area, mode 0700 and owned by the account. A folder this call makes is given to the account
+ * (as root) through a descriptor. One that is already there is never changed: it must be the account's own and not writable by group or
+ * others, else `UnsafeFolders`. This is enough because the area is root's alone (0711), so the account cannot replace its own key folder;
+ * it can replace only the last part of a path in its own folder, and the open without following a link (`O_NOFOLLOW`, `O_DIRECTORY`)
+ * refuses a link or a file there.
  */
-async function ownedDir(dir: string, mode: number, owner?: { uid: number; gid: number }): Promise<void> {
-  await fs.mkdir(dir, { mode }).catch((e: NodeJS.ErrnoException) => {
-    if (e.code !== "EEXIST") throw e;
-  });
-  const fh = await fs.open(dir, fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY | fsc.constants.O_NOFOLLOW);
+async function accountDir(dir: string, account: LocalAccount): Promise<void> {
+  let made = true;
+  try {
+    await fs.mkdir(dir, { mode: 0o700 });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    made = false;
+  }
+  let fh: fs.FileHandle;
+  try {
+    fh = await fs.open(dir, OPEN_DIR);
+  } catch (e) {
+    throw new UnsafeFolders(`${dir}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+  }
   try {
     const st = await fh.stat();
-    const me = process.getuid?.() ?? 0;
-    // root gives the folder to the account, whoever has it now (only root can make entries in the area); anyone else must own it already
-    const want = owner && me === 0 ? owner : { uid: me, gid: st.gid };
-    if (me !== 0 && st.uid !== me) throw new Error(`${dir} belongs to uid ${st.uid}`);
-    if (st.uid !== want.uid || st.gid !== want.gid) await fh.chown(want.uid, want.gid);
-    if ((st.mode & 0o7777) !== mode) await fh.chmod(mode);
+    if (made) {
+      if (process.getuid?.() === 0 && (st.uid !== account.uid || st.gid !== account.gid)) await fh.chown(account.uid, account.gid);
+      await fh.chmod(0o700);
+    } else if (st.uid !== account.uid || (st.mode & 0o022) !== 0) {
+      throw new UnsafeFolders(`${dir} has owner ${st.uid} and mode ${(st.mode & 0o7777).toString(8)}; the account is ${account.uid}`);
+    }
   } finally {
     await fh.close();
   }
 }
 
-/** The folder name of one key under the workers' area: `u<uid>` for a system account, `v-<name>-<grants hash>` for a virtual one. */
-function keyDir(claim: UserClaim, account: LocalAccount, key: string): string {
-  if (claim.kind === "sys") return `u${account.uid}`;
-  const name = validSystemName(claim.name) ? claim.name : "x";
-  return `v-${name}-${key.slice(key.lastIndexOf(":") + 1)}`;
+/**
+ * The owner part of a virtual account's folder names (`v-<this>`, also its trash folder): its name when it fits the folder name rule
+ * (Task 8's `TRASH_OWNER`), else `h` and 16 hex of its hash.
+ */
+function virtOwner(name: string): string {
+  return /^[a-z_][a-z0-9_.-]{0,31}$/.test(name) ? name : `h${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
+}
+
+/** The trash folder of an account: `u<uid>` for a system account, `v-<owner>` for a virtual one. */
+function trashFolder(claim: UserClaim, account: LocalAccount): string {
+  return claim.kind === "sys" ? `u${account.uid}` : `v-${virtOwner(claim.name)}`;
 }
 
 /**
- * The `spec` of `workerGate`: the worker's start-up message from `workerConfig` (no secret) with its own temporary, thumbnail and index
- * folders under `<tmp>/filedeck-workers/<key folder>/` (the area itself 0711 and this process's own; each key's folders 0700 and the
- * account's). Task 7 replaces these folders (`accountDirs`) and adds Landlock for virtual accounts; until then no spec has Landlock.
+ * The folder of one key under the workers' area: the trash folder name, and for a virtual account its grants hash as well. Two system
+ * names with one uid share `u<uid>` (they are the same user to the kernel).
  */
-export function makeWorkerSpec(cfg: Config, o: { base?: string } = {}): (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec> {
-  const base = o.base ?? path.join(os.tmpdir(), "filedeck-workers");
-  return async (claim, account) => {
+function keyDir(claim: UserClaim, account: LocalAccount, key: string): string {
+  const owner = trashFolder(claim, account);
+  return claim.kind === "sys" ? owner : `${owner}-${key.slice(key.lastIndexOf(":") + 1)}`;
+}
+
+export interface WorkerSpecs {
+  /** the `spec` of `workerGate` */
+  spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
+  /** the workers' area of this agent */
+  base: string;
+  /** removes the area (once no worker runs) */
+  close(): void;
+}
+
+/**
+ * The specs of the workers: the start-up message from `workerConfig` (no secret), and per key a temporary, a thumbnail and an index
+ * folder in `<key folder>/` below an area made new for this agent (`mkdtemp` in the temporary folder: root's and 0711 when the agent
+ * runs as root, else 0700), kept while it runs and removed by `close`. An area that exists already is never used. The folders of a key
+ * are made once (also while several requests wait for them) and made again only after a start with them failed. Task 7 replaces these
+ * folders (`accountDirs`, which must follow the same rules) and adds Landlock for virtual accounts; until then no spec has Landlock.
+ */
+export function makeWorkerSpecs(cfg: Config): WorkerSpecs {
+  const base = fsc.mkdtempSync(path.join(os.tmpdir(), "filedeck-workers-"));
+  fsc.chmodSync(base, process.getuid?.() === 0 ? 0o711 : 0o700);
+  /** per key folder and uid, the folders once made */
+  const ready = new Map<string, Promise<{ tmp: string; thumbs: string; index: string }>>();
+  const prepare = (dir: string, account: LocalAccount) => {
+    const id = `${dir}:${account.uid}`;
+    let p = ready.get(id);
+    if (!p) {
+      p = (async () => {
+        await accountDir(dir, account);
+        const d = { tmp: path.join(dir, "tmp"), thumbs: path.join(dir, "thumbs"), index: path.join(dir, "index") };
+        for (const sub of [d.tmp, d.thumbs, d.index]) await accountDir(sub, account);
+        return d;
+      })();
+      ready.set(id, p);
+      p.catch(() => ready.get(id) === p && ready.delete(id)); // a failure is tried again on the next request
+    }
+    return { id, p };
+  };
+  const spec = async (claim: UserClaim, account: LocalAccount): Promise<WorkerSpec> => {
     const key = workerKey(claim);
-    const dir = path.join(base, keyDir(claim, account, key));
-    const owner = { uid: account.uid, gid: account.gid };
-    await ownedDir(base, 0o711);
-    await ownedDir(dir, 0o700, owner);
-    const tmp = path.join(dir, "tmp");
-    const thumbs = path.join(dir, "thumbs");
-    const index = path.join(dir, "index");
-    for (const d of [tmp, thumbs, index]) await ownedDir(d, 0o700, owner);
+    const { id, p } = prepare(path.join(base, keyDir(claim, account, key)), account);
+    const d = await p;
     return {
       key,
       kind: claim.kind,
@@ -214,11 +306,16 @@ export function makeWorkerSpec(cfg: Config, o: { base?: string } = {}): (claim: 
       epoch: claim.epoch,
       account,
       init: {
-        cfg: workerConfig(cfg, { thumbs, index }),
+        cfg: workerConfig(cfg, { thumbs: d.thumbs, index: d.index }),
         account: { kind: claim.kind, name: claim.name, uid: account.uid },
-        trashFolder: claim.kind === "sys" ? `u${account.uid}` : `v-${claim.name}`,
+        trashFolder: trashFolder(claim, account),
       },
-      tmp,
+      tmp: d.tmp,
+      // the folders may be what failed (removed, or changed): the next start makes and checks them again
+      startFailed: () => {
+        if (ready.get(id) === p) ready.delete(id);
+      },
     };
   };
+  return { spec, base, close: () => fsc.rmSync(base, { recursive: true, force: true }) };
 }

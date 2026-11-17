@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, workerConfig } from "../src/config.ts";
 import { createWorkerApp, type WorkerInit } from "../src/worker.ts";
 import { WorkerGone } from "../src/worker-proto.ts";
-import { BACKOFF_MS, PoolFull, WorkerPool, startWorkerProcess, workerLog, type StartWorker, type WorkerSpec } from "../src/worker-pool.ts";
+import { BACKOFF_MS, PoolFull, StaleEpoch, WorkerPool, startWorkerProcess, workerLog, type StartWorker, type WorkerSpec } from "../src/worker-pool.ts";
 import { resetSandbox } from "../src/sandbox.ts";
 import { useSandbox } from "./sandbox-env.ts";
 import { chownForTest, testAccount } from "./worker-env.ts";
@@ -292,6 +292,48 @@ test("stopKey during a start: the waiting request gets a fresh start", async () 
   await ok(await pending);
   assert.equal(children.length, 2);
   assert.equal(pidOf(p, "sys:stop-starting"), children[1]!.pid);
+});
+
+test("old epoch: a request waiting in a start when the epoch rises is refused, and the worker that stays has the new epoch", async () => {
+  const epochs = new Map<number, number>();
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let calls = 0;
+  const p = pool({
+    start: async (s) => {
+      if (calls++ === 0) await held; // the first start is held back
+      const child = await startWorkerProcess(s);
+      epochs.set(child.pid!, s.epoch);
+      return child;
+    },
+  });
+  const old = { ...spec("sys:epoch"), name: "epoch", epoch: 1 };
+  const first = stat(p, old);
+  assert.ok(await until(() => calls === 1, 2000));
+  const newer = { ...old, epoch: 2 };
+  const stopping = p.stopAccount("sys", "epoch", 2);
+  const second = stat(p, newer);
+  release();
+  await stopping;
+  await assert.rejects(first, StaleEpoch);
+  await ok(await second);
+  assert.equal(epochs.get(pidOf(p, "sys:epoch")), 2);
+  // a later request at the old epoch never starts a worker
+  await p.stopKey("sys:epoch");
+  const before = calls;
+  await assert.rejects(stat(p, old), StaleEpoch);
+  assert.equal(calls, before);
+});
+
+test("old epoch: the limit is checked after the start rules have waited", async () => {
+  let calls = 0;
+  const p = pool({ start: (s) => (calls++, startWorkerProcess(s)) });
+  const old = { ...spec("sys:epoch2"), name: "epoch2", epoch: 1 };
+  const r = stat(p, old); // waits in the (async) start rules
+  void p.stopAccount("sys", "epoch2", 2);
+  await assert.rejects(r, StaleEpoch);
+  assert.equal(calls, 0);
+  assert.equal(p.list().length, 0);
 });
 
 test("close during a start: the waiting request gets WorkerGone and nothing is left", async () => {

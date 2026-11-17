@@ -41,9 +41,19 @@ export interface WorkerSpec {
   tmp?: string;
   /** closes descriptor roots once the start is over, whether it worked or not */
   release?: () => void;
+  /** called when a start with this spec fails (not when it is refused or cancelled), so that the caller can prepare it again */
+  startFailed?: () => void;
 }
 
 export type StartWorker = (spec: WorkerSpec) => Promise<ChildProcess>;
+
+/** The spec's epoch is under the lowest one its account may still use (`stopAccount` with an epoch): the account has changed. */
+export class StaleEpoch extends Error {
+  constructor() {
+    super("account changed");
+    this.name = "StaleEpoch";
+  }
+}
 
 /** Every worker is busy and the pool holds `max`: no room for another key. */
 export class PoolFull extends Error {
@@ -267,6 +277,8 @@ export class WorkerPool {
   private readonly procs = new Set<Live>();
   /** per key, the stop of its old process: a new start for the key waits for it */
   private readonly stoppingKeys = new Map<string, Promise<void>>();
+  /** per `kind:name`, the lowest epoch a new start may have (raised by `stopAccount` with an epoch) */
+  private readonly minEpoch = new Map<string, number>();
   private readonly timer: ReturnType<typeof setInterval>;
   private closed = false;
 
@@ -293,11 +305,12 @@ export class WorkerPool {
 
   /**
    * Sends `req` to the worker for `spec.key`, started first when none runs. A start the rules refuse, or one that fails, is answered
-   * here (403 or 503, JSON `{error}`). Throws `PoolFull` when there is no room, and `WorkerGone` when the worker stops before its answer
-   * has started (after that, the answer's body errors).
+   * here (403 or 503, JSON `{error}`). Throws `StaleEpoch` for a spec under its account's lowest allowed epoch, `PoolFull` when there
+   * is no room, and `WorkerGone` when the worker stops before its answer has started (after that, the answer's body errors).
    */
   async fetch(spec: WorkerSpec, req: Request): Promise<Response> {
     if (this.closed) throw new WorkerGone();
+    this.checkEpoch(spec);
     // a running worker gets the request at once (no await before `mux.fetch`, so nothing can stop it in between)
     let w = this.workers.get(spec.key);
     if (!w) {
@@ -323,9 +336,23 @@ export class WorkerPool {
     await this.stopWhere((s) => s.key === key);
   }
 
-  /** Stops every worker of one account, whatever its key (a virtual account has a key per set of grants). */
-  async stopAccount(kind: "sys" | "virt", name: string): Promise<void> {
+  /**
+   * Stops every worker of one account, whatever its key (a virtual account has a key per set of grants). With `epoch`, no worker of
+   * the account is started any more for a spec with a lower epoch: such a request gets `StaleEpoch`, also one that is already waiting
+   * for a start here (it would otherwise start again with its own, old spec).
+   */
+  async stopAccount(kind: "sys" | "virt", name: string, epoch?: number): Promise<void> {
+    if (epoch !== undefined) {
+      const id = `${kind}:${name}`;
+      if (epoch > (this.minEpoch.get(id) ?? -Infinity)) this.minEpoch.set(id, epoch);
+    }
     await this.stopWhere((s) => s.kind === kind && s.name === name);
+  }
+
+  /** throws `StaleEpoch` for a spec under its account's lowest allowed epoch */
+  private checkEpoch(spec: WorkerSpec): void {
+    const min = this.minEpoch.get(`${spec.kind}:${spec.name}`);
+    if (min !== undefined && spec.epoch < min) throw new StaleEpoch();
   }
 
   list(): { key: string; pid: number; busy: boolean; lastUsed: number }[] {
@@ -364,6 +391,7 @@ export class WorkerPool {
    */
   private async join(spec: WorkerSpec): Promise<Live | Refusal> {
     const key = spec.key;
+    this.checkEpoch(spec); // (also on every retry after a cancelled start)
     let st = this.starting.get(key);
     if (!st) {
       const until = this.failed.get(key);
@@ -389,6 +417,8 @@ export class WorkerPool {
           if (!lru) throw new PoolFull();
           void this.stop(lru);
         }
+        // (the start rules above may have waited while the account's epoch rose: checked again with no wait before the new start)
+        this.checkEpoch(spec);
         st = { spec, promise: null!, waiters: 0, cancelled: false };
         // in the map before the start runs, so that a start which ends at once still finds (and removes) its own slot
         this.starting.set(key, st);
@@ -469,6 +499,11 @@ export class WorkerPool {
         w.child.kill("SIGKILL");
       } else child?.kill("SIGKILL");
       if (st.cancelled || this.closed) return null;
+      try {
+        spec.startFailed?.();
+      } catch {
+        /* the caller's hook does not change the answer */
+      }
       this.failed.set(key, this.now() + BACKOFF_MS);
       if (this.failed.size > 4096) {
         const now = this.now();

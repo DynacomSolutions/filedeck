@@ -9,8 +9,8 @@ import { Hono } from "hono";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts";
-import { isRootRoute, workerGate, workerKey } from "../src/agent-workers.ts";
-import { PoolFull, type StartWorker, type WorkerPool, type WorkerSpec } from "../src/worker-pool.ts";
+import { isRootRoute, makeWorkerSpecs, workerGate, workerKey } from "../src/agent-workers.ts";
+import { PoolFull, StaleEpoch, startWorkerProcess, type StartWorker, type WorkerPool, type WorkerSpec } from "../src/worker-pool.ts";
 import { WorkerGone } from "../src/worker-proto.ts";
 import { sandboxInfo } from "../src/sandbox.ts";
 import type { AccountResolver } from "../src/local-accounts.ts";
@@ -51,6 +51,9 @@ function agent(env: Record<string, string> = {}, opts: { accounts?: AccountResol
   return app;
 }
 const poolOf = (app: Agent) => (app as unknown as { pool?: WorkerPool }).pool;
+const baseOf = (app: Agent) => (app as unknown as { workerBase?: string }).workerBase;
+const IS_ROOT = process.getuid?.() === 0;
+const me = process.getuid?.() ?? 0;
 
 const sys = (name: string, epoch = 1): UserClaim => ({ kind: "sys", name, epoch, iat: Date.now() });
 const virt = (name: string, grants: UserClaim["grants"], epoch = 1): UserClaim => ({ kind: "virt", name, epoch, runAs: "guest", grants, iat: Date.now() });
@@ -192,6 +195,113 @@ test("epoch change", async () => {
   assert.equal((await get(app, "/api/fs/stat?path=/", g2)).status, 401, "the other grants at the old epoch");
 });
 
+test("old epoch inside the pool: a request waiting in a held-back start gets 401, and the worker that stays has the new epoch", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const epochOf = new Map<number, number>();
+  let calls = 0;
+  const app = agent({}, {
+    accounts: accounts(),
+    startWorker: async (s) => {
+      if (calls++ === 0) await held;
+      const child = await startWorkerProcess(s);
+      epochOf.set(child.pid!, s.epoch);
+      return child;
+    },
+  });
+  const old = get(app, "/api/fs/stat?path=/", sys("alice", 1));
+  assert.ok(await until(() => calls === 1, 5000));
+  const newer = get(app, "/api/fs/stat?path=/", sys("alice", 2));
+  await new Promise((r) => setTimeout(r, 50)); // (the new epoch has reached the pool's stop)
+  release();
+  const o = await old;
+  assert.equal(o.status, 401);
+  assert.deepEqual(await o.json(), { error: "account changed" });
+  assert.equal((await newer).status, 200);
+  const live = poolOf(app)!.list();
+  assert.equal(live.length, 1);
+  assert.equal(epochOf.get(live[0]!.pid), 2);
+});
+
+test("the workers' area is new for each agent, root's only, and removed on close", async () => {
+  const a = agent();
+  const b = agent();
+  const base = baseOf(a)!;
+  assert.ok(base && baseOf(b) && base !== baseOf(b));
+  const st = fs.lstatSync(base);
+  assert.ok(st.isDirectory());
+  assert.equal(st.uid, me);
+  assert.equal(st.mode & 0o7777, IS_ROOT ? 0o711 : 0o700);
+  assert.equal((await get(a, "/api/fs/stat?path=/", sys("alice"))).status, 200);
+  const key = fs.lstatSync(path.join(base, `u${fakeAccountUid()}`));
+  assert.equal(key.mode & 0o7777, 0o700);
+  await (a as unknown as { close(): Promise<void> }).close();
+  assert.ok(!fs.existsSync(base), "removed on close");
+});
+
+const fakeAccountUid = () => (IS_ROOT ? 65534 : me);
+
+test("a key folder that is already there must be the account's own and private, and is never changed", async () => {
+  const logs: string[] = [];
+  const orig = console.error;
+  console.error = (s: string) => logs.push(String(s));
+  try {
+    const app = agent({}, { accounts: fakeResolver({ alice: {}, carol: { uid: 4242 } }) });
+    const base = baseOf(app)!;
+    // owned by another uid (this process): refused, and left as it was
+    const carol = path.join(base, "u4242");
+    fs.mkdirSync(carol, { mode: 0o700 });
+    const r = await get(app, "/api/fs/stat?path=/", sys("carol"));
+    assert.equal(r.status, 503);
+    assert.deepEqual(await r.json(), { error: "worker folders are not safe" });
+    assert.equal(fs.lstatSync(carol).uid, me, "not given away");
+    assert.ok(logs.some((l) => l.includes("u4242") && l.includes("owner")), logs.join("\n"));
+    // a link in place of the key folder
+    const own = path.join(base, `u${fakeAccountUid()}`);
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-elsewhere-"));
+    fs.symlinkSync(elsewhere, own);
+    const l = await get(app, "/api/fs/stat?path=/", sys("alice"));
+    assert.equal(l.status, 503);
+    assert.deepEqual(await l.json(), { error: "worker folders are not safe" });
+    assert.deepEqual(fs.readdirSync(elsewhere), [], "nothing made through the link");
+    fs.rmSync(elsewhere, { recursive: true });
+    // one others may write to
+    fs.unlinkSync(own);
+    fs.mkdirSync(own, { mode: 0o700 });
+    if (IS_ROOT) fs.chownSync(own, 65534, 65534);
+    fs.chmodSync(own, 0o770);
+    assert.equal((await get(app, "/api/fs/stat?path=/", sys("alice"))).status, 503);
+    assert.equal(fs.lstatSync(own).mode & 0o7777, 0o770, "not changed");
+    assert.equal(poolOf(app)!.list().length, 0, "no worker started");
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("worker folders: made once per key, made again after a failed start; one name rule for folders and trash", async () => {
+  const specs = makeWorkerSpecs(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+  try {
+    const account = (await accounts().resolve("alice"))!;
+    const s1 = await specs.spec(sys("alice"), account);
+    const dir = path.dirname(s1.tmp!);
+    fs.chmodSync(dir, 0o777); // would be refused if it were checked again
+    const s2 = await specs.spec(sys("alice"), account);
+    assert.equal(s2.tmp, s1.tmp, "the folders are not checked again for each request");
+    s2.startFailed!();
+    await assert.rejects(specs.spec(sys("alice"), account), /owner .* mode 777/);
+    fs.chmodSync(dir, 0o700);
+    // a virtual account's name that does not fit the folder rule: one name for its folders and its trash
+    const v = await specs.spec(virt("Guest One", [{ path: "/", write: true }]), account);
+    assert.match(v.init.trashFolder, /^v-h[0-9a-f]{16}$/);
+    assert.ok(path.basename(path.dirname(v.tmp!)).startsWith(`${v.init.trashFolder}-`));
+    const w = await specs.spec(virt("guest1", [{ path: "/", write: true }]), account);
+    assert.equal(w.init.trashFolder, "v-guest1");
+    assert.match(path.basename(path.dirname(w.tmp!)), /^v-guest1-[0-9a-f]{16}$/);
+  } finally {
+    specs.close();
+  }
+});
+
 test("auth off", async () => {
   let starts = 0;
   let lookups = 0;
@@ -251,7 +361,7 @@ function gateApp(o: { fetch?: (spec: WorkerSpec, req: Request) => Promise<Respon
       return o.fetch ? o.fetch(spec, req) : new Response("ok");
     },
     list: () => [],
-    async stopAccount(kind: string, name: string) {
+    async stopAccount(kind: string, name: string, _epoch?: number) {
       stopped.push(`${kind}:${name}`);
     },
   } as unknown as WorkerPool;
@@ -373,6 +483,41 @@ test("the gate's answers: pool full, worker gone, worker error, lookup failed", 
   // a request without a claim never reaches a worker
   const none = await g.call("/api/fs/stat?path=/");
   assert.equal(none.status, 401);
+});
+
+test("a stale epoch from the pool is 401; one fresh lookup per key at a time", async () => {
+  const g = gateApp({ fetch: async () => Promise.reject(new StaleEpoch()) });
+  const r = await g.call("/api/fs/stat?path=/", { claim: sys("alice") });
+  assert.equal(r.status, 401);
+  assert.deepEqual(await r.json(), { error: "account changed" });
+  let freshCalls = 0;
+  let release!: () => void;
+  const slow = new Promise<void>((res) => (release = res));
+  const base = accounts();
+  const h = gateApp({ accounts: { resolve: async (n, f) => (f && freshCalls++, await slow, base.resolve(n, f)) } });
+  const all = [1, 2, 3].map(() => h.call("/api/fs/stat?path=/", { claim: sys("alice") }));
+  await new Promise((res) => setTimeout(res, 20));
+  release();
+  for (const x of await Promise.all(all)) assert.equal(x.status, 200);
+  assert.equal(freshCalls, 1);
+});
+
+test("a content-length from the worker: kept when it is a number and the body is held to it, else dropped", async () => {
+  const logs: string[] = [];
+  let res = () => new Response("abc", { headers: { "content-length": "10" } });
+  const g = gateApp({ logs, fetch: async () => res() });
+  const short = await g.call("/api/fs/read?path=/a.txt", { claim: sys("alice") });
+  assert.equal(short.headers.get("content-length"), "10");
+  await assert.rejects(short.text());
+  assert.ok(logs.some((l) => l.includes("it said 10")));
+  res = () => new Response("abcdef", { headers: { "content-length": "2" } });
+  await assert.rejects((await g.call("/api/fs/read?path=/a.txt", { claim: sys("alice") })).text());
+  res = () => new Response("abc", { headers: { "content-length": "3" } });
+  assert.equal(await (await g.call("/api/fs/read?path=/a.txt", { claim: sys("alice") })).text(), "abc");
+  res = () => new Response("abc", { headers: { "content-length": "3, 3" } });
+  const odd = await g.call("/api/fs/read?path=/a.txt", { claim: sys("alice") });
+  assert.equal(odd.headers.get("content-length"), null);
+  assert.equal(await odd.text(), "abc");
 });
 
 test("an error after the head ends the body with an error that holds none of the worker's text", async () => {
