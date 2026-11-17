@@ -81,3 +81,17 @@ test("bootstrap", () => {
   bootstrapAdmin(acc, f);
   assert.equal(acc.epochOf("virt", "admin"), 1);
 });
+
+test("missing account", () => {
+  const acc = new Accounts(new AuthDb(":memory:"));
+  assert.throws(() => acc.addKey("ghost", "ssh-ed25519 AAAA x"), (e: unknown) => e instanceof AccountError && e.message === "no such account");
+  assert.throws(() => acc.bumpEpoch("virt", "ghost"), (e: unknown) => e instanceof AccountError && e.message === "no such account");
+});
+
+test("bootstrap refuses a bad hash", () => {
+  const acc = new Accounts(new AuthDb(":memory:"));
+  const f = path.join(tmp(), "admin.json");
+  fs.writeFileSync(f, JSON.stringify({ name: "admin", passwordHash: "plaintext" }));
+  assert.throws(() => bootstrapAdmin(acc, f), /not a scrypt hash/);
+  assert.equal(acc.get("admin"), undefined);
+});

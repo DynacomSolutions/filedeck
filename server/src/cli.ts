@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { run, USAGE } from "./du-cli.ts";
-import { hashPassword } from "./auth/store.ts";
 
 const HASH_USAGE = "       filedeck hash-password   (reads one line from stdin, prints a password hash)";
 
@@ -32,7 +31,13 @@ async function readPassword(): Promise<string> {
 
 const [cmd, ...args] = process.argv.slice(2);
 if (cmd === "hash-password") {
-  process.stdout.write(`${hashPassword(await readPassword())}\n`);
+  const pw = await readPassword();
+  if (!pw) {
+    process.stderr.write("filedeck hash-password: the password is empty\n");
+    process.exit(2);
+  }
+  const { hashPassword } = await import("./auth/store.ts");
+  process.stdout.write(`${hashPassword(pw)}\n`);
   process.exit(0);
 }
 if (cmd !== "du") {

@@ -12,6 +12,7 @@ import type { Identity, NodeAccess } from "./identity.ts";
 
 export class AccountError extends Error {}
 
+const HASH_RE = /^scrypt\$\d+\$\d+\$\d+\$[A-Za-z0-9+/]+=*\$[A-Za-z0-9+/]+=*$/;
 const NAME_RE = /^[a-z_][a-z0-9_.-]{0,31}$/;
 
 export class AuthDb {
@@ -79,11 +80,11 @@ export function hashPassword(pw: string): string {
   return `scrypt$${LOG_N}$${R}$${P}$${salt.toString("base64")}$${derive(pw, salt, LOG_N, R, P).toString("base64")}`;
 }
 
-const DUMMY = hashPassword("filedeck dummy password");
+let dummy: string | undefined;
 
 /** Same work whether or not a hash is stored. With no stored hash it hashes against a fixed dummy, then answers false. */
 export function checkPassword(pw: string, stored: string | null): boolean {
-  const ok = verify(pw, stored ?? DUMMY);
+  const ok = verify(pw, stored ?? (dummy ??= hashPassword("filedeck dummy password")));
   return stored !== null && ok;
 }
 
@@ -130,9 +131,14 @@ export class Accounts {
     if (!NAME_RE.test(a.name) || a.name === "root") throw new AccountError("invalid name");
     if (this.get(a.name)) throw new AccountError("exists");
     const hash = a.passwordHash ?? (a.password !== undefined ? hashPassword(a.password) : null);
-    this.db
-      .prepare("INSERT INTO accounts (name, password_hash, admin, epoch, nodes) VALUES (?, ?, ?, 0, ?)")
-      .run(a.name, hash, a.admin ? 1 : 0, JSON.stringify(a.nodes));
+    try {
+      this.db
+        .prepare("INSERT INTO accounts (name, password_hash, admin, epoch, nodes) VALUES (?, ?, ?, 0, ?)")
+        .run(a.name, hash, a.admin ? 1 : 0, JSON.stringify(a.nodes));
+    } catch (e) {
+      if (/UNIQUE|PRIMARY KEY/i.test((e as Error).message)) throw new AccountError("exists");
+      throw e;
+    }
   }
 
   get(name: string): AccountRecord | undefined {
@@ -148,6 +154,7 @@ export class Accounts {
   }
 
   addKey(name: string, publicKeyLine: string): void {
+    if (!this.get(name)) throw new AccountError("no such account");
     this.db.prepare("INSERT OR IGNORE INTO account_keys (name, public_key) VALUES (?, ?)").run(name, publicKeyLine);
   }
 
@@ -161,7 +168,8 @@ export class Accounts {
       this.epochOf("sys", name);
       this.db.prepare("UPDATE sys_users SET epoch = epoch + 1 WHERE name = ?").run(name);
     } else {
-      this.db.prepare("UPDATE accounts SET epoch = epoch + 1 WHERE name = ?").run(name);
+      const r = this.db.prepare("UPDATE accounts SET epoch = epoch + 1 WHERE name = ?").run(name);
+      if (r.changes === 0) throw new AccountError("no such account");
     }
     return this.epochOf(kind, name);
   }
@@ -187,6 +195,7 @@ export function bootstrapAdmin(acc: Accounts, file: string | undefined): void {
   if (!file) return;
   const j = JSON.parse(fs.readFileSync(file, "utf8")) as { name?: unknown; passwordHash?: unknown };
   if (typeof j.name !== "string" || typeof j.passwordHash !== "string") throw new Error("admin bootstrap file needs name and passwordHash");
+  if (!HASH_RE.test(j.passwordHash)) throw new Error("admin bootstrap passwordHash is not a scrypt hash");
   if (acc.get(j.name)) return;
   acc.create({ name: j.name, passwordHash: j.passwordHash, admin: true, nodes: {} });
 }
