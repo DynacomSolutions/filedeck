@@ -571,6 +571,45 @@ test("bounded maps: epochs for a bounded number of accounts; an account's folder
   }
 });
 
+test("the workers' temporary folder: a folder above it that others may change without the sticky bit refuses the workers", async () => {
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never);
+  const account = (await accounts().resolve("alice"))!;
+  const above = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-above-")));
+  const inner = path.join(above, "inner");
+  fs.mkdirSync(inner, { mode: 0o700 });
+  const old = process.env.TMPDIR;
+  process.env.TMPDIR = inner;
+  try {
+    for (const [mode, ok] of [
+      [0o777, false], // open to others, not sticky: someone else could move `inner` away
+      [0o1777, true],
+      [0o755, true],
+    ] as const) {
+      fs.chmodSync(above, mode);
+      const logs: string[] = [];
+      const specs = makeWorkerSpecs(cfg, { log: (l) => logs.push(l) });
+      try {
+        if (ok) {
+          assert.ok(specs.base.startsWith(inner + "/"), `${mode.toString(8)}: ${logs.join("\n")}`);
+          await specs.spec(sys("alice"), account);
+        } else {
+          assert.equal(specs.base, "", "no area made");
+          assert.ok(logs.some((l) => l.includes("workers are refused") && l.includes(above)), logs.join("\n"));
+          await assert.rejects(specs.spec(sys("alice"), account), { name: "UnsafeFolders" });
+          assert.equal(fs.lstatSync(above).mode & 0o7777, 0o777, "a folder above is never changed");
+        }
+      } finally {
+        await specs.close();
+      }
+    }
+  } finally {
+    if (old === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = old;
+    fs.chmodSync(above, 0o755);
+    fs.rmSync(above, { recursive: true, force: true });
+  }
+});
+
 test("thumbnail caches: each account gets its share of the limit", async () => {
   const MiB = 1024 * 1024;
   const account = (await accounts().resolve("alice"))!;

@@ -204,7 +204,8 @@ export function tightenTop(dir: string, log: (s: string) => void): void {
 
 /**
  * At agent start (sign-in on): the temporary folder `dir` (a real path) that holds the workers' area must not let anyone else rename the
- * area or put another folder in its place. It must be root's (or this process's); when others may write to it (an empty volume such as the
+ * area or put another folder in its place. It must be root's (or this process's), and so must every folder above it, each of them sticky
+ * when others may write to it (these are never changed); when others may write to it (an empty volume such as the
  * chart's `/tmp` is 0777) it must have the sticky bit, which is set here through a descriptor when the folder is this process's, with one
  * log line. Null when the folder is fine (now); else why the workers are refused (logged once: every start then answers 503 "worker folders
  * are not safe").
@@ -227,6 +228,19 @@ export function workersParent(dir: string, log: (s: string) => void): string | n
     const mode = st.mode & 0o7777;
     const shown = `the temporary folder ${dir} has owner ${st.uid} and mode ${mode.toString(8)}`;
     if (st.uid !== 0 && st.uid !== me) return refuse(`${shown}; its owner could move the workers' folders`);
+    // every folder above it too (never changed here): someone who could move one of them could move the whole temporary folder
+    for (let d = path.dirname(dir); ; d = path.dirname(d)) {
+      let a: fsc.Stats;
+      try {
+        a = fsc.lstatSync(d);
+      } catch (e) {
+        return refuse(`the folder ${d} above the temporary folder cannot be read (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
+      }
+      const m = a.mode & 0o7777;
+      if ((a.uid !== 0 && a.uid !== me) || ((m & 0o022) !== 0 && (m & 0o1000) === 0))
+        return refuse(`the folder ${d} above the temporary folder has owner ${a.uid} and mode ${m.toString(8)}; others could move the workers' folders`);
+      if (d === path.dirname(d)) break;
+    }
     if ((mode & 0o022) === 0 || mode & 0o1000) return null;
     if (st.uid !== me) return refuse(`${shown}; others may move the workers' folders`);
     fsc.fchmodSync(fd, mode | 0o1000);
