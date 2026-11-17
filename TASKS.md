@@ -74,7 +74,7 @@ ETA: 2026-11-17 16:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 45 | Remove rebuildable and temporary material from this repo's .data folder and finished task worktrees | done | claude-20261021-cleanup | cleanup-20261021 | | 2026-10-21 00:19 ICT | Freed about 0.9 GiB: generated lag test tree, node_modules, dist copies, release tarballs; finished merged task worktree board-format-20261020. Kept scripts, notes and evidence. Was FD-44. |
-| 155 | A friendlier README with screenshots of the app on demo data; detailed reference moved to docs/ | done | claude-20261117-readme-friendly | readme-friendly | | | Merged https://github.com/DynacomSolutions/filedeck/pull/230 (3445c5d).<br>Screenshots from a local hub and three agents on made-up demo folders (no real data).<br>Reference sections moved word for word to docs/*.md and CONTRIBUTING.md. |
+| 155 | A friendlier README with screenshots of the app on demo data; detailed reference moved to docs/ | done | claude-20261117-readme-friendly | readme-friendly | | | Merged https://github.com/DynacomSolutions/filedeck/pull/230 (3445c5d); banner in https://github.com/DynacomSolutions/filedeck/pull/231 (ca859ad).<br>Screenshots from a local hub and three agents on made-up demo folders (no real data).<br>Reference sections moved word for word to docs/*.md and CONTRIBUTING.md. |
 
 ## 7. Sidebar tree
 ETA: 2026-10-21 04:30 ICT
