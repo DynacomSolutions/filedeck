@@ -319,7 +319,7 @@ test("HEAD through the gate: 200, the length kept, nothing logged as failed", as
   }
 });
 
-test("a new key folder: its subfolders are made while it is still root's, and a folder swapped in is refused, never changed", async () => {
+test("a new key folder: its tmp is made while it is still root's, and a folder swapped in is refused, never changed", async () => {
   const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never);
   const account = (await accounts().resolve("alice"))!;
   const other = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-swapped-"));
@@ -366,8 +366,9 @@ test("a new key folder: its subfolders are made while it is still root's, and a 
       seen.length = 0;
       try {
         await specs3.spec(sys("alice"), account);
-        assert.deepEqual(seen.map((x) => x.step), ["key", "tmp", "thumbs", "index"]);
-        for (const x of seen.slice(1)) assert.equal(x.owner, me, "the key folder is still ours while its subfolders are made");
+        // (the caches are outside the key folder now, in their own root-owned parents: see worker-confine.test.ts)
+        assert.deepEqual(seen.map((x) => x.step).slice(0, 2), ["key", "tmp"]);
+        assert.equal(seen[1]!.owner, me, "the key folder is still ours while its tmp is made");
         const key = fs.lstatSync(path.join(specs3.base, `u${account.uid}`));
         assert.equal(key.uid, account.uid);
         assert.equal(key.mode & 0o7777, 0o700);

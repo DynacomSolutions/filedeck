@@ -1,10 +1,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadConfig, workerConfig } from "../src/config.ts";
 import { WorkerPool, type WorkerSpec } from "../src/worker-pool.ts";
+import { makeWorkerSpecs } from "../src/agent-workers.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
 /** Workers started as another user (needs root): the user, the groups and the confinement the kernel reports for the process. */
@@ -74,5 +76,60 @@ test("a worker for another user needs its own temporary folder", { skip: ROOT_ON
     assert.equal(starts, 0);
   } finally {
     await p.close();
+  }
+});
+
+test("an account's thumbnail folder is its own (0700), and files its worker extracts are owned by it", { skip: ROOT_ONLY }, async (t) => {
+  if (spawnSync("bsdtar", ["--version"], { stdio: "ignore" }).status !== 0) throw new Error("the root pass needs bsdtar");
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-worker-live-")));
+  temps.push(tmp);
+  fs.chmodSync(tmp, 0o755);
+  const root = path.join(tmp, "root");
+  fs.mkdirSync(path.join(root, "x"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "in.txt"), "extracted\n");
+  assert.equal(spawnSync("bsdtar", ["-C", tmp, "--format", "zip", "-cf", path.join(root, "x/in.zip"), "in.txt"]).status, 0);
+  fs.chmodSync(root, 0o755);
+  for (const p of [path.join(root, "x"), path.join(root, "x/in.zip")]) fs.chownSync(p, 1234, 1234);
+  const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_THUMB_DIR: path.join(tmp, "thumbs"), FILEDECK_INDEX_DIR: path.join(tmp, "index") } as never);
+  const specs = makeWorkerSpecs(cfg);
+  const account = { name: "live3", uid: 1234, gid: 1234, groups: [1234], home: "/nonexistent" };
+  const claim = { kind: "sys" as const, name: "live3", epoch: 1, iat: Date.now() };
+  const p = new WorkerPool({ max: 2, idleMs: 60_000, log: () => {} });
+  try {
+    const spec = await specs.spec(claim, account);
+    const thumbs = fs.lstatSync(path.join(tmp, "thumbs/u1234"));
+    assert.equal(thumbs.uid, 1234);
+    assert.equal(thumbs.mode & 0o7777, 0o700);
+    const parent = fs.lstatSync(path.join(tmp, "thumbs"));
+    assert.equal(parent.uid, 0);
+    assert.equal(parent.mode & 0o7777, 0o711);
+    const index = fs.lstatSync(path.join(tmp, "index/accounts/u1234"));
+    assert.equal(index.uid, 1234);
+    assert.equal(index.mode & 0o7777, 0o700);
+    // a file the worker writes is the account's
+    const w = await p.fetch(spec, new Request("http://agent/api/fs/write?path=/x/w.txt&create=1", { method: "PUT", body: "w\n" }));
+    assert.equal(w.status, 200, await w.clone().text());
+    assert.equal(fs.lstatSync(path.join(root, "x/w.txt")).uid, 1234);
+    // Archive staging refuses a work folder below a folder that is neither root's nor the worker's own. In a user namespace (a fake root)
+    // "/" belongs to an unmapped user, so every staging place is refused there; only a real root can run the extraction.
+    if (fs.statSync("/").uid !== 0) {
+      t.diagnostic("extraction not checked: / is not root's here (a user namespace)");
+      return;
+    }
+    const r = await p.fetch(spec, new Request("http://agent/api/jobs/extract", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/x/in.zip", destDir: "/x", subfolder: false }) }));
+    assert.equal(r.status, 202, await r.clone().text());
+    const { id } = (await r.json()) as { id: string };
+    let job: { state?: string } = {};
+    for (let i = 0; i < 400 && !["done", "failed", "canceled"].includes(job.state ?? ""); i++) {
+      await new Promise((res) => setTimeout(res, 25));
+      job = (await (await p.fetch(spec, new Request(`http://agent/api/jobs/${id}`))).json()) as { state: string };
+    }
+    assert.equal(job.state, "done", JSON.stringify(job));
+    const out = fs.lstatSync(path.join(root, "x/in.txt"));
+    assert.equal(out.uid, 1234);
+    assert.equal(out.gid, 1234);
+  } finally {
+    await p.close();
+    await specs.close();
   }
 });

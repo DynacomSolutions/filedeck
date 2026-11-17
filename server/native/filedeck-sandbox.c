@@ -838,7 +838,11 @@ int main(int argc, char **argv) {
       return EXIT_FAILED;
     }
   }
-  if (cap_set_all(keep_caps) < 0 || set_ambient(keep_caps) < 0) {
+  /* capset only when the sets differ from what is asked: a launcher started inside another one (a helper of a worker) holds none already,
+   * and the outer launcher's filter refuses capset */
+  uint64_t ce = ~0ULL, cp = ~0ULL, ci = ~0ULL;
+  int caps_as_asked = cap_get(&ce, &cp, &ci) == 0 && ce == keep_caps && cp == keep_caps && ci == keep_caps;
+  if ((!caps_as_asked && cap_set_all(keep_caps) < 0) || set_ambient(keep_caps) < 0) {
     fprintf(stderr, "filedeck-sandbox: capabilities: %s\n", strerror(errno));
     return EXIT_FAILED;
   }

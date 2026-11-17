@@ -27,6 +27,8 @@ const allowed = [
   /^worker live: skipped \(not running as root\)$/,
   // server/test/agent-workers.test.ts: two virtual accounts with one runAs need Landlock (their workers are confined); a kernel without it skips.
   /^sandbox live: skipped \(no Landlock on this kernel\)$/,
+  // server/test/worker-confine.test.ts: a helper program a worker starts (git, bsdtar, ffmpeg, 7zz, qpdf) that is not installed on a development machine.
+  /^worker helpers: skipped \((?:git|bsdtar|ffmpeg|7zz|qpdf) not installed here\)$/,
   // server/test/host-helpers.test.ts: the host helper tests need root (the chroot) and a glibc machine (dynamic glibc helpers);
   // the root pass sets FILEDECK_REQUIRE_HOST_HELPERS=1, which turns the glibc skip into a failure.
   /^host helpers live: skipped \(not running as root\)$/,

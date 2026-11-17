@@ -36,7 +36,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : makeResolver(cfg, (s) => console.error(s)).then((r) => r.resolver);
     found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
-    specs = makeWorkerSpecs(cfg);
+    specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [] });
     pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker });
   }
   app.use("*", trustProxies(cfg.trustedProxies));
@@ -49,7 +49,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   // sign-in on: from here on, only the root process's own routes are served in this process. The checks above still run as root first
   // (so `readOnlyGuard` answers for read-only volumes before the worker is asked; see workerGate).
   if (pool && accounts && specs) app.use("*", workerGate(cfg, { pool, accounts, spec: specs.spec }));
-  Object.assign(app, { pool, workerBase: specs?.base });
+  Object.assign(app, { pool, workerBase: specs?.base, workerSpecs: specs });
   const root = cfg.root;
 
   app.onError(agentError);

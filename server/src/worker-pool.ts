@@ -33,8 +33,13 @@ export interface WorkerSpec {
   name: string;
   epoch: number;
   account: LocalAccount;
-  /** Landlock roots (virtual accounts); without, the worker gets no Landlock ruleset */
+  /** Landlock roots (virtual accounts); without these and `openLandlock`, the worker gets no Landlock ruleset */
   landlock?: { readOnly: Root[]; readWrite: Root[]; readExec: Root[] };
+  /**
+   * opens the Landlock roots (descriptors) when a start runs, so a request that goes to a live worker opens nothing; they are released once
+   * the start is over. A failure fails the start.
+   */
+  openLandlock?: () => Promise<{ readOnly: Root[]; readWrite: Root[]; readExec: Root[]; release(): void }>;
   /** the worker's start-up message (`cfg` from `workerConfig`, so no secret) */
   init: WorkerInit;
   /** the account's own temporary folder (`TMPDIR` and `HOME` of the worker); unset = this process's temporary folder */
@@ -441,7 +446,7 @@ export class WorkerPool {
       if (!spec.tmp) return { status: 503, error: "worker has no temporary folder" };
       if (!(await launcherAvailable())) return { status: 503, error: "workers need filedeck-sandbox" };
     }
-    if (spec.landlock && (await sandboxInfo()).state !== "landlock") return { status: 503, error: "virtual accounts need Landlock on this machine" };
+    if ((spec.landlock || spec.openLandlock) && (await sandboxInfo()).state !== "landlock") return { status: 503, error: "virtual accounts need Landlock on this machine" };
     return null;
   }
 
@@ -466,10 +471,13 @@ export class WorkerPool {
       const old = this.stoppingKeys.get(key);
       if (old) await old;
       if (st.cancelled || this.closed) return null;
+      let roots: Awaited<ReturnType<NonNullable<WorkerSpec["openLandlock"]>>> | undefined;
       try {
-        child = await this.startFn(spec);
+        roots = await spec.openLandlock?.();
+        child = await this.startFn(roots ? { ...spec, landlock: { readOnly: roots.readOnly, readWrite: roots.readWrite, readExec: roots.readExec } } : spec);
       } finally {
         release();
+        roots?.release();
       }
       w = this.attach(spec, child);
       w.mux.hello(spec.init); // (throws when the message is too large)
