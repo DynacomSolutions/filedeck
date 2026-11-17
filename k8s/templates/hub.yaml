@@ -60,6 +60,28 @@ spec:
             # Sign-in (not ready to turn on yet; see docs/security.md).
             - name: FILEDECK_AUTH
               value: "on"
+            {{- with .Values.auth.admins }}
+            - name: FILEDECK_ADMINS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.auth.authNodes }}
+            - name: FILEDECK_AUTH_NODES
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: FILEDECK_PAM_SERVICE
+              value: {{ .Values.auth.pamService | quote }}
+            - name: FILEDECK_SESSION_IDLE_SECONDS
+              value: {{ .Values.auth.session.idleSeconds | quote }}
+            - name: FILEDECK_SESSION_MAX_SECONDS
+              value: {{ .Values.auth.session.maxSeconds | quote }}
+            {{- with .Values.auth.apiTokenAccount }}
+            - name: FILEDECK_API_TOKEN_ACCOUNT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.auth.bootstrapAdmin.secretName }}
+            - name: FILEDECK_BOOTSTRAP_ADMIN_FILE
+              value: /var/run/filedeck/bootstrap/{{ .Values.auth.bootstrapAdmin.key }}
+            {{- end }}
             {{- end }}
             {{- if .Values.hub.trustedProxies }}
             - name: FILEDECK_TRUSTED_PROXIES
@@ -155,6 +177,11 @@ spec:
               mountPath: /var/lib/filedeck-vault
             - name: cache
               mountPath: /var/cache/filedeck
+            {{- if and .Values.auth.enabled .Values.auth.bootstrapAdmin.secretName }}
+            - name: bootstrap-admin
+              mountPath: /var/run/filedeck/bootstrap
+              readOnly: true
+            {{- end }}
             {{- if .Values.brand.cssContent }}
             - name: brand-css
               mountPath: /app/web/assets/brand/theme.css
@@ -181,6 +208,12 @@ spec:
         - name: cache
           emptyDir:
             sizeLimit: {{ .Values.hub.cacheVolume }}
+        {{- if and .Values.auth.enabled .Values.auth.bootstrapAdmin.secretName }}
+        - name: bootstrap-admin
+          secret:
+            secretName: {{ .Values.auth.bootstrapAdmin.secretName }}
+            defaultMode: 0440
+        {{- end }}
         {{- if .Values.brand.cssContent }}
         - name: brand-css
           configMap:

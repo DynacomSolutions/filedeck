@@ -34,7 +34,29 @@ By default (sign-in off) agents run as root with the node's `/` mounted read-wri
 
 ## Turning sign-in on
 
-Sign-in is not ready to turn on yet: system accounts cannot sign in, and there is no screen to make accounts (see [Sign-in and sessions](security.md#sign-in-and-sessions)). When it is, `auth.enabled: true` sets `FILEDECK_AUTH=on` on the hub and on every agent. It needs the agent token: set `agentToken.secretName` or `agentToken.generate: true`, or the chart refuses to render with `auth.enabled needs agentToken`. With sign-in on, each agent runs every signed-in request in a worker process as that person's own user (`auth.workers.max`, default 6 at once; `auth.workers.idleSeconds`, default 600), and each worker has a heap of up to 96 MiB. So the agent's memory limit rises from 512Mi to 1Gi (`auth.agentMemoryLimit`, which replaces `agent.resources.limits.memory`), and the agent container gets the `SYS_CHROOT` capability, which it uses only to run its account lookup helper inside the node's root (`/host`), with the node's own libc and NSS; the helper is run from the image, and nothing is written on the node. Virtual accounts need Landlock ABI 3 or newer on the node (Linux 6.2); the agent logs at start whether it has it. Keep the thumbnail and index folders as the chart sets them (see [Configuration](configuration.md)): pointing them at a shared folder such as `/tmp` makes every worker start fail. The agent sets the sticky bit on the chart's `/tmp` volume at start, because the workers' temporary folders are made there. With sign-in off, none of this is rendered.
+Sign-in is not ready to turn on yet: there is no screen to make accounts or to give them machines and folders, and network sources are open to every signed-in account (see [Sign-in and sessions](security.md#sign-in-and-sessions)). When it is, `auth.enabled: true` sets `FILEDECK_AUTH=on` on the hub and on every agent. It needs the agent token: set `agentToken.secretName` or `agentToken.generate: true`, or the chart refuses to render with `auth.enabled needs agentToken`. With sign-in on, each agent runs every signed-in request in a worker process as that person's own user (`auth.workers.max`, default 6 at once; `auth.workers.idleSeconds`, default 600), and each worker has a heap of up to 96 MiB. So the agent's memory limit rises from 512Mi to 1Gi (`auth.agentMemoryLimit`, which replaces `agent.resources.limits.memory`), and the agent container gets the `SYS_CHROOT` capability, which it uses only to run its account lookup helper inside the node's root (`/host`), with the node's own libc and NSS; the helper is run from the image, and nothing is written on the node. Virtual accounts need Landlock ABI 3 or newer on the node (Linux 6.2); the agent logs at start whether it has it. Keep the thumbnail and index folders as the chart sets them (see [Configuration](configuration.md)): pointing them at a shared folder such as `/tmp` makes every worker start fail. The agent sets the sticky bit on the chart's `/tmp` volume at start, because the workers' temporary folders are made there. With sign-in off, none of this is rendered.
+
+### System sign-in (PAM)
+
+System accounts sign in with the password or `authorized_keys` they have on the machines. The values are `auth.admins` (system user names that are administrators), `auth.authNodes` (machines asked, in order; empty = the order of `nodes`), `auth.pamService` (default `filedeck`), `auth.bootstrapAdmin.secretName` and `.key` (a Secret that holds `{"name": "...", "passwordHash": "..."}` for the first virtual administrator; make the hash with `filedeck hash-password`), `auth.session.idleSeconds` and `.maxSeconds`, and `auth.apiTokenAccount` (the account the `filedeck du` token acts as).
+
+Each machine needs glibc for system sign-in: the PAM helper and the account lookup helper run inside the machine's own root with its libc and NSS. On a machine without glibc (Alpine, for example) the agent logs it and system sign-in is refused there.
+
+You must install the PAM service file on each machine, as `/etc/pam.d/<auth.pamService>`; Filedeck writes nothing on the machine. It should include the machine's normal `auth` and `account` stacks. For the Debian layout (Debian, Ubuntu), `/etc/pam.d/filedeck`:
+
+```
+@include common-auth
+@include common-account
+```
+
+For the Red Hat layout (RHEL, Fedora, Rocky, Alma), `/etc/pam.d/filedeck`:
+
+```
+auth     include system-auth
+account  include system-auth
+```
+
+Use no `session` lines. Only one hidden password prompt is answered: a stack that asks for a second factor (a one-time code) fails the attempt. The name `root` (uid 0) never signs in.
 
 ## Vault storage
 

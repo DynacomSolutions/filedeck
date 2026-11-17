@@ -78,6 +78,8 @@ spec:
               value: {{ $.Values.auth.workers.max | quote }}
             - name: FILEDECK_WORKER_IDLE_SECONDS
               value: {{ $.Values.auth.workers.idleSeconds | quote }}
+            - name: FILEDECK_PAM_SERVICE
+              value: {{ $.Values.auth.pamService | quote }}
             {{- end }}
             - name: FILEDECK_MAX_UPLOAD
               value: {{ $.Values.agent.maxUpload | quote }}

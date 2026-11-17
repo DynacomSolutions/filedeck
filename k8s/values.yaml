@@ -50,6 +50,17 @@ auth:
     idleSeconds: 600
   # agent memory limit while sign-in is on (each worker adds up to about 96Mi of heap); replaces agent.resources.limits.memory
   agentMemoryLimit: 1Gi
+  # System user names that are administrators (FILEDECK_ADMINS)
+  admins: []
+  # Machines asked to check system sign-ins, in order (FILEDECK_AUTH_NODES); empty = the order of `nodes`
+  authNodes: []
+  # PAM service on the machines (FILEDECK_PAM_SERVICE); install /etc/pam.d/<service> yourself
+  pamService: filedeck
+  # First virtual administrator: a Secret holding {"name": ..., "passwordHash": ...} under `key` (FILEDECK_BOOTSTRAP_ADMIN_FILE)
+  bootstrapAdmin: {secretName: "", key: admin.json}
+  session: {idleSeconds: 28800, maxSeconds: 604800}
+  # Account the `filedeck du` token acts as (FILEDECK_API_TOKEN_ACCOUNT)
+  apiTokenAccount: ""
 
 # Optional read-only token for the `filedeck du` CLI (hub). Name an existing Secret (created out of band, never in Git)
 # that holds a long random value under `key`; the hub then lets a request with the header `X-Filedeck-Token: <token>` call only GET /api/du and
