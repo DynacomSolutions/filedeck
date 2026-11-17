@@ -295,10 +295,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       /** give the destination file the source's modification time */
       preserveTimes?: boolean;
     } | null;
+    // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
+    for (const end of [b?.src, b?.dst]) if (typeof end?.node === "string" && !mayUse(end.node)) return noAccess(c);
     const src = b?.src && agents.get(b.src.node);
     const dst = b?.dst && agents.get(b.dst.node);
     if (!b?.src || !b.dst || !src || !dst) return c.json({ error: "unknown node" }, 404);
-    if (!mayUse(b.src.node) || !mayUse(b.dst.node)) return noAccess(c);
     if (typeof b.src.path !== "string" || typeof b.dst.dir !== "string" || !b.src.path.startsWith("/") || b.src.path === "/") {
       return c.json({ error: "invalid path" }, 400);
     }
@@ -330,9 +331,10 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
 
   // Reverse proxy: /api/nodes/<node>/<rest> -> <agent>/<rest>
   app.all("/api/nodes/:node/*", async (c) => {
+    // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
+    if (!mayUse(c.req.param("node"))) return noAccess(c);
     const target = agents.get(c.req.param("node"));
     if (!target) return c.json({ error: "unknown node" }, 404);
-    if (!mayUse(c.req.param("node"))) return noAccess(c);
     const url = new URL(c.req.url);
     // the node segment is matched as sent: its decoded form can have another length
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";

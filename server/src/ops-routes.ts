@@ -27,8 +27,9 @@ export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (n
     return p;
   };
   const node = (n: unknown): string => {
+    // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
+    if (typeof n === "string" && !mayUse(n)) throw new OpError(403, "no access to this machine");
     if (typeof n !== "string" || !agents.has(n)) throw new OpError(404, `unknown node ${String(n)}`);
-    if (!mayUse(n)) throw new OpError(403, "no access to this machine");
     return n;
   };
   const loc = (v: unknown, what: string): Loc => {
@@ -89,8 +90,9 @@ export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (n
   });
   app.get("/api/ops/jobs", (c) => c.json({ jobs: queue.list(currentUser()) }));
   // every route on one job: a job the caller may not see is not found
-  app.use("/api/ops/jobs/:id/*", async (c, next) => (queue.visible(c.req.param("id") ?? "", currentUser()) ? next() : c.json({ error: "not found" }, 404)));
-  app.use("/api/ops/jobs/:id", async (c, next) => (queue.visible(c.req.param("id") ?? "", currentUser()) ? next() : c.json({ error: "not found" }, 404)));
+  const own = async (c: import("hono").Context, next: () => Promise<void>) => (queue.visible(c.req.param("id") ?? "", currentUser()) ? next() : c.json({ error: "not found" }, 404));
+  app.use("/api/ops/jobs/:id", own);
+  app.use("/api/ops/jobs/:id/*", own);
   const one = (fn: (id: string) => unknown) => (c: import("hono").Context) => {
     const v = fn(c.req.param("id") ?? "");
     return v ? c.json(v) : c.json({ error: "not found" }, 404);

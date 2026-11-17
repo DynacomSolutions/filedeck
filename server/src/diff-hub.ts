@@ -10,7 +10,7 @@ import { CompareSession, type DirSource, type LsEntry } from "./cmp-engine.ts";
 import type { Target } from "./hub.ts";
 import { currentUser } from "./auth/context.ts";
 import type { Identity } from "./auth/identity.ts";
-import { asOwner, seesJob } from "./ops-queue.ts";
+import { asOwner, seesJob } from "./auth/job-owner.ts";
 
 async function agentError(r: Response, what: string): Promise<FsError> {
   let msg = r.statusText;
@@ -158,8 +158,9 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     if (!o || typeof o.node !== "string" || typeof o.path !== "string" || !o.path.startsWith("/")) {
       throw new FsError(400, `${what} must be {node, path} with an absolute path`);
     }
-    if (!agents.has(o.node)) throw new FsError(404, `unknown node ${o.node}`);
+    // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
     if (!mayUse(o.node)) throw new FsError(403, "no access to this machine");
+    if (!agents.has(o.node)) throw new FsError(404, `unknown node ${o.node}`);
     return { node: o.node, path: o.path };
   };
   const strip = (j: JobView) => {

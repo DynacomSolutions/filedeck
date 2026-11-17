@@ -11,6 +11,7 @@ import { loadConfig } from "../src/config.ts";
 import { USER_HEADER, verifyClaim, type NodeAccess, type UserClaim } from "../src/auth/identity.ts";
 import { withAgentToken, canUseNode, NoAccessError } from "../src/agent-auth.ts";
 import { runAs } from "../src/auth/context.ts";
+import { ownerFrom } from "../src/auth/job-owner.ts";
 
 const T = "agent-secret-forwarding";
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-authfwd-")));
@@ -263,6 +264,90 @@ test("resumed job keeps its owner: a job carried on by a new hub still runs as t
   } finally {
     A.hook = undefined;
   }
+});
+
+test("hidden node names: a node without access and a node that does not exist get the same 403; auth off keeps 404", async () => {
+  const guest = signIn(hub, "guest1");
+  fs.writeFileSync(path.join(A.root, "hidden.txt"), "x");
+  const want = { error: "no access to this machine" };
+  for (const node of ["B", "nosuch"]) {
+    const p = await call(hub, `/api/nodes/${node}/api/fs/stat?path=/`, guest);
+    assert.equal(p.status, 403, `proxy ${node}`);
+    assert.deepEqual(await p.json(), want);
+    const t = await postJson(hub, "/api/transfer", guest, { src: { node: "A", path: "/hidden.txt" }, dst: { node, dir: "/" }, op: "copy" });
+    assert.equal(t.status, 403, `transfer to ${node}`);
+    assert.deepEqual(await t.json(), want);
+    const t2 = await postJson(hub, "/api/transfer", guest, { src: { node, path: "/x" }, dst: { node: "A", dir: "/" }, op: "copy" });
+    assert.equal(t2.status, 403, `transfer from ${node}`);
+    const o = await postJson(hub, "/api/ops/jobs", guest, { op: "trash", items: [{ node, path: "/x" }] });
+    assert.equal(o.status, 403, `ops ${node}`);
+    assert.deepEqual(await o.json(), want);
+    const d = await postJson(hub, "/api/diff/jobs", guest, { left: { node: "A", path: "/" }, right: { node, path: "/" } });
+    assert.equal(d.status, 403, `diff ${node}`);
+    assert.deepEqual(await d.json(), want);
+  }
+  const off = makeHub({ FILEDECK_AUTH: "off" });
+  const u = await off.request("http://localhost/api/nodes/nosuch/api/fs/stat?path=/", {}, peer as never);
+  assert.equal(u.status, 404, "auth off: an unknown node is still 404");
+  const ut = await off.request("http://localhost/api/transfer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ src: { node: "A", path: "/hidden.txt" }, dst: { node: "nosuch", dir: "/" } }) }, peer as never);
+  assert.equal(ut.status, 404);
+});
+
+test("ownerless job resumed with auth on: it fails with no identity and sends nothing to the agent", async () => {
+  const jobsFile = path.join(tmp, "jobs-ownerless.sqlite");
+  const h1 = makeHub({ FILEDECK_JOBS_FILE: jobsFile, FILEDECK_AUTH: "off" });
+  fs.mkdirSync(path.join(A.root, "osrc"));
+  for (let i = 0; i < 4; i++) fs.writeFileSync(path.join(A.root, "osrc", `f${i}.txt`), `file ${i}`);
+  fs.mkdirSync(path.join(A.root, "odst"));
+  let firstCopy!: () => void;
+  const started = new Promise<void>((r) => (firstCopy = r));
+  A.hook = async (req) => {
+    if (new URL(req.url).pathname !== "/api/fs/copy") return;
+    firstCopy();
+    await new Promise((r) => setTimeout(r, 150));
+  };
+  try {
+    const items = [0, 1, 2, 3].map((i) => ({ node: "A", path: `/osrc/f${i}.txt` }));
+    const res = await h1.request("http://localhost/api/ops/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ op: "copy", items, dst: { node: "A", dir: "/odst" }, conflict: "overwrite" }) }, peer as never);
+    assert.equal(res.status, 202);
+    const { id } = (await res.json()) as { id: string };
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([started, new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("the job never reached a copy")), 10_000)))]).finally(() => clearTimeout(timer));
+    await h1.close();
+    hubs.splice(hubs.indexOf(h1), 1);
+    A.recs.length = 0;
+    const h2 = makeHub({ FILEDECK_JOBS_FILE: jobsFile });
+    const boss = signIn(h2, "boss", {}, true);
+    const v = await until(
+      async () => (await (await call(h2, `/api/ops/jobs/${id}`, boss)).json()) as { state: string; error?: string; items?: { state: string; error?: string }[] },
+      (x) => ["done", "failed", "canceled"].includes(x.state),
+      15_000,
+    );
+    const errors = [v.error, ...(v.items ?? []).map((i) => i.error)];
+    assert.ok(errors.includes("agent call without an identity"), `the job says why: ${JSON.stringify(v)}`);
+    assert.ok(!(v.items ?? []).some((i, n) => n > 0 && i.state === "done"), "no item after the restart was carried out");
+    assert.deepEqual(real(A.recs), [], "the agent got nothing from the new hub");
+    const guest = signIn(h2, "guest1");
+    assert.equal((await call(h2, `/api/ops/jobs/${id}`, guest)).status, 404, "an ownerless job is shown to admins only");
+  } finally {
+    A.hook = undefined;
+  }
+});
+
+test("ownerFrom: only a well-formed stored identity reads back", () => {
+  const virt = { kind: "virt", name: "g", admin: false, epoch: 1, nodes: ACCESS_A };
+  assert.deepEqual(ownerFrom(JSON.stringify(virt)), virt);
+  assert.deepEqual(ownerFrom(JSON.stringify({ kind: "sys", name: "alice", admin: true, epoch: 0 })), { kind: "sys", name: "alice", admin: true, epoch: 0 });
+  assert.equal(ownerFrom(null), undefined);
+  assert.equal(ownerFrom("not json"), undefined);
+  assert.equal(ownerFrom(JSON.stringify({ ...virt, nodes: null })), undefined);
+  assert.equal(ownerFrom(JSON.stringify({ ...virt, nodes: [] })), undefined);
+  assert.equal(ownerFrom(JSON.stringify({ ...virt, nodes: "A" })), undefined);
+  const { nodes: _n, ...noNodes } = virt;
+  assert.equal(ownerFrom(JSON.stringify(noNodes)), undefined);
+  assert.equal(ownerFrom(JSON.stringify({ kind: "root", name: "x", admin: true, epoch: 0 })), undefined);
+  assert.equal(ownerFrom(JSON.stringify({ kind: "sys", name: 5, admin: true, epoch: 0 })), undefined);
+  assert.equal(ownerFrom(JSON.stringify([virt])), undefined);
 });
 
 test("withAgentToken: no identity with auth on fails loudly; a node without access is refused", () => {
