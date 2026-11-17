@@ -80,6 +80,18 @@ export interface Config {
   vaultKey: string | undefined;
   vaultTtlMs: number;
   vaultMaxMs: number;
+  /** sign-in: off = every request is open, as before */
+  auth: boolean;
+  /** system account names that are administrators */
+  admins: string[];
+  /** hub: file that holds the first administrator's password for a first start; unset = none */
+  bootstrapAdminFile: string | undefined;
+  /** hub: SQLite file for accounts (`:memory:` when no vault volume is configured) */
+  authFile: string;
+  sessionIdleMs: number;
+  sessionMaxMs: number;
+  /** hub: account the `filedeck du` API token acts as; unset = none */
+  apiTokenAccount: string | undefined;
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -179,5 +191,13 @@ export function loadConfig(env = process.env): Config {
     vaultKey: readSecret(env, "FILEDECK_VAULT_KEY"),
     vaultTtlMs: Number(env.FILEDECK_VAULT_TTL_SECONDS ?? 30 * 60) * 1000,
     vaultMaxMs: Number(env.FILEDECK_VAULT_MAX_HOURS ?? 24) * 3600_000,
+    auth: env.FILEDECK_AUTH === "on",
+    admins: (env.FILEDECK_ADMINS ?? "").split(",").map((a) => a.trim()).filter(Boolean),
+    bootstrapAdminFile: env.FILEDECK_BOOTSTRAP_ADMIN_FILE || undefined,
+    // next to the vault, only where the vault volume is configured, so tests never touch /var/lib
+    authFile: env.FILEDECK_AUTH_FILE ?? (env.FILEDECK_VAULT_FILE ? path.join(path.dirname(env.FILEDECK_VAULT_FILE), "auth.sqlite") : ":memory:"),
+    sessionIdleMs: Number(env.FILEDECK_SESSION_IDLE_SECONDS ?? 8 * 3600) * 1000,
+    sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
+    apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
   };
 }
