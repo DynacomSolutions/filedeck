@@ -50,6 +50,13 @@ export const CLIENT_HEADER = "x-filedeck-client";
 /** The client's copies of these are dropped: the hub sets its own (the user header is signed per node, see withAgentToken). */
 const HOP = new Set([CLIENT_HEADER, USER_HEADER, "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "host", "content-length"]);
 
+/** A copy of `init` without a Cookie header. */
+function withoutCookie(init: RequestInit | undefined): RequestInit {
+  const headers = new Headers(init?.headers);
+  headers.delete("cookie");
+  return { ...init, headers };
+}
+
 function clean(h: Headers, keepLength: boolean): Headers {
   const out = new Headers();
   h.forEach((v, k) => {
@@ -107,9 +114,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   // Every call to an agent names the person behind it (with auth on, a call with nobody behind it throws). Only the open
   // probes go out without a user header: they carry no data and are made for nobody in particular.
-  const openProbe = isOpenProbe;
-  const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) =>
-    openProbe(rest) ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name))) : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth));
+  // With auth on the client's cookie (its session) never goes to an agent, whatever path built the headers.
+  const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) => {
+    if (cfg.auth) init = withoutCookie(init);
+    return isOpenProbe(rest) ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name))) : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth));
+  };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));
   const sources = buildSources(cfg);
   for (const [name, backend] of Object.entries(injected ?? {})) {
@@ -350,6 +359,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       ...(c.req.method === "GET" && rest === "/api/fs/zip" && url.searchParams.has("ticket") ? { replay: false } : {}),
     };
     stripBrowserContext(init.headers as Headers); // judged above; the agent sees a hub call
+    if (cfg.auth) (init.headers as Headers).delete("cookie"); // the session stays with the hub (network sources too)
     // who is asking, as this hub saw it (the last hop of the forwarded chain behind a proxy, else the socket's peer: what the audit log records)
     const who = clientOf(c).ip;
     if (who) (init.headers as Headers).set(CLIENT_HEADER, who.slice(0, 64));

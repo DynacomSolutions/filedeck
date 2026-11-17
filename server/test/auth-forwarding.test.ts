@@ -32,6 +32,7 @@ after(async () => {
 interface Rec {
   path: string;
   user: string | null;
+  cookie: string | null;
 }
 interface Agent {
   root: string;
@@ -51,7 +52,7 @@ async function agent(node: string): Promise<Agent> {
     const s: Server = serve(
       {
         fetch: async (req: Request, env: unknown) => {
-          a.recs.push({ path: new URL(req.url).pathname, user: req.headers.get(USER_HEADER) });
+          a.recs.push({ path: new URL(req.url).pathname, user: req.headers.get(USER_HEADER), cookie: req.headers.get("cookie") });
           if (a.hook) await a.hook(req);
           return app.fetch(req, env as never);
         },
@@ -148,7 +149,7 @@ test("no grant, no forwarding: the proxy, transfer, ops and diff refuse a node w
   assert.deepEqual(real(B.recs), [], "agent B got no request");
 });
 
-test("client copy dropped: a forged user header never reaches the agent", async () => {
+test("client copy dropped: a forged user header and the session cookie never reach the agent", async () => {
   const guest = signIn(hub, "guest1");
   A.recs.length = 0;
   const r = await call(hub, "/api/nodes/A/api/fs/stat?path=/", guest, { headers: { [USER_HEADER]: "forged" } });
@@ -157,6 +158,15 @@ test("client copy dropped: a forged user header never reaches the agent", async 
   assert.equal(got.length, 1);
   assert.notEqual(got[0]!.user, "forged");
   assert.equal(claimOf(got[0]!)?.name, "guest1");
+  assert.equal(got[0]!.cookie, null, "the agent gets no cookie");
+  // the vault path (a password route) and a transfer copy no client header either
+  fs.writeFileSync(path.join(A.root, "ck.txt"), "x");
+  A.recs.length = 0;
+  await call(hub, "/api/nodes/A/api/archive/list?path=/ck.txt", guest);
+  const t = await postJson(hub, "/api/transfer", guest, { src: { node: "A", path: "/ck.txt" }, dst: { node: "A", dir: "/ckdst" }, op: "copy" });
+  assert.ok(t.status < 500);
+  assert.ok(real(A.recs).length >= 2);
+  for (const x of real(A.recs)) assert.equal(x.cookie, null, `${x.path} gets no cookie`);
 });
 
 test("job owner: every agent call of a job carries its owner, and other accounts do not see it", async () => {
