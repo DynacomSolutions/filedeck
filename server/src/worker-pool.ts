@@ -83,6 +83,15 @@ const STOP_MS = 5_000;
 export const BACKOFF_MS = 5_000;
 /** how long the idle check waits for a worker's job count */
 const PROBE_MS = 5_000;
+/** how many accounts the epoch maps (here and in the gate) keep at most: past that, the least recently set is forgotten */
+export const MAX_ACCOUNTS = 4096;
+
+/** Sets `key` in `map` as its most recent entry; past `max` entries the least recent one is dropped (a map that would else grow per account). */
+export function setRecent<K, V>(map: Map<K, V>, key: K, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > max) map.delete(map.keys().next().value as K);
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -283,6 +292,7 @@ export class WorkerPool {
   private readonly rootHandler: ((spec: WorkerSpec, req: Request) => Promise<Response>) | undefined;
   private readonly sandbox: () => Promise<{ state: string; abi: number }>;
   private readonly onStopped: ((spec: WorkerSpec) => void) | undefined;
+  private readonly maxAccounts: number;
   private readonly workers = new Map<string, Live>();
   private readonly starting = new Map<string, Starting>();
   /** keys whose last start failed, until when they get the same answer */
@@ -291,7 +301,10 @@ export class WorkerPool {
   private readonly procs = new Set<Live>();
   /** per key, the stop of its old process: a new start for the key waits for it */
   private readonly stoppingKeys = new Map<string, Promise<void>>();
-  /** per `kind:name`, the lowest epoch a new start may have (raised by `stopAccount` with an epoch) */
+  /**
+   * per `kind:name`, the lowest epoch a new start may have (raised by `stopAccount` with an epoch); at most `maxAccounts`, the least recently
+   * raised forgotten first (the gate keeps the same bound on its own epochs, which refuse an old claim before it gets here)
+   */
   private readonly minEpoch = new Map<string, number>();
   private readonly timer: ReturnType<typeof setInterval>;
   private closed = false;
@@ -308,6 +321,8 @@ export class WorkerPool {
     sandbox?: () => Promise<{ state: string; abi: number }>;
     /** called once a worker's process has exited, whatever stopped it (idle, room, its account, close, or itself) */
     onStopped?: (spec: WorkerSpec) => void;
+    /** how many accounts' lowest allowed epochs are kept (default `MAX_ACCOUNTS`) */
+    maxAccounts?: number;
   }) {
     if (!Number.isInteger(o.max) || o.max < 1) throw new Error(`the worker limit must be a whole number of at least 1, not ${o.max}`);
     if (!Number.isFinite(o.idleMs) || o.idleMs <= 0) throw new Error(`the worker idle time must be more than 0, not ${o.idleMs}`);
@@ -319,6 +334,7 @@ export class WorkerPool {
     this.rootHandler = o.rootHandler;
     this.sandbox = o.sandbox ?? sandboxInfo;
     this.onStopped = o.onStopped;
+    this.maxAccounts = o.maxAccounts ?? MAX_ACCOUNTS;
     this.timer = setInterval(() => this.tick(), Math.max(10, Math.min(o.idleMs, 30_000)));
     this.timer.unref();
   }
@@ -384,7 +400,7 @@ export class WorkerPool {
   async stopAccount(kind: "sys" | "virt", name: string, epoch?: number): Promise<void> {
     if (epoch !== undefined) {
       const id = `${kind}:${name}`;
-      if (epoch > (this.minEpoch.get(id) ?? -Infinity)) this.minEpoch.set(id, epoch);
+      if (epoch > (this.minEpoch.get(id) ?? -Infinity)) setRecent(this.minEpoch, id, epoch, this.maxAccounts);
     }
     await this.stopWhere((s) => s.kind === kind && s.name === name);
   }

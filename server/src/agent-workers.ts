@@ -6,7 +6,7 @@ import type { MiddlewareHandler } from "hono";
 import { USER_HEADER, type UserClaim } from "./auth/identity.ts";
 import { workerConfig, type Config } from "./config.ts";
 import { type AccountResolver, type LocalAccount } from "./local-accounts.ts";
-import { PoolFull, StaleEpoch, type WorkerPool, type WorkerSpec } from "./worker-pool.ts";
+import { MAX_ACCOUNTS, PoolFull, StaleEpoch, setRecent, type WorkerPool, type WorkerSpec } from "./worker-pool.ts";
 import { WorkerGone } from "./worker-proto.ts";
 import {
   OPEN_DIR,
@@ -227,9 +227,15 @@ export function accountWorkers(o: {
   accounts: AccountResolver;
   spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
   log?: (s: string) => void;
+  /** how many accounts' epochs are kept (default `MAX_ACCOUNTS`) */
+  maxAccounts?: number;
 }): AccountWorkers {
   const log = o.log ?? ((s) => console.error(s));
-  /** per `kind:name`, the highest epoch seen */
+  const maxAccounts = o.maxAccounts ?? MAX_ACCOUNTS;
+  /**
+   * per `kind:name`, the highest epoch seen; at most `maxAccounts`, the least recently seen forgotten first (a forgotten account's next claim
+   * sets it again; the hub signs each claim with the account's current epoch)
+   */
   const epochs = new Map<string, number>();
   /** per key, the fresh lookup in progress (one at a time per key; the requests that come meanwhile share it) */
   const fresh = new Map<string, Promise<LocalAccount | null>>();
@@ -255,8 +261,9 @@ export function accountWorkers(o: {
       const who = `${claim.kind}:${claim.name}`;
       const seen = epochs.get(who);
       if (seen !== undefined && claim.epoch < seen) return json("account changed", 401);
+      setRecent(epochs, who, Math.max(seen ?? claim.epoch, claim.epoch), maxAccounts); // (also marks it as recently seen)
       if (seen === undefined || claim.epoch > seen) {
-        epochs.set(who, claim.epoch); // (before the wait, so a second request at the new epoch does not stop the account again)
+        // (set before the wait, so a second request at the new epoch does not stop the account again)
         // the pool takes the old workers out of its map at once, so this request cannot reach one; a new start waits for their exit
         // (with the epoch, so a request at the old one that already waits inside the pool for a start is refused there too)
         if (seen !== undefined) await o.pool.stopAccount(claim.kind, claim.name, claim.epoch);

@@ -353,6 +353,15 @@ test("old epoch: the limit is checked after the start rules have waited", async 
   assert.equal(p.list().length, 0);
 });
 
+test("the lowest allowed epochs are kept for a bounded number of accounts, the least recently set forgotten first", async () => {
+  const p = pool({ maxAccounts: 2 });
+  for (const n of ["a", "b", "c"]) await p.stopAccount("sys", n, 5);
+  const who = (name: string) => ({ key: `sys:${name}`, kind: "sys" as const, name, epoch: 1 });
+  assert.equal(await p.fetchLive(who("a"), new Request("http://agent/api/jobs")), undefined, "a is forgotten");
+  await assert.rejects(p.fetchLive(who("b"), new Request("http://agent/api/jobs")), StaleEpoch);
+  await assert.rejects(p.fetchLive(who("c"), new Request("http://agent/api/jobs")), StaleEpoch);
+});
+
 test("close during a start: the waiting request gets WorkerGone and nothing is left", async () => {
   const children: ChildProcess[] = [];
   const p = pool({ start: async (sp) => { const c = await startWorkerProcess(sp); children.push(c); return c; } });

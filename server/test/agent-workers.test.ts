@@ -10,7 +10,7 @@ import { Hono } from "hono";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts";
-import { isRootRoute, makeWorkerSpecs, workerGate, workerKey } from "../src/agent-workers.ts";
+import { accountWorkers, isRootRoute, makeWorkerSpecs, workerGate, workerKey } from "../src/agent-workers.ts";
 import { landlockRoots } from "../src/account-dirs.ts";
 import { PoolFull, StaleEpoch, startWorkerProcess, type StartWorker, type WorkerPool, type WorkerSpec } from "../src/worker-pool.ts";
 import { WorkerGone } from "../src/worker-proto.ts";
@@ -540,6 +540,30 @@ test("Landlock roots: a grant whose path is changed between its check and its op
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(own, { recursive: true, force: true });
+  }
+});
+
+test("bounded maps: epochs for a bounded number of accounts; an account's folders are checked again once its worker has stopped", async () => {
+  const fakePool = { stopAccount: async () => {}, list: () => [] } as unknown as WorkerPool;
+  const aw = accountWorkers({ pool: fakePool, accounts: accounts(), spec: async () => assert.fail("not used"), maxAccounts: 2 });
+  assert.equal(await aw.epoch(sys("a", 5)), null);
+  assert.equal(await aw.epoch(sys("b", 5)), null);
+  assert.equal(await aw.epoch(sys("c", 5)), null);
+  assert.equal(await aw.epoch(sys("a", 3)), null, "a, the least recently seen, is forgotten");
+  assert.equal((await aw.epoch(sys("c", 3)))?.status, 401, "c is kept");
+  // the folders of an account whose worker has stopped are not held as made: its next start checks them again
+  const specs = makeWorkerSpecs(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+  try {
+    const account = (await accounts().resolve("alice"))!;
+    const s1 = await specs.spec(sys("alice"), account);
+    const dir = path.dirname(s1.tmp!);
+    fs.chmodSync(dir, 0o777);
+    await specs.spec(sys("alice"), account); // (held as made: not checked)
+    specs.stopped(s1);
+    await assert.rejects(specs.spec(sys("alice"), account), /owner .* mode 777/);
+    fs.chmodSync(dir, 0o700);
+  } finally {
+    await specs.close();
   }
 });
 
