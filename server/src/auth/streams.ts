@@ -19,8 +19,13 @@ interface Entry {
   kind: "sys" | "virt";
   name: string;
   asRoot?: AsRootStream;
+  /** the session's absolute end (created + the absolute limit), ms since the epoch */
+  endsAt?: number;
   end: () => void;
 }
+
+/** The longest delay setTimeout takes as it is. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 export class LiveStreams {
   private live = new Set<Entry>();
@@ -35,9 +40,10 @@ export class LiveStreams {
 
   /**
    * A response whose body is `res`'s, ended (closed) when this stream is told to end or a check finds it no longer valid. `abort` cuts
-   * the upstream request; the upstream body is cancelled as well.
+   * the upstream request; the upstream body is cancelled as well. `endsAt` is the session's absolute end, known already, so the stream
+   * ends at that time and not up to one check later (as at the end of the act-as-root switch).
    */
-  track(key: string, kind: "sys" | "virt", name: string, res: Response, o?: { abort?: () => void; asRoot?: AsRootStream }): Response {
+  track(key: string, kind: "sys" | "virt", name: string, res: Response, o?: { abort?: () => void; asRoot?: AsRootStream; endsAt?: number }): Response {
     if (!res.body) return res;
     const reader = res.body.getReader();
     let done = false;
@@ -61,6 +67,7 @@ export class LiveStreams {
       kind,
       name,
       asRoot: o?.asRoot,
+      endsAt: o?.endsAt,
       end: () => {
         if (!finish()) return;
         cutUpstream();
@@ -103,9 +110,11 @@ export class LiveStreams {
       entry.end();
       return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
     }
-    // the switch's end, in real time, so a root stream does not outlive it by up to one check
-    if (o?.asRoot) {
-      deadline = setTimeout(() => entry.end(), Math.max(0, o.asRoot.until - this.now()));
+    // the session's absolute end and the switch's end, in real time, so the stream does not outlive either by up to one check
+    // (a time beyond what a timer can hold, about 24.8 days, is left to the check: a longer delay would fire at once)
+    const wait = Math.min(o?.endsAt ?? Infinity, o?.asRoot?.until ?? Infinity) - this.now();
+    if (wait <= MAX_TIMER_MS) {
+      deadline = setTimeout(() => entry.end(), Math.max(0, wait));
       deadline.unref();
     }
     return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
@@ -141,10 +150,14 @@ export class LiveStreams {
   }
 
   private valid(e: Entry): boolean {
+    const t = this.now();
+    if (e.endsAt !== undefined && t >= e.endsAt) return false;
     try {
-      return this.o.peek(e.key) && (e.asRoot === undefined || (this.now() < e.asRoot.until && e.asRoot.ok()));
+      return this.o.peek(e.key) && (e.asRoot === undefined || (t < e.asRoot.until && e.asRoot.ok()));
     } catch {
-      return true; // the store could not be read: checked again at the next tick
+      // On purpose: a store that cannot be read keeps the stream until the next tick. The gate then refuses every new request anyway
+      // (it reads the same store), and sign-out, ending sessions and hub shutdown still end streams through their own paths.
+      return true;
     }
   }
 

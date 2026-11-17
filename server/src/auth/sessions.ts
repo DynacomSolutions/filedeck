@@ -81,6 +81,12 @@ export class Sessions {
     return sha(raw);
   }
 
+  /** The absolute end (sign-in time + the absolute limit, ms since the epoch) of the session kept under `key`, or undefined when there is none. */
+  endsAt(key: string): number | undefined {
+    const r = this.db.prepare("SELECT created FROM sessions WHERE id = ?").get(key) as Pick<SessionRow, "created"> | undefined;
+    return r ? r.created + this.o.maxMs : undefined;
+  }
+
   /**
    * Whether the session kept under `key` is valid now: by the idle and absolute limits, its account (a virtual one still exists) and its
    * epoch. Read only: it never writes `last_used` and never deletes (the hub asks it for each open event stream).

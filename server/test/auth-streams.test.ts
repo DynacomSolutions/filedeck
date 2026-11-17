@@ -28,6 +28,10 @@ interface Fake {
   aborted: number;
   /** ends every open feed from the agent's side */
   endAll(): void;
+  /** while set, a feed waits for it before it answers (the hub's call is still in flight) */
+  hold?: Promise<void>;
+  /** called when a feed request arrives */
+  onArrive?: () => void;
 }
 const servers: http.Server[] = [];
 const hubs: { close(): Promise<void> }[] = [];
@@ -51,8 +55,11 @@ async function fakeAgent(): Promise<Fake> {
       open.clear();
     },
   };
-  const srv = http.createServer((req, res) => {
-    if (req.url?.startsWith("/api/events")) {
+  const srv = http.createServer(async (req, res) => {
+    // a change feed, and (for the API token test) a folder-size answer that asks for one
+    if (req.url?.startsWith("/api/events") || (req.url?.startsWith("/api/du") && req.url.includes("feed=1"))) {
+      f.onArrive?.();
+      if (f.hold) await f.hold;
       f.opened++;
       open.add(res);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
@@ -76,12 +83,12 @@ const ACCESS: Record<string, NodeAccess> = { a: { runAs: "guest", grants: [{ pat
 
 type Hub = ReturnType<typeof createHub>;
 let clock = Date.now();
-function makeHub(env: Record<string, string> = {}): Hub {
+function makeHub(env: Record<string, string> = {}, streamCheckMs = 50): Hub {
   const h = createHub(
     loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `a=${agent.url}`, FILEDECK_ADMINS: "alice", FILEDECK_DIFF_DIR: path.join(tmp, `diff-${hubs.length}`), FILEDECK_AUTH_FILE: path.join(tmp, `auth-${hubs.length}.db`), ...env } as never),
     undefined,
     () => {},
-    { now: () => clock, streamCheckMs: 50 },
+    { now: () => clock, streamCheckMs },
   );
   hubs.push(h);
   return h;
@@ -99,7 +106,8 @@ function virt(h: Hub, name: string): { cookie: string; raw: string } {
 /** Opens the change feed through the hub and reads its first chunk; `ended` resolves true when the body ends, false if it is still open after `ms`. */
 async function openFeed(h: Hub, cookie: string) {
   const before = agent.opened;
-  const r = await call(h, "/api/nodes/a/api/events?path=/", cookie);
+  // as EventSource asks for it
+  const r = await call(h, "/api/nodes/a/api/events?path=/", cookie, { headers: { accept: "text/event-stream" } });
   assert.equal(r.status, 200);
   assert.match(r.headers.get("content-type") ?? "", /^text\/event-stream/);
   const reader = r.body!.getReader();
@@ -137,7 +145,7 @@ test("sign-out ends streams: the body ends within 1 s, the agent sees its reques
   assert.equal(await feed.ended(1000), true, "the stream ended");
   await waitFor(() => agent.aborted === cut + 1);
   assert.equal(h.streams!.size(), 0);
-  const again = await call(h, "/api/nodes/a/api/events?path=/", cookie);
+  const again = await call(h, "/api/nodes/a/api/events?path=/", cookie, { headers: { accept: "text/event-stream" } });
   assert.equal(again.status, 401);
   assert.equal(again.headers.get("x-filedeck-auth"), "signed-out");
 });
@@ -252,7 +260,7 @@ test("auth off: no stream tracking at all, and the feed passes as before", async
   const h = createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, NODES: `a=${agent.url}`, FILEDECK_DIFF_DIR: path.join(tmp, "diff-off") } as never), undefined, () => {});
   hubs.push(h);
   assert.equal(h.streams, undefined);
-  const r = await h.request("http://localhost/api/nodes/a/api/events?path=/", {}, peer as never);
+  const r = await h.request("http://localhost/api/nodes/a/api/events?path=/", { headers: { accept: "text/event-stream" } }, peer as never);
   assert.equal(r.status, 200);
   const reader = r.body!.getReader();
   assert.equal((await reader.read()).done, false);
@@ -343,5 +351,96 @@ test("LiveStreams: a stream whose session (or switch) already ended when it is t
   assert.equal(gone.cancelled, true);
   assert.equal(rootGone.cancelled, true);
   assert.equal(ls.size(), 0);
+  ls.close();
+});
+
+test("a session's absolute end ends its stream on time, by its own timer (not the check)", async () => {
+  clock = Date.now();
+  const h = makeHub({ FILEDECK_SESSION_MAX_SECONDS: "1" }, 60_000);
+  const feed = await openFeed(h, virt(h, "g1").cookie);
+  assert.equal(await feed.ended(500), false, "open before the end");
+  assert.equal(await feed.ended(1500), true, "ended at the session's absolute end");
+  assert.equal(h.streams!.size(), 0);
+});
+
+test("LiveStreams: endsAt ends the stream at that time without waiting for the check, and the timer goes with the entry", async () => {
+  const ls = new LiveStreams({ peek: () => true, checkMs: 60_000 });
+  const u = upstream();
+  ls.track("k", "virt", "g1", u.res, { endsAt: Date.now() + 50 });
+  await waitFor(() => u.cancelled, 1000);
+  assert.equal(ls.size(), 0);
+  const v = upstream();
+  ls.track("k", "virt", "g1", v.res, { endsAt: Date.now() - 1 });
+  assert.equal(v.cancelled, true, "already past: ended at once");
+  ls.close();
+});
+
+test("a feed made with the API token is not tied to a session: nothing is tracked, even with a cookie beside it", async () => {
+  const h = makeHub({ FILEDECK_API_TOKEN: "du-token-123456", FILEDECK_API_TOKEN_ACCOUNT: "g1" });
+  const { cookie } = virt(h, "g1");
+  const r = await call(h, "/api/nodes/a/api/du?path=/&feed=1", cookie, { headers: { accept: "text/event-stream", "x-filedeck-token": "du-token-123456" } });
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get("content-type") ?? "", /^text\/event-stream/);
+  const reader = r.body!.getReader();
+  assert.equal((await reader.read()).done, false);
+  assert.equal(h.streams!.size(), 0);
+  await reader.cancel();
+});
+
+test("a feed opened without Accept: text/event-stream (not EventSource) is passed on untracked", async () => {
+  const h = makeHub();
+  const r = await call(h, "/api/nodes/a/api/events?path=/", virt(h, "g1").cookie);
+  assert.equal(r.status, 200);
+  const reader = r.body!.getReader();
+  assert.equal((await reader.read()).done, false);
+  assert.equal(h.streams!.size(), 0);
+  await reader.cancel();
+});
+
+test("a new sign-in that replaces the session ends the old session's feed", async () => {
+  const h = makeHub();
+  const { cookie } = virt(h, "g1");
+  const feed = await openFeed(h, cookie);
+  const r = await call(h, "/api/auth/login", cookie, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "g1", password: "pw-g1-123" }) });
+  assert.equal(r.status, 200);
+  assert.equal(await feed.ended(1000), true);
+  assert.equal(h.streams!.size(), 0);
+});
+
+test("the race: the session ends while the agent call is in flight; the stream ends at once when it is tracked", async () => {
+  const h = makeHub({}, 60_000); // no check to fall back on: only the check at track time can end it
+  const { cookie, raw } = virt(h, "g1");
+  let release!: () => void;
+  agent.hold = new Promise<void>((r) => (release = r));
+  const arrived = new Promise<void>((r) => (agent.onArrive = r));
+  const cut = agent.aborted;
+  try {
+    const pending = call(h, "/api/nodes/a/api/events?path=/", cookie, { headers: { accept: "text/event-stream" } });
+    await arrived; // the gate let it through and the agent has it
+    h.auth!.sessions.destroy(raw); // signed out meanwhile: its end is told before the stream exists
+    release();
+    const r = await pending;
+    assert.equal(r.status, 200);
+    const reader = r.body!.getReader();
+    const end = (async () => {
+      while (!(await reader.read()).done);
+      return true;
+    })();
+    assert.equal(await Promise.race([end, new Promise<boolean>((res) => setTimeout(() => res(false), 1000))]), true, "ended at once, not at the next check");
+    assert.equal(h.streams!.size(), 0);
+    await waitFor(() => agent.aborted === cut + 1);
+  } finally {
+    agent.hold = undefined;
+    agent.onArrive = undefined;
+  }
+});
+
+test("LiveStreams: an absolute end further away than a timer can hold does not end the stream at once", async () => {
+  const ls = new LiveStreams({ peek: () => true, checkMs: 60_000 });
+  const u = upstream();
+  ls.track("k", "virt", "g1", u.res, { endsAt: Date.now() + 40 * 24 * 3600_000 });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(u.cancelled, false);
+  assert.equal(ls.size(), 1);
   ls.close();
 });
