@@ -306,10 +306,17 @@ test("a repair fenced because the lease lapsed during the first check does not s
     }
     return post(m, read);
   };
-  const first = await capture(async () => {
-    (A as Any).giveUp(malformed());
-    await (A as Any).repairing;
-  });
+  // a busy moment ("database is locked") can end an attempt before the fence is reached: try again, stealing the lease again, until one attempt is fenced
+  const first = { lines: [] as string[] };
+  for (const end = Date.now() + 15_000; !first.lines.some((l) => /repair not done/.test(l)) && Date.now() < end; ) {
+    steal = true;
+    const one = await capture(async () => {
+      (A as Any).giveUp(malformed());
+      await (A as Any).repairing;
+    });
+    first.lines.push(...one.lines);
+    if (!first.lines.some((l) => /repair not done/.test(l))) await new Promise((r) => setTimeout(r, 100));
+  }
   assert.equal((A as Any).repaired, false, "a fenced repair is not counted");
   assert.notDeepEqual(integrity(file), ["ok"]);
   assert.ok(first.lines.some((l) => /repair not done/.test(l)), first.lines.join("\n"));
