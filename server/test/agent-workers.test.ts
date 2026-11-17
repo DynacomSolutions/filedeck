@@ -298,7 +298,7 @@ test("worker folders: made once per key, made again after a failed start; one na
     assert.equal(w.init.trashFolder, "v-guest1");
     assert.match(path.basename(path.dirname(w.tmp!)), /^v-guest1-[0-9a-f]{16}$/);
   } finally {
-    specs.close();
+    await specs.close();
   }
 });
 
@@ -343,7 +343,7 @@ test("a new key folder: its subfolders are made while it is still root's, and a 
         assert.equal(st.mode & 0o7777, 0o755, "the swapped-in folder is not changed");
         assert.equal(st.uid, IS_ROOT ? 65534 : me);
       } finally {
-        specs.close();
+        await specs.close();
       }
       // a real folder swapped in (not ours, or open to others) is refused too
       const specs2 = makeWorkerSpecs(cfg, {
@@ -358,7 +358,7 @@ test("a new key folder: its subfolders are made while it is still root's, and a 
       try {
         await assert.rejects(specs2.spec(sys("alice"), account), { name: "UnsafeFolders" });
       } finally {
-        specs2.close();
+        await specs2.close();
       }
       if (at === "key") continue;
       // the subfolders were made while the key folder still belonged to this process
@@ -372,7 +372,7 @@ test("a new key folder: its subfolders are made while it is still root's, and a 
         assert.equal(key.uid, account.uid);
         assert.equal(key.mode & 0o7777, 0o700);
       } finally {
-        specs3.close();
+        await specs3.close();
       }
     }
   } finally {
@@ -390,29 +390,60 @@ test("an existing key folder with a subfolder missing is refused, not filled in"
     await assert.rejects(specs.spec(sys("alice"), account), { name: "UnsafeFolders" });
     assert.ok(!fs.existsSync(s1.tmp!));
   } finally {
-    specs.close();
+    await specs.close();
   }
 });
 
-test("areas left by an agent that is gone are removed at start (as root, root's own, not links); others stay", async () => {
-  const gone = path.join(os.tmpdir(), "filedeck-workers-999999999-left");
-  const link = path.join(os.tmpdir(), "filedeck-workers-999999998-link");
-  const live = path.join(os.tmpdir(), `filedeck-workers-${process.pid}-live`);
-  const target = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-target-"));
-  fs.mkdirSync(gone);
-  fs.mkdirSync(live);
-  fs.symlinkSync(target, link);
+test("removal: an account's folders are emptied as the account, never walked by root; links in them are not followed", async () => {
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never);
+  const account = (await accounts().resolve("alice"))!;
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-outside-"));
+  fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
+  const listed: string[] = [];
+  const emptied: string[] = [];
+  const specs = makeWorkerSpecs(cfg, {
+    onRootList: (d) => listed.push(d),
+    onEmpty: (d) => {
+      emptied.push(d);
+      // the account swaps a folder for a link to the outside just as the removal starts
+      fs.renameSync(path.join(d, "tmp/a"), path.join(d, "tmp/a2"));
+      fs.symlinkSync(outside, path.join(d, "tmp/a"));
+    },
+  });
   try {
-    const app = agent();
-    await (app as unknown as { leave(): Promise<void> }).leave();
-    assert.ok(!fs.existsSync(baseOf(app)!), "leave removes the area");
-    assert.equal(fs.existsSync(gone), !IS_ROOT, IS_ROOT ? "removed" : "kept: not root");
-    assert.ok(fs.lstatSync(link).isSymbolicLink(), "a link is kept");
-    assert.ok(fs.existsSync(target));
-    assert.ok(fs.existsSync(live), "an area of a running agent is kept");
+    const s1 = await specs.spec(sys("alice"), account);
+    // what the account leaves in its folders: a link to a folder outside, and a tree
+    fs.symlinkSync(outside, path.join(s1.tmp!, "out"));
+    fs.mkdirSync(path.join(s1.tmp!, "a/b"), { recursive: true });
+    fs.writeFileSync(path.join(s1.tmp!, "a/b/f"), "x");
+    if (IS_ROOT) chownForTest(s1.tmp!);
+    await specs.close();
+    assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep", "nothing removed through the link");
+    assert.ok(!fs.existsSync(specs.base), "the area is gone once its folders could be emptied");
+    const keyDir = path.dirname(s1.tmp!);
+    assert.deepEqual(emptied, [keyDir], "the account's key folder is emptied by the account");
+    assert.deepEqual(listed, [specs.base], "root lists only its own folders");
   } finally {
-    for (const p of [gone, link, live, target]) fs.rmSync(p, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   }
+});
+
+test("removal: a folder the account's removal cannot empty is left, logged, and never removed by root", async () => {
+  if (!IS_ROOT) return; // (without root every folder is this process's own)
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never);
+  const account = (await accounts().resolve("alice"))!;
+  const logs: string[] = [];
+  const specs = makeWorkerSpecs(cfg, { log: (l) => logs.push(l) });
+  const s1 = await specs.spec(sys("alice"), account);
+  // a folder in the account's folder that only root may change: the account cannot empty it
+  const stuck = path.join(s1.tmp!, "stuck");
+  fs.mkdirSync(stuck);
+  fs.writeFileSync(path.join(stuck, "f"), "x");
+  fs.chmodSync(stuck, 0o755);
+  await specs.close();
+  assert.ok(fs.existsSync(path.join(stuck, "f")), "root did not remove it");
+  assert.ok(logs.some((l) => l.includes("left")), logs.join("\n"));
+  fs.rmSync(specs.base, { recursive: true, force: true });
 });
 
 test("auth off", async () => {

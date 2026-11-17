@@ -9,6 +9,7 @@ import { workerConfig, type Config } from "./config.ts";
 import { type AccountResolver, type LocalAccount } from "./local-accounts.ts";
 import { PoolFull, StaleEpoch, type WorkerPool, type WorkerSpec } from "./worker-pool.ts";
 import { WorkerGone } from "./worker-proto.ts";
+import { spawnSandboxed } from "./sandbox.ts";
 import { JOBS_HEADER } from "./worker.ts";
 
 /**
@@ -305,37 +306,99 @@ function keyDir(claim: UserClaim, account: LocalAccount, key: string): string {
   return claim.kind === "sys" ? owner : `${owner}-${key.slice(key.lastIndexOf(":") + 1)}`;
 }
 
+/** what the removal runs as a folder's owner, in that folder (its working folder): removes everything in it, and exits 1 if anything is left */
+const EMPTY_SCRIPT =
+  'const fs=require("fs");let bad=0;' +
+  'for(const n of fs.readdirSync(".")){try{fs.rmSync(n,{recursive:true,force:true})}catch(e){bad++;console.error(e.message)}}' +
+  "process.exit(bad?1:0)";
+const EMPTY_MS = 30_000;
+
 /**
- * Removes the workers' areas of agents that are gone (killed before they could remove their own): only as root, only an area named
- * `filedeck-workers-<pid>-*` whose pid runs no process, that is a real folder (not a link) and root's. Anything else is left alone.
+ * Empties `dir` as its owner `uid`/`gid`: through the sandbox launcher, which gets the folder as its working folder by descriptor (opened
+ * here without following a link), so the removal never resolves a path through folders it may not pass (a key folder still root's).
+ * Without a change of user (the owner is this process, not root) it is done here. True when the folder is empty.
  */
-function removeStaleAreas(): void {
-  if (process.getuid?.() !== 0) return;
-  const tmp = os.tmpdir();
-  let names: string[];
+async function emptyAs(dir: string, uid: number, gid: number, log: (s: string) => void): Promise<boolean> {
+  const me = process.getuid?.() ?? 0;
+  if (uid === me && me !== 0) {
+    let ok = true;
+    for (const n of await fs.readdir(dir)) await fs.rm(path.join(dir, n), { recursive: true, force: true }).catch((e: Error) => ((ok = false), log(`workers' area: ${e.message}`)));
+    if (!ok) log(`workers' area: ${dir} could not be emptied; left`);
+    return ok;
+  }
+  if (uid === 0 || gid === 0) {
+    log(`workers' area: ${dir} has owner ${uid}:${gid}; left`);
+    return false;
+  }
+  let fh: fs.FileHandle | undefined;
   try {
-    names = fsc.readdirSync(tmp);
-  } catch {
-    return;
+    fh = await fs.open(dir, OPEN_DIR);
+    const st = await fh.stat();
+    if (st.uid !== uid) throw new Error(`its owner changed to ${st.uid}`);
+    const child = await spawnSandboxed(process.execPath, ["-e", EMPTY_SCRIPT], {
+      uid,
+      gid,
+      landlock: false,
+      cwdFd: fh.fd,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { PATH: process.env.PATH || "/usr/bin:/bin", LANG: "C.UTF-8" },
+    });
+    await fh.close();
+    fh = undefined;
+    let err = "";
+    child.stderr?.on("data", (d: Buffer) => {
+      if (err.length < 500) err += d.toString("utf8");
+    });
+    const code = await new Promise<number | null>((res) => {
+      const t = setTimeout(() => child.kill("SIGKILL"), EMPTY_MS);
+      t.unref();
+      child.once("error", () => (clearTimeout(t), res(null)));
+      child.once("exit", (c) => (clearTimeout(t), res(c)));
+    });
+    if (code === 0) return true;
+    log(`workers' area: emptying ${dir} as ${uid} failed (${code === null ? "stopped" : `exit ${code}`}): ${err.trim().slice(0, 500)}; left`);
+  } catch (e) {
+    log(`workers' area: emptying ${dir} as ${uid} failed: ${(e as Error).message}; left`);
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+  return false;
+}
+
+/**
+ * Removes the workers' area without ever walking a folder that an account owns: an account could swap a folder in it for a link while
+ * root walks it by path, and root would then remove what the link points to. A folder owned by someone else (a key folder or its
+ * subfolders) is emptied by a process that runs as its owner, and then only the empty folder is removed here (`rmdir`, in a folder
+ * that is this process's own, so the entry cannot be swapped). Only this process's own folders are listed here. Whatever cannot be
+ * removed is logged and left; there is no fallback to a removal by root.
+ */
+async function removeArea(dir: string, log: (s: string) => void, onList?: (dir: string) => void, onEmpty?: (dir: string) => void): Promise<void> {
+  const me = process.getuid?.() ?? 0;
+  onList?.(dir);
+  let names: string[] = [];
+  try {
+    names = await fs.readdir(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    log(`workers' area: ${dir}: ${(e as Error).message}; left`);
   }
   for (const n of names) {
-    const m = /^filedeck-workers-(\d{1,10})-[^/]+$/.exec(n);
-    if (!m) continue;
-    const pid = Number(m[1]);
+    const p = path.join(dir, n);
     try {
-      process.kill(pid, 0);
-      continue; // its agent may still run
+      const st = await fs.lstat(p);
+      if (!st.isDirectory()) await fs.unlink(p); // (a link or a file: removing the entry follows nothing)
+      // the key folders are the accounts' (also without root, where the account is this process); a key folder still root's (its start
+      // failed half-way) is root's alone, so it is walked like the area
+      else if (me === 0 && st.uid === 0) await removeArea(p, log, onList, onEmpty);
+      else if ((onEmpty?.(p), await emptyAs(p, st.uid, st.gid, log))) await fs.rmdir(p);
+      else continue;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ESRCH") continue;
-    }
-    const p = path.join(tmp, n);
-    try {
-      const st = fsc.lstatSync(p);
-      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === 0) fsc.rmSync(p, { recursive: true, force: true });
-    } catch {
-      /* gone meanwhile, or not ours to remove */
+      log(`workers' area: ${p}: ${(e as Error).message}; left`);
     }
   }
+  await fs.rmdir(dir).catch((e: NodeJS.ErrnoException) => {
+    if (e.code !== "ENOENT") log(`workers' area: ${dir}: ${e.message}; left`);
+  });
 }
 
 export interface WorkerSpecs {
@@ -343,21 +406,24 @@ export interface WorkerSpecs {
   spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
   /** the workers' area of this agent */
   base: string;
-  /** removes the area (once no worker runs) */
-  close(): void;
+  /** removes the area once no worker runs (see `removeArea`); what cannot be removed is logged and left */
+  close(): Promise<void>;
 }
 
 /**
  * The specs of the workers: the start-up message from `workerConfig` (no secret), and per key a temporary, a thumbnail and an index
  * folder in `<key folder>/` below an area made new for this agent (`mkdtemp` in the temporary folder: root's and 0711 when the agent
- * runs as root, else 0700), kept while it runs and removed by `close` (the agent calls it in `leave`). An area that exists already is never used. The folders of a key
+ * runs as root, else 0700), kept while it runs and removed by `close` (the agent calls it in `leave`; see `removeArea`). An area that exists already is never used. The folders of a key
  * are made once (also while several requests wait for them) and made again only after a start with them failed. Task 7 replaces these
  * folders (`accountDirs`, which must follow the same rules) and adds Landlock for virtual accounts; until then no spec has Landlock.
  */
-export function makeWorkerSpecs(cfg: Config, o: { afterMkdir?: Hook } = {}): WorkerSpecs {
-  removeStaleAreas();
-  // (the agent's pid in the name tells a later agent whether the area's agent is gone)
-  const base = fsc.mkdtempSync(path.join(os.tmpdir(), `filedeck-workers-${process.pid}-`));
+export function makeWorkerSpecs(
+  cfg: Config,
+  o: { afterMkdir?: Hook; log?: (s: string) => void; onRootList?: (dir: string) => void; onEmpty?: (dir: string) => void } = {},
+): WorkerSpecs {
+  const log = o.log ?? ((s) => console.error(s));
+  // (an area left by an agent that was killed stays: it is root's and 0711, and removing it safely would need its accounts)
+  const base = fsc.mkdtempSync(path.join(os.tmpdir(), "filedeck-workers-"));
   fsc.chmodSync(base, process.getuid?.() === 0 ? 0o711 : 0o700);
   /** per key folder and uid, the folders once made */
   const ready = new Map<string, Promise<{ tmp: string; thumbs: string; index: string }>>();
@@ -396,5 +462,7 @@ export function makeWorkerSpecs(cfg: Config, o: { afterMkdir?: Hook } = {}): Wor
       },
     };
   };
-  return { spec, base, close: () => fsc.rmSync(base, { recursive: true, force: true }) };
+  let closing: Promise<void> | undefined;
+  const close = () => (closing ??= removeArea(base, log, o.onRootList, o.onEmpty));
+  return { spec, base, close };
 }
