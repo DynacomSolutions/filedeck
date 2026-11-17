@@ -8,6 +8,12 @@ import { auditRefusal, type AuditSink } from "./audit.ts";
 /** The two paths that need no credentials and name nobody: the liveness probe and the metrics scrape (a query string is allowed). The hub and the agents use this one test. */
 export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)/.test(pathAndQuery);
 
+/**
+ * The agent's sign-in routes (`/api/auth/password`, and later the key check and the lookup, agent-auth-routes.ts): the hub calls them
+ * behind the agent token but before anyone is signed in, so they carry no user. The root process answers them itself (`ROOT_ROUTES`).
+ */
+export const isAgentAuthRoute = (p: string) => /^\/api\/auth\/[a-z-]+$/.test(p);
+
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
 /**
@@ -37,7 +43,8 @@ declare module "hono" {
 }
 
 /**
- * With auth on, every request except the two open probes (the same two paths the hub sends without a user) must carry a
+ * With auth on, every request except the two open probes (the same two paths the hub sends without a user) and the sign-in routes
+ * (`isAgentAuthRoute`, behind the agent token) must carry a
  * claim signed with the agent token and still fresh. A bad, missing or stale header gives 401 `no user`; neither the
  * header nor its MAC is ever logged or echoed. The verified claim is stored for the audit and the routes. Part 2 enforces
  * its `runAs` and `grants`; here it is only verified and kept. Mount it right after `agentAuth`. Off: nothing is checked.
@@ -47,6 +54,8 @@ export function agentUser(cfg: Config, sink?: AuditSink): MiddlewareHandler {
   const token = cfg.agentToken;
   return async (c, next) => {
     if (isOpenProbe(c.req.path)) return next();
+    // (the sign-in routes name nobody yet; they are still behind `agentAuth`, so only a caller with the agent token reaches them)
+    if (token && isAgentAuthRoute(c.req.path)) return next();
     const value = c.req.header(USER_HEADER);
     const claim = token && value ? verifyClaim(value, token, Date.now()) : null;
     if (!claim) {

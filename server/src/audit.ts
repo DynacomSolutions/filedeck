@@ -31,6 +31,16 @@ export function pick(v: unknown, depth = 0): unknown {
   return out;
 }
 
+/**
+ * A sign-in body (hub and agent `/api/auth/*`) holds a password or a key signature: only its `name` is kept, and a body of any other
+ * shape (an array, say, whose strings `pick` would keep) gives nothing.
+ */
+function signInBody(v: unknown): { name: string } | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const name = (v as { name?: unknown }).name;
+  return typeof name === "string" ? { name: clip(name) } : undefined;
+}
+
 /** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. The user is named when the account is already known: on an agent always, on the hub never (its guard runs before sign-in, so those lines are "refused before sign-in"). */
 /**
  * How many reverse proxies sit in front of this process (FILEDECK_TRUSTED_PROXIES, 0 = none, the default). The forwarded chain
@@ -124,7 +134,8 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
       const shared = c.req.bodyCache.json as Promise<unknown> | undefined;
       if (shared || (len > 0 && len <= MAX_BODY && !c.req.raw.headers.has("transfer-encoding"))) {
         try {
-          body = pick(await (shared ?? c.req.json()));
+          const parsed = await (shared ?? c.req.json());
+          body = p.startsWith("/api/auth/") ? signInBody(parsed) : pick(parsed);
         } catch {
           body = undefined;
         }

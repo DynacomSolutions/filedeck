@@ -171,10 +171,10 @@ export class FilesAccounts implements AccountResolver {
 
 /**
  * The account lookup of an agent with sign-in on. It finds the host helpers in the image and asks `filedeck-id` for root once, inside
- * the machine's root: when that works, accounts come from the machine's NSS and `helpers` says where the helpers are (a later part
- * starts PAM with it). Otherwise only the local files resolve, and the log says why.
+ * the machine's root: when that works, accounts come from the machine's NSS and `helpers` says where the helpers are (the agent
+ * starts PAM with it, host-pam.ts). Otherwise only the local files resolve, and the log and `reason` say why.
  */
-export async function makeResolver(cfg: Config, log: (s: string) => void): Promise<{ resolver: AccountResolver; helpers?: { root: string; dir: string } }> {
+export async function makeResolver(cfg: Config, log: (s: string) => void): Promise<{ resolver: AccountResolver; helpers?: { root: string; dir: string }; reason?: string }> {
   const found = await (async (): Promise<string | { dir: string }> => {
     const dir = await hostHelperDir(cfg.hostHelpers);
     if (!dir) return cfg.hostHelpers ? `no filedeck-id in ${cfg.hostHelpers}` : "filedeck-id is not installed";
@@ -194,5 +194,5 @@ export async function makeResolver(cfg: Config, log: (s: string) => void): Promi
     return { resolver: new HostAccounts({ run: (name) => runHostHelper(helpers.root, helpers.dir, "filedeck-id", [name]), log }), helpers };
   }
   log(`system accounts: host lookup unavailable (${found}); only local /etc/passwd accounts resolve, and system sign-in is refused`);
-  return { resolver: new FilesAccounts(cfg.root, log) };
+  return { resolver: new FilesAccounts(cfg.root, log), reason: found };
 }

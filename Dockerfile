@@ -14,7 +14,7 @@ RUN printf 'deb http://archive.debian.org/debian bullseye main\ndeb http://archi
  && rm -rf /var/lib/apt/lists/*
 COPY server/native/host /src/host
 RUN set -e; mkdir /out; \
-    for f in /src/host/*.c; do gcc -O2 -Wall -o "/out/$(basename "$f" .c)" "$f"; done; \
+    for f in /src/host/*.c; do gcc -O2 -Wall -o "/out/$(basename "$f" .c)" "$f" -Wl,--as-needed -ldl; done; \
     newest=$(objdump -T /out/* | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1); \
     echo "host helpers: newest glibc symbol version $newest"; \
     if [ -z "$newest" ] || [ "$(printf '%s\nGLIBC_2.17\n' "$newest" | sort -V | tail -1)" != "GLIBC_2.17" ]; then \

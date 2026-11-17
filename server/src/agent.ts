@@ -1,3 +1,4 @@
+import path from "node:path";
 import { Hono } from "hono";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
 import { registerSizeRoutes } from "./props.ts";
@@ -12,6 +13,9 @@ import { readOnlyGuard, hitsReadOnly } from "./readonly.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
 import { makeResolver, type AccountResolver } from "./local-accounts.ts";
+import { executable } from "./native.ts";
+import { HostPam, hostPam } from "./host-pam.ts";
+import { registerAgentAuthRoutes } from "./agent-auth-routes.ts";
 import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
 import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
 import { Followers, registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
@@ -21,6 +25,8 @@ export interface AgentOptions {
   accounts?: AccountResolver;
   /** how the pool starts a worker process; default: through the sandbox launcher */
   startWorker?: StartWorker;
+  /** the system users' password check (sign-in on); default: `filedeck-pam` from the host helpers `makeResolver` found, else none */
+  pam?: HostPam;
 }
 
 /**
@@ -34,9 +40,24 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   let accounts: AccountResolver | undefined;
   let specs: WorkerSpecs | undefined;
   let workers: AccountWorkers | undefined;
+  let pam: Promise<HostPam | undefined> | undefined;
   if (cfg.auth) {
-    const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : makeResolver(cfg, (s) => console.error(s)).then((r) => r.resolver);
+    const made = opts.accounts ? undefined : makeResolver(cfg, (s) => console.error(s));
+    const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : made!.then((r) => r.resolver);
     found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
+    // system sign-in: `filedeck-pam` beside the `filedeck-id` that answered; without it every password check answers `unavailable`
+    pam = opts.pam
+      ? Promise.resolve(opts.pam)
+      : (made ?? Promise.resolve({ helpers: undefined, reason: "the account lookup was passed in, so no host helpers are known" }))
+          .then(async (r) => {
+            if (!r.helpers) throw new Error(r.reason ?? "no host helpers");
+            if (!(await executable(path.join(r.helpers.dir, "filedeck-pam")))) throw new Error(`no filedeck-pam in ${r.helpers.dir}`);
+            return hostPam(cfg, r.helpers);
+          })
+          .catch((e: unknown) => {
+            console.error(`system sign-in: unavailable (${(e as Error)?.message ?? String(e)})`);
+            return undefined;
+          });
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
     specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [], uidInUse: (uid) => pool?.usesUid(uid) ?? false });
     const ws = specs;
@@ -69,6 +90,10 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   app.onError((e, c) => (e instanceof GateAnswer ? e.res : agentError(e, c))); // (a GateAnswer: the account rules refused, sign-in on)
 
   app.get("/healthz", (c) => c.text("ok"));
+  if (cfg.auth && accounts) {
+    const a = accounts;
+    registerAgentAuthRoutes(app, { pam, accounts: async () => a });
+  }
   app.get("/api/info", async (c) => c.json({ node: cfg.node, root: cfg.root, watches: files.watches.size, readOnly: cfg.readOnly, sandbox: await sandboxSummary() }));
   // The jobs of this process (kept in the shared job file when there is one), the file routes, the folder sizes and the job list, all over the same jobs
   const jobs = makeAgentJobs(cfg);

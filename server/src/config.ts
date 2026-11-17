@@ -94,6 +94,8 @@ export interface Config {
   apiTokenAccount: string | undefined;
   /** agent, sign-in on: folder that holds the host helpers (`filedeck-id`); unset = the image's folder, else the built one (host-helpers.ts) */
   hostHelpers: string | undefined;
+  /** agent, sign-in on: the PAM service `filedeck-pam` uses for system users' passwords (FILEDECK_PAM_SERVICE: /etc/pam.d/<name> on the machine) */
+  pamService: string;
   /** this process is a worker that serves one signed-in account (worker.ts); never set from the environment */
   worker: boolean;
   /** agent, sign-in on: most worker processes at once; past it the least recently used idle one is stopped */
@@ -216,6 +218,7 @@ export function loadConfig(env = process.env): Config {
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
     hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
+    pamService: env.FILEDECK_PAM_SERVICE || "filedeck",
     worker: false,
     maxWorkers: wholeSetting(env, "FILEDECK_MAX_WORKERS", 6),
     workerIdleMs: wholeSetting(env, "FILEDECK_WORKER_IDLE_SECONDS", 600) * 1000,

@@ -42,10 +42,10 @@ import { JOBS_HEADER } from "./worker.ts";
 
 /**
  * The routes the root process keeps: the probes, the node's own information, the folder sizes, and the job list and job routes (they
- * also reach the account's worker for its jobs: agent-jobs.ts). Part 2b adds `/api/auth/*`. Archive jobs (`POST /api/jobs/compress`,
+ * also reach the account's worker for its jobs: agent-jobs.ts). The sign-in routes (`/api/auth/*`, agent-auth-routes.ts) carry no user. Archive jobs (`POST /api/jobs/compress`,
  * `/api/jobs/extract`) run as the account, in its worker.
  */
-export const ROOT_ROUTES: readonly RegExp[] = [/^\/healthz$/, /^\/metrics$/, /^\/api\/info$/, /^\/api\/du$/, /^\/api\/jobs$/, /^\/api\/jobs\/[^/]+(?:\/cancel)?$/];
+export const ROOT_ROUTES: readonly RegExp[] = [/^\/healthz$/, /^\/metrics$/, /^\/api\/info$/, /^\/api\/du$/, /^\/api\/jobs$/, /^\/api\/jobs\/[^/]+(?:\/cancel)?$/, /^\/api\/auth\/[a-z-]+$/];
 
 /**
  * The paths that exist only between the root process and a worker, over the worker's connection (`/_worker/*`, `/_root/*`, and any

@@ -7,7 +7,7 @@
 // succeeds: the agent then reports the sandbox as "fallback". A helper that does not compile is an error.
 // FILEDECK_CC names the compiler (default: cc, then gcc); the test sets it to a missing program.
 //
-// The host helpers in server/native/host (filedeck-id) run inside the machine's own root against its glibc (src/host-helpers.ts),
+// The host helpers in server/native/host (filedeck-id, filedeck-pam) run inside the machine's own root against its glibc (src/host-helpers.ts),
 // so they are built dynamically into <out>/host, and only with a glibc toolchain (`cc -dumpmachine` ends in -gnu, -gnueabihf, ...). The image
 // builds them against an old glibc instead (Dockerfile, stage hostbuild).
 import { spawnSync } from "node:child_process";
@@ -57,13 +57,20 @@ if (hostFiles.length && !/-gnu[a-z0-9]*$/.test(machine)) {
 } else if (hostFiles.length) {
   const hostOut = path.join(outDir, "host");
   fs.mkdirSync(hostOut, { recursive: true });
+  const skipped = [];
   for (const file of hostFiles) {
     const name = file.slice(0, -2);
-    const r = spawnSync(cc, ["-O2", "-Wall", "-o", path.join(hostOut, name), path.join(hostSrc, file)], { encoding: "utf8" });
+    // (filedeck-pam loads the machine's libpam with dlopen: libdl before glibc 2.34, part of libc after; --as-needed keeps it off the others)
+    const r = spawnSync(cc, ["-O2", "-Wall", "-o", path.join(hostOut, name), path.join(hostSrc, file), "-Wl,--as-needed", "-ldl"], { encoding: "utf8" });
+    if (r.status !== 0 && /security\/pam_appl\.h/.test(r.stderr) && !process.env.FILEDECK_REQUIRE_HOST_HELPERS) {
+      console.log(`host helpers: ${name} skipped (no PAM headers here: install libpam0g-dev or pam-devel)`);
+      skipped.push(name);
+      continue;
+    }
     if (r.status !== 0) {
       console.error(`host helpers: ${name} did not compile:\n${r.stderr}`);
       process.exit(1);
     }
   }
-  console.log(`host helpers: built ${hostFiles.map((f) => f.slice(0, -2)).join(", ")} in ${hostOut}`);
+  console.log(`host helpers: built ${hostFiles.map((f) => f.slice(0, -2)).filter((n) => !skipped.includes(n)).join(", ")} in ${hostOut}`);
 }
