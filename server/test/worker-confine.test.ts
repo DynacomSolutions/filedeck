@@ -425,3 +425,18 @@ test("virtual accounts need Landlock ABI 3 or newer", () => {
   assert.equal(landlockForVirtual({ state: "landlock", abi: 3 }), true);
   assert.equal(landlockForVirtual({ state: "fallback", abi: 0 }), false);
 });
+
+test("a request without a path (or with an empty one) is checked as /", { skip: NEED }, async () => {
+  for (const p of ["/api/fs/search?content=needle", "/api/fs/search?path=&content=needle", "/api/fs/stat", "/api/fs/props?path=", "/api/fs/list", "/api/fs/walk", "/api/fs/zip?name=secret", "/api/upload/status?name=x&id=1"]) {
+    const r = await get(p);
+    const t = await r.text();
+    assert.equal(r.status, 403, `${p}: ${r.status} ${t}`);
+    assert.deepEqual(JSON.parse(t), { error: "outside your folders" }, p);
+  }
+  const z = await post("/api/fs/zip-ticket", { names: ["c"] });
+  assert.equal(z.status, 403, await z.clone().text());
+  // a grant on / covers it
+  const all = await get("/api/fs/stat", virt([{ path: "/", write: false }], 1, "guest7"));
+  assert.equal(all.status, 200, await all.clone().text());
+  await all.text();
+});
