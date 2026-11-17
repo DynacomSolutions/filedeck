@@ -17,7 +17,7 @@ import { WorkerGone } from "../src/worker-proto.ts";
 import { sandboxInfo } from "../src/sandbox.ts";
 import type { AccountResolver } from "../src/local-accounts.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
-import { chownForTest, fakeResolver, privateTmpdir } from "./worker-env.ts";
+import { chownForTest, fakeResolver, privateTmpdir, withSignIn } from "./worker-env.ts";
 
 /**
  * Sign-in on: every request that is not one of the root process's own routes runs in the worker of its account (agent-workers.ts).
@@ -681,7 +681,7 @@ test("auth off", async () => {
   const app = agent(
     { FILEDECK_AUTH: "off" },
     {
-      accounts: { resolve: async () => (lookups++, null) },
+      accounts: withSignIn({ resolve: async () => (lookups++, null) }),
       startWorker: async () => (starts++, assert.fail("no worker may start")),
     },
   );
@@ -848,7 +848,7 @@ test("the gate's answers: pool full, worker gone, worker error, lookup failed", 
   assert.ok(!text.includes("secret"), "the worker's text never reaches the client");
   assert.ok(logs.some((l) => l.includes("secret detail")), "it is logged");
   // a lookup that fails is not "no account"
-  const broken = gateApp({ logs, accounts: { resolve: () => Promise.reject(new Error("helper killed")) } });
+  const broken = gateApp({ logs, accounts: withSignIn({ resolve: () => Promise.reject(new Error("helper killed")) }) });
   const r = await broken.call("/api/fs/stat?path=/", { claim: sys("alice") });
   assert.equal(r.status, 503);
   assert.deepEqual(await r.json(), { error: "account lookup failed; try again" });
@@ -867,7 +867,7 @@ test("a stale epoch from the pool is 401; one fresh lookup per key at a time", a
   let release!: () => void;
   const slow = new Promise<void>((res) => (release = res));
   const base = accounts();
-  const h = gateApp({ accounts: { resolve: async (n, f) => (f && freshCalls++, await slow, base.resolve(n, f)) } });
+  const h = gateApp({ accounts: withSignIn({ resolve: async (n, f) => (f && freshCalls++, await slow, base.resolve(n, f)) }) });
   const all = [1, 2, 3].map(() => h.call("/api/fs/stat?path=/", { claim: sys("alice") }));
   await new Promise((res) => setTimeout(res, 20));
   release();
@@ -931,7 +931,7 @@ test("epochs at the gate: a higher one stops the account first, a lower one is r
   let release!: () => void;
   const slow = new Promise<void>((r) => (release = r));
   const base = accounts();
-  const h = gateApp({ accounts: { resolve: async (n, f) => (n === "alice" ? await slow : undefined, base.resolve(n, f)) } });
+  const h = gateApp({ accounts: withSignIn({ resolve: async (n, f) => (n === "alice" ? await slow : undefined, base.resolve(n, f)) }) });
   const waiting = h.call("/api/fs/stat?path=/", { claim: sys("alice", 1) });
   await new Promise((r) => setTimeout(r, 20));
   const newer = h.call("/api/fs/stat?path=/", { claim: sys("alice", 2) });

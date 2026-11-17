@@ -53,6 +53,9 @@ test("password route: the agent token and no user header give the PAM result", a
   // a wrong password is a 200 with fail (the hub decides what the person sees)
   const wrong = await post(agent({ FILEDECK_AUTH: "on" }, { pam: fakePam(1).pam }), { name: "alice", password: "x" });
   assert.deepEqual([wrong.status, await wrong.json()], [200, { result: "fail" }]);
+  // the helper sees uid 0 or gid 0 (exit 6) though the account lookup (perhaps cached) saw an ordinary account: refused
+  const stale = await post(agent({ FILEDECK_AUTH: "on" }, { pam: fakePam(6).pam }), { name: "alice", password: SECRET });
+  assert.deepEqual([stale.status, await stale.json()], [200, { result: "refused" }]);
   // a signed user header changes nothing here
   const claim: UserClaim = { kind: "sys", name: "alice", epoch: 1, iat: Date.now() };
   const withUser = await post(app, { name: "alice", password: SECRET }, { authorization: `Bearer ${T}`, [USER_HEADER]: signClaim(claim, T) });

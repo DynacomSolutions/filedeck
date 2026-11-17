@@ -11,8 +11,10 @@
  *   2   the account stage refused (expired, locked, a new password needed, ...)
  *   3   the PAM stack asked more than one question, or a question that is not a hidden one (a one-time code, an echo-on prompt):
  *       only one password prompt is supported, so the attempt fails at once
- *   4   no such account, or an account with uid 0 (it never signs in here)
+ *   4   no such account
  *   5   PAM cannot be used: no libpam.so.0, no service file, a lookup or PAM system error
+ *   6   the account has uid 0 or gid 0: it never signs in, and the hub stops at this machine (the agent answers `refused`); PAM is not
+ *       started. Its own code, so the refusal holds even when the agent's cached account lookup still saw an ordinary account.
  *   64  usage error
  * A reason goes to stderr for the agent's log (never the password). The very first step makes the process undumpable (no core file,
  * no ptrace by other processes of its uid); when that fails it exits 1 before it reads anything.
@@ -191,7 +193,8 @@ int main(int argc, char **argv) {
     }
     break;
   }
-  if (!found || pw.pw_uid == 0) finish(4);
+  if (!found) finish(4);
+  if (pw.pw_uid == 0 || pw.pw_gid == 0) finish(6);
 
   if (!has_service(service)) {
     say("no PAM service file for", service);

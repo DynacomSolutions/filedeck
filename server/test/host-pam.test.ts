@@ -78,6 +78,7 @@ test("each exit code maps to a result", async () => {
     [3, "fail"],
     [4, "unknown"],
     [5, "unavailable"],
+    [6, "refused"],
     [64, "unavailable"],
     [71, "unavailable"],
     [127, "unavailable"],
@@ -271,14 +272,16 @@ const raw = (built: string, args: string[], stdin = "x") => runHostHelper("/", b
 live("filedeck-pam: permit gives ok, deny gives fail, root and an unknown name are unknown, a missing service is never ok", async ({ built }) => {
   assert.equal(await pamFor(built, "filedeck-test-ok").check("nobody", SECRET), "ok");
   assert.equal(await pamFor(built, "filedeck-test-deny").check("nobody", SECRET), "fail");
-  assert.equal(await pamFor(built, "filedeck-test-ok").check("root", SECRET), "unknown");
+  // the helper itself sees uid 0 (whatever an agent's cached lookup said) and refuses, so the hub stops
+  assert.equal(await pamFor(built, "filedeck-test-ok").check("root", SECRET), "refused");
   assert.equal(await pamFor(built, "filedeck-test-ok").check("no-such-user-xyz", SECRET), "unknown");
   assert.notEqual(await pamFor(built, "filedeck-test-missing-xyz").check("nobody", SECRET), "ok");
   // the raw codes
   assert.equal((await raw(built, ["filedeck-test-ok", "nobody"])).code, 0);
   assert.equal((await raw(built, ["filedeck-test-deny", "nobody"])).code, 1);
   assert.equal((await raw(built, ["filedeck-test-acct", "nobody"])).code, 2);
-  assert.equal((await raw(built, ["filedeck-test-ok", "root"])).code, 4);
+  assert.equal((await raw(built, ["filedeck-test-ok", "root"])).code, 6);
+  assert.equal((await raw(built, ["filedeck-test-ok", "no-such-user-xyz"])).code, 4);
   assert.equal((await raw(built, ["filedeck-test-missing-xyz", "nobody"])).code, 5);
   for (const bad of [[], ["filedeck-test-ok"], ["filedeck-test-ok", "nobody", "x"], ["../passwd", "nobody"], ["filedeck-test-ok", "-nobody"], ["", "nobody"]]) {
     assert.equal((await raw(built, bad)).code, 64, JSON.stringify(bad));

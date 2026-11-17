@@ -52,6 +52,20 @@ export function fakeResolver(map: Record<string, Partial<LocalAccount>> = {}): A
 }
 
 /**
+ * A test fake's `resolve` with the `forSignIn` the interface requires, worked out from what `resolve` returns: `"root"` for uid 0, gid 0
+ * or group 0. Only for fakes whose `resolve` returns the raw ids (the real resolvers implement `forSignIn` themselves).
+ */
+export function withSignIn(r: Pick<AccountResolver, "resolve">): AccountResolver {
+  return {
+    resolve: (name, fresh) => r.resolve(name, fresh),
+    async forSignIn(name) {
+      const a = await r.resolve(name);
+      return a && (a.uid === 0 || a.gid === 0 || a.groups.includes(0)) ? "root" : a;
+    },
+  };
+}
+
+/**
  * Points `TMPDIR` at a new folder for the rest of this test file, so the folders the agent makes there for its workers
  * (`filedeck-workers/`) go with it: the returned function removes it. The folder can be passed through (0755), as a worker that runs as
  * another account must reach its own folders below it.

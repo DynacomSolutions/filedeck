@@ -9,15 +9,16 @@ import { validSystemName } from "./local-accounts.ts";
  *
  * - `ok`: PAM accepted the password and the account.
  * - `fail`: a wrong password, an account PAM refuses, or a PAM stack that asks more than the one password question.
- * - `unknown`: no such account here, or one with uid 0 (it never signs in).
+ * - `unknown`: no such account here.
+ * - `refused`: the helper found uid 0 or gid 0 (exit 6); such a name never signs in, and the hub stops.
  * - `unavailable`: PAM cannot be used here (no helper, no library, no service file, a crash or a timeout).
  *
  * At most 4 helpers run at once; a call over that waits for a place, and its time limit counts from the call, so it never waits for long.
  */
-export type PamResult = "ok" | "fail" | "unknown" | "unavailable";
+export type PamResult = "ok" | "fail" | "unknown" | "refused" | "unavailable";
 
 /** The helper's exit codes (filedeck-pam.c). */
-const RESULTS: Record<number, PamResult> = { 0: "ok", 1: "fail", 2: "fail", 3: "fail", 4: "unknown" };
+const RESULTS: Record<number, PamResult> = { 0: "ok", 1: "fail", 2: "fail", 3: "fail", 4: "unknown", 6: "refused" };
 
 export const SECOND_PROMPT_LOG = "pam: the service asked more than one question; only one password prompt is supported";
 

@@ -16,7 +16,7 @@ import { loginMessage } from "../src/auth/sshkey.ts";
 import { USER_HEADER } from "../src/auth/identity.ts";
 import { AgentSystemAuth, CALL_TIMEOUT_MS, TOTAL_MS } from "../src/auth/system.ts";
 import type { LocalAccount } from "../src/local-accounts.ts";
-import { fakeResolver, privateTmpdir } from "./worker-env.ts";
+import { fakeResolver, privateTmpdir, withSignIn } from "./worker-env.ts";
 
 /**
  * work-item: the hub signs system users in by asking the agents in the sign-in order (password through PAM, key through the user's own
@@ -261,7 +261,7 @@ test("uid 0 on one machine asked ends the search: refused stops like fail", asyn
 test("lookup: a root route behind the agent token, strict body, a failing lookup is false", async () => {
   const lines: string[] = [];
   const logs: string[] = [];
-  const accounts = {
+  const accounts = withSignIn({
     async resolve(name: string): Promise<LocalAccount | null> {
       if (name === "broken") throw new Error("nss: no answer");
       if (name === "gid0") return { name, uid: 1500, gid: 0, groups: [], home: "/home/x" };
@@ -269,7 +269,7 @@ test("lookup: a root route behind the agent token, strict body, a failing lookup
       if (name === "uid0") return { name, uid: 0, gid: 1500, groups: [1500], home: "/home/x" };
       return name === "carol" ? { name, uid: 1500, gid: 1500, groups: [1500], home: "/home/x" } : null;
     },
-  };
+  });
   const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "l", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on" } as never), (l) => lines.push(l), { accounts });
   closers.push(app as unknown as { close(): Promise<void> });
   const origError = console.error;

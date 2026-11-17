@@ -11,7 +11,7 @@ import { KeyCheck, keyListed, readAsUser, logLine, MAX_AUTHORIZED_KEYS, MAX_READ
 import { loginMessage, parseLoginMessage } from "../src/auth/sshkey.ts";
 import type { AccountResolver, LocalAccount } from "../src/local-accounts.ts";
 import { resetSandbox } from "../src/sandbox.ts";
-import { fakeResolver, privateTmpdir } from "./worker-env.ts";
+import { fakeResolver, privateTmpdir, withSignIn } from "./worker-env.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
 /**
@@ -47,7 +47,7 @@ const signed = (name = "alice") => {
 const FILE = `# my keys\n\n${ecLine(ec.publicKey)}\n${ED_LINE}\n`;
 
 /** A resolver that also hands out a uid-0 account (the real ones never do: KeyCheck must still refuse it). */
-const resolverWith = (accounts: Record<string, Partial<LocalAccount>>): AccountResolver => ({
+const resolverWith = (accounts: Record<string, Partial<LocalAccount>>): AccountResolver => withSignIn({
   async resolve(name) {
     if (!Object.hasOwn(accounts, name)) return null;
     return { name, uid: 1234, gid: 1234, groups: [1234], home: "/home/" + name, ...accounts[name] };
@@ -152,7 +152,7 @@ test("a file that cannot be read gives fail and one log line without the key or 
   const blob = ED_LINE.split(" ")[1]!;
   assert.ok(!log[0]!.includes(blob) && !log[0]!.includes(s.signature.toString("base64")));
   // a lookup that fails is not an answer: the caller says unavailable
-  const broken = new KeyCheck({ root: "/", accounts: { resolve: () => Promise.reject(new Error("helper stopped")) }, read: fakeRead(FILE).read });
+  const broken = new KeyCheck({ root: "/", accounts: withSignIn({ resolve: () => Promise.reject(new Error("helper stopped")) }), read: fakeRead(FILE).read });
   await assert.rejects(broken.check("alice", ED_LINE, s.message, s.signature), /helper stopped/);
 });
 
@@ -297,7 +297,7 @@ test("key route: no token is 401, a bad body is 400 and echoes nothing, auth off
 test("key route: no key check here, or a lookup that fails, gives unavailable", async () => {
   const none = agent({ FILEDECK_AUTH: "on" });
   assert.deepEqual(await (await postKey(none, goodBody())).json(), { result: "unavailable" });
-  const keys = new KeyCheck({ root: "/", accounts: { resolve: () => Promise.reject(new Error("helper stopped")) }, read: fakeRead(FILE).read, log: () => {} });
+  const keys = new KeyCheck({ root: "/", accounts: withSignIn({ resolve: () => Promise.reject(new Error("helper stopped")) }), read: fakeRead(FILE).read, log: () => {} });
   const broken = agent({ FILEDECK_AUTH: "on" }, { keys });
   const r = await postKey(broken, goodBody());
   assert.deepEqual([r.status, await r.json()], [200, { result: "unavailable" }]);

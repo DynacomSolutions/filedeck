@@ -20,21 +20,19 @@ export interface AccountResolver {
    * For sign-in: like `resolve`, but `"root"` for an account with uid 0, gid 0 or group 0 among its groups (where `resolve` answers null
    * for the first two and leaves group 0 out). Such an account never signs in, and the agent says so (`refused`) rather than "unknown".
    */
-  forSignIn?(name: string): Promise<LocalAccount | "root" | null>;
+  forSignIn(name: string): Promise<LocalAccount | "root" | null>;
 }
 
 /** Ids that make an account root for sign-in: uid 0, gid 0 or group 0 among its groups. */
 const rootIds = (uid: number, gid: number, groups: number[]) => uid === 0 || gid === 0 || groups.includes(0);
 
 /**
- * The account for a sign-in check: `"root"` for uid 0, gid 0 or group 0 (never signs in), null for no such account. Uses the resolver's
- * `forSignIn` when it has one, else `resolve` (which cannot tell uid 0 from no account, so that is null there). Rejects as `resolve` does.
+ * The account for a sign-in check: `"root"` for uid 0, gid 0 or group 0 (never signs in), null for no such account or an invalid name.
+ * Always the resolver's own `forSignIn` (required, so no wrapper can fall back to `resolve`, which cannot tell root from unknown).
+ * Rejects as `resolve` does.
  */
 export async function signInAccount(r: AccountResolver, name: string): Promise<LocalAccount | "root" | null> {
-  if (!validSystemName(name)) return null;
-  if (r.forSignIn) return r.forSignIn(name);
-  const a = await r.resolve(name);
-  return a && rootIds(a.uid, a.gid, a.groups) ? "root" : a;
+  return validSystemName(name) ? r.forSignIn(name) : null;
 }
 
 /** A system account name Filedeck accepts: what the usual tools allow, with `@` and `.` for directory accounts, never a leading `-`. */
