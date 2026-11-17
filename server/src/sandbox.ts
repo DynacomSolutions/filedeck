@@ -184,6 +184,12 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
    */
   chroot?: string;
   /**
+   * with `chroot`: `cmd` is an absolute path in this process's root (the image), not inside the new root. The launcher opens it before
+   * the chroot and runs it from that descriptor (its `--exec-outside`), so a dynamic program's loader and libraries are those of the new
+   * root and nothing is copied there. An ELF program only (a script's interpreter could not reach the descriptor).
+   */
+  execOutside?: boolean;
+  /**
    * let the program make unix stream socket pairs (Node makes the stdio pipes of its own children that way). Stream pairs only: a datagram or
    * seqpacket pair can send to any named or abstract unix socket with an address, which nothing else stops when Landlock is off. Every other
    * socket call stays refused.
@@ -244,9 +250,13 @@ async function helperPath(info: SandboxInfo): Promise<string | null> {
  * If the launcher itself exits with `EXIT_LANDLOCK_UNSUPPORTED`, the program did not run: call `resetSandbox()` and treat it as unavailable.
  */
 export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxOpts = {}): Promise<ChildProcess> {
-  const { readOnly = [], readExec = [], readWrite = [], uid, gid, groups, chroot, allowSocketpair, landlock, keepStdio = [], noSystem, allowSockets, keepCaps = [], allowMetadata, cwdFd, keepFds = [], stdio, ...rest } = opts;
+  const { readOnly = [], readExec = [], readWrite = [], uid, gid, groups, chroot, execOutside, allowSocketpair, landlock, keepStdio = [], noSystem, allowSockets, keepCaps = [], allowMetadata, cwdFd, keepFds = [], stdio, ...rest } = opts;
   const info = await sandboxInfo();
-  if (info.state === "unavailable") throw sandboxRequiredError();
+  // `require` refuses to run a program without Landlock; a caller that asks for no Landlock (it sets its own limits: a chroot, a user)
+  // still runs, through the launcher only, which applies the user change, the capability steps and the seccomp filter
+  const noLandlockLauncher = info.state === "unavailable" && landlock === false ? await helperPath(info) : null;
+  if (info.state === "unavailable" && !noLandlockLauncher) throw sandboxRequiredError();
+  if (execOutside && (chroot === undefined || !cmd.startsWith("/"))) throw new FsError(500, "execOutside needs a chroot and an absolute program path");
   if ((uid === 0 || gid === 0) && uid !== process.getuid?.()) throw new FsError(500, "refusing to run a confined program as root");
   if (groups) {
     if (groups.includes(0)) throw new FsError(500, "refusing to run a confined program as root");
@@ -264,14 +274,16 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
   const extra: string[] = [];
   if (owner && groups) extra.push("--groups", groups.join(","));
   if (chroot !== undefined) extra.push("--chroot", chroot);
+  if (execOutside) extra.push("--exec-outside");
   if (allowSocketpair) extra.push("--allow-socketpair");
   const addFd = (fd: number): number => (fds.push(fd), fds.length - 1);
   const kept = keepFds.map(addFd); // first, so the first is descriptor 3 whatever else follows
   // No Landlock rules (state off or fallback): the privilege drop and the working folder still must not depend on the mode, so the
   // launcher, when there is one, runs `--no-landlock` with them (it also clears the supplementary groups, or sets `groups`, which spawn's uid option does not).
-  if (info.state === "off" || info.state === "fallback") {
+  if (info.state === "off" || info.state === "fallback" || noLandlockLauncher) {
     // `allowSocketpair` and `keepStdio` do not call for the launcher here: without it there is no filter to relax, and spawn hands every stdio slot on as it is
-    const helper = owner || cwdFd !== undefined || keepCaps.length || chroot !== undefined ? await helperPath(info) : null;
+    // (under `require` without Landlock the launcher is always used: it is what the caller is let through for)
+    const helper = noLandlockLauncher ?? (owner || cwdFd !== undefined || keepCaps.length || chroot !== undefined ? await helperPath(info) : null);
     if (helper) {
       const flags = ["--no-landlock"];
       for (const k of kept) flags.push("--keep-fd", String(k));

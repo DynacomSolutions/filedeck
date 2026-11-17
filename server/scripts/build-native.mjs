@@ -8,7 +8,7 @@
 // FILEDECK_CC names the compiler (default: cc, then gcc); the test sets it to a missing program.
 //
 // The host helpers in server/native/host (filedeck-id) run inside the machine's own root against its glibc (src/host-helpers.ts),
-// so they are built dynamically into <out>/host, and only with a glibc toolchain (`cc -dumpmachine` ends in -gnu). The image
+// so they are built dynamically into <out>/host, and only with a glibc toolchain (`cc -dumpmachine` ends in -gnu, -gnueabihf, ...). The image
 // builds them against an old glibc instead (Dockerfile, stage hostbuild).
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -52,7 +52,7 @@ say(`built ${built.join(", ")} in ${outDir}`);
 const hostSrc = path.join(srcDir, "host");
 const hostFiles = fs.existsSync(hostSrc) ? fs.readdirSync(hostSrc).filter((f) => f.endsWith(".c")).sort() : [];
 const machine = spawnSync(cc, ["-dumpmachine"], { encoding: "utf8" }).stdout?.trim() ?? "";
-if (hostFiles.length && !machine.endsWith("-gnu")) {
+if (hostFiles.length && !/-gnu[a-z0-9]*$/.test(machine)) {
   console.log("host helpers: skipped (not a glibc toolchain)");
 } else if (hostFiles.length) {
   const hostOut = path.join(outDir, "host");

@@ -26,10 +26,12 @@ test("host lookup: the helper's four lines become the account", async () => {
   assert.deepEqual(f.calls, ["alice"]);
 });
 
-test("host lookup: uid 0, gid 0 and malformed output give no account", async () => {
+test("host lookup: uid 0 or gid 0 give no account; malformed output is an error, not an unknown name", async () => {
+  for (const stdout of ["0\n1000\n/root\n1000\n", "1000\n0\n/home/a\n0\n"]) {
+    const f = fake({ code: 0, stdout });
+    assert.equal(await new HostAccounts({ run: f.run }).resolve("alice"), null, JSON.stringify(stdout));
+  }
   for (const stdout of [
-    "0\n1000\n/root\n1000\n", // uid 0
-    "1000\n0\n/home/a\n0\n", // gid 0
     "1000\n1000\n/home/a\n", // three lines
     "1000\n1000\n/home/a\n1000\nextra\n", // five lines
     "1000\n1000\n/home/a\n1000", // no final newline
@@ -46,20 +48,28 @@ test("host lookup: uid 0, gid 0 and malformed output give no account", async () 
     "",
   ]) {
     const f = fake({ code: 0, stdout });
-    assert.equal(await new HostAccounts({ run: f.run }).resolve("alice"), null, JSON.stringify(stdout));
+    await assert.rejects(new HostAccounts({ run: f.run }).resolve("alice"), /alice/, JSON.stringify(stdout));
   }
 });
 
-test("host lookup: a supplementary group 0 is dropped, the account still resolves", async () => {
+test("host lookup: a supplementary group 0 is dropped and said once per name, the account still resolves", async () => {
   const f = fake({ code: 0, stdout: "1000\n1000\n/home/a\n1000 0 27 27\n" });
-  assert.deepEqual((await new HostAccounts({ run: f.run }).resolve("alice"))?.groups, [1000, 27]);
+  const logs: string[] = [];
+  const h = new HostAccounts({ run: f.run, log: (s) => logs.push(s) });
+  assert.deepEqual((await h.resolve("alice"))?.groups, [1000, 27]);
+  assert.deepEqual((await h.resolve("alice", true))?.groups, [1000, 27]);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0]!, /alice/);
+  assert.match(logs[0]!, /group 0/);
 });
 
-test("host lookup: exit 2 (unknown name), another code or a killed helper give no account", async () => {
-  for (const code of [2, 1, 64, null]) {
-    const f = fake({ code, stdout: code === 2 ? "" : "1000\n1000\n/home/a\n1000\n" });
-    assert.equal(await new HostAccounts({ run: f.run }).resolve("alice"), null, String(code));
+test("host lookup: exit 2 with no output is an unknown name; another code, a killed helper or a failed start is an error", async () => {
+  assert.equal(await new HostAccounts({ run: fake({ code: 2, stdout: "" }).run }).resolve("alice"), null);
+  for (const r of [{ code: 2, stdout: "x\n" }, { code: 1, stdout: "" }, { code: 64, stdout: "" }, { code: null, stdout: "1000\n1000\n/home/a\n1000\n" }]) {
+    await assert.rejects(new HostAccounts({ run: fake(r).run }).resolve("alice"), /alice/, JSON.stringify(r));
   }
+  const failing = new HostAccounts({ run: async () => { throw new Error("launcher missing"); } });
+  await assert.rejects(failing.resolve("alice"), /launcher missing/);
 });
 
 test("host lookup: an invalid name gives no account and the helper is never run", async () => {
@@ -91,7 +101,7 @@ test("host lookup: a failed run is not cached", async () => {
   let code: number | null = null;
   const f = fake(() => ({ code, stdout: "1000\n1000\n/home/a\n1000\n" }));
   const h = new HostAccounts({ run: f.run });
-  assert.equal(await h.resolve("alice"), null);
+  await assert.rejects(h.resolve("alice"));
   code = 0;
   assert.equal((await h.resolve("alice"))?.uid, 1000);
   assert.equal(f.calls.length, 2);

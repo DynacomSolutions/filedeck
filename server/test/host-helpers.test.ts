@@ -5,14 +5,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";
-import { hostHelperDir, installHostHelpers, runHostHelper } from "../src/host-helpers.ts";
+import { hostHelperDir, runHostHelper } from "../src/host-helpers.ts";
 import { HostAccounts, makeResolver } from "../src/local-accounts.ts";
 import { resetSandbox } from "../src/sandbox.ts";
 import { useSandbox } from "./sandbox-env.ts";
 
 /**
- * work-item: the host helpers are copied into a private, root-owned folder under the machine's /run and run there through the
- * launcher's chroot, so `filedeck-id` answers from the machine's own NSS. The install refuses links and folders that root does not own.
+ * work-item: the host helpers stay in the image. The launcher opens one by its path in the container, changes the root to the
+ * machine's (`FILEDECK_ROOT`) and runs it from that descriptor, so its dynamic loader, libc and NSS modules are the machine's own
+ * and nothing is written on the machine. `filedeck-id` then answers from the machine's own account database.
  */
 const ROOT_ONLY = process.getuid?.() === 0 ? false : "host helpers live: skipped (not running as root)";
 const ldd = spawnSync("ldd", ["--version"], { encoding: "utf8" });
@@ -31,13 +32,18 @@ after(() => {
 });
 
 const write = (p: string, s: string, mode = 0o755) => (fs.mkdirSync(path.dirname(p), { recursive: true }), fs.writeFileSync(p, s, { mode }), p);
-const modeOf = (p: string) => fs.lstatSync(p).mode & 0o7777;
 
-test("helper folder: FILEDECK_HOST_HELPERS is used as given, and a folder without filedeck-id is no folder", async () => {
+test("helper folder: the configured folder is used as given, and a folder without filedeck-id is no folder", async () => {
   const dir = path.join(tmp, "given");
   write(path.join(dir, "filedeck-id"), "#!/bin/sh\n");
   assert.equal(await hostHelperDir(dir), dir);
   assert.equal(await hostHelperDir(path.join(tmp, "empty")), null);
+});
+
+test("runHostHelper: a folder that is not absolute or a name with a slash is refused before anything starts", async () => {
+  await assert.rejects(runHostHelper("/", "relative/dir", "filedeck-id", []), /folder/);
+  await assert.rejects(runHostHelper("/", "/abs", "../filedeck-id", []), /name/);
+  await assert.rejects(runHostHelper("/", "/abs", "", []), /name/);
 });
 
 test("no host helper: only the local files resolve, and the log says why", async () => {
@@ -54,93 +60,28 @@ test("no host helper: only the local files resolve, and the log says why", async
   assert.match(logs[0]!, /^system accounts: host lookup unavailable \(.+\); only local \/etc\/passwd accounts resolve, and system sign-in is refused$/);
 });
 
-test("install: a private root-owned folder named by the files' hash, files 0500, the same folder again for the same files", { skip: ROOT_ONLY }, async () => {
-  const root = path.join(tmp, "inst");
-  fs.mkdirSync(path.join(root, "run"), { recursive: true, mode: 0o755 });
-  const from = path.join(tmp, "inst-from");
-  write(path.join(from, "filedeck-id"), "one\n", 0o644);
-  write(path.join(from, "filedeck-pam"), "two\n", 0o644);
-  const r = await installHostHelpers(root, from);
-  assert.ok("dir" in r, JSON.stringify(r));
-  assert.match(r.dir, /^\/run\/filedeck\/host-[0-9a-f]{16}$/);
-  for (const d of [path.join(root, "run/filedeck"), path.join(root, r.dir)]) {
-    const st = fs.lstatSync(d);
-    assert.ok(st.isDirectory() && !st.isSymbolicLink(), d);
-    assert.equal(st.uid, 0, d);
-    assert.equal(modeOf(d), 0o700, d);
-  }
-  assert.deepEqual(fs.readdirSync(path.join(root, r.dir)).sort(), ["filedeck-id", "filedeck-pam"]);
-  for (const [n, body] of [["filedeck-id", "one\n"], ["filedeck-pam", "two\n"]] as const) {
-    const p = path.join(root, r.dir, n);
-    assert.equal(fs.readFileSync(p, "utf8"), body);
-    assert.equal(modeOf(p), 0o500, n);
-    assert.equal(fs.lstatSync(p).uid, 0, n);
-  }
-  // a folder left with a wrong mode is put right, and a file changed in place is written again
-  fs.chmodSync(path.join(root, "run/filedeck"), 0o755);
-  fs.chmodSync(path.join(root, r.dir, "filedeck-id"), 0o700);
-  fs.writeFileSync(path.join(root, r.dir, "filedeck-id"), "tampered\n");
-  const again = await installHostHelpers(root, from);
-  assert.deepEqual(again, r);
-  assert.equal(modeOf(path.join(root, "run/filedeck")), 0o700);
-  assert.equal(fs.readFileSync(path.join(root, r.dir, "filedeck-id"), "utf8"), "one\n");
-  assert.equal(modeOf(path.join(root, r.dir, "filedeck-id")), 0o500);
-  // other files, another folder
-  write(path.join(from, "filedeck-id"), "one, changed\n", 0o644);
-  const other = await installHostHelpers(root, from);
-  assert.ok("dir" in other && other.dir !== r.dir);
-});
-
-test("install: a link or a folder that root does not own is refused, and nothing is written through it", { skip: ROOT_ONLY }, async () => {
-  const from = path.join(tmp, "refuse-from");
-  write(path.join(from, "filedeck-id"), "x\n");
-  const elsewhere = path.join(tmp, "elsewhere");
-  fs.mkdirSync(elsewhere, { mode: 0o700 });
-
-  const linked = path.join(tmp, "linked");
-  fs.mkdirSync(path.join(linked, "run"), { recursive: true });
-  fs.symlinkSync(elsewhere, path.join(linked, "run/filedeck"));
-  const a = await installHostHelpers(linked, from);
-  assert.ok("error" in a, JSON.stringify(a));
-  assert.deepEqual(fs.readdirSync(elsewhere), []);
-
-  const runLinked = path.join(tmp, "runlinked");
-  fs.mkdirSync(runLinked);
-  fs.symlinkSync(elsewhere, path.join(runLinked, "run"));
-  assert.ok("error" in (await installHostHelpers(runLinked, from)));
-  assert.deepEqual(fs.readdirSync(elsewhere), []);
-
-  const leaf = path.join(tmp, "leaflinked");
-  fs.mkdirSync(path.join(leaf, "run/filedeck"), { recursive: true, mode: 0o700 });
-  const ok = await installHostHelpers(leaf, from);
-  assert.ok("dir" in ok);
-  fs.rmSync(path.join(leaf, ok.dir), { recursive: true });
-  fs.symlinkSync(elsewhere, path.join(leaf, ok.dir));
-  assert.ok("error" in (await installHostHelpers(leaf, from)));
-  assert.deepEqual(fs.readdirSync(elsewhere), []);
-
-  const foreign = path.join(tmp, "foreign");
-  fs.mkdirSync(path.join(foreign, "run/filedeck"), { recursive: true, mode: 0o700 });
-  fs.chownSync(path.join(foreign, "run/filedeck"), 65534, 65534);
-  assert.ok("error" in (await installHostHelpers(foreign, from)));
-  assert.deepEqual(fs.readdirSync(path.join(foreign, "run/filedeck")), []);
-});
-
-/** Live against this machine's own `/`: needs root (the chroot and /run), the launcher and a glibc toolchain. */
-const live = (name: string, fn: (h: { dir: string; built: string }) => Promise<void>) =>
+/**
+ * Live against this machine's own `/`: needs root (the chroot), the launcher, and glibc (the helpers are dynamic glibc programs; the
+ * image's Alpine build stage has none, so these skip there). `FILEDECK_REQUIRE_HOST_HELPERS=1` turns the glibc skip into a failure.
+ */
+const live = (name: string, fn: (h: { built: string; extra: string }) => Promise<void>) =>
   test(name, { skip: ROOT_ONLY }, async (t) => {
     if (!GLIBC) {
       if (process.env.FILEDECK_REQUIRE_HOST_HELPERS) throw new Error(`host helpers required but this is not a glibc system: ${(ldd.stdout || ldd.stderr || String(ldd.error)).trim().split("\n")[0]}`);
       return t.skip("host helpers live: skipped (no glibc here)");
     }
-    const h = await liveSetup();
-    await fn(h);
+    await fn(await liveSetup());
   });
 
-let setup: Promise<{ dir: string; built: string }> | undefined;
-// the live tests write into this machine's /run/filedeck: remove what they made
-const hadRunFiledeck = fs.existsSync("/run/filedeck");
-const liveDirs = new Set<string>();
+const C_HELPERS: Record<string, string> = {
+  sleeper: "#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n",
+  talker: '#include <stdio.h>\nint main(void) { for (int i = 0; i < 200000; i++) putchar(\'x\'); return 0; }\n',
+  "bad-utf8": '#include <stdio.h>\nint main(void) { fputs("\\xff\\xfe\\n", stdout); return 0; }\n',
+  "show-env":
+    '#include <stdio.h>\n#include <unistd.h>\nextern char **environ;\nint main(void) { printf("uid=%d gid=%d\\n", (int)getuid(), (int)getgid()); for (char **e = environ; *e; e++) puts(*e); char b[256]; size_t n = fread(b, 1, sizeof b - 1, stdin); b[n] = 0; fputs(b, stdout); return 0; }\n',
+};
+
+let setup: Promise<{ built: string; extra: string }> | undefined;
 function liveSetup() {
   setup ??= (async () => {
     await useSandbox();
@@ -149,33 +90,70 @@ function liveSetup() {
     assert.equal(b.status, 0, b.stderr);
     const built = path.join(out, "host");
     assert.ok(fs.existsSync(path.join(built, "filedeck-id")), `build-native did not build the host helpers: ${b.stdout}`);
-    const r = await installHostHelpers("/", built);
-    assert.ok("dir" in r, JSON.stringify(r));
-    liveDirs.add(r.dir);
-    return { dir: r.dir, built };
+    const extra = path.join(tmp, "extra");
+    fs.mkdirSync(extra, { mode: 0o755 });
+    for (const [name, src] of Object.entries(C_HELPERS)) {
+      const c = write(path.join(tmp, "src", `${name}.c`), src, 0o644);
+      const r = spawnSync("cc", ["-O2", "-o", path.join(extra, name), c], { encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+    }
+    return { built, extra };
   })();
   return setup;
 }
-after(() => {
-  for (const d of liveDirs) fs.rmSync(d, { recursive: true, force: true });
-  if (!hadRunFiledeck) fs.rmSync("/run/filedeck", { recursive: true, force: true });
-});
 
-live("filedeck-id: nobody resolves to 65534, root and an unknown name do not, usage errors exit 64", async ({ dir }) => {
-  const raw = await runHostHelper("/", dir, "filedeck-id", ["root"], {});
-  assert.equal(raw.code, 0);
+live("filedeck-id: nobody resolves to 65534, root and an unknown name do not, usage errors exit 64; nothing is written on the machine", async ({ built }) => {
+  const runBefore = fs.existsSync("/run/filedeck");
+  const raw = await runHostHelper("/", built, "filedeck-id", ["root"]);
+  assert.equal(raw.code, 0, raw.stderr);
   assert.match(raw.stdout, /^0\n0\n\/[^\n]*\n[0-9 ]*\n$/);
-  const usage = await runHostHelper("/", dir, "filedeck-id", [], {});
+  const usage = await runHostHelper("/", built, "filedeck-id", []);
   assert.deepEqual([usage.code, usage.stdout], [64, ""]);
-  const unknown = await runHostHelper("/", dir, "filedeck-id", ["no-such-user-xyz"], {});
+  const unknown = await runHostHelper("/", built, "filedeck-id", ["no-such-user-xyz"]);
   assert.deepEqual([unknown.code, unknown.stdout], [2, ""]);
 
-  const accounts = new HostAccounts({ run: (name) => runHostHelper("/", dir, "filedeck-id", [name], {}) });
+  const accounts = new HostAccounts({ run: (name) => runHostHelper("/", built, "filedeck-id", [name]) });
   const nobody = await accounts.resolve("nobody");
   assert.equal(nobody?.uid, 65534);
   assert.ok(nobody.groups.includes(nobody.gid));
   assert.equal(await accounts.resolve("root"), null);
   assert.equal(await accounts.resolve("no-such-user-xyz"), null);
+  assert.equal(fs.existsSync("/run/filedeck"), runBefore, "the helpers are not copied onto the machine");
+});
+
+live("filedeck-id runs from the image even where the helper's path does not exist inside the new root", async ({ built }) => {
+  // a new root that holds only the machine's system folders (read-only bind mounts), so the helper's own path does not exist inside
+  // it. It is not under `tmp`, and it is taken down with rmdir only: a recursive removal must never reach a mount that is still there.
+  const jail = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-jail-"));
+  fs.chmodSync(jail, 0o755);
+  const sys = ["usr", "etc", "lib", "lib64", "bin"].filter((d) => fs.existsSync(`/${d}`));
+  const mounted: string[] = [];
+  try {
+    for (const d of sys) {
+      const real = fs.lstatSync(`/${d}`);
+      const at = path.join(jail, d);
+      if (real.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(`/${d}`), at);
+      else {
+        fs.mkdirSync(at);
+        const m = spawnSync("mount", ["-o", "bind,ro", `/${d}`, at], { encoding: "utf8" });
+        assert.equal(m.status, 0, `bind mount of /${d}: ${m.stderr}`);
+        mounted.push(at);
+      }
+    }
+    assert.equal(fs.existsSync(path.join(jail, built)), false);
+    const r = await runHostHelper(jail, built, "filedeck-id", ["nobody"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^65534\n/);
+  } finally {
+    for (const at of mounted) spawnSync("umount", [at]);
+    for (const d of sys) {
+      const at = path.join(jail, d);
+      const st = fs.lstatSync(at, { throwIfNoEntry: false });
+      if (st?.isSymbolicLink()) fs.unlinkSync(at);
+      else if (st) fs.rmdirSync(at); // fails, and leaves everything, if the mount is still there
+    }
+    fs.rmdirSync(jail);
+  }
 });
 
 live("makeResolver: the host lookup is used and the helpers are handed on", async ({ built }) => {
@@ -183,33 +161,28 @@ live("makeResolver: the host lookup is used and the helpers are handed on", asyn
   const cfg = { ...loadConfig({ FILEDECK_ROOT: "/", FILEDECK_AUTH: "on" }), hostHelpers: built };
   const r = await makeResolver(cfg, (s) => logs.push(s));
   assert.deepEqual(logs, ["system accounts: resolved through the host (NSS)"]);
-  assert.equal(r.helpers?.root, "/");
-  assert.match(r.helpers.dir, /^\/run\/filedeck\/host-[0-9a-f]{16}$/);
-  liveDirs.add(r.helpers.dir);
+  assert.deepEqual(r.helpers, { root: "/", dir: built });
   assert.ok(r.resolver instanceof HostAccounts);
   assert.equal((await r.resolver.resolve("nobody"))?.uid, 65534);
 });
 
-test("runHostHelper: a helper that runs too long is killed (code null), and output is cut at 64 KiB", { skip: ROOT_ONLY }, async () => {
-  await useSandbox();
-  const from = path.join(tmp, "scripts");
-  write(path.join(from, "sleeper"), "#!/bin/sh\nexec sleep 30\n");
-  write(path.join(from, "talker"), "#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' x\n");
-  write(path.join(from, "show-env"), "#!/bin/sh\nenv\ncat\n");
-  const r = await installHostHelpers("/", from);
-  assert.ok("dir" in r, JSON.stringify(r));
-  liveDirs.add(r.dir);
-  const started = Date.now();
-  const slow = await runHostHelper("/", r.dir, "sleeper", [], { timeoutMs: 300 });
-  assert.equal(slow.code, null);
-  assert.ok(Date.now() - started < 10_000);
-  const big = await runHostHelper("/", r.dir, "talker", [], {});
-  assert.equal(big.code, null);
-  assert.ok(big.stdout.length <= 64 * 1024, String(big.stdout.length));
-  const env = await runHostHelper("/", r.dir, "show-env", [], { stdin: Buffer.from("from stdin\n") });
-  assert.equal(env.code, 0);
+live("runHostHelper: runs as 65534 unless asked for root, with only PATH and the given input; killed when too slow or too talkative; output must be UTF-8", async ({ extra }) => {
+  const env = await runHostHelper("/", extra, "show-env", [], { stdin: Buffer.from("from stdin\n") });
+  assert.equal(env.code, 0, env.stderr);
   const lines = env.stdout.trim().split("\n");
+  assert.equal(lines[0], "uid=65534 gid=65534");
   assert.ok(lines.includes("PATH=/usr/bin:/bin"), env.stdout);
   assert.ok(lines.includes("from stdin"), env.stdout);
   assert.ok(!lines.some((l) => /^FILEDECK_|TOKEN|KEY=/.test(l)), env.stdout);
+  const asRoot = await runHostHelper("/", extra, "show-env", [], { asRoot: true });
+  assert.match(asRoot.stdout, /^uid=0 gid=0\n/);
+
+  const started = Date.now();
+  const slow = await runHostHelper("/", extra, "sleeper", [], { timeoutMs: 300 });
+  assert.equal(slow.code, null);
+  assert.ok(Date.now() - started < 10_000);
+  const big = await runHostHelper("/", extra, "talker", []);
+  assert.equal(big.code, null);
+  assert.ok(big.stdout.length <= 64 * 1024, String(big.stdout.length));
+  await assert.rejects(runHostHelper("/", extra, "bad-utf8", []), /UTF-8/);
 });

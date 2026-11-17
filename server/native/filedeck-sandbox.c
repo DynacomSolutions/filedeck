@@ -2,7 +2,7 @@
  * filedeck-sandbox: run a command with access to the listed folders only.
  *
  *   filedeck-sandbox --probe
- *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N | --chroot DIR] [--keep-fd N]... [--uid N --gid N [--groups G1,G2,...] [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets | --allow-socketpair] -- COMMAND [ARG...]
+ *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N | --chroot DIR [--exec-outside]] [--keep-fd N]... [--uid N --gid N [--groups G1,G2,...] [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets | --allow-socketpair] -- COMMAND [ARG...]
  *
  *   --cwd-fd N  start COMMAND in the directory descriptor N (fchdir, done after every descriptor is in place and before the user
  *               change and the restriction). A working folder given as a /proc/self/fd path can point at the wrong descriptor, because
@@ -12,6 +12,12 @@
  *               capability steps; COMMAND is then looked up inside DIR. Not together with --cwd-fd. It needs the chroot capability
  *               (exit 71 without it). The Landlock rules stay attached to what was opened outside DIR, so a program that runs inside
  *               DIR with Landlock on sees only what those rules name; the callers that chroot run with --no-landlock.
+ *   --exec-outside  (only with --chroot) COMMAND is an absolute path in the CURRENT root, not inside DIR: it is opened (read-only) before
+ *               the chroot, must be a regular file, and is executed from that descriptor (execveat with AT_EMPTY_PATH) after every other
+ *               step. Its ELF interpreter is then looked up inside DIR, so a dynamic program shipped beside this launcher runs against
+ *               the libraries of DIR, and nothing has to be copied into DIR. A script cannot be run this way (its interpreter would need
+ *               the descriptor, which is closed on exec). Exit 64 without --chroot or with a relative path, 71 when the file cannot be opened
+ *               or is not a regular file.
  *   --keep-fd N keep descriptor N open for COMMAND (repeatable): for a descriptor the caller means the command to use, such as an
  *               archive opened read-only, which it then reads as a file descriptor in every mode. Every other descriptor above 2 is
  *               closed on exec. Landlock does not restrict a descriptor that is already open: hand over only what COMMAND should use.
@@ -53,7 +59,7 @@
  * apply). --probe only reports whether Landlock can be used here and which rights it handles. No dependencies;
  * build: cc -O2 -static -o filedeck-sandbox filedeck-sandbox.c
  *
- * Order of the steps: open the roots, fchdir or chroot, bounding set, supplementary groups/gid/uid (keeping the named capabilities across the change),
+ * Order of the steps: open the roots, open COMMAND (--exec-outside), fchdir or chroot, bounding set, supplementary groups/gid/uid (keeping the named capabilities across the change),
  * capability sets and ambient set, no-new-privileges, close descriptors, seccomp filter, Landlock, exec. --probe also reports `caps 1` when
  * the capability steps work here. Exit status: 0 for --probe: Landlock works; 70 Landlock is not available (old kernel, not enabled in the kernel's list
  * of security modules, or blocked by a seccomp profile): COMMAND was NOT run; 64 usage error; 71 a step failed (message on
@@ -585,7 +591,8 @@ int main(int argc, char **argv) {
   struct root_spec roots[MAX_ROOTS];
   int nroots = 0;
   long uid = -1, gid = -1, cwd_fd = -1;
-  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, allow_sockets = 0, allow_socketpair = 0, allow_metadata = 0, i = 1;
+  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, allow_sockets = 0, allow_socketpair = 0, allow_metadata = 0, exec_outside = 0, i = 1;
+  int exec_fd = -1;
   gid_t groups[MAX_GROUPS];
   int ngroups = -1; /* -1: --groups not given, the supplementary groups are cleared */
   const char *chroot_dir = NULL;
@@ -613,6 +620,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--allow-sockets")) allow_sockets = 1;
     else if (!strcmp(argv[i], "--allow-socketpair")) allow_socketpair = 1;
     else if (!strcmp(argv[i], "--allow-metadata")) allow_metadata = 1;
+    else if (!strcmp(argv[i], "--exec-outside")) exec_outside = 1;
     else if (!strcmp(argv[i], "--keep-cap") && i + 1 < argc) {
       if (!strcmp(argv[++i], "dac_read_search")) keep_caps |= 1ULL << CAP_BIT_DAC_READ_SEARCH;
       else if (!strcmp(argv[i], "dac_override")) keep_caps |= 1ULL << CAP_BIT_DAC_OVERRIDE;
@@ -683,7 +691,7 @@ int main(int argc, char **argv) {
     return r;
   }
   if (i >= argc) {
-    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N | --chroot DIR] [--keep-fd N]... [--uid N --gid N [--groups G1,G2,...] [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets | --allow-socketpair] -- COMMAND [ARG...]\n");
+    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N | --chroot DIR [--exec-outside]] [--keep-fd N]... [--uid N --gid N [--groups G1,G2,...] [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets | --allow-socketpair] -- COMMAND [ARG...]\n");
     return EXIT_USAGE;
   }
   if ((uid == 0 || gid == 0) && !allow_root_user) {
@@ -705,6 +713,14 @@ int main(int argc, char **argv) {
     }
   if (chroot_dir && cwd_fd >= 0) {
     fprintf(stderr, "filedeck-sandbox: --chroot and --cwd-fd do not go together\n");
+    return EXIT_USAGE;
+  }
+  if (exec_outside && !chroot_dir) {
+    fprintf(stderr, "filedeck-sandbox: --exec-outside needs --chroot\n");
+    return EXIT_USAGE;
+  }
+  if (exec_outside && argv[i][0] != '/') {
+    fprintf(stderr, "filedeck-sandbox: --exec-outside needs an absolute path for the command\n");
     return EXIT_USAGE;
   }
 
@@ -766,6 +782,15 @@ int main(int argc, char **argv) {
   if (cwd_fd >= 0 && fchdir((int)cwd_fd) < 0) {
     fprintf(stderr, "filedeck-sandbox: working folder (descriptor %ld): %s\n", cwd_fd, strerror(errno));
     return EXIT_FAILED;
+  }
+  /* the program from outside the new root: opened here, while the current root is still this process's own, and run by descriptor below */
+  if (exec_outside) {
+    struct stat st;
+    exec_fd = open(argv[i], O_RDONLY | O_CLOEXEC);
+    if (exec_fd < 0 || fstat(exec_fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+      fprintf(stderr, "filedeck-sandbox: %s: %s\n", argv[i], exec_fd < 0 ? strerror(errno) : "not a regular file");
+      return EXIT_FAILED;
+    }
   }
   /* the new root: after the roots are opened (outside it) and before the capability steps (chroot needs its capability) */
   if (chroot_dir && (chroot(chroot_dir) < 0 || chdir("/") < 0)) {
@@ -833,6 +858,13 @@ int main(int argc, char **argv) {
     close(rs);
   }
 
+  if (exec_fd >= 0) {
+    /* execveat, not fexecve: fexecve may fall back to a /proc path, which does not exist inside the new root */
+    extern char **environ;
+    syscall(SYS_execveat, exec_fd, "", argv + i, environ, AT_EMPTY_PATH);
+    fprintf(stderr, "filedeck-sandbox: %s (by descriptor): %s\n", argv[i], strerror(errno));
+    return 127;
+  }
   execvp(argv[i], argv + i);
   fprintf(stderr, "filedeck-sandbox: %s: %s\n", argv[i], strerror(errno));
   return 127;

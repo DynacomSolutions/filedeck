@@ -12,10 +12,11 @@
  * Exit status: 0 with the four lines; 2 with no output when there is no such account; 64 on a usage error; 1 when the lookup
  * itself fails (an NSS error, a home that cannot be printed on one line, more than 65536 groups).
  *
- * It runs inside the machine's root (the agent starts it through `filedeck-sandbox --chroot`, server/src/host-helpers.ts), so it
- * is a dynamic glibc program that loads the machine's own libc and NSS modules. The image builds it against an old glibc so that
- * it starts on old machines too (Dockerfile, stage hostbuild). The agent checks the name before it starts this program and
- * parses the output strictly; this program still refuses an empty name or one that starts with '-'.
+ * It runs inside the machine's root as uid 65534 (the agent starts it from the image by descriptor through `filedeck-sandbox
+ * --chroot --exec-outside`, server/src/host-helpers.ts), so it is a dynamic glibc program that loads the machine's own loader, libc
+ * and NSS modules. The image builds it against an old glibc so that it starts on old machines too (Dockerfile, stage hostbuild). The
+ * agent checks the name before it starts this program and parses the output strictly; this program still refuses an empty name or
+ * one that starts with '-'.
  */
 #define _GNU_SOURCE
 #include <errno.h>

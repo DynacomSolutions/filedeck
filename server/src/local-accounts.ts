@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Config } from "./config.ts";
-import { hostHelperDir, installHostHelpers, runHostHelper } from "./host-helpers.ts";
+import { hostHelperDir, runHostHelper } from "./host-helpers.ts";
 
 /** A local account of this machine that a worker runs as. Never uid 0 or gid 0, and `groups` never holds 0. */
 export interface LocalAccount {
@@ -29,11 +29,24 @@ const id = (s: string): number | null => {
   return n <= MAX_ID ? n : null;
 };
 
-/** Builds the account, or null for uid 0, gid 0 or a home that is not an absolute path. Group 0 is dropped (never handed to a worker). */
-function account(name: string, uid: number, gid: number, home: string, groups: number[]): LocalAccount | null {
+/**
+ * Builds the account, or null for uid 0 or gid 0. A supplementary group 0 is dropped (never handed to a worker) and said once per name
+ * through `dropped`.
+ */
+function account(name: string, uid: number, gid: number, home: string, groups: number[], dropped: (name: string) => void): LocalAccount | null {
   if (uid === 0 || gid === 0) return null;
-  if (!home.startsWith("/") || home.includes("\0")) return null;
+  if (groups.includes(0)) dropped(name);
   return { name, uid, gid, home, groups: [...new Set(groups)].filter((g) => g !== 0) };
+}
+
+/** A logger that says each name's dropped group 0 once. */
+function droppedOnce(log: (s: string) => void): (name: string) => void {
+  const said = new Set<string>();
+  return (name) => {
+    if (said.has(name) || said.size >= 4096) return;
+    said.add(name);
+    log(`system accounts: ${name} is a member of group 0; that group is left out of its workers`);
+  };
 }
 
 /**
@@ -63,21 +76,25 @@ export function parseIdOutput(stdout: string): { uid: number; gid: number; home:
 type Run = (name: string) => Promise<{ code: number | null; stdout: string }>;
 
 /**
- * Accounts from the machine's own NSS through the `filedeck-id` host helper (`run`). Every answer, also "no such account", is kept
- * for `ttlMs` (default 60 s); a run that failed (another exit code, killed, malformed output) is not kept. A worker start always
- * asks with `fresh`, so a change of groups is picked up when a worker starts.
+ * Accounts from the machine's own NSS through the `filedeck-id` host helper (`run`). Null means only "no such account" (exit 2 with
+ * no output) or an account that is root (uid 0 or gid 0); every other outcome (another exit code, a killed helper, malformed output, a
+ * start that failed) rejects with an error, so that a caller can answer "unavailable" rather than "no account". Answers are kept for
+ * `ttlMs` (default 60 s), also "no such account"; errors are not kept. A worker start always asks with `fresh`, so a change of groups is
+ * picked up when a worker starts.
  */
 export class HostAccounts implements AccountResolver {
   private readonly run: Run;
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private readonly dropped: (name: string) => void;
   private readonly cache = new Map<string, { at: number; value: LocalAccount | null }>();
   private static readonly MAX_CACHED = 1024;
 
-  constructor(o: { run: Run; ttlMs?: number; now?: () => number }) {
+  constructor(o: { run: Run; ttlMs?: number; now?: () => number; log?: (s: string) => void }) {
     this.run = o.run;
     this.ttlMs = o.ttlMs ?? 60_000;
     this.now = o.now ?? Date.now;
+    this.dropped = droppedOnce(o.log ?? ((s) => console.error(s)));
   }
 
   async resolve(name: string, fresh = false): Promise<LocalAccount | null> {
@@ -87,11 +104,12 @@ export class HostAccounts implements AccountResolver {
     const r = await this.run(name);
     let value: LocalAccount | null;
     if (r.code === 2 && r.stdout === "") value = null;
-    else if (r.code === 0) {
+    else {
+      if (r.code !== 0) throw new Error(`account lookup for ${name} failed: ${r.code === null ? "the helper was stopped" : `exit ${r.code}`}`);
       const p = parseIdOutput(r.stdout);
-      if (!p) return null; // malformed: refused, and asked again next time
-      value = account(name, p.uid, p.gid, p.home, p.groups);
-    } else return null;
+      if (!p) throw new Error(`account lookup for ${name} failed: the helper's answer is malformed`);
+      value = account(name, p.uid, p.gid, p.home, p.groups, this.dropped);
+    }
     this.cache.delete(name);
     if (this.cache.size >= HostAccounts.MAX_CACHED) this.cache.delete(this.cache.keys().next().value!); // the oldest answer
     this.cache.set(name, { at: this.now(), value });
@@ -105,7 +123,14 @@ export class HostAccounts implements AccountResolver {
  * member list names the account. The files are read again on every call (they are small, and this way a change is seen at once).
  */
 export class FilesAccounts implements AccountResolver {
-  constructor(private readonly root: string) {}
+  private readonly dropped: (name: string) => void;
+
+  constructor(
+    private readonly root: string,
+    log: (s: string) => void = (s) => console.error(s),
+  ) {
+    this.dropped = droppedOnce(log);
+  }
 
   async resolve(name: string): Promise<LocalAccount | null> {
     if (!validSystemName(name)) return null;
@@ -131,36 +156,36 @@ export class FilesAccounts implements AccountResolver {
       const g = id(f[2]!);
       if (g !== null && f[3]!.split(",").includes(name)) groups.push(g);
     }
-    return account(name, uid, gid, entry[5]!, groups);
+    const home = entry[5]!;
+    if (!home.startsWith("/")) return null;
+    return account(name, uid, gid, home, groups, this.dropped);
   }
 }
 
 /**
- * The account lookup of an agent with sign-in on. It installs the host helpers into the machine's root and asks `filedeck-id` for
- * root once: when that works, accounts come from the machine's NSS and `helpers` says where the helpers are (a later part starts
- * PAM with it). Otherwise only the local files resolve, and the log says why.
+ * The account lookup of an agent with sign-in on. It finds the host helpers in the image and asks `filedeck-id` for root once, inside
+ * the machine's root: when that works, accounts come from the machine's NSS and `helpers` says where the helpers are (a later part
+ * starts PAM with it). Otherwise only the local files resolve, and the log says why.
  */
 export async function makeResolver(cfg: Config, log: (s: string) => void): Promise<{ resolver: AccountResolver; helpers?: { root: string; dir: string } }> {
-  const reason = await (async (): Promise<string | { dir: string }> => {
-    const from = await hostHelperDir(cfg.hostHelpers);
-    if (!from) return cfg.hostHelpers ? `no filedeck-id in ${cfg.hostHelpers}` : "filedeck-id is not installed";
-    const inst = await installHostHelpers(cfg.root, from);
-    if ("error" in inst) return `install: ${inst.error}`;
+  const found = await (async (): Promise<string | { dir: string }> => {
+    const dir = await hostHelperDir(cfg.hostHelpers);
+    if (!dir) return cfg.hostHelpers ? `no filedeck-id in ${cfg.hostHelpers}` : "filedeck-id is not installed";
     try {
-      const r = await runHostHelper(cfg.root, inst.dir, "filedeck-id", ["root"], {});
+      const r = await runHostHelper(cfg.root, dir, "filedeck-id", ["root"]);
       const p = r.code === 0 ? parseIdOutput(r.stdout) : null;
-      if (p?.uid === 0) return inst;
+      if (p?.uid === 0) return { dir };
       const detail = r.stderr.trim().split("\n")[0];
-      return `filedeck-id root: ${r.code === null ? "killed" : `exit ${r.code}`}${p ? ", unexpected answer" : ""}${detail ? `: ${detail}` : ""}`;
+      return `filedeck-id root: ${r.code === null ? "killed" : `exit ${r.code}`}${r.code === 0 ? ", unexpected answer" : ""}${detail ? `: ${detail}` : ""}`;
     } catch (e) {
       return (e as Error).message;
     }
   })();
-  if (typeof reason !== "string") {
+  if (typeof found !== "string") {
     log("system accounts: resolved through the host (NSS)");
-    const helpers = { root: cfg.root, dir: reason.dir };
-    return { resolver: new HostAccounts({ run: (name) => runHostHelper(helpers.root, helpers.dir, "filedeck-id", [name], {}) }), helpers };
+    const helpers = { root: cfg.root, dir: found.dir };
+    return { resolver: new HostAccounts({ run: (name) => runHostHelper(helpers.root, helpers.dir, "filedeck-id", [name]), log }), helpers };
   }
-  log(`system accounts: host lookup unavailable (${reason}); only local /etc/passwd accounts resolve, and system sign-in is refused`);
-  return { resolver: new FilesAccounts(cfg.root) };
+  log(`system accounts: host lookup unavailable (${found}); only local /etc/passwd accounts resolve, and system sign-in is refused`);
+  return { resolver: new FilesAccounts(cfg.root, log) };
 }

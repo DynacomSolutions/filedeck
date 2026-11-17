@@ -826,3 +826,70 @@ test("groups and chroot: the program runs with exactly the given supplementary g
   const viaTs = await run("/probe", ["--probe"], { chroot: jail, landlock: false, uid: 1234, gid: 1234, groups: [1234] });
   assert.ok(viaTs.code === 0 || viaTs.code === 70, `${viaTs.code} ${viaTs.stderr}`);
 });
+
+/* ---- part 2a: a host helper run from the image by descriptor, inside another root; Landlock-off callers under `require` ---- */
+
+test("--exec-outside: needs --chroot and an absolute program path (exit 64), and is in the usage text", () => {
+  const st = (...a: string[]) => spawnSync(box.bin, a, { encoding: "utf8" });
+  for (const bad of [
+    ["--no-landlock", "--exec-outside", "--", "/bin/true"], // no --chroot
+    ["--no-landlock", "--chroot", "/", "--exec-outside", "--", "true"], // a relative path
+    ["--no-landlock", "--chroot", "/", "--exec-outside", "--", "./true"],
+  ]) {
+    const r = st(...bad);
+    assert.equal(r.status, 64, `${bad.join(" ")}: ${r.stderr}`);
+    assert.match(r.stderr, /filedeck-sandbox:/);
+  }
+  const usage = st("--exec-outside");
+  assert.equal(usage.status, 64);
+  assert.ok(usage.stderr.startsWith("usage: ") && usage.stderr.includes("--exec-outside"), usage.stderr);
+});
+
+test("--exec-outside: the program comes from outside the new root, by descriptor; a folder or a missing file stops the launcher (exit 71)", { skip: ROOT_ONLY }, async () => {
+  assert.ok(box.staticBin, "the root pass builds the static launcher");
+  const jail = path.join(tmp, "jail-outside");
+  fs.mkdirSync(jail, { mode: 0o755 });
+  const prog = path.join(tmp, "outside-probe");
+  fs.copyFileSync(box.staticBin, prog);
+  fs.chmodSync(prog, 0o755);
+  assert.equal(fs.existsSync(path.join(jail, prog)), false);
+  const direct = spawnSync(box.bin, ["--chroot", jail, "--no-landlock", "--exec-outside", "--uid", "1234", "--gid", "1234", "--", prog, "--probe"], { encoding: "utf8" });
+  assert.ok(direct.status === 0 || direct.status === 70, `${direct.status} ${direct.stderr}`);
+  const viaTs = await run(prog, ["--probe"], { chroot: jail, execOutside: true, landlock: false, uid: 1234, gid: 1234 });
+  assert.ok(viaTs.code === 0 || viaTs.code === 70, `${viaTs.code} ${viaTs.stderr}`);
+  for (const bad of [tmp, path.join(tmp, "no-such-program")]) {
+    const r = spawnSync(box.bin, ["--chroot", jail, "--no-landlock", "--exec-outside", "--", bad], { encoding: "utf8" });
+    assert.equal(r.status, 71, `${bad}: ${r.status} ${r.stderr}`);
+    assert.match(r.stderr, /filedeck-sandbox:/);
+  }
+  await assert.rejects(spawnSandboxed(prog, [], { execOutside: true, landlock: false }), (e: { status?: number }) => e.status === 500, "execOutside without a chroot");
+});
+
+test("require without Landlock: a caller that asks for no Landlock still runs, through the launcher; one that wants Landlock is refused", async () => {
+  const fake = path.join(tmp, "fake-launcher.sh");
+  const argsFile = path.join(tmp, "fake-launcher.args");
+  // reports Landlock as unsupported at probe time; otherwise records its arguments and runs the command after "--"
+  write(fake, `#!/bin/sh\n[ "$1" = --probe ] && exit ${EXIT_LANDLOCK_UNSUPPORTED}\nprintf '%s\\n' "$@" > ${JSON.stringify(argsFile)}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n`);
+  fs.chmodSync(fake, 0o755);
+  const prevHelper = process.env.FILEDECK_SANDBOX_HELPER;
+  try {
+    process.env.FILEDECK_SANDBOX_HELPER = fake;
+    process.env.FILEDECK_SANDBOX = "require";
+    resetSandbox();
+    assert.equal((await sandboxInfo()).state, "unavailable");
+    await assert.rejects(spawnSandboxed("echo", ["hi"], { readOnly: [tmp] }), (e: Error & { status?: number }) => e.status === 503);
+    const r = await run("echo", ["hi"], { landlock: false });
+    assert.deepEqual([r.code, r.stdout], [0, "hi\n"], r.stderr);
+    const args = fs.readFileSync(argsFile, "utf8").split("\n");
+    assert.ok(args.includes("--no-landlock"), args.join(" "));
+    // no launcher at all: refused, never run unconfined
+    process.env.FILEDECK_SANDBOX_HELPER = path.join(tmp, "no-such-launcher");
+    resetSandbox();
+    await assert.rejects(spawnSandboxed("echo", ["hi"], { landlock: false }), (e: Error & { status?: number }) => e.status === 503);
+  } finally {
+    delete process.env.FILEDECK_SANDBOX;
+    if (prevHelper === undefined) delete process.env.FILEDECK_SANDBOX_HELPER;
+    else process.env.FILEDECK_SANDBOX_HELPER = prevHelper;
+    resetSandbox();
+  }
+});
