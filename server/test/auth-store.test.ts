@@ -95,3 +95,15 @@ test("bootstrap refuses a bad hash", () => {
   assert.throws(() => bootstrapAdmin(acc, f), /not a scrypt hash/);
   assert.equal(acc.get("admin"), undefined);
 });
+
+test("bootstrap: a file that is not JSON gives a fixed message without its content", () => {
+  const d = tmp();
+  const f = path.join(d, "admin.json");
+  fs.writeFileSync(f, '{"name":"admin","passwordHash":"secret-ish-content');
+  const acc = new Accounts(new AuthDb(":memory:"));
+  assert.throws(
+    () => bootstrapAdmin(acc, f),
+    (e: unknown) => e instanceof Error && e.message === "FILEDECK_BOOTSTRAP_ADMIN_FILE is not valid JSON" && !String(e.stack).includes("secret-ish"),
+  );
+  fs.rmSync(d, { recursive: true, force: true });
+});

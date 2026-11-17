@@ -356,3 +356,7 @@ test("no secrets in audit lines", async () => {
     assert.ok(!l.includes(value), l);
   }
 });
+
+test("createHub refuses auth on without an agent token", () => {
+  assert.throws(() => createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_STATIC: tmp, NODES: "t=http://127.0.0.1:9" } as never)), /FILEDECK_AUTH=on needs FILEDECK_AGENT_TOKEN/);
+});

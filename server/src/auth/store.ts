@@ -193,7 +193,15 @@ export class Accounts {
 /** Creates the first admin from a JSON file, only when that name is free. Never changes an existing account. */
 export function bootstrapAdmin(acc: Accounts, file: string | undefined): void {
   if (!file) return;
-  const j = JSON.parse(fs.readFileSync(file, "utf8")) as { name?: unknown; passwordHash?: unknown };
+  let j: { name?: unknown; passwordHash?: unknown };
+  try {
+    j = JSON.parse(fs.readFileSync(file, "utf8")) as typeof j;
+  } catch (e) {
+    // the parser's message quotes the file, and the file holds a password hash
+    if (e instanceof SyntaxError) throw new Error("FILEDECK_BOOTSTRAP_ADMIN_FILE is not valid JSON");
+    throw e;
+  }
+  if (!j || typeof j !== "object") throw new Error("admin bootstrap file needs name and passwordHash");
   if (typeof j.name !== "string" || typeof j.passwordHash !== "string") throw new Error("admin bootstrap file needs name and passwordHash");
   if (!HASH_RE.test(j.passwordHash)) throw new Error("admin bootstrap passwordHash is not a scrypt hash");
   if (acc.get(j.name)) return;

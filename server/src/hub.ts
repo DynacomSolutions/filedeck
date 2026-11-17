@@ -70,6 +70,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
+  // the signed user header is keyed on the agent token, so there is no auth without one (main.ts says so first)
+  if (cfg.auth && !cfg.agentToken) throw new Error("FILEDECK_AUTH=on needs FILEDECK_AGENT_TOKEN");
   if (cfg.auth) {
     const db = new AuthDb(cfg.authFile);
     const accounts = new Accounts(db);
