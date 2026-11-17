@@ -336,7 +336,14 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     }
   });
 
-  registerVaultRoutes(app, vault, (n) => cfg.nodes.some((x) => x.name === n));
+  // With auth on each account has its own saved passwords: the owner is the signed-in account.
+  // A call with nobody behind it would see every entry, so it fails instead (the gate makes this unreachable).
+  const vaultOwner = () => {
+    const id = currentUser();
+    if (!id) throw new Error("vault use without an identity");
+    return `${id.kind}:${id.name}`;
+  };
+  registerVaultRoutes(app, vault, (n) => cfg.nodes.some((x) => x.name === n), cfg.auth ? { owner: vaultOwner, mayUse } : undefined);
 
   // Reverse proxy: /api/nodes/<node>/<rest> -> <agent>/<rest>
   app.all("/api/nodes/:node/*", async (c) => {
@@ -372,7 +379,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     try {
       if (isPasswordRoute(c.req.method, rest)) {
         // encrypted archives / PDFs: the vault supplies (and saves) the password
-        const r = await proxyWithVault({ vault, node: c.req.param("node"), target, method: c.req.method, rest, search: url.search, headers: init.headers as Headers, body: c.req.raw.body, signal: c.req.raw.signal });
+        const r = await proxyWithVault({ vault, owner: cfg.auth ? vaultOwner() : undefined, node: c.req.param("node"), target, method: c.req.method, rest, search: url.search, headers: init.headers as Headers, body: c.req.raw.body, signal: c.req.raw.signal });
         return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
       }
       const r = await target.fetch(rest + url.search, init);

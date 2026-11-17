@@ -195,6 +195,60 @@ test("without a key the vault is memory only", () => {
   assert.throws(() => new Vault({ secret: "short" }));
 });
 
+test("owners: each account sees and uses only its own entries; ownerless entries serve nobody with an owner", () => {
+  const { v } = clocked();
+  const a = v.put("n", "/same.zip", "pw-a", { owner: "virt:a" });
+  const b = v.put("n", "/same.zip", "pw-b", { owner: "sys:b" });
+  v.put("n", "/same.zip", "pw-none"); // made with auth off
+  v.put("n", "/dir", "pw-a-folder", { scope: "folder", owner: "virt:a" });
+  assert.notEqual(a.id, b.id, "two accounts keep two entries for one file");
+  assert.equal(v.get("n", "/same.zip", undefined, true, "virt:a")?.password, "pw-a");
+  assert.equal(v.get("n", "/same.zip", undefined, true, "sys:b")?.password, "pw-b");
+  assert.equal(v.get("n", "/dir/x.zip", undefined, true, "sys:b"), undefined, "another account's folder entry is not used");
+  assert.equal(v.get("n", "/other.zip", undefined, true, "virt:c"), undefined);
+  assert.equal(v.hasNode("n", "virt:c"), false);
+  assert.equal(v.hasNode("n", "virt:a"), true);
+  assert.deepEqual(v.list("sys:b").map((e) => e.id), [b.id]);
+  assert.equal(v.list("virt:c").length, 0, "an ownerless entry is listed to no account");
+  assert.equal(v.list().length, 4, "auth off: every entry, as before");
+  assert.equal(v.extend(a.id, "sys:b"), undefined, "another account cannot extend it");
+  assert.equal(v.forget(a.id, "sys:b"), false, "nor forget it");
+  assert.equal(v.forgetPath("n", "/same.zip", "sys:b"), 1, "forget by path takes only the caller's own");
+  assert.equal(v.get("n", "/same.zip", undefined, true, "virt:a")?.password, "pw-a");
+  assert.equal(v.forgetAll("virt:a"), 2, "forget all takes only the caller's own");
+  assert.deepEqual(v.list().map((e) => e.path), ["/same.zip"], "the ownerless entry is left");
+  assert.equal(v.get("n", "/same.zip")?.password, "pw-none");
+});
+
+test("owners: a vault file made before owners existed is moved over, its entries kept without an owner", () => {
+  const file = path.join(dir, "v-old", "vault.sqlite");
+  const a = new Vault({ file, secret: KEY });
+  a.put("n", "/old.zip", "old-pw", { remember: true });
+  a.close();
+  // turn the file back into the old layout: no owner column, one entry per node, scope and path
+  const { DatabaseSync } = require_sqlite();
+  const db = new DatabaseSync(file);
+  db.exec(`
+    CREATE TABLE old_entries (id TEXT PRIMARY KEY, node TEXT NOT NULL, scope TEXT NOT NULL, path TEXT NOT NULL, fid TEXT, remembered INTEGER NOT NULL, created INTEGER NOT NULL, last_used INTEGER NOT NULL, blob BLOB NOT NULL, UNIQUE (node, scope, path));
+    INSERT INTO old_entries SELECT id, node, scope, path, fid, remembered, created, last_used, blob FROM entries;
+    DROP TABLE entries;
+    ALTER TABLE old_entries RENAME TO entries;
+    CREATE INDEX entries_fid ON entries (node, fid);
+  `);
+  db.close();
+  const b = new Vault({ file, secret: KEY });
+  assert.equal(b.get("n", "/old.zip")?.password, "old-pw", "auth off still finds it");
+  assert.equal(b.get("n", "/old.zip", undefined, true, "virt:a"), undefined, "no account owns it");
+  b.put("n", "/old.zip", "a-pw", { owner: "virt:a" });
+  assert.equal(b.get("n", "/old.zip", undefined, true, "virt:a")?.password, "a-pw");
+  b.put("n", "/old.zip", "new-pw");
+  assert.equal(b.list().length, 2, "auth off replaces the ownerless entry, not the account's");
+  b.close();
+  const c = new Vault({ file, secret: KEY });
+  assert.equal(c.list().length, 2, "a second open changes nothing");
+  c.close();
+});
+
 /* ------------------------------------------------------------ hub flow (live) */
 
 const HAVE = spawnSync("bsdtar", ["--version"]).status === 0 && haveSevenZip();

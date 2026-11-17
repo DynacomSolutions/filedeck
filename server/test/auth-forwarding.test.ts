@@ -33,6 +33,7 @@ interface Rec {
   path: string;
   user: string | null;
   cookie: string | null;
+  password: string | null;
 }
 interface Agent {
   root: string;
@@ -40,6 +41,8 @@ interface Agent {
   recs: Rec[];
   /** runs before the agent answers, for slowing chosen requests down */
   hook?: (req: Request) => Promise<void>;
+  /** answers in place of the agent when it returns a response */
+  reply?: (req: Request) => Response | undefined;
 }
 
 /** A real agent behind a wrapper that records the user header of every request it gets. */
@@ -52,8 +55,10 @@ async function agent(node: string): Promise<Agent> {
     const s: Server = serve(
       {
         fetch: async (req: Request, env: unknown) => {
-          a.recs.push({ path: new URL(req.url).pathname, user: req.headers.get(USER_HEADER), cookie: req.headers.get("cookie") });
+          a.recs.push({ path: new URL(req.url).pathname, user: req.headers.get(USER_HEADER), cookie: req.headers.get("cookie"), password: req.headers.get("x-filedeck-password") });
           if (a.hook) await a.hook(req);
+          const r = a.reply?.(req);
+          if (r) return r;
           return app.fetch(req, env as never);
         },
         port: 0,
@@ -301,6 +306,83 @@ test("hidden node names: a node without access and a node that does not exist ge
   assert.equal(u.status, 404, "auth off: an unknown node is still 404");
   const ut = await off.request("http://localhost/api/transfer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ src: { node: "A", path: "/hidden.txt" }, dst: { node: "nosuch", dir: "/" } }) }, peer as never);
   assert.equal(ut.status, 404);
+});
+
+test("vault per account: each account lists, forgets and uses only its own saved passwords", async () => {
+  const h = makeHub();
+  const one = signIn(h, "vone");
+  const two = signIn(h, "vtwo");
+  const boss = signIn(h, "vboss", ACCESS_A, true);
+  const v = h.vault;
+  const e1 = v.put("A", "/v/x.pdf", "pw-one", { owner: "virt:vone" });
+  const e2 = v.put("A", "/v/x.pdf", "pw-two", { owner: "virt:vtwo" });
+  v.put("A", "/v/x.pdf", "pw-nobody"); // saved with auth off
+  v.put("A", "/v/y.pdf", "pw-nobody");
+  type List = { entries: { id: string }[] };
+  const list = async (ck: string) => ((await (await call(h, "/api/vault", ck)).json()) as List).entries.map((e) => e.id);
+  assert.deepEqual(await list(one), [e1.id]);
+  assert.deepEqual(await list(two), [e2.id]);
+  assert.deepEqual(await list(boss), [], "an admin sees no one else's passwords");
+  const b64 = (x: string) => Buffer.from(x).toString("base64");
+  // the proxy hands the agent the caller's own password, and nobody's ownerless one
+  for (const [ck, want] of [[one, b64("pw-one")], [two, b64("pw-two")], [boss, null]] as const) {
+    A.recs.length = 0;
+    await call(h, "/api/nodes/A/api/pdf/status?path=/v/x.pdf", ck);
+    const got = real(A.recs).filter((r) => r.path === "/api/pdf/status");
+    assert.equal(got.length >= 1, true);
+    assert.equal(got[0]!.password, want);
+  }
+  A.recs.length = 0;
+  await call(h, "/api/nodes/A/api/pdf/status?path=/v/y.pdf", one);
+  assert.deepEqual(real(A.recs).filter((r) => r.path === "/api/pdf/status").map((r) => r.password), [null], "an ownerless entry is not used");
+  // forgetting by id, by path or all touches only the caller's own
+  assert.equal((await call(h, `/api/vault/${e1.id}`, two, { method: "DELETE" })).status, 404);
+  assert.equal((await call(h, `/api/vault/${e1.id}/extend`, two, { method: "POST" })).status, 404);
+  assert.equal(((await (await postJson(h, "/api/vault/forget", two, { node: "A", path: "/v" })).json()) as { removed: number }).removed, 1);
+  assert.deepEqual(await list(one), [e1.id], "the other account's entry is still there");
+  assert.equal(((await (await call(h, "/api/vault", boss, { method: "DELETE" })).json()) as { removed: number }).removed, 0);
+  assert.deepEqual(await list(one), [e1.id]);
+  assert.equal(((await (await call(h, "/api/vault", one, { method: "DELETE" })).json()) as { removed: number }).removed, 1);
+  assert.equal(v.list().length, 2, "the ownerless entries are left alone");
+});
+
+test("vault per account: a password typed through the proxy is saved for the caller only", async () => {
+  const h = makeHub();
+  const one = signIn(h, "sone");
+  signIn(h, "stwo");
+  // the agent says the typed password was needed and right
+  A.reply = (req) => (new URL(req.url).pathname === "/api/pdf/status" ? new Response("{}", { headers: { "content-type": "application/json", "x-filedeck-pw": "ok" } }) : undefined);
+  try {
+    const r = await call(h, "/api/nodes/A/api/pdf/status?path=/s/z.pdf", one, { headers: { "x-filedeck-password": Buffer.from("typed").toString("base64") } });
+    assert.equal(r.status, 200);
+  } finally {
+    A.reply = undefined;
+  }
+  assert.equal(h.vault.list("virt:sone").length, 1, "saved for the caller");
+  assert.equal(h.vault.list("virt:stwo").length, 0);
+  assert.equal(h.vault.get("A", "/s/z.pdf", undefined, false, "virt:stwo"), undefined, "another account cannot use it");
+  assert.equal(h.vault.get("A", "/s/z.pdf", undefined, false, "virt:sone")?.password, "typed");
+});
+
+test("vault: a hidden or unknown node in a vault route is refused like elsewhere", async () => {
+  const h = makeHub();
+  const guest = signIn(h, "vguest");
+  const want = { error: "no access to this machine" };
+  for (const node of ["B", "nosuch"]) {
+    const r = await postJson(h, "/api/vault/forget", guest, { node, path: "/x" });
+    assert.equal(r.status, 403, `forget on ${node}`);
+    assert.deepEqual(await r.json(), want);
+    const p = await call(h, `/api/nodes/${node}/api/pdf/status?path=/x.pdf`, guest);
+    assert.equal(p.status, 403, `vault proxy on ${node}`);
+    assert.deepEqual(await p.json(), want);
+  }
+  // an entry the account saved for a node it has since lost is not listed (the name stays hidden)
+  h.vault.put("B", "/lost.pdf", "pw", { owner: "virt:vguest" });
+  const listed = (await (await call(h, "/api/vault", guest)).json()) as { entries: { node: string }[] };
+  assert.deepEqual(listed.entries.map((e) => e.node), []);
+  const off = makeHub({ FILEDECK_AUTH: "off" });
+  const u = await off.request("http://localhost/api/vault/forget", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ node: "nosuch", path: "/x" }) }, peer as never);
+  assert.equal(u.status, 400, "auth off: unchanged");
 });
 
 test("ownerless job resumed with auth on: it fails with no identity and sends nothing to the agent", async () => {

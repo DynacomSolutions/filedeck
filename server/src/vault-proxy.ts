@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import path from "node:path";
 import { FsError } from "./fsops.ts";
 import { passwordFromHeader } from "./sevenzip.ts";
-import { Vault, type Scope } from "./vault.ts";
+import { Vault, type Owner, type Scope } from "./vault.ts";
 import type { Target } from "./hub.ts";
 import { MAX_JSON_BODY } from "./request-guard.ts";
 
@@ -17,6 +17,9 @@ import { MAX_JSON_BODY } from "./request-guard.ts";
  *  - otherwise a saved password for the file (or its folder) is added to the
  *    forwarded request, never to the response;
  *  - a saved password the agent rejects is forgotten.
+ *
+ * With sign-in on, every route and the proxy work on the caller's own entries only (see Vault: Owner). Admins get
+ * no other account's passwords.
  */
 
 /** Requests (agent-relative) that take a password, and where their file path is. */
@@ -88,25 +91,41 @@ const jsonErr = (status: number, error: string) => new Response(JSON.stringify({
 
 export const isPasswordRoute = (method: string, rest: string) => ROUTES.some((r) => r.method === method && r.rest === rest);
 
-export function registerVaultRoutes(app: Hono, vault: Vault, nodeExists: (n: string) => boolean) {
-  app.get("/api/vault", (c) =>
-    c.json({ entries: vault.list(), persistent: vault.persistent, ttlSeconds: Math.round(vault.ttlMs / 1000), maxHours: Math.round(vault.maxMs / 3600_000) }),
-  );
+/**
+ * With sign-in on: whose entries the request may see (`owner`, from the signed-in account) and whether it may use a
+ * node. Without it (sign-in off) every entry and every configured node is open, as before.
+ */
+export interface VaultAccess {
+  owner(): Owner;
+  mayUse(node: string): boolean;
+}
+
+export function registerVaultRoutes(app: Hono, vault: Vault, nodeExists: (n: string) => boolean, access?: VaultAccess) {
+  const owner = () => access?.owner();
+  app.get("/api/vault", (c) => {
+    // an entry for a node the account can no longer use is not listed, so the node's name stays hidden
+    const entries = vault.list(owner()).filter((e) => !access || access.mayUse(e.node));
+    return c.json({ entries, persistent: vault.persistent, ttlSeconds: Math.round(vault.ttlMs / 1000), maxHours: Math.round(vault.maxMs / 3600_000) });
+  });
   app.post("/api/vault/forget", async (c) => {
     const b = (await c.req.json().catch(() => null)) as { node?: unknown; path?: unknown } | null;
+    // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
+    if (access && typeof b?.node === "string" && (!access.mayUse(b.node) || !nodeExists(b.node))) return c.json({ error: "no access to this machine" }, 403);
     if (!b || typeof b.node !== "string" || typeof b.path !== "string" || !b.path.startsWith("/") || !nodeExists(b.node)) return c.json({ error: "node and absolute path required" }, 400);
-    return c.json({ removed: vault.forgetPath(b.node, b.path) });
+    return c.json({ removed: vault.forgetPath(b.node, b.path, owner()) });
   });
   app.post("/api/vault/:id/extend", (c) => {
-    const entry = vault.extend(c.req.param("id"));
+    const entry = vault.extend(c.req.param("id"), owner());
     return entry ? c.json(entry) : c.json({ error: "saved password has expired" }, 404);
   });
-  app.delete("/api/vault/:id", (c) => (vault.forget(c.req.param("id")) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404)));
-  app.delete("/api/vault", (c) => c.json({ removed: vault.forgetAll() }));
+  app.delete("/api/vault/:id", (c) => (vault.forget(c.req.param("id"), owner()) ? c.json({ ok: true }) : c.json({ error: "not found" }, 404)));
+  app.delete("/api/vault", (c) => c.json({ removed: vault.forgetAll(owner()) }));
 }
 
 export async function proxyWithVault(o: {
   vault: Vault;
+  /** whose saved passwords are used and where a typed one is saved (undefined with sign-in off) */
+  owner?: Owner;
   node: string;
   target: Target;
   method: string;
@@ -162,8 +181,8 @@ export async function proxyWithVault(o: {
   let hit: { password: string; id: string; scope: Scope } | undefined;
   if (typed) headers.set("x-filedeck-password", b64(typed));
   else if (file && file.startsWith("/")) {
-    hit = o.vault.get(o.node, file, undefined, false);
-    if (!hit && o.vault.hasNode(o.node)) hit = o.vault.get(o.node, file, await fidOf(), false);
+    hit = o.vault.get(o.node, file, undefined, false, o.owner);
+    if (!hit && o.vault.hasNode(o.node, o.owner)) hit = o.vault.get(o.node, file, await fidOf(), false, o.owner);
     if (hit) headers.set("x-filedeck-password", b64(hit.password));
   }
 
@@ -200,7 +219,7 @@ export async function proxyWithVault(o: {
   }
   if (used && typed && save !== "no" && file && file.startsWith("/")) {
     const where = scope === "folder" ? path.posix.dirname(file) : file;
-    o.vault.put(o.node, where, typed, { remember: save === "forever", scope, fid: scope === "file" ? await fidOf() : undefined });
+    o.vault.put(o.node, where, typed, { remember: save === "forever", scope, fid: scope === "file" ? await fidOf() : undefined, owner: o.owner });
   }
   return new Response(r.body, { status: r.status, headers: out });
 }
