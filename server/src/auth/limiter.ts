@@ -75,10 +75,6 @@ export class LoginLimiter {
     return wait > 0 ? { ok: false, retryAfterMs: wait } : { ok: true };
   }
 
-  fail(name: string, ip: string): void {
-    this.reserve(name, ip);
-  }
-
   /** Counts a failure now; call `succeed` on the result when the credentials turn out good. */
   reserve(name: string, ip: string): Reservation {
     const t = this.now();

@@ -99,10 +99,9 @@ export function registerAuthOff(app: Hono): void {
   app.get("/api/auth/me", (c) => c.json({ auth: false }));
 }
 
+/** Auth on only: the hub calls registerAuthOff instead when it is off. */
 export function registerAuth(app: Hono, deps: AuthDeps): void {
   const { cfg, accounts, sessions, challenges, limiter, system } = deps;
-
-  if (!cfg.auth) return registerAuthOff(app);
 
   const challengeLimit = new RateWindow(CHALLENGES_PER_MINUTE, 60_000, deps.now);
 
@@ -208,11 +207,12 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
 
   app.post("/api/auth/challenge", async (c) => {
     if (!secure(c)) return needsHttps(c);
-    const lim = challengeLimit.take(addressKey(clientOf(c).ip ?? ""));
+    const addr = addressKey(clientOf(c).ip ?? "");
+    const lim = challengeLimit.take(addr);
     if (!lim.ok) return tooMany(c, lim.retryAfterMs, false);
     const name = str((await body(c))?.name);
     // Always an answer of the same shape, so it does not show whether the name exists.
-    const ch = name !== undefined && name.length <= MAX_NAME ? challenges.issue(name) : randomBytes(32);
+    const ch = name !== undefined && name.length <= MAX_NAME ? challenges.issue(name, addr) : randomBytes(32);
     return c.json({ challenge: ch.toString("base64"), hubId: deps.db.hubId });
   });
 
@@ -228,17 +228,17 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (!lim.ok) return tooMany(c, lim.retryAfterMs);
     const attempt = limiter.reserve(name ?? "", ip);
     let kind: "sys" | "virt" | undefined;
-    if (name !== undefined && pub !== undefined && ch !== undefined && sig !== undefined && name !== "root") {
-      const cb = Buffer.from(ch, "base64");
-      if (challenges.take(name, cb)) {
-        const msg = loginMessage(deps.db.hubId, name, cb);
-        const sb = Buffer.from(sig, "base64");
-        if (accounts.get(name)) {
-          const given = parsePublicKey(pub);
-          const listed = given !== null && accounts.keys(name).some((k) => parsePublicKey(k)?.blob.equals(given.blob));
-          kind = listed && verifyLogin(given, msg, sb) ? "virt" : undefined;
-        } else kind = (await system.key(name, pub, msg, sb)) ? "sys" : undefined;
-      }
+    // The challenge is taken (used up) before any other check, so every attempt that names it ends it.
+    const cb = ch === undefined ? undefined : Buffer.from(ch, "base64");
+    const taken = name !== undefined && cb !== undefined && challenges.take(name, cb);
+    if (taken && cb && pub !== undefined && sig !== undefined && name !== "root") {
+      const msg = loginMessage(deps.db.hubId, name, cb);
+      const sb = Buffer.from(sig, "base64");
+      if (accounts.get(name)) {
+        const given = parsePublicKey(pub);
+        const listed = given !== null && accounts.keys(name).some((k) => parsePublicKey(k)?.blob.equals(given.blob));
+        kind = listed && verifyLogin(given, msg, sb) ? "virt" : undefined;
+      } else kind = (await system.key(name, pub, msg, sb)) ? "sys" : undefined;
     }
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();

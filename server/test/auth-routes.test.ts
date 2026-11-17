@@ -221,6 +221,25 @@ test("key sign-in: challenge, signature, cookie; a challenge works once", async 
   assert.equal((await post(h, "/api/auth/login-key", { name: "guest1", publicKey: other.line, challenge: c2, signature: s2 })).status, 401);
 });
 
+test("key sign-in: a failed attempt uses up its challenge, also with no signature, no key or the name root", async () => {
+  const { h } = makeHub();
+  h.auth!.accounts.create({ name: "guest1", admin: false, nodes: {} });
+  const k = sshKey();
+  h.auth!.accounts.addKey("guest1", k.line);
+  const fresh = async (name: string) => ((await (await post(h, "/api/auth/challenge", { name })).json()) as { challenge: string; hubId: string });
+  const { challenge, hubId } = await fresh("guest1");
+  const sig = sign(null, loginMessage(hubId, "guest1", Buffer.from(challenge, "base64")), k.privateKey).toString("base64");
+  assert.equal((await post(h, "/api/auth/login-key", { name: "guest1", publicKey: k.line, challenge })).status, 401, "no signature");
+  const late = await post(h, "/api/auth/login-key", { name: "guest1", publicKey: k.line, challenge, signature: sig });
+  assert.equal(late.status, 401, "the challenge was used up by the attempt without a signature");
+  const c2 = (await fresh("guest1")).challenge;
+  assert.equal((await post(h, "/api/auth/login-key", { name: "guest1", challenge: c2, signature: "x" })).status, 401, "no key");
+  assert.equal(h.auth!.challenges.take("guest1", Buffer.from(c2, "base64")), false);
+  const c3 = (await fresh("root")).challenge;
+  assert.equal((await post(h, "/api/auth/login-key", { name: "root", publicKey: k.line, challenge: c3, signature: "x" })).status, 401, "root");
+  assert.equal(h.auth!.challenges.take("root", Buffer.from(c3, "base64")), false);
+});
+
 test("challenge: always 200, also for an unknown name; limited per address", async () => {
   const { h } = makeHub();
   const r = await post(h, "/api/auth/challenge", { name: "nobody" });
