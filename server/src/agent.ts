@@ -38,9 +38,11 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : makeResolver(cfg, (s) => console.error(s)).then((r) => r.resolver);
     found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
-    specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [] });
-    // (a worker's own requests to this process, such as its trash folder, are served over its connection only)
-    pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker, rootHandler: rootRequests(cfg) });
+    specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [], uidInUse: (uid) => pool?.usesUid(uid) ?? false });
+    const ws = specs;
+    // (a worker's own requests to this process, such as its trash folder, are served over its connection only; once a worker has
+    // stopped, its account's thumbnail cache is emptied)
+    pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker, rootHandler: rootRequests(cfg), onStopped: (s) => ws.stopped(s) });
     // (one set of account rules, epochs included, for the gate and for the root routes that reach a worker)
     workers = accountWorkers({ pool, accounts, spec: specs.spec });
     void sandboxInfo().then((i) =>

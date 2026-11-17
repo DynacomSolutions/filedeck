@@ -477,6 +477,69 @@ test("removal: a folder the account's removal cannot empty is left, logged, and 
   fs.rmSync(specs.base, { recursive: true, force: true });
 });
 
+test("thumbnail caches: each account gets its share of the limit", async () => {
+  const MiB = 1024 * 1024;
+  const account = (await accounts().resolve("alice"))!;
+  for (const [limit, max, share] of [
+    [60 * MiB, 3, 20 * MiB],
+    [64 * MiB, 8, 16 * MiB], // (never under 16 MiB)
+  ] as const) {
+    const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_THUMB_CACHE_MAX: String(limit), FILEDECK_MAX_WORKERS: String(max) } as never);
+    const specs = makeWorkerSpecs(cfg);
+    try {
+      const s = await specs.spec(sys("alice"), account);
+      assert.equal(s.init.cfg.thumbCacheMax, share);
+      if (share * max === limit) assert.ok(s.init.cfg.thumbCacheMax * max <= limit, "every running worker's cache together stays within the limit");
+    } finally {
+      await specs.close();
+    }
+  }
+});
+
+test("thumbnail caches: emptied as the account when its worker stops, and at agent start; the folder stays", async () => {
+  const thumbs = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-thumbcaches-"));
+  fs.chmodSync(thumbs, 0o755);
+  const uid = fakeAccountUid();
+  const cache = path.join(thumbs, "accounts", `u${uid}`);
+  const put = () => {
+    fs.writeFileSync(path.join(cache, "t1.webp"), "x");
+    // as root: a folder in the cache that only root may change, so the account cannot empty it (root never walks it)
+    if (IS_ROOT) {
+      fs.mkdirSync(path.join(cache, "rootonly"), { recursive: true });
+      fs.writeFileSync(path.join(cache, "rootonly/f"), "x");
+      fs.chmodSync(path.join(cache, "rootonly"), 0o755);
+    }
+    if (IS_ROOT) fs.lchownSync(path.join(cache, "t1.webp"), uid, uid);
+  };
+  const logs: string[] = [];
+  const orig = console.error;
+  console.error = (s: string) => logs.push(String(s));
+  try {
+    const app = agent({ FILEDECK_THUMB_DIR: thumbs });
+    assert.equal((await get(app, "/api/fs/stat?path=/", sys("alice"))).status, 200);
+    put();
+    await poolOf(app)!.stopKey("sys:alice");
+    assert.ok(await until(() => !fs.existsSync(path.join(cache, "t1.webp")), 10_000), `emptied once its worker stopped\n${logs.join("\n")}`);
+    assert.equal(fs.lstatSync(cache).uid, uid, "the folder stays, still the account's");
+    if (IS_ROOT) assert.ok(fs.existsSync(path.join(cache, "rootonly/f")), "emptied by the account, not walked by root");
+    await (app as unknown as { close(): Promise<void> }).close();
+    // a cache left by an earlier agent (no worker runs for it) is emptied at start
+    put();
+    const other = path.join(thumbs, "accounts", "u4242");
+    fs.mkdirSync(other, { mode: 0o700 });
+    if (IS_ROOT) fs.chownSync(other, 4242, 4242);
+    fs.writeFileSync(path.join(other, "t2.webp"), "x");
+    if (IS_ROOT) fs.lchownSync(path.join(other, "t2.webp"), 4242, 4242);
+    const app2 = agent({ FILEDECK_THUMB_DIR: thumbs });
+    assert.ok(await until(() => !fs.existsSync(path.join(cache, "t1.webp")) && !fs.existsSync(path.join(other, "t2.webp")), 10_000), `emptied at start\n${logs.join("\n")}`);
+    assert.ok(fs.existsSync(other));
+    await (app2 as unknown as { close(): Promise<void> }).close();
+  } finally {
+    console.error = orig;
+    fs.rmSync(thumbs, { recursive: true, force: true });
+  }
+});
+
 test("auth off", async () => {
   let starts = 0;
   let lookups = 0;

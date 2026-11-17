@@ -14,6 +14,7 @@ import {
   UnsafeFolders,
   accountTrashDir,
   cacheDir,
+  emptyCaches,
   grantPath,
   inHeld,
   tightenTop,
@@ -300,6 +301,12 @@ export interface WorkerSpecs {
   spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
   /** the workers' area of this agent */
   base: string;
+  /**
+   * the pool's `onStopped`: once no process of the pool runs as the stopped worker's uid (`uidInUse`), that account's thumbnail cache is
+   * emptied as the account (`emptyCaches`), so the caches together stay within the thumbnail limit, and its folders are checked again on
+   * its next start
+   */
+  stopped(spec: WorkerSpec): void;
   /** removes the area once no worker runs (see `removeArea`); what cannot be removed is logged and left */
   close(): Promise<void>;
 }
@@ -314,7 +321,15 @@ export interface WorkerSpecs {
  */
 export function makeWorkerSpecs(
   cfg: Config,
-  o: { afterMkdir?: Hook; log?: (s: string) => void; onRootList?: (dir: string) => void; onEmpty?: (dir: string) => void; live?: () => string[] } = {},
+  o: {
+    afterMkdir?: Hook;
+    log?: (s: string) => void;
+    onRootList?: (dir: string) => void;
+    onEmpty?: (dir: string) => void;
+    live?: () => string[];
+    /** whether a worker runs (or starts, or stops) as this uid: the pool's `usesUid` */
+    uidInUse?: (uid: number) => boolean;
+  } = {},
 ): WorkerSpecs {
   const log = o.log ?? ((s) => console.error(s));
   // (an area left by an agent that was killed stays: it is root's and 0711, and removing it safely would need its accounts)
@@ -326,6 +341,11 @@ export function makeWorkerSpecs(
   // (as root: a cache folder on a volume made 0777 becomes 0755, so it can hold the accounts' folders)
   tightenTop(cfg.thumbDir, log);
   tightenTop(cfg.indexDir, log);
+  // Thumbnail caches: no worker runs yet, so every account's cache left by an earlier agent is emptied (as the account); a worker's own
+  // cache is emptied once it stops. So at most the running workers' caches hold anything, each within its share (`accountThumbMax`).
+  const sweep = emptyCaches(cfg.thumbDir, () => true, log);
+  /** per uid, the emptying of its thumbnail cache in progress: a start for the uid waits for it */
+  const emptying = new Map<number, Promise<unknown>>();
   /** per key folder and uid, the folders once made */
   const ready = new Map<string, Promise<AccountDirs & { removed?: string[] }>>();
   /** the index folder names being made now (not removed as old ones meanwhile) */
@@ -355,6 +375,8 @@ export function makeWorkerSpecs(
   };
   const spec = async (claim: UserClaim, account: LocalAccount): Promise<WorkerSpec> => {
     const key = workerKey(claim);
+    await sweep;
+    await emptying.get(account.uid);
     const { id, p } = prepare(claim, account, key);
     const d = await p;
     // the worker gets the paths; this process opens the folders through the held area
@@ -389,16 +411,25 @@ export function makeWorkerSpecs(
       },
     };
   };
+  const stopped = (s: WorkerSpec) => {
+    const uid = s.account.uid;
+    if (o.uidInUse?.(uid)) return;
+    // its folders are made (or checked) again on its next start, so this map holds only accounts that have a worker
+    for (const k of ready.keys()) if (k.endsWith(`:${uid}`)) ready.delete(k);
+    if (!cfg.thumbDir || emptying.has(uid)) return;
+    const e = emptyCaches(cfg.thumbDir, (n) => n === `u${uid}`, log).finally(() => emptying.delete(uid));
+    emptying.set(uid, e);
+  };
   let closing: Promise<void> | undefined;
   const close = () =>
-    (closing ??= removeArea(base, log, o.onRootList, o.onEmpty, areaFd).finally(() => {
+    (closing ??= Promise.all([sweep, ...emptying.values()]).then(() => removeArea(base, log, o.onRootList, o.onEmpty, areaFd)).finally(() => {
       try {
         fsc.closeSync(areaFd);
       } catch {
         /* already closed */
       }
     }));
-  return { spec, base, close };
+  return { spec, base, stopped, close };
 }
 
 /** A virtual account's grants in their compared form (a grant whose path cannot be compared is left out). */

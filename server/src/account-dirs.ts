@@ -337,26 +337,26 @@ export async function runInFolderAs(
 
 /**
  * Empties `dir` as its owner `uid`/`gid` (`runInFolderAs`). Without a change of user (the owner is this process, not root) it is done
- * here. True when the folder is empty.
+ * here. True when the folder is empty. `shown` is the folder's name in the log.
  */
-export async function emptyAs(dir: string, uid: number, gid: number, log: (s: string) => void): Promise<boolean> {
+export async function emptyAs(dir: string, uid: number, gid: number, log: (s: string) => void, shown = dir): Promise<boolean> {
   const me = myUid();
   if (uid === me && me !== 0) {
     let ok = true;
     for (const n of await fs.readdir(dir)) await fs.rm(path.join(dir, n), { recursive: true, force: true }).catch((e: Error) => ((ok = false), log(`workers' area: ${e.message}`)));
-    if (!ok) log(`workers' area: ${dir} could not be emptied; left`);
+    if (!ok) log(`workers' area: ${shown} could not be emptied; left`);
     return ok;
   }
   if (uid === 0 || gid === 0) {
-    log(`workers' area: ${dir} has owner ${uid}:${gid}; left`);
+    log(`workers' area: ${shown} has owner ${uid}:${gid}; left`);
     return false;
   }
   try {
     const r = await runInFolderAs(dir, uid, gid, EMPTY_SCRIPT, []);
     if (r.code === 0) return true;
-    log(`workers' area: emptying ${dir} as ${uid} failed (${r.code === null ? "stopped" : `exit ${r.code}`}): ${r.err}; left`);
+    log(`workers' area: emptying ${shown} as ${uid} failed (${r.code === null ? "stopped" : `exit ${r.code}`}): ${r.err}; left`);
   } catch (e) {
-    log(`workers' area: emptying ${dir} as ${uid} failed: ${(e as Error).message}; left`);
+    log(`workers' area: emptying ${shown} as ${uid} failed: ${(e as Error).message}; left`);
   }
   return false;
 }
@@ -443,6 +443,39 @@ export async function removeOldIndexDirs(indexDir: string, owner: string, keep: 
     await p.close();
   }
   return gone;
+}
+
+/**
+ * Empties the account caches `<top>/accounts/u<uid>` whose names `pick` accepts, each as its owner (`emptyAs`); the folders themselves stay.
+ * Root never walks one. The parent is held by descriptor (`accountsParent`) and every step goes through it. A folder still this process's
+ * own as root (its hand-over failed) holds nothing of an account's and is left. Nothing happens when `top` is missing. Gives the names of
+ * the folders emptied; never throws (what fails is logged).
+ */
+export async function emptyCaches(top: string, pick: (name: string) => boolean, log: (s: string) => void): Promise<string[]> {
+  const say = (s: string) => log(s.replace("workers' area", "thumbnail caches"));
+  const done: string[] = [];
+  if (!top || !(await fs.lstat(top).then(() => true, () => false))) return done;
+  let p: fs.FileHandle;
+  try {
+    p = await accountsParent(top);
+  } catch (e) {
+    say(`thumbnail caches: ${(e as Error).message}`);
+    return done;
+  }
+  try {
+    for (const n of await fs.readdir(inHeld(p))) {
+      if (!/^u[0-9]+$/.test(n) || !pick(n)) continue;
+      const at = inHeld(p, n);
+      const st = await fs.lstat(at).catch(() => null);
+      if (!st?.isDirectory() || (myUid() === 0 && st.uid === 0)) continue;
+      if (await emptyAs(at, st.uid, st.gid, say, path.join(top, "accounts", n))) done.push(n);
+    }
+  } catch (e) {
+    say(`thumbnail caches: ${(e as Error).message}`);
+  } finally {
+    await p.close();
+  }
+  return done;
 }
 
 /** A request for a trash folder that is refused (400: not a volume root; 403: not this account's to have). */

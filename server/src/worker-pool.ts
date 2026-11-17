@@ -282,6 +282,7 @@ export class WorkerPool {
   private readonly log: (s: string) => void;
   private readonly rootHandler: ((spec: WorkerSpec, req: Request) => Promise<Response>) | undefined;
   private readonly sandbox: () => Promise<{ state: string; abi: number }>;
+  private readonly onStopped: ((spec: WorkerSpec) => void) | undefined;
   private readonly workers = new Map<string, Live>();
   private readonly starting = new Map<string, Starting>();
   /** keys whose last start failed, until when they get the same answer */
@@ -305,6 +306,8 @@ export class WorkerPool {
     rootHandler?: (spec: WorkerSpec, req: Request) => Promise<Response>;
     /** what the sandbox is here (tests give another Landlock ABI); default `sandboxInfo` */
     sandbox?: () => Promise<{ state: string; abi: number }>;
+    /** called once a worker's process has exited, whatever stopped it (idle, room, its account, close, or itself) */
+    onStopped?: (spec: WorkerSpec) => void;
   }) {
     if (!Number.isInteger(o.max) || o.max < 1) throw new Error(`the worker limit must be a whole number of at least 1, not ${o.max}`);
     if (!Number.isFinite(o.idleMs) || o.idleMs <= 0) throw new Error(`the worker idle time must be more than 0, not ${o.idleMs}`);
@@ -315,6 +318,7 @@ export class WorkerPool {
     this.log = o.log ?? ((s) => console.error(s));
     this.rootHandler = o.rootHandler;
     this.sandbox = o.sandbox ?? sandboxInfo;
+    this.onStopped = o.onStopped;
     this.timer = setInterval(() => this.tick(), Math.max(10, Math.min(o.idleMs, 30_000)));
     this.timer.unref();
   }
@@ -389,6 +393,13 @@ export class WorkerPool {
   private checkEpoch(spec: Pick<WorkerSpec, "kind" | "name" | "epoch">): void {
     const min = this.minEpoch.get(`${spec.kind}:${spec.name}`);
     if (min !== undefined && spec.epoch < min) throw new StaleEpoch();
+  }
+
+  /** Whether a process of this pool runs as `uid`, or a start for it is in progress (also a process that is stopping and has not exited yet). */
+  usesUid(uid: number): boolean {
+    for (const w of this.procs) if (w.spec.account.uid === uid) return true;
+    for (const st of this.starting.values()) if (st.spec.account.uid === uid) return true;
+    return false;
   }
 
   list(): { key: string; pid: number; busy: boolean; lastUsed: number }[] {
@@ -599,6 +610,11 @@ export class WorkerPool {
     void exited.then(() => {
       this.procs.delete(live);
       this.ended(live);
+      try {
+        this.onStopped?.(spec);
+      } catch (e) {
+        this.log(`worker ${key}: after its stop: ${e instanceof Error ? e.message : String(e)}`);
+      }
     });
     void mux.closed.then(() => this.ended(live));
     return live;

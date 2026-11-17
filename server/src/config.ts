@@ -223,6 +223,15 @@ export function loadConfig(env = process.env): Config {
 }
 
 /**
+ * The most one account's thumbnail cache may hold (sign-in on): the thumbnail limit (`FILEDECK_THUMB_CACHE_MAX`) shared by the workers that
+ * may run at once (`FILEDECK_MAX_WORKERS`), never under 16 MiB. The cache of an account whose worker has stopped is emptied (agent-workers.ts),
+ * so the caches together stay within the limit.
+ */
+export function accountThumbMax(cfg: Pick<Config, "thumbCacheMax" | "maxWorkers">): number {
+  return Math.max(16 * 1024 * 1024, Math.floor(cfg.thumbCacheMax / Math.max(1, cfg.maxWorkers)));
+}
+
+/**
  * The settings a worker gets in its start-up message: the agent's own, without any secret (a worker runs as a person's account, so whatever it holds that
  * person could read), and without what only the root process does: the shared job file, the change watcher, trash retention and sign-in checks.
  * `dirs` are the account's own thumbnail cache and index folders.
@@ -250,6 +259,7 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     trashSweepMs: 0,
     // the account's own folders: a worker never shares the root process's index or thumbnail cache
     thumbDir: dirs.thumbs,
+    thumbCacheMax: accountThumbMax(cfg),
     indexDir: dirs.index,
   };
 }
