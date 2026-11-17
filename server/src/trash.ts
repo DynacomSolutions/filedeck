@@ -7,6 +7,7 @@ import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
 import { TRASH_DIR, TRASH_OWNER, resolveWrite, virtualJoin } from "./paths.ts";
 import { assertNotReserved, pinDirCreate, pinDirW, rmTree, walkGuard } from "./pinwalk.ts";
 import { runInFolderAs } from "./account-dirs.ts";
+import { renameNoReplace } from "./noreplace.ts";
 import { trashScope } from "./trash-scope.ts";
 
 export { setTrashScope, type TrashScope } from "./trash-scope.ts";
@@ -97,13 +98,33 @@ async function itemFolder(base: string, sub: string): Promise<string> {
 const myUid = () => process.getuid?.() ?? 0;
 
 /**
- * Whether an owner folder belongs to an account (its contents are then changed only as its owner): every one but `u0`, unless this
- * process is root and still owns it (one whose hand-over failed; nothing of the account's is in it).
+ * Whether an owner folder belongs to an account (its contents are then changed only as its owner): decided by its owner, for every
+ * folder (`u0` included): one that is this process's own (`u0`, or one whose hand-over failed) is not.
  */
 async function ownedByAccount(dir: string, sub: string): Promise<boolean> {
-  if (!sub || sub === "u0") return false;
-  const st = await fs.lstat(dir);
-  return !(myUid() === 0 && st.uid === 0);
+  if (!sub) return false;
+  return (await fs.lstat(dir)).uid !== myUid();
+}
+
+/** an account's item may only be renamed out of its folder: a copy would end with this process removing the account's files */
+const notHere = () => new ops.FsError(409, "the item cannot be moved there in one step; restore it signed in as its account, or choose another folder");
+
+/**
+ * Moves an account's item `from` to `to` with one rename that never replaces anything (no copy across mounts, also not across two
+ * bind mounts of one filesystem, where `rename` gives EXDEV too).
+ */
+async function renameOnly(from: string, to: string): Promise<void> {
+  const r = await renameNoReplace(from, to);
+  if (r === "done") return;
+  if (r === "exists") throw new ops.FsError(409, "destination exists");
+  if (r === "xdev") throw notHere();
+  if (await ops.exists(to)) throw new ops.FsError(409, "destination exists");
+  try {
+    await fs.rename(from, to);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EXDEV") throw notHere();
+    throw e;
+  }
 }
 
 /**
@@ -112,11 +133,12 @@ async function ownedByAccount(dir: string, sub: string): Promise<boolean> {
  *   with 1 each item's disk use is measured (once: it is kept in its meta.json, as `itemUsage` does), else it is 0;
  * - `remove <id>...`: removes the items in that order (each renamed to `.purge-<id>` first), stops at the first that cannot go, and
  *   prints `{removed: [id...]}`.
- * Nothing in it follows a link out of the folder: a removal does not follow links, and the walk enters only real folders on the
- * folder's own device.
+ * Nothing in it follows a link out of the folder: meta.json is opened without following a link (at the item and at the file) and only
+ * as a regular file, a removal does not follow links, and the walk enters only real folders on the folder's own device. Under Landlock
+ * it can open nothing but the folder (`runInFolderAs`).
  */
 const OWNER_SCRIPT = `
-const fs=require("fs"),path=require("path");
+const fs=require("fs"),path=require("path"),C=fs.constants;
 const ID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,P=".purge-";
 const [mode,...a]=process.argv.slice(1);
 const out=(o)=>process.stdout.write(JSON.stringify(o));
@@ -126,7 +148,11 @@ if(mode==="survey"){
     if(n.startsWith(P)&&ID.test(n.slice(P.length))){try{fs.rmSync(n,{recursive:true,force:true})}catch{failed++}continue}
     if(!ID.test(n))continue;
     let st;try{st=fs.lstatSync(n)}catch{continue}
-    let meta=null;try{if(st.isDirectory())meta=JSON.parse(fs.readFileSync(path.join(n,"meta.json"),"utf8"))}catch{}
+    let meta=null;
+    if(st.isDirectory()){let d=-1,f=-1;
+      try{d=fs.openSync(n,C.O_RDONLY|C.O_DIRECTORY|C.O_NOFOLLOW);f=fs.openSync("/proc/self/fd/"+d+"/meta.json",C.O_RDONLY|C.O_NOFOLLOW|C.O_NONBLOCK);
+        const s=fs.fstatSync(f);if(s.isFile()&&s.size<=1048576)meta=JSON.parse(fs.readFileSync(f,"utf8"))}catch{}
+      for(const x of [f,d])if(x>=0)try{fs.closeSync(x)}catch{}}
     const at=Number(meta&&meta.deletedAt)||st.mtimeMs||0;let d=0;
     if(disk){
       if(meta&&typeof meta.diskBytes==="number")d=meta.diskBytes;
@@ -169,6 +195,16 @@ async function asOwner(dir: string, args: string[]): Promise<unknown> {
   const r = await runInFolderAs(dir, st.uid, st.gid, OWNER_SCRIPT, args, { timeoutMs: OWNER_MS, maxOut: 256 << 20 });
   if (r.code !== 0) throw new Error(`as its owner: ${r.code === null ? "stopped" : `exit ${r.code}`}${r.err ? `: ${r.err}` : ""}`);
   return JSON.parse(r.out);
+}
+
+/** Whether a folder has no entries (its names only are read). */
+async function isEmpty(dir: string): Promise<boolean> {
+  const h = await fs.opendir(dir, { bufferSize: 1 });
+  try {
+    return (await h.read()) === null;
+  } finally {
+    await h.close().catch(() => undefined);
+  }
 }
 
 /** The items of an account's trash folder, as its owner sees them (and what earlier removals left is cleared). */
@@ -315,7 +351,7 @@ async function itemUsage(dir: string, id: string): Promise<{ id: string; deleted
   const metaFile = path.join(item, "meta.json");
   let meta: (ops.TrashMeta & { diskBytes?: number }) | undefined;
   try {
-    meta = JSON.parse(await fs.readFile(metaFile, "utf8"));
+    meta = await readMeta(dir, id); // (never through a link)
   } catch {
     /* orphan: measured every time, never written */
   }
@@ -403,6 +439,7 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
         try {
           account[k] = await ownedByAccount(f.dir, f.sub);
           if (account[k]) {
+            if (await isEmpty(f.dir)) continue; // (no process to start for an empty folder)
             const sv = await surveyAs(f.dir, cap !== Infinity);
             r.failed += sv.failed;
             const old = sv.items.filter((i) => i.deletedAt <= cutoff).map((i) => i.id);
@@ -550,6 +587,8 @@ export async function restoreItems(root: string, volume: string, ids: unknown, o
 async function restoreHeld(root: string, dir: string, id: string, policy: string, opts: RestoreOpts, account = false): Promise<TrashResult> {
   {
     {
+      // an account's meta.json is the account's to write: without a scope its item goes only where the admin says
+      if (account && !opts.toDir) throw new ops.FsError(403, "this item is in an account's trash folder: restore it signed in as its account, or choose a folder");
       const meta = await readMeta(dir, id);
       const data = path.join(dir, id, "data");
       await fs.lstat(data);
@@ -572,11 +611,8 @@ async function restoreHeld(root: string, dir: string, id: string, policy: string
         }
         let warning: string | undefined;
         if (account) {
-          // only a rename (a copy to another volume would end with this process removing the account's files)
-          await pinDirW(root, path.join(dir, id), async (srcAt) => {
-            if ((await fs.lstat(path.join(srcAt, "data"))).dev !== (await fs.stat(dstAt)).dev) throw new ops.FsError(409, "the item's place is on another volume now; restore it signed in as its account");
-            await ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false, root);
-          });
+          // only a rename (a copy across mounts would end with this process removing the account's files)
+          await pinDirW(root, path.join(dir, id), (srcAt) => renameOnly(path.join(srcAt, "data"), path.join(dstAt, final)));
           if ((await removeAs(dir, [id])).length !== 1) warning = "The item is restored. Its folder in the trash could not be removed; it is still listed there.";
           return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final), ...(warning ? { warning } : {}) };
         }

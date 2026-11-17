@@ -115,6 +115,9 @@ export function workerTrashScope(mux: Pick<Mux, "fetch">, folder: string, root: 
       }
       return p;
     },
+    forget(volume: string): void {
+      dirs.delete(volume);
+    },
     // (where a restore puts an item comes from its meta.json, which the account can write: so it is checked as a change there)
     ...(grants ? { mayRestore: (v: string) => insideGrants(root, grants, v, true) && mayChange(root, grants, v, { follow: false, contains: true }) } : {}),
   };

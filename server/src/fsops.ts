@@ -681,9 +681,18 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   const vol = await volumeRoot(path.dirname(r.real), root);
   // sign-in on: the account's own folder of the volume's trash store, which the root process makes (trash-scope.ts)
   const scope = trashScope();
-  const dir = scope ? await scope.ensure(vol) : path.join(vol, TRASH_DIR);
+  let dir = scope ? await scope.ensure(vol) : path.join(vol, TRASH_DIR);
   if (!scope) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const id = randomUUID();
+  try {
+    await fs.mkdir(path.join(dir, id));
+  } catch (e) {
+    // the account's folder was removed since the worker asked for it: asked again, once
+    if (!scope?.forget || (e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    scope.forget(vol);
+    dir = await scope.ensure(vol);
+    await fs.mkdir(path.join(dir, id));
+  }
   const meta: TrashMeta = {
     id,
     name: path.basename(r.real),
@@ -692,7 +701,6 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
     type: kind(st),
     size: st.size,
   };
-  await fs.mkdir(path.join(dir, id));
   await fs.writeFile(path.join(dir, id, "meta.json"), JSON.stringify(meta));
   try {
     await pinParentW(root, r.real, (at) => fs.rename(at, path.join(dir, id, "data")));

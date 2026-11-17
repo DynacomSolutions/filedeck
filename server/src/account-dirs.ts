@@ -271,8 +271,9 @@ const EMPTY_MS = 30_000;
  * Runs a Node `script` (`node -e`, with `args`) as `uid`/`gid`, with `dir` as its working folder, and gives back its exit code (null
  * when it was stopped), its output (at most `maxOut` bytes; past that it is stopped) and the start of its error output. The folder is
  * opened here without following a link and must still be `uid`'s; the launcher gets it by descriptor, so the program never resolves a
- * path through folders it may not pass. When `uid` is this process and this process is not root, no user change is needed and the
- * program runs without the launcher. Throws for uid or gid 0, and when the folder cannot be opened or has another owner.
+ * path through folders it may not pass. With Landlock here the program may write only that folder (and read what Node needs to run,
+ * `runtimeRoots`). Without Landlock, when `uid` is this process and this process is not root, no user change is needed and the program
+ * runs without the launcher. Throws for uid or gid 0, and when the folder cannot be opened or has another owner.
  */
 export async function runInFolderAs(
   dir: string,
@@ -290,7 +291,21 @@ export async function runInFolderAs(
     const st = await fh.stat();
     if (st.uid !== uid) throw new Error(`its owner changed to ${st.uid}`);
     const env = { PATH: process.env.PATH || "/usr/bin:/bin", LANG: "C.UTF-8" };
-    if (uid === me && me !== 0) {
+    // Under Landlock it may change the folder (by descriptor) and nothing else: one folder's owner may be the runAs account of
+    // several virtual accounts, whose other folders it must not reach. Elsewhere the script itself follows no link.
+    const confined = (await sandboxInfo()).state === "landlock";
+    if (confined) {
+      const rt = await runtimeRoots();
+      child = await spawnSandboxed(process.execPath, ["-e", script, ...args], {
+        ...(uid !== me ? { uid, gid } : {}),
+        readWrite: [fh.fd],
+        readOnly: rt.readOnly,
+        readExec: rt.readExec,
+        cwdFd: fh.fd,
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+      });
+    } else if (uid === me && me !== 0) {
       // (no privilege boundary: the account is this process)
       child = spawn(process.execPath, ["-e", script, ...args], { cwd: await fs.readlink(inHeld(fh)), env, stdio: ["ignore", "pipe", "pipe"] });
     } else {
@@ -492,12 +507,16 @@ export async function accountTrashDir(cfg: { root: string; readOnly: string[] },
       for (const g of who.grants ?? []) {
         if (!g.write || held) continue;
         try {
-          held = (await volumeRoot(resolveRead(root, g.path).real, root)) === volume;
+          const r = resolveRead(root, g.path);
+          if (r.virtual !== grantPath(g.path)) continue; // (a grant through a link holds nothing, as in the worker's Landlock rules)
+          held = (await volumeRoot(r.real, root)) === volume;
         } catch {
           /* a grant that cannot be reached holds nothing */
         }
       }
-      if (!held) throw new TrashRefused(403, "no write grant on this volume");
+      // (a volume mounted inside a write grant is not one of the grant's own volume: there is no trash there for this account, and
+      // nothing falls back to deleting without one, so the person is told to delete instead)
+      if (!held) throw new TrashRefused(403, "no trash here for this account (none of its write grants starts on this volume); delete the item instead");
     }
     const me = myUid();
     const shown = path.join(volume, TRASH_DIR);

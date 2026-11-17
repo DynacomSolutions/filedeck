@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -133,6 +134,7 @@ test("virtual accounts sharing a runAs: each has its own folder, sees only its i
   assert.equal(r.status, 200, await r.clone().text());
   const res = ((await r.json()) as { results: { ok: boolean; error?: string }[] }).results[0]!;
   assert.equal(res.ok, false, "guest2 cannot restore guest1's item");
+  assert.match(res.error ?? "", /not found/);
   // an id that names a folder, and a volume that holds none of its grants, are refused before the routes
   assert.equal((await post("/api/trash/restore", { volume: "/", ids: [`v-guest1/${id1}`] }, g2)).status, 403);
   assert.equal((await post("/api/trash/delete", { volume: "/", ids: [`v-guest1/${id1}`] }, g2)).status, 403);
@@ -151,6 +153,27 @@ test("virtual accounts sharing a runAs: each has its own folder, sees only its i
   const s = await post("/api/trash/delete", { volume: "/", ids: [`v-guest1/${id1}`] }, sys());
   assert.equal(s.status, 400);
   assert.ok(fs.existsSync(path.join(trashOf("v-guest1"), id1, "data")));
+});
+
+test("a meta.json that links to another account's item is never read or copied by the sweep", { skip: NEED }, async () => {
+  const idOf = async (claim: UserClaim) => (await list(claim))[0]!.items[0]!.id;
+  const i1 = await idOf(virt("guest1", "/g1"));
+  const i2 = await idOf(virt("guest2", "/g2"));
+  const m1 = path.join(trashOf("v-guest1"), i1, "meta.json");
+  const saved = fs.readFileSync(m1);
+  fs.unlinkSync(m1);
+  fs.symlinkSync(path.join(trashOf("v-guest2"), i2, "meta.json"), m1);
+  try {
+    // a cap far above what is there: every item is measured (and its size kept in its meta.json), nothing is removed
+    const r = await withReadOnly(root, [], () => applyRetention(root, "", { maxAgeDays: 0, maxPercent: 0, maxBytes: 2 ** 40 }));
+    assert.equal(r.reduce((n, x) => n + x.removed, 0), 0);
+    assert.ok(!(await names(virt("guest1", "/g1"))).includes("two"), "guest1 sees guest2's item");
+    assert.ok(fs.lstatSync(m1).isSymbolicLink(), "the link is left as it is");
+  } finally {
+    fs.rmSync(m1, { force: true });
+    fs.writeFileSync(m1, saved);
+    chownForTest(m1);
+  }
 });
 
 test("root view: without a scope every folder is listed with <folder>/<id> ids, and retention covers every folder", async () => {
@@ -183,7 +206,14 @@ test("root view: an account's item is restored and deleted without a scope; what
   chownForTest(path.join(root, "a/z"));
   const id = await trashIt("/a/z", sys());
   const own = `u${me.uid}`;
-  const [res] = await withoutReadOnly(() => restoreItems(root, "/", [`${own}/${id}`]));
+  if (IS_ROOT) {
+    // where the item goes comes from a meta.json the account wrote: without a scope root only puts it where the admin says
+    const [no] = await withoutReadOnly(() => restoreItems(root, "/", [`${own}/${id}`]));
+    assert.equal(no!.ok, false);
+    assert.match(no!.error ?? "", /restore it signed in as its account, or choose a folder/);
+    assert.ok(fs.existsSync(path.join(trashOf(own), id, "data")));
+  }
+  const [res] = await withoutReadOnly(() => restoreItems(root, "/", [`${own}/${id}`], { toDir: "/a" }));
   assert.equal(res!.ok, true, res!.error);
   assert.equal(res!.id, `${own}/${id}`);
   assert.equal(fs.readFileSync(path.join(root, "a/z"), "utf8"), "a/z\n");
@@ -275,6 +305,36 @@ test("the root request: a trash store or account folder that is not safe is refu
     assert.equal(mode(path.join(other, TRASH_DIR, `u${me.uid}`)), 0o755);
   } finally {
     fs.rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test("a trash folder removed while the worker runs is made again", async () => {
+  await trashIt("/a/c2", sys()).catch(() => undefined);
+  fs.writeFileSync(path.join(root, "a/again"), "again\n");
+  chownForTest(path.join(root, "a/again"));
+  fs.rmSync(trashOf(`u${me.uid}`), { recursive: true, force: true });
+  const id = await trashIt("/a/again", sys());
+  assert.ok(fs.existsSync(path.join(trashOf(`u${me.uid}`), id, "data")));
+});
+
+test("root view: an account's item whose rename crosses a mount stays in the trash (root never copies and removes it)", { skip: ROOT_ONLY }, async () => {
+  const bm = path.join(root, "bm");
+  fs.mkdirSync(bm);
+  const m = spawnSync("mount", ["--bind", path.join(root, "g1"), bm], { encoding: "utf8" });
+  assert.equal(m.status, 0, m.stderr);
+  try {
+    fs.writeFileSync(path.join(root, "a/w"), "w\n");
+    chownForTest(path.join(root, "a/w"));
+    const id = await trashIt("/a/w", sys());
+    const own = `u${me.uid}`;
+    const [r] = await withoutReadOnly(() => restoreItems(root, "/", [`${own}/${id}`], { toDir: "/bm" }));
+    assert.equal(r!.ok, false);
+    assert.match(r!.error ?? "", /restore it signed in as its account/);
+    assert.equal(fs.readFileSync(path.join(trashOf(own), id, "data"), "utf8"), "w\n");
+    assert.ok(!fs.existsSync(path.join(bm, "w")));
+  } finally {
+    spawnSync("umount", [bm]);
+    fs.rmdirSync(bm);
   }
 });
 

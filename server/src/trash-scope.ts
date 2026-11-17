@@ -8,6 +8,8 @@ export interface TrashScope {
   folder: string;
   /** the account's folder on the volume whose root is `volumeReal` (made by the root process when missing); its real path */
   ensure(volumeReal: string): Promise<string>;
+  /** drops what `ensure` keeps for that volume (its folder was removed), so the next `ensure` asks again */
+  forget?(volumeReal: string): void;
   /** a virtual account: whether a restore may put an item at this path (its grants); unset = anywhere the account may write */
   mayRestore?(virtual: string): boolean;
 }
