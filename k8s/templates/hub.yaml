@@ -56,6 +56,11 @@ spec:
               value: hub
             - name: PORT
               value: {{ .Values.port | quote }}
+            {{- if .Values.auth.enabled }}
+            # Sign-in (not ready to turn on yet; see docs/security.md).
+            - name: FILEDECK_AUTH
+              value: "on"
+            {{- end }}
             {{- if .Values.hub.trustedProxies }}
             - name: FILEDECK_TRUSTED_PROXIES
               value: {{ .Values.hub.trustedProxies | quote }}

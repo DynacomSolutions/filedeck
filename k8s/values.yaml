@@ -35,6 +35,22 @@ agentToken:
   key: token
   generate: false
 
+# Sign-in (FILEDECK_AUTH on the hub and the agents). Not ready to turn on until docs/security.md says so; see "Turning
+# sign-in on" in docs/install.md. It needs the agent token (`agentToken.secretName` or `agentToken.generate`): the chart
+# refuses to render without one. With it on, each agent runs every signed-in request in a worker process that holds the
+# person's own user (FILEDECK_MAX_WORKERS, FILEDECK_WORKER_IDLE_SECONDS), and the agent container gets the SYS_CHROOT
+# capability for its account lookup helper.
+auth:
+  # Sign-in (FILEDECK_AUTH). Not ready to turn on until the docs say so.
+  enabled: false
+  workers:
+    # Workers that run at once per agent; past this the least recently used idle one is stopped.
+    max: 6
+    # A worker without requests, open streams or running jobs for this long exits.
+    idleSeconds: 600
+  # agent memory limit while sign-in is on (each worker adds up to about 96Mi of heap); replaces agent.resources.limits.memory
+  agentMemoryLimit: 1Gi
+
 # Optional read-only token for the `filedeck du` CLI (hub). Name an existing Secret (created out of band, never in Git)
 # that holds a long random value under `key`; the hub then lets a request with the header `X-Filedeck-Token: <token>` call only GET /api/du and
 # the du jobs it starts (`Authorization` is never read, so an ingress login in front of the hub keeps working). Empty (the default) switches the feature off.
