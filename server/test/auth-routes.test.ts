@@ -141,6 +141,10 @@ test("https required: plain HTTP from a remote peer is refused, a trusted proxy'
   assert.equal(ok.status, 200);
   const no = await post(b, "/api/auth/login", { name: "guest1", password: "pw-guest-1" }, { base: "http://files.example", addr: "10.0.0.5", headers: { "x-forwarded-proto": "https, http" } });
   assert.equal(no.status, 403, "only the last X-Forwarded-Proto value counts");
+  // with a proxy configured, a loopback peer is the proxy: plain HTTP from it is not enough
+  const lo = await post(b, "/api/auth/login", { name: "guest1", password: "pw-guest-1" }, { base: "http://localhost", addr: "127.0.0.1" });
+  assert.equal(lo.status, 403);
+  assert.deepEqual(await lo.json(), { error: "sign-in needs HTTPS" });
 });
 
 test("limiter: five failures block, the block ends, success resets the name", async () => {

@@ -129,12 +129,15 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     return id ? admit(c, id, next) : signedOut(c);
   });
 
-  /** HTTPS: the URL, the last X-Forwarded-Proto behind a trusted proxy, or a loopback peer. */
+  /**
+   * HTTPS: the URL, or the last X-Forwarded-Proto behind a trusted proxy. A loopback peer on plain HTTP counts only
+   * without proxies: with one, the peer is the proxy, and it may be on the same host while the client is not.
+   */
   const secure = (c: Context): boolean => {
     if (new URL(c.req.url).protocol === "https:") return true;
     if (cfg.trustedProxies > 0) {
       const last = c.req.header("x-forwarded-proto")?.split(",").pop()?.trim().toLowerCase();
-      if (last === "https") return true;
+      return last === "https";
     }
     return isLoopback(peerOf(c));
   };
