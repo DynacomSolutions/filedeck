@@ -32,9 +32,12 @@ export async function signInMessage(r: Response): Promise<string> {
   return typeof b?.error === "string" ? b.error : `Sign-in failed (${r.status})`;
 }
 
-async function post(path: string, body: unknown): Promise<Response> {
+/** The JSON part of a sign-in POST. Each caller writes its own `fetch` with a literal URL and method, so the request guard's route test can read it. */
+const jsonBody = (body: unknown) => ({ credentials: "same-origin" as const, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+async function reach(send: () => Promise<Response>): Promise<Response> {
   try {
-    return await fetch(path, { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    return await send();
   } catch {
     throw new SignInError("Cannot reach the server");
   }
@@ -47,7 +50,7 @@ async function signedIn(r: Response): Promise<Account> {
 
 /** Signs in with a name and password. The password goes in the JSON body only. */
 export async function login(name: string, password: string): Promise<Account> {
-  return signedIn(await post("/api/auth/login", { name, password }));
+  return signedIn(await reach(() => fetch("/api/auth/login", { method: "POST", ...jsonBody({ name, password }) })));
 }
 
 /**
@@ -55,14 +58,14 @@ export async function login(name: string, password: string): Promise<Account> {
  * signed with the key, and the public key line. Throws KeyFileError for a file or passphrase problem.
  */
 export async function loginKey(name: string, keyText: string, passphrase?: string): Promise<Account> {
-  const r = await post("/api/auth/challenge", { name });
+  const r = await reach(() => fetch("/api/auth/challenge", { method: "POST", ...jsonBody({ name }) }));
   if (!r.ok) throw new SignInError(await signInMessage(r));
   const { challenge, hubId } = (await r.json()) as { challenge: string; hubId: string };
   const ch = Uint8Array.from(atob(challenge), (c) => c.charCodeAt(0));
   // loaded only here: bcrypt-pbkdf and its SHA-512 are not needed by anyone who signs in with a password
   const { signLogin, toBase64 } = await import("./sshkey");
   const { publicKey, signature } = await signLogin(keyText, passphrase, hubId, name, ch);
-  return signedIn(await post("/api/auth/login-key", { name, publicKey, challenge, signature: toBase64(signature) }));
+  return signedIn(await reach(() => fetch("/api/auth/login-key", { method: "POST", ...jsonBody({ name, publicKey, challenge, signature: toBase64(signature) }) })));
 }
 
 export async function logout(): Promise<void> {
