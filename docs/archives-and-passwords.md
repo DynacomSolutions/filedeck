@@ -10,7 +10,7 @@ Passwords are read by 7-Zip (`7zz`) from its standard input. They never appear o
 
 ## Saved passwords (the vault) and its trust model
 
-Filedeck has no user accounts: whoever can reach the page is the user. To spare retyping, the hub keeps the passwords you enter for encrypted archives (and, later, PDFs) in a vault:
+With sign-in off, Filedeck has no user accounts: whoever can reach the page is the user. To spare retyping, the hub keeps the passwords you enter for encrypted archives (and, later, PDFs) in a vault:
 
 - **What is stored.** The password, encrypted with AES-256-GCM (a fresh IV per row, the row id as authenticated data), in a small sqlite file on its own volume (`filedeck-vault`, never inside user data). The location (node and path), scope, timestamps and expiry are stored in clear so Settings can list them. The AES key is derived (HKDF-SHA256) from a Kubernetes Secret created out of band, `filedeck-vault-key` (key `key`, any random value of 16 or more bytes; see `vault` in `k8s/values.yaml` for the command). It is mounted as an environment variable (or `FILEDECK_VAULT_KEY_FILE`) and is never logged or printed. Without the Secret the vault is memory only and Settings says so.
 - **Lifetime.** Default: a sliding window (`vault.ttlSeconds`, 30 minutes idle) that every use renews, capped at `vault.maxHours` (24 h) after the password was entered, then it must be typed again. With **Remember** ticked it is kept until forgotten. **Use for all files in this folder** saves it for the folder and everything below it (the nearest folder entry wins; a file's own entry wins over a folder's). Entries are found by node and path, falling back to inode and size so a renamed or moved file still matches.
