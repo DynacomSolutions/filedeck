@@ -40,6 +40,9 @@ before(() => {
   fs.writeFileSync(path.join(root, "a/x/deep/f.bin"), Buffer.alloc(4096, 1));
   fs.writeFileSync(path.join(root, "a/top.txt"), "top\n");
   fs.writeFileSync(path.join(root, "a/z/hidden-name.txt"), "z\n");
+  fs.mkdirSync(path.join(root, "a/z/zz/deeper"), { recursive: true });
+  fs.mkdirSync(path.join(root, "a/z/plain"));
+  fs.symlinkSync("/a/y", path.join(root, "a/z/lnk")); // a link in a folder the account cannot open, to one it can
   fs.mkdirSync(path.join(root, "b"));
   fs.mkdirSync(path.join(root, "c/inner"), { recursive: true });
   fs.writeFileSync(path.join(root, "c/secret"), Buffer.alloc(8192, 2));
@@ -47,6 +50,10 @@ before(() => {
   fs.writeFileSync(path.join(root, "p/private"), "p\n");
   fs.mkdirSync(path.join(root, "q"));
   fs.writeFileSync(path.join(root, "q/open"), "q\n");
+  fs.mkdirSync(path.join(root, "p/inner/deeper"), { recursive: true });
+  // a folder others may pass through but not list (0711), with a folder below it that anyone may list (0755)
+  fs.mkdirSync(path.join(root, "h/pub/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "h/pub/f"), "h\n");
   fs.chmodSync(work, 0o755);
   chownForTest(root);
   // a folder inside the grant that the account (the runAs user) cannot open
@@ -54,6 +61,10 @@ before(() => {
   if (process.getuid?.() === 0) {
     fs.chownSync(path.join(root, "p"), 0, 0);
     fs.chmodSync(path.join(root, "p"), 0o700);
+    for (const d of ["h", "h/pub", "h/pub/sub"]) fs.chownSync(path.join(root, d), 0, 0);
+    fs.chownSync(path.join(root, "h/pub/f"), 0, 0);
+    fs.chmodSync(path.join(root, "h"), 0o711);
+    fs.chmodSync(path.join(root, "h/pub"), 0o755);
   }
   app = createAgent(
     loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on", FILEDECK_INDEX_DIR: index, FILEDECK_API_TOKEN_ACCOUNT: "du-bot" } as never),
@@ -154,4 +165,59 @@ test("a system account does not get the folders its user cannot open", { skip: R
   await refused("path=/p", claim, "permission denied");
   const s = await app.request("/api/jobs/size", { method: "POST", headers: headers(claim, { "content-type": "application/json" }), body: JSON.stringify({ path: "/p" }) });
   assert.equal(s.status, 403);
+});
+
+const postSize = (p: string, claim: UserClaim) => app.request("/api/jobs/size", { method: "POST", headers: headers(claim, { "content-type": "application/json" }), body: JSON.stringify({ path: p }) });
+
+/** every view of a size job the account gets while it runs and once it is done (the answer to the request, the job, the list) */
+async function sizeViews(p: string, claim: UserClaim): Promise<string[]> {
+  const r = await postSize(p, claim);
+  assert.equal(r.status, 202, await r.clone().text());
+  const views = [await r.text()];
+  const { id } = JSON.parse(views[0]!) as { id: string };
+  for (let i = 0; i < 400; i++) {
+    const j = await get(`/api/jobs/${id}`, claim);
+    assert.equal(j.status, 200);
+    const t = await j.text();
+    views.push(t);
+    const st = (JSON.parse(t) as { state: string }).state;
+    if (st !== "queued" && st !== "running") break;
+    await new Promise((res) => setTimeout(res, 5));
+  }
+  views.push(await (await get("/api/jobs", claim)).text());
+  return views;
+}
+const currents = (views: string[]) =>
+  views.flatMap((t) => {
+    const v = JSON.parse(t) as { progress?: { current: string }; jobs?: { progress: { current: string } }[] };
+    return [...(v.progress ? [v.progress.current] : []), ...(v.jobs ?? []).map((j) => j.progress.current)];
+  });
+
+test("a size job never shows the path its walk is at (a virtual account, a folder it cannot open)", { skip: NEED }, async () => {
+  const views = await sizeViews("/a", virt("guest5"));
+  for (const t of views) assert.doesNotMatch(t, /\/a\/z/);
+  assert.ok(currents(views).every((c) => c === ""), currents(views).join(" "));
+});
+
+test("a name in a folder the account cannot open: the same answer whether it is a link or not", { skip: NEED }, async () => {
+  const claim = virt("guest6");
+  for (const p of ["/a/z/lnk", "/a/z/plain", "/a/z/missing"]) {
+    await refused(`path=${p}`, claim, "permission denied");
+    const s = await postSize(p, claim);
+    assert.equal(s.status, 403, p);
+    assert.deepEqual(await s.json(), { error: "permission denied" }, p);
+  }
+});
+
+test("a system account's size job never shows the path its walk is at", { skip: ROOT_ONLY }, async () => {
+  const views = await sizeViews("/", sys("alice"));
+  for (const t of views) assert.doesNotMatch(t, /"\/p\//);
+  assert.ok(currents(views).every((c) => c === ""), currents(views).join(" "));
+});
+
+test("a folder below one the account may pass through but not list is left out, and so is all below it", { skip: ROOT_ONLY }, async () => {
+  const a = await answer("path=/&depth=3&all=1", sys("alice"));
+  const paths = a.entries.map((e) => e.path);
+  assert.ok(paths.includes("/q"), paths.join(" "));
+  assert.ok(!paths.some((p) => p === "/h" || p.startsWith("/h/")), paths.join(" "));
 });

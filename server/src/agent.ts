@@ -14,7 +14,7 @@ import type { Config } from "./config.ts";
 import { makeResolver, type AccountResolver } from "./local-accounts.ts";
 import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
 import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
-import { registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
+import { Followers, registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
 
 export interface AgentOptions {
   /** the account lookup (sign-in on); default: `makeResolver` */
@@ -72,9 +72,9 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const jobs = makeAgentJobs(cfg);
   const files = registerFileRoutes(app, cfg, jobs);
   // sign-in on: sizes and jobs follow the account (agent-jobs.ts); off: as before
-  let follows: ((c: import("hono").Context, id: string) => void) | undefined;
-  const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers ? sizeAccess(cfg, { pool, workers, follows: (c, id) => follows?.(c, id) }) : undefined);
-  if (pool && workers) follows = registerOwnedJobRoutes(app, jobs, { pool, workers }).follows;
+  const followers = pool && workers ? new Followers(jobs) : undefined;
+  const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
+  if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
   // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only these two 0/1 gauges may ever be served here): 1 when it answers from its file, and whether its file is damaged beyond repair (an operator must move it aside)
   app.get("/metrics", (c) => {

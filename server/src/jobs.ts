@@ -30,8 +30,8 @@ export interface JobView {
   finishedAt?: number;
   /** CLI du jobs: when a client last waited on or polled the job (see Jobs.abandonMs) */
   seenAt?: number;
-  /** queued jobs only: what is ahead of this one */
-  queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
+  /** queued jobs only: what is ahead of this one (with sign-in on, another account's job is only its state: agent-jobs.ts) */
+  queue?: { position: number; ahead: { id?: string; title?: string; state: JobState }[] };
 }
 
 /**

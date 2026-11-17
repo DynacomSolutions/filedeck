@@ -123,6 +123,32 @@ test("a size job belongs to the account that started it", async () => {
   assert.equal((await del(app, `/api/jobs/${job.id}`, "alice")).status, 200);
 });
 
+test("a queued job shows the jobs ahead of it, but another account's only by state", async () => {
+  let h!: SizeStore;
+  const { app } = agent({}, (index) => (h = holdLease(index)));
+  assert.equal(await h.mayScan(), true);
+  const b = await post(app, "/api/jobs/size", "bob", { path: "/d" });
+  assert.equal(b.status, 202);
+  const bob = (await b.json()) as View & { title: string };
+  const a = await post(app, "/api/jobs/size", "alice", { path: "/arc" });
+  assert.equal(a.status, 202);
+  const answers = [await a.text()];
+  const id = (JSON.parse(answers[0]!) as View).id;
+  answers.push(await (await get(app, `/api/jobs/${id}`, "alice")).text());
+  answers.push(await (await get(app, "/api/jobs", "alice")).text());
+  for (const t of answers) {
+    assert.ok(!t.includes(bob.id), "no id of bob's job");
+    assert.ok(!t.includes("Size of d"), "no title of bob's job");
+  }
+  const v = JSON.parse(answers[1]!) as { queue?: { position: number; ahead: unknown[] } };
+  assert.equal(v.queue?.position, 1);
+  assert.deepEqual(v.queue?.ahead, [{ state: "queued" }]);
+  // bob's own view of his job is whole
+  const bv = (await (await get(app, `/api/jobs/${bob.id}`, "bob")).json()) as View & { title: string };
+  assert.equal(bv.title, "Size of d");
+  for (const x of [bob.id, id]) await post(app, `/api/jobs/${x}/cancel`, x === id ? "alice" : "bob");
+});
+
 test("the job routes never start a worker", async () => {
   const { app } = agent();
   assert.deepEqual(await listOf(app, "carol"), []);

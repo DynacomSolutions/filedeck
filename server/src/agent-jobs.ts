@@ -3,6 +3,7 @@ import type { UserClaim } from "./auth/identity.ts";
 import type { Config } from "./config.ts";
 import { FsError } from "./fsops.ts";
 import { insideGrants } from "./grant-guard.ts";
+import { cleanVirtual } from "./paths.ts";
 import type { JobView, Jobs } from "./jobs.ts";
 import type { SizeAccess } from "./props.ts";
 import { MAX_CAN_LIST } from "./agent-routes.ts";
@@ -31,8 +32,37 @@ const followerView = (v: JobView): JobView => {
   const { queue: _q, ...rest } = v;
   return { ...rest, progress: { ...v.progress, current: "" } };
 };
+/**
+ * A root job as its owner sees it: never the path the walk is at (the walk runs as root, so it passes folders the owner cannot open), and
+ * of the jobs ahead in the queue, another account's only by its state (no id, no title).
+ */
+export function ownView(jobs: Pick<Jobs, "ownerOf">, me: string, v: JobView): JobView {
+  const out: JobView = { ...v, progress: { ...v.progress, current: "" } };
+  if (v.queue) out.queue = { position: v.queue.position, ahead: v.queue.ahead.map((x) => (x.id !== undefined && jobs.ownerOf(x.id) === me ? x : { state: x.state })) };
+  return out;
+}
 /** jobs that may be followed by others, kept at most */
 const MAX_FOLLOWED = 1024;
+
+/** Per root job, the accounts other than its owner who may follow it (their size or du request joined its scan). Shared by the size and job routes. */
+export class Followers {
+  private readonly by = new Map<string, Set<string>>();
+  constructor(private readonly jobs: Pick<Jobs, "ownerOf" | "get">) {}
+  add(owner: string, id: string): void {
+    if (this.jobs.ownerOf(id) === owner) return;
+    if (this.by.size >= MAX_FOLLOWED) for (const k of this.by.keys()) if (!this.jobs.get(k)) this.by.delete(k);
+    if (this.by.size >= MAX_FOLLOWED) this.by.delete(this.by.keys().next().value!);
+    let s = this.by.get(id);
+    if (!s) this.by.set(id, (s = new Set()));
+    s.add(owner);
+  }
+  has(owner: string, id: string): boolean {
+    return this.by.get(id)?.has(owner) === true;
+  }
+  delete(id: string): void {
+    this.by.delete(id);
+  }
+}
 
 /**
  * The job routes with sign-in on, in place of `registerJobRoutes`. `GET /api/jobs`: the root process's jobs of the request's owner, then
@@ -46,20 +76,10 @@ const MAX_FOLLOWED = 1024;
 export function registerOwnedJobRoutes(
   app: Hono,
   jobs: Jobs,
-  o: { pool: Pick<WorkerPool, "fetchLive">; workers: Pick<AccountWorkers, "poolError">; log?: (s: string) => void },
-): { follows: (c: Context, id: string) => void } {
+  o: { pool: Pick<WorkerPool, "fetchLive">; workers: Pick<AccountWorkers, "poolError">; followers: Followers; log?: (s: string) => void },
+): void {
   const log = o.log ?? ((s) => console.error(s));
-  /** per job id of the root process, the owners other than its own who may follow it */
-  const followers = new Map<string, Set<string>>();
-  const follows = (c: Context, id: string) => {
-    const me = ownerOf(claimOf(c));
-    if (jobs.ownerOf(id) === me) return;
-    if (followers.size >= MAX_FOLLOWED) for (const k of followers.keys()) if (!jobs.get(k)) followers.delete(k);
-    if (followers.size >= MAX_FOLLOWED) followers.delete(followers.keys().next().value!);
-    let s = followers.get(id);
-    if (!s) followers.set(id, (s = new Set()));
-    s.add(me);
-  };
+  const followers = o.followers;
 
   /** the account's worker, when one runs: its answer as the client gets it, or undefined (none runs) */
   const toWorker = async (c: Context, claim: UserClaim, p: string, method: string): Promise<Response | undefined> => {
@@ -76,7 +96,8 @@ export function registerOwnedJobRoutes(
 
   app.get("/api/jobs", async (c) => {
     const claim = claimOf(c);
-    const all = jobs.list(ownerOf(claim));
+    const me = ownerOf(claim);
+    const all = jobs.list(me).map((v) => ownView(jobs, me, v));
     const res = await toWorker(c, claim, "/api/jobs", "GET");
     if (res && res.status === 401) return res; // (the account changed)
     if (res?.ok) {
@@ -94,7 +115,7 @@ export function registerOwnedJobRoutes(
     const v = jobs.get(id);
     if (!v) return undefined;
     const me = ownerOf(claimOf(c));
-    return { v, mine: jobs.ownerOf(id) === me, follower: followers.get(id)?.has(me) === true };
+    return { v, me, mine: jobs.ownerOf(id) === me, follower: followers.has(me, id) };
   };
   const path = (id: string, rest = "") => `/api/jobs/${encodeURIComponent(id)}${rest}`;
 
@@ -105,7 +126,7 @@ export function registerOwnedJobRoutes(
       if (!l.mine && !l.follower) return notFound();
       jobs.touch(id); // a client polling a CLI du job keeps it alive
       const v = jobs.get(id) ?? l.v;
-      return c.json(l.mine ? v : followerView(v));
+      return c.json(l.mine ? ownView(jobs, l.me, v) : followerView(v));
     }
     return (await toWorker(c, claimOf(c), path(id), "GET")) ?? notFound();
   });
@@ -115,7 +136,7 @@ export function registerOwnedJobRoutes(
     if (l) {
       if (!l.mine) return notFound();
       const j = jobs.cancel(id);
-      return j ? c.json(j) : notFound();
+      return j ? c.json(ownView(jobs, l.me, j)) : notFound();
     }
     return (await toWorker(c, claimOf(c), path(id, "/cancel"), "POST")) ?? notFound();
   });
@@ -130,7 +151,6 @@ export function registerOwnedJobRoutes(
     }
     return (await toWorker(c, claimOf(c), path(id), "DELETE")) ?? notFound();
   });
-  return { follows };
 }
 
 /**
@@ -142,7 +162,7 @@ export function registerOwnedJobRoutes(
  */
 export function sizeAccess(
   cfg: Config,
-  o: { pool: Pick<WorkerPool, "fetch">; workers: Pick<AccountWorkers, "specFor" | "poolError">; follows?: (c: Context, id: string) => void; log?: (s: string) => void },
+  o: { pool: Pick<WorkerPool, "fetch">; workers: Pick<AccountWorkers, "specFor" | "poolError">; jobs: Pick<Jobs, "ownerOf">; followers: Followers; log?: (s: string) => void },
 ): SizeAccess {
   const log = o.log ?? ((s) => console.error(s));
   /** one spec per request (an answer asks once per batch of entries) */
@@ -176,11 +196,21 @@ export function sizeAccess(
       }
       return out;
     },
-    inside(c, p) {
+    inside(c, p, exact) {
       const claim = claimOf(c);
-      if (claim.kind === "virt" && !insideGrants(cfg.root, grantsOf(claim), p)) throw new FsError(403, "outside your folders");
+      if (claim.kind !== "virt") return;
+      const grants = grantsOf(claim);
+      // (not exact: the path as written, no lstat here; the person cannot open it, so its links are not theirs to see)
+      const ok = exact ? insideGrants(cfg.root, grants, p) : ((v: string) => grants.some((g) => g.path === "/" || v === g.path || v.startsWith(g.path + "/")))("/" + cleanVirtual(p).join("/"));
+      if (!ok) throw new FsError(403, "outside your folders");
     },
     owner: (c) => ownerOf(claimOf(c)),
-    follows: o.follows,
+    follows: (c, id) => o.followers.add(ownerOf(claimOf(c)), id),
+    view(c, v) {
+      const me = ownerOf(claimOf(c));
+      o.followers.add(me, v.id);
+      return o.jobs.ownerOf(v.id) === me ? ownView(o.jobs, me, v) : followerView(v);
+    },
+    log,
   };
 }

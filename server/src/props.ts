@@ -5,10 +5,10 @@ import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
 import { direntsOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { PathError, assertNotReserved, isReservedName, openChecked, resolveRead, resolveWrite } from "./paths.ts";
+import { PathError, assertNotReserved, cleanVirtual, isReservedName, openChecked, resolveRead, resolveWrite } from "./paths.ts";
 import { MAX_DEPTH, assertMayChange, dirAt, openDir, pinParentW, tooDeep, walkGuard, withReadOnly } from "./pinwalk.ts";
 import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
-import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
+import type { JobCtl, JobOrigin, JobView, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { stream } from "hono/streaming";
 import { SizeStore, type DuEntry } from "./size-store.ts";
@@ -381,14 +381,25 @@ async function json<T>(c: Context): Promise<T> {
  * person gets of them is filtered here.
  */
 export interface SizeAccess {
-  /** which of these folders (virtual paths, at most 512) the person can open; a false one is left out of an answer, and refused when asked for */
+  /**
+   * which of these folders (virtual paths) the person can open, resolved as the person resolves them; a false one is left out of an answer
+   * (with everything below it), and refused when asked for. It is asked first, before this process looks at the path (no `lstat` as root
+   * of a name the person cannot see: whether it is a link must not change the answer).
+   */
   canList?: (c: Context, paths: string[]) => Promise<boolean[]>;
-  /** checked first, on the path as the request names it; throws to refuse it (a virtual account outside its grants) */
-  inside?: (c: Context, path: string) => void | Promise<void>;
+  /**
+   * throws to refuse a path as the request names it (a virtual account outside its grants). `exact` false: by the path as written only
+   * (the person cannot open it, so its links are not theirs to see); true: also with its links resolved.
+   */
+  inside?: (c: Context, path: string, exact: boolean) => void | Promise<void>;
   /** the owner a new size or du job gets */
   owner?: (c: Context) => string | undefined;
   /** the request is answered with a job to follow (one it joined may be another person's: they may follow it too) */
   follows?: (c: Context, id: string) => void;
+  /** the job as the request's answer shows it (also calls `follows`) */
+  view?: (c: Context, v: JobView) => JobView;
+  /** where the real text of a failed scan goes (the job says only `size scan failed`) */
+  log?: (s: string) => void;
 }
 
 /** entries of a du answer checked with one `canList` call */
@@ -408,7 +419,15 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     let release: (() => void) | undefined;
     return {
       run: async (ctl: JobCtl) => {
-        const x = await sizes.scanRead(virtual, ctl, fresh, release, after, since);
+        let x: Awaited<ReturnType<typeof sizes.scanRead<T>>>;
+        try {
+          x = await sizes.scanRead(virtual, ctl, fresh, release, after, since);
+        } catch (e) {
+          // (sign-in on: the text may name what the walk met, which is the machine's, not the person's)
+          if (!o.canList || ctl.signal.aborted) throw e;
+          (o.log ?? ((t) => console.error(t)))(JSON.stringify({ sizeScan: virtual, failed: e instanceof Error ? e.message : String(e) }));
+          throw new ops.FsError(500, "size scan failed");
+        }
         done?.(x);
         // (`untrusted` also in a size job's result: a du that joins it answers from it)
         return kind === "size" ? { ...x.res, untrusted: x.untrusted } : { res: x.res, read: x.read, untrusted: x.untrusted };
@@ -462,18 +481,26 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
   app.post("/api/jobs/size", async (c) => {
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
-    const r = resolveRead(cfg.root, b.path);
-    await o.inside?.(c, b.path);
+    let self = true;
     if (o.canList) {
       // a folder the person can open, or a file in one (whether a name there is a folder they cannot open is theirs to see)
-      const [self, up] = await o.canList(c, r.virtual === "/" ? ["/"] : [r.virtual, path.posix.dirname(r.virtual)]);
-      if (!self && (!up || (await fs.stat(r.real)).isDirectory())) throw new ops.FsError(403, "permission denied");
+      const asked = "/" + cleanVirtual(b.path).join("/");
+      const [own, up] = await o.canList(c, asked === "/" ? ["/"] : [asked, path.posix.dirname(asked)]);
+      self = own === true;
+      if (!self && !up) {
+        await o.inside?.(c, b.path, false);
+        throw new ops.FsError(403, "permission denied");
+      }
     }
+    await o.inside?.(c, b.path, true);
+    const r = resolveRead(cfg.root, b.path);
+    if (!self && (await fs.stat(r.real)).isDirectory()) throw new ops.FsError(403, "permission denied");
     await fs.stat(r.real);
     if (stopping()) throw leaving();
     // one live size job per path (while another process holds the store's writer lease the job waits for it: see the gate): a second request attaches to it
     const same = liveScan(r.virtual, b.fresh === true);
     const v = same ?? startScan("size", r.virtual, b.fresh === true, undefined, undefined, "ui", o.owner?.(c));
+    if (o.view) return c.json(o.view(c, v), 202);
     o.follows?.(c, v.id);
     return c.json(v, 202);
   });
@@ -490,7 +517,9 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
    * The answer, streamed from the store as it is read (SizeStore.treeEach): an agent never holds a whole answer, whatever its size. The JSON is
    * {path, cached, watched, entries: [...], truncated, partial?, stale?, error?}; what is known only at the end comes after the entries. `recheck` runs after the
    * last entry (stale when it says no); `done` always runs once (a lock held for the read is released there). An error after the first byte cannot change the status: it ends the answer with `error`.
-   * With `canList` (sign-in on), the entries go out in batches of `FILTER_BATCH`, without each folder the person cannot open and each file whose folder they cannot open.
+   * With `canList` (sign-in on), the entries go out in batches of `FILTER_BATCH`, without each entry below a folder the person cannot open (any folder
+   * between `virtual` and the entry, the entry itself when it is a folder): a folder they may pass through but not list hides what is below it.
+   * Each folder is asked once for the whole answer.
    */
   const answerTree = (c: Context, virtual: string, depth: number, all: boolean, head: { cached: boolean; watched: boolean; stale?: boolean }, t: { recheck?: () => Promise<boolean>; done?: () => void } = {}) => {
     c.header("Content-Type", "application/json; charset=UTF-8");
@@ -516,16 +545,27 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
         }
       };
       let batch: DuEntry[] = [];
-      /** the folder that decides whether an entry is shown: the folder itself, or a file's folder */
-      const folderOf = (e: DuEntry) => (e.type === "dir" || e.type === "mount" ? e.path : path.posix.dirname(e.path));
+      /** the folders that decide whether an entry is shown: each one from below `virtual` down to the entry itself (a folder) or its folder (a file) */
+      const chainOf = (e: DuEntry): string[] => {
+        const f = e.type === "dir" || e.type === "mount" ? e.path : path.posix.dirname(e.path);
+        if (f === virtual || !f.startsWith(virtual === "/" ? "/" : virtual + "/")) return [];
+        const out: string[] = [];
+        let at = virtual === "/" ? "" : virtual;
+        for (const part of f.slice(at.length + 1).split("/")) out.push((at = `${at}/${part}`));
+        return out;
+      };
+      /** per folder, whether the person can open it (asked once each for the whole answer; `virtual` was checked before) */
+      const listable = new Map<string, boolean>([[virtual, true]]);
       const flush = async () => {
         if (!canList || !batch.length) return;
-        const out = batch;
+        const out = batch.map((e) => ({ e, chain: chainOf(e) }));
         batch = [];
-        const asked = [...new Set(out.map(folderOf))];
-        const ok = await canList(c, asked);
-        const yes = new Set(asked.filter((_, i) => ok[i] === true));
-        for (const e of out) if (yes.has(folderOf(e))) await put(e);
+        const asked = [...new Set(out.flatMap((x) => x.chain))].filter((f) => !listable.has(f));
+        if (asked.length) {
+          const ok = await canList(c, asked);
+          asked.forEach((f, i) => listable.set(f, ok[i] === true));
+        }
+        for (const x of out) if (x.chain.every((f) => listable.get(f) === true)) await put(x.e);
       };
       try {
         const r = await sizes.treeEach(virtual, depth, all, async (e) => {
@@ -555,10 +595,13 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     const depth = q("depth") === undefined ? 1 : Number(q("depth"));
     if (!Number.isInteger(depth) || depth < 0 || depth > 64) throw bad("depth must be an integer between 0 and 64");
     for (const k of ["all", "fresh", "cachedOnly"]) if (q(k) !== undefined && q(k) !== "0" && q(k) !== "1") throw bad(`${k} must be 0 or 1`);
+    // (sign-in on: before this process looks at the path, and before anything about the folder is told)
+    if (o.canList && !(await o.canList(c, ["/" + cleanVirtual(q("path") ?? "/").join("/")]))[0]) {
+      await o.inside?.(c, q("path") ?? "/", false);
+      throw new ops.FsError(403, "permission denied");
+    }
+    await o.inside?.(c, q("path") ?? "/", true);
     const r = resolveRead(cfg.root, q("path") ?? "/");
-    // (sign-in on: before anything about the folder is told)
-    await o.inside?.(c, q("path") ?? "/");
-    if (o.canList && !(await o.canList(c, [r.virtual]))[0]) throw new ops.FsError(403, "permission denied");
     if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
