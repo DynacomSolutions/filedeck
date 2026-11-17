@@ -317,6 +317,7 @@ export class WorkerPool {
   private readonly rootHandler: ((spec: WorkerSpec, req: Request) => Promise<Response>) | undefined;
   private readonly sandbox: () => Promise<{ state: string; abi: number }>;
   private readonly onStopped: ((spec: WorkerSpec) => void) | undefined;
+  private readonly beforeStart: ((spec: WorkerSpec) => Promise<unknown> | undefined) | undefined;
   private readonly maxAccounts: number;
   private readonly workers = new Map<string, Live>();
   private readonly starting = new Map<string, Starting>();
@@ -346,6 +347,11 @@ export class WorkerPool {
     sandbox?: () => Promise<{ state: string; abi: number }>;
     /** called once a worker's process has exited, whatever stopped it (idle, room, its account, close, or itself) */
     onStopped?: (spec: WorkerSpec) => void;
+    /**
+     * awaited just before a worker's process is started (the agent: the emptying of the uid's thumbnail cache in progress, which a stop of
+     * another worker of the uid may have begun after this start's spec was made)
+     */
+    beforeStart?: (spec: WorkerSpec) => Promise<unknown> | undefined;
     /** past how many accounts the lowest allowed epochs drop old entries (default `MAX_ACCOUNTS`; see `Epochs`) */
     maxAccounts?: number;
   }) {
@@ -359,6 +365,7 @@ export class WorkerPool {
     this.rootHandler = o.rootHandler;
     this.sandbox = o.sandbox ?? sandboxInfo;
     this.onStopped = o.onStopped;
+    this.beforeStart = o.beforeStart;
     this.maxAccounts = o.maxAccounts ?? MAX_ACCOUNTS;
     this.minEpoch = new Epochs(this.maxAccounts, this.now);
     this.timer = setInterval(() => this.tick(), Math.max(10, Math.min(o.idleMs, 30_000)));
@@ -554,6 +561,8 @@ export class WorkerPool {
       // the key's old process (stopped for its account, or gone by itself) is out of the way first
       const old = this.stoppingKeys.get(key);
       if (old) await old;
+      if (st.cancelled || this.closed) return null;
+      await this.beforeStart?.(spec);
       if (st.cancelled || this.closed) return null;
       let roots: Awaited<ReturnType<NonNullable<WorkerSpec["openLandlock"]>>> | undefined;
       try {

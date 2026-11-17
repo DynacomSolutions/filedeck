@@ -42,7 +42,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     const ws = specs;
     // (a worker's own requests to this process, such as its trash folder, are served over its connection only; once a worker has
     // stopped, its account's thumbnail cache is emptied)
-    pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker, rootHandler: rootRequests(cfg), onStopped: (s) => ws.stopped(s) });
+    pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker, rootHandler: rootRequests(cfg), onStopped: (s) => ws.stopped(s), beforeStart: (s) => ws.emptied(s.account.uid) });
     // (one set of account rules, epochs included, for the gate and for the root routes that reach a worker)
     workers = accountWorkers({ pool, accounts, spec: specs.spec });
     void sandboxInfo().then((i) =>

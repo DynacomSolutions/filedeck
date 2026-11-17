@@ -367,6 +367,25 @@ test("the lowest allowed epochs: past the bound only entries raised more than 65
   await assert.rejects(p.fetchLive(who("late"), req()), StaleEpoch);
 });
 
+test("a start waits for the emptying of its uid's thumbnail cache just before the process starts", async () => {
+  let calls = 0;
+  let finish = () => {};
+  const asked: number[] = [];
+  const p = pool({
+    start: (s) => (calls++, startWorkerProcess(s)),
+    // a slow emptying of the cache, as the agent's `emptied(uid)` gives it
+    beforeStart: (s) => (asked.push(s.account.uid), new Promise<void>((res) => (finish = res))),
+  });
+  const s = spec("sys:emptying");
+  const r = stat(p, s);
+  await new Promise((res) => setTimeout(res, 200));
+  assert.deepEqual(asked, [s.account.uid]);
+  assert.equal(calls, 0, "no process while the cache is being emptied");
+  finish();
+  assert.equal((await r).status, 200);
+  assert.equal(calls, 1);
+});
+
 test("close during a start: the waiting request gets WorkerGone and nothing is left", async () => {
   const children: ChildProcess[] = [];
   const p = pool({ start: async (sp) => { const c = await startWorkerProcess(sp); children.push(c); return c; } });

@@ -319,6 +319,8 @@ export interface WorkerSpecs {
    * its next start
    */
   stopped(spec: WorkerSpec): void;
+  /** the emptying of the uid's thumbnail cache in progress (the pool's `beforeStart` waits for it), else undefined */
+  emptied(uid: number): Promise<unknown> | undefined;
   /** removes the area once no worker runs (see `removeArea`); what cannot be removed is logged and left */
   close(): Promise<void>;
 }
@@ -456,7 +458,7 @@ export function makeWorkerSpecs(
         /* already closed */
       }
     }));
-  return { spec, base, stopped, close };
+  return { spec, base, stopped, emptied: (uid) => emptying.get(uid), close };
 }
 
 /** A virtual account's grants in their compared form (a grant whose path cannot be compared is left out). */
