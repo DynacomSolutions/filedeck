@@ -574,16 +574,18 @@ test("bounded maps: epochs for a bounded number of accounts; an account's folder
 test("thumbnail caches: each account gets its share of the limit", async () => {
   const MiB = 1024 * 1024;
   const account = (await accounts().resolve("alice"))!;
+  // (twice the workers: stopped workers that are still exiting keep their caches until they have gone)
   for (const [limit, max, share] of [
-    [60 * MiB, 3, 20 * MiB],
-    [64 * MiB, 8, 16 * MiB], // (never under 16 MiB)
+    [60 * MiB, 3, 10 * MiB],
+    [64 * MiB, 8, 4 * MiB],
+    [4 * MiB, 6, 1 * MiB], // (never under 1 MiB, so never 0)
   ] as const) {
     const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_THUMB_CACHE_MAX: String(limit), FILEDECK_MAX_WORKERS: String(max) } as never);
     const specs = makeWorkerSpecs(cfg);
     try {
       const s = await specs.spec(sys("alice"), account);
       assert.equal(s.init.cfg.thumbCacheMax, share);
-      if (share * max === limit) assert.ok(s.init.cfg.thumbCacheMax * max <= limit, "every running worker's cache together stays within the limit");
+      if (share > MiB) assert.ok(s.init.cfg.thumbCacheMax * 2 * max <= limit, "the caches of twice the workers together stay within the limit");
     } finally {
       await specs.close();
     }

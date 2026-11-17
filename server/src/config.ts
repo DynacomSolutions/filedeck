@@ -223,12 +223,12 @@ export function loadConfig(env = process.env): Config {
 }
 
 /**
- * The most one account's thumbnail cache may hold (sign-in on): the thumbnail limit (`FILEDECK_THUMB_CACHE_MAX`) shared by the workers that
- * may run at once (`FILEDECK_MAX_WORKERS`), never under 16 MiB. The cache of an account whose worker has stopped is emptied (agent-workers.ts),
- * so the caches together stay within the limit.
+ * The most one account's thumbnail cache may hold (sign-in on): the thumbnail limit (`FILEDECK_THUMB_CACHE_MAX`) shared by twice the workers
+ * that may run at once (`FILEDECK_MAX_WORKERS`): while new workers run, stopped ones may still be exiting with their caches. At least 1 MiB
+ * (never 0). The cache of an account whose worker has stopped is emptied (agent-workers.ts), so the caches together stay within the limit.
  */
 export function accountThumbMax(cfg: Pick<Config, "thumbCacheMax" | "maxWorkers">): number {
-  return Math.max(16 * 1024 * 1024, Math.floor(cfg.thumbCacheMax / Math.max(1, cfg.maxWorkers)));
+  return Math.max(1024 * 1024, Math.floor(cfg.thumbCacheMax / (2 * Math.max(1, cfg.maxWorkers))));
 }
 
 /**

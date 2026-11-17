@@ -135,7 +135,7 @@ agent:
   readOnlyPaths: ["/proc", "/sys"]
   # Thumbnail cache (emptyDir, lost on restart): the agent deletes the least recently used entries beyond
   # thumbCacheBytes; the volume limit is a backstop. With sign-in on, each account's cache gets
-  # thumbCacheBytes / auth.workers.max (at least 16 MiB), and a cache is emptied once its account's worker stops.
+  # thumbCacheBytes / (2 x auth.workers.max) (at least 1 MiB), and a cache is emptied once its account's worker stops.
   thumbCacheBytes: "268435456"
   thumbCacheVolume: 512Mi
   # Compare index: inotify watches per agent on recently listed folders (LRU). A watched folder's listing is served
