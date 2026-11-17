@@ -51,11 +51,17 @@ after(async () => {
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-function agent(env: Record<string, string> = {}, first?: (index: string) => void): { app: Agent; index: string; jobsFile: string } {
+function agent(env: Record<string, string> = {}): { app: Agent; index: string; jobsFile: string } {
+  const { index, jobsFile } = folders();
+  return made(env, index, jobsFile);
+}
+function folders(): { index: string; jobsFile: string } {
   const index = path.join(work, `index${n}`);
   const jobsFile = path.join(work, `jobs${n++}.db`);
   fs.mkdirSync(index, { recursive: true });
-  first?.(index);
+  return { index, jobsFile };
+}
+function made(env: Record<string, string>, index: string, jobsFile: string): { app: Agent; index: string; jobsFile: string } {
   const app = createAgent(
     loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on", FILEDECK_INDEX_DIR: index, FILEDECK_JOBS_FILE: jobsFile, ...env } as never),
     () => {},
@@ -84,11 +90,16 @@ function holdLease(index: string): SizeStore {
   holders.push(h);
   return h;
 }
+/** An agent whose size store finds the lease already held: the holder takes it before the agent's store exists, so the two never race for it. */
+async function agentBehindHolder(): Promise<{ app: Agent; h: SizeStore }> {
+  const { index, jobsFile } = folders();
+  const h = holdLease(index);
+  assert.equal(await h.mayScan(), true, "the holder took the lease");
+  return { app: made({}, index, jobsFile).app, h };
+}
 
 test("a size job belongs to the account that started it", async () => {
-  let h!: SizeStore;
-  const { app } = agent({}, (index) => (h = holdLease(index)));
-  assert.equal(await h.mayScan(), true);
+  const { app } = await agentBehindHolder();
   const s = await post(app, "/api/jobs/size", "alice", { path: "/d" });
   assert.equal(s.status, 202, await s.clone().text());
   const job = (await s.json()) as View;
@@ -124,9 +135,7 @@ test("a size job belongs to the account that started it", async () => {
 });
 
 test("a queued job shows the jobs ahead of it, but another account's only by state", async () => {
-  let h!: SizeStore;
-  const { app } = agent({}, (index) => (h = holdLease(index)));
-  assert.equal(await h.mayScan(), true);
+  const { app } = await agentBehindHolder();
   const b = await post(app, "/api/jobs/size", "bob", { path: "/d" });
   assert.equal(b.status, 202);
   const bob = (await b.json()) as View & { title: string };
