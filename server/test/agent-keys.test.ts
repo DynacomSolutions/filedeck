@@ -7,8 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { KeyCheck, keyListed, readAsUser, MAX_AUTHORIZED_KEYS } from "../src/agent-keys.ts";
-import { loginMessage } from "../src/auth/sshkey.ts";
+import { KeyCheck, keyListed, readAsUser, logLine, MAX_AUTHORIZED_KEYS, MAX_READERS } from "../src/agent-keys.ts";
+import { loginMessage, parseLoginMessage } from "../src/auth/sshkey.ts";
 import type { AccountResolver, LocalAccount } from "../src/local-accounts.ts";
 import { resetSandbox } from "../src/sandbox.ts";
 import { fakeResolver, privateTmpdir } from "./worker-env.ts";
@@ -54,14 +54,20 @@ const resolverWith = (accounts: Record<string, Partial<LocalAccount>>): AccountR
   },
 });
 
+/** A reader that answers `text`; like the real one it says when its (pretend) process is gone, after the answer. */
 const fakeRead = (text: string | (() => Promise<string>)) => {
-  const calls: { root: string; account: LocalAccount; file: string; maxBytes: number }[] = [];
-  const read = (async (root: string, account: LocalAccount, file: string, maxBytes: number) => {
-    calls.push({ root, account, file, maxBytes });
-    return typeof text === "function" ? text() : text;
-  }) as typeof readAsUser;
+  const calls: { root: string; account: LocalAccount; file: string; maxBytes: number; timeoutMs: number }[] = [];
+  const read: typeof readAsUser = async (root, account, file, maxBytes, o) => {
+    calls.push({ root, account, file, maxBytes, timeoutMs: o?.timeoutMs });
+    try {
+      return await (typeof text === "function" ? text() : text);
+    } finally {
+      o?.closed();
+    }
+  };
   return { read, calls };
 };
+const str2 = (b: Buffer | string) => str(b);
 
 test("listed key: a good signature gives ok, one over another name's message gives fail", async () => {
   const { read, calls } = fakeRead(FILE);
@@ -72,9 +78,33 @@ test("listed key: a good signature gives ok, one over another name's message giv
   assert.equal(MAX_AUTHORIZED_KEYS, 256 * 1024);
   // the key without its comment is the same key
   assert.equal(await keys.check("alice", ED_LINE.split(" ").slice(0, 2).join(" "), good.message, good.signature), "ok");
-  // signed for bob, offered for alice
+  // a good signature over bob's login message, offered for alice
   const other = signed("bob");
-  assert.equal(await keys.check("alice", ED_LINE, msgFor("alice"), other.signature), "fail");
+  assert.equal(await keys.check("alice", ED_LINE, other.message, other.signature), "fail");
+  // a good signature over bytes that are not a login message (a signed commit, say)
+  const commit = Buffer.from("tree 4b825dc6\nauthor alice <a@b> 1 +0000\n\nfix\n");
+  assert.equal(await keys.check("alice", ED_LINE, commit, sign(null, commit, ed.privateKey)), "fail");
+  // a good signature over a login message with bytes after it
+  const trailing = Buffer.concat([msgFor("alice"), Buffer.from([0])]);
+  assert.equal(await keys.check("alice", ED_LINE, trailing, sign(null, trailing, ed.privateKey)), "fail");
+  // other layouts, each well signed: wrong tag, empty or long hub id, short challenge, three strings, name case
+  const build = (parts: (Buffer | string)[]) => Buffer.concat(parts.map(str2));
+  for (const m of [
+    build(["filedeck-login-v2", "hub1", "alice", randomBytes(32)]),
+    build(["filedeck-login-v1", "", "alice", randomBytes(32)]),
+    build(["filedeck-login-v1", "h".repeat(65), "alice", randomBytes(32)]),
+    build(["filedeck-login-v1", "hub1", "alice", randomBytes(31)]),
+    build(["filedeck-login-v1", "hub1", "alice"]),
+    build(["filedeck-login-v1", "hub1", "Alice", randomBytes(32)]),
+    build(["filedeck-login-v1", "hub1", "alice", randomBytes(32), ""]),
+  ]) {
+    assert.equal(await keys.check("alice", ED_LINE, m, sign(null, m, ed.privateKey)), "fail", m.toString("hex"));
+  }
+  assert.equal(calls.length, 2, "no reader for a message that is not alice's login message");
+  // the parser itself
+  const c = randomBytes(32);
+  assert.deepEqual(parseLoginMessage(loginMessage("h".repeat(64), "alice", c)), { hubId: "h".repeat(64), name: "alice", challenge: c });
+  assert.equal(parseLoginMessage(Buffer.concat([loginMessage("hub1", "alice", c), Buffer.from([0, 0, 0])])), null);
   // a key that is not listed, with a good signature of its own
   const stranger = generateKeyPairSync("ed25519");
   const m = msgFor("alice");
@@ -99,9 +129,11 @@ test("options make a key unusable", async () => {
 
 test("unknown: an unknown name and a uid-0 account give unknown, and nothing is read", async () => {
   const { read, calls } = fakeRead(FILE);
-  const keys = new KeyCheck({ root: "/", accounts: resolverWith({ toor: { uid: 0 }, wheel: { gid: 0 } }), read });
-  const s = signed();
-  for (const name of ["nobody-here", "toor", "wheel", "-bad", "../x"]) assert.equal(await keys.check(name, ED_LINE, s.message, s.signature), "unknown", name);
+  const keys = new KeyCheck({ root: "/", accounts: resolverWith({ toor: { uid: 0 }, wheel: { gid: 0 }, staff: { groups: [1234, 0] } }), read });
+  for (const name of ["nobody-here", "toor", "wheel", "staff", "-bad", "../x"]) {
+    const s = signed(name);
+    assert.equal(await keys.check(name, ED_LINE, s.message, s.signature), "unknown", name);
+  }
   assert.equal(calls.length, 0);
 });
 
@@ -118,6 +150,66 @@ test("a file that cannot be read gives fail and one log line without the key or 
   // a lookup that fails is not an answer: the caller says unavailable
   const broken = new KeyCheck({ root: "/", accounts: { resolve: () => Promise.reject(new Error("helper stopped")) }, read: fakeRead(FILE).read });
   await assert.rejects(broken.check("alice", ED_LINE, s.message, s.signature), /helper stopped/);
+});
+
+test("a home that is not absolute gives fail and one log line with the name only", async () => {
+  const log: string[] = [];
+  const { read, calls } = fakeRead(FILE);
+  const keys = new KeyCheck({ root: "/", accounts: resolverWith({ alice: { home: "home/alice" } }), read, log: (l) => log.push(l) });
+  const s = signed();
+  assert.equal(await keys.check("alice", ED_LINE, s.message, s.signature), "fail");
+  assert.equal(calls.length, 0);
+  assert.deepEqual(log, ["keys: the home of alice is not an absolute path"]);
+});
+
+test("logged reasons are one line without control characters", () => {
+  assert.equal(logLine("cat: x: Permission denied\r\nmore\x1b[31m"), "cat: x: Permission denied");
+  assert.equal(logLine("a\tb\x7fc\x1bd"), "a b c d");
+  assert.equal(logLine("x".repeat(300)).length, 200);
+});
+
+test("at most 4 readers at once; the place is given back when the reader is gone; a wait that runs out rejects", async () => {
+  assert.equal(MAX_READERS, 4);
+  const pending: { closed: () => void; answer: (s: string) => void }[] = [];
+  let started = 0;
+  const read: typeof readAsUser = (_root, _account, _file, _max, o) =>
+    new Promise<string>((resolve) => {
+      started++;
+      pending.push({ closed: o.closed, answer: resolve });
+    });
+  const keys = new KeyCheck({ root: "/", accounts: resolverWith({ alice: {} }), read, timeoutMs: 300 });
+  const s = signed();
+  const first = Array.from({ length: 4 }, () => keys.check("alice", ED_LINE, s.message, s.signature));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(started, 4);
+  // the fifth waits; its time runs out while it waits: it rejects (the route says unavailable) and its reader never starts
+  const t0 = Date.now();
+  await assert.rejects(keys.check("alice", ED_LINE, s.message, s.signature), /no reader/);
+  assert.ok(Date.now() - t0 >= 250);
+  assert.equal(started, 4);
+  // an answer without the process gone keeps the place
+  pending[0]!.answer(FILE);
+  assert.equal(await first[0], "ok");
+  const sixth = keys.check("alice", ED_LINE, s.message, s.signature);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(started, 4);
+  // the process is gone: the waiting call gets the place, with the rest of its time
+  pending[0]!.closed();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(started, 5);
+  assert.ok(pending[4]!, "the sixth started");
+  pending[4]!.answer(FILE);
+  pending[4]!.closed();
+  assert.equal(await sixth, "ok");
+  for (const p of pending.slice(1, 4)) {
+    p.answer(FILE);
+    p.closed();
+  }
+  assert.deepEqual(await Promise.all(first.slice(1)), ["ok", "ok", "ok"]);
+  // a reader's own limit is what is left of the call's time
+  const { read: r2, calls } = fakeRead(FILE);
+  await new KeyCheck({ root: "/", accounts: resolverWith({ alice: {} }), read: r2 }).check("alice", ED_LINE, s.message, s.signature);
+  assert.ok(calls[0]!.timeoutMs > 4000 && calls[0]!.timeoutMs <= 5000, String(calls[0]!.timeoutMs));
 });
 
 // ------------------------------------------------------------------ the route
@@ -183,6 +275,8 @@ test("key route: no token is 401, a bad body is 400 and echoes nothing, auth off
     { ...body, message: "A".repeat(8192) },
     { ...body, signature: "abc" },
     { ...body, signature: "A".repeat(1024) },
+    { ...body, signature: randomBytes(129).toString("base64") },
+    { ...body, message: randomBytes(1025).toString("base64") },
     { ...body, signature: undefined },
   ];
   for (const b of bads) {
@@ -342,5 +436,5 @@ test("a FIFO, a large file, a file that is not UTF-8, a missing file and a missi
   assert.equal(await check(), "fail");
   for (const l of log) assert.ok(!l.includes(ED_LINE.split(" ")[1]!) && !l.includes(s.signature.toString("base64")), l);
   // readAsUser itself refuses root
-  await assert.rejects(readAsUser(m, { name: "toor", uid: 0, gid: 0, groups: [], home: "/root" }, "/root/.ssh/authorized_keys", 1024), /root/);
+  await assert.rejects(readAsUser(m, { name: "toor", uid: 0, gid: 0, groups: [], home: "/root" }, "/root/.ssh/authorized_keys", 1024, { timeoutMs: 5000, closed: () => {} }), /root/);
 });

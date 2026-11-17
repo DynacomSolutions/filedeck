@@ -60,6 +60,29 @@ export function loginMessage(hubId: string, name: string, challenge: Buffer): Bu
   return Buffer.concat([field("filedeck-login-v1"), field(hubId), field(name), field(challenge)]);
 }
 
+const LOGIN_TAG = "filedeck-login-v1";
+const MAX_HUB_ID = 64;
+const CHALLENGE_BYTES = 32;
+
+/**
+ * Reads a `loginMessage`: exactly four SSH-wire strings and nothing after them, the tag `filedeck-login-v1`, a hub id (1 to 64 bytes),
+ * a name and a 32-byte challenge. Null for anything else. The name is given as UTF-8 text only when its bytes are valid UTF-8.
+ */
+export function parseLoginMessage(msg: Buffer): { hubId: string; name: string; challenge: Buffer } | null {
+  const f = readFields(msg);
+  if (!f || f.length !== 4) return null;
+  const [tag, hub, name, challenge] = f as [Buffer, Buffer, Buffer, Buffer];
+  if (!tag.equals(Buffer.from(LOGIN_TAG, "latin1"))) return null;
+  if (hub.length === 0 || hub.length > MAX_HUB_ID || challenge.length !== CHALLENGE_BYTES) return null;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(name);
+  } catch {
+    return null;
+  }
+  return { hubId: hub.toString("utf8"), name: text, challenge: Buffer.from(challenge) };
+}
+
 /** True only for a valid signature. Never throws. ECDSA signatures are raw r||s (64 bytes), as WebCrypto makes them. */
 export function verifyLogin(pub: PublicKey | null, msg: Buffer, sig: Buffer): boolean {
   if (!pub) return false;

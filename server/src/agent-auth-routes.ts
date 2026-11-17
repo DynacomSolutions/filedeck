@@ -50,7 +50,8 @@ export function registerAgentAuthRoutes(
 /** Base64 of at most `max` decoded bytes (padded, the standard alphabet), or null. */
 function base64(v: unknown, max: number): Buffer | null {
   if (typeof v !== "string" || v.length === 0 || v.length > Math.ceil(max / 3) * 4 || v.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(v)) return null;
-  return Buffer.from(v, "base64");
+  const b = Buffer.from(v, "base64");
+  return b.length > 0 && b.length <= max ? b : null;
 }
 
 /** The most a sign-in message may hold (four SSH strings: a fixed tag, the hub's id, the name and a 32-byte challenge) and a signature (64 bytes for both key types). */
