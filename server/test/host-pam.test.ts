@@ -178,6 +178,7 @@ const MOD_SERVICES = (mod: string): Record<string, string> => ({
   "filedeck-test-acct": `auth required pam_permit.so\naccount required ${mod} expired\n`,
   "filedeck-test-sleep": `auth required ${mod} sleep\naccount required pam_permit.so\n`,
   "filedeck-test-dumpable": `auth required ${mod} undumpable\naccount required pam_permit.so\n`,
+  "filedeck-test-delay": `auth required ${mod} delay\naccount required pam_permit.so\n`,
 });
 const written: string[] = [];
 after(() => {
@@ -220,6 +221,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *h, int flags, int argc, const c
   else if (!strcmp(mode, "sleep")) { sleep(2); ok = 1; }
   else if (!strcmp(mode, "info")) ok = 1;
   else if (!strcmp(mode, "undumpable")) ok = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0;
+  else if (!strcmp(mode, "delay")) { pam_fail_delay(h, 2000000); ok = 0; }
   free(pw);
   return ok ? PAM_SUCCESS : PAM_AUTH_ERR;
 }
@@ -304,6 +306,13 @@ live("the password ends at the first newline and at 1024 bytes; the account stag
   assert.equal(await pamFor(built, "filedeck-test-acct").check("nobody", SECRET), "fail");
   // an empty password never reaches the stack as a success through a null token
   assert.equal(await pamFor(built, "filedeck-test-check").check("nobody", ""), "fail");
+});
+
+live("PAM's own failure delay is switched off: a failed attempt answers at once (the hub's floor is the one delay)", async ({ built }) => {
+  const t0 = performance.now();
+  assert.equal(await pamFor(built, "filedeck-test-delay").check("nobody", SECRET), "fail");
+  const ms = performance.now() - t0;
+  assert.ok(ms < 1000, `the helper waited ${Math.round(ms)} ms after a failure that asked for a 2 s delay`);
 });
 
 live("the helper is not dumpable while PAM holds the password (no core file can hold it)", async ({ built }) => {

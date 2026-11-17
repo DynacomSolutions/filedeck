@@ -16,6 +16,25 @@ export interface LocalAccount {
 export interface AccountResolver {
   /** The account, or null for an unknown name, a name that is not a valid system name, and uid 0 or gid 0. `fresh` skips any cache. */
   resolve(name: string, fresh?: boolean): Promise<LocalAccount | null>;
+  /**
+   * For sign-in: like `resolve`, but `"root"` for an account with uid 0, gid 0 or group 0 among its groups (where `resolve` answers null
+   * for the first two and leaves group 0 out). Such an account never signs in, and the agent says so (`refused`) rather than "unknown".
+   */
+  forSignIn?(name: string): Promise<LocalAccount | "root" | null>;
+}
+
+/** Ids that make an account root for sign-in: uid 0, gid 0 or group 0 among its groups. */
+const rootIds = (uid: number, gid: number, groups: number[]) => uid === 0 || gid === 0 || groups.includes(0);
+
+/**
+ * The account for a sign-in check: `"root"` for uid 0, gid 0 or group 0 (never signs in), null for no such account. Uses the resolver's
+ * `forSignIn` when it has one, else `resolve` (which cannot tell uid 0 from no account, so that is null there). Rejects as `resolve` does.
+ */
+export async function signInAccount(r: AccountResolver, name: string): Promise<LocalAccount | "root" | null> {
+  if (!validSystemName(name)) return null;
+  if (r.forSignIn) return r.forSignIn(name);
+  const a = await r.resolve(name);
+  return a && rootIds(a.uid, a.gid, a.groups) ? "root" : a;
 }
 
 /** A system account name Filedeck accepts: what the usual tools allow, with `@` and `.` for directory accounts, never a leading `-`. */
@@ -73,6 +92,7 @@ export function parseIdOutput(stdout: string): { uid: number; gid: number; home:
   return { uid, gid, home, groups };
 }
 
+type Parsed = { uid: number; gid: number; home: string; groups: number[] };
 type Run = (name: string) => Promise<{ code: number | null; stdout: string }>;
 
 /**
@@ -87,7 +107,7 @@ export class HostAccounts implements AccountResolver {
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly dropped: (name: string) => void;
-  private readonly cache = new Map<string, { at: number; value: LocalAccount | null }>();
+  private readonly cache = new Map<string, { at: number; value: Parsed | null }>();
   private static readonly MAX_CACHED = 1024;
 
   constructor(o: { run: Run; ttlMs?: number; now?: () => number; log?: (s: string) => void }) {
@@ -98,17 +118,28 @@ export class HostAccounts implements AccountResolver {
   }
 
   async resolve(name: string, fresh = false): Promise<LocalAccount | null> {
+    const p = await this.lookup(name, fresh);
+    return p && account(name, p.uid, p.gid, p.home, p.groups, this.dropped);
+  }
+
+  async forSignIn(name: string): Promise<LocalAccount | "root" | null> {
+    const p = await this.lookup(name, false);
+    if (!p) return null;
+    return rootIds(p.uid, p.gid, p.groups) ? "root" : account(name, p.uid, p.gid, p.home, p.groups, this.dropped);
+  }
+
+  /** What the helper said (cached), before the uid 0, gid 0 and group 0 rules. */
+  private async lookup(name: string, fresh: boolean): Promise<Parsed | null> {
     if (!validSystemName(name)) return null;
     const hit = this.cache.get(name);
     if (!fresh && hit && this.now() - hit.at < this.ttlMs) return hit.value;
     const r = await this.run(name);
-    let value: LocalAccount | null;
+    let value: Parsed | null;
     if (r.code === 2 && r.stdout === "") value = null;
     else {
       if (r.code !== 0) throw new Error(`account lookup for ${name} failed: ${r.code === null ? "the helper was stopped" : `exit ${r.code}`}`);
-      const p = parseIdOutput(r.stdout);
-      if (!p) throw new Error(`account lookup for ${name} failed: the helper's answer is malformed`);
-      value = account(name, p.uid, p.gid, p.home, p.groups, this.dropped);
+      value = parseIdOutput(r.stdout);
+      if (!value) throw new Error(`account lookup for ${name} failed: the helper's answer is malformed`);
     }
     this.cache.delete(name);
     if (this.cache.size >= HostAccounts.MAX_CACHED) this.cache.delete(this.cache.keys().next().value!); // the oldest answer
@@ -134,6 +165,17 @@ export class FilesAccounts implements AccountResolver {
   }
 
   async resolve(name: string): Promise<LocalAccount | null> {
+    const p = await this.lookup(name);
+    return p && account(name, p.uid, p.gid, p.home, p.groups, this.dropped);
+  }
+
+  async forSignIn(name: string): Promise<LocalAccount | "root" | null> {
+    const p = await this.lookup(name);
+    if (!p) return null;
+    return rootIds(p.uid, p.gid, p.groups) ? "root" : account(name, p.uid, p.gid, p.home, p.groups, this.dropped);
+  }
+
+  private async lookup(name: string): Promise<Parsed | null> {
     if (!validSystemName(name)) return null;
     // an account file that cannot be read is an error (the caller answers "unavailable"), never "no such account"
     const passwd = await fs.readFile(path.join(this.root, "etc/passwd"), "utf8").catch((e: Error) => {
@@ -165,7 +207,7 @@ export class FilesAccounts implements AccountResolver {
     }
     const home = entry[5]!;
     if (!home.startsWith("/")) return null;
-    return account(name, uid, gid, home, groups, this.dropped);
+    return { uid, gid, home, groups };
   }
 }
 

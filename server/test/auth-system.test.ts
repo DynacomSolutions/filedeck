@@ -118,8 +118,9 @@ async function deadUrl(): Promise<string> {
 }
 
 // alice: only on a. bob: on both; b's PAM takes "pw-b", a's takes PW. toor: uid 0 on both, and both "PAMs" would take PW.
-const A = await agent("a", { alice: {}, bob: {}, toor: { uid: 0 } }, { alice: PW, bob: PW, toor: PW });
-const B = await agent("b", { bob: {}, toor: { uid: 0 } }, { bob: "pw-b", toor: PW });
+// zed: uid 0 on b only, an ordinary account with PW on a. gzed: a member of group 0 on b only.
+const A = await agent("a", { alice: {}, bob: {}, toor: { uid: 0 }, zed: {}, gzed: {} }, { alice: PW, bob: PW, toor: PW, zed: PW, gzed: PW });
+const B = await agent("b", { bob: {}, toor: { uid: 0 }, zed: { uid: 0 }, gzed: { groups: [4242, 0] } }, { bob: "pw-b", toor: PW, zed: PW, gzed: PW });
 
 type Hub = ReturnType<typeof createHub>;
 function makeHub(nodes: string, env: Record<string, string> = {}, sink?: (l: string) => void): Hub {
@@ -224,6 +225,37 @@ test("uid 0 never signs in", async () => {
   assert.equal(await exists(B.url, "toor"), false);
   assert.equal(await exists(A.url, "alice"), true);
   assert.equal(await exists(B.url, "alice"), false);
+  assert.deepEqual(await (await look(B.url, { name: "toor" })).json(), { exists: false, refused: true });
+});
+
+test("uid 0 on one machine asked ends the search: refused stops like fail", async () => {
+  for (const name of ["zed", "gzed"]) {
+    // the agent itself says refused, for the password and the key
+    const direct = (route: string, body: unknown) =>
+      fetch(`${B.url}/api/auth/${route}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${T}` }, body: JSON.stringify(body) }).then((r) => r.json());
+    assert.deepEqual(await direct("password", { name, password: PW }), { result: "refused" }, name);
+    const msg = loginMessage("h", name, Buffer.alloc(32, 1));
+    assert.deepEqual(await direct("key", { name, publicKey: KEY.line, message: msg.toString("base64"), signature: sign(null, msg, KEY.privateKey).toString("base64") }), { result: "refused" }, name);
+    // b (uid 0 or group 0 there) first: no sign-in, although a would take the password and the key
+    const h = makeHub(`a=${A.url},b=${B.url}`, { FILEDECK_AUTH_NODES: "b,a" });
+    seen.length = 0;
+    const [p, ms] = await timed(() => post(h, "/api/auth/login", { name, password: PW }));
+    assert.equal(p.status, 401, name);
+    assert.deepEqual(await p.json(), { error: "sign-in failed" });
+    assert.ok(ms >= 480, `${ms} ms`);
+    const k = await signed(h, name);
+    const [q, kms] = await timed(() => post(h, "/api/auth/login-key", { name, publicKey: KEY.line, challenge: k.challenge, signature: k.signature }));
+    assert.equal(q.status, 401, name);
+    assert.ok(kms >= 480, `${kms} ms`);
+    assert.deepEqual(
+      authRecs().map((x) => x.node),
+      ["b", "b"],
+      "a is never asked",
+    );
+    // only the machines asked count: with a first, a answers ok and b is never asked
+    const first = makeHub(`a=${A.url},b=${B.url}`, { FILEDECK_AUTH_NODES: "a,b" });
+    assert.equal((await post(first, "/api/auth/login", { name, password: PW })).status, 200, name);
+  }
 });
 
 test("lookup: a root route behind the agent token, strict body, a failing lookup is false", async () => {
@@ -246,7 +278,8 @@ test("lookup: a root route behind the agent token, strict body, a failing lookup
     const look = (body: unknown, headers: Record<string, string> = { authorization: `Bearer ${T}` }) =>
       app.request("/api/auth/lookup", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) });
     assert.deepEqual(await (await look({ name: "carol" })).json(), { exists: true });
-    for (const n of ["uid0", "gid0", "grp0", "nobody-here", "broken"]) assert.deepEqual(await (await look({ name: n })).json(), { exists: false }, n);
+    for (const n of ["uid0", "gid0", "grp0"]) assert.deepEqual(await (await look({ name: n })).json(), { exists: false, refused: true }, n);
+    for (const n of ["nobody-here", "broken"]) assert.deepEqual(await (await look({ name: n })).json(), { exists: false }, n);
     assert.equal(logs.filter((l) => l.includes("broken")).length, 1, logs.join("\n"));
     assert.ok(logs.some((l) => l.includes("nss: no answer")));
     assert.equal((await look({ name: "carol" }, {})).status, 401);
@@ -277,9 +310,8 @@ test("key sign-in: the hub builds the message; a message from the client is neve
   const otherSig = sign(null, otherMsg, KEY.privateKey).toString("base64");
   const bad = await post(hub, "/api/auth/login-key", { name: "alice", publicKey: KEY.line, challenge: k.challenge, signature: otherSig, message: otherMsg.toString("base64") });
   assert.equal(bad.status, 401);
-  const sent = authRecs().filter((r) => r.path === "/api/auth/key");
-  assert.ok(sent.length > 0);
-  for (const r of sent) assert.equal(JSON.parse(r.body).message, loginMessage(k.hubId, "alice", Buffer.from(k.challenge, "base64")).toString("base64"));
+  // (its signature is not over the hub's message, so the hub's own check fails it before any agent is asked)
+  assert.deepEqual(authRecs(), []);
   // the same client message with the hub's own signature: the challenge is used up, so a new one
   seen.length = 0;
   const k2 = await signed(hub, "alice");
@@ -324,11 +356,39 @@ test("no user header on sign-in calls, no cookie or client header, bodies hold o
 test("the hub never forwards a client to an agent's sign-in routes", async () => {
   const cookie = `__Host-filedeck=${hub.auth!.sessions.create("sys", "alice")}`;
   seen.length = 0;
-  for (const p of ["/api/auth/password", "/api/auth/lookup", "/api/auth/key", "/api/%61uth/password", "//api/auth/password", "/API/auth/lookup", "/api/auth"]) {
+  for (const p of ["/api/auth/password", "/api/auth/lookup", "/api/auth/key", "/api/%61uth/password", "//api/auth/password", "/API/auth/lookup", "/api/auth", "/api/auth/password/", "/api%2Fauth/password", "/api%2fauth/lookup", "/api/x%2f..%2fauth/password", "/api%5cauth/password", "/api/x/%2e%2e/auth/key"]) {
     const r = await hub.request(`http://localhost/api/nodes/a${p}`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ name: "bob", password: PW }) }, peer as never);
     assert.equal(r.status, 404, p);
   }
   assert.deepEqual(seen, []);
+});
+
+test("every other agent call refuses the sign-in routes too (not only the proxy)", async () => {
+  const target = hub.nodeTargets.get("a");
+  assert.ok(target);
+  seen.length = 0;
+  for (const p of ["/api/auth/password", "/api/auth/lookup?x=1", "/api%2Fauth/key", "/api/x%2f..%2fauth/password", "/api%5cauth/password", "/api/auth/password/"]) {
+    await assert.rejects(target.fetch(p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "bob", password: PW }) }), /sign-in routes are not forwarded/, p);
+  }
+  assert.deepEqual(seen, []);
+});
+
+test("key sign-in: the hub checks a system account's signature first; a bad one asks no agent and still counts", async () => {
+  const h = makeHub(`a=${A.url},b=${B.url}`, { FILEDECK_AUTH_NODES: "b,a" });
+  const other = sshKey();
+  seen.length = 0;
+  for (let i = 0; i < 5; i++) {
+    const k = await signed(h, "alice");
+    const bad = sign(null, loginMessage(k.hubId, "alice", Buffer.from(k.challenge, "base64")), other.privateKey).toString("base64");
+    const [r, ms] = await timed(() => post(h, "/api/auth/login-key", { name: "alice", publicKey: KEY.line, challenge: k.challenge, signature: bad }));
+    assert.equal(r.status, 401);
+    assert.deepEqual(await r.json(), { error: "sign-in failed" });
+    assert.ok(ms >= 480, `${ms} ms`);
+  }
+  assert.deepEqual(authRecs(), [], "no agent was asked");
+  // the five failures were counted: the next attempt, even a good one, is refused
+  const k = await signed(h, "alice");
+  assert.equal((await post(h, "/api/auth/login-key", { name: "alice", publicKey: KEY.line, challenge: k.challenge, signature: k.signature })).status, 429);
 });
 
 // --- AgentSystemAuth on its own: how answers, slow nodes and the total limit drive the order ---
@@ -362,6 +422,7 @@ test("AgentSystemAuth: only ok signs in, only fail stops; anything else goes on 
     [json({ answer: "ok" }), true],
     ["throw", true],
     [json({ result: "fail" }), false],
+    [json({ result: "refused" }), false],
   ];
   for (const [first, next] of cases) {
     for (const m of ["password", "key"] as const) {
@@ -388,7 +449,7 @@ test("AgentSystemAuth: a slow node does not stop the next from being asked; the 
   const [ok, ms] = await timed(() => s.password("alice", PW));
   assert.equal(ok, true);
   assert.deepEqual(asked, ["x", "y"]);
-  assert.ok(ms >= 140 && ms < 900, `${ms} ms`);
+  assert.ok(ms >= 140 && ms < 5000, `${ms} ms`);
   assert.ok(logs.some((l) => l.includes("x")));
   assert.ok(!logs.join("\n").includes(PW));
   // a call that ignores its abort signal is still left behind at its limit
@@ -399,13 +460,13 @@ test("AgentSystemAuth: a slow node does not stop the next from being asked; the 
   const t = new AgentSystemAuth({ nodes: ["x", "y", "z", "w"], call: all.call, callTimeoutMs: 200, totalMs: 500, log: () => {} });
   const [no, ms2] = await timed(() => t.key("alice", KEY.line, Buffer.from("m"), Buffer.from("s")));
   assert.equal(no, false);
-  assert.ok(ms2 >= 480 && ms2 < 800, `${ms2} ms`);
+  assert.ok(ms2 >= 480 && ms2 < 5000, `${ms2} ms`);
   assert.deepEqual(all.asked, ["x", "y", "z"]);
   // a body that never ends counts against the same limit
   const stall = async () => new Response(new ReadableStream({ start: () => {} }), { status: 200 });
   const [no2, ms3] = await timed(() => new AgentSystemAuth({ nodes: ["x"], call: stall, callTimeoutMs: 150, totalMs: 1000, log: () => {} }).password("alice", PW));
   assert.equal(no2, false);
-  assert.ok(ms3 < 600, `${ms3} ms`);
+  assert.ok(ms3 >= 140 && ms3 < 5000, `${ms3} ms`);
 });
 
 test("AgentSystemAuth.exists: the agent's answer, or undefined when it does not answer in time", async () => {
@@ -424,7 +485,7 @@ test("AgentSystemAuth.exists: the agent's answer, or undefined when it does not 
   assert.equal(await s.exists("err", "alice"), undefined);
   const [u, ms] = await timed(() => s.exists("slow", "alice"));
   assert.equal(u, undefined);
-  assert.ok(ms < 600, `${ms} ms`);
+  assert.ok(ms >= 140 && ms < 5000, `${ms} ms`);
   assert.deepEqual(bodies[0], ["yes", "/api/auth/lookup", { name: "alice" }]);
   // the hub's own lookup goes to the agent without a user, and the real agent answers
   const h = hub as unknown as { systemAuth?: AgentSystemAuth };

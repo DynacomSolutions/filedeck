@@ -22,8 +22,9 @@ export type SignInCall = (node: string, path: string, body: unknown, signal?: Ab
 
 /**
  * System sign-in through the agents (hub, sign-in on). The agents are asked one at a time in the sign-in order (`FILEDECK_AUTH_NODES`,
- * else the order of `NODES`): `ok` signs in, `fail` (a wrong password, or a key that is not listed) ends the attempt, and every other
- * outcome goes on to the next node: `unknown` (no such account there, or one that resolves to uid 0), `unavailable`, an answer that is
+ * else the order of `NODES`): `ok` signs in, `fail` (a wrong password, or a key that is not listed) and `refused` (the name has uid 0, gid
+ * 0 or group 0 on that machine) end the attempt, and every other
+ * outcome goes on to the next node: `unknown` (no such account there), `unavailable`, an answer that is
  * not 200, a body that does not parse, no answer within `CALL_TIMEOUT_MS`, or a node that cannot be reached. All nodes passed over, or
  * `TOTAL_MS` gone: no.
  *
@@ -79,7 +80,8 @@ export class AgentSystemAuth implements SystemAuth {
       const v = await this.answer(node, path, body, Math.min(this.callTimeoutMs, left));
       const result = v.ok ? (v.body as { result?: unknown } | null)?.result : undefined;
       if (result === "ok") return true;
-      if (result === "fail") return false;
+      // (refused: the name is root on that machine, uid 0, gid 0 or group 0; it never signs in, so the search ends as for a wrong password)
+      if (result === "fail" || result === "refused") return false;
       if (result === "unknown" || result === "unavailable") continue;
       this.log(`system sign-in: node ${node} passed over (${v.ok ? "an answer that is not a result" : v.why})`);
     }

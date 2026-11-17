@@ -68,7 +68,7 @@ function clean(h: Headers, keepLength: boolean): Headers {
 }
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth }) {
-  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; systemAuth?: AgentSystemAuth };
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; systemAuth?: AgentSystemAuth; nodeTargets: ReadonlyMap<string, Target> };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
   // the signed user header is keyed on the agent token, so there is no auth without one (main.ts says so first)
@@ -137,6 +137,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     return isOpenProbe(rest) ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name))) : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth));
   };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));
+  app.nodeTargets = agents; // (tests reach the agent calls through it)
   const sources = buildSources(cfg);
   for (const [name, backend] of Object.entries(injected ?? {})) {
     sources.set(name, { config: { name, type: backend.type, host: "test", root: "/" }, backend });

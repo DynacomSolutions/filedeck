@@ -12,7 +12,7 @@ import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, hitsReadOnly } from "./readonly.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
-import { makeResolver, type AccountResolver } from "./local-accounts.ts";
+import { makeResolver, signInAccount, type AccountResolver } from "./local-accounts.ts";
 import { executable } from "./native.ts";
 import { HostPam, hostPam } from "./host-pam.ts";
 import { registerAgentAuthRoutes } from "./agent-auth-routes.ts";
@@ -66,7 +66,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     // key sign-in: `authorized_keys` read as the user inside the machine's root; only with the host's own account lookup (the
     // /etc/passwd fallback refuses system sign-in), and not for an account lookup passed in without `opts.keys`
     keys = opts.keys ? Promise.resolve(opts.keys) : made?.then((r) => (r.helpers ? new KeyCheck({ root: r.helpers.root, accounts: r.resolver }) : undefined)).catch(() => undefined);
-    accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
+    accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh), forSignIn: async (name) => signInAccount(await found, name) };
     specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [], uidInUse: (uid) => pool?.usesUid(uid) ?? false });
     const ws = specs;
     // (a worker's own requests to this process, such as its trash folder, are served over its connection only; once a worker has

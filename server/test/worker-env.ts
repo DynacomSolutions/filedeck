@@ -32,7 +32,8 @@ export function chownForTest(dir: string): void {
 
 /**
  * A resolver over a fixed map of names. Each named account is `testAccount()` with the given fields over it; a name that is not
- * in the map, and an entry with uid 0 or gid 0, resolve to null (as the real resolvers answer).
+ * in the map, and an entry with uid 0 or gid 0, resolve to null (as the real resolvers answer); `forSignIn` says `"root"` for those and
+ * for an entry with group 0.
  */
 export function fakeResolver(map: Record<string, Partial<LocalAccount>> = {}): AccountResolver {
   return {
@@ -41,6 +42,11 @@ export function fakeResolver(map: Record<string, Partial<LocalAccount>> = {}): A
       const a: LocalAccount = { ...testAccount(), name, ...map[name] };
       if (a.uid === 0 || a.gid === 0) return null;
       return { ...a, groups: a.groups.filter((g) => g !== 0) };
+    },
+    async forSignIn(name: string): Promise<LocalAccount | "root" | null> {
+      if (!Object.hasOwn(map, name)) return null;
+      const a: LocalAccount = { ...testAccount(), name, ...map[name] };
+      return a.uid === 0 || a.gid === 0 || a.groups.includes(0) ? "root" : a;
     },
   };
 }

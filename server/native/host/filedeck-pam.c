@@ -124,6 +124,18 @@ typedef int (*call_fn)(pam_handle_t *, int);
 typedef int (*end_fn)(pam_handle_t *, int);
 typedef const char *(*strerror_fn)(pam_handle_t *, int);
 typedef int (*get_item_fn)(const pam_handle_t *, int, const void **);
+typedef int (*set_item_fn)(pam_handle_t *, int, const void *);
+
+/*
+ * PAM_FAIL_DELAY: Linux-PAM calls this instead of sleeping after a failed attempt. It does nothing, so a failure answers at once: a
+ * delay here would hold one of the agent's few PAM places, and its length would show which names exist. The hub holds every failed
+ * sign-in to one floor (500 ms) instead.
+ */
+static void no_fail_delay(int retval, unsigned usec_delay, void *appdata) {
+  (void)retval;
+  (void)usec_delay;
+  (void)appdata;
+}
 
 int main(int argc, char **argv) {
   /* first of all: not dumpable, so no core file (a crashing PAM module) and no other process of this uid can read the password out of
@@ -196,7 +208,8 @@ int main(int argc, char **argv) {
   end_fn pam_end_p = (end_fn)dlsym(lib, "pam_end");
   strerror_fn pam_strerror_p = (strerror_fn)dlsym(lib, "pam_strerror");
   get_item_fn pam_get_item_p = (get_item_fn)dlsym(lib, "pam_get_item");
-  if (!pam_start_p || !pam_authenticate_p || !pam_acct_mgmt_p || !pam_end_p || !pam_strerror_p || !pam_get_item_p) {
+  set_item_fn pam_set_item_p = (set_item_fn)dlsym(lib, "pam_set_item");
+  if (!pam_start_p || !pam_authenticate_p || !pam_acct_mgmt_p || !pam_end_p || !pam_strerror_p || !pam_get_item_p || !pam_set_item_p) {
     say("libpam.so.0 lacks a function", NULL);
     finish(5);
   }
@@ -207,6 +220,12 @@ int main(int argc, char **argv) {
   if (rc != PAM_SUCCESS) {
     say("pam_start failed", h ? pam_strerror_p(h, rc) : NULL);
     if (h) pam_end_p(h, rc);
+    finish(5);
+  }
+  rc = pam_set_item_p(h, PAM_FAIL_DELAY, (const void *)no_fail_delay);
+  if (rc != PAM_SUCCESS) {
+    say("cannot switch off PAM's failure delay", pam_strerror_p(h, rc));
+    pam_end_p(h, rc);
     finish(5);
   }
 

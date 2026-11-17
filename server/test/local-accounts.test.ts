@@ -133,6 +133,22 @@ test("local files: groups come from the member lists, root and a uid 0 alias nev
   for (const name of ["root", "toor", "wheelie", "broken", "ghost", "-x", "+nisuser"]) assert.equal(await f.resolve(name), null, name);
 });
 
+test("for sign-in: uid 0, gid 0 and group 0 are root (never signs in); unknown stays null; an error still rejects", async () => {
+  const root = path.join(tmp, "files");
+  const f = new FilesAccounts(root, () => {});
+  for (const name of ["root", "toor", "wheelie", "alice"]) assert.equal(await f.forSignIn(name), "root", name); // (alice is in group root)
+  assert.deepEqual(await f.forSignIn("bob"), { name: "bob", uid: 1001, gid: 1001, home: "/home/bob", groups: [1001, 10] });
+  for (const name of ["ghost", "broken", "-x"]) assert.equal(await f.forSignIn(name), null, name);
+  const host = (stdout: string) => new HostAccounts({ run: fake({ code: 0, stdout }).run, log: () => {} });
+  assert.equal(await host("0\n0\n/root\n0\n").forSignIn("toor"), "root");
+  assert.equal(await host("1000\n0\n/home/a\n0\n").forSignIn("alice"), "root");
+  assert.equal(await host("1000\n1000\n/home/a\n1000 0\n").forSignIn("alice"), "root");
+  assert.equal((await host("1000\n1000\n/home/a\n1000 0\n").resolve("alice"))?.uid, 1000, "a worker still runs without group 0");
+  assert.equal((await host("1000\n1000\n/home/a\n1000\n").forSignIn("alice") as { uid: number }).uid, 1000);
+  assert.equal(await new HostAccounts({ run: fake({ code: 2, stdout: "" }).run }).forSignIn("alice"), null);
+  await assert.rejects(new HostAccounts({ run: fake({ code: 1, stdout: "" }).run }).forSignIn("alice"), /alice/);
+});
+
 test("local files: a missing or unreadable passwd file is an error, a missing group file means no extra groups", async () => {
   await assert.rejects(new FilesAccounts(path.join(tmp, "nothing")).resolve("alice"), /passwd/);
   const dirAsFile = path.join(tmp, "passwd-folder");

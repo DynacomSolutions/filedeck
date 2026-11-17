@@ -127,12 +127,16 @@ test("options make a key unusable", async () => {
   assert.equal(keyListed(ED_LINE, "garbage"), false);
 });
 
-test("unknown: an unknown name and a uid-0 account give unknown, and nothing is read", async () => {
+test("unknown and refused: an unknown name gives unknown, a uid-0, gid-0 or group-0 account refused, and nothing is read", async () => {
   const { read, calls } = fakeRead(FILE);
   const keys = new KeyCheck({ root: "/", accounts: resolverWith({ toor: { uid: 0 }, wheel: { gid: 0 }, staff: { groups: [1234, 0] } }), read });
-  for (const name of ["nobody-here", "toor", "wheel", "staff", "-bad", "../x"]) {
+  for (const name of ["nobody-here", "-bad", "../x"]) {
     const s = signed(name);
     assert.equal(await keys.check(name, ED_LINE, s.message, s.signature), "unknown", name);
+  }
+  for (const name of ["toor", "wheel", "staff"]) {
+    const s = signed(name);
+    assert.equal(await keys.check(name, ED_LINE, s.message, s.signature), "refused", name);
   }
   assert.equal(calls.length, 0);
 });

@@ -238,7 +238,11 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
         const given = parsePublicKey(pub);
         const listed = given !== null && accounts.keys(name).some((k) => parsePublicKey(k)?.blob.equals(given.blob));
         kind = listed && verifyLogin(given, msg, sb) ? "virt" : undefined;
-      } else kind = (await system.key(name, pub, msg, sb)) ? "sys" : undefined;
+      } else {
+        // the signature is checked here first, so a bad one costs no agent call; the agent checks it again with the key it finds listed
+        const given = parsePublicKey(pub);
+        kind = given !== null && verifyLogin(given, msg, sb) && (await system.key(name, pub, msg, sb)) ? "sys" : undefined;
+      }
     }
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();

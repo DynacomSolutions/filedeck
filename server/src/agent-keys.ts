@@ -1,6 +1,6 @@
 import path from "node:path";
 import { parseLoginMessage, parsePublicKey, verifyLogin } from "./auth/sshkey.ts";
-import { validSystemName, type AccountResolver, type LocalAccount } from "./local-accounts.ts";
+import { signInAccount, validSystemName, type AccountResolver, type LocalAccount } from "./local-accounts.ts";
 import { spawnSandboxed } from "./sandbox.ts";
 import type { ChildProcess } from "node:child_process";
 
@@ -14,7 +14,7 @@ import type { ChildProcess } from "node:child_process";
  * in the user's home. A file the user cannot read, a missing file, a missing or odd `cat`, more than 256 KiB, no end within 5 seconds (a
  * FIFO, a hung network home) or output that is not UTF-8 gives `fail`, and one log line with the reason (never the key or the signature).
  */
-export type KeyResult = "ok" | "fail" | "unknown";
+export type KeyResult = "ok" | "fail" | "unknown" | "refused";
 
 /** The most of `authorized_keys` that is read; a larger file is not used at all. */
 export const MAX_AUTHORIZED_KEYS = 256 * 1024;
@@ -133,15 +133,16 @@ export class KeyCheck {
   }
 
   /**
-   * `unknown` for a name that is not a system account here, or one with uid 0, gid 0 or group 0 (nothing is read); `ok` when `message` is
+   * `unknown` for a name that is not a system account here, `refused` for one with uid 0, gid 0 or group 0 (nothing is read); `ok` when `message` is
    * a login message for this very name, its signature is good and the key is listed without options; else `fail`. Rejects when the
    * account lookup fails, or when no reader place comes free within the time limit (5 s from the call): the caller answers "unavailable".
    */
   async check(name: string, publicKey: string, message: Buffer, signature: Buffer): Promise<KeyResult> {
     const deadline = Date.now() + this.timeoutMs;
     if (!validSystemName(name)) return "unknown";
-    const account = await this.accounts.resolve(name);
-    if (!account || account.uid === 0 || account.gid === 0 || account.groups.includes(0)) return "unknown";
+    const account = await signInAccount(this.accounts, name);
+    if (account === "root") return "refused";
+    if (!account) return "unknown";
     // only a login message for this name counts: any other bytes the key signed (a signed commit, say) must not sign in
     const login = parseLoginMessage(message);
     if (!login || login.name !== name) return "fail";
