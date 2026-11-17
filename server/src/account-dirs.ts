@@ -17,7 +17,9 @@ import { sandboxInfo, spawnSandboxed, type Root } from "./sandbox.ts";
  *
  * - `tmp` (the worker's TMPDIR and HOME): `<area>/<key folder>/tmp`, below an area made new for each agent (root's alone, 0711). It goes
  *   when the agent stops.
- * - `thumbs`: `<FILEDECK_THUMB_DIR>/u<uid>`, one per uid (accounts with one uid have the same rights, so they may share the cache).
+ * - `thumbs`: `<FILEDECK_THUMB_DIR>/accounts/u<uid>`, one per uid: every system account with that uid and every virtual account that runs as
+ *   it share it. A virtual account's Landlock rules give it this folder too, so it can read thumbnails made by the others, also of files
+ *   outside its grants; no route reads the folder by path, so none is served. Emptied as the account once no worker runs as the uid.
  * - `index`: `<FILEDECK_INDEX_DIR>/accounts/<key folder>` (none without an index folder: the worker then keeps its index in its `tmp`).
  *   A virtual account's key folder holds a hash of its grants, so a listing cached under old grants is never served under new ones.
  * - `trash`: `<volume>/.filedeck-trash/<u<uid> | v-<owner>>`, the account's own trash folder on each volume (`accountTrashDir`), made by
@@ -796,9 +798,17 @@ export function runtimeRoots(): Promise<{ readOnly: string[]; readExec: string[]
  *   worker gets less, never more.
  * - read and write: the worker's own folders (`dirs`), opened the same way, and its trash folders (`dirs.trash`).
  * - read only: the mount table (`cfg.procMounts`, for the volumes and the read-only checks), and `runtimeRoots`.
- * Grants and folders are passed as descriptors, so the rule is attached to what was opened here, whatever happens to the path later.
+ * Grants and folders are passed as descriptors, so the rule is attached to what was opened here, whatever happens to the path later. A
+ * grant whose opened folder is not at its resolved path (a part of the path was changed into a link between the check and the open) is left
+ * out and logged too. `afterResolve` is for the tests.
  */
-export async function landlockRoots(cfg: Config, claim: UserClaim, dirs: AccountDirs, log: (s: string) => void = (s) => console.error(s)): Promise<LandlockRoots> {
+export async function landlockRoots(
+  cfg: Config,
+  claim: UserClaim,
+  dirs: AccountDirs,
+  log: (s: string) => void = (s) => console.error(s),
+  o: { afterResolve?: (real: string) => void | Promise<void> } = {},
+): Promise<LandlockRoots> {
   const held: fs.FileHandle[] = [];
   const release = () => {
     for (const fh of held.splice(0)) void fh.close().catch(() => {});
@@ -812,7 +822,14 @@ export async function landlockRoots(cfg: Config, claim: UserClaim, dirs: Account
         const r = resolveRead(cfg.root, g.path);
         // a grant that is a link or runs through one would follow it to wherever it leads at this moment: left out instead
         if (r.virtual !== grantPath(g.path)) throw new Error(`it leads to ${r.virtual} through a link`);
+        await o.afterResolve?.(r.real);
         const fh = await openChecked(cfg.root, r.real, fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY);
+        // a part of the path changed into a link between the check and the open: the folder opened is another one
+        const at = await fs.readlink(inHeld(fh)).catch(() => "");
+        if (at !== r.real) {
+          await fh.close().catch(() => {});
+          throw new Error(`it was opened at ${at || "an unknown place"}, not ${r.real} (its path changed meanwhile)`);
+        }
         held.push(fh);
         (g.write ? readWrite : readOnly).push(fh.fd);
       } catch (e) {

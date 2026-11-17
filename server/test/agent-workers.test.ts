@@ -11,6 +11,7 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts";
 import { isRootRoute, makeWorkerSpecs, workerGate, workerKey } from "../src/agent-workers.ts";
+import { landlockRoots } from "../src/account-dirs.ts";
 import { PoolFull, StaleEpoch, startWorkerProcess, type StartWorker, type WorkerPool, type WorkerSpec } from "../src/worker-pool.ts";
 import { WorkerGone } from "../src/worker-proto.ts";
 import { sandboxInfo } from "../src/sandbox.ts";
@@ -512,6 +513,33 @@ test("old workers' areas: an area of an agent that no longer runs is removed at 
     if (IS_ROOT) assert.ok(emptied.some((d) => path.basename(d) === `u${uid}`), "the account's folder was emptied as the account");
   } finally {
     for (const d of [live, link, open, outside, old, samePid]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("Landlock roots: a grant whose path is changed between its check and its open is left out", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-llroots-")));
+  const own = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-llown-")));
+  try {
+    for (const d of ["a/g", "b/g"]) fs.mkdirSync(path.join(root, d), { recursive: true });
+    const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never);
+    const logs: string[] = [];
+    const claim = virt("guest1", [{ path: "/a/g", write: true }]);
+    const r = await landlockRoots(cfg, claim, { tmp: own, thumbs: "", index: "" }, (l) => logs.push(l), {
+      // a part of the grant's path becomes a link to another folder just after the grant was checked
+      afterResolve: () => {
+        fs.renameSync(path.join(root, "a"), path.join(root, "a-old"));
+        fs.symlinkSync("b", path.join(root, "a"));
+      },
+    });
+    try {
+      assert.equal(r.readWrite.length, 1, "only the worker's own folder: the grant opened elsewhere is dropped");
+      assert.ok(logs.some((l) => l.includes("grant /a/g left out")), logs.join("\n"));
+    } finally {
+      r.release();
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(own, { recursive: true, force: true });
   }
 });
 
