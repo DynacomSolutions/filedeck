@@ -433,10 +433,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
-    // with auth on, an event stream (EventSource always asks for one in Accept) made with a session must be cut off at the agent when its
-    // session ends; other requests keep the client's signal alone
-    const wantsStream = c.req.method === "GET" && (c.req.header("accept") ?? "").toLowerCase().includes("text/event-stream");
-    const session = app.streams && wantsStream ? sessionKeyOf(c) : undefined;
+    // with auth on, any GET made with a session may answer an event stream, which must be cut off at the agent when its session ends.
+    // The answer's type decides, not the request's Accept header: a client (a script with a stolen cookie) could leave that out.
+    const session = app.streams && c.req.method === "GET" ? sessionKeyOf(c) : undefined;
     const upstream = session !== undefined ? new AbortController() : undefined;
     const init: AgentFetchInit & { duplex?: string } = {
       method: c.req.method,

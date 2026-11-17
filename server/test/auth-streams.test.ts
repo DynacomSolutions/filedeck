@@ -387,14 +387,23 @@ test("a feed made with the API token is not tied to a session: nothing is tracke
   await reader.cancel();
 });
 
-test("a feed opened without Accept: text/event-stream (not EventSource) is passed on untracked", async () => {
+test("a session feed opened without Accept: text/event-stream (not EventSource, e.g. a script) still ends at sign-out", async () => {
   const h = makeHub();
-  const r = await call(h, "/api/nodes/a/api/events?path=/", virt(h, "g1").cookie);
+  const { cookie } = virt(h, "g1");
+  const r = await call(h, "/api/nodes/a/api/events?path=/", cookie);
   assert.equal(r.status, 200);
   const reader = r.body!.getReader();
   assert.equal((await reader.read()).done, false);
+  assert.equal(h.streams!.size(), 1, "tracked by the answer's type");
+  const cut = agent.aborted;
+  await call(h, "/api/auth/logout", cookie, { method: "POST" });
+  const end = (async () => {
+    while (!(await reader.read()).done);
+    return true;
+  })();
+  assert.equal(await Promise.race([end, new Promise<boolean>((res) => setTimeout(() => res(false), 1000))]), true);
   assert.equal(h.streams!.size(), 0);
-  await reader.cancel();
+  await waitFor(() => agent.aborted === cut + 1);
 });
 
 test("a new sign-in that replaces the session ends the old session's feed", async () => {
