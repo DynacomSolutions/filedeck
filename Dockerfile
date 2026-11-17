@@ -5,7 +5,11 @@
 # (server/src/host-helpers.ts), so they are dynamic glibc programs built against an old glibc: the build fails when they need
 # a symbol version newer than GLIBC_2.17, so that they start on old machines too. libpam0g-dev is for the PAM helper of a later part.
 FROM debian:bullseye-slim@sha256:e5b6442dd2e9684cf5e87d8338b5968f3b348636fc0be6d7850a381e3731a2bd AS hostbuild
-RUN apt-get update \
+# Bullseye is past its support period: its packages are only on archive.debian.org now (the normal mirrors list them but no longer
+# serve the files). Bullseye is used for its glibc 2.31, so the helpers link only to symbol versions old machines have (checked below).
+RUN printf 'deb http://archive.debian.org/debian bullseye main\ndeb http://archive.debian.org/debian-security bullseye-security main\n' > /etc/apt/sources.list \
+ && rm -f /etc/apt/sources.list.d/* \
+ && apt-get update \
  && apt-get install -y --no-install-recommends gcc libc6-dev libpam0g-dev binutils \
  && rm -rf /var/lib/apt/lists/*
 COPY server/native/host /src/host
