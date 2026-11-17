@@ -103,6 +103,10 @@ jobs:
         timeout-minutes: 15
       # The image build runs the whole suite as root (Dockerfile), so run it that way here too; a skip of the fanotify helper test is a failure,
       # and so is a skip of the live host helper tests (this runner has glibc; the image's Alpine build stage does not).
+      # Workers run as an unprivileged account from this checkout, so that account must be able to pass through to it.
+      # The runner's home folder is 0750; the image build's source folder is already open.
+      - name: Let worker accounts reach the checkout
+        run: chmod o+x "$HOME" "$HOME/work" "$GITHUB_WORKSPACE/.."
       - name: Run the server tests as root, as the image build does
         run: sudo env "PATH=$PATH" FILEDECK_REQUIRE_FANWATCH=1 FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_HOST_HELPERS=1 npm test
         working-directory: server
