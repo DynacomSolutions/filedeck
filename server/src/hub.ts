@@ -27,7 +27,7 @@ import { Accounts, AuthDb, bootstrapAdmin } from "./auth/store.ts";
 import { Sessions } from "./auth/sessions.ts";
 import { Challenges } from "./auth/sshkey.ts";
 import { LoginLimiter } from "./auth/limiter.ts";
-import { identityFor, markArrival, registerAuth, registerAuthOff, unavailableSystemAuth } from "./auth/routes.ts";
+import { markArrival, registerAuth, registerAuthOff, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
 export interface HubAuth {
@@ -56,7 +56,7 @@ function clean(h: Headers, keepLength: boolean): Headers {
   return out;
 }
 
-export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number }) {
+export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth }) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
@@ -90,9 +90,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // editor saves are limited by the agent that takes them (its own maxEdit), not here
   app.use("*", requestGuard({ forward: true, allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
-  const tokenAccount = cfg.apiTokenAccount;
-  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => (tokenAccount ? identityFor(cfg, auth.accounts, tokenAccount) : undefined) : undefined));
-  if (auth) registerAuth(app, { cfg, ...auth, system: unavailableSystemAuth, now: opts?.now });
+  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined));
+  if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? unavailableSystemAuth, now: opts?.now });
   else registerAuthOff(app);
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;

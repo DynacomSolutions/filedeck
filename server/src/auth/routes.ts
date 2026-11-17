@@ -8,7 +8,7 @@ import type { Identity } from "./identity.ts";
 import { checkPassword, type Accounts, type AuthDb } from "./store.ts";
 import type { Sessions } from "./sessions.ts";
 import { loginMessage, parsePublicKey, verifyLogin, type Challenges } from "./sshkey.ts";
-import { RateWindow, type LoginLimiter } from "./limiter.ts";
+import { RateWindow, addressKey, type LoginLimiter } from "./limiter.ts";
 import { currentUser, runAs } from "./context.ts";
 
 /**
@@ -60,6 +60,14 @@ export const markArrival = (): MiddlewareHandler => async (c, next) => {
   c.set("authArrival" as never, performance.now() as never);
   await next();
 };
+
+/** The identity the API token acts as (FILEDECK_API_TOKEN_ACCOUNT), or why there is none. */
+export function tokenIdentity(cfg: Config, accounts: Accounts): Identity | { error: string } {
+  const name = cfg.apiTokenAccount;
+  if (!name) return { error: "FILEDECK_API_TOKEN_ACCOUNT is not set" };
+  if (name === "root") return { error: "FILEDECK_API_TOKEN_ACCOUNT may not be root" };
+  return identityFor(cfg, accounts, name);
+}
 
 /** The identity of an account: a virtual account if one has the name, else the system user. */
 export function identityFor(cfg: Config, accounts: Accounts, name: string): Identity {
@@ -130,11 +138,14 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   });
 
   /**
-   * HTTPS: the URL, or the last X-Forwarded-Proto behind a trusted proxy. A loopback peer on plain HTTP counts only
-   * without proxies: with one, the peer is the proxy, and it may be on the same host while the client is not.
+   * HTTPS: a TLS socket, or the last X-Forwarded-Proto behind a trusted proxy. The URL is never believed on a socket:
+   * a plain-HTTP request line may carry an absolute `https://` target, which becomes the URL as it is. Only without a
+   * socket (in-process requests) does the URL decide. A loopback peer on plain HTTP counts only without proxies:
+   * with one, the peer is the proxy, and it may be on the same host while the client is not.
    */
   const secure = (c: Context): boolean => {
-    if (new URL(c.req.url).protocol === "https:") return true;
+    const socket = (c.env as { incoming?: { socket?: { encrypted?: boolean } } } | undefined)?.incoming?.socket;
+    if (socket ? socket.encrypted === true : new URL(c.req.url).protocol === "https:") return true;
     if (cfg.trustedProxies > 0) {
       const last = c.req.header("x-forwarded-proto")?.split(",").pop()?.trim().toLowerCase();
       return last === "https";
@@ -161,7 +172,6 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const signIn = (c: Context, kind: "sys" | "virt", name: string) => {
     const old = getCookie(c, COOKIE);
     if (old) sessions.destroy(old);
-    limiter.succeed(name);
     const raw = sessions.create(kind, name);
     const id = kind === "virt" ? accounts.identity("virt", name) : sysIdentity(cfg, accounts, name);
     const maxAge = Math.floor(cfg.sessionMaxMs / 1000);
@@ -182,22 +192,23 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     const ip = clientOf(c).ip ?? "";
     const lim = limiter.check(name ?? "", ip);
     if (!lim.ok) return tooMany(c, lim.retryAfterMs);
+    // counted before any wait, so parallel guesses cannot all pass the check; given back on success
+    const attempt = limiter.reserve(name ?? "", ip);
     let kind: "sys" | "virt" | undefined;
+    // root never signs in, and never reaches the system check
     if (name !== undefined && pw !== undefined && name !== "root") {
       const acc = accounts.get(name);
       if (acc) kind = checkPassword(pw, acc.passwordHash) ? "virt" : undefined;
       else kind = (await system.password(name, pw)) ? "sys" : undefined;
     }
-    if (!kind || name === undefined) {
-      limiter.fail(name ?? "", ip);
-      return failed(c);
-    }
+    if (!kind || name === undefined) return failed(c);
+    attempt.succeed();
     return signIn(c, kind, name);
   });
 
   app.post("/api/auth/challenge", async (c) => {
     if (!secure(c)) return needsHttps(c);
-    const lim = challengeLimit.take(clientOf(c).ip ?? "");
+    const lim = challengeLimit.take(addressKey(clientOf(c).ip ?? ""));
     if (!lim.ok) return tooMany(c, lim.retryAfterMs, false);
     const name = str((await body(c))?.name);
     // Always an answer of the same shape, so it does not show whether the name exists.
@@ -215,6 +226,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     const ip = clientOf(c).ip ?? "";
     const lim = limiter.check(name ?? "", ip);
     if (!lim.ok) return tooMany(c, lim.retryAfterMs);
+    const attempt = limiter.reserve(name ?? "", ip);
     let kind: "sys" | "virt" | undefined;
     if (name !== undefined && pub !== undefined && ch !== undefined && sig !== undefined && name !== "root") {
       const cb = Buffer.from(ch, "base64");
@@ -228,10 +240,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
         } else kind = (await system.key(name, pub, msg, sb)) ? "sys" : undefined;
       }
     }
-    if (!kind || name === undefined) {
-      limiter.fail(name ?? "", ip);
-      return failed(c);
-    }
+    if (!kind || name === undefined) return failed(c);
+    attempt.succeed();
     return signIn(c, kind, name);
   });
 

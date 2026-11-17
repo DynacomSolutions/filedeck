@@ -4,12 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { generateKeyPairSync, sign } from "node:crypto";
+import net from "node:net";
+import type { AddressInfo } from "node:net";
+import { serve } from "@hono/node-server";
 import { createHub } from "../src/hub.ts";
+import type { SystemAuth } from "../src/auth/routes.ts";
 import { loadConfig } from "../src/config.ts";
 import { loginMessage } from "../src/auth/sshkey.ts";
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-authroutes-")));
 fs.writeFileSync(path.join(tmp, "index.html"), "<!doctype html><title>t</title>");
+fs.writeFileSync(path.join(tmp, "favicon.svg"), "<svg xmlns='http://www.w3.org/2000/svg'/>");
 const hubs: { close(): Promise<void> }[] = [];
 after(async () => {
   for (const h of hubs) await h.close().catch(() => {});
@@ -19,26 +24,26 @@ after(async () => {
 type Hub = ReturnType<typeof createHub>;
 type Clock = { t: number };
 
-function makeHub(env: Record<string, string> = {}, sink?: (l: string) => void): { h: Hub; clock: Clock } {
+function makeHub(env: Record<string, string> = {}, sink?: (l: string) => void, system?: SystemAuth): { h: Hub; clock: Clock } {
   const clock: Clock = { t: Date.now() };
   const h = createHub(
     loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: "agent-secret", FILEDECK_STATIC: tmp, NODES: "t=http://127.0.0.1:9", ...env } as never),
     undefined,
     sink ?? (() => {}),
-    { now: () => clock.t },
+    { now: () => clock.t, ...(system ? { system } : {}) },
   );
   hubs.push(h);
   return { h, clock };
 }
 
-const peer = (addr: string) => ({ incoming: { socket: { remoteAddress: addr } } });
+const peer = (addr: string, encrypted = false) => ({ incoming: { socket: { remoteAddress: addr, encrypted } } });
 const LOCAL = "http://localhost";
 
-async function post(h: Hub, p: string, body: unknown, o: { addr?: string; base?: string; headers?: Record<string, string> } = {}): Promise<Response> {
+async function post(h: Hub, p: string, body: unknown, o: { addr?: string; base?: string; tls?: boolean; headers?: Record<string, string> } = {}): Promise<Response> {
   return h.request(
     (o.base ?? LOCAL) + p,
     { method: "POST", headers: { "content-type": "application/json", ...o.headers }, body: JSON.stringify(body) },
-    peer(o.addr ?? "127.0.0.1") as never,
+    peer(o.addr ?? "127.0.0.1", o.tls) as never,
   );
 }
 
@@ -95,13 +100,16 @@ test("password sign-in sets the cookie, and /api/auth/me knows the name", async 
   assert.equal((await get(h, "/api/nodes", cookieOf(r))).status, 200);
 });
 
-test("an HTTPS URL needs no loopback peer", async () => {
+test("a TLS socket needs no loopback peer; an https URL on a plain socket is not HTTPS", async () => {
   const { h } = makeHub();
   h.auth!.accounts.create({ name: "boss", password: "pw-boss", admin: true, nodes: {} });
-  const r = await post(h, "/api/auth/login", { name: "boss", password: "pw-boss" }, { base: "https://files.example", addr: "10.0.0.5" });
+  const r = await post(h, "/api/auth/login", { name: "boss", password: "pw-boss" }, { base: "https://files.example", addr: "10.0.0.5", tls: true });
   assert.equal(r.status, 200);
-  const me = await h.request("https://files.example/api/auth/me", { headers: { cookie: cookieOf(r) } }, peer("10.0.0.5") as never);
+  const me = await h.request("https://files.example/api/auth/me", { headers: { cookie: cookieOf(r) } }, peer("10.0.0.5", true) as never);
   assert.deepEqual(await me.json(), { auth: true, kind: "virt", name: "boss", admin: true });
+  const plain = await post(h, "/api/auth/login", { name: "boss", password: "pw-boss" }, { base: "https://files.example", addr: "10.0.0.5", tls: false });
+  assert.equal(plain.status, 403);
+  assert.deepEqual(await plain.json(), { error: "sign-in needs HTTPS" });
 });
 
 test("uniform failure: wrong password, unknown name and system name look the same", async () => {
@@ -253,8 +261,83 @@ test("du token needs an account when auth is on", async () => {
   // with an account the token passes the gate (the node itself is not reachable here)
   const b = makeHub({ FILEDECK_API_TOKEN: TOKEN, FILEDECK_API_TOKEN_ACCOUNT: "sizes" }).h;
   const ok = await b.request("/api/nodes/t/api/du?path=/", { headers: { "x-filedeck-token": TOKEN } });
-  assert.notEqual(ok.status, 401);
-  assert.notEqual(ok.status, 403);
+  // it reached the node proxy, which cannot reach the agent here
+  assert.equal(ok.status, 502);
+  assert.deepEqual(await ok.json(), { error: "agent unreachable" });
+  const c = makeHub({ FILEDECK_API_TOKEN: TOKEN, FILEDECK_API_TOKEN_ACCOUNT: "root" }).h;
+  const root = await c.request("/api/nodes/t/api/du?path=/", { headers: { "x-filedeck-token": TOKEN } });
+  assert.equal(root.status, 403);
+  assert.deepEqual(await root.json(), { error: "FILEDECK_API_TOKEN_ACCOUNT may not be root" });
+});
+
+test("gate: favicon, HEAD on an open path, and /api without a slash", async () => {
+  const { h } = makeHub();
+  assert.equal((await get(h, "/favicon.svg")).status, 200);
+  const head = await h.request(LOCAL + "/", { method: "HEAD" }, peer("127.0.0.1") as never);
+  assert.equal(head.status, 200);
+  const api = await get(h, "/api");
+  assert.equal(api.status, 401);
+  assert.equal(api.headers.get("x-filedeck-auth"), "signed-out");
+});
+
+test("an https URL on a plain socket is refused, also through a real socket (absolute-form request line)", async () => {
+  const { h } = makeHub({ FILEDECK_TRUSTED_PROXIES: "1" });
+  h.auth!.accounts.create({ name: "guest1", password: "pw-guest-1", admin: false, nodes: {} });
+  const fake = await post(h, "/api/auth/login", { name: "guest1", password: "pw-guest-1" }, { base: "https://files.example", addr: "10.0.0.5" });
+  assert.equal(fake.status, 403);
+  assert.deepEqual(await fake.json(), { error: "sign-in needs HTTPS" });
+  // the same over a real socket: plain HTTP with an absolute https:// target
+  const srv = await new Promise<ReturnType<typeof serve>>((res) => {
+    const s: ReturnType<typeof serve> = serve({ fetch: h.fetch as never, port: 0, hostname: "127.0.0.1" }, () => res(s));
+  });
+  try {
+    const port = (srv.address() as AddressInfo).port;
+    const body = JSON.stringify({ name: "guest1", password: "pw-guest-1" });
+    const raw = await new Promise<string>((res, rej) => {
+      const sock = net.connect(port, "127.0.0.1");
+      let out = "";
+      sock.on("data", (d) => (out += d.toString("latin1")));
+      sock.on("end", () => res(out));
+      sock.on("error", rej);
+      sock.write(`POST https://files.example/api/auth/login HTTP/1.1\r\nHost: files.example\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+    });
+    assert.match(raw, /^HTTP\/1\.1 403 /);
+    assert.ok(!/set-cookie/i.test(raw));
+    assert.ok(raw.includes("sign-in needs HTTPS"));
+  } finally {
+    srv.close();
+  }
+});
+
+test("root never signs in and never reaches the system check", async () => {
+  const seen: string[] = [];
+  const system: SystemAuth = { password: async (n) => (seen.push(n), true), key: async (n) => (seen.push(n), true) };
+  const { h } = makeHub({}, undefined, system);
+  const r = await post(h, "/api/auth/login", { name: "root", password: "anything" });
+  assert.equal(r.status, 401);
+  assert.deepEqual(await r.json(), { error: "sign-in failed" });
+  assert.equal(r.headers.get("set-cookie"), null);
+  assert.deepEqual(seen, []);
+  // the same fake lets another system name in, so the refusal is the name, not the fake
+  assert.equal((await post(h, "/api/auth/login", { name: "alice", password: "anything" })).status, 200);
+});
+
+test("limiter reserves attempts: of 10 parallel guesses for one name at most 5 reach the system check", async () => {
+  let calls = 0;
+  const system: SystemAuth = {
+    password: async () => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 200));
+      return false;
+    },
+    key: async () => false,
+  };
+  const { h } = makeHub({}, undefined, system);
+  const rs = await Promise.all(Array.from({ length: 10 }, (_, i) => post(h, "/api/auth/login", { name: "alice", password: "guess" + i }, { addr: `127.0.1.${i + 1}` })));
+  assert.ok(calls <= 5, `${calls} attempts reached the system check`);
+  const statuses = rs.map((r) => r.status).sort();
+  assert.equal(statuses.filter((s) => s === 401).length, calls);
+  assert.equal(statuses.filter((s) => s === 429).length, 10 - calls);
 });
 
 test("no secrets in audit lines", async () => {
