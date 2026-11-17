@@ -368,18 +368,21 @@ async function applyPermsIn(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise
 
 const flag = (v: string | undefined) => v === "1";
 
-/** The size store lives next to the compare index; its `du` is a bounded, cancellable walk that reuses unchanged folders. */
-export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStore {
+async function json<T>(c: Context): Promise<T> {
+  try {
+    return (await c.req.json()) as T;
+  } catch {
+    throw bad("invalid JSON body");
+  }
+}
+
+/**
+ * Folder sizes (`POST /api/jobs/size`, `GET /api/du`) and their jobs. The size store lives next to the compare index; its `du` is a bounded, cancellable walk
+ * that reuses unchanged folders. It stays in the agent's root process (one store and one change watcher per machine).
+ */
+export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStore {
   jobs.abandonMs = cfg.duAbandonMs;
   const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : spillPath("sizes"), { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
-  const json = async <T,>(c: Context): Promise<T> => {
-    try {
-      return (await c.req.json()) as T;
-    } catch {
-      throw bad("invalid JSON body");
-    }
-  };
-  app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
 
   // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
   // `since`: when the job began. Rows written since are the job's own: when the job runs again after a restart (adopted), the walk keeps them instead of starting over.
@@ -611,6 +614,13 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     }
   });
 
+  return sizes;
+}
+
+/** Properties (`GET /api/fs/props`) and permission changes (`POST /api/fs/perms`); a recursive change runs as a job of `jobs`. */
+export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
+  app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
+
   // Immediate for one entry; recursive changes run as a job (202 + job view).
   app.post("/api/fs/perms", async (c) => {
     const req = await json<PermsRequest>(c);
@@ -640,5 +650,4 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       return { run: async () => Promise.reject(e) };
     }
   });
-  return sizes;
 }

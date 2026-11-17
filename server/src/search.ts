@@ -504,13 +504,14 @@ export async function* limitSearch<T, S>(inner: AsyncGenerator<T, S>, abort: () 
 
 /**
  * Who a search belongs to, for the per-client bound: an address the server saw, never a value a client chose. The hub sets
- * `x-filedeck-client` (and drops any copy it receives); the agent believes that header only when the shared agent token is
- * configured, because then every request that gets here carries it and so comes from the hub. Otherwise (no token: the agent
- * cannot tell the hub from anybody else) and for direct requests the key is the socket's peer address, which behind a hub
- * is the hub itself: all its users then share a key, which the bound's floor of two slots is generous enough for.
+ * `x-filedeck-client` (and drops any copy it receives); the agent believes that header only when `trusted`: the shared agent
+ * token is configured (then every request that gets here carries it and so comes from the hub), or this process is a worker
+ * (its requests come only from the agent's root process, which checked the token). Otherwise (no token: the agent cannot
+ * tell the hub from anybody else) and for direct requests the key is the socket's peer address, which behind a hub is the
+ * hub itself: all its users then share a key, which the bound's floor of two slots is generous enough for.
  */
-export function clientKey(c: import("hono").Context, agentToken: string | undefined): string {
-  if (agentToken) {
+export function clientKey(c: import("hono").Context, trusted: boolean): string {
+  if (trusted) {
     const v = c.req.header("x-filedeck-client")?.trim();
     if (v) return v.slice(0, 64);
   }
@@ -534,7 +535,7 @@ export function registerSearchRoutes(app: Hono, cfg: Config) {
       const r = resolveRead(cfg.root, (start === "/" ? "" : start.replace(/\/+$/, "")) + "/" + rel);
       return createReadStream(r.real, { highWaterMark: 64 * 1024 });
     };
-    const client = clientKey(c, cfg.agentToken);
+    const client = clientKey(c, !!cfg.agentToken || cfg.worker);
     return walkResponse(limitSearch(gate.wrap(searchTree(walk, p, read, signal), client), () => stop.abort()));
   });
 }

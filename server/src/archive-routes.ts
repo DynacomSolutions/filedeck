@@ -17,12 +17,12 @@ import { clientKey } from "./search.ts";
 
 /**
  * Who a request belongs to for the per-client limits of the download and listing pools, and whether that key can be trusted to tell clients apart. It can when
- * the agent token is set (the hub's `x-filedeck-client` header is then believed, and a request without it is a direct client, keyed by its peer address). Without
- * an agent token the agent cannot tell the hub from a direct client, so every user behind the hub shares one key (the hub's address): the per-client limit is
- * then not applied and only the pool's own limit holds.
+ * `trusted`: the agent token is set, or this process is a worker behind the agent's root process (the hub's `x-filedeck-client` header is then believed, and a
+ * request without it is a direct client, keyed by its peer address). Without an agent token the agent cannot tell the hub from a direct client, so every user
+ * behind the hub shares one key (the hub's address): the per-client limit is then not applied and only the pool's own limit holds.
  */
-export function clientIdentity(c: Context, agentToken: string | undefined): { key: string; limited: boolean } {
-  return { key: clientKey(c, agentToken), limited: !!agentToken };
+export function clientIdentity(c: Context, trusted: boolean): { key: string; limited: boolean } {
+  return { key: clientKey(c, trusted), limited: trusted };
 }
 
 const bad = (m: string) => new ops.FsError(400, m);
@@ -50,12 +50,31 @@ function dispo(name: string) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
-export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
+/** The agent's background jobs: kept in the shared job file when `cfg.jobsFile` is set (handed to the next process on a restart), else in memory. */
+export function makeAgentJobs(cfg: Config): Jobs {
+  const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
+  return new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
+}
+
+/** Listing, polling, cancelling and dismissing the jobs of `jobs`, whatever their kind. */
+export function registerJobRoutes(app: Hono, jobs: Jobs): void {
+  app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));
+  app.get("/api/jobs/:id", (c) => {
+    jobs.touch(c.req.param("id")); // a client polling a CLI du job keeps it alive
+    const j = jobs.get(c.req.param("id"));
+    return j ? c.json(j) : c.json({ error: "not found" }, 404);
+  });
+  app.post("/api/jobs/:id/cancel", (c) => {
+    const j = jobs.cancel(c.req.param("id"));
+    return j ? c.json(j) : c.json({ error: "not found" }, 404);
+  });
+  app.delete("/api/jobs/:id", (c) => (jobs.dismiss(c.req.param("id")) ? c.json({ ok: true }) : c.json({ error: "not found or still active" }, 404)));
+}
+
+export function registerArchiveRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
   const root = cfg.root;
   void ar.sweepWorkArea(root, cfg.procMounts); // leftovers of a crashed run are removed from the private work folder, nowhere else
   const limits: ar.ArchiveLimits = { maxEntries: cfg.archiveMaxEntries, maxBytes: cfg.archiveMaxBytes };
-  const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
-  const jobs = new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
 
   // Queued jobs are checked again when they start, on where the destination really is by then (a folder may have been swapped for a link meanwhile).
   const mayWrite = (real: string, contains: boolean) => {
@@ -88,7 +107,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.get("/api/archive/list", async (c) => {
     const lim = Number(c.req.query("limit"));
-    const who = clientIdentity(c, cfg.agentToken);
+    const who = clientIdentity(c, !!cfg.agentToken || cfg.worker);
     const slot = await listGate.acquire(c.req.raw.signal, who.key, who.limited); // a listing is never held up by downloads: its own pool
     let res: Awaited<ReturnType<typeof ar.listArchive>>;
     try {
@@ -130,7 +149,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     };
     if (c.req.method === "HEAD") return new Response(null, { headers });
     await ar.assertSandboxUsable();
-    const who = clientIdentity(c, cfg.agentToken);
+    const who = clientIdentity(c, !!cfg.agentToken || cfg.worker);
     const client = who.key;
     const slot = await downloadGate.acquire(c.req.raw.signal, client, who.limited); // a client over its own limit (or a full pool) is answered 429 here, before the response starts
     const stream = ar.zipStream(sel.d.real, sel.names, c.req.raw.signal, { root, slot, client });
@@ -146,18 +165,6 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     if (!id) return c.json({ error: "too many pending downloads" }, 429);
     return c.json({ id }, 201);
   });
-
-  app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));
-  app.get("/api/jobs/:id", (c) => {
-    jobs.touch(c.req.param("id")); // a client polling a CLI du job keeps it alive
-    const j = jobs.get(c.req.param("id"));
-    return j ? c.json(j) : c.json({ error: "not found" }, 404);
-  });
-  app.post("/api/jobs/:id/cancel", (c) => {
-    const j = jobs.cancel(c.req.param("id"));
-    return j ? c.json(j) : c.json({ error: "not found" }, 404);
-  });
-  app.delete("/api/jobs/:id", (c) => (jobs.dismiss(c.req.param("id")) ? c.json({ ok: true }) : c.json({ error: "not found or still active" }, 404)));
 
   app.post("/api/jobs/compress", async (c) => {
     const b = await body<{ dir?: string; names?: string[]; format?: string; name?: string; level?: number; encryptHeaders?: boolean; splitBytes?: number; exclude?: string[]; destDir?: string }>(c);
@@ -177,7 +184,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
 
   app.post("/api/jobs/extract", async (c) => {
     const b = await body<{ path?: string; destDir?: string; subfolder?: boolean; overwrite?: string; entries?: string[] }>(c);
-    const who = clientIdentity(c, cfg.agentToken);
+    const who = clientIdentity(c, !!cfg.agentToken || cfg.worker);
     const slot = await listGate.acquire(c.req.raw.signal, who.key, who.limited); // preparing reads the archive's listing (and checks a password): the listing pool
     let plan: Awaited<ReturnType<typeof ar.prepareExtract>>;
     try {
@@ -194,6 +201,4 @@ export function registerArchiveRoutes(app: Hono, cfg: Config): Jobs {
     const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => runExtract(plan, ctl));
     return c.json(job, 202, plan.viaSz ? { "x-filedeck-pw": "ok" } : {});
   });
-
-  return jobs;
 }

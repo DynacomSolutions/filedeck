@@ -94,6 +94,8 @@ export interface Config {
   apiTokenAccount: string | undefined;
   /** agent, sign-in on: folder that holds the host helpers (`filedeck-id`); unset = the image's folder, else the built one (host-helpers.ts) */
   hostHelpers: string | undefined;
+  /** this process is a worker that serves one signed-in account (worker.ts); never set from the environment */
+  worker: boolean;
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -202,5 +204,32 @@ export function loadConfig(env = process.env): Config {
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
     hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
+    worker: false,
+  };
+}
+
+/**
+ * The settings a worker gets in its start-up message: the agent's own, without any secret (a worker runs as a person's account, so whatever it holds that
+ * person could read), and without what only the root process does: the shared job file, the change watcher, trash retention and sign-in checks.
+ * `dirs` are the account's own cache and index folders.
+ */
+export function workerConfig(cfg: Config, dirs?: { thumbs: string; index: string }): Config {
+  return {
+    ...cfg,
+    worker: true,
+    auth: false,
+    agentToken: undefined,
+    apiToken: undefined,
+    apiTokenAccount: undefined,
+    vaultKey: undefined,
+    bootstrapAdminFile: undefined,
+    // hub settings (network sources and the folder of their credentials): an agent never uses them
+    nodes: [],
+    sources: [],
+    sourceSecretDir: "",
+    jobsFile: "",
+    fanwatch: "",
+    trashSweepMs: 0,
+    ...(dirs ? { thumbDir: dirs.thumbs, indexDir: dirs.index } : {}),
   };
 }
