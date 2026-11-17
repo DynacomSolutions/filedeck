@@ -664,3 +664,155 @@ liveRoot("keepCaps (read-search, or override where that is what the agent holds)
   assert.match(r.stdout, /status=1/);
   assert.match(r.stdout, /write=[12]/);
 });
+
+/* ---- part 2a: supplementary groups, chroot, socketpair only, kept stdio slots, Landlock off on request ---- */
+
+const nodePrefix = () => path.dirname(path.dirname(process.execPath));
+const nodeEnv = () => ({ ...process.env, OPENSSL_CONF: "/dev/null" });
+
+test("--groups, --chroot and --allow-socketpair: usage errors are refused before anything runs (exit 64)", async () => {
+  const st = (...a: string[]) => spawnSync(box.bin, [...a, "--", "true"], { encoding: "utf8" });
+  const many = Array.from({ length: 257 }, (_, k) => String(1000 + k)).join(",");
+  for (const bad of [
+    ["--groups", "5"], // needs --uid and --gid
+    ["--uid", "5", "--gid", "5", "--groups", "5,0"], // gid 0 among them
+    ["--uid", "5", "--gid", "5", "--groups", ""],
+    ["--uid", "5", "--gid", "5", "--groups", "5,"],
+    ["--uid", "5", "--gid", "5", "--groups", ",5"],
+    ["--uid", "5", "--gid", "5", "--groups", "5,,6"],
+    ["--uid", "5", "--gid", "5", "--groups", "5,x"],
+    ["--uid", "5", "--gid", "5", "--groups", "5,-1"],
+    ["--uid", "5", "--gid", "5", "--groups", "5,+6"],
+    ["--uid", "5", "--gid", "5", "--groups", "5, 6"],
+    ["--uid", "5", "--gid", "5", "--groups", "4294967295"],
+    ["--uid", "5", "--gid", "5", "--groups", "99999999999999999999"],
+    ["--uid", "5", "--gid", "5", "--groups", many], // more than 256
+    ["--uid", "5", "--gid", "5", "--groups", "5", "--groups", "6"], // given twice
+    ["--chroot", "/", "--cwd-fd", "3"],
+    ["--chroot", "/", "--chroot", "/"],
+  ]) {
+    const r = st(...bad);
+    assert.equal(r.status, 64, `${bad.join(" ")}: ${r.stderr}`);
+    assert.match(r.stderr, /filedeck-sandbox:/);
+  }
+  assert.match(spawnSync(box.bin, ["--groups"], { encoding: "utf8" }).stderr, /unknown option --groups/, "an option with no value is an unknown option, as for the others");
+  const usage = spawnSync(box.bin, ["--allow-socketpair"], { encoding: "utf8" });
+  assert.equal(usage.status, 64);
+  for (const opt of ["--groups G1,G2,...", "--chroot DIR", "--allow-socketpair"]) assert.ok(usage.stderr.startsWith("usage: ") && usage.stderr.includes(opt), `${opt}: ${usage.stderr}`);
+  // spawnSandboxed refuses a root group, whoever runs it, and nonsense group numbers, before it starts anything
+  await assert.rejects(spawnSandboxed("true", [], { uid: 1234, gid: 1234, groups: [1234, 0] }), (e: { status?: number; message?: string }) => e.status === 500 && /root/.test(e.message ?? ""));
+  for (const groups of [[-1], [1.5], [4294967295], [Number.NaN]]) await assert.rejects(spawnSandboxed("true", [], { uid: 1234, gid: 1234, groups }), (e: { status?: number }) => e.status === 500, String(groups));
+  await assert.rejects(spawnSandboxed("true", [], { uid: 1234, gid: 1234, groups: Array.from({ length: 257 }, (_, k) => 1000 + k) }), (e: { status?: number }) => e.status === 500);
+  await assert.rejects(spawnSandboxed("true", [], { groups: [1234] }), (e: { status?: number; message?: string }) => e.status === 500 && /uid/.test(e.message ?? ""), "groups without a user");
+  for (const keepStdio of [[2], [4], [1.5]]) await assert.rejects(spawnSandboxed("true", [], { stdio: ["ignore", "pipe", "pipe", "pipe"], keepStdio }), (e: { status?: number }) => e.status === 500, String(keepStdio));
+});
+
+test("--chroot: a chroot that fails stops the launcher (exit 71) and the program does not run", () => {
+  // unprivileged, chroot needs a capability this process does not hold; as root, a folder that does not exist fails the same way
+  const dir = IS_ROOT ? path.join(tmp, "no-such-root") : "/";
+  const r = spawnSync(box.bin, ["--no-landlock", "--chroot", dir, "--", "echo", "ran"], { encoding: "utf8" });
+  assert.equal(r.status, 71, r.stderr);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, new RegExp(`filedeck-sandbox: chroot ${dir.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}: `));
+});
+
+live("socketpair needs the flag: only AF_UNIX pairs pass with it, every other socket call is still refused", async (t) => {
+  const info = await sandboxInfo();
+  if (!info.seccomp) return t.skip("sandbox live: skipped (no socket filter on this kernel)");
+  const opts = { readExec: [nodePrefix()], env: nodeEnv() };
+  const child = "require('child_process').execFileSync('true')"; // Node makes a child's stdio pipes with socketpair(AF_UNIX)
+  const denied = await run(process.execPath, ["-e", child], opts);
+  assert.notEqual(denied.code, 0);
+  assert.match(denied.stderr, /EACCES/);
+  const allowed = await run(process.execPath, ["-e", child], { ...opts, allowSocketpair: true });
+  assert.equal(allowed.code, 0, allowed.stderr);
+  const conn = await run(process.execPath, ["-e", "require('net').connect('/nonexistent').on('error', e => { console.log(e.code); })"], { ...opts, allowSocketpair: true });
+  assert.equal(conn.stdout.trim(), "EACCES", conn.stderr);
+  // a pair of another family is refused with the flag too (AF_INET pairs do not exist, so the kernel alone would answer EOPNOTSUPP)
+  const src = path.join(tmp, "sp.c");
+  write(src, `#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+int main(void) {
+  int sv[2];
+  printf("unix %s\\n", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 ? "ok" : strerror(errno));
+  printf("inet %s\\n", socketpair(AF_INET, SOCK_STREAM, 0, sv) == 0 ? "ok" : strerror(errno));
+  printf("unix-plus %s\\n", socketpair(AF_UNIX | 0x100, SOCK_STREAM, 0, sv) == 0 ? "ok" : strerror(errno));
+  return 0;
+}
+`);
+  const bin = path.join(tmp, "spbin");
+  const cc = spawnSync("cc", ["-O2", "-o", bin, src], { encoding: "utf8" });
+  assert.equal(cc.status, 0, cc.stderr);
+  const free = spawnSync(bin, [], { encoding: "utf8" }).stdout;
+  assert.match(free, /unix ok/, "control");
+  const pairs = await run(bin, [], { readExec: [tmp], allowSocketpair: true });
+  assert.match(pairs.stdout, /^unix ok$/m, pairs.stderr);
+  assert.match(pairs.stdout, /^inet Permission denied$/m);
+  assert.match(pairs.stdout, /^unix-plus Permission denied$/m);
+  const none = await run(bin, [], { readExec: [tmp] });
+  assert.match(none.stdout, /^unix Permission denied$/m, "without the flag: refused as before");
+  const sockets = await run(bin, [], { readExec: [tmp], allowSocketpair: true, allowSockets: true });
+  assert.match(sockets.stdout, /^unix ok$/m, "with --allow-sockets the flag changes nothing");
+  assert.doesNotMatch(sockets.stdout, /Permission denied/);
+});
+
+for (const landlock of [undefined, false] as const) {
+  live(`keepStdio: a stdio slot above 2 stays open for the program (landlock ${landlock ?? "on"})`, async () => {
+    const child = await spawnSandboxed(process.execPath, ["-e", "require('fs').writeSync(3,'x')"], { readExec: [nodePrefix()], env: nodeEnv(), stdio: ["ignore", "pipe", "pipe", "pipe"], keepStdio: [3], landlock });
+    let three = "";
+    let stderr = "";
+    (child.stdio[3] as NodeJS.ReadableStream).on("data", (d) => (three += d));
+    child.stderr!.on("data", (d) => (stderr += d));
+    const code = await new Promise((resolve) => child.on("close", resolve));
+    assert.equal(code, 0, stderr);
+    assert.equal(three, "x");
+    // control: without keepStdio the launcher closes it, as every descriptor above 2 (Node then reuses the number for its own use)
+    const ctl = await spawnSandboxed(process.execPath, ["-e", "try { require('fs').writeSync(3,'x') } catch {}"], { readExec: [nodePrefix()], env: nodeEnv(), stdio: ["ignore", "pipe", "pipe", "pipe"], landlock });
+    let ctlThree = "";
+    (ctl.stdio[3] as NodeJS.ReadableStream).on("data", (d) => (ctlThree += d));
+    await new Promise((resolve) => ctl.on("close", resolve));
+    assert.equal(ctlThree, "", "the slot did not reach the program");
+  });
+}
+
+live("landlock: false runs the program without a ruleset where Landlock works", async () => {
+  const outside = path.join(tmp, "nolandlock-outside");
+  const inside = path.join(tmp, "nolandlock-inside");
+  write(path.join(outside, "f.txt"), "reachable\n");
+  fs.mkdirSync(inside);
+  assert.notEqual((await run("cat", [path.join(outside, "f.txt")], { readOnly: [inside] })).code, 0, "control: confined");
+  const r = await run("cat", [path.join(outside, "f.txt")], { readOnly: [inside], landlock: false });
+  assert.deepEqual([r.code, r.stdout], [0, "reachable\n"], r.stderr);
+});
+
+test("groups and chroot: the program runs with exactly the given supplementary groups, and inside the given root", { skip: ROOT_ONLY }, async () => {
+  const modes = box.state === "landlock" ? (["landlock", "nolandlock", "off"] as const) : (["off"] as const);
+  for (const mode of modes) {
+    const prev = process.env.FILEDECK_SANDBOX;
+    try {
+      if (mode === "off") process.env.FILEDECK_SANDBOX = "off";
+      resetSandbox();
+      const r = await run("sh", ["-c", "id -u; id -g; id -G"], { uid: 1234, gid: 1234, groups: [1234, 2345], ...(mode === "landlock" ? {} : { landlock: false as const }) });
+      assert.deepEqual(r.stdout.trim().split("\n"), ["1234", "1234", "1234 2345"], `${mode}: ${r.stderr}`);
+    } finally {
+      if (prev === undefined) delete process.env.FILEDECK_SANDBOX;
+      else process.env.FILEDECK_SANDBOX = prev;
+      resetSandbox();
+    }
+  }
+  await assert.rejects(spawnSandboxed("true", [], { uid: 1234, gid: 1234, groups: [0] }), /root/);
+  assert.equal(spawnSync(box.bin, ["--uid", "5", "--gid", "5", "--groups", "0", "--allow-root-user", "--no-landlock", "--", "true"]).status, 0, "--allow-root-user lets gid 0 through, as for --gid");
+  // inside a root: the command is looked up there (a static launcher copy is the only file in it)
+  const jail = path.join(tmp, "jail");
+  fs.mkdirSync(jail, { mode: 0o755 });
+  assert.ok(box.staticBin, "the root pass builds the static launcher");
+  fs.copyFileSync(box.staticBin, path.join(jail, "probe"));
+  fs.chmodSync(path.join(jail, "probe"), 0o755);
+  const direct = spawnSync(box.bin, ["--chroot", jail, "--no-landlock", "--", "/probe", "--probe"], { encoding: "utf8" });
+  assert.ok(direct.status === 0 || direct.status === 70, `${direct.status} ${direct.stderr}`);
+  assert.equal(spawnSync(box.bin, ["--chroot", jail, "--no-landlock", "--", path.join(jail, "probe"), "--probe"], { encoding: "utf8" }).status, 127, "the outside path does not exist inside the root");
+  const viaTs = await run("/probe", ["--probe"], { chroot: jail, landlock: false, uid: 1234, gid: 1234, groups: [1234] });
+  assert.ok(viaTs.code === 0 || viaTs.code === 70, `${viaTs.code} ${viaTs.stderr}`);
+});

@@ -50,7 +50,7 @@ export interface SandboxInfo {
  * this launcher knows controls UDP bind/connect before the kernel's newest one, so there UDP stays open to a confined program,
  * with one extra layer: unless `allowSockets` is set the launcher installs a seccomp filter that makes `socket()`,
  * `socketpair()`, `connect()`, `bind()`, `listen()`, `accept()` and io_uring fail with EACCES (x32 system call numbers end the
- * process), on every kernel, so a confined program can neither reach UDP nor connect to a pathname unix socket (such as a
+ * process; with `allowSocketpair` a unix socket pair is let through, nothing else), on every kernel, so a confined program can neither reach UDP nor connect to a pathname unix socket (such as a
  * container runtime's) under the served root; it uses the descriptors it was given. That layer is best effort: a kernel without
  * seccomp filters, or an architecture other than x86-64 and arm64, leaves it off, which `SandboxInfo.seccomp`, the start-up
  * log line and `/api/info` report. Landlock never restricts
@@ -169,9 +169,29 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
   readExec?: Root[];
   /** the same, and write, create, remove, rename and link (not execute) */
   readWrite?: Root[];
-  /** run as this user and group, supplementary groups cleared (applied before the program starts) */
+  /** run as this user and group, supplementary groups cleared unless `groups` names them (applied before the program starts) */
   uid?: number;
   gid?: number;
+  /**
+   * the supplementary groups for the user change (at most 256; 0 is refused). Needs `uid` and `gid`; applied only when there is a user change
+   * (a `uid` that is this process's own changes nothing, and neither do its groups). Needs the launcher: without one the start is refused.
+   */
+  groups?: number[];
+  /**
+   * change the root directory to this folder before the program starts (the launcher's `--chroot`): `cmd` is then looked up inside it. Needs
+   * the chroot capability and the launcher (without one the start is refused). Not together with `cwdFd`. The Landlock rules stay attached to
+   * what was opened outside the folder, so callers that chroot also pass `landlock: false`.
+   */
+  chroot?: string;
+  /** let the program make unix socket pairs (Node makes the stdio pipes of its own children that way); every other socket call stays refused */
+  allowSocketpair?: boolean;
+  /** `false`: no Landlock ruleset even where Landlock works (`--no-landlock`); the user change, the capability steps and the seccomp filter still apply */
+  landlock?: false;
+  /**
+   * slots of `stdio` above 2 (such as 3, a pipe) that stay open for the program (`--keep-fd`); the launcher closes every other descriptor above 2.
+   * A slot that is not in `stdio`, or one of 0, 1 and 2, is an error.
+   */
+  keepStdio?: number[];
   /**
    * start the program in this directory, given as an open descriptor of this process (the launcher does `fchdir` on it, after every
    * descriptor is in place: a `/proc/self/fd/N` working folder can name the wrong descriptor). Use this, not `cwd`, for a pinned folder.
@@ -200,6 +220,8 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
 
 /** Most roots (folders and files the program may use) one start can carry; the launcher's own limit. More is an error, never a silent cut. */
 export const MAX_ROOTS = 4096;
+/** Most supplementary groups one start can carry; the launcher's own limit. */
+export const MAX_GROUPS = 256;
 
 /** The launcher's exit statuses that mean the launcher failed and the program did NOT run (usage error, a step failed, Landlock unsupported). */
 export const isLauncherFailure = (code: number | null, stderrText: string): boolean => (code === 64 || code === 70 || code === 71) && /filedeck-sandbox:/.test(stderrText);
@@ -218,37 +240,56 @@ async function helperPath(info: SandboxInfo): Promise<string | null> {
  * If the launcher itself exits with `EXIT_LANDLOCK_UNSUPPORTED`, the program did not run: call `resetSandbox()` and treat it as unavailable.
  */
 export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxOpts = {}): Promise<ChildProcess> {
-  const { readOnly = [], readExec = [], readWrite = [], uid, gid, noSystem, allowSockets, keepCaps = [], allowMetadata, cwdFd, keepFds = [], stdio, ...rest } = opts;
+  const { readOnly = [], readExec = [], readWrite = [], uid, gid, groups, chroot, allowSocketpair, landlock, keepStdio = [], noSystem, allowSockets, keepCaps = [], allowMetadata, cwdFd, keepFds = [], stdio, ...rest } = opts;
   const info = await sandboxInfo();
   if (info.state === "unavailable") throw sandboxRequiredError();
   if ((uid === 0 || gid === 0) && uid !== process.getuid?.()) throw new FsError(500, "refusing to run a confined program as root");
+  if (groups) {
+    if (groups.includes(0)) throw new FsError(500, "refusing to run a confined program as root");
+    if (uid === undefined || gid === undefined) throw new FsError(500, "supplementary groups need a uid and a gid");
+    if (groups.length > MAX_GROUPS || !groups.every((g) => Number.isInteger(g) && g > 0 && g <= 4294967294)) throw new FsError(500, `supplementary groups must be at most ${MAX_GROUPS} whole numbers from 1 to 4294967294`);
+  }
+  if (chroot !== undefined && cwdFd !== undefined) throw new FsError(500, "a chroot and a working folder descriptor do not go together");
   if (readOnly.length + readExec.length + readWrite.length > MAX_ROOTS) throw new FsError(500, `the sandbox was given ${readOnly.length + readExec.length + readWrite.length} folders and files to allow; the limit is ${MAX_ROOTS}`);
   const owner = uid !== undefined && gid !== undefined && uid !== process.getuid?.() ? { uid, gid } : null;
   const std: SpawnOptions["stdio"] = stdio ?? ["ignore", "pipe", "pipe"];
   const fds: unknown[] = Array.isArray(std) ? [...std] : [std, std, std];
   while (fds.length < 3) fds.push("ignore");
+  if (!keepStdio.every((n) => Number.isInteger(n) && n >= 3 && n < fds.length)) throw new FsError(500, `keepStdio names a slot that is not in stdio above 2: ${keepStdio.join(", ")}`);
+  // the flags of the new options, the same in both branches (none of them when they are not given, so the other options' flags are unchanged)
+  const extra: string[] = [];
+  if (owner && groups) extra.push("--groups", groups.join(","));
+  if (chroot !== undefined) extra.push("--chroot", chroot);
+  if (allowSocketpair) extra.push("--allow-socketpair");
   const addFd = (fd: number): number => (fds.push(fd), fds.length - 1);
   const kept = keepFds.map(addFd); // first, so the first is descriptor 3 whatever else follows
   // No Landlock rules (state off or fallback): the privilege drop and the working folder still must not depend on the mode, so the
-  // launcher, when there is one, runs `--no-landlock` with them (it also clears the supplementary groups, which spawn's uid option does not).
+  // launcher, when there is one, runs `--no-landlock` with them (it also clears the supplementary groups, or sets `groups`, which spawn's uid option does not).
   if (info.state === "off" || info.state === "fallback") {
-    const helper = owner || cwdFd !== undefined || keepCaps.length ? await helperPath(info) : null;
+    const helper = owner || cwdFd !== undefined || keepCaps.length || chroot !== undefined ? await helperPath(info) : null;
     if (helper) {
       const flags = ["--no-landlock"];
       for (const k of kept) flags.push("--keep-fd", String(k));
+      for (const n of keepStdio) flags.push("--keep-fd", String(n));
       if (owner) flags.push("--uid", String(owner.uid), "--gid", String(owner.gid));
       if (cwdFd !== undefined) flags.push("--cwd-fd", String(addFd(cwdFd)));
       for (const c of keepCaps) flags.push("--keep-cap", c);
       if (allowMetadata) flags.push("--allow-metadata");
+      if (allowSockets) flags.push("--allow-sockets");
+      flags.push(...extra);
       return spawn(helper, [...flags, "--", cmd, ...args], { ...rest, stdio: fds as SpawnOptions["stdio"] });
     }
+    // a new root or supplementary groups cannot be set without the launcher: refuse rather than run the program somewhere else or with other groups
+    if (chroot !== undefined) throw new FsError(500, "a chroot needs the sandbox launcher, which is not installed here");
+    if (owner && groups) throw new FsError(500, "supplementary groups need the sandbox launcher, which is not installed here");
     // no launcher (a development start without the helper): the folder by its current path, and the drop by spawn's own uid and gid (Node/libuv
     // clears the supplementary groups itself when a gid is given; the root-only test in sandbox.test.ts checks `id -G`); the kept descriptors are inherited as they are
     const cwd = cwdFd !== undefined ? await fs.readlink(`/proc/self/fd/${cwdFd}`).catch(() => rest.cwd) : rest.cwd;
     return spawn(cmd, args, { ...rest, ...(cwd !== undefined ? { cwd } : {}), stdio: kept.length ? (fds as SpawnOptions["stdio"]) : std, ...(owner && !keepCaps.length ? owner : {}) }); // a capability cannot be handed on without the launcher: the tool then stays the agent's own user
   }
-  const flags: string[] = [];
+  const flags: string[] = landlock === false ? ["--no-landlock"] : [];
   for (const k of kept) flags.push("--keep-fd", String(k));
+  for (const n of keepStdio) flags.push("--keep-fd", String(n));
   const add = (flag: string, roots: Root[]) => {
     for (const r of roots) {
       if (typeof r === "number") flags.push(flag, `fd:${addFd(r)}`);
@@ -264,6 +305,7 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
   for (const c of keepCaps) flags.push("--keep-cap", c);
   if (allowMetadata) flags.push("--allow-metadata");
   if (owner) flags.push("--uid", String(owner.uid), "--gid", String(owner.gid));
+  flags.push(...extra);
   return spawn(info.helper!, [...flags, "--", cmd, ...args], { ...rest, stdio: fds as SpawnOptions["stdio"] });
 }
 

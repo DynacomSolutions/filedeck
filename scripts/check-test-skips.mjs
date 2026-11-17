@@ -23,6 +23,8 @@ const allowed = [
   /^helper cannot run here: .+$/,
   // server/test/{sandbox,git-sandbox,archive-sandbox}.test.ts: the tests that need root skip in the unprivileged pass; the root pass runs them.
   /^(?:git )?sandbox live: skipped \(not running as root\)$/,
+  // the worker tests (sign-in part 2) that need root to start a worker as another user skip in the unprivileged pass; the root pass runs them.
+  /^worker live: skipped \(not running as root\)$/,
   // server/test/sandbox.test.ts: the x32 system call tests exist only on x86-64, and only where the kernel has x32 calls enabled.
   /^sandbox live: skipped \(x32 calls exist on x86-64 only\)$/,
   /^sandbox live: skipped \(this kernel has x32 calls disabled(?:: .*)?\)$/,

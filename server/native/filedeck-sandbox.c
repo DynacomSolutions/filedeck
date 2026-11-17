@@ -2,12 +2,16 @@
  * filedeck-sandbox: run a command with access to the listed folders only.
  *
  *   filedeck-sandbox --probe
- *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]
+ *   filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N | --chroot DIR] [--keep-fd N]... [--uid N --gid N [--groups G1,G2,...] [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets | --allow-socketpair] -- COMMAND [ARG...]
  *
  *   --cwd-fd N  start COMMAND in the directory descriptor N (fchdir, done after every descriptor is in place and before the user
  *               change and the restriction). A working folder given as a /proc/self/fd path can point at the wrong descriptor, because
  *               the caller's spawn moves descriptors into the slots 3, 4, ... first; this option names the folder by the number it has
  *               in this process, which is exact.
+ *   --chroot DIR  change the root directory to DIR (chroot, then chdir to the new /), after the roots are opened and before the
+ *               capability steps; COMMAND is then looked up inside DIR. Not together with --cwd-fd. It needs the chroot capability
+ *               (exit 71 without it). The Landlock rules stay attached to what was opened outside DIR, so a program that runs inside
+ *               DIR with Landlock on sees only what those rules name; the callers that chroot run with --no-landlock.
  *   --keep-fd N keep descriptor N open for COMMAND (repeatable): for a descriptor the caller means the command to use, such as an
  *               archive opened read-only, which it then reads as a file descriptor in every mode. Every other descriptor above 2 is
  *               closed on exec. Landlock does not restrict a descriptor that is already open: hand over only what COMMAND should use.
@@ -26,8 +30,10 @@
  *               case, also when COMMAND runs as uid 0: the permitted, effective, inheritable and ambient sets are cleared (and checked) and
  *               the bounding set is emptied when this process may; no-new-privileges keeps an exec from raising the permitted set again. The caller must hold a capability to keep it, else the helper fails.
  *   --allow-metadata  do not refuse the calls that change modes, owners, times and extended attributes (see the seccomp note below).
- * Before it executes COMMAND the helper drops to --uid/--gid with the supplementary groups cleared (when given; both must be
- * whole non-negative numbers, and 0 is refused unless --allow-root-user is also given), sets no-new-privileges and applies a
+ *   --groups G1,G2,...  the supplementary groups for the user change (decimal group ids separated by commas, at most 256; needs
+ *               --uid and --gid). Without it the supplementary groups are cleared.
+ * Before it executes COMMAND the helper drops to --uid/--gid with the supplementary groups set to --groups, or cleared (when given;
+ * every id must be a whole non-negative number, and 0, also among the groups, is refused unless --allow-root-user is also given), sets no-new-privileges and applies a
  * Landlock ruleset (Linux 5.13 or newer) that handles EVERY right the running kernel offers, so what is not allowed above is denied:
  *   ABI 1  file system: execute, read file, read directory, write file, remove file/dir, create any kind of entry
  *   ABI 2  + linking or renaming across directories (refer)
@@ -47,7 +53,7 @@
  * apply). --probe only reports whether Landlock can be used here and which rights it handles. No dependencies;
  * build: cc -O2 -static -o filedeck-sandbox filedeck-sandbox.c
  *
- * Order of the steps: open the roots, fchdir, bounding set, supplementary groups/gid/uid (keeping the named capabilities across the change),
+ * Order of the steps: open the roots, fchdir or chroot, bounding set, supplementary groups/gid/uid (keeping the named capabilities across the change),
  * capability sets and ambient set, no-new-privileges, close descriptors, seccomp filter, Landlock, exec. --probe also reports `caps 1` when
  * the capability steps work here. Exit status: 0 for --probe: Landlock works; 70 Landlock is not available (old kernel, not enabled in the kernel's list
  * of security modules, or blocked by a seccomp profile): COMMAND was NOT run; 64 usage error; 71 a step failed (message on
@@ -64,6 +70,7 @@
 #include <dirent.h>
 #include <stddef.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -186,6 +193,28 @@ static int parse_id(const char *text, long *out) {
   long v = strtol(text, &end, 10);
   if (errno || end == text || *end || v < 0 || v > 4294967294L || text[0] == '+' || text[0] == ' ') return -1;
   *out = v;
+  return 0;
+}
+
+/* --groups: a list of whole non-negative decimal ids separated by commas, each read by parse_id; no empty item, at most MAX_GROUPS */
+#define MAX_GROUPS 256
+static int parse_groups(const char *text, gid_t *out, int *count) {
+  int n = 0;
+  const char *p = text;
+  for (;;) {
+    const char *comma = strchr(p, ',');
+    size_t len = comma ? (size_t)(comma - p) : strlen(p);
+    char item[16];
+    long v;
+    if (len == 0 || len >= sizeof item || n >= MAX_GROUPS) return -1;
+    memcpy(item, p, len);
+    item[len] = 0;
+    if (parse_id(item, &v) < 0) return -1;
+    out[n++] = (gid_t)v;
+    if (!comma) break;
+    p = comma + 1;
+  }
+  *count = n;
   return 0;
 }
 
@@ -323,6 +352,9 @@ static int caps_work(void) {
  *  - sockets (unless --allow-sockets): socket(), socketpair(), connect(), bind(), listen(), accept() and accept4() fail with EACCES, and so does
  *    io_uring (which can do the same without those calls). A program that is meant to talk to nobody (git, bsdtar, 7-Zip) needs none of them:
  *    it uses the descriptors it was given. Name lookups degrade to numeric ids (the lookup's socket() fails, then it reads /etc/passwd).
+ *    --allow-socketpair lets socketpair() through when its first argument (the family) is AF_UNIX, and only then: a program that starts
+ *    its own children (Node makes their stdio pipes with a unix socket pair) needs it. A pair is not connected to anything outside the
+ *    process. Every other socket call is still refused. With --allow-sockets it changes nothing.
  *  - always: mount and the new mount API, umount2, pivot_root, chroot, the setuid/setgid family, capset, ptrace, process_vm_readv/writev,
  *    kexec, bpf, unshare, setns, mknod/mknodat fail with EPERM; clone3 fails with ENOSYS (as container runtimes do, so the C library falls back
  *    to clone), and clone with a new-namespace flag fails with EPERM.
@@ -343,13 +375,17 @@ static int caps_work(void) {
 
 #ifdef SB_ARCH
 #define MAXD 128
-static int build_filter(struct sock_filter *f, int allow_sockets, int allow_metadata) {
+static int build_filter(struct sock_filter *f, int allow_sockets, int allow_socketpair, int allow_metadata) {
+  /* socketpair(AF_UNIX) only: socketpair leaves the list and gets its own test on the family below */
+  int pair_unix = !allow_sockets && allow_socketpair;
   long sock[MAXD], always[MAXD], meta[MAXD];
   int ns = 0, na = 0, nm = 0;
 #define S(nr) sock[ns++] = (nr)
 #define A(nr) always[na++] = (nr)
 #define M(nr) meta[nm++] = (nr)
-  S(__NR_socket); S(__NR_socketpair); S(__NR_connect); S(__NR_bind); S(__NR_listen); S(__NR_accept); S(__NR_accept4);
+  S(__NR_socket);
+  if (!pair_unix) S(__NR_socketpair);
+  S(__NR_connect); S(__NR_bind); S(__NR_listen); S(__NR_accept); S(__NR_accept4);
 #ifdef __NR_io_uring_setup
   S(__NR_io_uring_setup); S(__NR_io_uring_enter); S(__NR_io_uring_register);
 #endif
@@ -400,11 +436,12 @@ static int build_filter(struct sock_filter *f, int allow_sockets, int allow_meta
   f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, SB_NR_LIMIT, 0, 1); /* x32 (and any other out-of-range) numbers */
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
 #endif
-  /* tail layout, after the n list entries:  clone3 test, clone test (3 instructions), allow, EPERM-or-EACCES, ENOSYS */
+  /* tail layout, after the n list entries:  clone3 test, socketpair test (3 instructions, with pair_unix only), clone test (3 instructions),
+   * allow, EPERM, EACCES, ENOSYS */
   /* a list entry at index e jumps to the EPERM return; sockets use EACCES as before, so they get their own return */
   int first = k;
   int tail = first + n;          /* clone3 test */
-  int t_allow = tail + 1 + 3;    /* after the clone test */
+  int t_allow = tail + 1 + (pair_unix ? 3 : 0) + 3; /* after the socketpair and clone tests */
   int t_eperm = t_allow + 1;
   int t_eacces = t_eperm + 1;
   int t_enosys = t_eacces + 1;
@@ -417,6 +454,14 @@ static int build_filter(struct sock_filter *f, int allow_sockets, int allow_meta
   }
   f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone3, (uint8_t)(t_enosys - k - 1), 0);
   k++;
+  if (pair_unix) {
+    /* not socketpair: skip the load and the family test, onto the clone test. The family is an int: the kernel reads the low 32 bits of
+     * the argument, which is the word at args[0] on these little-endian architectures (as for the clone flags below). */
+    f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_socketpair, 0, 2);
+    f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
+    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, (uint8_t)(t_allow - k - 1), (uint8_t)(t_eacces - k - 1));
+    k++;
+  }
   f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone, 0, 2); /* not clone: skip the load and the flag test, onto ALLOW (a jump of 2 from here lands two after the next instruction) */
   f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
   f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, SB_NS_FLAGS, (uint8_t)(t_eperm - k - 1), 0);
@@ -425,18 +470,24 @@ static int build_filter(struct sock_filter *f, int allow_sockets, int allow_meta
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES);
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS);
+  if (k != t_enosys + 1) return -1; /* the layout above and the jump targets disagree: install nothing rather than a wrong filter */
   return k;
 }
 #endif
 
-static int install_filter(int allow_sockets, int allow_metadata) {
+static int install_filter(int allow_sockets, int allow_socketpair, int allow_metadata) {
 #ifdef SB_ARCH
   struct sock_filter f[3 * MAXD + 24];
-  int n = build_filter(f, allow_sockets, allow_metadata);
+  int n = build_filter(f, allow_sockets, allow_socketpair, allow_metadata);
+  if (n < 0) {
+    errno = EFAULT;
+    return -1;
+  }
   struct sock_fprog prog = {.len = (unsigned short)n, .filter = f};
   return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
 #else
   (void)allow_sockets;
+  (void)allow_socketpair;
   (void)allow_metadata;
   errno = ENOSYS;
   return -1;
@@ -450,7 +501,7 @@ static int seccomp_works(void) {
   if (pid < 0) return 0;
   if (pid == 0) {
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) _exit(1);
-    _exit(install_filter(0, 0) == 0 ? 0 : 1);
+    _exit(install_filter(0, 0, 0) == 0 ? 0 : 1);
   }
   int st = 0;
   if (waitpid(pid, &st, 0) < 0) return 0;
@@ -519,7 +570,10 @@ int main(int argc, char **argv) {
   struct root_spec roots[MAX_ROOTS];
   int nroots = 0;
   long uid = -1, gid = -1, cwd_fd = -1;
-  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, allow_sockets = 0, allow_metadata = 0, i = 1;
+  int no_landlock = 0, no_system = 0, do_probe = 0, allow_root_user = 0, allow_sockets = 0, allow_socketpair = 0, allow_metadata = 0, i = 1;
+  gid_t groups[MAX_GROUPS];
+  int ngroups = -1; /* -1: --groups not given, the supplementary groups are cleared */
+  const char *chroot_dir = NULL;
   uint64_t keep_caps = 0;
   const uint64_t R = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
   const uint64_t RX = R | LANDLOCK_ACCESS_FS_EXECUTE;
@@ -542,6 +596,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--no-landlock")) no_landlock = 1;
     else if (!strcmp(argv[i], "--no-system")) no_system = 1;
     else if (!strcmp(argv[i], "--allow-sockets")) allow_sockets = 1;
+    else if (!strcmp(argv[i], "--allow-socketpair")) allow_socketpair = 1;
     else if (!strcmp(argv[i], "--allow-metadata")) allow_metadata = 1;
     else if (!strcmp(argv[i], "--keep-cap") && i + 1 < argc) {
       if (!strcmp(argv[++i], "dac_read_search")) keep_caps |= 1ULL << CAP_BIT_DAC_READ_SEARCH;
@@ -582,6 +637,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "filedeck-sandbox: --gid needs a whole non-negative number\n");
         return EXIT_USAGE;
       }
+    } else if (!strcmp(argv[i], "--groups") && i + 1 < argc) {
+      if (ngroups >= 0 || parse_groups(argv[++i], groups, &ngroups) < 0) {
+        fprintf(stderr, "filedeck-sandbox: --groups needs whole non-negative numbers separated by commas (at most %d of them, given once)\n", MAX_GROUPS);
+        return EXIT_USAGE;
+      }
+    } else if (!strcmp(argv[i], "--chroot") && i + 1 < argc) {
+      if (chroot_dir) {
+        fprintf(stderr, "filedeck-sandbox: --chroot given twice\n");
+        return EXIT_USAGE;
+      }
+      chroot_dir = argv[++i];
     } else if (!strcmp(argv[i], "--allow-root-user")) allow_root_user = 1;
     else {
       fprintf(stderr, "filedeck-sandbox: unknown option %s\n", argv[i]);
@@ -602,7 +668,7 @@ int main(int argc, char **argv) {
     return r;
   }
   if (i >= argc) {
-    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N] [--keep-fd N]... [--uid N --gid N [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets] -- COMMAND [ARG...]\n");
+    fprintf(stderr, "usage: filedeck-sandbox [--ro ROOT]... [--rx ROOT]... [--rw ROOT]... [--cwd-fd N | --chroot DIR] [--keep-fd N]... [--uid N --gid N [--groups G1,G2,...] [--allow-root-user]] [--keep-cap NAME]... [--allow-metadata] [--no-system] [--no-landlock] [--allow-sockets | --allow-socketpair] -- COMMAND [ARG...]\n");
     return EXIT_USAGE;
   }
   if ((uid == 0 || gid == 0) && !allow_root_user) {
@@ -611,6 +677,19 @@ int main(int argc, char **argv) {
   }
   if ((uid >= 0) != (gid >= 0)) {
     fprintf(stderr, "filedeck-sandbox: --uid and --gid go together\n");
+    return EXIT_USAGE;
+  }
+  if (ngroups >= 0 && uid < 0) {
+    fprintf(stderr, "filedeck-sandbox: --groups needs --uid and --gid\n");
+    return EXIT_USAGE;
+  }
+  for (int k = 0; k < ngroups; k++)
+    if (groups[k] == 0 && !allow_root_user) {
+      fprintf(stderr, "filedeck-sandbox: group 0 given in --groups: refused unless --allow-root-user says it is meant\n");
+      return EXIT_USAGE;
+    }
+  if (chroot_dir && cwd_fd >= 0) {
+    fprintf(stderr, "filedeck-sandbox: --chroot and --cwd-fd do not go together\n");
     return EXIT_USAGE;
   }
 
@@ -673,6 +752,11 @@ int main(int argc, char **argv) {
     fprintf(stderr, "filedeck-sandbox: working folder (descriptor %ld): %s\n", cwd_fd, strerror(errno));
     return EXIT_FAILED;
   }
+  /* the new root: after the roots are opened (outside it) and before the capability steps (chroot needs its capability) */
+  if (chroot_dir && (chroot(chroot_dir) < 0 || chdir("/") < 0)) {
+    fprintf(stderr, "filedeck-sandbox: chroot %s: %s\n", chroot_dir, strerror(errno));
+    return EXIT_FAILED;
+  }
   /* capabilities: none survive but the ones named. The bounding set first (a root process gets it back as capabilities at exec), while the
    * launcher still holds CAP_SETPCAP; a named capability must be held to be kept. */
   if (keep_caps) {
@@ -688,7 +772,7 @@ int main(int argc, char **argv) {
       fprintf(stderr, "filedeck-sandbox: keepcaps: %s\n", strerror(errno));
       return EXIT_FAILED;
     }
-    if (setgroups(0, NULL) < 0 || setgid((gid_t)gid) < 0 || setuid((uid_t)uid) < 0) {
+    if ((ngroups >= 0 ? setgroups((size_t)ngroups, groups) : setgroups(0, NULL)) < 0 || setgid((gid_t)gid) < 0 || setuid((uid_t)uid) < 0) {
       fprintf(stderr, "filedeck-sandbox: cannot change to uid %ld gid %ld: %s\n", uid, gid, strerror(errno));
       return EXIT_FAILED;
     }
@@ -721,7 +805,7 @@ int main(int argc, char **argv) {
    * Done before the ruleset is applied (the list of descriptors lives in /proc, which the ruleset hides). */
   mark_cloexec();
   /* the socket, privilege and metadata filter (see above) */
-  if (install_filter(allow_sockets, allow_metadata) < 0 && errno != ENOSYS && errno != EINVAL) {
+  if (install_filter(allow_sockets, allow_socketpair, allow_metadata) < 0 && errno != ENOSYS && errno != EINVAL) {
     fprintf(stderr, "filedeck-sandbox: seccomp: %s\n", strerror(errno));
     return EXIT_FAILED;
   }
