@@ -256,3 +256,10 @@ ETA: 2026-11-20 12:00 ICT
 | 152 | Release v0.3.39 with 19.146 to 19.148 | done | claude-20261116-release-v0339 | release-v0339 | 19.146, 19.147, 19.148, 19.151, 19.153 | | Released v0.3.39: https://github.com/DynacomSolutions/filedeck/pull/227 (6a6d685), release run green, stable moved<br>Local run on the branch: 240 web and 969 server tests pass, 0 failed, 0 cancelled |
 | 153 | The resumed-scan test waits for the lease without ending its own process early | done | claude-20261116-rv-postcheck | rv-scan-test-wait | | | Merged https://github.com/DynacomSolutions/filedeck/pull/228, CI green<br>Cause shown with a script: a process that only waits for the lease ends without it; the test now holds a timer of its own<br>Seen in two of four full local runs on a loaded machine; no product change |
 | 154 | Size jobs on a busy tree finish or answer partial sizes; small paths skip the long queue | todo | | | | | Seen 17 Nov 2026: `filedeck du -d 3` of a large busy tree stayed `queued, 0 entries` or passed `--timeout 3500`; a tiny path also timed out in the queue<br>Agent logged many fanotify overflow lines during builds (4.28, 4.30, 11.81, 11.94 are done, so new or a regression)<br>`--cached` answered `not stored yet` after a hub restart |
+
+## 20. Sign-in and per-user access
+Sign-in for system users (PAM, SSH key) and virtual accounts, with file work that runs as the signed-in person. Design: docs/superpowers/specs/2026-11-17-authentication-design.md
+ETA: 2026-11-17 22:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 156 | Design for sign-in and per-user access approved | review | claude-20261117-auth-design | auth-design | | 2026-11-17 22:00 ICT | Approach A (one worker per user on each agent) chosen<br>Decided: same name on every machine, the host's own PAM and NSS through a chroot helper, admins can switch on "act as root", no root sign-in<br>Waiting for approval of the written design |
