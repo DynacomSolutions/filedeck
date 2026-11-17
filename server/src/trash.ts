@@ -8,6 +8,7 @@ import { TRASH_DIR, TRASH_OWNER, resolveWrite, virtualJoin } from "./paths.ts";
 import { assertNotReserved, pinDirCreate, pinDirW, rmTree, walkGuard } from "./pinwalk.ts";
 import { runInFolderAs } from "./account-dirs.ts";
 import { renameNoReplace } from "./noreplace.ts";
+import { sandboxInfo } from "./sandbox.ts";
 import { trashScope } from "./trash-scope.ts";
 
 export { setTrashScope, type TrashScope } from "./trash-scope.ts";
@@ -110,21 +111,28 @@ async function ownedByAccount(dir: string, sub: string): Promise<boolean> {
 const notHere = () => new ops.FsError(409, "the item cannot be moved there in one step; restore it signed in as its account, or choose another folder");
 
 /**
- * Moves an account's item `from` to `to` with one rename that never replaces anything (no copy across mounts, also not across two
- * bind mounts of one filesystem, where `rename` gives EXDEV too).
+ * Moves an account's item `from` to `to` in one step that never replaces anything: the no-replace rename, or (without it) for a file a
+ * hard link, which fails when the name is taken, and then the removal of the old name. A folder without the no-replace rename, or a
+ * file that cannot be linked, is refused: a check followed by a plain rename could replace what appears in between. Never a copy (not
+ * across mounts, also not across two bind mounts of one filesystem, where `rename` gives EXDEV too).
  */
 async function renameOnly(from: string, to: string): Promise<void> {
   const r = await renameNoReplace(from, to);
   if (r === "done") return;
   if (r === "exists") throw new ops.FsError(409, "destination exists");
   if (r === "xdev") throw notHere();
-  if (await ops.exists(to)) throw new ops.FsError(409, "destination exists");
+  const unsafe = () => new ops.FsError(409, "cannot restore safely here (this machine cannot move a folder without the risk of replacing one)");
+  if ((await fs.lstat(from)).isDirectory()) throw unsafe();
   try {
-    await fs.rename(from, to);
+    await fs.link(from, to);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "EXDEV") throw notHere();
-    throw e;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") throw new ops.FsError(409, "destination exists");
+    if (code === "EXDEV") throw notHere();
+    throw unsafe();
   }
+  // (if the old name stays, the item's folder is removed as its owner next, with it)
+  await fs.unlink(from).catch(() => undefined);
 }
 
 /**
@@ -188,8 +196,20 @@ const OWNER_MS = 10 * 60_000;
 /** ids per removal run (the list goes on its command line) */
 const OWNER_BATCH = 1000;
 
+/**
+ * A virtual account's folder belongs to its runAs account, which may serve several virtual accounts: the script may run there only
+ * under Landlock (limited to that folder). Without it such a folder is left alone.
+ */
+export class NeedsSandbox extends ops.FsError {
+  constructor(dir: string) {
+    super(409, `${path.basename(dir)}: a virtual account's trash folder needs the sandbox (Landlock) to be changed here`);
+  }
+}
+const needsSandbox = async (dir: string) => path.basename(dir).startsWith("v-") && (await sandboxInfo()).state !== "landlock";
+
 /** Runs `OWNER_SCRIPT` as the owner of `dir` (an account's trash folder) and gives back what it printed. */
 async function asOwner(dir: string, args: string[]): Promise<unknown> {
+  if (await needsSandbox(dir)) throw new NeedsSandbox(dir);
   const st = await fs.lstat(dir);
   if (!st.isDirectory()) throw new Error(`${dir} is not a folder`);
   const r = await runInFolderAs(dir, st.uid, st.gid, OWNER_SCRIPT, args, { timeoutMs: OWNER_MS, maxOut: 256 << 20 });
@@ -435,11 +455,19 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
       const items: { id: string; deletedAt: number; disk: number; f: number }[] = [];
       const folders = [{ sub: "", dir }, ...(await ownerFolders(dir))];
       const account: boolean[] = [];
+      /** virtual accounts' folders left alone (no Landlock here) */
+      const skipped: string[] = [];
       for (const [k, f] of folders.entries()) {
         try {
           account[k] = await ownedByAccount(f.dir, f.sub);
           if (account[k]) {
             if (await isEmpty(f.dir)) continue; // (no process to start for an empty folder)
+            if (await needsSandbox(f.dir)) {
+              account[k] = false;
+              skipped.push(f.sub);
+              folders[k] = { sub: f.sub, dir: "" }; // (left out of the cap too)
+              continue;
+            }
             const sv = await surveyAs(f.dir, cap !== Infinity);
             r.failed += sv.failed;
             const old = sv.items.filter((i) => i.deletedAt <= cutoff).map((i) => i.id);
@@ -465,6 +493,7 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
           r.failed++;
         }
       }
+      if (skipped.length) console.error(JSON.stringify({ trashRetention: volume, skipped: skipped.join(" "), reason: "a virtual account's trash folder needs the sandbox (Landlock)" }));
       let total = items.reduce((t, i) => t + i.disk, 0);
       if (total > cap) {
         items.sort((a, b) => a.deletedAt - b.deletedAt);
@@ -477,7 +506,7 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
         }
         for (const [k, f] of folders.entries()) {
           const mine = doomed.filter((i) => i.f === k);
-          if (!mine.length) continue;
+          if (!mine.length || !f.dir) continue;
           if (account[k]) {
             const gone = new Set(await removeAs(f.dir, mine.map((i) => i.id)).catch(() => [] as string[]));
             for (const i of mine) if (gone.has(i.id)) (r.removed++, (r.freed += i.disk));
@@ -650,6 +679,7 @@ export async function deleteItems(root: string, volume: string, ids: unknown): P
       const dir = await itemFolder(base, x.sub);
       if (await ownedByAccount(dir, x.sub))
         await withItem(dir, x.id, async () => {
+          if (await needsSandbox(dir)) throw new NeedsSandbox(dir);
           if ((await removeAs(dir, [x.id])).length !== 1) throw new ops.FsError(500, "the item could not be removed");
         });
       else await removeItem(root, dir, x.id);
@@ -671,12 +701,17 @@ export async function emptyTrash(root: string, volume: string, olderThanDays?: n
   if (olderThanDays !== undefined && !(olderThanDays >= 0)) throw bad("olderThanDays must be >= 0");
   const sum = await emptyDir(root, base, cutoff);
   if (trashScope()) return sum;
+  const left: string[] = [];
   for (const f of await ownerFolders(base)) {
     try {
       if (!(await ownedByAccount(f.dir, f.sub))) {
         const e = await emptyDir(root, f.dir, cutoff);
         sum.removed += e.removed;
         sum.failed += e.failed;
+        continue;
+      }
+      if (await needsSandbox(f.dir)) {
+        left.push(f.sub);
         continue;
       }
       const old = (await surveyAs(f.dir, false)).items.filter((i) => cutoff === Infinity || i.deletedAt <= cutoff).map((i) => i.id);
@@ -687,6 +722,7 @@ export async function emptyTrash(root: string, volume: string, olderThanDays?: n
       sum.failed++;
     }
   }
+  if (left.length) throw new ops.FsError(409, `the rest was emptied (${sum.removed} removed); ${left.join(", ")} needs the sandbox (Landlock) to be emptied here`);
   return sum;
 }
 

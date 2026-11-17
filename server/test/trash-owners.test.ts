@@ -10,10 +10,12 @@ import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts"
 import { rootRequests } from "../src/agent-workers.ts";
 import { virtOwner } from "../src/account-dirs.ts";
 import * as ops from "../src/fsops.ts";
-import { applyRetention, deleteItems, listTrash, restoreItems } from "../src/trash.ts";
+import { applyRetention, deleteItems, emptyTrash, listTrash, restoreItems } from "../src/trash.ts";
+import { resetNoReplace } from "../src/noreplace.ts";
 import { TRASH_DIR, TRASH_OWNER } from "../src/paths.ts";
 import { withReadOnly, withoutReadOnly } from "../src/pinwalk.ts";
-import { sandboxInfo } from "../src/sandbox.ts";
+import { resetSandbox, sandboxInfo } from "../src/sandbox.ts";
+import { noRenameHelper } from "./noreplace-env.ts";
 import type { WorkerSpec } from "../src/worker-pool.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
 import { chownForTest, fakeResolver, privateTmpdir, testAccount } from "./worker-env.ts";
@@ -335,6 +337,67 @@ test("root view: an account's item whose rename crosses a mount stays in the tra
   } finally {
     spawnSync("umount", [bm]);
     fs.rmdirSync(bm);
+  }
+});
+
+test("root view: without the no-replace rename an account's folder is not restored (no check-then-rename), a file is linked", { skip: ROOT_ONLY }, async () => {
+  const prev = process.env.FILEDECK_RENAME_HELPER;
+  noRenameHelper();
+  try {
+    fs.mkdirSync(path.join(root, "a/fold"));
+    fs.writeFileSync(path.join(root, "a/fold/f"), "f\n");
+    fs.writeFileSync(path.join(root, "a/file1"), "file1\n");
+    chownForTest(path.join(root, "a/fold"));
+    chownForTest(path.join(root, "a/file1"));
+    const own = `u${me.uid}`;
+    const dirId = await trashIt("/a/fold", sys());
+    const fileId = await trashIt("/a/file1", sys());
+    const [d] = await withoutReadOnly(() => restoreItems(root, "/", [`${own}/${dirId}`], { toDir: "/a" }));
+    assert.equal(d!.ok, false);
+    assert.match(d!.error ?? "", /cannot restore safely here/);
+    assert.ok(fs.existsSync(path.join(trashOf(own), dirId, "data/f")));
+    assert.ok(!fs.existsSync(path.join(root, "a/fold")));
+    // a file: linked (refused when the name is taken), then the old name goes
+    fs.writeFileSync(path.join(root, "a/file1"), "someone else's\n");
+    const [taken] = await withoutReadOnly(() => restoreItems(root, "/", [`${own}/${fileId}`], { toDir: "/a", conflict: "rename" }));
+    assert.equal(taken!.ok, true, taken!.error);
+    assert.equal(fs.readFileSync(path.join(root, "a/file1"), "utf8"), "someone else's\n");
+    assert.equal(fs.readFileSync(path.join(root, taken!.path!), "utf8"), "file1\n");
+    assert.ok(!fs.existsSync(path.join(trashOf(own), fileId)));
+  } finally {
+    if (prev === undefined) delete process.env.FILEDECK_RENAME_HELPER;
+    else process.env.FILEDECK_RENAME_HELPER = prev;
+    resetNoReplace();
+  }
+});
+
+test("root view: without Landlock a virtual account's folder is left alone (sweep, delete, empty)", { skip: ROOT_ONLY || NEED }, async () => {
+  const g1 = virt("guest1", "/g1");
+  fs.writeFileSync(path.join(root, "g1/three"), "three\n");
+  chownForTest(path.join(root, "g1/three"));
+  const id = await trashIt("/g1/three", g1);
+  const meta = path.join(trashOf("v-guest1"), id, "meta.json");
+  fs.writeFileSync(meta, JSON.stringify({ ...JSON.parse(fs.readFileSync(meta, "utf8")), deletedAt: Date.now() - 30 * day }));
+  const prev = process.env.FILEDECK_SANDBOX;
+  process.env.FILEDECK_SANDBOX = "off";
+  resetSandbox();
+  const logged: string[] = [];
+  const err = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
+  try {
+    await withReadOnly(root, [], () => applyRetention(root, "", { maxAgeDays: 7, maxPercent: 0, maxBytes: 0 }));
+    assert.equal(logged.filter((l) => l.includes("v-guest1")).length, 1, logged.join("\n"));
+    assert.ok(fs.existsSync(path.join(trashOf("v-guest1"), id, "data")));
+    const [del] = await withoutReadOnly(() => deleteItems(root, "/", [`v-guest1/${id}`]));
+    assert.equal(del!.ok, false);
+    assert.match(del!.error ?? "", /needs the sandbox/);
+    await assert.rejects(withoutReadOnly(() => emptyTrash(root, "/")), (e: { status?: number; message: string }) => e.status === 409 && /needs the sandbox/.test(e.message));
+    assert.ok(fs.existsSync(path.join(trashOf("v-guest1"), id, "data")));
+  } finally {
+    console.error = err;
+    if (prev === undefined) delete process.env.FILEDECK_SANDBOX;
+    else process.env.FILEDECK_SANDBOX = prev;
+    resetSandbox();
   }
 });
 
