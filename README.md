@@ -1,6 +1,4 @@
-<p align="center"><img src="web/public/logo-wordmark.svg" alt="Filedeck" height="48"></p>
-
-<p align="center"><strong>One file manager for all your machines, in the browser.</strong></p>
+<p align="center"><img src="docs/images/banner.webp" alt="Filedeck: one file manager for all your machines" width="900"></p>
 
 <p align="center"><img src="docs/images/hero.webp" alt="Filedeck with two panels: holiday photos on a workstation and backups on a NAS" width="900"></p>
 
