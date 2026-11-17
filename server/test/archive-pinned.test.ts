@@ -358,7 +358,9 @@ test("on the fallback, a job that cannot fit fails at once and says what it need
   const big = path.join(s.root, "src/huge.bin");
   try {
     fs.closeSync(fs.openSync(big, "w"));
-    fs.truncateSync(big, 2 ** 42);
+    // Larger than the free space, so the job cannot fit on this machine either.
+    const st = fs.statfsSync(s.root);
+    fs.truncateSync(big, Math.max(2 ** 42, st.bavail * st.bsize * 2));
   } catch {
     fs.chmodSync(s.root, 0o755);
     return; // this filesystem cannot make a sparse file that large
