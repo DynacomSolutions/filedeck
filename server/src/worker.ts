@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentError, registerFileRoutes, registerWorkerRoutes } from "./agent-routes.ts";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
@@ -86,6 +87,27 @@ function unreachable(cfg: Config): void {
   }
 }
 
+/**
+ * Exits with one line unless the worker's TMPDIR (also its HOME) is its own folder, mode 0700, given by its real path (no link in any part):
+ * its archive staging and the tools it starts write there, so nobody else may change or replace it.
+ */
+function ownTmp(): void {
+  const t = process.env.TMPDIR ?? "";
+  let why = "";
+  try {
+    const st = fs.lstatSync(t);
+    if (!path.isAbsolute(t)) why = "not an absolute path";
+    else if (!st.isDirectory()) why = st.isSymbolicLink() ? "a link" : "not a folder";
+    else if (st.uid !== process.getuid?.() || (st.mode & 0o777) !== 0o700) why = `owner ${st.uid}, mode ${(st.mode & 0o7777).toString(8)}`;
+    else if (fs.realpathSync(t) !== t) why = "a link on its path";
+  } catch (e) {
+    why = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+  }
+  if (!why) return;
+  process.stderr.write(`worker: its temporary folder ${JSON.stringify(t)} is not its own 0700 folder (${why}); stopped\n`);
+  process.exit(1);
+}
+
 type Status = ConstructorParameters<typeof FsError>[0];
 const STATUSES = new Set<number>([400, 403, 404, 409, 500, 503]);
 
@@ -134,6 +156,7 @@ function fail(e: unknown): never {
 async function main(): Promise<void> {
   process.on("uncaughtException", fail);
   process.on("unhandledRejection", fail);
+  ownTmp();
   const sock = new net.Socket({ fd: 3, readable: true, writable: true });
   let app: Hono | undefined;
   const mux = new Mux(sock, "worker", {

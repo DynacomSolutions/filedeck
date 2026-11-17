@@ -55,6 +55,7 @@ function spec(key: string, cfgEnv: Record<string, string> = {}): WorkerSpec {
   const dir = path.join(state, key.replace(/[^a-z0-9]/gi, "_"));
   // the worker's own temporary folder (tsx keeps its cache there when the worker runs from source)
   fs.mkdirSync(path.join(dir, "tmp"), { recursive: true });
+  fs.chmodSync(path.join(dir, "tmp"), 0o700); // (a worker checks that its TMPDIR is its own 0700 folder)
   chownForTest(dir);
   const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", ...cfgEnv } as never);
   const init: WorkerInit = {
@@ -409,6 +410,24 @@ test("a start the sandbox rules refuse does not stop another worker", async () =
   }
   assert.equal(pidOf(p, "sys:keep"), pid);
   assert.ok(alive(pid));
+});
+
+test("a worker whose TMPDIR is not its own 0700 folder, or is a link, stops at start with one line", async () => {
+  const cases: [string, (dir: string) => string][] = [
+    ["mode", (dir) => (fs.chmodSync(path.join(dir, "tmp"), 0o755), path.join(dir, "tmp"))],
+    ["link", (dir) => (fs.symlinkSync(path.join(dir, "tmp"), path.join(dir, "tmplink")), path.join(dir, "tmplink"))],
+  ];
+  for (const [name, make] of cases) {
+    const s = spec(`sys:badtmp-${name}`);
+    const dir = path.dirname(s.tmp!);
+    const lines: string[] = [];
+    const p = pool({ log: (l) => lines.push(l) });
+    const res = await p.fetch({ ...s, tmp: make(dir) }, new Request("http://agent/api/fs/stat?path=/"));
+    assert.equal(res.status, 503, name);
+    assert.deepEqual(await res.json(), { error: "worker failed to start" });
+    assert.ok(lines.some((l) => /worker: its temporary folder .* is not its own/.test(l)), `${name}\n${lines.join("\n")}`);
+    assert.equal(p.list().length, 0);
+  }
 });
 
 test("settings: empty means the default, nonsense is refused", () => {

@@ -27,6 +27,7 @@ import {
   virtKeyDir,
   virtOwner,
   virtualTrashDirs,
+  workersParent,
   type AccountDirs,
   type Hook,
 } from "./account-dirs.ts";
@@ -299,7 +300,7 @@ export { UnsafeFolders };
 export interface WorkerSpecs {
   /** the `spec` of `workerGate` */
   spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
-  /** the workers' area of this agent */
+  /** the workers' area of this agent (empty when the temporary folder is refused: see `workersParent`) */
   base: string;
   /**
    * the pool's `onStopped`: once no process of the pool runs as the stopped worker's uid (`uidInUse`), that account's thumbnail cache is
@@ -333,11 +334,22 @@ export function makeWorkerSpecs(
 ): WorkerSpecs {
   const log = o.log ?? ((s) => console.error(s));
   // (an area left by an agent that was killed stays: it is root's and 0711, and removing it safely would need its accounts)
-  const base = fsc.mkdtempSync(path.join(os.tmpdir(), "filedeck-workers-"));
-  // held from here on: the temporary folder may let others rename the area and put a link in its place, so the area is only used through this
-  const areaFd = fsc.openSync(base, OPEN_DIR);
-  fsc.fchmodSync(areaFd, process.getuid?.() === 0 ? 0o711 : 0o700);
-  const area = inHeld({ fd: areaFd });
+  // The workers get their folders as paths below the temporary folder (as a real path, so a worker can check that its TMPDIR is no
+  // link): nobody else may rename the area there (`workersParent`), else no area is made and every start is refused.
+  let top = "";
+  let unsafe: string | null;
+  try {
+    top = fsc.realpathSync(os.tmpdir());
+    unsafe = workersParent(top, log);
+  } catch (e) {
+    unsafe = `workers are refused: the temporary folder ${os.tmpdir()}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`;
+    log(unsafe);
+  }
+  const base = unsafe ? "" : fsc.mkdtempSync(path.join(top, "filedeck-workers-"));
+  // held from here on: the area is only used through this (a second guard, should the area be renamed and a link put in its place)
+  const areaFd = unsafe ? -1 : fsc.openSync(base, OPEN_DIR);
+  if (!unsafe) fsc.fchmodSync(areaFd, process.getuid?.() === 0 ? 0o711 : 0o700);
+  const area = unsafe ? "" : inHeld({ fd: areaFd });
   // (as root: a cache folder on a volume made 0777 becomes 0755, so it can hold the accounts' folders)
   tightenTop(cfg.thumbDir, log);
   tightenTop(cfg.indexDir, log);
@@ -375,6 +387,7 @@ export function makeWorkerSpecs(
   };
   const spec = async (claim: UserClaim, account: LocalAccount): Promise<WorkerSpec> => {
     const key = workerKey(claim);
+    if (unsafe) throw new UnsafeFolders(unsafe);
     await sweep;
     await emptying.get(account.uid);
     const { id, p } = prepare(claim, account, key);
@@ -422,7 +435,8 @@ export function makeWorkerSpecs(
   };
   let closing: Promise<void> | undefined;
   const close = () =>
-    (closing ??= Promise.all([sweep, ...emptying.values()]).then(() => removeArea(base, log, o.onRootList, o.onEmpty, areaFd)).finally(() => {
+    (closing ??= Promise.all([sweep, ...emptying.values()]).then(() => (unsafe ? undefined : removeArea(base, log, o.onRootList, o.onEmpty, areaFd))).finally(() => {
+      if (unsafe) return;
       try {
         fsc.closeSync(areaFd);
       } catch {

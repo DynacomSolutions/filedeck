@@ -201,6 +201,41 @@ export function tightenTop(dir: string, log: (s: string) => void): void {
 }
 
 /**
+ * At agent start (sign-in on): the temporary folder `dir` (a real path) that holds the workers' area must not let anyone else rename the
+ * area or put another folder in its place. It must be root's (or this process's); when others may write to it (an empty volume such as the
+ * chart's `/tmp` is 0777) it must have the sticky bit, which is set here through a descriptor when the folder is this process's, with one
+ * log line. Null when the folder is fine (now); else why the workers are refused (logged once: every start then answers 503 "worker folders
+ * are not safe").
+ */
+export function workersParent(dir: string, log: (s: string) => void): string | null {
+  const me = myUid();
+  const refuse = (why: string) => {
+    const s = `workers are refused: ${why}; set TMPDIR to a folder of root's (with the sticky bit when others may write to it)`;
+    log(s);
+    return s;
+  };
+  let fd: number;
+  try {
+    fd = fsc.openSync(dir, OPEN_DIR);
+  } catch (e) {
+    return refuse(`the temporary folder ${dir} cannot be opened (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
+  }
+  try {
+    const st = fsc.fstatSync(fd);
+    const mode = st.mode & 0o7777;
+    const shown = `the temporary folder ${dir} has owner ${st.uid} and mode ${mode.toString(8)}`;
+    if (st.uid !== 0 && st.uid !== me) return refuse(`${shown}; its owner could move the workers' folders`);
+    if ((mode & 0o022) === 0 || mode & 0o1000) return null;
+    if (st.uid !== me) return refuse(`${shown}; others may move the workers' folders`);
+    fsc.fchmodSync(fd, mode | 0o1000);
+    log(`${dir} was mode ${mode.toString(8)} (others could move the workers' folders in it); made ${(mode | 0o1000).toString(8)} (sticky)`);
+    return null;
+  } finally {
+    fsc.closeSync(fd);
+  }
+}
+
+/**
  * `<top>/accounts/<name>`, the account's own (0700), made when missing. The parent is checked and held (`accountsParent`); the folder is made
  * and opened through it. A new folder is ours until it is handed over through its descriptor; an existing one must already be the account's
  * and not writable by group or others, and is never changed.

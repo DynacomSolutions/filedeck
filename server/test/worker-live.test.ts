@@ -32,6 +32,7 @@ test("a worker runs as its account, with its groups, no capabilities, no new pri
   const state = path.join(tmp, "state");
   fs.mkdirSync(state);
   fs.chownSync(state, 1234, 1234);
+  fs.chmodSync(state, 0o700); // (its TMPDIR: the worker checks that it is its own 0700 folder)
   const account = { name: "live", uid: 1234, gid: 1234, groups: [1234, 2345], home: state };
   const spec: WorkerSpec = {
     key: "sys:live",
@@ -156,5 +157,76 @@ test("a cache folder that is a shared folder (sticky, as /tmp) is never changed,
     assert.deepEqual(fs.readdirSync(shared), [], "nothing made in it");
   } finally {
     await specs.close();
+  }
+});
+
+test("a temporary folder open to everyone without the sticky bit gets it at start, and a worker's archive job works there", { skip: ROOT_ONLY }, async () => {
+  if (spawnSync("bsdtar", ["--version"], { stdio: "ignore" }).status !== 0) throw new Error("the root pass needs bsdtar");
+  if (fs.statSync("/").uid !== 0) throw new Error("the root pass needs a / that is root's (a user namespace needs a root folder of its own)");
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-worker-live-")));
+  temps.push(tmp);
+  fs.chmodSync(tmp, 0o755);
+  const root = path.join(tmp, "root");
+  fs.mkdirSync(path.join(root, "x"), { recursive: true });
+  fs.writeFileSync(path.join(root, "x/in.txt"), "packed\n");
+  fs.chmodSync(root, 0o755);
+  for (const p of [path.join(root, "x"), path.join(root, "x/in.txt")]) fs.chownSync(p, 1234, 1234);
+  // the chart's /tmp: an empty volume, root's and 0777 without the sticky bit
+  const open = path.join(tmp, "open");
+  fs.mkdirSync(open);
+  fs.chmodSync(open, 0o777);
+  const logs: string[] = [];
+  const old = process.env.TMPDIR;
+  process.env.TMPDIR = open;
+  let specs: ReturnType<typeof makeWorkerSpecs> | undefined;
+  const p = new WorkerPool({ max: 2, idleMs: 60_000, log: (l) => logs.push(l) });
+  try {
+    specs = makeWorkerSpecs(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never), { log: (l) => logs.push(l) });
+    assert.equal(fs.lstatSync(open).mode & 0o7777, 0o1777, "the sticky bit is set");
+    assert.ok(logs.some((l) => l.includes(open) && l.includes("sticky")), logs.join("\n"));
+    const account = { name: "live5", uid: 1234, gid: 1234, groups: [1234], home: "/nonexistent" };
+    const spec = await specs.spec({ kind: "sys", name: "live5", epoch: 1, iat: Date.now() }, account);
+    const r = await p.fetch(spec, new Request("http://agent/api/jobs/compress", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ dir: "/x", names: ["in.txt"], format: "zip", name: "out" }) }));
+    assert.equal(r.status, 202, `${await r.clone().text()}\n${logs.join("\n")}`);
+    const { id } = (await r.json()) as { id: string };
+    let job: { state?: string } = {};
+    for (let i = 0; i < 400 && !["done", "failed", "canceled"].includes(job.state ?? ""); i++) {
+      await new Promise((res) => setTimeout(res, 25));
+      job = (await (await p.fetch(spec, new Request(`http://agent/api/jobs/${id}`))).json()) as { state: string };
+    }
+    assert.equal(job.state, "done", `${JSON.stringify(job)}\n${logs.join("\n")}`);
+    assert.equal(fs.lstatSync(path.join(root, "x/out.zip")).uid, 1234);
+  } finally {
+    await p.close();
+    await specs?.close();
+    if (old === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = old;
+  }
+});
+
+test("a temporary folder that others can change and that is not root's: workers are refused", { skip: ROOT_ONLY }, async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-worker-live-")));
+  temps.push(tmp);
+  fs.chmodSync(tmp, 0o755);
+  const theirs = path.join(tmp, "theirs");
+  fs.mkdirSync(theirs);
+  fs.chownSync(theirs, 4242, 4242);
+  fs.chmodSync(theirs, 0o1777);
+  const logs: string[] = [];
+  const old = process.env.TMPDIR;
+  process.env.TMPDIR = theirs;
+  try {
+    const specs = makeWorkerSpecs(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never), { log: (l) => logs.push(l) });
+    try {
+      assert.ok(logs.some((l) => l.includes(theirs) && l.includes("refused")), logs.join("\n"));
+      assert.deepEqual(fs.readdirSync(theirs), [], "no area made there");
+      const account = { name: "live6", uid: 1234, gid: 1234, groups: [1234], home: "/nonexistent" };
+      await assert.rejects(specs.spec({ kind: "sys", name: "live6", epoch: 1, iat: Date.now() }, account), { name: "UnsafeFolders" });
+    } finally {
+      await specs.close();
+    }
+  } finally {
+    if (old === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = old;
   }
 });
