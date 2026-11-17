@@ -5,6 +5,11 @@ import { claimFor, signClaim, verifyClaim, USER_HEADER, type Identity, type User
 import type { Config } from "./config.ts";
 import { auditRefusal, type AuditSink } from "./audit.ts";
 
+/** The two paths that need no credentials and name nobody: the liveness probe and the metrics scrape (a query string is allowed). The hub and the agents use this one test. */
+export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)/.test(pathAndQuery);
+
+const digest = (s: string) => createHash("sha256").update(s).digest();
+
 /**
  * Optional shared secret between the hub and the agents (FILEDECK_AGENT_TOKEN
  * on both). When set, an agent answers 401 to every request that does not
@@ -13,11 +18,6 @@ import { auditRefusal, type AuditSink } from "./audit.ts";
  * nothing that names a path, a node or a size may be added to it). It sits behind the NetworkPolicy as a second layer: a pod
  * that is allowed to reach an agent still cannot use it without the secret.
  */
-/** The two paths that need no credentials and name nobody: the liveness probe and the metrics scrape (a query string is allowed). The hub and the agents use this one test. */
-export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)/.test(pathAndQuery);
-
-const digest = (s: string) => createHash("sha256").update(s).digest();
-
 export function agentAuth(token: string | undefined): MiddlewareHandler {
   if (!token) return (_c, next) => next();
   const want = digest(token);
