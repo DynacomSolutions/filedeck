@@ -1052,11 +1052,13 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 .signin-err{margin:0;color:var(--accent-text);font-size:.82rem;font-weight:500;overflow-wrap:anywhere}
 .signin-err:empty{display:none}
 /* act as root: the editor banner look, as a pill in the header, kept to one line */
-.site-header .asroot-banner{flex:none;flex-wrap:nowrap;gap:.5rem;padding:.15rem .2rem .15rem .6rem;border:1px solid var(--accent-line);border-radius:var(--radius-btn);white-space:nowrap}
+.site-header .asroot-banner{flex:0 1 auto;min-width:0;flex-wrap:nowrap;gap:.5rem;padding:.15rem .2rem .15rem .6rem;border:1px solid var(--accent-line);border-radius:var(--radius-btn);white-space:nowrap}
 .asroot-banner button{gap:var(--btn-gap)}
+.asroot-err{white-space:normal;min-width:10rem;max-width:16rem;font-size:.74rem;line-height:1.2;font-weight:600;color:var(--accent-text)}
 /* a phone header has no room beside the actions: the banner takes a row of its own under them */
 @media(max-width:700px),(max-height:500px) and (max-width:1000px){
   .site-header__inner:has(>.asroot-banner){height:auto;flex-wrap:wrap;row-gap:.3rem;padding-block:.2rem .4rem}
   .site-header__inner:has(>.asroot-banner)>:not(.asroot-banner){min-height:36px}
-  .site-header .asroot-banner{order:1;flex:1 1 100%;justify-content:space-between;min-width:0}
+  .site-header .asroot-banner{order:1;flex:1 1 100%;flex-wrap:wrap;justify-content:space-between;min-width:0}
+  .asroot-err{flex:1 1 100%;max-width:none}
 }

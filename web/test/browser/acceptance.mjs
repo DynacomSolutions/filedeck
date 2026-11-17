@@ -95,22 +95,24 @@ async function installFixture(page, opts = {}) {
     // the act-as-root switch; a POST with the password 'fixture-root-password' turns it on for 15 minutes, DELETE turns it off.
     if (opts.asRoot && pathname === '/api/auth/as-root') {
       if (req.method() === 'DELETE') {
-        opts.asRoot.until = undefined;
         opts.asRoot.stopped = (opts.asRoot.stopped ?? 0) + 1;
+        if (opts.asRoot.failStop) return json({ error: 'internal error' }, 500);
+        opts.asRoot.until = undefined;
         return json({ ok: true });
       }
       const b = JSON.parse(req.postData() || '{}');
       opts.asRoot.bodies = [...(opts.asRoot.bodies ?? []), Object.keys(b).sort().join(',')];
       if (b.password !== 'fixture-root-password') return json({ error: 'sign-in failed' }, 401);
-      opts.asRoot.until = Date.now() + (opts.asRoot.lasts ?? 15 * 60_000);
-      return json({ asRootUntil: opts.asRoot.until });
+      const lasts = opts.asRoot.lasts ?? 15 * 60_000;
+      opts.asRoot.until = Date.now() + lasts;
+      return json({ asRootUntil: opts.asRoot.until, asRootLeftMs: lasts });
     }
     if (pathname === '/api/auth/me') {
       if (opts.account) {
         const kind = opts.kind ?? 'virt';
         const until = opts.asRoot?.until;
         opts.meCalls = (opts.meCalls ?? 0) + 1;
-        return json({ auth: true, kind, name: opts.account, admin: opts.admin === true, ...(until !== undefined && until > Date.now() ? { asRootUntil: until } : {}) });
+        return json({ auth: true, kind, name: opts.account, admin: opts.admin === true, ...(until !== undefined && until > Date.now() ? { asRootUntil: until, asRootLeftMs: until - Date.now() } : {}) });
       }
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
@@ -224,7 +226,8 @@ async function expectText(page, text) {
 let currentCheck = 'check';
 let pendingShots = [];
 
-async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {} } = {}) {
+// clockOffsetMs: the page's Date runs that far ahead of the fake hub's clock (timers are untouched).
+async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {}, clockOffsetMs = 0 } = {}) {
   // bypassCSP only lets the harness inject axe-core into the page; the app's own scripts are unaffected.
   const context = await browser.newContext({ viewport, colorScheme, bypassCSP: true });
   const page = await context.newPage();
@@ -244,6 +247,16 @@ async function openPage(browser, { viewport = { width: 1365, height: 900 }, colo
     if (new URL(response.url()).pathname.includes('/api/git/')) diagnostics.push({ type: 'git-response', status: response.status(), url: response.url() });
   });
   await page.addInitScript((mode) => localStorage.setItem('filedeck-theme', mode), colorScheme);
+  if (clockOffsetMs) {
+    await page.addInitScript((off) => {
+      const Real = Date;
+      const now = () => Real.now() + off;
+      globalThis.Date = class extends Real {
+        constructor(...a) { if (a.length) super(...a); else super(now()); }
+        static now() { return now(); }
+      };
+    }, clockOffsetMs);
+  }
   await installFixture(page, fixture);
   await page.goto(new URL(state, baseURL).toString(), { waitUntil: 'domcontentloaded' });
   await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
@@ -1561,8 +1574,8 @@ async function verifySignIn(browser) {
   assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
 }
 
-// Act as root (a system administrator only): the "Act as root…" item opens a dialog with the sign-in fields; while the switch is
-// on the header shows "Acting as root until HH:MM" with Stop. Banner and open dialog pass axe in light and dark and fit at 390x844
+// Act as root (a system administrator only): the "Act as root…" item opens a dialog with the sign-in fields; while the hub
+// reports the switch the header shows "Acting as root until HH:MM" (local end from the hub's time left) with Stop. Banner and open dialog pass axe in light and dark and fit at 390x844
 // and 320x568; the password is cleared after a failed attempt and is never stored. Stop and the end time hide the banner and
 // ask the hub again. Non-admins and virtual accounts never see the item or the banner.
 async function verifyActAsRoot(browser) {
@@ -1590,9 +1603,9 @@ async function verifyActAsRoot(browser) {
       page0 = page;
       const label = `${viewport.width}x${viewport.height} ${scheme}`;
       try {
-        const banner = page.getByRole('status').filter({ hasText: 'Acting as root until' });
+        const banner = page.locator('.asroot-banner');
         await banner.waitFor({ state: 'visible', timeout: 8000 });
-        assert.equal((await banner.innerText()).replace(/\s+/g, ' ').trim(), `Acting as root until ${await hhmm(asRoot.until)} Stop`, `the banner names the end time (${label})`);
+        assert.equal((await banner.getByRole('status').innerText()).trim(), `Acting as root until ${await hhmm(asRoot.until)}`, `the banner names the end time (${label})`);
         await page.waitForTimeout(150);
         await overflow(page, `banner ${label}`);
         await runAxe(page, `act as root banner ${label}`, failures);
@@ -1625,7 +1638,7 @@ async function verifyActAsRoot(browser) {
     const { context, page } = await openPage(browser, { state: directState(), fixture });
     page0 = page;
     try {
-      const banner = page.getByRole('status').filter({ hasText: 'Acting as root until' });
+      const banner = page.locator('.asroot-banner');
       await banner.waitFor({ state: 'visible', timeout: 8000 });
       const before = fixture.meCalls;
       await banner.getByRole('button', { name: 'Stop' }).click();
@@ -1655,7 +1668,7 @@ async function verifyActAsRoot(browser) {
     const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
     const { context, page } = await openPage(browser, { state: directState(), fixture });
     try {
-      const banner = page.getByRole('status').filter({ hasText: 'Acting as root until' });
+      const banner = page.locator('.asroot-banner');
       const dialog = await openDialog(page);
       await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
       await dialog.getByRole('button', { name: 'Act as root' }).click();
@@ -1667,6 +1680,53 @@ async function verifyActAsRoot(browser) {
       await context.close();
     }
   }
+  // A browser clock 20 minutes ahead of the hub: the hub's time left decides. The banner shows, names the local end, and
+  // a switch with 3 seconds left by the hub's clock hides about 3 seconds later by the browser's timers.
+  {
+    const skew = 20 * 60_000;
+    const asRoot = { until: Date.now() + 10 * 60_000, lasts: 3000 };
+    const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
+    const { context, page } = await openPage(browser, { state: directState(), fixture, clockOffsetMs: skew });
+    page0 = page;
+    try {
+      const banner = page.locator('.asroot-banner');
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      assert.equal((await banner.getByRole('status').innerText()).trim(), `Acting as root until ${await hhmm(asRoot.until + skew)}`, 'a skewed browser names the end by its own clock');
+      await banner.getByRole('button', { name: 'Stop' }).click();
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      const dialog = await openDialog(page);
+      await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
+      await dialog.getByRole('button', { name: 'Act as root' }).click();
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      const shown = Date.now();
+      await banner.waitFor({ state: 'hidden', timeout: 10000 });
+      const after = Date.now() - shown;
+      assert.ok(after > 1500 && after < 6000, `the banner hides at the local end, about 3 s after it showed (${after} ms)`);
+    } finally {
+      await context.close();
+    }
+  }
+  // A Stop the hub does not confirm keeps the banner and says so in an alert; it passes axe and fits the window.
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
+      const asRoot = { until: Date.now() + 10 * 60_000, failStop: true };
+      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture: { account: 'fixture-admin', kind: 'sys', admin: true, asRoot } });
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      try {
+        const banner = page.locator('.asroot-banner');
+        await banner.waitFor({ state: 'visible', timeout: 8000 });
+        await banner.getByRole('button', { name: 'Stop' }).click();
+        await banner.getByRole('alert').filter({ hasText: 'Could not stop acting as root. Try again.' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.ok(await banner.getByRole('status').isVisible(), `the banner stays after a failed Stop (${label})`);
+        assert.equal(asRoot.stopped, 1);
+        await page.waitForTimeout(150);
+        await overflow(page, `failed stop ${label}`);
+        await runAxe(page, `act as root failed stop ${label}`, failures);
+      } finally {
+        await context.close();
+      }
+    }
+  }
   // a system account that is not an administrator, and a virtual account, never see the item or the banner
   for (const fixture of [{ account: 'fixture-admin', kind: 'sys', admin: false, asRoot: { until: Date.now() + 600_000 } }, { account: 'fixture-admin', kind: 'virt', admin: false, asRoot: { until: Date.now() + 600_000 } }]) {
     const { context, page } = await openPage(browser, { state: directState(), fixture });
@@ -1674,7 +1734,7 @@ async function verifyActAsRoot(browser) {
       await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
       await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
       assert.equal(await page.getByRole('menuitem', { name: 'Act as root…' }).count(), 0, `no "Act as root…" for a ${fixture.kind} account that is not an administrator`);
-      if (fixture.kind === 'sys') assert.equal(await page.locator('.asroot-banner').count(), 0, 'no banner for a non-administrator');
+      assert.equal(await page.locator('.asroot-banner').count(), 0, `no banner for a ${fixture.kind} account that is not an administrator`);
     } finally {
       await context.close();
     }

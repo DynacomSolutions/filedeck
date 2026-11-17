@@ -2,8 +2,12 @@
  * Sign-in calls to the hub (server/src/auth/routes.ts) and the signed-out signal. With auth off the hub answers
  * `GET /api/auth/me` with `{auth:false}` and nothing else here is used.
  */
-/** `asRootUntil` (ms since the epoch, the hub's clock): a system administrator's act-as-root switch is on until then. */
-export type Account = { auth: true; kind: "sys" | "virt"; name: string; admin: boolean; asRootUntil?: number };
+/**
+ * A system administrator's act-as-root switch, when the hub reports it: `asRootUntil` is the end by the hub's clock,
+ * `asRootLeftMs` the time left by the hub's clock, and `asRootEndsAt` the end by this browser's clock, worked out when
+ * the answer arrived (now + time left), so a browser clock that is off does not hide or keep the switch.
+ */
+export type Account = { auth: true; kind: "sys" | "virt"; name: string; admin: boolean; asRootUntil?: number; asRootLeftMs?: number; asRootEndsAt?: number };
 export type Me = { auth: false } | Account;
 
 /** A sign-in that did not work; the message is ready to show. */
@@ -12,6 +16,8 @@ export class SignInError extends Error {}
 /** The header the hub's gate sets on its 401. Other 401s (an archive that needs its password) do not have it. */
 const SIGNED_OUT = "x-filedeck-auth";
 const isSignedOut = (r: Response) => r.status === 401 && r.headers.get(SIGNED_OUT) === "signed-out";
+
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
 /** Who is signed in, `{auth:false}` when the hub has no sign-in, or "signed-out". Other failures throw. */
 export async function me(): Promise<Me | "signed-out"> {
@@ -22,7 +28,7 @@ export async function me(): Promise<Me | "signed-out"> {
   if (b.auth !== true || typeof b.name !== "string") return { auth: false };
   const kind = b.kind === "virt" ? "virt" : "sys";
   // only a system account can act as root; a virtual account never carries the switch
-  const asRoot = kind === "sys" && typeof b.asRootUntil === "number" && Number.isFinite(b.asRootUntil) ? { asRootUntil: b.asRootUntil } : {};
+  const asRoot = kind === "sys" && finite(b.asRootUntil) && finite(b.asRootLeftMs) ? { asRootUntil: b.asRootUntil, asRootLeftMs: b.asRootLeftMs, asRootEndsAt: Date.now() + Math.max(0, b.asRootLeftMs) } : {};
   return { auth: true, kind, name: b.name, admin: b.admin === true, ...asRoot };
 }
 
@@ -81,7 +87,14 @@ export type RootProof = { password: string } | { keyText: string; passphrase?: s
  * file signs a fresh challenge for `name` (the hub checks it against the session's own name) and only the public key
  * line and the signature are sent. Failures throw SignInError with the same messages as sign-in, or KeyFileError.
  */
-export async function startAsRoot(proof: RootProof): Promise<{ asRootUntil: number }> {
+/** Loads the key reader (./sshkey) on the key path only. An object, so a test can make the load fail. */
+export const keyReader = { load: () => import("./sshkey") };
+
+/**
+ * The end of the switch by this browser's clock, from the hub's answer: now + the time left by the hub's clock.
+ * `asRootUntil` stays as the hub gave it.
+ */
+export async function startAsRoot(proof: RootProof): Promise<{ asRootUntil: number; asRootEndsAt: number }> {
   let r: Response;
   if ("password" in proof) {
     r = await reach(() => fetch("/api/auth/as-root", { method: "POST", ...jsonBody({ password: proof.password }) }));
@@ -90,14 +103,20 @@ export async function startAsRoot(proof: RootProof): Promise<{ asRootUntil: numb
     if (!c.ok) throw new SignInError(await signInMessage(c));
     const { challenge, hubId } = (await c.json()) as { challenge: string; hubId: string };
     const ch = Uint8Array.from(atob(challenge), (x) => x.charCodeAt(0));
-    const { signLogin, toBase64 } = await import("./sshkey");
+    let reader: Awaited<ReturnType<typeof keyReader.load>>;
+    try {
+      reader = await keyReader.load();
+    } catch {
+      throw new SignInError("Could not load the key reader. Reload the page.");
+    }
+    const { signLogin, toBase64 } = reader;
     const { publicKey, signature } = await signLogin(proof.keyText, proof.passphrase, hubId, proof.name, ch);
     r = await reach(() => fetch("/api/auth/as-root", { method: "POST", ...jsonBody({ publicKey, challenge, signature: toBase64(signature) }) }));
   }
   if (!r.ok) throw new SignInError(await signInMessage(r));
-  const b = (await r.json()) as { asRootUntil?: unknown };
-  if (typeof b.asRootUntil !== "number") throw new SignInError("Act as root failed");
-  return { asRootUntil: b.asRootUntil };
+  const b = (await r.json().catch(() => null)) as { asRootUntil?: unknown; asRootLeftMs?: unknown } | null;
+  if (!b || !finite(b.asRootUntil) || !finite(b.asRootLeftMs)) throw new SignInError("Act as root failed");
+  return { asRootUntil: b.asRootUntil, asRootEndsAt: Date.now() + Math.max(0, b.asRootLeftMs) };
 }
 
 /** Turns act as root off for this session. Throws when the hub does not confirm it. */

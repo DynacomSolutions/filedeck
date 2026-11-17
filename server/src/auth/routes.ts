@@ -200,7 +200,9 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   app.get("/api/auth/me", (c) => {
     const id = currentUser();
     if (!id) return signedOut(c);
-    const asRoot = id.kind === "sys" && id.asRootUntil !== undefined && id.asRootUntil > now() ? { asRootUntil: id.asRootUntil } : {};
+    // asRootLeftMs is the time left by the hub's own clock, so a browser whose clock is off still shows the right end
+    const t = now();
+    const asRoot = id.kind === "sys" && id.asRootUntil !== undefined && id.asRootUntil > t ? { asRootUntil: id.asRootUntil, asRootLeftMs: id.asRootUntil - t } : {};
     return c.json({ auth: true, kind: id.kind, name: id.name, admin: id.admin, ...asRoot });
   });
 
@@ -274,7 +276,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
    * Act as root (system administrators only, never a virtual account): a fresh proof for the session's own name, `{password}` or
    * `{publicKey, challenge, signature}` (a challenge from /api/auth/challenge for that name; the hub builds the message itself). The
    * body never names an account. Under the sign-in limiter (by name and address) and the 500 ms floor; a failure is 401 `sign-in failed`.
-   * Success: the switch lasts `AS_ROOT_MS`, answered as `{asRootUntil}`. The audit line keeps no part of the proof (audit.ts).
+   * Success: the switch lasts `AS_ROOT_MS`, answered as `{asRootUntil, asRootLeftMs}` (the time left by the hub's clock). The audit line keeps no part of the proof (audit.ts).
    */
   const notAdmin = (c: Context) => c.json({ error: "only system administrators can act as root" }, 403);
   app.post("/api/auth/as-root", async (c) => {
@@ -313,7 +315,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     attempt.succeed();
     const until = now() + AS_ROOT_MS;
     sessions.setAsRoot(raw, until);
-    return c.json({ asRootUntil: until });
+    return c.json({ asRootUntil: until, asRootLeftMs: AS_ROOT_MS });
   });
 
   app.delete("/api/auth/as-root", (c) => {

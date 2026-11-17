@@ -9,9 +9,9 @@ const AsRootDialog = lazy(() => import("./AsRootDialog").then((m) => ({ default:
 
 /**
  * The signed-in account in the header: its name, and a menu with "Sign out". Only shown when sign-in is on. A system
- * administrator also gets "Act as root…", which asks for the password or key again; `onAsRoot` gets the end time.
+ * administrator also gets "Act as root…", which asks for the password or key again; `onAsRoot` gets the local end time.
  */
-export function AccountMenu({ account, onAsRoot }: { account: Account; onAsRoot: (asRootUntil: number) => void }) {
+export function AccountMenu({ account, onAsRoot }: { account: Account; onAsRoot: (endsAt: number) => void }) {
   const { name } = account;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [asking, setAsking] = useState(false);

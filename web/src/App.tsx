@@ -608,7 +608,7 @@ export function App({ account }: { account?: Account } = {}) {
             onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
             onStatus={setStatus}
           />
-          {asRoot.until !== undefined && <AsRootBanner until={asRoot.until} onStop={asRoot.stop} onEnd={asRoot.end} />}
+          {asRoot.view.endsAt !== undefined && <AsRootBanner endsAt={asRoot.view.endsAt} stopping={asRoot.view.stopping} stopFailed={asRoot.view.stopFailed} onStop={() => void asRoot.stop()} />}
           <div className="site-header__actions">
             {diffMark && (
               <Tip label="Clear diff mark">

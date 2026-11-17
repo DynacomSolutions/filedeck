@@ -265,6 +265,20 @@ test("forged asRoot: a virtual claim with asRoot, or an asRoot that is not true,
   assert.deepEqual([virtOwner.asRootUntil, virtOwner.asRootSession], [undefined, undefined]);
 });
 
+test("time left by the hub's own clock: asRootLeftMs in the POST answer and in me, beside asRootUntil", async () => {
+  clock = Date.now();
+  const alice = sysCookie(hub, "alice");
+  const on = await postJson(hub, "/api/auth/as-root", alice, { password: RIGHT });
+  assert.equal(on.status, 200);
+  assert.deepEqual(await on.json(), { asRootUntil: clock + FIFTEEN_MIN, asRootLeftMs: FIFTEEN_MIN });
+  clock += 60_000;
+  const m = (await (await call(hub, "/api/auth/me", alice)).json()) as { asRootUntil?: number; asRootLeftMs?: number };
+  assert.deepEqual([m.asRootUntil, m.asRootLeftMs], [clock - 60_000 + FIFTEEN_MIN, FIFTEEN_MIN - 60_000]);
+  assert.equal((await call(hub, "/api/auth/as-root", alice, { method: "DELETE" })).status, 200);
+  const off = (await (await call(hub, "/api/auth/me", alice)).json()) as { asRootUntil?: number; asRootLeftMs?: number };
+  assert.deepEqual([off.asRootUntil, off.asRootLeftMs], [undefined, undefined]);
+});
+
 test("root for 15 minutes: requests run in the root process, every machine is open, then the worker again at until + 1 ms; DELETE ends it", async () => {
   clock = Date.now();
   const alice = sysCookie(hub, "alice");

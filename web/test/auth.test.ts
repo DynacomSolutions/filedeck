@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createPublicKey, verify } from "node:crypto";
-import { installSignedOutWatch, login, me, noteXhr, signInMessage, SignInError, startAsRoot, stopAsRoot } from "../src/auth.ts";
+import { installSignedOutWatch, keyReader, login, me, noteXhr, signInMessage, SignInError, startAsRoot, stopAsRoot } from "../src/auth.ts";
 import * as keys from "./fixtures/keys.ts";
 
 type Handler = (url: string, init?: RequestInit) => Response;
@@ -86,26 +86,47 @@ test("signed-out watch: an upload (XMLHttpRequest) answer reports through the sa
   assert.equal(n, 1);
 });
 
-test("me: a system administrator acting as root carries asRootUntil; nobody else does", async (t) => {
-  let answer: Response = json({ auth: true, kind: "sys", name: "alice", admin: true, asRootUntil: 1_800_000_000_000 });
+test("me: a system administrator acting as root carries the switch, with its local end from the hub's time left; nobody else does", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 2_000_000_000_000 });
+  let answer: Response = json({ auth: true, kind: "sys", name: "alice", admin: true, asRootUntil: 1_800_000_000_000, asRootLeftMs: 600_000 });
   fakeFetch(t, () => answer);
-  assert.deepEqual(await me(), { auth: true, kind: "sys", name: "alice", admin: true, asRootUntil: 1_800_000_000_000 });
+  // the browser clock is far ahead of the hub: asRootUntil is in its past, but the hub says 10 minutes are left
+  assert.deepEqual(await me(), { auth: true, kind: "sys", name: "alice", admin: true, asRootUntil: 1_800_000_000_000, asRootLeftMs: 600_000, asRootEndsAt: 2_000_000_600_000 });
   answer = json({ auth: true, kind: "sys", name: "alice", admin: true });
   assert.deepEqual(await me(), { auth: true, kind: "sys", name: "alice", admin: true });
   // a virtual account never acts as root, whatever the answer says
-  answer = json({ auth: true, kind: "virt", name: "bob", admin: false, asRootUntil: 1_800_000_000_000 });
+  answer = json({ auth: true, kind: "virt", name: "bob", admin: false, asRootUntil: 1_800_000_000_000, asRootLeftMs: 600_000 });
   assert.deepEqual(await me(), { auth: true, kind: "virt", name: "bob", admin: false });
-  answer = json({ auth: true, kind: "sys", name: "alice", admin: true, asRootUntil: "soon" });
+  answer = json({ auth: true, kind: "sys", name: "alice", admin: true, asRootUntil: "soon", asRootLeftMs: 600_000 });
+  assert.deepEqual(await me(), { auth: true, kind: "sys", name: "alice", admin: true });
+  answer = new Response('{"auth":true,"kind":"sys","name":"alice","admin":true,"asRootUntil":1800000000000,"asRootLeftMs":"lots"}', { status: 200 });
   assert.deepEqual(await me(), { auth: true, kind: "sys", name: "alice", admin: true });
 });
 
-test("startAsRoot with a password posts it in the body only, and gives back the end time", async (t) => {
-  const calls = fakeFetch(t, () => json({ asRootUntil: 1_800_000_000_000 }));
-  assert.deepEqual(await startAsRoot({ password: "secret" }), { asRootUntil: 1_800_000_000_000 });
+test("startAsRoot with a password posts it in the body only, and gives back the local end from the hub's time left", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 2_000_000_000_000 });
+  const calls = fakeFetch(t, () => json({ asRootUntil: 1_800_000_000_000, asRootLeftMs: 900_000 }));
+  assert.deepEqual(await startAsRoot({ password: "secret" }), { asRootUntil: 1_800_000_000_000, asRootEndsAt: 2_000_000_900_000 });
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.url, "/api/auth/as-root");
   assert.equal(calls[0]!.init?.method, "POST");
   assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { password: "secret" });
+});
+
+test("startAsRoot refuses an answer whose times are not finite numbers", async (t) => {
+  let answer: Response = new Response('{"asRootUntil":1e999,"asRootLeftMs":900000}', { status: 200 });
+  fakeFetch(t, () => answer);
+  await assert.rejects(startAsRoot({ password: "x" }), SignInError);
+  answer = new Response('{"asRootUntil":1800000000000,"asRootLeftMs":"lots"}', { status: 200 });
+  await assert.rejects(startAsRoot({ password: "x" }), SignInError);
+});
+
+test("startAsRoot with a key file: a key reader that cannot load says so", async (t) => {
+  fakeFetch(t, () => json({ challenge: Buffer.alloc(32).toString("base64"), hubId: "hub-1" }));
+  const real = keyReader.load;
+  keyReader.load = () => Promise.reject(new TypeError("Failed to fetch dynamically imported module"));
+  t.after(() => (keyReader.load = real));
+  await assert.rejects(startAsRoot({ keyText: keys.ed25519.key, name: "alice" }), (e: unknown) => e instanceof SignInError && e.message === "Could not load the key reader. Reload the page.");
 });
 
 test("startAsRoot reports the hub's answers as sign-in messages", async (t) => {
@@ -120,8 +141,8 @@ test("startAsRoot reports the hub's answers as sign-in messages", async (t) => {
 
 test("startAsRoot with a key file asks for a fresh challenge first and sends only the public key and a signature", async (t) => {
   const challenge = Buffer.alloc(32, 7).toString("base64");
-  const calls = fakeFetch(t, (url) => (url === "/api/auth/challenge" ? json({ challenge, hubId: "hub-1" }) : json({ asRootUntil: 1_800_000_000_000 })));
-  assert.deepEqual(await startAsRoot({ keyText: keys.ed25519.key, name: "alice" }), { asRootUntil: 1_800_000_000_000 });
+  const calls = fakeFetch(t, (url) => (url === "/api/auth/challenge" ? json({ challenge, hubId: "hub-1" }) : json({ asRootUntil: 1_800_000_000_000, asRootLeftMs: 900_000 })));
+  assert.equal((await startAsRoot({ keyText: keys.ed25519.key, name: "alice" })).asRootUntil, 1_800_000_000_000);
   assert.deepEqual(calls.map((c) => [c.url, c.init?.method]), [["/api/auth/challenge", "POST"], ["/api/auth/as-root", "POST"]]);
   assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { name: "alice" });
   const sent = JSON.parse(String(calls[1]!.init?.body)) as Record<string, string>;
