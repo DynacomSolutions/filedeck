@@ -165,9 +165,11 @@ spec:
             # on a file descriptor it opened, so a hostile media file is parsed
             # without root or any capability. With sign-in on, the same two start
             # each person's worker as their own user, and the chroot capability
-            # (added below only then) lets the account lookup helper run inside the
-            # machine's root, with the machine's own libc and NSS; the helper holds
-            # no capability once it starts.
+            # (added below only then) lets the host helpers run inside the
+            # machine's root, with the machine's own libc, NSS and PAM. The account
+            # lookup helper (filedeck-id) holds no capability once it starts; the
+            # password helper (filedeck-pam) keeps DAC_READ_SEARCH only, as pam_unix
+            # may need to read a mode-0000 /etc/shadow.
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]

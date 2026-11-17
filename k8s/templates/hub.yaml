@@ -68,8 +68,6 @@ spec:
             - name: FILEDECK_AUTH_NODES
               value: {{ join "," . | quote }}
             {{- end }}
-            - name: FILEDECK_PAM_SERVICE
-              value: {{ .Values.auth.pamService | quote }}
             - name: FILEDECK_SESSION_IDLE_SECONDS
               value: {{ .Values.auth.session.idleSeconds | quote }}
             - name: FILEDECK_SESSION_MAX_SECONDS

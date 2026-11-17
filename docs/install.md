@@ -42,7 +42,7 @@ System accounts sign in with the password or `authorized_keys` they have on the 
 
 Each machine needs glibc for system sign-in: the PAM helper and the account lookup helper run inside the machine's own root with its libc and NSS. On a machine without glibc (Alpine, for example) the agent logs it and system sign-in is refused there.
 
-You must install the PAM service file on each machine, as `/etc/pam.d/<auth.pamService>`; Filedeck writes nothing on the machine. It should include the machine's normal `auth` and `account` stacks. For the Debian layout (Debian, Ubuntu), `/etc/pam.d/filedeck`:
+You must install the PAM service file on each machine, as `/etc/pam.d/<auth.pamService>`; Filedeck writes nothing on the machine. It should include the machine's normal `auth` and `account` stacks. PAM sees each attempt as a remote login: the client's address (as the hub sees it) is `PAM_RHOST` and the TTY is `filedeck`, so `pam_access` rules for remote logins apply to it, and a rule for `LOCAL` does not match it (see [Security](security.md)). For the Debian layout (Debian, Ubuntu), `/etc/pam.d/filedeck`:
 
 ```
 @include common-auth

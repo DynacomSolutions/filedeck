@@ -1,9 +1,10 @@
 # One image, two modes: FILEDECK_MODE=agent (per node, hostPath mounted at /host)
 # or FILEDECK_MODE=hub (serves the SPA and proxies to the agents).
 
-# The host helpers (server/native/host: filedeck-id) run inside the machine's own root against its glibc and NSS modules
-# (server/src/host-helpers.ts), so they are dynamic glibc programs built against an old glibc: the build fails when they need
-# a symbol version newer than GLIBC_2.17, so that they start on old machines too. libpam0g-dev is for the PAM helper of a later part.
+# The host helpers (server/native/host: filedeck-id, filedeck-pam) run inside the machine's own root against its glibc, NSS and
+# PAM modules (server/src/host-helpers.ts), so they are dynamic glibc programs built against an old glibc: the build fails when
+# they need a symbol version newer than GLIBC_2.17, so that they start on old machines too. libpam0g-dev gives filedeck-pam the
+# PAM headers; it loads the machine's own libpam.so.0 at run time.
 FROM debian:bullseye-slim@sha256:e5b6442dd2e9684cf5e87d8338b5968f3b348636fc0be6d7850a381e3731a2bd AS hostbuild
 # Bullseye is past its support period: its packages are only on archive.debian.org now (the normal mirrors list them but no longer
 # serve the files). Bullseye is used for its glibc 2.31, so the helpers link only to symbol versions old machines have (checked below).
