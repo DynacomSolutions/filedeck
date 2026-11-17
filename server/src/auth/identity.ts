@@ -12,9 +12,13 @@ export interface NodeAccess {
   grants: Grant[];
 }
 
-/** Who a request belongs to. `sys` is a system account; `virt` is a virtual account with per-node access. */
+/**
+ * Who a request belongs to. `sys` is a system account; `virt` is a virtual account with per-node access. `asRootUntil` (system
+ * administrators only): the end of the act-as-root switch, set by the hub's gate only while it is in the future and the name is in
+ * FILEDECK_ADMINS. A hub job keeps it in its stored owner, so the job's calls carry `asRoot` only until then.
+ */
 export type Identity =
-  | { kind: "sys"; name: string; admin: boolean; epoch: number }
+  | { kind: "sys"; name: string; admin: boolean; epoch: number; asRootUntil?: number }
   | { kind: "virt"; name: string; admin: boolean; epoch: number; nodes: Record<string, NodeAccess> };
 
 /** The signed statement the hub sends to one agent about the person behind a request. */
@@ -24,6 +28,8 @@ export interface UserClaim {
   epoch: number;
   runAs?: string;
   grants?: Grant[];
+  /** the request runs in the agent's root process (act as root); only ever `true`, only on a `sys` claim */
+  asRoot?: true;
   /** issue time, ms since the epoch */
   iat: number;
 }
@@ -35,7 +41,7 @@ const MAX_SKEW_MS = 5_000;
 
 /** The claim for one node, or null when a virtual account has no access there. */
 export function claimFor(id: Identity, node: string, now: number): UserClaim | null {
-  if (id.kind === "sys") return { kind: "sys", name: id.name, epoch: id.epoch, iat: now };
+  if (id.kind === "sys") return { kind: "sys", name: id.name, epoch: id.epoch, ...((id.asRootUntil ?? 0) > now ? { asRoot: true as const } : {}), iat: now };
   const access = Object.hasOwn(id.nodes, node) ? id.nodes[node] : undefined;
   if (!access) return null;
   return { kind: "virt", name: id.name, epoch: id.epoch, runAs: access.runAs, grants: access.grants.map((g) => ({ ...g })), iat: now };
@@ -69,6 +75,8 @@ export function verifyClaim(value: string, agentToken: string, now: number): Use
     if (!c || typeof c !== "object" || typeof c.iat !== "number" || !Number.isFinite(c.iat)) return null;
     if (c.kind !== "sys" && c.kind !== "virt") return null;
     if (typeof c.name !== "string" || typeof c.epoch !== "number") return null;
+    // act as root: only `true`, and never on a virtual account's claim
+    if (c.asRoot !== undefined && (c.asRoot !== true || c.kind !== "sys")) return null;
     if (c.kind === "virt") {
       if (typeof c.runAs !== "string" || !Array.isArray(c.grants)) return null;
       for (const g of c.grants) {

@@ -8,7 +8,7 @@ import type { JobView, Jobs } from "./jobs.ts";
 import type { SizeAccess } from "./props.ts";
 import { MAX_CAN_LIST } from "./agent-routes.ts";
 import type { WorkerPool, WorkerSpec } from "./worker-pool.ts";
-import { GateAnswer, clientResponse, grantsOf, workerKey, type AccountWorkers } from "./agent-workers.ts";
+import { GateAnswer, clientResponse, grantsOf, isAsRoot, workerKey, type AccountWorkers } from "./agent-workers.ts";
 
 /**
  * Sign-in on: the root routes that hold or reach an account's data follow the account. The jobs of the root process (folder sizes)
@@ -69,7 +69,8 @@ export class Followers {
  * the jobs of the account's worker when one runs (none is ever started for this). `GET`, `POST .../cancel` and `DELETE` on an id: a job
  * the root process knows (its own, or one in the shared job file) is the owner's only, else 404 `{"error":"not found"}`; an id it does not
  * know goes to the account's worker, 404 when none runs. A person whose size or du request joined another account's scan may follow
- * that job (`GET`, without its current path), but it is not listed to them and they cannot cancel or dismiss it (`follows`).
+ * that job (`GET`, without its current path), but it is not listed to them and they cannot cancel or dismiss it (`follows`). A claim with
+ * `asRoot` sees, cancels and dismisses every job of the root process, shown in full as with sign-in off.
  *
  * (The brief gave `specFor`; no spec is needed, since these routes never start a worker: only the key and the epoch of the claim.)
  */
@@ -97,7 +98,8 @@ export function registerOwnedJobRoutes(
   app.get("/api/jobs", async (c) => {
     const claim = claimOf(c);
     const me = ownerOf(claim);
-    const all = jobs.list(me).map((v) => ownView(jobs, me, v));
+    // (act as root: every job of the root process, as with sign-in off)
+    const all = isAsRoot(claim) ? jobs.list() : jobs.list(me).map((v) => ownView(jobs, me, v));
     const res = await toWorker(c, claim, "/api/jobs", "GET");
     if (res && res.status === 401) return res; // (the account changed)
     if (res?.ok) {
@@ -114,8 +116,9 @@ export function registerOwnedJobRoutes(
   const local = (c: Context, id: string) => {
     const v = jobs.get(id);
     if (!v) return undefined;
-    const me = ownerOf(claimOf(c));
-    return { v, me, mine: jobs.ownerOf(id) === me, follower: followers.has(me, id) };
+    const claim = claimOf(c);
+    const me = ownerOf(claim);
+    return { v, me, root: isAsRoot(claim), mine: jobs.ownerOf(id) === me, follower: followers.has(me, id) };
   };
   const path = (id: string, rest = "") => `/api/jobs/${encodeURIComponent(id)}${rest}`;
 
@@ -123,10 +126,10 @@ export function registerOwnedJobRoutes(
     const id = c.req.param("id");
     const l = local(c, id);
     if (l) {
-      if (!l.mine && !l.follower) return notFound();
+      if (!l.root && !l.mine && !l.follower) return notFound();
       jobs.touch(id); // a client polling a CLI du job keeps it alive
       const v = jobs.get(id) ?? l.v;
-      return c.json(l.mine ? ownView(jobs, l.me, v) : followerView(v));
+      return c.json(l.root ? v : l.mine ? ownView(jobs, l.me, v) : followerView(v));
     }
     return (await toWorker(c, claimOf(c), path(id), "GET")) ?? notFound();
   });
@@ -134,9 +137,9 @@ export function registerOwnedJobRoutes(
     const id = c.req.param("id");
     const l = local(c, id);
     if (l) {
-      if (!l.mine) return notFound();
+      if (!l.root && !l.mine) return notFound();
       const j = jobs.cancel(id);
-      return j ? c.json(ownView(jobs, l.me, j)) : notFound();
+      return j ? c.json(l.root ? j : ownView(jobs, l.me, j)) : notFound();
     }
     return (await toWorker(c, claimOf(c), path(id, "/cancel"), "POST")) ?? notFound();
   });
@@ -144,7 +147,7 @@ export function registerOwnedJobRoutes(
     const id = c.req.param("id");
     const l = local(c, id);
     if (l) {
-      if (!l.mine) return notFound();
+      if (!l.root && !l.mine) return notFound();
       if (!jobs.dismiss(id)) return c.json({ error: "not found or still active" }, 404);
       followers.delete(id);
       return c.json({ ok: true });
@@ -174,6 +177,8 @@ export function sizeAccess(
   };
   return {
     async canList(c, paths) {
+      // (act as root: the root process lists everything, and no worker is started for it)
+      if (isAsRoot(claimOf(c))) return paths.map(() => true);
       const spec = await specOf(c);
       const signal = c.req.raw.signal;
       const out: boolean[] = [];
@@ -207,8 +212,10 @@ export function sizeAccess(
     owner: (c) => ownerOf(claimOf(c)),
     follows: (c, id) => o.followers.add(ownerOf(claimOf(c)), id),
     view(c, v) {
-      const me = ownerOf(claimOf(c));
+      const claim = claimOf(c);
+      const me = ownerOf(claim);
       o.followers.add(me, v.id);
+      if (isAsRoot(claim)) return v;
       return o.jobs.ownerOf(v.id) === me ? ownView(o.jobs, me, v) : followerView(v);
     },
     log,

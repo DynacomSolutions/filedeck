@@ -143,6 +143,9 @@ export function clientResponse(res: Response, key: string, log: (s: string) => v
  * 503 `worker stopped` (`WorkerGone` before the head), 503 `worker folders are not safe` (`UnsafeFolders`), and 500 `worker error` for
  * any other failure (its text only in the log).
  *
+ * A claim with `asRoot` (a system administrator acting as root; `verifyClaim` refuses it on any other claim) is not forwarded: after the
+ * epoch rule it runs in the root process, as with sign-in off, and needs no account on this machine.
+ *
  * The agent mounts it after `readOnlyGuard`, which runs as root before a request is forwarded. So with read-only prefixes set, a person
  * can learn whether a path they cannot reach (a folder they may not pass through) is on a read-only volume: a write there gets
  * `read-only volume` instead of the worker's `permission denied`. Accepted; the docs say so.
@@ -165,6 +168,8 @@ export function workerGate(
     if (isMuxOnly(c.req.path)) return json("not found", 404);
     const claim = c.get("user") as UserClaim | undefined;
     const valid = !!claim && (claim.kind === "sys" || claim.kind === "virt") && typeof claim.epoch === "number";
+    // act as root (a verified system claim only): the request runs in this process, as with sign-in off; no account lookup, no worker
+    if (valid && isAsRoot(claim!)) return (await aw.epoch(claim!)) ?? next();
     if (isRootRoute(c.req.method, c.req.path)) {
       // (the epoch rule holds here too: the job and size routes reach the account's worker)
       const no = valid ? await aw.epoch(claim!) : null;
@@ -196,6 +201,9 @@ export function workerGate(
     return clientResponse(res, spec.key, log, raw.signal, raw.method);
   };
 }
+
+/** Whether a verified claim is a system administrator's act-as-root claim. */
+export const isAsRoot = (claim: UserClaim | undefined): boolean => claim?.kind === "sys" && claim.asRoot === true;
 
 /** An answer of the gate's own (`AccountWorkers.specFor`), thrown so that a route can pass it on as it is (the agent's error handler does). */
 export class GateAnswer extends Error {

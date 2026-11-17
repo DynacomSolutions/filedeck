@@ -167,6 +167,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const present = (name: string, node: string): boolean | undefined => {
     // a name that is not a machine answers as a hidden one (403, not 404), so a system account cannot learn hidden names by trying
     if (!nodeNames.has(node)) return false;
+    // act as root: every configured machine is open, also one without the account (the agent then needs no account)
+    const id = currentUser();
+    if (id?.kind === "sys" && id.name === name && (id.asRootUntil ?? 0) > (opts?.now ?? Date.now)()) return true;
     if (!presence) return undefined;
     if (presence.due(name)) void presence.refresh(name);
     return presence.known(name, node);

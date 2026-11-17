@@ -114,10 +114,14 @@ export function auditRefusal(who: string, c: import("hono").Context, status: num
   );
 }
 
-/** `sys:<name>` or `virt:<name>` of the account behind a request (set by the hub's gate or the agent's check), else nothing. */
-function userOf(c: import("hono").Context): { user?: string } {
+/**
+ * `sys:<name>` or `virt:<name>` of the account behind a request (set by the hub's gate or the agent's check), else nothing; and
+ * `asRoot: true` for a request made under a system administrator's act-as-root switch (no such field otherwise).
+ */
+function userOf(c: import("hono").Context): { user?: string; asRoot?: true } {
   const u = c.get("user");
-  return u?.kind && u.name ? { user: `${u.kind}:${u.name}` } : {};
+  if (!u?.kind || !u.name) return {};
+  return { user: `${u.kind}:${u.name}`, ...(u.kind === "sys" && u.asRoot === true ? { asRoot: true as const } : {}) };
 }
 
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {

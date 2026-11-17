@@ -5,7 +5,8 @@ import type { AuthDb, Accounts } from "./store.ts";
  * Session store (hub). The cookie value is 32 random bytes as base64url. Only
  * its SHA-256 is kept, so a copy of the database cannot be used to sign in.
  * A session ends when it is idle too long, when it is older than the absolute
- * limit, or when its account epoch is raised.
+ * limit, or when its account epoch is raised. `as_root_until` holds the end of a system administrator's "act as root"
+ * switch (ms since the epoch), or NULL; it goes with the session (sign-out, `endAll` and an epoch rise end it too).
  */
 
 /** A lookup writes `last_used` at most this often. */
@@ -19,6 +20,7 @@ interface SessionRow {
   created: number;
   last_used: number;
   epoch: number;
+  as_root_until: number | null;
 }
 
 export class Sessions {
@@ -41,6 +43,8 @@ export class Sessions {
       );
       CREATE INDEX IF NOT EXISTS sessions_account ON sessions (kind, name);
     `);
+    const cols = this.store.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "as_root_until")) this.store.db.exec("ALTER TABLE sessions ADD COLUMN as_root_until INTEGER");
   }
 
   private get db() {
@@ -56,9 +60,10 @@ export class Sessions {
     return raw;
   }
 
-  lookup(raw: string): { kind: "sys" | "virt"; name: string } | undefined {
+  /** `asRootUntil` is the stored end of the act-as-root switch, as it is (the caller decides whether it still holds). */
+  lookup(raw: string): { kind: "sys" | "virt"; name: string; asRootUntil?: number } | undefined {
     const id = sha(raw);
-    const r = this.db.prepare("SELECT kind, name, created, last_used, epoch FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
+    const r = this.db.prepare("SELECT kind, name, created, last_used, epoch, as_root_until FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
     if (!r) return undefined;
     const t = this.now();
     const gone = () => {
@@ -69,7 +74,12 @@ export class Sessions {
     if (r.kind === "virt" && !this.acc.get(r.name)) return gone();
     if (this.acc.epochOf(r.kind, r.name) > r.epoch) return gone();
     if (t - r.last_used >= TOUCH_MS) this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ?").run(t, id);
-    return { kind: r.kind, name: r.name };
+    return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}) };
+  }
+
+  /** Sets (or, with null, clears) the end of the act-as-root switch of a session. An unknown session is left as it is. */
+  setAsRoot(raw: string, until: number | null): void {
+    this.db.prepare("UPDATE sessions SET as_root_until = ? WHERE id = ?").run(until, sha(raw));
   }
 
   destroy(raw: string): void {

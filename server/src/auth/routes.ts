@@ -40,6 +40,8 @@ const FAIL_FLOOR_MS = 500;
 const CHALLENGES_PER_MINUTE = 20;
 /** A challenge for a longer name is answered but not kept. */
 const MAX_NAME = 256;
+/** How long the act-as-root switch lasts once turned on. */
+export const AS_ROOT_MS = 15 * 60_000;
 
 const AUTH_ROUTES = new Set(["/api/auth/me", "/api/auth/login", "/api/auth/challenge", "/api/auth/login-key", "/api/auth/logout"]);
 
@@ -109,6 +111,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const { cfg, accounts, sessions, challenges, limiter, system } = deps;
 
   const challengeLimit = new RateWindow(CHALLENGES_PER_MINUTE, 60_000, deps.now);
+  const now = deps.now ?? Date.now;
 
   const signedOut = (c: Context) => c.json({ error: "signed out" }, 401, { "x-filedeck-auth": "signed-out" });
 
@@ -118,11 +121,16 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (!raw) return undefined;
     const s = sessions.lookup(raw);
     if (!s) return undefined;
-    return s.kind === "virt" ? accounts.identity("virt", s.name) : sysIdentity(cfg, accounts, s.name);
+    if (s.kind === "virt") return accounts.identity("virt", s.name);
+    const id = sysIdentity(cfg, accounts, s.name);
+    // act as root: only while the switch is still on and the name is still in FILEDECK_ADMINS (checked on every request)
+    if (id.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() && cfg.admins.includes(s.name)) return { ...id, asRootUntil: s.asRootUntil };
+    return id;
   };
 
   const admit = (c: Context, id: Identity, next: () => Promise<void>) => {
-    c.set("user" as never, { kind: id.kind, name: id.name } as never);
+    // (`asRoot` goes into the audit line of every request made under the switch)
+    c.set("user" as never, { kind: id.kind, name: id.name, ...(id.kind === "sys" && id.asRootUntil !== undefined ? { asRoot: true } : {}) } as never);
     return runAs(id, next);
   };
 
@@ -190,7 +198,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   app.get("/api/auth/me", (c) => {
     const id = currentUser();
     if (!id) return signedOut(c);
-    return c.json({ auth: true, kind: id.kind, name: id.name, admin: id.admin });
+    const asRoot = id.kind === "sys" && id.asRootUntil !== undefined && id.asRootUntil > now() ? { asRootUntil: id.asRootUntil } : {};
+    return c.json({ auth: true, kind: id.kind, name: id.name, admin: id.admin, ...asRoot });
   });
 
   app.post("/api/auth/login", async (c) => {
@@ -257,6 +266,57 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();
     return signIn(c, kind, name);
+  });
+
+  /**
+   * Act as root (system administrators only, never a virtual account): a fresh proof for the session's own name, `{password}` or
+   * `{publicKey, challenge, signature}` (a challenge from /api/auth/challenge for that name; the hub builds the message itself). The
+   * body never names an account. Under the sign-in limiter (by name and address) and the 500 ms floor; a failure is 401 `sign-in failed`.
+   * Success: the switch lasts `AS_ROOT_MS`, answered as `{asRootUntil}`. The audit line keeps no part of the proof (audit.ts).
+   */
+  const notAdmin = (c: Context) => c.json({ error: "only system administrators can act as root" }, 403);
+  app.post("/api/auth/as-root", async (c) => {
+    const id = currentUser();
+    const raw = getCookie(c, COOKIE);
+    if (!id || !raw) return signedOut(c);
+    if (id.kind !== "sys" || !cfg.admins.includes(id.name)) return notAdmin(c);
+    if (!secure(c)) return needsHttps(c);
+    const name = id.name;
+    const ip = clientOf(c).ip ?? "";
+    const lim = limiter.check(name, ip);
+    if (!lim.ok) return tooMany(c, lim.retryAfterMs);
+    const attempt = limiter.reserve(name, ip);
+    const b = await body(c);
+    const pw = str(b?.password);
+    let ok = false;
+    if (pw !== undefined) {
+      ok = await system.password(name, pw);
+    } else {
+      const pub = str(b?.publicKey);
+      const ch = str(b?.challenge);
+      const sig = str(b?.signature);
+      // the challenge is taken (used up) before any other check, as at sign-in
+      const cb = ch === undefined ? undefined : Buffer.from(ch, "base64");
+      const taken = cb !== undefined && challenges.take(name, cb);
+      if (taken && cb && pub !== undefined && sig !== undefined) {
+        const msg = loginMessage(deps.db.hubId, name, cb);
+        const sb = Buffer.from(sig, "base64");
+        const given = parsePublicKey(pub);
+        ok = given !== null && verifyLogin(given, msg, sb) && (await system.key(name, pub, msg, sb));
+      }
+    }
+    if (!ok) return failed(c);
+    attempt.succeed();
+    const until = now() + AS_ROOT_MS;
+    sessions.setAsRoot(raw, until);
+    return c.json({ asRootUntil: until });
+  });
+
+  app.delete("/api/auth/as-root", (c) => {
+    const raw = getCookie(c, COOKIE);
+    if (!currentUser() || !raw) return signedOut(c);
+    sessions.setAsRoot(raw, null);
+    return c.json({ ok: true });
   });
 
   app.post("/api/auth/logout", (c) => {

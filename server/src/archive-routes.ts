@@ -57,6 +57,15 @@ export function makeAgentJobs(cfg: Config): Jobs {
 }
 
 /** Listing, polling, cancelling and dismissing the jobs of `jobs`, whatever their kind. */
+/**
+ * The owner of a job a request starts: `<kind>:<name>` of the claim the agent's check stored (sign-in on). Only the root process has
+ * one, and there only for a request made under act as root (all others go to a worker); with sign-in off, and in a worker, none.
+ */
+const requestOwner = (c: import("hono").Context): string | undefined => {
+  const u = c.get("user");
+  return u?.kind && u.name ? `${u.kind}:${u.name}` : undefined;
+};
+
 export function registerJobRoutes(app: Hono, jobs: Jobs): void {
   app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));
   app.get("/api/jobs/:id", (c) => {
@@ -178,7 +187,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config, jobs: Jobs): void 
     });
     // Allowlisted fields only, and none at all when a password was given: that job is failed after a restart, never stored.
     const params = plan.password ? undefined : { dir: b.dir, names: b.names, format: b.format, name: b.name, level: b.level, encryptHeaders: b.encryptHeaders, splitBytes: b.splitBytes, exclude: b.exclude, destDir: b.destDir };
-    const job = jobs.create("compress", `Compress ${plan.names.length} item(s) to ${plan.outName}`, (ctl) => runCompress(plan, ctl), undefined, undefined, { params });
+    const job = jobs.create("compress", `Compress ${plan.names.length} item(s) to ${plan.outName}`, (ctl) => runCompress(plan, ctl), undefined, undefined, { params, owner: requestOwner(c) });
     return c.json(job, 202);
   });
 
@@ -198,7 +207,7 @@ export function registerArchiveRoutes(app: Hono, cfg: Config, jobs: Jobs): void 
     }
     // judged on the resolved destination and the real archive name, which are what the extraction will use
     if (extractBlocked(root, cfg.readOnly, plan, ar.archiveBase)) throw new ops.FsError(403, "read-only volume");
-    const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => runExtract(plan, ctl));
+    const job = jobs.create("extract", `Extract ${plan.entries.length ? `${plan.entries.length} item(s) from ` : ""}${plan.archiveName}`, (ctl) => runExtract(plan, ctl), undefined, undefined, { owner: requestOwner(c) });
     return c.json(job, 202, plan.viaSz ? { "x-filedeck-pw": "ok" } : {});
   });
 }
