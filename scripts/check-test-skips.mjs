@@ -31,6 +31,8 @@ const allowed = [
   /^worker helpers: skipped \((?:git|bsdtar|ffmpeg|7zz|qpdf) not installed here\)$/,
   // server/test/host-helpers.test.ts: the host helper tests need root (the chroot) and a glibc machine (dynamic glibc helpers);
   // the root pass sets FILEDECK_REQUIRE_HOST_HELPERS=1, which turns the glibc skip into a failure.
+  // server/test/trash-owners.test.ts: the bind-mount restore test needs CAP_SYS_ADMIN, which root in the image build lacks; the CI root pass sets FILEDECK_REQUIRE_MOUNT=1.
+  /^trash live: skipped \(bind mounts not permitted here\)$/,
   /^host helpers live: skipped \(not running as root\)$/,
   /^host helpers live: skipped \(no glibc here\)$/,
   // server/test/sandbox.test.ts: the x32 system call tests exist only on x86-64, and only where the kernel has x32 calls enabled.

@@ -319,10 +319,16 @@ test("a trash folder removed while the worker runs is made again", async () => {
   assert.ok(fs.existsSync(path.join(trashOf(`u${me.uid}`), id, "data")));
 });
 
-test("root view: an account's item whose rename crosses a mount stays in the trash (root never copies and removes it)", { skip: ROOT_ONLY }, async () => {
+test("root view: an account's item whose rename crosses a mount stays in the trash (root never copies and removes it)", { skip: ROOT_ONLY }, async (t) => {
   const bm = path.join(root, "bm");
   fs.mkdirSync(bm);
   const m = spawnSync("mount", ["--bind", path.join(root, "g1"), bm], { encoding: "utf8" });
+  // root in a container build has no CAP_SYS_ADMIN; the CI root pass sets FILEDECK_REQUIRE_MOUNT=1 and fails instead of skipping
+  if (m.status !== 0 && /permission denied|not permitted/i.test(m.stderr) && process.env.FILEDECK_REQUIRE_MOUNT !== "1") {
+    fs.rmdirSync(bm);
+    t.skip("trash live: skipped (bind mounts not permitted here)");
+    return;
+  }
   assert.equal(m.status, 0, m.stderr);
   try {
     fs.writeFileSync(path.join(root, "a/w"), "w\n");

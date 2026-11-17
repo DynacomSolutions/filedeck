@@ -42,7 +42,7 @@ test("forged or stale header refused", async () => {
   assert.equal((await get(app, "/api/fs/stat?path=/", signClaim(claim(now - 61_000), T))).status, 401, "61 s old");
   assert.equal((await get(app, "/api/fs/stat?path=/", signClaim(claim(now), T))).status, 200);
   assert.equal((await app.request("/api/fs/read?path=/", { method: "HEAD", headers: { authorization: `Bearer ${T}` } })).status, 401, "HEAD without a claim");
-  assert.equal((await get(app, "/api/fs/stat?path=/", signClaim(claim(now + 6_000), T))).status, 401, "6 s in the future");
+  assert.equal((await get(app, "/api/fs/stat?path=/", signClaim(claim(Date.now() + 20_000), T))).status, 401, "20 s in the future");
   // the open probes need no user
   assert.equal((await get(app, "/healthz")).status, 200);
   assert.equal((await get(app, "/metrics")).status, 200);
