@@ -27,6 +27,8 @@ import { usePhone } from "./viewport";
 import { useDialogFocus } from "./dialogFocus";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
+import { AccountMenu } from "./AccountMenu";
+import type { Account } from "./auth";
 
 /** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = swap places). */
 function DockSlot({ id, dragging, onDock, children }: { id: string; dragging: string | null; onDock: (src: string, target: string, zone: DropZone) => void; children: React.ReactNode }) {
@@ -240,7 +242,7 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
   );
 }
 
-export function App() {
+export function App({ account }: { account?: Account } = {}) {
   const nodesState = useNodes();
   const phone = usePhone();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -618,6 +620,7 @@ export function App() {
               </Tip>
             )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
+            {account && <AccountMenu name={account.name} />}
           </div>
         </div>
       </header>

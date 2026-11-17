@@ -31,7 +31,7 @@ export function pick(v: unknown, depth = 0): unknown {
   return out;
 }
 
-/** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. */
+/** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. The user is named when the account is already known: on an agent always, on the hub never (its guard runs before sign-in, so those lines are "refused before sign-in"). */
 /**
  * How many reverse proxies sit in front of this process (FILEDECK_TRUSTED_PROXIES, 0 = none, the default). The forwarded chain
  * is believed only to that depth; with none, a client that talks to the process directly cannot choose the address that is
@@ -91,6 +91,7 @@ export function auditRefusal(who: string, c: import("hono").Context, status: num
       audit: true,
       ts: new Date().toISOString(),
       who,
+      ...userOf(c),
       ...clientOf(c),
       method: c.req.method,
       route: clip(c.req.path),
@@ -101,6 +102,12 @@ export function auditRefusal(who: string, c: import("hono").Context, status: num
       status,
     }),
   );
+}
+
+/** `sys:<name>` or `virt:<name>` of the account behind a request (set by the hub's gate or the agent's check), else nothing. */
+function userOf(c: import("hono").Context): { user?: string } {
+  const u = c.get("user");
+  return u?.kind && u.name ? { user: `${u.kind}:${u.name}` } : {};
 }
 
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {
@@ -134,6 +141,7 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
         audit: true,
         ts: new Date(t0).toISOString(),
         who,
+        ...userOf(c),
         ...clientOf(c),
         method: m,
         route: clip(p),

@@ -11,6 +11,7 @@ There is one run, no scopes. It makes these checks, in order (the names are what
 - Editor: a file that mixes CRLF and LF shows a notice naming the ending a save writes, inside the window at 1365, 390 and 320 px and clear of the text; a file with one kind of ending shows none.
 - A compare whose result reports skipped paths shows the count and the first paths in the warning area at 1365 and 390 px, and never the "Comparison done" status or the empty-state text for it.
 - Address bar and Compare toolbar: every address-bar control is 44 px tall, at least 24 px wide and does not overlap another at 1365, 390 and 320 px; focusing "Edit address" with Tab does not start editing, Enter and Space do; no Compare toolbar button is clipped by its panel at 1365, 1280, 1024, 390 and 320 px; on a phone the Compare toolbar collapses to Filter, Compare by, the primary action and a More menu (at most 100 px tall, at least 8 of 40 compared rows visible at 390x844, menus reachable by keyboard and returning focus to their button).
+- Sign-in: with the fake hub saying signed out (401 with `x-filedeck-auth: signed-out` from `/api/auth/me`) the sign-in screen replaces the app; axe-core passes on the password form, after a failed attempt and on the key-file form, in light and dark, with no horizontal overflow at 1365x900, 390x844 and 320x568, and the password is cleared after the failed attempt. Signed in, the header names the account and its menu offers Sign out. When the session ends while a file is being edited, signing in again as the same account brings the app back without a page load and the unsaved text is still in the editor. Every other check gets `{"auth":false}`, as from a hub with sign-in off.
 - Layout: no horizontal document overflow at 1440x900, 1024x768, 768x1024, 390x844, 320x568, 844x390 and 320x256.
 - axe-core with the WCAG 2.0, 2.1 and 2.2 A and AA rule tags (`wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa`, `wcag22aa`) on the main view, an open context menu, an open dialog, Settings, the Trash view, the Compare view, the Markdown preview and the phone layout, each in light and dark.
 - Measurements at 1365, 390 and 320 CSS pixels in light and dark: axe-core A and AA again, controls clipped by a container that cannot scroll, text-spacing overrides (WCAG 1.4.12), visible and unobscured focus, and document overflow.
@@ -35,7 +36,7 @@ FILEDECK_URL=http://127.0.0.1:<port> npm run check
 FILEDECK_URL=http://127.0.0.1:<port> npm run check:firefox
 ```
 
-The first command uses Chromium, the second Firefox. The two runs make the same 35 checks: no check is skipped or relaxed for one browser. A check must not depend on how one engine rounds a size or scrolls a focused element; when the two browsers disagree, find out which one shows a defect a user can see and correct the product.
+The first command uses Chromium, the second Firefox. The two runs make the same 36 checks: no check is skipped or relaxed for one browser. A check must not depend on how one engine rounds a size or scrolls a focused element; when the two browsers disagree, find out which one shows a defect a user can see and correct the product.
 
 - `FILEDECK_URL` is required; the script contains no deployment or machine-specific address.
 - `BROWSER` selects the browser: `chromium` (the default) or `firefox`. `npm run check:firefox` sets it.

@@ -1,4 +1,5 @@
 import type { DiffMode, DiffStatus, Loc, SearchForm } from "./urlState";
+import { noteXhr } from "./auth";
 export interface Entry {
   name: string;
   path: string;
@@ -647,6 +648,7 @@ export const api = {
       x.open("PUT", `${nodeBase(node)}/api/fs/upload?dir=${enc(dir)}&name=${enc(file.name)}`);
       x.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
       x.onload = () => {
+        noteXhr(x);
         if (x.status < 300) return resolve();
         let msg = x.statusText;
         try {

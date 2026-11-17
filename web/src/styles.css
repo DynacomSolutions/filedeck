@@ -1041,3 +1041,13 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .drawer-back{display:block;position:fixed;inset:0;z-index:65;background:rgba(0,0,0,.5)}
 }
 @media(prefers-reduced-motion:reduce) and (max-width:700px),(prefers-reduced-motion:reduce) and (max-height:500px) and (max-width:1000px){.side,.side.open{transition:none}}
+/* sign-in screen: the dialog look on the page background; the page scrolls itself because body does not */
+.signin{box-sizing:border-box;height:100%;overflow:auto;display:flex;align-items:center;justify-content:center;padding:16px}
+.signin-form{max-width:100%;box-sizing:border-box}
+.signin-form h1{margin:0;font-size:1rem;font-weight:700;letter-spacing:-.01em}
+.signin-seg{margin:0}
+.signin-seg button{min-height:32px;font-size:.82rem}
+.signin-form input[type=file]{width:100%;border:0;padding:.2rem 0;background:transparent;box-shadow:none;min-width:0;font:inherit;font-size:.82rem;color:var(--fg);text-transform:none;letter-spacing:0}
+.signin-note{margin:0;font-size:.78rem;color:var(--muted)}
+.signin-err{margin:0;color:var(--accent-text);font-size:.82rem;font-weight:500;overflow-wrap:anywhere}
+.signin-err:empty{display:none}

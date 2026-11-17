@@ -10,6 +10,10 @@ import { SERVER_KEEP_ALIVE_MS } from "./agent-fetch.ts";
 import { installShutdown } from "./shutdown.ts";
 
 const cfg = loadConfig();
+if (cfg.auth && !cfg.agentToken) {
+  console.error("FILEDECK_AUTH=on needs FILEDECK_AGENT_TOKEN");
+  process.exit(2);
+}
 if (cfg.mode === "agent") void initSandbox().then(() => selfCheckTools()); // says once at start-up when helper programs are not confined by the kernel
 if (cfg.mode === "agent") void noReplaceWarning().then((w) => w && console.warn(w)); // says once at start-up when the rename helper is missing
 const app = cfg.mode === "hub" ? createHub(cfg) : createAgent(cfg);

@@ -19,7 +19,7 @@ import { registerSearchRoutes } from "./search.ts";
 import { registerGitWorktreeRoutes } from "./git-worktrees.ts";
 import { registerThumbRoutes } from "./thumbs.ts";
 import { registerTranscodeRoutes } from "./transcode.ts";
-import { agentAuth } from "./agent-auth.ts";
+import { agentAuth, agentUser } from "./agent-auth.ts";
 import { sandboxSummary } from "./sandbox.ts";
 import { audit, trustProxies, type AuditSink } from "./audit.ts";
 import { requestGuard } from "./request-guard.ts";
@@ -41,6 +41,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
   app.use("*", trustProxies(cfg.trustedProxies));
   app.use("*", agentAuth(cfg.agentToken));
+  app.use("*", agentUser(cfg, auditSink)); // with auth on: a valid signed user header, or 401
   app.use("*", requestGuard({ maxEdit: cfg.maxEdit, audit: { who: `agent:${cfg.node}`, sink: auditSink } }));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
   app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point

@@ -8,6 +8,9 @@ import path from "node:path";
 import { normalizeOptions, DIFF_STATUSES, type DiffOptions, type Status } from "./folderdiff.ts";
 import { CompareSession, type DirSource, type LsEntry } from "./cmp-engine.ts";
 import type { Target } from "./hub.ts";
+import { currentUser } from "./auth/context.ts";
+import type { Identity } from "./auth/identity.ts";
+import { asOwner, seesJob } from "./auth/job-owner.ts";
 
 async function agentError(r: Response, what: string): Promise<FsError> {
   let msg = r.statusText;
@@ -83,6 +86,17 @@ export interface HubDiffOptions {
   /** a running compare counts as big (stops holding an interactive slot) after this long or this many entries */
   bigAfterMs?: number;
   bigEntries?: number;
+  /** whether the caller may use a node (auth on); a compare naming one it may not is refused with 403 */
+  mayUse?: (node: string) => boolean;
+}
+
+/**
+ * A target that always calls as `owner`. A compare reaches its agents from the job, from its live change feed (a timer)
+ * and from other people's requests (an admin reading the rows moves the focus), so the owner is bound to every call
+ * rather than taken from whatever context the call happens to start in.
+ */
+function boundTo(t: Target, owner: Identity | undefined): Target {
+  return { fetch: (rest, init) => asOwner(owner, () => t.fetch(rest, init)) };
 }
 
 export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs {
@@ -107,6 +121,10 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     if (jobs.get(id)) seen.set(id, Date.now());
   };
   const meta = new Map<string, { left: Loc; right: Loc; options: DiffOptions }>();
+  /** the account that started each compare (none with auth off); only it and admins see the compare */
+  const owners = new Map<string, Identity>();
+  const mayUse = o.mayUse ?? (() => true);
+  const sees = (id: string) => seesJob(currentUser(), owners.get(id));
   /** live sessions (rows spill to one SQLite file each under diffDir); closed when their job is dismissed or evicted */
   const sessions = new Map<string, CompareSession>();
   if (diffDir) {
@@ -115,6 +133,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
   }
   const prune = () => {
     for (const id of meta.keys()) if (!jobs.get(id)) meta.delete(id);
+    for (const id of owners.keys()) if (!jobs.get(id)) owners.delete(id);
     for (const id of seen.keys()) if (!jobs.get(id)) seen.delete(id);
     for (const [id, s] of sessions) if (!jobs.get(id)) (s.close(), sessions.delete(id));
   };
@@ -139,6 +158,8 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     if (!o || typeof o.node !== "string" || typeof o.path !== "string" || !o.path.startsWith("/")) {
       throw new FsError(400, `${what} must be {node, path} with an absolute path`);
     }
+    // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
+    if (!mayUse(o.node)) throw new FsError(403, "no access to this machine");
     if (!agents.has(o.node)) throw new FsError(404, `unknown node ${o.node}`);
     return { node: o.node, path: o.path };
   };
@@ -157,8 +178,15 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     return Response.json({ error: m.message }, { status: m.status });
   };
 
-  app.use("/api/diff/jobs/:id", async (c, next) => (touch(c.req.param("id")), next()));
-  app.use("/api/diff/jobs/:id/*", async (c, next) => (touch(c.req.param("id")), next()));
+  // every route on one compare: one the caller may not see is not found (and reading it does not keep it alive)
+  const own = async (c: import("hono").Context, next: () => Promise<void>) => {
+    const id = c.req.param("id") ?? "";
+    if (!sees(id)) return c.json({ error: "not found" }, 404);
+    touch(id);
+    return next();
+  };
+  app.use("/api/diff/jobs/:id", own);
+  app.use("/api/diff/jobs/:id/*", own);
   app.post("/api/diff/jobs", async (c) => {
     try {
       const b = (await c.req.json().catch(() => null)) as { left?: unknown; right?: unknown; options?: unknown } | null;
@@ -166,8 +194,9 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
       const left = loc(b.left, "left");
       const right = loc(b.right, "right");
       const options = normalizeOptions(b.options);
-      const ls = agentSource(agents.get(left.node) as Target, left.path, "left");
-      const rs = agentSource(agents.get(right.node) as Target, right.path, "right");
+      const owner = currentUser();
+      const ls = agentSource(boundTo(agents.get(left.node) as Target, owner), left.path, "left");
+      const rs = agentSource(boundTo(agents.get(right.node) as Target, owner), right.path, "right");
       const t0 = Date.now();
       const sess = new CompareSession(ls, rs, options, diffDir ? path.join(diffDir, `${randomUUID()}.db`) : spillPath("diff"));
       const job = jobs.create("folderdiff", `Compare ${left.node}:${left.path} with ${right.node}:${right.path}`, async (ctl) => {
@@ -176,6 +205,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
         return { left, right, options, ...s.counts(), hashedFiles: s.stats.hashed, hashedBytes: s.stats.hashedBytes, warnings: s.warnings, skipped: s.skipped, incomplete: s.incomplete, durationMs: Date.now() - t0 };
       });
       sessions.set(job.id, sess);
+      if (owner) owners.set(job.id, owner);
       seen.set(job.id, Date.now());
       sess.startLive(); // follow both agents' change feeds while the compare is open
       meta.set(job.id, { left, right, options });
@@ -185,7 +215,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
       return fail(e);
     }
   });
-  app.get("/api/diff/jobs", (c) => c.json({ jobs: jobs.list().map(strip) }));
+  app.get("/api/diff/jobs", (c) => c.json({ jobs: jobs.list().filter((j) => sees(j.id)).map(strip) }));
   app.get("/api/diff/jobs/:id", (c) => {
     const j = jobs.get(c.req.param("id"));
     return j ? c.json(strip(j)) : c.json({ error: "not found" }, 404);

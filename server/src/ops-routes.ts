@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import { OpQueue, OpError, type OpQueueDeps, type Choice, type ConflictPolicy, type Loc, type OpSpec, type SyncStep } from "./ops-queue.ts";
 import type { Target } from "./hub.ts";
+import { currentUser } from "./auth/context.ts";
 
 const MAX_ITEMS = 10_000;
 const POLICIES = new Set(["ask", "skip", "overwrite", "rename"]);
@@ -13,8 +14,12 @@ const POLICIES = new Set(["ask", "skip", "overwrite", "rename"]);
  *   POST   /api/ops/jobs/:id/{pause,resume,cancel}
  *   POST   /api/ops/jobs/:id/resolve    {action: skip|overwrite|rename, all?}
  *   DELETE /api/ops/jobs/:id            forget a finished job
+ *
+ * With auth on, a job belongs to the account that started it: it runs as that account, and only that account and admins see
+ * or steer it (a job someone else may not see answers 404, as if it did not exist). `mayUse` says whether the caller may use
+ * a node; a job naming one it may not is refused with 403 before it starts.
  */
-export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (node: string) => boolean, shared?: OpQueueDeps["shared"]): OpQueue {
+export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (node: string) => boolean, shared?: OpQueueDeps["shared"], mayUse: (node: string) => boolean = () => true): OpQueue {
   const queue = new OpQueue({ agents, isSource, shared });
 
   const abs = (p: unknown, what: string): string => {
@@ -22,6 +27,8 @@ export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (n
     return p;
   };
   const node = (n: unknown): string => {
+    // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
+    if (typeof n === "string" && !mayUse(n)) throw new OpError(403, "no access to this machine");
     if (typeof n !== "string" || !agents.has(n)) throw new OpError(404, `unknown node ${String(n)}`);
     return n;
   };
@@ -76,12 +83,16 @@ export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (n
 
   app.post("/api/ops/jobs", async (c) => {
     try {
-      return c.json(queue.create(parse(await c.req.json().catch(() => null))), 202);
+      return c.json(queue.create(parse(await c.req.json().catch(() => null)), currentUser()), 202);
     } catch (e) {
       return fail(e);
     }
   });
-  app.get("/api/ops/jobs", (c) => c.json({ jobs: queue.list() }));
+  app.get("/api/ops/jobs", (c) => c.json({ jobs: queue.list(currentUser()) }));
+  // every route on one job: a job the caller may not see is not found
+  const own = async (c: import("hono").Context, next: () => Promise<void>) => (queue.visible(c.req.param("id") ?? "", currentUser()) ? next() : c.json({ error: "not found" }, 404));
+  app.use("/api/ops/jobs/:id", own);
+  app.use("/api/ops/jobs/:id/*", own);
   const one = (fn: (id: string) => unknown) => (c: import("hono").Context) => {
     const v = fn(c.req.param("id") ?? "");
     return v ? c.json(v) : c.json({ error: "not found" }, 404);

@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import type { Target } from "./hub.ts";
 import type { JobRow, JobStore } from "./job-store.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
+import { asOwner, ownerFrom, seesJob } from "./auth/job-owner.ts";
+import type { Identity } from "./auth/identity.ts";
 
 /**
  * Hub-side queue for bulk file operations (copy, move, trash, delete, folder-diff sync).
@@ -68,7 +70,7 @@ export interface OpView {
 
 export class OpError extends Error {
   constructor(
-    public status: 400 | 404 | 409 | 502,
+    public status: 400 | 403 | 404 | 409 | 502,
     message: string,
   ) {
     super(message);
@@ -100,6 +102,8 @@ interface StatLite {
 interface Job {
   id: string;
   spec: OpSpec;
+  /** the account that started the job, as it was then (with auth off, none); every step runs as it */
+  user?: Identity;
   title: string;
   state: "queued" | "running" | "done" | "failed" | "canceled";
   paused: boolean;
@@ -217,8 +221,9 @@ export class OpQueue {
     if (d.shared) setInterval(() => this.tick(), d.shared.tickMs ?? 1000).unref();
   }
 
-  create(spec: OpSpec): OpView {
+  create(spec: OpSpec, owner?: Identity): OpView {
     const job = this.build(spec, randomUUID(), Date.now());
+    job.user = owner;
     this.jobs.set(job.id, job);
     this.save(job);
     this.prune();
@@ -272,11 +277,21 @@ export class OpQueue {
     return v;
   }
 
-  list(): OpView[] {
-    const own = [...this.jobs.values()].map((j) => this.view(j, false));
-    const other = (this.d.shared?.store.list(SCOPE) ?? []).filter((r) => !this.jobs.has(r.id)).map((r) => this.rowView(r));
+  /** Jobs `who` may see (with no caller, every job). */
+  list(who?: Identity): OpView[] {
+    const own = [...this.jobs.values()].filter((j) => seesJob(who, j.user)).map((j) => this.view(j, false));
+    const other = (this.d.shared?.store.list(SCOPE) ?? []).filter((r) => !this.jobs.has(r.id) && seesJob(who, ownerFrom(r.user))).map((r) => this.rowView(r));
     return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
   }
+  /** Whether `who` may see the job; an unknown id counts as visible, so the route itself answers "not found". */
+  visible(id: string, who: Identity | undefined): boolean {
+    if (!who) return true;
+    const j = this.jobs.get(id);
+    if (j) return seesJob(who, j.user);
+    const r = this.d.shared?.store.get(id, SCOPE);
+    return !r || seesJob(who, ownerFrom(r.user));
+  }
+
   get(id: string): OpView | undefined {
     const j = this.jobs.get(id);
     if (j) return this.view(j, true);
@@ -437,6 +452,7 @@ export class OpQueue {
     const ok = sh.store.put({
       id: j.id, scope: SCOPE, kind: "ops", title: j.title, params, view: this.stored(j),
       state: j.state, owner: this.me, beat: now, created_at: j.createdAt, finished_at: j.finishedAt ?? null,
+      user: j.user ? JSON.stringify(j.user) : null,
     });
     if (ok && !fin && params !== null) j.specStored = true;
     j.dirty = !ok;
@@ -494,6 +510,7 @@ export class OpQueue {
       const v = JSON.parse(r.view) as OpView & { _p: Persisted };
       const p = v._p;
       const j = this.build(spec, r.id, r.created_at);
+      j.user = ownerFrom(r.user); // the identity the job started with: it runs as that, whoever is signed in now
       const transfer = spec.op === "copy" || spec.op === "move";
       j.policy = p.policy;
       j.scanned = p.scanned;
@@ -557,7 +574,8 @@ export class OpQueue {
       j.state = "running";
       j.startedAt ??= Date.now();
       this.save(j);
-      void this.exec(j)
+      // pump runs from whatever moved the queue (a request, another job ending, the tick): the job runs as its own owner
+      void asOwner(j.user, () => this.exec(j))
         .catch((e) => {
           if (this.stopping || j.lost) return; // interrupted or taken over: the job is not finished, so it is not recorded as canceled
           if (j.abort.signal.aborted || e instanceof Aborted) j.state = "canceled";

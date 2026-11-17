@@ -73,14 +73,29 @@ const trashItems = [
 ];
 const stateOf = (tree, extra = {}) => `?s=${encodeURIComponent(JSON.stringify({ t: tree, a: 'p1', ...extra }))}`;
 
-// opts.vault: serve one saved password near expiry; opts.worktrees: serve a nested repository with worktrees.
+// opts.vault: serve one saved password near expiry; opts.worktrees: serve a nested repository with worktrees;
+// opts.signedOut: the hub has sign-in on and no session; opts.account: signed in as that name.
 async function installFixture(page, opts = {}) {
   if (opts.vault) vaultExpiry = Date.now() + 30_000;
   await page.route('**/api/**', async (route) => {
     const req = route.request();
     const url = new URL(req.url());
     const pathname = url.pathname;
-    const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    const json = (body, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
+    // Sign-in is off unless a check asks for a signed-out or signed-in hub. opts.session ({ out }) lets a check end the
+    // session while the app is open: every API call is then the gate's 401 until a password sign-in starts a new one.
+    if (opts.session) {
+      if (pathname === '/api/auth/login' && req.method() === 'POST') {
+        opts.session.out = false;
+        return json({ auth: true, kind: 'virt', name: opts.account, admin: false });
+      }
+      if (opts.session.out) return json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' });
+    }
+    if (pathname === '/api/auth/me') {
+      if (opts.account) return json({ auth: true, kind: 'virt', name: opts.account, admin: false });
+      return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
+    }
+    if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
     if (pathname === '/api/nodes') return json({ nodes: [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }] });
     if (pathname === `/api/nodes/${encodeURIComponent(nodeName)}/api/mounts`) return json({ mounts: [] });
     if (pathname === '/api/vault') {
@@ -1477,6 +1492,86 @@ async function verifyNoHorizontalOverflow(browser) {
   assert.deepEqual(failures, [], 'the document never scrolls horizontally');
 }
 
+// Sign-in on and no session: the sign-in screen replaces the app. It passes axe in both schemes, with an error shown too,
+// and does not scroll sideways on a phone. Signed in, the header names the account and offers "Sign out".
+async function verifySignIn(browser) {
+  const failures = [];
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
+      const context = await browser.newContext({ viewport, colorScheme: scheme, bypassCSP: true });
+      const page = await context.newPage();
+      try {
+        await page.addInitScript((mode) => localStorage.setItem('filedeck-theme', mode), scheme);
+        await installFixture(page, { signedOut: true });
+        await page.goto(new URL(directState(), baseURL).toString(), { waitUntil: 'domcontentloaded' });
+        const heading = page.getByRole('heading', { name: /^Sign in to / });
+        await heading.waitFor({ state: 'visible', timeout: 15000 });
+        assert.equal(await page.locator('.fp').count(), 0, 'no file panel behind the sign-in screen');
+        const label = `${viewport.width}x${viewport.height} ${scheme}`;
+        const overflow = async (what) => {
+          const o = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, body: document.body.scrollWidth, form: document.querySelector('.signin-form')?.getBoundingClientRect().right ?? 0 }));
+          if (o.scroll > o.client + 1 || o.body > o.client + 1 || o.form > o.client + 1) failures.push({ view: `${what} ${label}`, rule: 'horizontal overflow', ...o });
+        };
+        await overflow('password form');
+        await runAxe(page, `sign-in password ${label}`, failures);
+        await page.getByRole('textbox', { name: 'Name' }).fill('fixture-user');
+        await page.getByLabel('Password', { exact: true }).fill('not-the-password');
+        await page.getByRole('button', { name: 'Sign in' }).click();
+        await page.getByRole('alert').filter({ hasText: 'Sign-in failed' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(await page.getByLabel('Password', { exact: true }).inputValue(), '', 'the password is cleared after a failed attempt');
+        await runAxe(page, `sign-in error ${label}`, failures);
+        await page.getByRole('radio', { name: 'Key file' }).click();
+        await page.getByLabel('Key file').waitFor({ state: 'visible' });
+        await overflow('key file form');
+        await runAxe(page, `sign-in key file ${label}`, failures);
+        const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+        if (stored.includes('not-the-password')) failures.push({ view: label, rule: 'password kept in storage' });
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-user' } });
+  try {
+    await page.getByRole('button', { name: 'Account: fixture-user' }).click();
+    await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
+  } finally {
+    await context.close();
+  }
+  await verifyResumeAfterSessionEnds(browser);
+  assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
+}
+
+// The session ends while a file is being edited. Signing in again as the same account brings the app back without a
+// page load, and the unsaved text is still in the editor.
+async function verifyResumeAfterSessionEnds(browser) {
+  const session = { out: false };
+  const state = `?s=${encodeURIComponent(JSON.stringify({ t: { i: 'p1', n: nodeName, p: '/work', e: [nodeName, '/work/tracked.txt'] }, a: 'p1' }))}`;
+  const { context, page } = await openPage(browser, { state, fixture: { account: 'fixture-user', session } });
+  try {
+    const lines = () => page.getByRole('dialog', { name: 'Editing tracked.txt' }).locator('.monaco-editor .view-lines');
+    await lines().waitFor({ state: 'visible', timeout: 20000 });
+    await page.waitForFunction(() => /saved\s*text/.test(document.querySelector('.monaco-editor .view-lines')?.textContent ?? ''), null, { timeout: 20000 });
+    await lines().click();
+    await page.keyboard.type('TYPED-BEFORE-SIGN-OUT');
+    await page.waitForFunction(() => document.querySelector('.monaco-editor .view-lines')?.textContent.includes('TYPED-BEFORE-SIGN-OUT'), null, { timeout: 8000 });
+    // A marker on the window shows whether the page was loaded again.
+    await page.evaluate(() => { window.__sameDocument = true; });
+    session.out = true;
+    await page.evaluate(() => fetch('/api/nodes').catch(() => {}));
+    await page.getByRole('heading', { name: /^Sign in to / }).waitFor({ state: 'visible', timeout: 8000 });
+    await page.getByRole('textbox', { name: 'Name' }).fill('fixture-user');
+    await page.getByLabel('Password', { exact: true }).fill('fixture-password');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await lines().waitFor({ state: 'visible', timeout: 20000 });
+    await page.waitForFunction(() => document.querySelector('.monaco-editor .view-lines')?.textContent.includes('TYPED-BEFORE-SIGN-OUT'), null, { timeout: 8000 }).catch(() => {});
+    assert.match(await lines().innerText(), /TYPED-BEFORE-SIGN-OUT/, 'the unsaved text is back in the editor after signing in again');
+    assert.equal(await page.evaluate(() => window.__sameDocument === true), true, 'signing in again does not load the page again');
+  } finally {
+    await context.close();
+  }
+}
+
 async function verifyShortWindowRows(browser) {
   const { context, page } = await openPage(browser, { viewport: { width: 844, height: 390 }, state: `?s=${encodeURIComponent(JSON.stringify({ t: { i: 'p1', n: nodeName, p: '/big' }, a: 'p1' }))}` });
   try {
@@ -1609,6 +1704,7 @@ const checks = [
   ['rows visible in a short window', verifyShortWindowRows],
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],
   ['axe-core A and AA in every view', verifyAxeViews],
+  ['sign-in screen and account menu', verifySignIn],
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
 
