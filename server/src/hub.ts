@@ -13,7 +13,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
-import { withAgentToken } from "./agent-auth.ts";
+import { canUseNode, NoAccessError, withAgentToken } from "./agent-auth.ts";
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
@@ -27,6 +27,8 @@ import { Accounts, AuthDb, bootstrapAdmin } from "./auth/store.ts";
 import { Sessions } from "./auth/sessions.ts";
 import { Challenges } from "./auth/sshkey.ts";
 import { LoginLimiter } from "./auth/limiter.ts";
+import { currentUser, userContext } from "./auth/context.ts";
+import { USER_HEADER } from "./auth/identity.ts";
 import { markArrival, registerAuth, registerAuthOff, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
@@ -45,7 +47,8 @@ export interface Target {
 
 /** The header the hub sets for the agent with the client address it saw itself; any copy a client sends is dropped. */
 export const CLIENT_HEADER = "x-filedeck-client";
-const HOP = new Set([CLIENT_HEADER, "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "host", "content-length"]);
+/** The client's copies of these are dropped: the hub sets its own (the user header is signed per node, see withAgentToken). */
+const HOP = new Set([CLIENT_HEADER, USER_HEADER, "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "host", "content-length"]);
 
 function clean(h: Headers, keepLength: boolean): Headers {
   const out = new Headers();
@@ -102,7 +105,12 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     auth?.db.close();
     await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined)));
   };
-  const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken)) }]));
+  // Every call to an agent names the person behind it (with auth on, a call with nobody behind it throws). Only the open
+  // probes go out without a user header: they carry no data and are made for nobody in particular.
+  const openProbe = (rest: string) => /^\/(healthz|metrics)(\?|$)/.test(rest);
+  const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) =>
+    openProbe(rest) ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name))) : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth));
+  const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));
   const sources = buildSources(cfg);
   for (const [name, backend] of Object.entries(injected ?? {})) {
     sources.set(name, { config: { name, type: backend.type, host: "test", root: "/" }, backend });
@@ -113,6 +121,13 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const sapp = createSourceApp(name, s.backend, { ...sourceOpts, indexFile: cfg.indexDir ? path.join(cfg.indexDir, `source-${name}.db`) : "" });
     agents.set(name, { fetch: (rest, init) => Promise.resolve(sapp.fetch(new Request("http://source" + rest, init))) });
   }
+  /**
+   * Whether the person behind the current request may use a node or source. Network sources stay open to every signed-in
+   * account until source grants exist (part 3). With auth off everything is open, as before.
+   */
+  const mayUse = (name: string) => !cfg.auth || sources.has(name) || canUseNode(currentUser(), name);
+  const noAccess = (c: import("hono").Context) => c.json({ error: "no access to this machine" }, 403);
+
   // Reachability of a source is cached briefly so the sidebar poll does not open a connection per request.
   const pingCache = new Map<string, { at: number; ok: boolean; reason?: string }>();
   const sourceOnline = async (name: string) => {
@@ -145,7 +160,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
 
   app.get("/api/nodes", async (c) => {
     const nodes = await Promise.all(
-      cfg.nodes.map(async (n) => {
+      cfg.nodes.filter((n) => mayUse(n.name)).map(async (n) => {
         try {
           const r = await fetch(`${n.url}/healthz`, { signal: AbortSignal.timeout(2000) }); // open probe: no token needed
           return { name: n.name, online: r.ok };
@@ -164,9 +179,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   });
 
   // Folder diff jobs run here: the hub reads both agents' listings and asks each agent to hash its own files.
-  registerHubDiff(app, agents, cfg.mode === "hub" ? cfg.diffDir : "");
+  registerHubDiff(app, agents, cfg.mode === "hub" ? cfg.diffDir : "", { mayUse });
   // Bulk copy/move/trash/delete/sync run as hub jobs (survive the browser closing, pausable, conflict policy).
-  opq = registerOps(app, agents, (n) => sources.has(n), cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), leaseMs: 30_000 } : undefined);
+  opq = registerOps(app, agents, (n) => sources.has(n), cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), leaseMs: 30_000 } : undefined, mayUse);
   for (const f of cfg.jobsFile ? [cfg.jobsFile, cfg.jobsFile + "-wal", cfg.jobsFile + "-shm"] : []) {
     try {
       fs.chmodSync(f, 0o600);
@@ -283,6 +298,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const src = b?.src && agents.get(b.src.node);
     const dst = b?.dst && agents.get(b.dst.node);
     if (!b?.src || !b.dst || !src || !dst) return c.json({ error: "unknown node" }, 404);
+    if (!mayUse(b.src.node) || !mayUse(b.dst.node)) return noAccess(c);
     if (typeof b.src.path !== "string" || typeof b.dst.dir !== "string" || !b.src.path.startsWith("/") || b.src.path === "/") {
       return c.json({ error: "invalid path" }, 400);
     }
@@ -304,6 +320,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       return c.json(tally.skipped > 0 ? { ...res, skipped: tally.skipped } : res, 201);
     } catch (e) {
       if (e instanceof TransferError) return c.json({ error: e.message }, e.status as 400);
+      if (e instanceof NoAccessError) return noAccess(c);
       if ((e as Error)?.name === "AbortError") return new Response(null, { status: 499 });
       return c.json({ error: "transfer failed" }, 502);
     }
@@ -315,6 +332,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.all("/api/nodes/:node/*", async (c) => {
     const target = agents.get(c.req.param("node"));
     if (!target) return c.json({ error: "unknown node" }, 404);
+    if (!mayUse(c.req.param("node"))) return noAccess(c);
     const url = new URL(c.req.url);
     // the node segment is matched as sent: its decoded form can have another length
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
@@ -349,6 +367,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
     } catch (e) {
       if ((e as Error).name === "AbortError") return new Response(null, { status: 499 });
+      if (e instanceof NoAccessError) return noAccess(c);
       if (isBodyTooLarge(e)) return c.json({ error: "request body too large" }, 413);
       return c.json({ error: "agent unreachable" }, 502);
     }

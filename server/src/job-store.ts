@@ -19,6 +19,11 @@ export interface JobRow {
   finished_at: number | null;
   /** when a client last waited on or polled the job through any process (0 = never recorded) */
   seen_at?: number;
+  /**
+   * JSON of the account that started the job (an Identity), as it was then; null with auth off and in stores of older
+   * versions. Not to be confused with `owner`, the process that runs the job.
+   */
+  user?: string | null;
 }
 
 const LIVE = "state IN ('queued','running')";
@@ -42,7 +47,10 @@ export class JobStore {
           params TEXT, view TEXT NOT NULL, state TEXT NOT NULL, owner TEXT NOT NULL, beat INTEGER NOT NULL,
           cancel INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, finished_at INTEGER)`);
         // stores of older versions have no seen_at (they ignore it)
-        if (!db.prepare("PRAGMA table_info(jobs)").all().some((c) => c.name === "seen_at")) db.exec("ALTER TABLE jobs ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
+        const cols = db.prepare("PRAGMA table_info(jobs)").all();
+        if (!cols.some((c) => c.name === "seen_at")) db.exec("ALTER TABLE jobs ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
+        // and no user (their jobs have no owner account)
+        if (!cols.some((c) => c.name === "user")) db.exec("ALTER TABLE jobs ADD COLUMN user TEXT");
         db.prepare("SELECT count(*) FROM jobs").get();
         this.db = db;
       } catch (e) {
@@ -67,12 +75,15 @@ export class JobStore {
     }
   }
 
-  /** Insert, or update the row while `r.owner` still owns it. Returns false when someone else owns it (or the database is busy). */
+  /**
+   * Insert, or update the row while `r.owner` still owns it. Returns false when someone else owns it (or the database is busy).
+   * `user` is written only on insert: the account behind a job never changes.
+   */
   put(r: Omit<JobRow, "cancel">): boolean {
     return this.run(
-      `INSERT INTO jobs (id,scope,kind,title,params,view,state,owner,beat,created_at,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO jobs (id,scope,kind,title,params,view,state,owner,beat,created_at,finished_at,user) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET params=CASE excluded.params WHEN '' THEN NULL ELSE COALESCE(excluded.params, params) END, view=excluded.view, state=excluded.state, beat=excluded.beat, finished_at=excluded.finished_at WHERE owner=excluded.owner`,
-      (s) => s.run(r.id, r.scope, r.kind, r.title, r.params, r.view, r.state, r.owner, r.beat, r.created_at, r.finished_at).changes > 0,
+      (s) => s.run(r.id, r.scope, r.kind, r.title, r.params, r.view, r.state, r.owner, r.beat, r.created_at, r.finished_at, r.user ?? null).changes > 0,
       false,
     );
   }
