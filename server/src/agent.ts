@@ -12,7 +12,7 @@ import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, hitsReadOnly } from "./readonly.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
-import { makeResolver, signInAccount, type AccountResolver } from "./local-accounts.ts";
+import { makeResolver, signInAccount, SignInLookups, type AccountResolver } from "./local-accounts.ts";
 import { executable } from "./native.ts";
 import { HostPam, hostPam } from "./host-pam.ts";
 import { registerAgentAuthRoutes } from "./agent-auth-routes.ts";
@@ -45,6 +45,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   let workers: AccountWorkers | undefined;
   let pam: Promise<HostPam | undefined> | undefined;
   let keys: Promise<KeyCheck | undefined> | undefined;
+  let signInLookups: SignInLookups | undefined;
   if (cfg.auth) {
     const made = opts.accounts ? undefined : makeResolver(cfg, (s) => console.error(s));
     const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : made!.then((r) => r.resolver);
@@ -65,8 +66,11 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
           });
     // key sign-in: `authorized_keys` read as the user inside the machine's root; only with the host's own account lookup (the
     // /etc/passwd fallback refuses system sign-in), and not for an account lookup passed in without `opts.keys`
-    keys = opts.keys ? Promise.resolve(opts.keys) : made?.then((r) => (r.helpers ? new KeyCheck({ root: r.helpers.root, accounts: r.resolver }) : undefined)).catch(() => undefined);
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh), forSignIn: async (name) => signInAccount(await found, name) };
+    // the sign-in routes' lookups run before anyone is signed in: at most 4 at once (the key check's too)
+    signInLookups = new SignInLookups(accounts);
+    const lookups = signInLookups;
+    keys = opts.keys ? Promise.resolve(opts.keys) : made?.then((r) => (r.helpers ? new KeyCheck({ root: r.helpers.root, accounts: lookups }) : undefined)).catch(() => undefined);
     specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [], uidInUse: (uid) => pool?.usesUid(uid) ?? false });
     const ws = specs;
     // (a worker's own requests to this process, such as its trash folder, are served over its connection only; once a worker has
@@ -98,8 +102,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   app.onError((e, c) => (e instanceof GateAnswer ? e.res : agentError(e, c))); // (a GateAnswer: the account rules refused, sign-in on)
 
   app.get("/healthz", (c) => c.text("ok"));
-  if (cfg.auth && accounts) {
-    const a = accounts;
+  if (cfg.auth && signInLookups) {
+    const a = signInLookups;
     registerAgentAuthRoutes(app, { pam, keys, accounts: async () => a });
   }
   app.get("/api/info", async (c) => c.json({ node: cfg.node, root: cfg.root, watches: files.watches.size, readOnly: cfg.readOnly, sandbox: await sandboxSummary() }));

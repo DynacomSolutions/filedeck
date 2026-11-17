@@ -18,6 +18,9 @@ import { signInAccount, validSystemName, type AccountResolver } from "./local-ac
  *   fails (one log line). The hub
  *   asks it for the machines a system user may see; it never passes a client's request on to it, so its rate is the hub's.
  *
+ * The agent hands these routes its `SignInLookups` as `accounts`: their lookups run before anyone is signed in, so at most 4 run at
+ * once, and one that finds no place within a second fails as a failed lookup does.
+ *
  * The password, the key and the signature are never logged, never put in an audit line (an `/api/auth/` body keeps only its `name`) and
  * never echoed in an error.
  */

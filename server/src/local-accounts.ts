@@ -35,6 +35,70 @@ export async function signInAccount(r: AccountResolver, name: string): Promise<L
   return validSystemName(name) ? r.forSignIn(name) : null;
 }
 
+/** Sign-in lookups that may run at once on one agent. */
+export const MAX_SIGN_IN_LOOKUPS = 4;
+/** How long a sign-in lookup waits for a place before it is refused. */
+export const SIGN_IN_LOOKUP_WAIT_MS = 1_000;
+
+/**
+ * The account lookups of the agent's sign-in routes (`/api/auth/*`), which run before anyone is signed in: at most
+ * `MAX_SIGN_IN_LOOKUPS` at once, like the PAM helpers. A lookup over that waits for a place in order, at most `waitMs`, and is then
+ * refused (it rejects, so the route answers as for a failed lookup: `unavailable`). A place is given back when the lookup itself
+ * settles, also after its caller has stopped waiting. `resolve` (worker starts) is passed through, not counted.
+ */
+export class SignInLookups implements AccountResolver {
+  private running = 0;
+  private readonly waiting: (() => void)[] = [];
+  private readonly max: number;
+  private readonly waitMs: number;
+
+  constructor(
+    private readonly inner: AccountResolver,
+    o: { max?: number; waitMs?: number } = {},
+  ) {
+    this.max = o.max ?? MAX_SIGN_IN_LOOKUPS;
+    this.waitMs = o.waitMs ?? SIGN_IN_LOOKUP_WAIT_MS;
+  }
+
+  resolve(name: string, fresh?: boolean): Promise<LocalAccount | null> {
+    return this.inner.resolve(name, fresh);
+  }
+
+  async forSignIn(name: string): Promise<LocalAccount | "root" | null> {
+    if (!(await this.place())) throw new Error(`too many account lookups at once (${this.max}); try again`);
+    try {
+      return await signInAccount(this.inner, name);
+    } finally {
+      this.leave();
+    }
+  }
+
+  private place(): Promise<boolean> {
+    if (this.running < this.max) {
+      this.running++;
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const go = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        const at = this.waiting.indexOf(go);
+        if (at >= 0) this.waiting.splice(at, 1);
+        resolve(false);
+      }, this.waitMs);
+      this.waiting.push(go);
+    });
+  }
+
+  private leave(): void {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.running--;
+  }
+}
+
 /** A system account name Filedeck accepts: what the usual tools allow, with `@` and `.` for directory accounts, never a leading `-`. */
 export const validSystemName = (name: string): boolean => /^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$/.test(name);
 
