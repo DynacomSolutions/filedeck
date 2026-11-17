@@ -73,27 +73,30 @@ export function verifyLogin(pub: PublicKey | null, msg: Buffer, sig: Buffer): bo
 
 const TTL_MS = 60_000;
 const MAX_OUTSTANDING = 10_000;
-const MAX_PER_NAME = 5;
+const MAX_PER_ASKER = 5;
 
-type Entry = { name: string; c: Buffer; exp: number };
+type Entry = { name: string; asker: string; c: Buffer; exp: number };
 
 /** One-use sign-in challenges, bound to a name. A failed take does not consume the challenge. */
 export class Challenges {
   private byId = new Map<number, Entry>(); // insertion order = age
   private byName = new Map<string, Set<number>>();
+  /** per client address and name, so one address cannot push out the challenges another one asked for */
+  private byAsker = new Map<string, Set<number>>();
   private seq = 0;
 
   constructor(private now: () => number = Date.now) {}
 
-  issue(name: string): Buffer {
+  /** `addr` is the client address (as the rate limit keys it) that asked. */
+  issue(name: string, addr: string): Buffer {
     const c = randomBytes(32);
     const id = this.seq++;
-    this.byId.set(id, { name, c, exp: this.now() + TTL_MS });
-    let set = this.byName.get(name);
-    if (!set) this.byName.set(name, (set = new Set()));
-    set.add(id);
-    // One name may hold at most MAX_PER_NAME; the oldest of its own goes first (Set keeps insertion order).
-    if (set.size > MAX_PER_NAME) this.drop(set.values().next().value as number);
+    const asker = JSON.stringify([addr, name]);
+    this.byId.set(id, { name, asker, c, exp: this.now() + TTL_MS });
+    add(this.byName, name, id);
+    const own = add(this.byAsker, asker, id);
+    // One address may hold at most MAX_PER_ASKER for one name; the oldest of its own goes first (Set keeps insertion order).
+    if (own.size > MAX_PER_ASKER) this.drop(own.values().next().value as number);
     // Then the global cap: drop the oldest challenge of all (Map keeps insertion order).
     if (this.byId.size > MAX_OUTSTANDING) this.drop(this.byId.keys().next().value as number);
     return c;
@@ -122,8 +125,20 @@ export class Challenges {
     const e = this.byId.get(id);
     if (!e) return;
     this.byId.delete(id);
-    const set = this.byName.get(e.name);
-    set?.delete(id);
-    if (set?.size === 0) this.byName.delete(e.name);
+    remove(this.byName, e.name, id);
+    remove(this.byAsker, e.asker, id);
   }
+}
+
+function add(m: Map<string, Set<number>>, k: string, id: number): Set<number> {
+  let set = m.get(k);
+  if (!set) m.set(k, (set = new Set()));
+  set.add(id);
+  return set;
+}
+
+function remove(m: Map<string, Set<number>>, k: string, id: number): void {
+  const set = m.get(k);
+  set?.delete(id);
+  if (set?.size === 0) m.delete(k);
 }

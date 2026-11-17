@@ -88,40 +88,47 @@ test("type word must match type in blob; ecdsa curve and point checked", () => {
 test("challenge once, expiry, binding and failed take keeps it", () => {
   let t = 1_000_000;
   const ch = new Challenges(() => t);
-  const c = ch.issue("alice");
+  const c = ch.issue("alice", "10.0.0.1");
   assert.equal(c.length, 32);
   assert.equal(ch.take("bob", c), false);
   assert.equal(ch.take("alice", randomBytes(32)), false);
   assert.equal(ch.take("alice", c.subarray(1)), false);
   assert.equal(ch.take("alice", c), true);
   assert.equal(ch.take("alice", c), false);
-  const d = ch.issue("alice");
+  const d = ch.issue("alice", "10.0.0.1");
   t += 60_000;
   assert.equal(ch.take("alice", d), true);
-  const e = ch.issue("alice");
+  const e = ch.issue("alice", "10.0.0.1");
   t += 60_001;
   assert.equal(ch.take("alice", e), false);
 });
 
-test("each name keeps at most 5 outstanding challenges", () => {
+test("each address keeps at most 5 outstanding challenges per name", () => {
   const ch = new Challenges();
-  const cs = Array.from({ length: 6 }, () => ch.issue("alice"));
-  const other = ch.issue("bob");
+  const cs = Array.from({ length: 6 }, () => ch.issue("alice", "10.0.0.1"));
+  const other = ch.issue("bob", "10.0.0.1");
   assert.equal(ch.take("alice", cs[0]!), false);
   assert.equal(ch.take("alice", cs[1]!), true);
   assert.equal(ch.take("bob", other), true);
 });
 
+test("another address cannot push out a user's challenge", () => {
+  const ch = new Challenges();
+  const mine = ch.issue("alice", "10.0.0.1");
+  for (let i = 0; i < 6; i++) ch.issue("alice", "10.0.0.2");
+  assert.equal(ch.take("alice", mine), true);
+});
+
 test("outstanding challenges are capped, oldest dropped first", () => {
   let t = 0;
   const ch = new Challenges(() => t++);
-  const first = ch.issue("a0");
-  const second = ch.issue("a1");
-  for (let i = 0; i < 9_997; i++) ch.issue("n" + i);
+  const first = ch.issue("a0", "10.0.0.1");
+  const second = ch.issue("a1", "10.0.0.1");
+  for (let i = 0; i < 9_997; i++) ch.issue("n" + i, "10.0.0.1");
   // Exactly at the cap: nothing dropped yet.
-  const last = ch.issue("z");
+  const last = ch.issue("z", "10.0.0.1");
   // One over the cap: only the oldest goes.
-  ch.issue("extra");
+  ch.issue("extra", "10.0.0.1");
   assert.equal(ch.take("a0", first), false);
   assert.equal(ch.take("a1", second), true);
   assert.equal(ch.take("z", last), true);
