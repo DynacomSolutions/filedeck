@@ -8,6 +8,10 @@ import { loadConfig } from "../src/config.ts";
 import { claimFor, signClaim, USER_HEADER, type Identity, type UserClaim } from "../src/auth/identity.ts";
 import { tokenIdentity } from "../src/auth/routes.ts";
 import { sandboxInfo } from "../src/sandbox.ts";
+import { Hono } from "hono";
+import { agentError } from "../src/agent-routes.ts";
+import { Jobs } from "../src/jobs.ts";
+import { entryChain, registerSizeRoutes } from "../src/props.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
 import { chownForTest, fakeResolver, privateTmpdir } from "./worker-env.ts";
 
@@ -43,6 +47,7 @@ before(() => {
   fs.mkdirSync(path.join(root, "a/z/zz/deeper"), { recursive: true });
   fs.mkdirSync(path.join(root, "a/z/plain"));
   fs.symlinkSync("/a/y", path.join(root, "a/z/lnk")); // a link in a folder the account cannot open, to one it can
+  fs.symlinkSync("/a/z/hidden-name.txt", path.join(root, "a/zl")); // a link the account owns, to a file in a folder it cannot open
   fs.mkdirSync(path.join(root, "b"));
   fs.mkdirSync(path.join(root, "c/inner"), { recursive: true });
   fs.writeFileSync(path.join(root, "c/secret"), Buffer.alloc(8192, 2));
@@ -50,6 +55,7 @@ before(() => {
   fs.writeFileSync(path.join(root, "p/private"), "p\n");
   fs.mkdirSync(path.join(root, "q"));
   fs.writeFileSync(path.join(root, "q/open"), "q\n");
+  fs.symlinkSync("/p/private", path.join(root, "q/lnk")); // the account's own link, to a file in root's 0700 folder
   fs.mkdirSync(path.join(root, "p/inner/deeper"), { recursive: true });
   // a folder others may pass through but not list (0711), with a folder below it that anyone may list (0755)
   fs.mkdirSync(path.join(root, "h/pub/sub"), { recursive: true });
@@ -139,7 +145,7 @@ test("a virtual account gets sizes inside its grants only, without the folders i
   // from the store only, too
   const cached = await get("/api/du?path=/a&depth=2&all=1&cachedOnly=1", claim);
   assert.equal(cached.status, 200);
-  assert.ok(!((await cached.json()) as Answer).entries.some((e) => e.path.startsWith("/a/z")));
+  assert.ok(!((await cached.json()) as Answer).entries.some((e) => e.path === "/a/z" || e.path.startsWith("/a/z/")));
 });
 
 test("the API token's account gets the same filter", { skip: NEED }, async () => {
@@ -150,7 +156,7 @@ test("the API token's account gets the same filter", { skip: NEED }, async () =>
   assert.ok(!("error" in id));
   const claim = claimFor(id as Identity, "t", Date.now())!;
   const a = await answer("path=/a&depth=2", claim);
-  assert.ok(!a.entries.some((e) => e.path.startsWith("/a/z")));
+  assert.ok(!a.entries.some((e) => e.path === "/a/z" || e.path.startsWith("/a/z/")));
   assert.ok(a.entries.some((e) => e.path === "/a/x/deep"));
   await refused("path=/", claim, "outside your folders");
   await refused("path=/c", claim, "outside your folders");
@@ -220,4 +226,49 @@ test("a folder below one the account may pass through but not list is left out, 
   const paths = a.entries.map((e) => e.path);
   assert.ok(paths.includes("/q"), paths.join(" "));
   assert.ok(!paths.some((p) => p === "/h" || p.startsWith("/h/")), paths.join(" "));
+});
+
+test("the size of a file is answered only when the account can open the folder it really is in", { skip: ROOT_ONLY }, async () => {
+  for (const [p, claim] of [["/q/lnk", sys("alice")], ["/a/zl", virt("guest7")]] as const) {
+    const r = await postSize(p, claim);
+    assert.equal(r.status, 403, `${p}: ${await r.clone().text()}`);
+    assert.deepEqual(await r.json(), { error: "permission denied" });
+  }
+  assert.equal((await postSize("/q/open", sys("alice"))).status, 202, "a file in a folder the account can open");
+});
+
+test("an entry that is not below the asked folder has no chain, and is left out", () => {
+  const e = (p: string, type = "dir") => ({ path: p, type, bytes: 0, diskBytes: 0, files: 0, dirs: 0 }) as Parameters<typeof entryChain>[1];
+  assert.deepEqual(entryChain("/a", e("/a")), []);
+  assert.deepEqual(entryChain("/a", e("/a/x/y")), ["/a/x", "/a/x/y"]);
+  assert.deepEqual(entryChain("/a", e("/a/x/f", "file")), ["/a/x"]);
+  assert.deepEqual(entryChain("/", e("/x/f", "file")), ["/x"]);
+  assert.equal(entryChain("/a", e("/b")), null);
+  assert.equal(entryChain("/a", e("/ab")), null);
+  assert.equal(entryChain("/a", e("/ab/f", "file")), null);
+});
+
+test("an asked folder that is a link: the folder it leads to is checked too", async () => {
+  // a stand-in for the worker: the link itself is listable, the folder it leads to is not
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-dulink-")));
+  try {
+    fs.mkdirSync(path.join(dir, "root/real/inner"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "root/real/inner/f"), "x");
+    fs.symlinkSync("/real", path.join(dir, "root/lnk"));
+    fs.mkdirSync(path.join(dir, "index"));
+    const cfg = loadConfig({ FILEDECK_ROOT: path.join(dir, "root"), FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: path.join(dir, "index") } as never);
+    const asked: string[] = [];
+    const h = new Hono();
+    h.onError(agentError);
+    const sizes = registerSizeRoutes(h, cfg, new Jobs(2), { canList: async (_c, ps) => (asked.push(...ps), ps.map((p) => p === "/lnk")) });
+    try {
+      const r = await h.request("/api/du?path=/lnk&depth=2");
+      assert.equal(r.status, 403, await r.clone().text());
+      assert.ok(asked.includes("/real"), asked.join(" "));
+    } finally {
+      sizes.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

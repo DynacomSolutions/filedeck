@@ -402,6 +402,21 @@ export interface SizeAccess {
   log?: (s: string) => void;
 }
 
+/**
+ * The folders that decide whether a du entry below `virtual` is shown: each one from below `virtual` down to the entry itself (a folder or
+ * mount point) or its folder (a file, link or other). `[]` for `virtual` itself and a file directly in it; null for an entry that is not
+ * below `virtual` (left out).
+ */
+export function entryChain(virtual: string, e: Pick<DuEntry, "path" | "type">): string[] | null {
+  const f = e.type === "dir" || e.type === "mount" ? e.path : path.posix.dirname(e.path);
+  if (f === virtual) return [];
+  if (!f.startsWith(virtual === "/" ? "/" : virtual + "/")) return null;
+  const out: string[] = [];
+  let at = virtual === "/" ? "" : virtual;
+  for (const part of f.slice(at.length + 1).split("/")) out.push((at = `${at}/${part}`));
+  return out;
+}
+
 /** entries of a du answer checked with one `canList` call */
 const FILTER_BATCH = 256;
 
@@ -482,9 +497,9 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
     let self = true;
+    const asked = "/" + cleanVirtual(b.path).join("/");
     if (o.canList) {
       // a folder the person can open, or a file in one (whether a name there is a folder they cannot open is theirs to see)
-      const asked = "/" + cleanVirtual(b.path).join("/");
       const [own, up] = await o.canList(c, asked === "/" ? ["/"] : [asked, path.posix.dirname(asked)]);
       self = own === true;
       if (!self && !up) {
@@ -494,7 +509,13 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     }
     await o.inside?.(c, b.path, true);
     const r = resolveRead(cfg.root, b.path);
-    if (!self && (await fs.stat(r.real)).isDirectory()) throw new ops.FsError(403, "permission denied");
+    if (o.canList) {
+      // What this process resolved (as root, following a link at the end) is checked as the person too: their own link in a folder they can
+      // open may lead to a file in one they cannot. A file's size needs the folder it really is in; a folder reached through a link, itself.
+      if (!self && (await fs.stat(r.real)).isDirectory()) throw new ops.FsError(403, "permission denied");
+      const check = !self ? [path.posix.dirname(r.virtual)] : r.virtual !== asked ? [r.virtual] : [];
+      if (check.length && !(await o.canList(c, check))[0]) throw new ops.FsError(403, "permission denied");
+    }
     await fs.stat(r.real);
     if (stopping()) throw leaving();
     // one live size job per path (while another process holds the store's writer lease the job waits for it: see the gate): a second request attaches to it
@@ -545,20 +566,15 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
         }
       };
       let batch: DuEntry[] = [];
-      /** the folders that decide whether an entry is shown: each one from below `virtual` down to the entry itself (a folder) or its folder (a file) */
-      const chainOf = (e: DuEntry): string[] => {
-        const f = e.type === "dir" || e.type === "mount" ? e.path : path.posix.dirname(e.path);
-        if (f === virtual || !f.startsWith(virtual === "/" ? "/" : virtual + "/")) return [];
-        const out: string[] = [];
-        let at = virtual === "/" ? "" : virtual;
-        for (const part of f.slice(at.length + 1).split("/")) out.push((at = `${at}/${part}`));
-        return out;
-      };
-      /** per folder, whether the person can open it (asked once each for the whole answer; `virtual` was checked before) */
+      /** per folder, whether the person can open it (asked once each for the whole answer; `virtual` was checked before: see the du route) */
       const listable = new Map<string, boolean>([[virtual, true]]);
       const flush = async () => {
         if (!canList || !batch.length) return;
-        const out = batch.map((e) => ({ e, chain: chainOf(e) }));
+        // (an entry that is not below the asked folder has no chain: it is left out)
+        const out = batch.flatMap((e) => {
+          const chain = entryChain(virtual, e);
+          return chain ? [{ e, chain }] : [];
+        });
         batch = [];
         const asked = [...new Set(out.flatMap((x) => x.chain))].filter((f) => !listable.has(f));
         if (asked.length) {
@@ -602,6 +618,9 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     }
     await o.inside?.(c, q("path") ?? "/", true);
     const r = resolveRead(cfg.root, q("path") ?? "/");
+    // (the answer is for the folder this process resolved: when that is not the path the worker was asked about, it is asked about it too, so
+    // the answer's own folder, which `answerTree` takes as checked, always is)
+    if (o.canList && r.virtual !== "/" + cleanVirtual(q("path") ?? "/").join("/") && !(await o.canList(c, [r.virtual]))[0]) throw new ops.FsError(403, "permission denied");
     if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
