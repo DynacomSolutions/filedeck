@@ -72,6 +72,9 @@ test("IPv6 addresses count by their /64; mapped IPv4 as IPv4", () => {
   assert.equal(addressKey("::1"), "0:0:0:0::/64");
   assert.equal(addressKey("::ffff:10.0.0.5"), "10.0.0.5");
   assert.equal(addressKey("10.0.0.5"), "10.0.0.5");
+  for (const m of ["::ffff:0a00:0005", "::FFFF:A00:5", "0:0:0:0:0:ffff:0a00:0005", "0000:0000:0000:0000:0000:FFFF:0A00:0005", "0:0:0:0:0:ffff:10.0.0.5", "::ffff:10.0.0.5"]) {
+    assert.equal(addressKey(m), "10.0.0.5", m);
+  }
   const c = clock();
   const l = new LoginLimiter(c.now);
   for (let i = 0; i < 5; i++) l.fail("n" + i, `2001:db8:1:2::${i + 1}`);
@@ -86,4 +89,38 @@ test("over the key cap, unblocked keys are evicted before blocked ones", () => {
   // fill the map with unblocked keys (one failure each, name and address)
   for (let i = 0; i < 20; i++) l.fail("n" + i, "b" + i);
   assert.equal(l.check("victim", "zz").ok, false, "the blocked name survived");
+});
+
+test("a good reservation undoes only its own failure, not a block that others set meanwhile", () => {
+  const c = clock();
+  const l = new LoginLimiter(c.now);
+  const slow = l.reserve("good", "ip"); // a slow good sign-in starts: one failure counted
+  for (let i = 0; i < 4; i++) l.fail("bad" + i, "ip"); // four parallel failures: the fifth failure starts a block
+  assert.equal(l.check("z", "ip").ok, false);
+  slow.succeed();
+  assert.equal(l.check("z", "ip").ok, false, "the block set by the other failures stays");
+  // the count stays too: after the block, one more failure blocks again (the streak goes on)
+  c.t += 1000;
+  assert.equal(l.check("z", "ip").ok, true);
+  l.fail("bad", "ip");
+  assert.equal(l.check("z", "ip").ok, false);
+
+  // when the reservation itself was the fifth failure, success takes back the block but keeps the four failures
+  const l2 = new LoginLimiter(c.now);
+  for (let i = 0; i < 4; i++) l2.fail("bad" + i, "ip");
+  const r = l2.reserve("good", "ip");
+  assert.equal(l2.check("z", "ip").ok, false);
+  r.succeed();
+  assert.equal(l2.check("z", "ip").ok, true);
+  l2.fail("bad", "ip");
+  assert.equal(l2.check("z", "ip").ok, false, "the four earlier failures still count");
+});
+
+test("a flood of one-failure keys does not evict a key with four failures", () => {
+  const c = clock();
+  const l = new LoginLimiter(c.now, 10);
+  for (let i = 0; i < 4; i++) l.fail("victim", "a" + i); // the oldest key, four failures, not blocked
+  for (let i = 0; i < 50; i++) l.fail("n" + i, "b" + i);
+  l.fail("victim", "c");
+  assert.equal(l.check("victim", "d").ok, false, "the fifth failure blocks: the four were kept");
 });

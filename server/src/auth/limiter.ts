@@ -18,20 +18,35 @@ const MAX_KEYS = 10_000;
 /** Names are cut to this length for the key, so a long name cannot use much memory. */
 const MAX_NAME = 256;
 
-type Entry = { times: number[]; streak: number; until: number };
+/** `gen` changes each time a streak starts, so a reservation never touches a later streak. */
+type Entry = { times: number[]; streak: number; until: number; gen: number };
 
 const blockMs = (streak: number) => Math.min(MAX_BLOCK_MS, 2 ** (streak - LIMIT) * 1000);
 
-/** The limiter key of a client address: an IPv6 address by its first 64 bits, an IPv4-mapped one as IPv4. */
-export function addressKey(ip: string): string {
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
-  if (mapped) return mapped[1] as string;
-  if (isIP(ip) !== 6) return ip;
-  const [head = "", tail] = ip.toLowerCase().split("::");
+/** The eight 16-bit groups of a valid IPv6 address (a dotted IPv4 tail becomes the last two groups). */
+function groups6(ip: string): number[] {
+  let s = ip.toLowerCase();
+  const v4 = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number) as [number, number, number, number];
+    s = s.slice(0, v4.index) + ((a << 8) | b).toString(16) + ":" + ((c << 8) | d).toString(16);
+  }
+  const [head = "", tail] = s.split("::");
   const h = head ? head.split(":") : [];
   const t = tail === undefined ? null : tail ? tail.split(":") : [];
-  const groups = t === null ? h : [...h, ...Array<string>(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t];
-  return groups.slice(0, 4).map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16).toString(16) : "0")).join(":") + "::/64";
+  const g = t === null ? h : [...h, ...Array<string>(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t];
+  return g.map((x) => parseInt(x, 16) || 0);
+}
+
+/** The limiter key of a client address: an IPv6 address by its first 64 bits, an IPv4-mapped one (any form) as dotted IPv4. */
+export function addressKey(ip: string): string {
+  if (isIP(ip) !== 6) return ip;
+  const g = groups6(ip);
+  if (g.length === 8 && g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) {
+    const [hi, lo] = [g[6] as number, g[7] as number];
+    return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  }
+  return g.slice(0, 4).map((x) => x.toString(16)).join(":") + "::/64";
 }
 
 const nameKey = (name: string) => "n:" + name.slice(0, MAX_NAME);
@@ -69,20 +84,22 @@ export class LoginLimiter {
     const t = this.now();
     const ik = ipKey(ip);
     this.record(nameKey(name), t);
-    const before = this.keys.get(ik);
-    const prev = before ? { streak: before.streak, until: before.until } : undefined;
-    this.record(ik, t);
+    const own = this.record(ik, t);
     if (this.keys.size > this.maxKeys) this.prune(t);
     return {
+      // Undoes only what this attempt did to the address; failures that came in meanwhile stay.
       succeed: () => {
         this.succeed(name);
         const e = this.keys.get(ik);
         if (!e) return;
         const i = e.times.lastIndexOf(t);
         if (i >= 0) e.times.splice(i, 1);
-        if (e.streak > 0) {
-          e.streak = prev?.streak ?? 0;
-          e.until = prev?.until ?? 0;
+        if (own.raised && e.gen === own.gen && e.streak > 0) {
+          e.streak--;
+          if (e.streak < LIMIT) {
+            e.streak = 0;
+            e.until = 0;
+          }
         }
         if (e.streak === 0 && e.times.length === 0) this.keys.delete(ik);
       },
@@ -94,14 +111,25 @@ export class LoginLimiter {
     this.keys.delete(nameKey(name));
   }
 
-  private record(k: string, t: number): void {
-    const e = this.live(k, t) ?? { times: [], streak: 0, until: 0 };
+  private gen = 0;
+
+  /** Adds one failure. Says whether it raised the streak, and in which streak. */
+  private record(k: string, t: number): { raised: boolean; gen: number } {
+    const e = this.live(k, t) ?? { times: [], streak: 0, until: 0, gen: 0 };
     e.times.push(t);
-    if (e.streak > 0) e.streak++;
-    else if (e.times.length >= LIMIT) e.streak = LIMIT;
+    let raised = false;
+    if (e.streak > 0) {
+      e.streak++;
+      raised = true;
+    } else if (e.times.length >= LIMIT) {
+      e.streak = LIMIT;
+      e.gen = ++this.gen;
+      raised = true;
+    }
     if (e.streak > 0) e.until = t + blockMs(e.streak);
     this.keys.delete(k);
     this.keys.set(k, e);
+    return { raised, gen: e.gen };
   }
 
   /** The entry with its old failures dropped, or undefined (and removed) when nothing about it is left. */
@@ -117,14 +145,21 @@ export class LoginLimiter {
     return e;
   }
 
+  /**
+   * Brings the map down to 90% of the cap (so it does not run on every failure): forgotten keys first, then keys that
+   * are not blocked, fewest failures first and oldest first among equals, then the oldest blocked keys.
+   */
   private prune(t: number): void {
+    const target = Math.floor(this.maxKeys * 0.9);
     for (const k of [...this.keys.keys()]) this.live(k, t);
-    if (this.keys.size <= this.maxKeys) return;
-    for (const [k, e] of this.keys) {
-      if (this.keys.size <= this.maxKeys) return;
-      if (e.streak === 0 || t >= e.until) this.keys.delete(k);
+    if (this.keys.size <= target) return;
+    const open = [...this.keys].filter(([, e]) => e.streak === 0 || t >= e.until);
+    open.sort((a, b) => a[1].times.length - b[1].times.length); // stable: Map order (oldest first) among equals
+    for (const [k] of open) {
+      if (this.keys.size <= target) return;
+      this.keys.delete(k);
     }
-    while (this.keys.size > this.maxKeys) this.keys.delete(this.keys.keys().next().value as string);
+    while (this.keys.size > target) this.keys.delete(this.keys.keys().next().value as string);
   }
 }
 
