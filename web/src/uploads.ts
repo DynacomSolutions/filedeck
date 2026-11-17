@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { announceJob, emitOpFinished, nodeBase } from "./api";
+import { noteXhr } from "./auth";
 import type { Picked } from "./dropTree";
 export { dropEntries, gatherDrop, pickedFromInput } from "./dropTree";
 export type { Picked } from "./dropTree";
@@ -115,6 +116,7 @@ function xhr(method: string, url: string, body: Blob | null, onProgress: ((loade
     x.open(method, url);
     if (onProgress) x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded);
     x.onload = () => {
+      noteXhr(x);
       let json: Record<string, unknown> = {};
       try {
         json = JSON.parse(x.responseText) as Record<string, unknown>;

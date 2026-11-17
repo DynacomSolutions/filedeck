@@ -82,7 +82,15 @@ async function installFixture(page, opts = {}) {
     const url = new URL(req.url());
     const pathname = url.pathname;
     const json = (body, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
-    // Sign-in is off unless a check asks for a signed-out or signed-in hub.
+    // Sign-in is off unless a check asks for a signed-out or signed-in hub. opts.session ({ out }) lets a check end the
+    // session while the app is open: every API call is then the gate's 401 until a password sign-in starts a new one.
+    if (opts.session) {
+      if (pathname === '/api/auth/login' && req.method() === 'POST') {
+        opts.session.out = false;
+        return json({ auth: true, kind: 'virt', name: opts.account, admin: false });
+      }
+      if (opts.session.out) return json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' });
+    }
     if (pathname === '/api/auth/me') {
       if (opts.account) return json({ auth: true, kind: 'virt', name: opts.account, admin: false });
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
@@ -1530,7 +1538,38 @@ async function verifySignIn(browser) {
   } finally {
     await context.close();
   }
+  await verifyResumeAfterSessionEnds(browser);
   assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
+}
+
+// The session ends while a file is being edited. Signing in again as the same account brings the app back without a
+// page load, and the unsaved text is still in the editor.
+async function verifyResumeAfterSessionEnds(browser) {
+  const session = { out: false };
+  const state = `?s=${encodeURIComponent(JSON.stringify({ t: { i: 'p1', n: nodeName, p: '/work', e: [nodeName, '/work/tracked.txt'] }, a: 'p1' }))}`;
+  const { context, page } = await openPage(browser, { state, fixture: { account: 'fixture-user', session } });
+  try {
+    const lines = () => page.getByRole('dialog', { name: 'Editing tracked.txt' }).locator('.monaco-editor .view-lines');
+    await lines().waitFor({ state: 'visible', timeout: 20000 });
+    await page.waitForFunction(() => /saved\s*text/.test(document.querySelector('.monaco-editor .view-lines')?.textContent ?? ''), null, { timeout: 20000 });
+    await lines().click();
+    await page.keyboard.type('TYPED-BEFORE-SIGN-OUT');
+    await page.waitForFunction(() => document.querySelector('.monaco-editor .view-lines')?.textContent.includes('TYPED-BEFORE-SIGN-OUT'), null, { timeout: 8000 });
+    // A marker on the window shows whether the page was loaded again.
+    await page.evaluate(() => { window.__sameDocument = true; });
+    session.out = true;
+    await page.evaluate(() => fetch('/api/nodes').catch(() => {}));
+    await page.getByRole('heading', { name: /^Sign in to / }).waitFor({ state: 'visible', timeout: 8000 });
+    await page.getByRole('textbox', { name: 'Name' }).fill('fixture-user');
+    await page.getByLabel('Password', { exact: true }).fill('fixture-password');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await lines().waitFor({ state: 'visible', timeout: 20000 });
+    await page.waitForFunction(() => document.querySelector('.monaco-editor .view-lines')?.textContent.includes('TYPED-BEFORE-SIGN-OUT'), null, { timeout: 8000 }).catch(() => {});
+    assert.match(await lines().innerText(), /TYPED-BEFORE-SIGN-OUT/, 'the unsaved text is back in the editor after signing in again');
+    assert.equal(await page.evaluate(() => window.__sameDocument === true), true, 'signing in again does not load the page again');
+  } finally {
+    await context.close();
+  }
 }
 
 async function verifyShortWindowRows(browser) {

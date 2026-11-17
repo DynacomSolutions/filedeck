@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { SWRConfig } from "swr";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
@@ -27,9 +27,24 @@ installSignedOutWatch(() => {
   show("sign-in");
 });
 
+/**
+ * After a sign-in: the first one reloads the page (the URL keeps the layout). When the session ended while the app
+ * was open and the same account signs in again, the app is shown again without a reload, so unsaved editor text
+ * (editDrafts) comes back. Another account gets a fresh page.
+ */
+async function afterSignIn(shownAs: string | undefined, setView: (v: View) => void) {
+  const m = shownAs ? await me().catch(() => null) : null;
+  if (m && m !== "signed-out" && m.auth && m.name === shownAs) {
+    signedOut = false;
+    setView(m);
+  } else location.reload();
+}
+
 /** The app when sign-in is off or done, else the sign-in screen. */
 function Root() {
   const [view, setView] = useState<View>("loading");
+  /** the account the app was last shown for */
+  const shownAs = useRef<string | undefined>(undefined);
   useEffect(() => {
     show = setView;
     if (signedOut) return setView("sign-in");
@@ -38,8 +53,11 @@ function Root() {
       // An older hub or a failed request: show the app as before; its own requests report what is wrong.
       .catch(() => setView((v) => (v === "sign-in" ? v : { auth: false })));
   }, []);
+  useEffect(() => {
+    if (typeof view === "object" && view.auth) shownAs.current = view.name;
+  }, [view]);
   if (view === "loading") return null;
-  if (view === "sign-in") return <Suspense fallback={null}><SignIn onSignedIn={() => location.reload()} /></Suspense>;
+  if (view === "sign-in") return <Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense>;
   return (
     <>
       <AccessibilityChrome />

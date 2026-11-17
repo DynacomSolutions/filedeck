@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { installSignedOutWatch, login, me, signInMessage, SignInError } from "../src/auth.ts";
+import { installSignedOutWatch, login, me, noteXhr, signInMessage, SignInError } from "../src/auth.ts";
 
 type Handler = (url: string, init?: RequestInit) => Response;
 /** Puts a fake fetch in place for one test and gives back the calls it saw. */
@@ -70,4 +70,16 @@ test("login sends the password in the body only, and reports a failure", async (
   assert.equal(calls[0]!.url, "/api/auth/login");
   assert.ok(!calls[0]!.url.includes("secret"));
   assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { name: "alice", password: "secret" });
+});
+
+test("signed-out watch: an upload (XMLHttpRequest) answer reports through the same callback", (t) => {
+  fakeFetch(t, () => json({}));
+  let n = 0;
+  installSignedOutWatch(() => n++);
+  const xhr = (status: number, header: string | null) => ({ status, getResponseHeader: (h: string) => (h.toLowerCase() === "x-filedeck-auth" ? header : null) });
+  noteXhr(xhr(401, null)); // an archive password or other 401
+  noteXhr(xhr(200, "signed-out"));
+  assert.equal(n, 0);
+  noteXhr(xhr(401, "signed-out"));
+  assert.equal(n, 1);
 });

@@ -69,13 +69,17 @@ export async function logout(): Promise<void> {
   await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
 }
 
+let signedOutHandler: (() => void) | null = null;
+
 /**
  * Calls `onSignedOut` when any response is the gate's signed-out 401. Only the header counts: an archive's
  * "password_required" 401 is left alone, so its password prompt still opens. The response itself is passed on
- * as it is. Returns a function that puts the old fetch back.
+ * as it is. Uploads use XMLHttpRequest; they report through `noteXhr`, which calls the same function.
+ * Returns a function that puts the old fetch back.
  */
 export function installSignedOutWatch(onSignedOut: () => void): () => void {
   const inner = globalThis.fetch;
+  signedOutHandler = onSignedOut;
   const watched: typeof fetch = async (...args) => {
     const r = await inner(...args);
     if (isSignedOut(r)) onSignedOut();
@@ -84,5 +88,11 @@ export function installSignedOutWatch(onSignedOut: () => void): () => void {
   globalThis.fetch = watched;
   return () => {
     if (globalThis.fetch === watched) globalThis.fetch = inner;
+    if (signedOutHandler === onSignedOut) signedOutHandler = null;
   };
+}
+
+/** For an XMLHttpRequest that has loaded: the same signed-out check as the fetch watch. */
+export function noteXhr(x: Pick<XMLHttpRequest, "status" | "getResponseHeader">): void {
+  if (x.status === 401 && x.getResponseHeader(SIGNED_OUT) === "signed-out") signedOutHandler?.();
 }

@@ -81,3 +81,57 @@ test("wrong passphrase", async () => {
   }
   await assert.rejects(signLogin(keys.ed25519Enc.key, undefined, "hub-1", "alice", new Uint8Array(32)), (e: unknown) => e instanceof KeyFileError && e.message === "wrong passphrase");
 });
+
+// Damaged files: the bytes of a fixture, changed, and armoured again.
+const rawOf = (text: string) => Buffer.from(text.replace(/-----[A-Z ]+-----/g, "").replace(/\s+/g, ""), "base64");
+const armour = (b: Buffer) => `-----BEGIN OPENSSH PRIVATE KEY-----\n${b.toString("base64").replace(/(.{70})/g, "$1\n")}\n-----END OPENSSH PRIVATE KEY-----\n`;
+const mutate = (text: string, f: (b: Buffer) => Buffer | void) => {
+  const b = Buffer.from(rawOf(text));
+  return armour(f(b) ?? b);
+};
+const isKeyError = (msg?: string) => (e: unknown) => e instanceof KeyFileError && (msg === undefined || e.message === msg);
+const sign = (text: string, pass?: string) => signLogin(text, pass, "hub-1", "alice", new Uint8Array(32));
+const MAGIC_LEN = 15;
+
+test("damaged files throw KeyFileError", async () => {
+  const damaged: [string, string, string | undefined, string?][] = [
+    ["truncated", mutate(keys.ed25519.key, (b) => b.subarray(0, b.length - 10)), "not an OpenSSH private key"],
+    ["truncated to the header", mutate(keys.ecdsa.key, (b) => b.subarray(0, 40)), "not an OpenSSH private key"],
+    ["oversized cipher name length", mutate(keys.ed25519.key, (b) => void b.writeUInt32BE(0xffffffff, MAGIC_LEN)), "not an OpenSSH private key"],
+    ["oversized private section length", mutate(keys.ecdsa.key, (b) => {
+      // magic, cipher "none", kdf "none", empty kdf options, key count, public blob, then the private section length
+      let at = MAGIC_LEN + 8 + 8 + 4 + 4;
+      at += 4 + b.readUInt32BE(at);
+      b.writeUInt32BE(b.length, at);
+    }), "not an OpenSSH private key"],
+    ["oversized field inside the private section", mutate(keys.ed25519.key, (b) => {
+      let at = MAGIC_LEN + 8 + 8 + 4 + 4;
+      at += 4 + b.readUInt32BE(at);
+      b.writeUInt32BE(0x7fffffff, at + 4 + 8); // the key type string, after the check numbers
+    }), "not an OpenSSH private key"],
+    ["check numbers differ (no passphrase)", mutate(keys.ed25519.key, (b) => {
+      let at = MAGIC_LEN + 8 + 8 + 4 + 4;
+      at += 4 + b.readUInt32BE(at);
+      b[at + 4] ^= 1;
+    }), "not an OpenSSH private key"],
+    ["bad padding", mutate(keys.ed25519.key, (b) => void (b[b.length - 1] ^= 0x40)), "not an OpenSSH private key"],
+    ["Ed25519 secret does not end with the public key", mutate(keys.ed25519.key, (b) => {
+      const pub = rawOf(keys.ed25519.pub.split(" ")[1]!).subarray(19); // after the type string and the length
+      b[b.lastIndexOf(pub) + 5] ^= 1;
+    }), "not an OpenSSH private key"],
+    ["ECDSA point does not match", mutate(keys.ecdsa.key, (b) => {
+      const blob = rawOf(keys.ecdsa.pub.split(" ")[1]!);
+      const pt = blob.subarray(blob.length - 65);
+      b[b.lastIndexOf(pt) + 40] ^= 1;
+    }), "not an OpenSSH private key"],
+    ["too many bcrypt rounds", mutate(keys.ed25519Enc.key, (b) => {
+      // magic, "aes256-ctr", "bcrypt", kdf options length, salt string, then the rounds
+      const at = MAGIC_LEN + 4 + 10 + 4 + 6 + 4;
+      b.writeUInt32BE(1_000_000, at + 4 + b.readUInt32BE(at));
+    }), "key encryption not supported", "pw"],
+    ["unknown cipher", mutate(keys.ed25519Enc.key, (b) => void b.write("aes128-ctr", MAGIC_LEN + 4, "latin1")), "key encryption not supported", "pw"],
+  ];
+  for (const [what, text, msg, pass] of damaged) {
+    await assert.rejects(sign(text, pass), isKeyError(msg), what);
+  }
+});
