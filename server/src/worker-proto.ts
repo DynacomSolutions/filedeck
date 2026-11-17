@@ -212,6 +212,8 @@ export class Mux {
   /** resolves once the mux is closed, from either side or because the socket went away */
   readonly closed: Promise<void>;
   private isClosed = false;
+  /** why the mux closed when the peer sent something malformed or a callback threw; undefined after a clean end */
+  failure: string | undefined;
   private resolveClosed!: () => void;
   private readonly streams = new Map<number, Stream>();
   private readonly window = WINDOW_SIZE;
@@ -502,8 +504,9 @@ export class Mux {
         this.need = 0;
         this.onFrame(f[4]!, f.readUInt32BE(5), f.subarray(HEADER));
       }
-    } catch {
+    } catch (e) {
       // a malformed peer (or a bug in a callback) closes the mux instead of the process
+      this.failure ??= message(e);
       this.shutdown(false, true);
     }
   }

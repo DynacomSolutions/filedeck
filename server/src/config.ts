@@ -211,9 +211,9 @@ export function loadConfig(env = process.env): Config {
 /**
  * The settings a worker gets in its start-up message: the agent's own, without any secret (a worker runs as a person's account, so whatever it holds that
  * person could read), and without what only the root process does: the shared job file, the change watcher, trash retention and sign-in checks.
- * `dirs` are the account's own cache and index folders.
+ * `dirs` are the account's own thumbnail cache and index folders.
  */
-export function workerConfig(cfg: Config, dirs?: { thumbs: string; index: string }): Config {
+export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string }): Config {
   return {
     ...cfg,
     worker: true,
@@ -223,13 +223,19 @@ export function workerConfig(cfg: Config, dirs?: { thumbs: string; index: string
     apiTokenAccount: undefined,
     vaultKey: undefined,
     bootstrapAdminFile: undefined,
-    // hub settings (network sources and the folder of their credentials): an agent never uses them
+    // whatever a worker holds, its account can read: hub settings (network sources and the folder of their credentials, the administrators, the hub's
+    // account and vault files) are dropped, an agent never uses them
+    admins: [],
+    authFile: "",
+    vaultFile: "",
     nodes: [],
     sources: [],
     sourceSecretDir: "",
     jobsFile: "",
     fanwatch: "",
     trashSweepMs: 0,
-    ...(dirs ? { thumbDir: dirs.thumbs, indexDir: dirs.index } : {}),
+    // the account's own folders: a worker never shares the root process's index or thumbnail cache
+    thumbDir: dirs.thumbs,
+    indexDir: dirs.index,
   };
 }

@@ -58,12 +58,22 @@ async function main(): Promise<void> {
     onRequest: async (r) => (app ? app.fetch(r) : Response.json({ error: "worker not ready" }, { status: 503 })),
   });
   mux.onHello((init) => {
-    const i = init as Partial<WorkerInit> | null;
-    if (!i || typeof i.cfg !== "object" || i.cfg === null) fail(new Error("bad start-up message"));
-    app = createWorkerApp({ ...i.cfg, worker: true });
-    mux.ready();
+    try {
+      const i = init as Partial<WorkerInit> | null;
+      if (!i || typeof i.cfg !== "object" || i.cfg === null) throw new Error("bad start-up message");
+      app = createWorkerApp({ ...i.cfg, worker: true });
+      mux.ready();
+    } catch (e) {
+      fail(e);
+    }
   });
   await mux.closed;
+  // a malformed or repeated start-up message, or a protocol error, closes the mux: that is a failure, not the root process ending the socket
+  if (mux.failure !== undefined) fail(new Error(`connection to the agent failed: ${mux.failure}`));
+  if (!app) fail(new Error("the agent ended the connection before the start-up message"));
+  // stop the running jobs (and their child processes) and close the index, for at most 3 s
+  const closing = (app as unknown as { close: () => Promise<void> }).close().catch(() => undefined);
+  await Promise.race([closing, new Promise((res) => setTimeout(res, 3000).unref())]);
   process.exit(0);
 }
 
