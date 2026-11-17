@@ -195,7 +195,7 @@ export function loadConfig(env = process.env): Config {
     admins: (env.FILEDECK_ADMINS ?? "").split(",").map((a) => a.trim()).filter(Boolean),
     bootstrapAdminFile: env.FILEDECK_BOOTSTRAP_ADMIN_FILE || undefined,
     // next to the vault, only where the vault volume is configured, so tests never touch /var/lib
-    authFile: env.FILEDECK_AUTH_FILE ?? (env.FILEDECK_VAULT_FILE ? path.join(path.dirname(env.FILEDECK_VAULT_FILE), "auth.sqlite") : ":memory:"),
+    authFile: env.FILEDECK_AUTH_FILE || (env.FILEDECK_VAULT_FILE ? path.join(path.dirname(env.FILEDECK_VAULT_FILE), "auth.sqlite") : ":memory:"),
     sessionIdleMs: Number(env.FILEDECK_SESSION_IDLE_SECONDS ?? 8 * 3600) * 1000,
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,

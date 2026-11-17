@@ -69,6 +69,12 @@ export function verifyClaim(value: string, agentToken: string, now: number): Use
     if (!c || typeof c !== "object" || typeof c.iat !== "number" || !Number.isFinite(c.iat)) return null;
     if (c.kind !== "sys" && c.kind !== "virt") return null;
     if (typeof c.name !== "string" || typeof c.epoch !== "number") return null;
+    if (c.kind === "virt") {
+      if (typeof c.runAs !== "string" || !Array.isArray(c.grants)) return null;
+      for (const g of c.grants) {
+        if (!g || typeof g !== "object" || typeof g.path !== "string" || typeof g.write !== "boolean") return null;
+      }
+    }
     if (now - c.iat > MAX_AGE_MS || c.iat - now > MAX_SKEW_MS) return null;
     return c;
   } catch {

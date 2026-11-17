@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { createHmac, hkdfSync } from "node:crypto";
 import { claimFor, signClaim, verifyClaim, USER_HEADER, type Identity, type UserClaim } from "../src/auth/identity.ts";
 import { loadConfig } from "../src/config.ts";
 
@@ -63,4 +64,21 @@ test("config", () => {
   assert.equal(d.apiTokenAccount, "svc");
   assert.equal(d.sessionIdleMs, 60_000);
   assert.equal(d.sessionMaxMs, 120_000);
+});
+
+test("bad MAC and bad shape", () => {
+  const v = signClaim(claim, T);
+  const i = v.length - 3;
+  assert.equal(verifyClaim(v.slice(0, i) + (v[i] === "A" ? "B" : "A") + v.slice(i + 1), T, claim.iat), null);
+  assert.equal(verifyClaim(v.slice(0, -4), T, claim.iat), null);
+  const forge = (c: object) => {
+    const payload = Buffer.from(JSON.stringify(c)).toString("base64url");
+    const k = Buffer.from(hkdfSync("sha256", T, "", "filedeck-user-header-v1", 32));
+    return `${payload}.${createHmac("sha256", k).update(payload).digest().toString("base64url")}`;
+  };
+  assert.deepEqual(verifyClaim(forge(claim), T, claim.iat), claim);
+  assert.equal(verifyClaim(forge({ ...claim, grants: [{ path: 1, write: true }] }), T, claim.iat), null);
+  assert.equal(verifyClaim(forge({ ...claim, grants: [{ path: "/a", write: "yes" }] }), T, claim.iat), null);
+  assert.equal(verifyClaim(forge({ ...claim, grants: "x" }), T, claim.iat), null);
+  assert.equal(verifyClaim(forge({ ...claim, runAs: undefined }), T, claim.iat), null);
 });
