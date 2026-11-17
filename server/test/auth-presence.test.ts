@@ -297,8 +297,12 @@ test("alice exists on a only: b is hidden from /api/nodes and refused everywhere
   await deny(await postJson(h, "/api/diff/jobs", { left: { node: "a", path: "/" }, right: { node: "b", path: "/" } }, H), "diff");
   await deny(await postJson(h, "/api/vault/forget", { node: "b", path: "/x" }, H), "vault");
   assert.deepEqual(work("b"), [], "nothing is sent to b");
-  // a is still usable
-  assert.notEqual((await req(h, "/api/nodes/a/api/fs/list?path=/", { headers: H })).status, 403);
+  // a is still usable: the hub passes the request on (what a then answers depends on the test account's rights, e.g. 403 from a worker
+  // that cannot read the test folder when the suite runs as root), and the answer is not the hub's own refusal
+  const sentToA = work("a").length;
+  const ra = await req(h, "/api/nodes/a/api/fs/list?path=/", { headers: H });
+  assert.equal(work("a").length, sentToA + 1, "the request reached a");
+  assert.notDeepEqual(await ra.json().catch(() => null), { error: "no access to this machine" });
   // bob exists on both and sees both
   const bob = await signIn(h, "bob");
   assert.deepEqual(
