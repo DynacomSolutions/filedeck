@@ -103,12 +103,39 @@ test("challenge once, expiry, binding and failed take keeps it", () => {
   assert.equal(ch.take("alice", e), false);
 });
 
+test("each name keeps at most 5 outstanding challenges", () => {
+  const ch = new Challenges();
+  const cs = Array.from({ length: 6 }, () => ch.issue("alice"));
+  const other = ch.issue("bob");
+  assert.equal(ch.take("alice", cs[0]!), false);
+  assert.equal(ch.take("alice", cs[1]!), true);
+  assert.equal(ch.take("bob", other), true);
+});
+
 test("outstanding challenges are capped, oldest dropped first", () => {
   let t = 0;
   const ch = new Challenges(() => t++);
-  const first = ch.issue("a");
-  for (let i = 0; i < 10_000; i++) ch.issue("b" + (i % 5));
-  assert.equal(ch.take("a", first), false);
+  const first = ch.issue("a0");
+  const second = ch.issue("a1");
+  for (let i = 0; i < 9_997; i++) ch.issue("n" + i);
+  // Exactly at the cap: nothing dropped yet.
   const last = ch.issue("z");
+  // One over the cap: only the oldest goes.
+  ch.issue("extra");
+  assert.equal(ch.take("a0", first), false);
+  assert.equal(ch.take("a1", second), true);
   assert.equal(ch.take("z", last), true);
+});
+
+test("ecdsa wrong name and wrong key fail", () => {
+  const a = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const b = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const pubA = parsePublicKey(ecLine(a.publicKey));
+  const pubB = parsePublicKey(ecLine(b.publicKey));
+  const c = randomBytes(32);
+  const msg = loginMessage("hub1", "alice", c);
+  const sig = sign("sha256", msg, { key: a.privateKey, dsaEncoding: "ieee-p1363" });
+  assert.equal(verifyLogin(pubA, msg, sig), true);
+  assert.equal(verifyLogin(pubA, loginMessage("hub1", "bob", c), sig), false);
+  assert.equal(verifyLogin(pubB, msg, sig), false);
 });

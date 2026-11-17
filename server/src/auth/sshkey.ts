@@ -73,6 +73,7 @@ export function verifyLogin(pub: PublicKey | null, msg: Buffer, sig: Buffer): bo
 
 const TTL_MS = 60_000;
 const MAX_OUTSTANDING = 10_000;
+const MAX_PER_NAME = 5;
 
 type Entry = { name: string; c: Buffer; exp: number };
 
@@ -91,7 +92,10 @@ export class Challenges {
     let set = this.byName.get(name);
     if (!set) this.byName.set(name, (set = new Set()));
     set.add(id);
-    for (let old = this.byId.keys().next(); this.byId.size > MAX_OUTSTANDING && !old.done; old = this.byId.keys().next()) this.drop(old.value);
+    // One name may hold at most MAX_PER_NAME; the oldest of its own goes first (Set keeps insertion order).
+    if (set.size > MAX_PER_NAME) this.drop(set.values().next().value as number);
+    // Then the global cap: drop the oldest challenge of all (Map keeps insertion order).
+    if (this.byId.size > MAX_OUTSTANDING) this.drop(this.byId.keys().next().value as number);
     return c;
   }
 
