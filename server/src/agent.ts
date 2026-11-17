@@ -13,7 +13,7 @@ import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
 import { makeResolver, type AccountResolver } from "./local-accounts.ts";
 import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
-import { makeWorkerSpecs, workerGate, type WorkerSpecs } from "./agent-workers.ts";
+import { makeWorkerSpecs, rootRequests, workerGate, type WorkerSpecs } from "./agent-workers.ts";
 
 export interface AgentOptions {
   /** the account lookup (sign-in on); default: `makeResolver` */
@@ -37,7 +37,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
     specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [] });
-    pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker });
+    // (a worker's own requests to this process, such as its trash folder, are served over its connection only)
+    pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker, rootHandler: rootRequests(cfg) });
     void sandboxInfo().then((i) =>
       console.error(
         landlockForVirtual(i)

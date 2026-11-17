@@ -19,6 +19,7 @@ import {
   type Resolved,
 } from "./paths.ts";
 import { renameNoReplace } from "./noreplace.ts";
+import { trashScope } from "./trash-scope.ts";
 import { assertWritableAt, copyTree, pinDirW, pinParentW, rmTree, stagedEntry, walkGuard, withStaging } from "./pinwalk.ts";
 
 export interface Entry {
@@ -678,8 +679,10 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   if (r.virtual === "/") throw new FsError(400, "cannot trash root");
   const st = await fs.lstat(r.real);
   const vol = await volumeRoot(path.dirname(r.real), root);
-  const dir = path.join(vol, TRASH_DIR);
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  // sign-in on: the account's own folder of the volume's trash store, which the root process makes (trash-scope.ts)
+  const scope = trashScope();
+  const dir = scope ? await scope.ensure(vol) : path.join(vol, TRASH_DIR);
+  if (!scope) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const id = randomUUID();
   const meta: TrashMeta = {
     id,

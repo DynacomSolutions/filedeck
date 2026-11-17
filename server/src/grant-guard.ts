@@ -17,7 +17,7 @@ export interface Grant {
 
 /** query parameters that hold a path */
 const QUERY_KEYS = ["path", "dir"];
-/** JSON body fields that hold one path or a list of paths (`volume` names a trash store, which the trash routes check themselves) */
+/** JSON body fields that hold one path or a list of paths (`volume` names a trash store: see `TRASH_ROUTES`) */
 const BODY_KEYS = ["path", "paths", "from", "to", "toDir", "dir", "destDir"];
 /** fields whose entry itself is changed or removed, not what a link there leads to: only the link's own place must be inside */
 const OWN_ENTRY: Record<string, string[]> = {
@@ -28,6 +28,8 @@ const OWN_ENTRY: Record<string, string[]> = {
   "/api/fs/symlink": ["path"],
 };
 const ROUTES_WITH_BODY = new Set([...BODY_ROUTES, "/api/fs/zip-ticket"]);
+/** the trash routes that name a volume (and items in it) in their body */
+const TRASH_ROUTES = new Set(["/api/trash/restore", "/api/trash/delete", "/api/trash/empty"]);
 
 /**
  * The routes whose path is optional (missing or empty means `/` or the served root to the route): there the guard checks `/` when the
@@ -45,6 +47,17 @@ const BODY_DEFAULTS: Record<string, string> = { "/api/fs/zip-ticket": "dir" };
 
 const under = (v: string, g: string) => g === "/" || v === g || v.startsWith(g + "/");
 const arr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : typeof v === "string" ? [v] : []);
+
+/** Whether a volume (a client path) holds one of the grants or lies inside one (as written; the root process checks the real volume). */
+function holdsGrant(grants: Grant[], volume: string): boolean {
+  try {
+    const v = "/" + cleanVirtual(volume).join("/");
+    return grants.some((g) => under(g.path, v) || under(v, g.path));
+  } catch (e) {
+    if (e instanceof PathError) return false;
+    throw e;
+  }
+}
 
 /** Whether `p` (a client path) lies inside one of the grants: as written, with the links on the way resolved, and (unless `own`) with a link at its end followed too. */
 export function insideGrants(root: string, grants: Grant[], p: string, own = false): boolean {
@@ -118,13 +131,20 @@ export function grantGuard(root: string, grants: Grant[]): MiddlewareHandler {
       for (const k of BODY_KEYS) for (const v of arr(body[k])) paths.push({ p: v || "/", own: own.includes(k) });
       const d = BODY_DEFAULTS[c.req.path];
       if (d && (body[d] === undefined || body[d] === "")) paths.push({ p: "/", own: false });
+      // the trash: a volume that holds one of the grants (or lies inside one), and only the account's own items (an id never names a folder)
+      if (TRASH_ROUTES.has(c.req.path)) {
+        if (typeof body.volume !== "string" || !holdsGrant(grants, body.volume)) return deny();
+        if (arr(body.ids).some((id) => id.includes("/"))) return deny();
+      }
     }
     for (const { p, own } of paths) if (!insideGrants(root, grants, p, own)) return deny();
     // changes: only where the deepest grant allows writing (the targets as readOnlyGuard finds them)
     const m = c.req.method;
     const q1 = (k: string) => c.req.query(k);
     const ro = () => c.json({ error: "read-only folder" }, 403);
-    if (writeTargets(m, c.req.path, q1, body).some((t) => !mayChange(root, grants, t, { follow: true, contains: false }))) return ro();
+    // (a trash route changes only the account's own trash folder on the volume, checked above; a restore also writes where `toDir` says)
+    const writes = TRASH_ROUTES.has(c.req.path) ? arr(body.toDir) : writeTargets(m, c.req.path, q1, body);
+    if (writes.some((t) => !mayChange(root, grants, t, { follow: true, contains: false }))) return ro();
     const rm = removalTargets(m, c.req.path, body, q1);
     if (rm.paths.some((t) => !mayChange(root, grants, t, { follow: rm.followFinal, contains: true }))) return ro();
     if (mergeTargets(m, c.req.path, body).some((t) => !mayChange(root, grants, t, { follow: false, contains: true }))) return ro();

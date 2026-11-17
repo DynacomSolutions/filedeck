@@ -10,7 +10,9 @@ import { PoolFull, StaleEpoch, type WorkerPool, type WorkerSpec } from "./worker
 import { WorkerGone } from "./worker-proto.ts";
 import {
   OPEN_DIR,
+  TrashRefused,
   UnsafeFolders,
+  accountTrashDir,
   cacheDir,
   grantPath,
   inHeld,
@@ -23,6 +25,7 @@ import {
   trashFolder,
   virtKeyDir,
   virtOwner,
+  virtualTrashDirs,
   type AccountDirs,
   type Hook,
 } from "./account-dirs.ts";
@@ -281,7 +284,7 @@ export function makeWorkerSpecs(
     // the worker gets the paths; this process opens the folders through the held area
     const tmp = path.join(base, path.relative(area, d.tmp));
     const thumbs = d.thumbs.startsWith(area + "/") ? path.join(base, path.relative(area, d.thumbs)) : d.thumbs;
-    const grants = claim.kind === "virt" ? (claim.grants ?? []).flatMap((g) => (validGrant(g.path) ? [{ path: grantPath(g.path), write: g.write === true }] : [])) : undefined;
+    const grants = claim.kind === "virt" ? grantsOf(claim) : undefined;
     // A grant that does not allow writing is also a read-only prefix of the worker (a second layer under the worker's grant check, which
     // also covers what Landlock does not: modes, owners, times), unless a writable grant lies below it: a prefix has no exceptions, so
     // there the grant check alone decides (`mayChange`: the deepest grant over a path).
@@ -322,6 +325,9 @@ export function makeWorkerSpecs(
   return { spec, base, close };
 }
 
+/** A virtual account's grants in their compared form (a grant whose path cannot be compared is left out). */
+const grantsOf = (claim: UserClaim) => (claim.grants ?? []).flatMap((g) => (validGrant(g.path) ? [{ path: grantPath(g.path), write: g.write === true }] : []));
+
 /** A grant path that can be compared (no `..`, no NUL); others are left out. */
 function validGrant(p: unknown): p is string {
   try {
@@ -335,7 +341,8 @@ function validGrant(p: unknown): p is string {
  * The folders of one key (see account-dirs.ts): `tmp` in the key folder below the workers' area `base` (the held area's path, as this
  * process uses it), `thumbs` = `<thumbDir>/accounts/u<uid>` (in `tmp` when there is no thumbnail folder), and `index` =
  * `<indexDir>/accounts/<key folder>` (empty without an index folder). For a
- * virtual account, the index folders of its earlier grants are then removed (`removed` names them), unless `inUse`.
+ * virtual account, the index folders of its earlier grants are then removed (`removed` names them), unless `inUse`, and its trash
+ * folders are made (`trash`, see `virtualTrashDirs`).
  */
 export async function accountDirs(
   cfg: Config,
@@ -349,8 +356,68 @@ export async function accountDirs(
   const name = keyDir(claim, account, key);
   const tmp = await keyFolder(path.join(base, name), account, o.hook);
   const thumbs = cfg.thumbDir ? await cacheDir(cfg.thumbDir, `u${account.uid}`, account, "thumbs", o.hook) : path.join(tmp, "thumbs");
-  if (!cfg.indexDir) return { tmp, thumbs, index: "" };
+  // a virtual account's trash folders exist before its worker starts, so its Landlock rules can name them
+  const trashDirs = async () =>
+    claim.kind === "virt" ? { trash: await virtualTrashDirs(cfg, { kind: "virt", folder: trashFolder(claim, account), account, grants: grantsOf(claim) }, log, o.hook) } : {};
+  if (!cfg.indexDir) return { tmp, thumbs, index: "", ...(await trashDirs()) };
   const index = await cacheDir(cfg.indexDir, name, account, "index", o.hook);
   const removed = claim.kind === "virt" ? await removeOldIndexDirs(cfg.indexDir, virtOwner(claim.name), name, o.inUse ?? (() => false), log) : [];
-  return { tmp, thumbs, index, removed };
+  return { tmp, thumbs, index, removed, ...(await trashDirs()) };
+}
+
+/** the most a request from a worker to the root process may carry (its JSON body) */
+const MAX_ROOT_BODY = 4096;
+
+/**
+ * The requests a worker sends to the root process over its own connection (the pool's `rootHandler`; there is no such route on the HTTP
+ * app). The account is the one of the worker's spec, never one the request names.
+ *
+ * `POST /_root/trash-dir {volume}`: the account's trash folder on that volume (`accountTrashDir`), as `{dir}`. 400 for a body that is not
+ * `{volume: <absolute path>}` or a path that is not a real volume root, 403 for a folder the account may not have there (a read-only
+ * volume, a virtual account without a write grant on it), 503 `trash folder is not safe` (logged), 500 for any other failure (logged).
+ */
+export function rootRequests(cfg: Config, log: (s: string) => void = (s) => console.error(s)): (spec: WorkerSpec, req: Request) => Promise<Response> {
+  return async (spec, req) => {
+    const p = new URL(req.url).pathname;
+    if (req.method !== "POST" || p !== "/_root/trash-dir") {
+      void req.body?.cancel().catch(() => {});
+      return json("not found", 404);
+    }
+    let volume: unknown;
+    try {
+      volume = (JSON.parse(await capped(req, MAX_ROOT_BODY)) as { volume?: unknown } | null)?.volume;
+    } catch {
+      return json("bad request", 400);
+    }
+    if (typeof volume !== "string" || !path.isAbsolute(volume)) return json("bad request", 400);
+    const kind = spec.kind;
+    const grants = kind === "virt" ? (spec.init.grants ?? []) : undefined;
+    try {
+      const dir = await accountTrashDir(cfg, volume, { kind, folder: spec.init.trashFolder, account: spec.account, grants }, log);
+      return Response.json({ dir });
+    } catch (e) {
+      if (e instanceof TrashRefused) return json(e.message, e.status);
+      log(`worker ${spec.key}: trash folder on ${volume}: ${e instanceof Error ? e.message : String(e)}`);
+      return e instanceof UnsafeFolders ? json("trash folder is not safe", 503) : json("trash folder failed", 500);
+    }
+  };
+}
+
+/** A request's body as text, at most `max` bytes (else it throws, and the rest is not read). */
+async function capped(req: Request, max: number): Promise<string> {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > max) {
+      void reader.cancel().catch(() => {});
+      throw new Error("body too large");
+    }
+    parts.push(value);
+  }
+  return Buffer.concat(parts).toString("utf8");
 }

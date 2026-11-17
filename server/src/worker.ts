@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 import { agentError, registerFileRoutes } from "./agent-routes.ts";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
 import { isReadOnly, readOnlyGuard } from "./readonly.ts";
-import { grantGuard, mountsInGrants, type Grant } from "./grant-guard.ts";
+import { grantGuard, insideGrants, mayChange, mountsInGrants, type Grant } from "./grant-guard.ts";
+import { FsError } from "./fsops.ts";
+import { TRASH_OWNER } from "./paths.ts";
+import { setTrashScope } from "./trash-scope.ts";
 import { listMounts } from "./mounts.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import { Mux } from "./worker-proto.ts";
@@ -82,6 +85,41 @@ function unreachable(cfg: Config): void {
   }
 }
 
+type Status = ConstructorParameters<typeof FsError>[0];
+const STATUSES = new Set<number>([400, 403, 404, 409, 500, 503]);
+
+/**
+ * The worker's trash scope: its account's own folder in each volume's trash store, which it asks the root process for over its
+ * connection (`POST /_root/trash-dir`; the root process takes the account from this worker's spec). Asked once per volume (a failure
+ * is asked again next time). A virtual account restores only into its grants.
+ */
+export function workerTrashScope(mux: Pick<Mux, "fetch">, folder: string, root: string, grants?: Grant[]) {
+  const dirs = new Map<string, Promise<string>>();
+  const ask = async (volume: string): Promise<string> => {
+    const res = await mux.fetch(new Request("http://root/_root/trash-dir", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ volume }) }));
+    const v = (await res.json().catch(() => ({}))) as { dir?: unknown; error?: unknown };
+    if (!res.ok || typeof v.dir !== "string") {
+      const status = (STATUSES.has(res.status) ? res.status : 500) as Status;
+      throw new FsError(status, typeof v.error === "string" ? v.error : "no trash folder");
+    }
+    return v.dir;
+  };
+  return {
+    folder,
+    ensure(volume: string): Promise<string> {
+      let p = dirs.get(volume);
+      if (!p) {
+        p = ask(volume);
+        dirs.set(volume, p);
+        p.catch(() => dirs.get(volume) === p && dirs.delete(volume));
+      }
+      return p;
+    },
+    // (where a restore puts an item comes from its meta.json, which the account can write: so it is checked as a change there)
+    ...(grants ? { mayRestore: (v: string) => insideGrants(root, grants, v, true) && mayChange(root, grants, v, { follow: false, contains: true }) } : {}),
+  };
+}
+
 function fail(e: unknown): never {
   const msg = e instanceof Error ? e.stack ?? e.message : String(e);
   process.stderr.write(`worker: ${msg.replace(/\s*\n\s*/g, " | ")}\n`);
@@ -103,7 +141,10 @@ async function main(): Promise<void> {
       const i = init as Partial<WorkerInit> | null;
       if (!i || typeof i.cfg !== "object" || i.cfg === null) throw new Error("bad start-up message");
       if (i.grants !== undefined && !Array.isArray(i.grants)) throw new Error("bad start-up message");
+      if (typeof i.trashFolder !== "string" || !TRASH_OWNER.test(i.trashFolder)) throw new Error("bad start-up message");
       unreachable(i.cfg);
+      // every trash route works in the account's own folder
+      setTrashScope(workerTrashScope(mux, i.trashFolder, i.cfg.root, i.grants));
       app = createWorkerApp({ ...i.cfg, worker: true }, i.grants);
       mux.ready();
     } catch (e) {

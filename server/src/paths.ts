@@ -124,6 +124,13 @@ export function virtualJoin(dir: string, name: string): string {
 }
 
 export const TRASH_DIR = ".filedeck-trash";
+/** A virtual account's owner part of its folder names (see `virtOwner` in account-dirs.ts, which keeps every name it gives inside this). */
+export const OWNER_NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
+/**
+ * The name of one account's folder in a trash store (sign-in on): `u<uid>` for a system account (`u0` holds the items trashed with
+ * sign-in off), `v-<owner>` for a virtual one.
+ */
+export const TRASH_OWNER = /^(u\d{1,10}|v-[a-z_][a-z0-9_.-]{0,31})$/;
 /** Per-volume private staging for extraction and compression (see archive.ts); like the trash store it is Filedeck's own. */
 export const WORK_DIR = ".filedeck-work";
 /** Prefix of the private staging folders made inside a destination folder for copies (see pinwalk.ts). */

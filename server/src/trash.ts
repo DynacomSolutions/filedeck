@@ -4,8 +4,21 @@ import path from "node:path";
 import * as ops from "./fsops.ts";
 import { namesOf } from "./dirnames.ts";
 import { networkKind, parseMounts, readMountTable } from "./mounts.ts";
-import { TRASH_DIR, resolveWrite, virtualJoin } from "./paths.ts";
+import { TRASH_DIR, TRASH_OWNER, resolveWrite, virtualJoin } from "./paths.ts";
 import { assertNotReserved, pinDirCreate, pinDirW, rmTree, walkGuard } from "./pinwalk.ts";
+import { runInFolderAs } from "./account-dirs.ts";
+import { trashScope } from "./trash-scope.ts";
+
+export { setTrashScope, type TrashScope } from "./trash-scope.ts";
+
+/**
+ * Sign-in on, each account has its own folder in each volume's trash store (`.filedeck-trash/u<uid>/`, `.filedeck-trash/v-<owner>/`,
+ * owned by the account, 0700; the root process makes it: `accountTrashDir`). A worker has a scope (`setTrashScope`) and works in its
+ * own folder only, as its account. Without a scope (sign-in off, the root process) the whole store is seen: the items at its top, and
+ * those of every owner folder with ids `<folder>/<id>`. `u0` (items trashed with sign-in off, moved there when the first account folder
+ * was made) is the root process's own; what is in any other owner folder is only removed by a process that runs as the folder's owner
+ * (`runInFolderAs`), never walked by this process.
+ */
 
 export interface TrashItem extends ops.TrashMeta {
   /** meta.json missing or unreadable: the item can still be deleted but not restored */
@@ -39,10 +52,147 @@ async function trashDir(root: string, volume: string): Promise<string> {
   return dir;
 }
 
-const checkIds = (ids: unknown): string[] => {
-  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 10000 || ids.some((x) => typeof x !== "string" || !ID.test(x))) throw bad("ids must be a non-empty array of trash ids");
-  return ids as string[];
+/** The account's own folder of a volume's trash store with a scope, else the store itself. */
+async function scopeDir(root: string, volume: string): Promise<string> {
+  const store = await trashDir(root, volume);
+  const s = trashScope();
+  if (!s) return store;
+  const dir = path.join(store, s.folder);
+  const st = await fs.lstat(dir).catch(() => null);
+  if (!st?.isDirectory()) throw new ops.FsError(404, "no trash on this volume");
+  return dir;
+}
+
+/** a trash id: the item's own name, and (no scope) the owner folder it is in ("" for the top of the store) */
+interface ItemId {
+  full: string;
+  sub: string;
+  id: string;
+}
+const parseId = (x: unknown, scoped: boolean): ItemId | null => {
+  if (typeof x !== "string") return null;
+  if (ID.test(x)) return { full: x, sub: "", id: x };
+  const at = x.indexOf("/");
+  if (scoped || at < 0) return null;
+  const sub = x.slice(0, at);
+  const id = x.slice(at + 1);
+  return TRASH_OWNER.test(sub) && ID.test(id) ? { full: x, sub, id } : null;
 };
+const checkIds = (ids: unknown): ItemId[] => {
+  const scoped = trashScope() !== null;
+  const out = Array.isArray(ids) && ids.length > 0 && ids.length <= 10000 ? ids.map((x) => parseId(x, scoped)) : [null];
+  if (out.some((x) => x === null)) throw bad("ids must be a non-empty array of trash ids");
+  return out as ItemId[];
+};
+
+/** The folder that holds an item: the store (or scope folder) itself, or one of its owner folders, which must be a real folder. */
+async function itemFolder(base: string, sub: string): Promise<string> {
+  if (!sub) return base;
+  const dir = path.join(base, sub);
+  const st = await fs.lstat(dir).catch(() => null);
+  if (!st?.isDirectory()) throw new ops.FsError(404, "no such item in the trash");
+  return dir;
+}
+
+const myUid = () => process.getuid?.() ?? 0;
+
+/**
+ * Whether an owner folder belongs to an account (its contents are then changed only as its owner): every one but `u0`, unless this
+ * process is root and still owns it (one whose hand-over failed; nothing of the account's is in it).
+ */
+async function ownedByAccount(dir: string, sub: string): Promise<boolean> {
+  if (!sub || sub === "u0") return false;
+  const st = await fs.lstat(dir);
+  return !(myUid() === 0 && st.uid === 0);
+}
+
+/**
+ * What runs as the owner of an account's trash folder, in that folder (sign-in on; see `runInFolderAs`):
+ * - `survey <0|1>`: removes what removals cut short left (`.purge-<id>`), and prints `{items: [[id, deletedAt, diskBytes]], failed}`;
+ *   with 1 each item's disk use is measured (once: it is kept in its meta.json, as `itemUsage` does), else it is 0;
+ * - `remove <id>...`: removes the items in that order (each renamed to `.purge-<id>` first), stops at the first that cannot go, and
+ *   prints `{removed: [id...]}`.
+ * Nothing in it follows a link out of the folder: a removal does not follow links, and the walk enters only real folders on the
+ * folder's own device.
+ */
+const OWNER_SCRIPT = `
+const fs=require("fs"),path=require("path");
+const ID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,P=".purge-";
+const [mode,...a]=process.argv.slice(1);
+const out=(o)=>process.stdout.write(JSON.stringify(o));
+if(mode==="survey"){
+  const disk=a[0]==="1",items=[];let failed=0;
+  for(const n of fs.readdirSync(".")){
+    if(n.startsWith(P)&&ID.test(n.slice(P.length))){try{fs.rmSync(n,{recursive:true,force:true})}catch{failed++}continue}
+    if(!ID.test(n))continue;
+    let st;try{st=fs.lstatSync(n)}catch{continue}
+    let meta=null;try{if(st.isDirectory())meta=JSON.parse(fs.readFileSync(path.join(n,"meta.json"),"utf8"))}catch{}
+    const at=Number(meta&&meta.deletedAt)||st.mtimeMs||0;let d=0;
+    if(disk){
+      if(meta&&typeof meta.diskBytes==="number")d=meta.diskBytes;
+      else{
+        const dev=st.dev,seen=new Set();d=Number(st.blocks)*512;
+        const walk=(p,depth)=>{let es;try{es=fs.readdirSync(p)}catch{return}
+          for(const e of es){let s;try{s=fs.lstatSync(path.join(p,e))}catch{continue}
+            if(s.dev!==dev)continue;
+            if(!s.isDirectory()&&s.nlink>1){if(seen.has(s.ino))continue;seen.add(s.ino)}
+            d+=Number(s.blocks)*512;
+            if(s.isDirectory()&&depth<256)walk(path.join(p,e),depth+1)}};
+        if(st.isDirectory())walk(n,0);
+        if(meta){const t=path.join(n,".meta-"+process.pid+"-"+Date.now()+".json");
+          try{fs.writeFileSync(t,JSON.stringify({...meta,diskBytes:d}),{flag:"wx",mode:0o600});fs.renameSync(t,path.join(n,"meta.json"))}catch{try{fs.rmSync(t,{force:true})}catch{}}}
+      }
+    }
+    items.push([n,at,d]);
+  }
+  out({items,failed});
+}else if(mode==="remove"){
+  const removed=[];
+  for(const id of a){
+    if(!ID.test(id))break;
+    try{fs.renameSync(id,P+id)}catch(e){if(e.code!=="ENOENT"){console.error(e.message);break}removed.push(id);continue}
+    try{fs.rmSync(P+id,{recursive:true,force:true})}catch(e){console.error(e.message);break}
+    removed.push(id);
+  }
+  out({removed});
+}else process.exit(2);
+`;
+/** how long one run as an account may take (a survey measures every item once) */
+const OWNER_MS = 10 * 60_000;
+/** ids per removal run (the list goes on its command line) */
+const OWNER_BATCH = 1000;
+
+/** Runs `OWNER_SCRIPT` as the owner of `dir` (an account's trash folder) and gives back what it printed. */
+async function asOwner(dir: string, args: string[]): Promise<unknown> {
+  const st = await fs.lstat(dir);
+  if (!st.isDirectory()) throw new Error(`${dir} is not a folder`);
+  const r = await runInFolderAs(dir, st.uid, st.gid, OWNER_SCRIPT, args, { timeoutMs: OWNER_MS, maxOut: 256 << 20 });
+  if (r.code !== 0) throw new Error(`as its owner: ${r.code === null ? "stopped" : `exit ${r.code}`}${r.err ? `: ${r.err}` : ""}`);
+  return JSON.parse(r.out);
+}
+
+/** The items of an account's trash folder, as its owner sees them (and what earlier removals left is cleared). */
+async function surveyAs(dir: string, disk: boolean): Promise<{ items: { id: string; deletedAt: number; disk: number }[]; failed: number }> {
+  const o = (await asOwner(dir, ["survey", disk ? "1" : "0"])) as { items?: unknown; failed?: unknown };
+  const items = Array.isArray(o.items) ? o.items : [];
+  return {
+    items: items.flatMap((x) => (Array.isArray(x) && typeof x[0] === "string" && ID.test(x[0]) ? [{ id: x[0], deletedAt: Number(x[1]) || 0, disk: Number(x[2]) || 0 }] : [])),
+    failed: Number(o.failed) || 0,
+  };
+}
+
+/** Removes items of an account's trash folder as its owner, in order, up to the first that cannot go; the ids removed. */
+async function removeAs(dir: string, ids: string[]): Promise<string[]> {
+  const done: string[] = [];
+  for (let i = 0; i < ids.length; i += OWNER_BATCH) {
+    const part = ids.slice(i, i + OWNER_BATCH);
+    const o = (await asOwner(dir, ["remove", ...part])) as { removed?: unknown };
+    const got = Array.isArray(o.removed) ? o.removed.filter((x): x is string => typeof x === "string" && part.includes(x)) : [];
+    done.push(...got);
+    if (got.length < part.length) break;
+  }
+  return done;
+}
 
 async function readItems(dir: string): Promise<{ items: TrashItem[]; truncated: boolean }> {
   const slice: string[] = [];
@@ -60,9 +210,29 @@ async function readItems(dir: string): Promise<{ items: TrashItem[]; truncated: 
   return { items, truncated };
 }
 
+/**
+ * An item's meta.json, read without following a link at the item or at the file (an owner folder is its account's, and this may be the
+ * root process). At most 1 MiB.
+ */
+async function readMeta(dir: string, id: string): Promise<ops.TrashMeta> {
+  const item = await fs.open(path.join(dir, id), fsc.O_RDONLY | fsc.O_DIRECTORY | fsc.O_NOFOLLOW);
+  try {
+    const fh = await fs.open(`/proc/self/fd/${item.fd}/meta.json`, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
+    try {
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > 1 << 20) throw new Error("bad meta");
+      return JSON.parse(await fh.readFile("utf8")) as ops.TrashMeta;
+    } finally {
+      await fh.close();
+    }
+  } finally {
+    await item.close();
+  }
+}
+
 async function readItem(dir: string, id: string): Promise<TrashItem> {
   try {
-    const m = JSON.parse(await fs.readFile(path.join(dir, id, "meta.json"), "utf8")) as ops.TrashMeta;
+    const m = await readMeta(dir, id);
     if (typeof m.name !== "string" || typeof m.originalPath !== "string") throw new Error("bad meta");
     return { id, name: m.name, originalPath: m.originalPath, deletedAt: Number(m.deletedAt) || 0, type: m.type, size: Number(m.size) || 0 };
   } catch {
@@ -92,12 +262,43 @@ async function trashVolumes(root: string, procMounts: string): Promise<{ volume:
   return out;
 }
 
-/** Every volume of this node that has a trash store: the root plus each real mount point. */
+/** The owner folders of a trash store (real folders whose name is `TRASH_OWNER`), sorted. */
+async function ownerFolders(store: string): Promise<{ sub: string; dir: string }[]> {
+  const out: { sub: string; dir: string }[] = [];
+  for (const sub of (await fs.readdir(store)).filter((n) => TRASH_OWNER.test(n)).sort()) {
+    const dir = path.join(store, sub);
+    if ((await fs.lstat(dir).catch(() => null))?.isDirectory()) out.push({ sub, dir });
+  }
+  return out;
+}
+
+/**
+ * Every volume of this node that has a trash store: the root plus each real mount point. With a scope, only the volumes where the
+ * account has a folder, and only its items; without one, the items at the top of each store and those of every owner folder (ids
+ * `<folder>/<id>`), at most `MAX_TRASH_ITEMS` per volume.
+ */
 export async function listTrash(root: string, procMounts: string): Promise<TrashVolume[]> {
   const out: TrashVolume[] = [];
+  const s = trashScope();
   for (const { volume, dir } of await trashVolumes(root, procMounts)) {
     try {
-      out.push({ volume, ...(await readItems(dir)) });
+      if (s) {
+        const own = path.join(dir, s.folder);
+        if ((await fs.lstat(own).catch(() => null))?.isDirectory()) out.push({ volume, ...(await readItems(own)) });
+        continue;
+      }
+      const v = { volume, ...(await readItems(dir)) };
+      for (const { sub, dir: d } of await ownerFolders(dir)) {
+        if (v.truncated) break;
+        const r = await readItems(d).catch(() => null);
+        if (!r) continue;
+        v.items.push(...r.items.map((i) => ({ ...i, id: `${sub}/${i.id}` })));
+        if (r.truncated || v.items.length > MAX_TRASH_ITEMS) {
+          v.truncated = true;
+          v.items.length = Math.min(v.items.length, MAX_TRASH_ITEMS);
+        }
+      }
+      out.push(v);
     } catch {
       /* gone meanwhile */
     }
@@ -177,6 +378,10 @@ export interface RetentionPolicy {
 /**
  * Automatic trash retention, for every volume's trash: items older than `maxAgeDays` go, then, while the trash is bigger than its cap, the oldest go first.
  * The names are read a batch at a time; only the age and size of each item are kept for the cap (a few dozen bytes per item).
+ *
+ * Every folder of a store counts (its top, `u0`, and each account's folder), and the cap is for the whole store. The top and `u0` are
+ * this process's own; an account's folder is measured and cleared by a process that runs as its owner (`surveyAs`, `removeAs`). Oldest
+ * first, and in each folder never past an item that cannot go.
  */
 export async function applyRetention(root: string, procMounts: string, p: RetentionPolicy): Promise<{ volume: string; removed: number; freed: number; failed: number }[]> {
   const out: { volume: string; removed: number; freed: number; failed: number }[] = [];
@@ -184,34 +389,67 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
     if (p.blocked?.(volume)) continue;
     const r = { volume, removed: 0, freed: 0, failed: 0 };
     try {
-      r.failed += await clearPurged(root, dir);
-      if (p.maxAgeDays > 0) {
-        const e = await emptyTrash(root, volume, p.maxAgeDays);
-        r.removed += e.removed;
-        r.failed += e.failed;
-      }
       let cap = p.maxBytes > 0 ? p.maxBytes : Infinity;
       if (p.maxPercent > 0) {
         const sf = await fs.statfs(real);
         cap = Math.min(cap, (sf.blocks * sf.bsize * p.maxPercent) / 100);
       }
-      if (cap !== Infinity) {
-        const items: { id: string; deletedAt: number; disk: number }[] = [];
-        let total = 0;
-        for await (const names of namesOf(dir, 256, (n) => ID.test(n)))
-          for (const id of names) {
-            const u = await itemUsage(dir, id).catch(() => null);
-            if (!u) continue;
-            items.push(u);
-            total += u.disk;
+      const cutoff = p.maxAgeDays > 0 ? Date.now() - p.maxAgeDays * 86400_000 : -Infinity;
+      /** what is left after the age step, for the cap: one entry per item, with the folder it is in */
+      const items: { id: string; deletedAt: number; disk: number; f: number }[] = [];
+      const folders = [{ sub: "", dir }, ...(await ownerFolders(dir))];
+      const account: boolean[] = [];
+      for (const [k, f] of folders.entries()) {
+        try {
+          account[k] = await ownedByAccount(f.dir, f.sub);
+          if (account[k]) {
+            const sv = await surveyAs(f.dir, cap !== Infinity);
+            r.failed += sv.failed;
+            const old = sv.items.filter((i) => i.deletedAt <= cutoff).map((i) => i.id);
+            const gone = new Set(old.length ? await removeAs(f.dir, old) : []);
+            r.removed += gone.size;
+            r.failed += old.length - gone.size;
+            if (cap !== Infinity) for (const i of sv.items) if (!gone.has(i.id) && !old.includes(i.id)) items.push({ ...i, f: k });
+            continue;
           }
-        if (total > cap) {
-          items.sort((a, b) => a.deletedAt - b.deletedAt);
-          for (const it of items) {
-            if (total <= cap) break;
+          r.failed += await clearPurged(root, f.dir);
+          if (p.maxAgeDays > 0) {
+            const e = await emptyDir(root, f.dir, cutoff);
+            r.removed += e.removed;
+            r.failed += e.failed;
+          }
+          if (cap !== Infinity)
+            for await (const names of namesOf(f.dir, 256, (n) => ID.test(n)))
+              for (const id of names) {
+                const u = await itemUsage(f.dir, id).catch(() => null);
+                if (u) items.push({ ...u, f: k });
+              }
+        } catch {
+          r.failed++;
+        }
+      }
+      let total = items.reduce((t, i) => t + i.disk, 0);
+      if (total > cap) {
+        items.sort((a, b) => a.deletedAt - b.deletedAt);
+        // the oldest, until what is left fits; then removed folder by folder, in that order
+        const doomed: typeof items = [];
+        for (const it of items) {
+          if (total <= cap) break;
+          doomed.push(it);
+          total -= it.disk;
+        }
+        for (const [k, f] of folders.entries()) {
+          const mine = doomed.filter((i) => i.f === k);
+          if (!mine.length) continue;
+          if (account[k]) {
+            const gone = new Set(await removeAs(f.dir, mine.map((i) => i.id)).catch(() => [] as string[]));
+            for (const i of mine) if (gone.has(i.id)) (r.removed++, (r.freed += i.disk));
+            if (gone.size < mine.length) r.failed++;
+            continue;
+          }
+          for (const it of mine) {
             try {
-              await removeItem(root, dir, it.id);
-              total -= it.disk;
+              await removeItem(root, f.dir, it.id);
               r.removed++;
               r.freed += it.disk;
             } catch {
@@ -292,24 +530,27 @@ async function clearPurged(root: string, dir: string): Promise<number> {
 }
 
 export async function restoreItems(root: string, volume: string, ids: unknown, opts: RestoreOpts = {}): Promise<TrashResult[]> {
-  const dir = await trashDir(root, volume);
+  const base = await scopeDir(root, volume);
   const policy = opts.conflict ?? "fail";
   if (!["fail", "rename", "replace"].includes(policy)) throw bad("unknown conflict policy");
   const out: TrashResult[] = [];
-  for (const id of checkIds(ids)) {
+  for (const x of checkIds(ids)) {
     try {
-      out.push(await withItem(dir, id, () => restoreHeld(root, dir, id, policy, opts)));
+      const dir = await itemFolder(base, x.sub);
+      const account = await ownedByAccount(dir, x.sub);
+      out.push({ ...(await withItem(dir, x.id, () => restoreHeld(root, dir, x.id, policy, opts, account))), id: x.full });
     } catch (e) {
-      out.push({ id, ok: false, error: ops.mapError(e).message });
+      out.push({ id: x.full, ok: false, error: ops.mapError(e).message });
     }
   }
   return out;
 }
 
-async function restoreHeld(root: string, dir: string, id: string, policy: string, opts: RestoreOpts): Promise<TrashResult> {
+/** `account`: the item is in an account's folder (no scope): its data is only renamed out, and what is left is removed as the owner. */
+async function restoreHeld(root: string, dir: string, id: string, policy: string, opts: RestoreOpts, account = false): Promise<TrashResult> {
   {
     {
-      const meta = JSON.parse(await fs.readFile(path.join(dir, id, "meta.json"), "utf8")) as ops.TrashMeta;
+      const meta = await readMeta(dir, id);
       const data = path.join(dir, id, "data");
       await fs.lstat(data);
       const target = opts.toDir ? virtualJoin(resolveWrite(root, opts.toDir).virtual, meta.name) : meta.originalPath;
@@ -317,6 +558,8 @@ async function restoreHeld(root: string, dir: string, id: string, policy: string
       assertNotReserved(dest.virtual);
       if (dest.virtual === "/") throw bad("cannot restore onto the root");
       if (opts.blocked?.(dest.virtual)) throw new ops.FsError(403, "read-only volume");
+      const s = trashScope();
+      if (s?.mayRestore && !s.mayRestore(dest.virtual)) throw new ops.FsError(403, "outside your folders");
       // The destination folder is created and held one component at a time, and the item is moved out of its own pinned
       // folder, so neither side can be swapped for a link between the checks and the move.
       const res = await pinDirCreate(root, path.dirname(dest.real), async (dstAt): Promise<TrashResult> => {
@@ -328,6 +571,15 @@ async function restoreHeld(root: string, dir: string, id: string, policy: string
           else await ops.trash(root, dest.virtual); // the replaced item stays recoverable
         }
         let warning: string | undefined;
+        if (account) {
+          // only a rename (a copy to another volume would end with this process removing the account's files)
+          await pinDirW(root, path.join(dir, id), async (srcAt) => {
+            if ((await fs.lstat(path.join(srcAt, "data"))).dev !== (await fs.stat(dstAt)).dev) throw new ops.FsError(409, "the item's place is on another volume now; restore it signed in as its account");
+            await ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false, root);
+          });
+          if ((await removeAs(dir, [id])).length !== 1) warning = "The item is restored. Its folder in the trash could not be removed; it is still listed there.";
+          return { id, ok: true, path: path.posix.join(path.posix.dirname(dest.virtual), final), ...(warning ? { warning } : {}) };
+        }
         try {
           await pinDirW(root, path.join(dir, id), (srcAt) => ops.moveReal(path.join(srcAt, "data"), path.join(dstAt, final), false, root));
         } catch (e) {
@@ -355,24 +607,55 @@ async function restoreHeld(root: string, dir: string, id: string, policy: string
 }
 
 export async function deleteItems(root: string, volume: string, ids: unknown): Promise<TrashResult[]> {
-  const dir = await trashDir(root, volume);
+  const base = await scopeDir(root, volume);
   const out: TrashResult[] = [];
-  for (const id of checkIds(ids)) {
+  for (const x of checkIds(ids)) {
     try {
-      await removeItem(root, dir, id);
-      out.push({ id, ok: true });
+      const dir = await itemFolder(base, x.sub);
+      if (await ownedByAccount(dir, x.sub))
+        await withItem(dir, x.id, async () => {
+          if ((await removeAs(dir, [x.id])).length !== 1) throw new ops.FsError(500, "the item could not be removed");
+        });
+      else await removeItem(root, dir, x.id);
+      out.push({ id: x.full, ok: true });
     } catch (e) {
-      out.push({ id, ok: false, error: ops.mapError(e).message });
+      out.push({ id: x.full, ok: false, error: ops.mapError(e).message });
     }
   }
   return out;
 }
 
-/** Delete everything in a volume's trash, or only items deleted more than `olderThanDays` ago. */
+/**
+ * Delete everything in a volume's trash, or only items deleted more than `olderThanDays` ago. With a scope, the account's own folder;
+ * without one, the whole store (each account's folder as its owner).
+ */
 export async function emptyTrash(root: string, volume: string, olderThanDays?: number): Promise<{ removed: number; failed: number }> {
-  const dir = await trashDir(root, volume);
+  const base = await scopeDir(root, volume);
   const cutoff = olderThanDays !== undefined ? Date.now() - olderThanDays * 86400_000 : Infinity;
   if (olderThanDays !== undefined && !(olderThanDays >= 0)) throw bad("olderThanDays must be >= 0");
+  const sum = await emptyDir(root, base, cutoff);
+  if (trashScope()) return sum;
+  for (const f of await ownerFolders(base)) {
+    try {
+      if (!(await ownedByAccount(f.dir, f.sub))) {
+        const e = await emptyDir(root, f.dir, cutoff);
+        sum.removed += e.removed;
+        sum.failed += e.failed;
+        continue;
+      }
+      const old = (await surveyAs(f.dir, false)).items.filter((i) => cutoff === Infinity || i.deletedAt <= cutoff).map((i) => i.id);
+      const gone = old.length ? await removeAs(f.dir, old) : [];
+      sum.removed += gone.length;
+      sum.failed += old.length - gone.length;
+    } catch {
+      sum.failed++;
+    }
+  }
+  return sum;
+}
+
+/** Removes the items of one folder this process may change (the top of a store, `u0`, or a scope's own folder) deleted before `cutoff` (Infinity: all). */
+async function emptyDir(root: string, dir: string, cutoff: number): Promise<{ removed: number; failed: number }> {
   let removed = 0;
   let failed = 0;
   // Every item is judged on its own age, however many there are (the listing is capped, the sweep is not).

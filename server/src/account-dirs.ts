@@ -5,7 +5,11 @@ import path from "node:path";
 import type { UserClaim } from "./auth/identity.ts";
 import type { Config } from "./config.ts";
 import type { LocalAccount } from "./local-accounts.ts";
-import { cleanVirtual, openChecked, resolveRead } from "./paths.ts";
+import { spawn } from "node:child_process";
+import { volumeRoot } from "./fsops.ts";
+import type { Grant } from "./grant-guard.ts";
+import { OWNER_NAME, TRASH_DIR, TRASH_OWNER, cleanVirtual, openChecked, resolveRead } from "./paths.ts";
+import { hitsReadOnly } from "./readonly.ts";
 import { sandboxInfo, spawnSandboxed, type Root } from "./sandbox.ts";
 
 /**
@@ -16,6 +20,8 @@ import { sandboxInfo, spawnSandboxed, type Root } from "./sandbox.ts";
  * - `thumbs`: `<FILEDECK_THUMB_DIR>/u<uid>`, one per uid (accounts with one uid have the same rights, so they may share the cache).
  * - `index`: `<FILEDECK_INDEX_DIR>/accounts/<key folder>` (none without an index folder: the worker then keeps its index in its `tmp`).
  *   A virtual account's key folder holds a hash of its grants, so a listing cached under old grants is never served under new ones.
+ * - `trash`: `<volume>/.filedeck-trash/<u<uid> | v-<owner>>`, the account's own trash folder on each volume (`accountTrashDir`), made by
+ *   this process when a worker asks for it, and for a virtual account before its worker starts (its Landlock rules name it).
  * Both caches survive a restart of the agent. Their parents (`<FILEDECK_THUMB_DIR>` and `<FILEDECK_INDEX_DIR>/accounts`) must be this
  * process's (root's) and not writable by group or others; they are made 0711 when missing.
  *
@@ -39,13 +45,15 @@ export class UnsafeFolders extends Error {
 export const OPEN_DIR = fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY | fsc.constants.O_NOFOLLOW;
 
 /** Called after each mkdir (tests swap things in there). */
-export type Hook = (step: "key" | "tmp" | "thumbs" | "index", p: string) => void | Promise<void>;
+export type Hook = (step: "key" | "tmp" | "thumbs" | "index" | "trash", p: string) => void | Promise<void>;
 
 /** The folders of one worker. `index` is empty when the agent has no index folder. */
 export interface AccountDirs {
   tmp: string;
   thumbs: string;
   index: string;
+  /** a virtual account's trash folders, one on each volume that holds one of its write grants (made before its worker starts) */
+  trash?: string[];
 }
 
 /** Opens a folder without following a link; a link, a file or a missing entry is `UnsafeFolders`. */
@@ -66,7 +74,7 @@ async function expect(fh: fs.FileHandle, dir: string, uid: number, mask: number)
 const myUid = () => process.getuid?.() ?? 0;
 
 /** Gives a folder this process has just made to the account, through its descriptor (owner only as root), mode 0700. */
-async function give(fh: fs.FileHandle, account: LocalAccount): Promise<void> {
+export async function give(fh: fs.FileHandle, account: LocalAccount): Promise<void> {
   if (myUid() === 0) await fh.chown(account.uid, account.gid);
   await fh.chmod(0o700);
 }
@@ -229,7 +237,7 @@ export async function cacheDir(top: string, name: string, account: LocalAccount,
  * (Task 8's `TRASH_OWNER`), else `h` and 16 hex of its hash.
  */
 export function virtOwner(name: string): string {
-  return /^[a-z_][a-z0-9_.-]{0,31}$/.test(name) ? name : `h${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
+  return OWNER_NAME.test(name) ? name : `h${createHash("sha256").update(name).digest("hex").slice(0, 16)}`;
 }
 
 /** The trash folder of an account: `u<uid>` for a system account, `v-<owner>` for a virtual one. */
@@ -260,9 +268,61 @@ const EMPTY_SCRIPT =
 const EMPTY_MS = 30_000;
 
 /**
- * Empties `dir` as its owner `uid`/`gid`: through the sandbox launcher, which gets the folder as its working folder by descriptor (opened
- * here without following a link), so the removal never resolves a path through folders it may not pass (a key folder still root's).
- * Without a change of user (the owner is this process, not root) it is done here. True when the folder is empty.
+ * Runs a Node `script` (`node -e`, with `args`) as `uid`/`gid`, with `dir` as its working folder, and gives back its exit code (null
+ * when it was stopped), its output (at most `maxOut` bytes; past that it is stopped) and the start of its error output. The folder is
+ * opened here without following a link and must still be `uid`'s; the launcher gets it by descriptor, so the program never resolves a
+ * path through folders it may not pass. When `uid` is this process and this process is not root, no user change is needed and the
+ * program runs without the launcher. Throws for uid or gid 0, and when the folder cannot be opened or has another owner.
+ */
+export async function runInFolderAs(
+  dir: string,
+  uid: number,
+  gid: number,
+  script: string,
+  args: string[],
+  o: { timeoutMs?: number; maxOut?: number } = {},
+): Promise<{ code: number | null; out: string; err: string }> {
+  const me = myUid();
+  if (uid === 0 || gid === 0) throw new Error(`${dir} has owner ${uid}:${gid}`);
+  const fh = await fs.open(dir, OPEN_DIR);
+  let child: import("node:child_process").ChildProcess;
+  try {
+    const st = await fh.stat();
+    if (st.uid !== uid) throw new Error(`its owner changed to ${st.uid}`);
+    const env = { PATH: process.env.PATH || "/usr/bin:/bin", LANG: "C.UTF-8" };
+    if (uid === me && me !== 0) {
+      // (no privilege boundary: the account is this process)
+      child = spawn(process.execPath, ["-e", script, ...args], { cwd: await fs.readlink(inHeld(fh)), env, stdio: ["ignore", "pipe", "pipe"] });
+    } else {
+      child = await spawnSandboxed(process.execPath, ["-e", script, ...args], { uid, gid, landlock: false, cwdFd: fh.fd, stdio: ["ignore", "pipe", "pipe"], env });
+    }
+  } finally {
+    await fh.close().catch(() => {});
+  }
+  const maxOut = o.maxOut ?? 1 << 20;
+  const out: Buffer[] = [];
+  let outLen = 0;
+  let err = "";
+  child.stdout?.on("data", (d: Buffer) => {
+    outLen += d.length;
+    if (outLen > maxOut) child.kill("SIGKILL");
+    else out.push(d);
+  });
+  child.stderr?.on("data", (d: Buffer) => {
+    if (err.length < 500) err += d.toString("utf8");
+  });
+  const code = await new Promise<number | null>((res) => {
+    const t = setTimeout(() => child.kill("SIGKILL"), o.timeoutMs ?? EMPTY_MS);
+    t.unref();
+    child.once("error", () => (clearTimeout(t), res(null)));
+    child.once("close", (c) => (clearTimeout(t), res(c)));
+  });
+  return { code: outLen > maxOut ? null : code, out: Buffer.concat(out).toString("utf8"), err: err.trim().slice(0, 500) };
+}
+
+/**
+ * Empties `dir` as its owner `uid`/`gid` (`runInFolderAs`). Without a change of user (the owner is this process, not root) it is done
+ * here. True when the folder is empty.
  */
 export async function emptyAs(dir: string, uid: number, gid: number, log: (s: string) => void): Promise<boolean> {
   const me = myUid();
@@ -276,37 +336,12 @@ export async function emptyAs(dir: string, uid: number, gid: number, log: (s: st
     log(`workers' area: ${dir} has owner ${uid}:${gid}; left`);
     return false;
   }
-  let fh: fs.FileHandle | undefined;
   try {
-    fh = await fs.open(dir, OPEN_DIR);
-    const st = await fh.stat();
-    if (st.uid !== uid) throw new Error(`its owner changed to ${st.uid}`);
-    const child = await spawnSandboxed(process.execPath, ["-e", EMPTY_SCRIPT], {
-      uid,
-      gid,
-      landlock: false,
-      cwdFd: fh.fd,
-      stdio: ["ignore", "ignore", "pipe"],
-      env: { PATH: process.env.PATH || "/usr/bin:/bin", LANG: "C.UTF-8" },
-    });
-    await fh.close();
-    fh = undefined;
-    let err = "";
-    child.stderr?.on("data", (d: Buffer) => {
-      if (err.length < 500) err += d.toString("utf8");
-    });
-    const code = await new Promise<number | null>((res) => {
-      const t = setTimeout(() => child.kill("SIGKILL"), EMPTY_MS);
-      t.unref();
-      child.once("error", () => (clearTimeout(t), res(null)));
-      child.once("exit", (c) => (clearTimeout(t), res(c)));
-    });
-    if (code === 0) return true;
-    log(`workers' area: emptying ${dir} as ${uid} failed (${code === null ? "stopped" : `exit ${code}`}): ${err.trim().slice(0, 500)}; left`);
+    const r = await runInFolderAs(dir, uid, gid, EMPTY_SCRIPT, []);
+    if (r.code === 0) return true;
+    log(`workers' area: emptying ${dir} as ${uid} failed (${r.code === null ? "stopped" : `exit ${r.code}`}): ${r.err}; left`);
   } catch (e) {
     log(`workers' area: emptying ${dir} as ${uid} failed: ${(e as Error).message}; left`);
-  } finally {
-    await fh?.close().catch(() => {});
   }
   return false;
 }
@@ -395,6 +430,167 @@ export async function removeOldIndexDirs(indexDir: string, owner: string, keep: 
   return gone;
 }
 
+/** A request for a trash folder that is refused (400: not a volume root; 403: not this account's to have). */
+export class TrashRefused extends Error {
+  constructor(
+    readonly status: 400 | 403,
+    why: string,
+  ) {
+    super(why);
+    this.name = "TrashRefused";
+  }
+}
+
+/** an item of a trash store (or what is left of one whose removal was cut short) */
+const TRASH_ITEM = /^(?:\.purge-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Who a trash folder is for: taken from the worker's spec, never from what the worker asks. */
+export interface TrashOwner {
+  kind: "sys" | "virt";
+  /** `u<uid>` or `v-<owner>` (`trashFolder`) */
+  folder: string;
+  account: LocalAccount;
+  /** a virtual account's grants (compared form): the volume must hold one that allows writing */
+  grants?: Grant[];
+}
+
+/**
+ * `<volume>/.filedeck-trash/<folder>`, the account's own trash folder on one volume, made when missing (sign-in on). `volume` must be
+ * the real path of a volume root inside the served root, as `volumeRoot` gives it (no link, no `..`), and not read-only; a virtual
+ * account's must hold one of its write grants. Else `TrashRefused`.
+ *
+ * Every step goes through descriptors opened without following a link:
+ * - the volume root is opened and checked by its descriptor (its own path, and a parent on another device unless it is the served root);
+ * - `.filedeck-trash` is made (or opened) through it. It must be this process's (root's) and not sticky; it is made 0711 when its mode
+ *   is anything else (an older one is 0700; workers must pass through it). Else `UnsafeFolders`.
+ * - items at its top (trashed with sign-in off) move into `u0` (0700, root's) by rename, inside this process's own folders;
+ * - the account's folder is made through the store's descriptor and handed to the account last (as `keyFolder`); one that is there
+ *   already is never changed and must be the account's with no rights for group or others, else `UnsafeFolders` (the root route answers
+ *   503 "trash folder is not safe").
+ */
+export async function accountTrashDir(cfg: { root: string; readOnly: string[] }, volume: string, who: TrashOwner, log: (s: string) => void, hook?: Hook): Promise<string> {
+  const { account, folder } = who;
+  if (account.uid === 0 || account.gid === 0) throw new TrashRefused(403, "no account on this machine");
+  if (!TRASH_OWNER.test(folder) || folder === "u0" || (who.kind === "sys" ? folder !== `u${account.uid}` : !folder.startsWith("v-")))
+    throw new TrashRefused(403, `${folder} is not this account's trash folder`);
+  const root = path.resolve(cfg.root);
+  if (!path.isAbsolute(volume) || path.resolve(volume) !== volume) throw new TrashRefused(400, "not a volume root");
+  let vol: fs.FileHandle;
+  try {
+    vol = await openChecked(root, volume, fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY);
+  } catch {
+    throw new TrashRefused(400, "not a volume root");
+  }
+  try {
+    // the descriptor names the path asked for (no link on the way), and that is a volume root
+    if ((await fs.readlink(inHeld(vol))) !== volume) throw new TrashRefused(400, "not a volume root");
+    if (volume !== root && (await fs.stat(inHeld(vol, ".."))).dev === (await vol.stat()).dev) throw new TrashRefused(400, "not a volume root");
+    const virtual = "/" + path.relative(root, volume);
+    if (hitsReadOnly(root, cfg.readOnly, virtual)) throw new TrashRefused(403, "read-only volume");
+    if (who.kind === "virt") {
+      let held = false;
+      for (const g of who.grants ?? []) {
+        if (!g.write || held) continue;
+        try {
+          held = (await volumeRoot(resolveRead(root, g.path).real, root)) === volume;
+        } catch {
+          /* a grant that cannot be reached holds nothing */
+        }
+      }
+      if (!held) throw new TrashRefused(403, "no write grant on this volume");
+    }
+    const me = myUid();
+    const shown = path.join(volume, TRASH_DIR);
+    await fs.mkdir(inHeld(vol, TRASH_DIR), { mode: 0o711 }).catch((e: NodeJS.ErrnoException) => {
+      if (e.code !== "EEXIST") throw e;
+    });
+    const t = await openFolder(inHeld(vol, TRASH_DIR), shown);
+    try {
+      const st = await t.stat();
+      if (st.uid !== me || st.mode & 0o1000) throw new UnsafeFolders(`${shown} has owner ${st.uid} and mode ${(st.mode & 0o7777).toString(8)}; it must be this process's (${me}) and not a shared folder`);
+      if ((st.mode & 0o7777) !== 0o711) {
+        await t.chmod(0o711);
+        if (st.mode & 0o022) log(`${shown} was mode ${(st.mode & 0o7777).toString(8)}; made 0711`);
+      }
+      await moveLegacy(t, shown, log);
+      // the account's own folder
+      const mine = path.join(shown, folder);
+      let made = true;
+      try {
+        await fs.mkdir(inHeld(t, folder), { mode: 0o700 });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        made = false;
+      }
+      if (made) await hook?.("trash", mine);
+      const f = await openFolder(inHeld(t, folder), mine);
+      try {
+        if (made) {
+          await expect(f, mine, me, 0o077);
+          await give(f, account);
+        } else await expect(f, mine, account.uid, 0o077);
+      } finally {
+        await f.close();
+      }
+      return mine;
+    } finally {
+      await t.close();
+    }
+  } finally {
+    await vol.close();
+  }
+}
+
+/** Items at the top of a trash store (`t`, held) move into its `u0` folder (root's own, 0700), made when missing. */
+async function moveLegacy(t: fs.FileHandle, shown: string, log: (s: string) => void): Promise<void> {
+  const items = (await fs.readdir(inHeld(t))).filter((n) => TRASH_ITEM.test(n));
+  if (items.length === 0) return;
+  const me = myUid();
+  const u0 = path.join(shown, "u0");
+  await fs.mkdir(inHeld(t, "u0"), { mode: 0o700 }).catch((e: NodeJS.ErrnoException) => {
+    if (e.code !== "EEXIST") throw e;
+  });
+  const f = await openFolder(inHeld(t, "u0"), u0);
+  try {
+    await expect(f, u0, me, 0o077);
+    for (const n of items)
+      await fs.rename(inHeld(t, n), inHeld(f, n)).catch((e: NodeJS.ErrnoException) => {
+        if (e.code !== "ENOENT") log(`${shown}/${n}: not moved to u0: ${e.code ?? e.message}`);
+      });
+  } finally {
+    await f.close();
+  }
+}
+
+/**
+ * The trash folders a virtual account's worker needs before it starts (its Landlock rules can only name folders that exist): one on each
+ * volume that holds one of its write grants, made by `accountTrashDir`. A grant that cannot be reached, or a volume whose folder cannot
+ * be made, is left out and logged; the worker then cannot trash there.
+ */
+export async function virtualTrashDirs(cfg: { root: string; readOnly: string[] }, who: TrashOwner, log: (s: string) => void, hook?: Hook): Promise<string[]> {
+  const root = path.resolve(cfg.root);
+  const volumes = new Set<string>();
+  for (const g of who.grants ?? []) {
+    if (!g.write) continue;
+    try {
+      const r = resolveRead(root, g.path);
+      if (r.virtual !== grantPath(g.path)) continue; // (a grant through a link is left out of the worker's rules too)
+      volumes.add(await volumeRoot(r.real, root));
+    } catch {
+      /* missing: nothing to trash there */
+    }
+  }
+  const out: string[] = [];
+  for (const v of [...volumes].sort()) {
+    try {
+      out.push(await accountTrashDir(cfg, v, who, log, hook));
+    } catch (e) {
+      log(`worker of ${who.folder}: trash folder on ${v} left out: ${(e as Error).message}`);
+    }
+  }
+  return out;
+}
+
 /** A grant's path in the one form paths are compared in (`/a/b`; `.` and repeated slashes dropped; `..` refused). */
 export const grantPath = (p: string): string => "/" + cleanVirtual(p).join("/");
 
@@ -457,7 +653,7 @@ export function runtimeRoots(): Promise<{ readOnly: string[]; readExec: string[]
  *   be inside the root; read and write when the grant allows writing, else read only. A grant that is a link or runs through one (its
  *   resolved path is not the grant's own), or that cannot be opened (missing, not a folder, Filedeck's own), is left out and logged: the
  *   worker gets less, never more.
- * - read and write: the worker's own folders (`dirs`), opened the same way.
+ * - read and write: the worker's own folders (`dirs`), opened the same way, and its trash folders (`dirs.trash`).
  * - read only: the mount table (`cfg.procMounts`, for the volumes and the read-only checks), and `runtimeRoots`.
  * Grants and folders are passed as descriptors, so the rule is attached to what was opened here, whatever happens to the path later.
  */
@@ -487,6 +683,16 @@ export async function landlockRoots(cfg: Config, claim: UserClaim, dirs: Account
       const fh = await openFolder(d);
       held.push(fh);
       readWrite.push(fh.fd);
+    }
+    for (const d of dirs.trash ?? []) {
+      // (one removed since it was made is left out: the worker then cannot trash on that volume)
+      try {
+        const fh = await openFolder(d);
+        held.push(fh);
+        readWrite.push(fh.fd);
+      } catch (e) {
+        log(`worker of ${claim.name}: trash folder ${d} left out: ${(e as Error).message}`);
+      }
     }
     if (cfg.procMounts && (await exists(cfg.procMounts))) readOnly.push(cfg.procMounts);
     const rt = await runtimeRoots();
