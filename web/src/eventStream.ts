@@ -19,7 +19,17 @@ export interface ChangeHubOptions {
   setInterval: (fn: () => void, ms: number) => unknown;
   clearInterval: (id: unknown) => void;
   url: (node: string, path: string) => string;
+  /**
+   * Called when a stream reports an error without data: a dropped connection, which is also how a stream the hub ended with its session,
+   * or a 401, looks to EventSource. At most once per `DROP_MS`.
+   */
+  onDrop?: () => void;
+  /** clock for the `onDrop` limit (tests) */
+  now?: () => number;
 }
+
+/** `onDrop` is called at most once in this time. */
+const DROP_MS = 10_000;
 
 interface Entry {
   url: string;
@@ -33,6 +43,14 @@ interface Entry {
 export function createChangeHub(o: ChangeHubOptions) {
   const entries = new Map<string, Entry>();
   let visible = true;
+  let lastDrop = -Infinity;
+  const now = o.now ?? Date.now;
+  const dropped = () => {
+    const t = now();
+    if (!o.onDrop || t - lastDrop < DROP_MS) return;
+    lastDrop = t;
+    o.onDrop();
+  };
 
   const notify = (en: Entry) => en.listeners.forEach((fn) => fn());
   const stop = (en: Entry) => {
@@ -57,14 +75,15 @@ export function createChangeHub(o: ChangeHubOptions) {
         const src = o.open(en.url);
         en.src = src;
         src.addEventListener("change", () => notify(en));
-        // A server-sent "error" event carries data; a dropped connection does not and is retried by the browser itself.
+        // A server-sent "error" event carries data; a dropped connection does not and is retried by the browser itself (the hub is
+        // asked who is signed in, as the drop may be the session's end).
         src.addEventListener("error", (e) => {
           if (typeof e.data === "string" && en.src === src) {
             src.close();
             en.src = undefined;
             en.refused = true;
             rebalance();
-          }
+          } else if (typeof e.data !== "string") dropped();
         });
       } else if (en.poll === undefined) {
         en.poll = o.setInterval(() => notify(en), o.pollMs);
@@ -115,6 +134,8 @@ export function changeHub() {
     setInterval: (fn, ms) => window.setInterval(fn, ms),
     clearInterval: (id) => window.clearInterval(id as number),
     url: (node, path) => `/api/nodes/${encodeURIComponent(node)}/api/events?path=${encodeURIComponent(path)}`,
+    // asks the hub who is signed in: when the session has ended, the signed-out watch (auth.ts) sees the 401 and shows the sign-in screen
+    onDrop: () => void fetch("/api/auth/me").catch(() => undefined),
   });
   document.addEventListener("visibilitychange", () => shared!.setVisible(document.visibilityState !== "hidden"));
   return shared;

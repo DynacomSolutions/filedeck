@@ -97,3 +97,36 @@ test("a stream the server refuses falls back to polling instead of reconnecting"
   b.live()[0]!.emit("error");
   assert.equal(b.live().length, 1);
 });
+
+test("drop asks who is signed in: an error without data calls onDrop once per 10 s; an error event with data does not", () => {
+  let t = 1_000_000;
+  let drops = 0;
+  const sources: Fake[] = [];
+  const hub = createChangeHub({
+    open: (url) => {
+      const s = new Fake(url);
+      sources.push(s);
+      return s;
+    },
+    maxStreams: 4,
+    pollMs: 1000,
+    setInterval: () => 0,
+    clearInterval: () => {},
+    url: (n, p) => `${n}:${p}`,
+    onDrop: () => drops++,
+    now: () => t,
+  });
+  hub.subscribe("n", "/a", () => {});
+  hub.subscribe("n", "/b", () => {});
+  sources[0]!.emit("error");
+  assert.equal(drops, 1);
+  t += 5_000;
+  sources[1]!.emit("error");
+  assert.equal(drops, 1, "a second drop within 10 s does not ask again");
+  t += 5_000;
+  sources[0]!.emit("error");
+  assert.equal(drops, 2, "10 s later it asks again");
+  t += 20_000;
+  sources[1]!.emit("error", "too many watches");
+  assert.equal(drops, 2, "a server-sent error event is not a drop");
+});

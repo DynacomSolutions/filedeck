@@ -62,6 +62,12 @@ export interface AuthDeps {
   onSignIn?: (kind: "sys" | "virt", name: string) => void;
 }
 
+/**
+ * The key of the session the current request was admitted with (`Sessions.keyOf`), set by the gate; undefined for an API token request
+ * and with auth off. The hub ties an event stream to it, so the stream ends with the session. Never logged and never sent anywhere.
+ */
+export const sessionKeyOf = (c: Context): string | undefined => c.get("authSession" as never) as string | undefined;
+
 /** Notes when the request arrived, so the floor on failed sign-ins counts the time spent before the route. Put it first. */
 export const markArrival = (): MiddlewareHandler => async (c, next) => {
   c.set("authArrival" as never, performance.now() as never);
@@ -121,7 +127,10 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (!raw) return undefined;
     const s = sessions.lookup(raw);
     if (!s) return undefined;
-    if (s.kind === "virt") return accounts.identity("virt", s.name);
+    const id0 = s.kind === "virt" ? accounts.identity("virt", s.name) : undefined;
+    if (s.kind === "virt" && !id0) return undefined;
+    c.set("authSession" as never, sessions.keyOf(raw) as never);
+    if (id0) return id0;
     const id = sysIdentity(cfg, accounts, s.name);
     // act as root: only while the switch is still on and the name is still in FILEDECK_ADMINS (checked on every request)
     if (id.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() && cfg.admins.includes(s.name)) {

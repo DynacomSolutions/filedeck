@@ -29,7 +29,8 @@ import { Challenges } from "./auth/sshkey.ts";
 import { LoginLimiter } from "./auth/limiter.ts";
 import { currentUser, userContext } from "./auth/context.ts";
 import { USER_HEADER } from "./auth/identity.ts";
-import { markArrival, registerAuth, registerAuthOff, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
+import { LiveStreams } from "./auth/streams.ts";
+import { markArrival, registerAuth, registerAuthOff, sessionKeyOf, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
 import { SysPresence } from "./auth/presence.ts";
@@ -69,8 +70,8 @@ function clean(h: Headers, keepLength: boolean): Headers {
   return out;
 }
 
-export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number }) {
-  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target> };
+export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target> };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
   // the signed user header is keyed on the agent token, so there is no auth without one (main.ts says so first)
@@ -88,6 +89,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       limiter: new LoginLimiter(opts?.now),
     };
     app.auth = auth;
+    // Event streams end with their session (auth/streams.ts): told to by the session store, or found out by the check every minute.
+    const sessions = auth.sessions;
+    const streams = new LiveStreams({ peek: (key) => sessions.peek(key), checkMs: opts?.streamCheckMs, now: opts?.now });
+    sessions.onEnd((e) => {
+      if ("key" in e) {
+        if (e.asRoot) streams.endAsRoot(e.key);
+        else streams.endSession(e.key);
+      } else streams.endAccount(e.kind, e.name);
+    });
+    app.streams = streams;
     // first, so the floor on failed sign-ins counts from when the request arrived
     app.use("*", markArrival());
   }
@@ -134,6 +145,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.vault = vault;
   let opq: OpQueue | undefined;
   app.close = async () => {
+    app.streams?.close();
     await opq?.interrupt(); // stop at an item boundary and hand the running jobs over
     vault.close();
     auth?.db.close();
@@ -421,10 +433,13 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
+    // with auth on, a GET made with a session may be an event stream, which must be cut off at the agent when its session ends
+    const session = app.streams && c.req.method === "GET" ? sessionKeyOf(c) : undefined;
+    const upstream = session !== undefined ? new AbortController() : undefined;
     const init: AgentFetchInit & { duplex?: string } = {
       method: c.req.method,
       headers: clean(c.req.raw.headers, false),
-      signal: c.req.raw.signal,
+      signal: upstream ? AbortSignal.any([c.req.raw.signal, upstream.signal]) : c.req.raw.signal,
       redirect: "manual",
       // the zip download that redeems a one-use ticket must not be sent twice
       ...(c.req.method === "GET" && rest === "/api/fs/zip" && url.searchParams.has("ticket") ? { replay: false } : {}),
@@ -447,7 +462,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
         return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
       }
       const r = await target.fetch(rest + url.search, init);
-      return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
+      const out = new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
+      const id = currentUser();
+      if (app.streams && session !== undefined && upstream && id && (r.headers.get("content-type") ?? "").toLowerCase().startsWith("text/event-stream")) {
+        // a stream opened under the act-as-root switch ends with the switch too (turned off, its end passed, or no longer held). The gate
+        // gave the identity the switch, so the agent call may have carried it: the stream counts as one, and track ends it at once if the
+        // switch is already gone.
+        const asRoot = id.kind === "sys" && id.asRootUntil !== undefined ? { until: id.asRootUntil, ok: () => asRootOk(id) } : undefined;
+        return app.streams.track(session, id.kind, id.name, out, { abort: () => upstream.abort(), asRoot });
+      }
+      return out;
     } catch (e) {
       if ((e as Error).name === "AbortError") return new Response(null, { status: 499 });
       if (e instanceof NoAccessError) return noAccess(c);
