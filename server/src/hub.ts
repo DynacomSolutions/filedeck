@@ -13,7 +13,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
-import { canUseNode, NoAccessError, withAgentToken } from "./agent-auth.ts";
+import { canUseNode, isOpenProbe, NoAccessError, withAgentToken } from "./agent-auth.ts";
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
@@ -107,7 +107,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   // Every call to an agent names the person behind it (with auth on, a call with nobody behind it throws). Only the open
   // probes go out without a user header: they carry no data and are made for nobody in particular.
-  const openProbe = (rest: string) => /^\/(healthz|metrics)(\?|$)/.test(rest);
+  const openProbe = isOpenProbe;
   const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) =>
     openProbe(rest) ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name))) : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth));
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));

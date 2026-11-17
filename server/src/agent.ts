@@ -41,7 +41,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   const app = new Hono();
   app.use("*", trustProxies(cfg.trustedProxies));
   app.use("*", agentAuth(cfg.agentToken));
-  app.use("*", agentUser(cfg)); // with auth on: a valid signed user header, or 401
+  app.use("*", agentUser(cfg, auditSink)); // with auth on: a valid signed user header, or 401
   app.use("*", requestGuard({ maxEdit: cfg.maxEdit, audit: { who: `agent:${cfg.node}`, sink: auditSink } }));
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
   app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point

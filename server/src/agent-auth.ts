@@ -3,6 +3,7 @@ import type { MiddlewareHandler } from "hono";
 import { currentUser } from "./auth/context.ts";
 import { claimFor, signClaim, verifyClaim, USER_HEADER, type Identity, type UserClaim } from "./auth/identity.ts";
 import type { Config } from "./config.ts";
+import { auditRefusal, type AuditSink } from "./audit.ts";
 
 /**
  * Optional shared secret between the hub and the agents (FILEDECK_AGENT_TOKEN
@@ -12,13 +13,16 @@ import type { Config } from "./config.ts";
  * nothing that names a path, a node or a size may be added to it). It sits behind the NetworkPolicy as a second layer: a pod
  * that is allowed to reach an agent still cannot use it without the secret.
  */
+/** The two paths that need no credentials and name nobody: the liveness probe and the metrics scrape (a query string is allowed). The hub and the agents use this one test. */
+export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)/.test(pathAndQuery);
+
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
 export function agentAuth(token: string | undefined): MiddlewareHandler {
   if (!token) return (_c, next) => next();
   const want = digest(token);
   return async (c, next) => {
-    if (c.req.path === "/healthz" || c.req.path === "/metrics") return next();
+    if (isOpenProbe(c.req.path)) return next();
     const m = /^Bearer (.+)$/.exec(c.req.header("authorization") ?? "");
     if (!m || !timingSafeEqual(digest(m[1] as string), want)) return c.json({ error: "unauthorized" }, 401);
     return next();
@@ -38,14 +42,17 @@ declare module "hono" {
  * header nor its MAC is ever logged or echoed. The verified claim is stored for the audit and the routes. Part 2 enforces
  * its `runAs` and `grants`; here it is only verified and kept. Mount it right after `agentAuth`. Off: nothing is checked.
  */
-export function agentUser(cfg: Config): MiddlewareHandler {
+export function agentUser(cfg: Config, sink?: AuditSink): MiddlewareHandler {
   if (!cfg.auth) return (_c, next) => next();
   const token = cfg.agentToken;
   return async (c, next) => {
-    if (c.req.path === "/healthz" || c.req.path === "/metrics") return next();
+    if (isOpenProbe(c.req.path)) return next();
     const value = c.req.header(USER_HEADER);
     const claim = token && value ? verifyClaim(value, token, Date.now()) : null;
-    if (!claim) return c.json({ error: "no user" }, 401);
+    if (!claim) {
+      auditRefusal(`agent:${cfg.node}`, c, 401, sink); // the line holds no header value
+      return c.json({ error: "no user" }, 401);
+    }
     c.set("user", claim);
     return next();
   };
