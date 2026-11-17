@@ -14,6 +14,9 @@ import type { Config } from "./config.ts";
  * sends it a `WorkerInit` (HELLO) and forwards the account's requests to it over that socket (worker-proto.ts).
  */
 
+/** The header on each worker answer that holds the number of the worker's live (queued or running) jobs. */
+export const JOBS_HEADER = "x-filedeck-jobs";
+
 /** The worker's start-up message. `cfg` comes from `workerConfig` and holds no secret. */
 export interface WorkerInit {
   cfg: Config;
@@ -23,15 +26,28 @@ export interface WorkerInit {
 
 /**
  * The worker's app: the agent's read-only checks and error answer, every file route, and the job list over jobs kept in memory (a worker cannot write the root
- * process's shared job file). The root process checks the agent token and the signed user, writes the audit log, and keeps `/healthz`, `/metrics`, `/api/info`
- * and the folder sizes.
+ * process's shared job file). Every answer carries `x-filedeck-jobs`. The root process checks the agent token and the signed user, writes the audit log, and
+ * keeps `/healthz`, `/metrics`, `/api/info` and the folder sizes.
  */
 export function createWorkerApp(cfg: Config): Hono {
   const app = new Hono();
+  const jobs = makeAgentJobs({ ...cfg, jobsFile: "" });
+  // every answer says how many jobs are queued or running, so the root process does not stop a worker that still has work
+  app.use("*", async (c, next) => {
+    await next();
+    const n = String(jobs.active);
+    try {
+      c.res.headers.set(JOBS_HEADER, n);
+    } catch {
+      // (headers that cannot be changed: copy the answer)
+      const res = new Response(c.res.body, c.res);
+      res.headers.set(JOBS_HEADER, n);
+      c.res = res;
+    }
+  });
   app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   app.onError(agentError);
-  const jobs = makeAgentJobs({ ...cfg, jobsFile: "" });
   const files = registerFileRoutes(app, cfg, jobs);
   registerJobRoutes(app, jobs);
   (app as unknown as { close: () => Promise<void> }).close = async () => {

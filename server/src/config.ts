@@ -96,6 +96,10 @@ export interface Config {
   hostHelpers: string | undefined;
   /** this process is a worker that serves one signed-in account (worker.ts); never set from the environment */
   worker: boolean;
+  /** agent, sign-in on: most worker processes at once; past it the least recently used idle one is stopped */
+  maxWorkers: number;
+  /** agent, sign-in on: a worker with nothing to do for this long is stopped */
+  workerIdleMs: number;
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -205,6 +209,8 @@ export function loadConfig(env = process.env): Config {
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
     hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
     worker: false,
+    maxWorkers: Number(env.FILEDECK_MAX_WORKERS ?? 6),
+    workerIdleMs: Number(env.FILEDECK_WORKER_IDLE_SECONDS ?? 600) * 1000,
   };
 }
 
