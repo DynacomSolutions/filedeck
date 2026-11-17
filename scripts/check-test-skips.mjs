@@ -21,7 +21,7 @@ const allowed = [
   /^smb live: skipped \(FILEDECK_TEST_SMB not set\)$/,
   // server/test/fanwatch.test.ts: the fanotify helper needs two capabilities; the root pass sets FILEDECK_REQUIRE_FANWATCH=1 and fails instead of skipping.
   /^helper cannot run here: .+$/,
-  // server/test/{sandbox,git-sandbox,archive-sandbox}.test.ts: the tests that need root skip in the unprivileged pass; the root pass runs them.
+  // server/test/{sandbox,git-sandbox,archive-sandbox,agent-keys}.test.ts: the tests that need root skip in the unprivileged pass; the root pass runs them.
   /^(?:git )?sandbox live: skipped \(not running as root\)$/,
   // the worker tests (sign-in part 2) that need root to start a worker as another user skip in the unprivileged pass; the root pass runs them.
   /^worker live: skipped \(not running as root\)$/,

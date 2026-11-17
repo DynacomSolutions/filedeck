@@ -16,6 +16,7 @@ import { makeResolver, type AccountResolver } from "./local-accounts.ts";
 import { executable } from "./native.ts";
 import { HostPam, hostPam } from "./host-pam.ts";
 import { registerAgentAuthRoutes } from "./agent-auth-routes.ts";
+import { KeyCheck } from "./agent-keys.ts";
 import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
 import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
 import { Followers, registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
@@ -27,6 +28,8 @@ export interface AgentOptions {
   startWorker?: StartWorker;
   /** the system users' password check (sign-in on); default: `filedeck-pam` from the host helpers `makeResolver` found, else none */
   pam?: HostPam;
+  /** the system users' key check (sign-in on); default: one over the host's account lookup when `makeResolver` found the host helpers, else none */
+  keys?: KeyCheck;
 }
 
 /**
@@ -41,6 +44,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   let specs: WorkerSpecs | undefined;
   let workers: AccountWorkers | undefined;
   let pam: Promise<HostPam | undefined> | undefined;
+  let keys: Promise<KeyCheck | undefined> | undefined;
   if (cfg.auth) {
     const made = opts.accounts ? undefined : makeResolver(cfg, (s) => console.error(s));
     const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : made!.then((r) => r.resolver);
@@ -59,6 +63,9 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
             console.error(`system sign-in: unavailable (${(e as Error)?.message ?? String(e)})`);
             return undefined;
           });
+    // key sign-in: `authorized_keys` read as the user inside the machine's root; only with the host's own account lookup (the
+    // /etc/passwd fallback refuses system sign-in), and not for an account lookup passed in without `opts.keys`
+    keys = opts.keys ? Promise.resolve(opts.keys) : made?.then((r) => (r.helpers ? new KeyCheck({ root: r.helpers.root, accounts: r.resolver }) : undefined)).catch(() => undefined);
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
     specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [], uidInUse: (uid) => pool?.usesUid(uid) ?? false });
     const ws = specs;
@@ -93,7 +100,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   app.get("/healthz", (c) => c.text("ok"));
   if (cfg.auth && accounts) {
     const a = accounts;
-    registerAgentAuthRoutes(app, { pam, accounts: async () => a });
+    registerAgentAuthRoutes(app, { pam, keys, accounts: async () => a });
   }
   app.get("/api/info", async (c) => c.json({ node: cfg.node, root: cfg.root, watches: files.watches.size, readOnly: cfg.readOnly, sandbox: await sandboxSummary() }));
   // The jobs of this process (kept in the shared job file when there is one), the file routes, the folder sizes and the job list, all over the same jobs
