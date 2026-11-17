@@ -57,10 +57,11 @@ test("the password reaches the helper on stdin only: never in the name or the ar
     return { code: 0, stdout: "", stderr: "" };
   }) as unknown as typeof runHostHelper;
   const cfg = { ...loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_AUTH: "on" }), pamService: "filedeck-x" };
-  assert.equal(await hostPam(cfg, { root: "/host", dir: "/img/host" }, { runner }).check("alice", SECRET), "ok");
+  assert.equal(await hostPam(cfg, { root: "/host", dir: "/img/host" }, { runner }).check("alice", SECRET, "203.0.113.7"), "ok");
   assert.equal(seen.length, 1);
   const [root, dir, name, args, opts] = seen[0]!.args as [string, string, string, string[], Record<string, unknown>];
-  assert.deepEqual([root, dir, name, args], ["/host", "/img/host", "filedeck-pam", ["filedeck-x", "alice"]]);
+  // the client's address is the last argument (PAM_RHOST); it is not a secret
+  assert.deepEqual([root, dir, name, args], ["/host", "/img/host", "filedeck-pam", ["filedeck-x", "alice", "203.0.113.7"]]);
   assert.deepEqual(opts.stdin, Buffer.from(SECRET, "utf8"));
   assert.deepEqual(opts.keepCaps, ["dac_read_search"]);
   assert.equal(opts.asRoot, true);
@@ -68,6 +69,21 @@ test("the password reaches the helper on stdin only: never in the name or the ar
   assert.equal(typeof opts.timeoutMs, "number");
   const { stdin: _stdin, ...rest } = opts;
   assert.ok(!JSON.stringify([root, dir, name, args, rest]).includes(SECRET), "the password is only in stdin");
+});
+
+test("the client's address reaches the runner; without one the helper gets no address; a bad one runs nothing", async () => {
+  const seen: unknown[] = [];
+  const pam = new HostPam({ run: async (_n, _s, o) => (seen.push(o.address), { code: 0 }), log: () => {} });
+  assert.equal(await pam.check("alice", SECRET, "2001:db8::1"), "ok");
+  assert.equal(await pam.check("alice", SECRET), "ok");
+  assert.deepEqual(seen, ["2001:db8::1", undefined]);
+  for (const bad of ["", "host.example", "1.2.3.4 x", "fe80::1%eth0", "-1"]) assert.equal(await pam.check("alice", SECRET, bad), "fail", bad);
+  assert.equal(seen.length, 2);
+  const args: string[][] = [];
+  const runner = (async (_r: string, _d: string, _n: string, a: string[]) => (args.push(a), { code: 0, stdout: "", stderr: "" })) as unknown as typeof runHostHelper;
+  const cfg = { ...loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_AUTH: "on" }), pamService: "filedeck-x" };
+  await hostPam(cfg, { root: "/host", dir: "/img/host" }, { runner }).check("alice", SECRET);
+  assert.deepEqual(args, [["filedeck-x", "alice"]]);
 });
 
 test("each exit code maps to a result", async () => {
@@ -170,6 +186,10 @@ const SERVICES: Record<string, string> = {
   "filedeck-test-ok": "auth required pam_permit.so\naccount required pam_permit.so\n",
   "filedeck-test-deny": "auth required pam_deny.so\naccount required pam_deny.so\n",
 };
+/** pam_access with only local logins allowed: the file is written in the test folder (`accessFile`). */
+const ACCESS_SERVICE = (accessFile: string): Record<string, string> => ({
+  "filedeck-test-access": `auth required pam_permit.so\naccount required pam_access.so accessfile=${accessFile}\n`,
+});
 const MOD_SERVICES = (mod: string): Record<string, string> => ({
   "filedeck-test-twice": `auth required ${mod} twice\naccount required pam_permit.so\n`,
   "filedeck-test-echo": `auth required ${mod} echo\naccount required pam_permit.so\n`,
@@ -246,7 +266,9 @@ function liveSetup() {
     const mod = path.join(tmp, "pam_filedeck_test.so");
     const c = spawnSync("cc", ["-shared", "-fPIC", "-O2", "-o", mod, src, "-lpam"], { encoding: "utf8" });
     assert.equal(c.status, 0, c.stderr);
-    for (const [name, body] of Object.entries({ ...SERVICES, ...MOD_SERVICES(mod) })) {
+    const access = path.join(tmp, "access.conf");
+    fs.writeFileSync(access, "+:ALL:LOCAL\n-:ALL:ALL\n", { mode: 0o644 });
+    for (const [name, body] of Object.entries({ ...SERVICES, ...MOD_SERVICES(mod), ...ACCESS_SERVICE(access) })) {
       const f = path.join("/etc/pam.d", name);
       fs.writeFileSync(f, body, { mode: 0o644 });
       written.push(f);
@@ -283,9 +305,20 @@ live("filedeck-pam: permit gives ok, deny gives fail, root and an unknown name a
   assert.equal((await raw(built, ["filedeck-test-ok", "root"])).code, 6);
   assert.equal((await raw(built, ["filedeck-test-ok", "no-such-user-xyz"])).code, 4);
   assert.equal((await raw(built, ["filedeck-test-missing-xyz", "nobody"])).code, 5);
-  for (const bad of [[], ["filedeck-test-ok"], ["filedeck-test-ok", "nobody", "x"], ["../passwd", "nobody"], ["filedeck-test-ok", "-nobody"], ["", "nobody"]]) {
+  for (const bad of [[], ["filedeck-test-ok"], ["filedeck-test-ok", "nobody", "x"], ["filedeck-test-ok", "nobody", "1.2.3.4", "x"], ["../passwd", "nobody"], ["filedeck-test-ok", "-nobody"], ["", "nobody"]]) {
     assert.equal((await raw(built, bad)).code, 64, JSON.stringify(bad));
   }
+});
+
+live("PAM sees the client's address as PAM_RHOST: pam_access with only local logins refuses a remote address, and allows none", async ({ built }) => {
+  // a remote address: pam_access's LOCAL rule does not match, -:ALL:ALL refuses at the account stage
+  assert.equal((await raw(built, ["filedeck-test-access", "nobody", "203.0.113.7"])).code, 2);
+  assert.equal(await pamFor(built, "filedeck-test-access").check("nobody", SECRET, "203.0.113.7"), "fail");
+  // no address: the old behaviour (the TTY "filedeck" is not a remote host, so LOCAL matches)
+  assert.equal((await raw(built, ["filedeck-test-access", "nobody"])).code, 0);
+  assert.equal(await pamFor(built, "filedeck-test-access").check("nobody", SECRET), "ok");
+  // an address the helper does not take is a usage error, before PAM
+  for (const bad of ["host.example", "1.2.3.4;x", "", "1".repeat(46)]) assert.equal((await raw(built, ["filedeck-test-ok", "nobody", bad])).code, 64, bad);
 });
 
 live("second prompt fails: a one-time code after the password, or an echo-on question, fails at once with a log line", async ({ built }) => {

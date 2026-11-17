@@ -1,9 +1,13 @@
 /*
- * filedeck-pam SERVICE NAME
+ * filedeck-pam SERVICE NAME [ADDRESS]
  *
  * Checks NAME's password with the machine's own PAM, service SERVICE (/etc/pam.d/SERVICE). The password is read from stdin: at most
  * 1024 bytes, ending at the first newline or at the end of the input. It is never taken from the arguments or the environment, and
  * never printed. Nothing is written on stdout.
+ *
+ * PAM sees the TTY as "filedeck" (PAM_TTY) and, when ADDRESS is given, the client's address as PAM_RHOST (an IPv4 or IPv6 address:
+ * hex digits, '.' and ':' only), before pam_authenticate and pam_acct_mgmt. So pam_access and similar modules treat a web sign-in as
+ * a remote login from that address, not as one at the console. The agent always gives it.
  *
  * Exit status:
  *   0   PAM accepted the password (pam_authenticate) and the account (pam_acct_mgmt)
@@ -67,6 +71,18 @@ static int plain(const char *s, int service) {
   for (size_t i = 0; i < n; i++) {
     char c = s[i];
     int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || (!service && c == '@');
+    if (!ok) return 0;
+  }
+  return 1;
+}
+
+/* An address for PAM_RHOST: 2 to 45 bytes of hex digits, '.' and ':' (the agent has checked it is an IPv4 or IPv6 address). */
+static int plain_address(const char *s) {
+  size_t n = strlen(s);
+  if (n < 2 || n > 45) return 0;
+  for (size_t i = 0; i < n; i++) {
+    char c = s[i];
+    int ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '.' || c == ':';
     if (!ok) return 0;
   }
   return 1;
@@ -146,11 +162,11 @@ int main(int argc, char **argv) {
     fprintf(stderr, "filedeck-pam: cannot make the process undumpable\n");
     return 1;
   }
-  if (argc != 3 || !plain(argv[1], 1) || !plain(argv[2], 0)) {
-    fprintf(stderr, "usage: filedeck-pam SERVICE NAME (the password on stdin)\n");
+  if ((argc != 3 && argc != 4) || !plain(argv[1], 1) || !plain(argv[2], 0) || (argc == 4 && !plain_address(argv[3]))) {
+    fprintf(stderr, "usage: filedeck-pam SERVICE NAME [ADDRESS] (the password on stdin)\n");
     return 64;
   }
-  const char *service = argv[1], *name = argv[2];
+  const char *service = argv[1], *name = argv[2], *address = argc == 4 ? argv[3] : NULL;
 
   size_t len = 0;
   while (len < MAX_PASSWORD) {
@@ -228,6 +244,14 @@ int main(int argc, char **argv) {
   rc = pam_set_item_p(h, PAM_FAIL_DELAY, (const void *)no_fail_delay);
   if (rc != PAM_SUCCESS) {
     say("cannot switch off PAM's failure delay", pam_strerror_p(h, rc));
+    pam_end_p(h, rc);
+    finish(5);
+  }
+  /* where the attempt comes from, for pam_access and the like: never the console */
+  rc = pam_set_item_p(h, PAM_TTY, "filedeck");
+  if (rc == PAM_SUCCESS && address) rc = pam_set_item_p(h, PAM_RHOST, address);
+  if (rc != PAM_SUCCESS) {
+    say("cannot set PAM_TTY or PAM_RHOST", pam_strerror_p(h, rc));
     pam_end_p(h, rc);
     finish(5);
   }

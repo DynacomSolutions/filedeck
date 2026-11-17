@@ -19,7 +19,8 @@ import { currentUser, runAs } from "./context.ts";
 
 /** Checks a system user's password or key. Part 2 does this on an agent. */
 export interface SystemAuth {
-  password(name: string, pw: string): Promise<boolean>;
+  /** `address`: the client's address as the hub sees it (`clientOf`), for PAM_RHOST; undefined when the request came over no socket. */
+  password(name: string, pw: string, address?: string): Promise<boolean>;
   key(name: string, pub: string, msg: Buffer, sig: Buffer): Promise<boolean>;
 }
 
@@ -92,6 +93,9 @@ function sysIdentity(cfg: Config, accounts: Accounts, name: string): Identity {
 }
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+
+/** The client's address for PAM (PAM_RHOST): `clientOf`'s, without a zone id; undefined over no socket. */
+const pamAddress = (c: Context): string | undefined => clientOf(c).ip?.replace(/%.*$/, "") || undefined;
 
 function isLoopback(addr: string | undefined): boolean {
   if (!addr) return false;
@@ -230,7 +234,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (name !== undefined && pw !== undefined && name !== "root") {
       const acc = accounts.get(name);
       if (acc) kind = checkPassword(pw, acc.passwordHash) ? "virt" : undefined;
-      else kind = (await system.password(name, pw)) ? "sys" : undefined;
+      else kind = (await system.password(name, pw, pamAddress(c))) ? "sys" : undefined;
     }
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();
@@ -303,7 +307,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     const pw = str(b?.password);
     let ok = false;
     if (pw !== undefined) {
-      ok = await system.password(name, pw);
+      ok = await system.password(name, pw, pamAddress(c));
     } else {
       const pub = str(b?.publicKey);
       const ch = str(b?.challenge);

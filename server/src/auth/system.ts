@@ -28,8 +28,9 @@ export type SignInCall = (node: string, path: string, body: unknown, signal?: Ab
  * not 200, a body that does not parse, no answer within `CALL_TIMEOUT_MS`, or a node that cannot be reached. All nodes passed over, or
  * `TOTAL_MS` gone: no.
  *
- * Only the name and what the agent route needs go to an agent; the caller (hub.ts) sends them with the agent token and nothing of the
- * client's. Nothing secret is logged.
+ * Only the name and what the agent route needs go to an agent; the caller (hub.ts) sends them with the agent token and nothing else of
+ * the client's request. A password check also carries the client's address (`clientOf`), which the agent hands to PAM as PAM_RHOST. A
+ * key check runs no PAM, so it carries none. Nothing secret is logged.
  */
 export class AgentSystemAuth implements SystemAuth {
   private readonly nodes: string[];
@@ -48,8 +49,9 @@ export class AgentSystemAuth implements SystemAuth {
     this.log = o.log ?? ((s) => console.error(s));
   }
 
-  password(name: string, pw: string): Promise<boolean> {
-    return this.ask(name, "/api/auth/password", { name, password: pw });
+  /** `address`: the client's address (`clientOf(c).ip`), for PAM_RHOST on the agent; without one the agents refuse the check. */
+  password(name: string, pw: string, address?: string): Promise<boolean> {
+    return this.ask(name, "/api/auth/password", { name, password: pw, ...(address === undefined ? {} : { address }) });
   }
 
   /** `msg` is the login message the hub built itself (its own id, the name and the challenge it issued and took), never client bytes. */

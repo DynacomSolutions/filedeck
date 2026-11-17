@@ -234,7 +234,7 @@ test("uid 0 on one machine asked ends the search: refused stops like fail", asyn
     // the agent itself says refused, for the password and the key
     const direct = (route: string, body: unknown) =>
       fetch(`${B.url}/api/auth/${route}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${T}` }, body: JSON.stringify(body) }).then((r) => r.json());
-    assert.deepEqual(await direct("password", { name, password: PW }), { result: "refused" }, name);
+    assert.deepEqual(await direct("password", { name, password: PW, address: "203.0.113.7" }), { result: "refused" }, name);
     const msg = loginMessage("h", name, Buffer.alloc(32, 1));
     assert.deepEqual(await direct("key", { name, publicKey: KEY.line, message: msg.toString("base64"), signature: sign(null, msg, KEY.privateKey).toString("base64") }), { result: "refused" }, name);
     // b (uid 0 or group 0 there) first: no sign-in, although a would take the password and the key
@@ -347,7 +347,9 @@ test("no user header on sign-in calls, no cookie or client header, bodies hold o
     assert.ok(!JSON.stringify(r.headers).includes("203.0.113.9"), JSON.stringify(r.headers));
     assert.ok(!r.body.includes("leak-me"));
     const keys = Object.keys(JSON.parse(r.body)).sort();
-    assert.deepEqual(keys, r.path === "/api/auth/password" ? ["name", "password"] : ["message", "name", "publicKey", "signature"]);
+    assert.deepEqual(keys, r.path === "/api/auth/password" ? ["address", "name", "password"] : ["message", "name", "publicKey", "signature"]);
+    // the password check carries the client's address as the hub sees it (no trusted proxy here: the socket's peer, not the forwarded one)
+    if (r.path === "/api/auth/password") assert.equal(JSON.parse(r.body).address, "127.0.0.1");
   }
   assert.ok(hubLines.length > 0);
   assert.ok(!hubLines.join("\n").includes(PW), "no hub audit line holds the password");
@@ -407,6 +409,30 @@ function fakeCall(answers: Record<string, Answer>) {
   return { asked, call };
 }
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+
+test("AgentSystemAuth: a password check carries the client's address; a key check carries none", async () => {
+  const bodies: unknown[] = [];
+  const call = async (_node: string, _p: string, b: unknown) => (bodies.push(b), json({ result: "ok" }));
+  const s = new AgentSystemAuth({ nodes: ["x"], call, log: () => {} });
+  assert.equal(await s.password("alice", PW, "203.0.113.7"), true);
+  assert.equal(await s.key("alice", KEY.line, Buffer.from("m"), Buffer.from("s")), true);
+  assert.deepEqual(bodies[0], { name: "alice", password: PW, address: "203.0.113.7" });
+  assert.equal((bodies[1] as Record<string, unknown>).address, undefined);
+});
+
+test("the hub sends the client's address behind a trusted proxy, and a real agent refuses a check without one", async () => {
+  const h = makeHub(`a=${A.url}`, { FILEDECK_TRUSTED_PROXIES: "1" });
+  seen.length = 0;
+  assert.equal((await post(h, "/api/auth/login", { name: "alice", password: PW }, { "x-forwarded-for": "198.51.100.23", "x-forwarded-proto": "https" })).status, 200);
+  const pw = authRecs().filter((r) => r.path === "/api/auth/password");
+  assert.equal(pw.length, 1);
+  assert.equal(JSON.parse(pw[0]!.body).address, "198.51.100.23");
+  // straight to the agent without an address: 400, PAM never runs
+  const before = A.pamCalls.length;
+  const r = await fetch(`${A.url}/api/auth/password`, { method: "POST", headers: { authorization: `Bearer ${T}`, "content-type": "application/json" }, body: JSON.stringify({ name: "alice", password: PW }) });
+  assert.equal(r.status, 400);
+  assert.equal(A.pamCalls.length, before);
+});
 
 test("AgentSystemAuth: limits are 15 s per call and 20 s in all", () => {
   assert.equal(CALL_TIMEOUT_MS, 15_000);

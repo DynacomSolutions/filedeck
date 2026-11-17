@@ -113,10 +113,11 @@ function sshKey() {
 const ALICE_KEY = sshKey();
 
 /** A fake system sign-in: alice's password is RIGHT, and ALICE_KEY is listed for her; every other key is refused. It notes the names it was asked for. */
-function fakeSystem(asked: string[]): SystemAuth {
+function fakeSystem(asked: string[], addresses: (string | undefined)[] = []): SystemAuth {
   return {
-    async password(name, pw) {
+    async password(name, pw, address) {
       asked.push(name);
+      addresses.push(address);
       return name === "alice" && pw === RIGHT;
     },
     async key(name, pub) {
@@ -134,6 +135,7 @@ let C: Served;
 let hub: Hub;
 let clock = Date.now();
 const asked: string[] = [];
+const addresses: (string | undefined)[] = [];
 const hubLines: string[] = [];
 
 before(async () => {
@@ -144,7 +146,7 @@ before(async () => {
     loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `A=${A.url},B=${B.url}`, FILEDECK_ADMINS: "alice,vadmin", FILEDECK_AUTH_FILE: path.join(tmp, "auth.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff") } as never),
     undefined,
     (l) => hubLines.push(l),
-    { now: () => clock, system: fakeSystem(asked) },
+    { now: () => clock, system: fakeSystem(asked, addresses) },
   );
   closers.push(hub);
 });
@@ -180,6 +182,8 @@ test("admins only: a virtual admin and a system user who is not an admin get 403
   const r4 = await postJson(hub, "/api/auth/as-root", alice, { name: "bob", password: "wrong" });
   assert.equal(r4.status, 401);
   assert.deepEqual(asked, ["alice", "alice"]);
+  // the password proof goes to PAM with the client's address, as at sign-in
+  assert.deepEqual(addresses.slice(-2), ["127.0.0.1", "127.0.0.1"]);
   // a key proof needs a challenge the hub issued for this name; a bad signature is refused before the agent is asked
   const ch = (await (await postJson(hub, "/api/auth/challenge", alice, { name: "alice" })).json()) as { challenge: string; hubId: string };
   assert.ok(loginMessage(ch.hubId, "alice", Buffer.from(ch.challenge, "base64")).length > 0);

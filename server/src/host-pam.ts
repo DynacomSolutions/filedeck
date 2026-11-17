@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { Config } from "./config.ts";
 import { runHostHelper } from "./host-helpers.ts";
 import { validSystemName } from "./local-accounts.ts";
@@ -5,7 +6,8 @@ import { validSystemName } from "./local-accounts.ts";
 /**
  * A system user's password, checked by the machine's own PAM (sign-in on). `filedeck-pam` (server/native/host) runs once per attempt
  * inside the machine's root, like `filedeck-id`, so libpam and its modules never load into this process. The password goes to it
- * on its stdin pipe only: never in its arguments, its environment, a log line or an error.
+ * on its stdin pipe only: never in its arguments, its environment, a log line or an error. PAM sees the TTY as "filedeck" and the
+ * client's address (`address`, the hub's view of who signs in) as PAM_RHOST, so pam_access treats the attempt as a remote login.
  *
  * - `ok`: PAM accepted the password and the account.
  * - `fail`: a wrong password, an account PAM refuses, or a PAM stack that asks more than the one password question.
@@ -25,7 +27,13 @@ export const SECOND_PROMPT_LOG = "pam: the service asked more than one question;
 /** How long one attempt may take (a slow directory server, PAM's own delay after a wrong password) before it counts as unavailable. */
 const TIMEOUT_MS = 12_000;
 
-export type PamRun = (name: string, stdin: Buffer) => Promise<{ code: number | null; stderr?: string }>;
+export type PamRun = (name: string, stdin: Buffer, o: { address?: string }) => Promise<{ code: number | null; stderr?: string }>;
+
+/**
+ * A client address the helper takes for PAM_RHOST: an IPv4 or IPv6 address (`net.isIP`) of hex digits, '.' and ':' only (no zone
+ * id), at most 45 characters.
+ */
+export const validClientAddress = (s: unknown): s is string => typeof s === "string" && /^[0-9A-Fa-f.:]{2,45}$/.test(s) && isIP(s) !== 0;
 
 /** How many helpers may run at once; more calls wait for a place (within their time limit). */
 const MAX_RUNNING = 4;
@@ -43,8 +51,10 @@ export class HostPam {
     this.timeoutMs = o.timeoutMs ?? TIMEOUT_MS;
   }
 
-  async check(name: string, password: string): Promise<PamResult> {
+  /** `address`: the client's address, for PAM_RHOST; one that is not valid fails at once, and nothing runs. */
+  async check(name: string, password: string, address?: string): Promise<PamResult> {
     if (!validSystemName(name)) return "unknown";
+    if (address !== undefined && !validClientAddress(address)) return "fail";
     let timer: NodeJS.Timeout | undefined;
     let r: { code: number | null; stderr?: string };
     let gaveUp = false;
@@ -55,7 +65,7 @@ export class HostPam {
         return { code: null }; // (its time ran out while it waited: it never starts, and the caller has had its answer)
       }
       try {
-        return await this.run(name, Buffer.from(password, "utf8"));
+        return await this.run(name, Buffer.from(password, "utf8"), address === undefined ? {} : { address });
       } finally {
         this.leave();
       }
@@ -99,13 +109,13 @@ export class HostPam {
 
 /**
  * The machine's PAM through `filedeck-pam` in `helpers.dir` (the image's helper folder), inside `helpers.root`, with the service
- * `cfg.pamService`. It runs as root (pam_unix reads /etc/shadow) with only `CAP_DAC_READ_SEARCH` kept: on some distributions the
+ * `cfg.pamService`, and the client's address as its last argument when there is one. It runs as root (pam_unix reads /etc/shadow) with only `CAP_DAC_READ_SEARCH` kept: on some distributions the
  * shadow file has mode 0000, and pam_unix's setuid fallback does not work under no-new-privileges. `runner` is for tests.
  */
 export function hostPam(cfg: Config, helpers: { root: string; dir: string }, o: { log?: (s: string) => void; runner?: typeof runHostHelper } = {}): HostPam {
   const runner = o.runner ?? runHostHelper;
   return new HostPam({
-    run: (name, stdin) => runner(helpers.root, helpers.dir, "filedeck-pam", [cfg.pamService, name], { stdin, asRoot: true, keepCaps: ["dac_read_search"], allowMetadata: true, timeoutMs: TIMEOUT_MS - 1000 }),
+    run: (name, stdin, r) => runner(helpers.root, helpers.dir, "filedeck-pam", [cfg.pamService, name, ...(r.address === undefined ? [] : [r.address])], { stdin, asRoot: true, keepCaps: ["dac_read_search"], allowMetadata: true, timeoutMs: TIMEOUT_MS - 1000 }),
     log: o.log,
   });
 }

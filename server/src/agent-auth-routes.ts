@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import type { HostPam } from "./host-pam.ts";
+import { validClientAddress, type HostPam } from "./host-pam.ts";
 import { logLine, type KeyCheck } from "./agent-keys.ts";
 import { signInAccount, validSystemName, type AccountResolver } from "./local-accounts.ts";
 
@@ -7,8 +7,9 @@ import { signInAccount, validSystemName, type AccountResolver } from "./local-ac
  * The agent's sign-in routes (sign-in on only; with it off they do not exist). The hub calls them with the agent token and no user
  * (`isAgentAuthRoute`), and the root process answers them itself. Each answers 200 with a result; the hub decides what the person sees.
  *
- * - `POST /api/auth/password {name, password}`: `{result}` from the machine's PAM (`HostPam`); `unavailable` when PAM cannot be used here
- *   or the account lookup fails. Before PAM runs, a name that does not resolve is `unknown`, and one with uid 0, gid 0 or group 0 is
+ * - `POST /api/auth/password {name, password, address}`: `{result}` from the machine's PAM (`HostPam`); `unavailable` when PAM cannot be
+ *   used here or the account lookup fails. `address` is the client's address as the hub sees it (an IPv4 or IPv6 address); PAM gets it as
+ *   PAM_RHOST. Without a valid one the attempt is refused with 400, before any lookup. Before PAM runs, a name that does not resolve is `unknown`, and one with uid 0, gid 0 or group 0 is
  *   `refused` (the hub then stops: such a name never signs in, whatever another machine says).
  * - `POST /api/auth/key {name, publicKey, message, signature}` (`message` and `signature` base64): `{result}` from `KeyCheck` (the key
  *   listed in the user's own authorized_keys, read as the user; `refused` for uid 0, gid 0 or group 0); `unavailable` when there is no key
@@ -32,8 +33,10 @@ export function registerAgentAuthRoutes(
     } catch {
       body = undefined;
     }
-    const { name, password } = (body && typeof body === "object" && !Array.isArray(body) ? body : {}) as { name?: unknown; password?: unknown };
+    const { name, password, address } = (body && typeof body === "object" && !Array.isArray(body) ? body : {}) as { name?: unknown; password?: unknown; address?: unknown };
     if (typeof name !== "string" || typeof password !== "string") return c.json({ error: "name and password are needed" }, 400);
+    // (PAM must see where the attempt comes from: without it, pam_access would take a web sign-in for one at the console)
+    if (!validClientAddress(address)) return c.json({ error: "the client's address is needed" }, 400);
     const pam = await o.pam;
     if (!pam) return c.json({ result: "unavailable" });
     // uid 0 is refused here too, whatever the helper would say (it refuses it as well)
@@ -46,7 +49,7 @@ export function registerAgentAuthRoutes(
     }
     if (account === "root") return c.json({ result: "refused" });
     if (!account) return c.json({ result: "unknown" });
-    return c.json({ result: await pam.check(name, password) });
+    return c.json({ result: await pam.check(name, password, address) });
   });
 
   app.post("/api/auth/lookup", async (c) => {
