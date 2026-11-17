@@ -281,6 +281,7 @@ export class WorkerPool {
   private readonly now: () => number;
   private readonly log: (s: string) => void;
   private readonly rootHandler: ((spec: WorkerSpec, req: Request) => Promise<Response>) | undefined;
+  private readonly sandbox: () => Promise<{ state: string; abi: number }>;
   private readonly workers = new Map<string, Live>();
   private readonly starting = new Map<string, Starting>();
   /** keys whose last start failed, until when they get the same answer */
@@ -302,6 +303,8 @@ export class WorkerPool {
     log?: (s: string) => void;
     /** serves the requests a worker sends to the root process, with that worker's own spec; without it they get 404 */
     rootHandler?: (spec: WorkerSpec, req: Request) => Promise<Response>;
+    /** what the sandbox is here (tests give another Landlock ABI); default `sandboxInfo` */
+    sandbox?: () => Promise<{ state: string; abi: number }>;
   }) {
     if (!Number.isInteger(o.max) || o.max < 1) throw new Error(`the worker limit must be a whole number of at least 1, not ${o.max}`);
     if (!Number.isFinite(o.idleMs) || o.idleMs <= 0) throw new Error(`the worker idle time must be more than 0, not ${o.idleMs}`);
@@ -311,6 +314,7 @@ export class WorkerPool {
     this.now = o.now ?? Date.now;
     this.log = o.log ?? ((s) => console.error(s));
     this.rootHandler = o.rootHandler;
+    this.sandbox = o.sandbox ?? sandboxInfo;
     this.timer = setInterval(() => this.tick(), Math.max(10, Math.min(o.idleMs, 30_000)));
     this.timer.unref();
   }
@@ -453,7 +457,7 @@ export class WorkerPool {
       if (!spec.tmp) return { status: 503, error: "worker has no temporary folder" };
       if (!(await launcherAvailable())) return { status: 503, error: "workers need filedeck-sandbox" };
     }
-    if ((spec.landlock || spec.openLandlock) && !landlockForVirtual(await sandboxInfo())) return { status: 503, error: "virtual accounts need Landlock on this machine" };
+    if ((spec.landlock || spec.openLandlock) && !landlockForVirtual(await this.sandbox())) return { status: 503, error: "virtual accounts need Landlock on this machine" };
     return null;
   }
 

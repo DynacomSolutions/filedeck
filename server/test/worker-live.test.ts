@@ -137,3 +137,24 @@ test("an account's thumbnail folder is its own (0700), and files its worker extr
     await specs.close();
   }
 });
+
+test("a cache folder that is a shared folder (sticky, as /tmp) is never changed, and the workers' folders are refused", { skip: ROOT_ONLY }, async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-worker-live-")));
+  temps.push(tmp);
+  fs.chmodSync(tmp, 0o755);
+  const shared = path.join(tmp, "shared");
+  fs.mkdirSync(shared);
+  fs.chmodSync(shared, 0o1777);
+  const logs: string[] = [];
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_THUMB_DIR: shared } as never);
+  const specs = makeWorkerSpecs(cfg, { log: (l) => logs.push(l) });
+  try {
+    assert.equal(fs.lstatSync(shared).mode & 0o7777, 0o1777, "not changed");
+    assert.ok(logs.some((l) => l.includes(shared) && l.includes("shared folder")), logs.join("\n"));
+    const account = { name: "live4", uid: 1234, gid: 1234, groups: [1234], home: "/nonexistent" };
+    await assert.rejects(specs.spec({ kind: "sys", name: "live4", epoch: 1, iat: Date.now() }, account), { name: "UnsafeFolders" });
+    assert.deepEqual(fs.readdirSync(shared), [], "nothing made in it");
+  } finally {
+    await specs.close();
+  }
+});

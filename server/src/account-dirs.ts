@@ -166,8 +166,8 @@ export async function accountsParent(top: string): Promise<fs.FileHandle> {
 
 /**
  * At agent start, as root: a cache folder (`<thumbDir>`, `<indexDir>`) that is root's and writable by group or others (an emptyDir volume
- * is 0777) is made 0755 through a descriptor opened without following a link, and one line is logged. One that belongs to someone else is
- * left as it is (the workers' folders are then refused). Nothing happens when it is missing or the agent is not root.
+ * is 0777) is made 0755 through a descriptor opened without following a link, and one line is logged. One that belongs to someone else, or
+ * that has the sticky bit (a shared folder such as /tmp), is left as it is (logged for the sticky one; the workers' folders are then refused). Nothing happens when it is missing or the agent is not root.
  */
 export function tightenTop(dir: string, log: (s: string) => void): void {
   if (!dir || myUid() !== 0) return;
@@ -180,6 +180,11 @@ export function tightenTop(dir: string, log: (s: string) => void): void {
   try {
     const st = fsc.fstatSync(fd);
     if (st.uid !== 0 || (st.mode & 0o022) === 0) return;
+    if (st.mode & 0o1000) {
+      // a shared folder (sticky, as /tmp) is never changed: the accounts' caches are refused there until the setting names another one
+      log(`${dir} is mode ${(st.mode & 0o7777).toString(8)} (a shared folder); it is left as it is, and workers are refused until FILEDECK_THUMB_DIR or FILEDECK_INDEX_DIR names a folder of its own`);
+      return;
+    }
     fsc.fchmodSync(fd, 0o755);
     log(`${dir} was mode ${(st.mode & 0o7777).toString(8)}; made 0755 (it holds the accounts' caches)`);
   } finally {

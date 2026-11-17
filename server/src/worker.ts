@@ -4,8 +4,9 @@ import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { agentError, registerFileRoutes } from "./agent-routes.ts";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
-import { readOnlyGuard } from "./readonly.ts";
-import { grantGuard, type Grant } from "./grant-guard.ts";
+import { isReadOnly, readOnlyGuard } from "./readonly.ts";
+import { grantGuard, mountsInGrants, type Grant } from "./grant-guard.ts";
+import { listMounts } from "./mounts.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import { Mux } from "./worker-proto.ts";
 import type { Config } from "./config.ts";
@@ -52,6 +53,8 @@ export function createWorkerApp(cfg: Config, grants?: Grant[]): Hono {
   app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   app.onError(agentError);
+  // a virtual account sees only the mounts at or below its grants (registered first, so this answers instead of the general route)
+  if (grants) app.get("/api/mounts", async (c) => c.json({ mounts: mountsInGrants(await listMounts(cfg.root, cfg.procMounts), grants).map((m) => (isReadOnly(cfg.readOnly, m.mountpoint) ? { ...m, readOnly: true } : m)) }));
   const files = registerFileRoutes(app, cfg, jobs);
   registerJobRoutes(app, jobs);
   (app as unknown as { close: () => Promise<void> }).close = async () => {

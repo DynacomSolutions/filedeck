@@ -1,6 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { PathError, cleanVirtual, resolveInRoot } from "./paths.ts";
-import { BODY_ROUTES } from "./readonly.ts";
+import { BODY_ROUTES, mergeTargets, removalTargets, writeTargets } from "./readonly.ts";
 import { MAX_JSON_BODY, isRawRoute } from "./request-guard.ts";
 
 /**
@@ -59,19 +59,54 @@ export function insideGrants(root: string, grants: Grant[], p: string, own = fal
   }
 }
 
+/** The grant that decides for `v`: the deepest one it lies under (null: none). */
+function deepest(grants: Grant[], v: string): Grant | null {
+  let best: Grant | null = null;
+  for (const g of grants) if (under(v, g.path) && (!best || g.path.length > best.path.length)) best = g;
+  return best;
+}
+
+/** The places a target names: the link itself and, with `follow`, where a link at its end leads (both must pass). */
+function places(root: string, t: string, follow: boolean): string[] | null {
+  try {
+    const own = resolveInRoot(root, t, { followFinal: false }).virtual;
+    return follow ? [own, resolveInRoot(root, t, { followFinal: true }).virtual] : [own];
+  } catch (e) {
+    if (e instanceof PathError) return null;
+    throw e;
+  }
+}
+
+/**
+ * Whether a change may happen at `t`: the deepest grant over each of its places allows writing, and (with `contains`, for removals, moves
+ * and recursive changes) no grant that does not allow writing lies below it. So `/b` read only with `/b/w` writable lets `/b/w` be written
+ * and nothing else of `/b`.
+ */
+export function mayChange(root: string, grants: Grant[], t: string, o: { follow: boolean; contains: boolean }): boolean {
+  const vs = places(root, t, o.follow);
+  if (!vs) return true; // (a bad path is the route's own 400)
+  for (const v of vs) {
+    if (!deepest(grants, v)?.write) return false;
+    if (o.contains && grants.some((g) => !g.write && g.path !== v && under(g.path, v) && !deepest(grants, g.path)?.write)) return false;
+  }
+  return true;
+}
+
 export function grantGuard(root: string, grants: Grant[]): MiddlewareHandler {
   const deny = () => Response.json({ error: "outside your folders" }, { status: 403 });
   return async (c, next) => {
     const paths: { p: string; own: boolean }[] = [];
-    const url = new URL(c.req.url);
-    for (const k of QUERY_KEYS) for (const v of url.searchParams.getAll(k)) paths.push({ p: v || "/", own: false });
-    const named = (k: string) => url.searchParams.getAll(k).length > 0;
+    // the query as the routes read it (Hono's decoding keeps a %XX run it cannot decode as written; a WHATWG parser would not)
+    const query = (k: string) => c.req.queries(k) ?? [];
+    for (const k of QUERY_KEYS) for (const v of query(k)) paths.push({ p: v || "/", own: false });
+    const named = (k: string) => query(k).length > 0;
     // (a zip with a ticket takes its folder from the ticket, which was checked when it was made)
     const optional = PATH_ROUTES.has(c.req.path) ? "path" : DIR_ROUTES.has(c.req.path) || (c.req.path === "/api/fs/zip" && !named("ticket")) ? "dir" : null;
     if (optional && !named(optional)) paths.push({ p: "/", own: false });
+    let body: Record<string, unknown> = {};
     if (c.req.method === "POST" && ROUTES_WITH_BODY.has(c.req.path) && !isRawRoute(c.req.method, c.req.path)) {
+      // (the root process has read and capped this body already: requestGuard; this is a second check)
       if (Number(c.req.header("content-length") ?? "0") > MAX_JSON_BODY) return c.json({ error: "request body too large" }, 413);
-      let body: Record<string, unknown>;
       try {
         const j = await c.req.json();
         if (!j || typeof j !== "object" || Array.isArray(j)) throw new Error("not an object");
@@ -85,6 +120,17 @@ export function grantGuard(root: string, grants: Grant[]): MiddlewareHandler {
       if (d && (body[d] === undefined || body[d] === "")) paths.push({ p: "/", own: false });
     }
     for (const { p, own } of paths) if (!insideGrants(root, grants, p, own)) return deny();
+    // changes: only where the deepest grant allows writing (the targets as readOnlyGuard finds them)
+    const m = c.req.method;
+    const q1 = (k: string) => c.req.query(k);
+    const ro = () => c.json({ error: "read-only folder" }, 403);
+    if (writeTargets(m, c.req.path, q1, body).some((t) => !mayChange(root, grants, t, { follow: true, contains: false }))) return ro();
+    const rm = removalTargets(m, c.req.path, body, q1);
+    if (rm.paths.some((t) => !mayChange(root, grants, t, { follow: rm.followFinal, contains: true }))) return ro();
+    if (mergeTargets(m, c.req.path, body).some((t) => !mayChange(root, grants, t, { follow: false, contains: true }))) return ro();
     return next();
   };
 }
+
+/** The mounts a virtual account's worker shows: those at or below one of its grants. */
+export const mountsInGrants = <T extends { mountpoint: string }>(mounts: T[], grants: Grant[]): T[] => mounts.filter((m) => grants.some((g) => under(m.mountpoint, g.path)));

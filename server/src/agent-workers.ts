@@ -282,8 +282,13 @@ export function makeWorkerSpecs(
     const tmp = path.join(base, path.relative(area, d.tmp));
     const thumbs = d.thumbs.startsWith(area + "/") ? path.join(base, path.relative(area, d.thumbs)) : d.thumbs;
     const grants = claim.kind === "virt" ? (claim.grants ?? []).flatMap((g) => (validGrant(g.path) ? [{ path: grantPath(g.path), write: g.write === true }] : [])) : undefined;
-    // everything under a grant that does not allow writing is read only, also what Landlock does not cover (modes, owners, times)
-    const readOnly = grants ? [...cfg.readOnly, ...grants.filter((g) => !g.write).map((g) => g.path)] : cfg.readOnly;
+    // A grant that does not allow writing is also a read-only prefix of the worker (a second layer under the worker's grant check, which
+    // also covers what Landlock does not: modes, owners, times), unless a writable grant lies below it: a prefix has no exceptions, so
+    // there the grant check alone decides (`mayChange`: the deepest grant over a path).
+    const under = (a: string, b: string) => b === "/" || a === b || a.startsWith(b + "/");
+    const readOnly = grants
+      ? [...cfg.readOnly, ...grants.filter((g) => !g.write && !grants.some((w) => w.write && w.path !== g.path && under(w.path, g.path))).map((g) => g.path)]
+      : cfg.readOnly;
     return {
       key,
       kind: claim.kind,

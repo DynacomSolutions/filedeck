@@ -9,7 +9,7 @@ import { loadConfig } from "../src/config.ts";
 import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts";
 import { makeWorkerSpecs, type WorkerSpecs } from "../src/agent-workers.ts";
 import { runtimeRoots } from "../src/account-dirs.ts";
-import { landlockForVirtual, type WorkerPool } from "../src/worker-pool.ts";
+import { WorkerPool, landlockForVirtual } from "../src/worker-pool.ts";
 import { sandboxInfo } from "../src/sandbox.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
@@ -59,6 +59,8 @@ before(() => {
   fs.writeFileSync(path.join(root, "a/notes.txt"), "a needle in a\n");
   fs.writeFileSync(path.join(root, "b/f.txt"), "read only b\n");
   fs.writeFileSync(path.join(root, "c/secret"), "TOPSECRET needle\n");
+  fs.writeFileSync(path.join(root, "a%2F%FF"), "outside, at the top\n"); // a name that an undecodable %FF keeps as written
+  fs.mkdirSync(path.join(root, "b/w"));
   if (HAVE_FFMPEG) {
     spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1", path.join(root, "a/img.png")]);
     fs.copyFileSync(path.join(root, "a/img.png"), path.join(root, "c/img.png"));
@@ -439,4 +441,72 @@ test("a request without a path (or with an empty one) is checked as /", { skip: 
   const all = await get("/api/fs/stat", virt([{ path: "/", write: false }], 1, "guest7"));
   assert.equal(all.status, 200, await all.clone().text());
   await all.text();
+});
+
+test("the guard reads the query as the routes do: an undecodable %XX run is kept as written", { skip: NEED }, async () => {
+  // the route reads `/a%2F%FF` (a file at the top, outside the grants); a WHATWG parser would see `/a/\uFFFD` (inside /a)
+  for (const p of ["/api/fs/stat?path=%2Fa%2F%FF", "/api/fs/props?path=%2Fa%2F%FF", "/api/fs/text?path=%2Fa%2F%FF"]) {
+    const r = await get(p);
+    const t = await r.text();
+    assert.equal(r.status, 403, `${p}: ${t}`);
+    assert.doesNotMatch(t, /size|outside, at the top/);
+  }
+  // a plain encoded path inside a grant still works
+  const ok = await get("/api/fs/text?path=%2Fa%2Ft.txt");
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.match(await ok.text(), /plain text in a/);
+});
+
+test("a write grant inside a read-only grant can be written; the rest of the read-only grant cannot", { skip: NEED }, async () => {
+  const claim = virt([{ path: "/b", write: false }, { path: "/b/w", write: true }], 1, "guest8");
+  const put = (p: string) => app.request(`/api/fs/write?path=${encodeURIComponent(p)}&create=1`, { method: "PUT", headers: headers(claim), body: "x" });
+  const w = await put("/b/w/x.txt");
+  assert.equal(w.status, 200, await w.clone().text());
+  assert.ok(fs.existsSync(path.join(root, "b/w/x.txt")));
+  const y = await put("/b/y.txt");
+  assert.equal(y.status, 403, await y.clone().text());
+  assert.ok(!fs.existsSync(path.join(root, "b/y.txt")));
+  const perms = await post("/api/fs/perms", { path: "/b/f.txt", mode: 0o600 }, claim);
+  assert.equal(perms.status, 403);
+  // removing the read-only grant (which holds the writable one) is refused; the writable one's own content can go
+  const del = await post("/api/fs/delete", { paths: ["/b"] }, claim);
+  assert.equal(del.status, 403);
+  assert.ok(fs.existsSync(path.join(root, "b/f.txt")));
+  const delw = await post("/api/fs/delete", { paths: ["/b/w/x.txt"] }, claim);
+  assert.ok(delw.status < 300, `${delw.status} ${await delw.clone().text()}`);
+  assert.ok(!fs.existsSync(path.join(root, "b/w/x.txt")));
+});
+
+test("a virtual account sees only the mounts at or below its grants", { skip: NEED }, async () => {
+  const table = path.join(work, "mounts");
+  fs.writeFileSync(table, ["/dev/sda1 / ext4 rw 0 0", "/dev/sdb1 /a ext4 rw 0 0", "/dev/sdc1 /c ext4 rw 0 0", "/dev/sdd1 /a/repo ext4 rw 0 0", ""].join("\n"));
+  const other = createAgent(
+    loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on", FILEDECK_THUMB_DIR: thumbs, FILEDECK_INDEX_DIR: index, FILEDECK_PROC_MOUNTS: table } as never),
+    () => {},
+    { accounts: fakeResolver({ guest: {} }) },
+  );
+  try {
+    const r = await other.request("/api/mounts", { headers: headers(virt(GRANTS, 1, "guest9")) });
+    assert.equal(r.status, 200, await r.clone().text());
+    const { mounts } = (await r.json()) as { mounts: { mountpoint: string }[] };
+    assert.deepEqual(mounts.map((m) => m.mountpoint).sort(), ["/a", "/a/repo"]);
+  } finally {
+    await (other as unknown as { close(): Promise<void> }).close();
+  }
+});
+
+test("a pool on a kernel with Landlock ABI 2 refuses a virtual account's worker with 503, and starts nothing", { skip: NEED }, async () => {
+  const specs = makeWorkerSpecs(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_THUMB_DIR: thumbs, FILEDECK_INDEX_DIR: index } as never));
+  let starts = 0;
+  const pool = new WorkerPool({ max: 2, idleMs: 60_000, log: () => {}, start: async () => (starts++, Promise.reject(new Error("not reached"))), sandbox: async () => ({ state: "landlock", abi: 2 }) });
+  try {
+    const spec = await specs.spec(virt(GRANTS, 1, "guest10"), (await fakeResolver({ guest: {} }).resolve("guest"))!);
+    const r = await pool.fetch(spec, new Request("http://agent/api/fs/stat?path=/a"));
+    assert.equal(r.status, 503);
+    assert.deepEqual(await r.json(), { error: "virtual accounts need Landlock on this machine" });
+    assert.equal(starts, 0);
+  } finally {
+    await pool.close();
+    await specs.close();
+  }
 });
