@@ -17,15 +17,15 @@ import type { Duplex } from "node:stream";
  *
  * The root treats the worker as untrusted: every length is checked before anything is buffered, a
  * worker can open only a few streams towards the root at once, heads have a size and count limit,
- * and anything malformed closes the mux (it never throws out of an event handler). Both sides must
- * use the same `window`.
+ * and anything malformed closes the mux (it never throws out of an event handler). Both sides use
+ * the fixed `WINDOW_SIZE`.
  */
 
 export const HELLO = 1, READY = 2, REQ_HEAD = 3, BODY = 4, END = 5, ABORT = 6, RES_HEAD = 7, ERROR = 8, WINDOW = 9, BYE = 10;
 /** most payload bytes in one frame */
 export const MAX_PAYLOAD = 64 * 1024;
-/** default per-stream window, in each direction */
-export const DEFAULT_WINDOW = 1024 * 1024;
+/** per-stream window, in each direction (fixed, since the receiver enforces what the sender assumes) */
+export const WINDOW_SIZE = 1024 * 1024;
 /** most header lines in one head (the frame size limits their total size to 64 KiB) */
 export const MAX_HEADERS = 512;
 /** streams the worker may have open towards the root at once */
@@ -145,6 +145,8 @@ interface Stream {
   /** bytes we may still send before the peer grants more */
   credit: number;
   wakeSend: (() => void) | null;
+  /** set while the body we send waits for the socket to drain */
+  wakeDrain: (() => void) | null;
   /** the body we send, while we read it */
   reader: ReadableStreamDefaultReader<Uint8Array> | null;
   /** the body we receive; null before the response head, or when it is thrown away */
@@ -164,7 +166,7 @@ interface Stream {
 
 function newStream(id: number, mine: boolean, window: number): Stream {
   return {
-    id, mine, done: false, credit: window, wakeSend: null, reader: null, inbound: null, discard: false, inEnded: false,
+    id, mine, done: false, credit: window, wakeSend: null, wakeDrain: null, reader: null, inbound: null, discard: false, inEnded: false,
     headSeen: false, resolve: null, reject: null, cleanup: null, ac: null,
   };
 }
@@ -194,6 +196,14 @@ function json(v: unknown): Buffer | null {
   return b.length > MAX_PAYLOAD ? null : b;
 }
 
+function isResponse(v: unknown): v is Response {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as { status?: unknown; headers?: unknown; body?: unknown };
+  const body = r.body;
+  return typeof r.status === "number" && typeof (r.headers as Headers | undefined)?.[Symbol.iterator] === "function" &&
+    (body === null || typeof (body as ReadableStream | undefined)?.getReader === "function");
+}
+
 function message(e: unknown): string {
   return (e instanceof Error ? e.message : String(e)).slice(0, 1000);
 }
@@ -204,18 +214,22 @@ export class Mux {
   private isClosed = false;
   private resolveClosed!: () => void;
   private readonly streams = new Map<number, Stream>();
-  private readonly window: number;
+  private readonly window = WINDOW_SIZE;
   private readonly maxPeerStreams: number;
   private readonly onRequest: ((req: Request) => Promise<Response>) | undefined;
   private nextId: number;
   /** the highest stream id the peer has opened */
   private lastPeerId = 0;
+  /** requests the peer opened whose handler has not settled yet (they hold a slot even after an ABORT) */
   private peerOpen = 0;
+  /** our own requests still open */
+  private ownOpen = 0;
   // incoming bytes not yet parsed
   private inChunks: Buffer[] = [];
   private inBytes = 0;
   private need = 0;
-  private drainWaiters: (() => void)[] = [];
+  private readonly drainWaiters = new Set<() => void>();
+  private drainListening = false;
   private helloInit: { v: unknown } | null = null;
   private helloFn: ((init: unknown) => void) | null = null;
   private readonly readyP: Promise<void>;
@@ -226,9 +240,8 @@ export class Mux {
   constructor(
     private readonly sock: Duplex,
     private readonly side: "root" | "worker",
-    o: { onRequest?: (req: Request) => Promise<Response>; window?: number } = {},
+    o: { onRequest?: (req: Request) => Promise<Response> } = {},
   ) {
-    this.window = o.window ?? DEFAULT_WINDOW;
     this.onRequest = o.onRequest;
     this.nextId = side === "root" ? 1 : 2;
     this.maxPeerStreams = side === "root" ? MAX_WORKER_STREAMS : MAX_ROOT_STREAMS;
@@ -241,9 +254,9 @@ export class Mux {
     sock.on("error", () => this.shutdown(false, true));
   }
 
-  /** streams open in either direction */
+  /** streams open in either direction; a served request counts until its handler has settled */
   inFlight(): number {
-    return this.streams.size;
+    return this.ownOpen + this.peerOpen;
   }
 
   /** sends BYE and ends the socket; every open stream fails with `WorkerGone` */
@@ -300,6 +313,7 @@ export class Mux {
       signal.addEventListener("abort", onAbort, { once: true });
       st.cleanup = () => signal.removeEventListener("abort", onAbort);
       this.streams.set(st.id, st);
+      this.ownOpen++;
       this.send(REQ_HEAD, st.id, head);
       if (req.body) void this.pump(st, req.body);
       else this.send(END, st.id);
@@ -335,16 +349,28 @@ export class Mux {
     }
   }
 
-  private drained(): Promise<void> {
+  /** waits for 'drain'; `finish` wakes the stream early so an aborted body lets go of its chunk */
+  private drained(st: Stream): Promise<void> {
     return new Promise((r) => {
-      this.drainWaiters.push(r);
-      if (this.drainWaiters.length === 1) this.sock.once("drain", this.onDrain);
+      const wake = () => {
+        this.drainWaiters.delete(wake);
+        st.wakeDrain = null;
+        r();
+      };
+      st.wakeDrain = wake;
+      this.drainWaiters.add(wake);
+      if (!this.drainListening) {
+        this.drainListening = true;
+        this.sock.once("drain", this.onDrain);
+      }
     });
   }
 
   private readonly onDrain = (): void => {
-    const w = this.drainWaiters;
-    this.drainWaiters = [];
+    this.drainListening = false;
+    this.sock.off("drain", this.onDrain);
+    const w = [...this.drainWaiters];
+    this.drainWaiters.clear();
     for (const r of w) r();
   };
 
@@ -370,7 +396,7 @@ export class Mux {
         while (off < chunk.length) {
           while (!st.done && (st.credit <= 0 || this.sock.writableNeedDrain)) {
             if (st.credit <= 0) await new Promise<void>((w) => { st.wakeSend = w; });
-            else await this.drained();
+            else await this.drained(st);
           }
           if (st.done) return;
           const n = Math.min(st.credit, MAX_PAYLOAD, chunk.length - off);
@@ -418,13 +444,14 @@ export class Mux {
     st.done = true;
     if (this.streams.get(st.id) === st) {
       this.streams.delete(st.id);
-      if (!st.mine) this.peerOpen--;
+      if (st.mine) this.ownOpen--;
     }
     st.cleanup?.();
     st.cleanup = null;
     const w = st.wakeSend;
     st.wakeSend = null;
     w?.();
+    st.wakeDrain?.();
     if (st.reader) {
       st.reader.cancel(err ?? abortError()).catch(noop);
       st.reader = null;
@@ -626,7 +653,9 @@ export class Mux {
     const st = newStream(id, false, this.window);
     this.streams.set(id, st);
     this.peerOpen++;
-    void this.serve(st, v.method, v.url, headers, this.onRequest);
+    // the slot is freed when the handler and its response have settled, not when the stream ends:
+    // a peer that opens and aborts streams must not get more handlers running than the cap
+    this.serve(st, v.method, v.url, headers, this.onRequest).catch(noop).finally(() => { this.peerOpen--; });
   }
 
   private async serve(st: Stream, method: string, url: string, headers: [string, string][], handler: (req: Request) => Promise<Response>): Promise<void> {
@@ -651,7 +680,8 @@ export class Mux {
     let res: Response;
     try {
       res = await handler(req);
-      if (!(res instanceof Response)) throw new TypeError("the handler did not return a Response");
+      // not `instanceof`: @hono/node-server replaces the global Response, and handlers may return either kind
+      if (!isResponse(res)) throw new TypeError("the handler did not return a Response");
     } catch (e) {
       if (!st.done) this.bodyFailed(st, e);
       return;

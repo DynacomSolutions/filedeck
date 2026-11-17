@@ -7,6 +7,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { Duplex, duplexPair } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
+import { getRequestListener } from "@hono/node-server";
 import { Mux, WorkerGone } from "../src/worker-proto.ts";
 
 // Errors that escape the mux (uncaught exceptions, unhandled rejections) fail the last test.
@@ -274,7 +275,7 @@ test("abort reaches the handler", async () => {
       seen4 = req.signal;
       upload = req.arrayBuffer();
       upload.catch(() => {});
-      return new Promise<Response>(() => {});
+      return new Promise<Response>((_, rej) => req.signal.addEventListener("abort", () => rej(req.signal.reason)));
     },
   });
   let fail!: (e: Error) => void;
@@ -417,6 +418,128 @@ test("hello, ready and bye", async () => {
   const ready = r2.whenReady();
   a.destroy();
   await assert.rejects(ready, WorkerGone);
+});
+
+/** a root mux whose far end is a raw socket the test writes frames into */
+function rawRoot(onRequest?: (req: Request) => Promise<Response>) {
+  const [a, b] = duplexPair();
+  const root = new Mux(a, "root", { onRequest });
+  muxes.push(root);
+  b.on("error", () => {});
+  const frames = frameReader(b);
+  return { a, b, root, frames };
+}
+const head = (o: unknown) => JSON.stringify(o);
+const u32 = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32BE(n, 0); return b; };
+
+test("stream cap holds until the handler ends", async () => {
+  let running = 0, most = 0, calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  // a handler that ignores its signal: aborting the stream must not free its slot
+  const { b, root, frames } = rawRoot(async () => {
+    calls++;
+    most = Math.max(most, ++running);
+    await gate;
+    running--;
+    return new Response("late");
+  });
+  for (let i = 1; i <= 20; i++) {
+    b.write(frame(3, 2 * i, head({ method: "GET", url: "/", headers: [] })));
+    b.write(frame(6, 2 * i));
+  }
+  await sleep(50);
+  assert.equal(calls, 16);
+  assert.equal(most, 16);
+  assert.equal(root.inFlight(), 16);
+  assert.deepEqual(frames.filter((f) => f.type === 8).map((f) => f.id), [34, 36, 38, 40]);
+  release();
+  await sleep(50);
+  assert.equal(root.inFlight(), 0);
+  // the slots are free again
+  b.write(frame(3, 42, head({ method: "GET", url: "/", headers: [] })));
+  await sleep(50);
+  assert.equal(calls, 17);
+});
+
+test("an aborted stream waiting for the socket to drain lets go", async () => {
+  // the far end never reads, so the body's first frame fills the socket
+  const [a] = duplexPair();
+  const root = new Mux(a, "root");
+  muxes.push(root);
+  const drainWaits = () => (root as unknown as { drainWaiters: { size?: number; length?: number } }).drainWaiters;
+  const waiting = () => drainWaits().size ?? drainWaits().length ?? -1;
+  let cancelled = false;
+  const src = new ReadableStream<Uint8Array>({
+    pull(c) { c.enqueue(new Uint8Array(256 * KiB)); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  const ac = new AbortController();
+  const p = root.fetch(new Request("http://x/up", { method: "POST", body: src, duplex: "half", signal: ac.signal } as RequestInit));
+  p.catch(() => {});
+  await sleep(20);
+  assert.equal(waiting(), 1);
+  ac.abort();
+  await assert.rejects(p, { name: "AbortError" });
+  await sleep(10);
+  assert.equal(waiting(), 0);
+  assert.ok(cancelled);
+  assert.equal(root.inFlight(), 0);
+});
+
+test("protocol errors on a stream", async () => {
+  // WINDOW past the window, and WINDOW 0
+  for (const [what, n] of [["past the window", 1], ["zero", 0]] as const) {
+    const { b, root } = rawRoot();
+    const pending = root.fetch(new Request("http://x/p"));
+    pending.catch(() => {});
+    b.write(frame(9, 1, u32(n)));
+    await within(root.closed, 1000, `WINDOW ${what}`);
+    await assert.rejects(pending, WorkerGone);
+  }
+  // BODY after END, on a request the worker sends the root (the stream is still open: the handler
+  // has not answered). Once both directions have ended a stream is forgotten, and later frames for
+  // it are dropped like those that cross an ABORT.
+  {
+    const { b, root } = rawRoot(() => new Promise<Response>(() => {}));
+    b.write(frame(3, 2, head({ method: "POST", url: "/_root/x", headers: [] })));
+    b.write(frame(4, 2, "body"));
+    b.write(frame(5, 2));
+    b.write(frame(4, 2, "late"));
+    await within(root.closed, 1000, "BODY after END");
+  }
+  // ERROR after RES_HEAD: the body errors with the message
+  {
+    const { b, root } = rawRoot();
+    const pending = root.fetch(new Request("http://x/p"));
+    b.write(frame(7, 1, head({ status: 200, headers: [] })));
+    const res = await pending;
+    b.write(frame(8, 1, head({ message: "disk went away" })));
+    await assert.rejects(res.text(), /disk went away/);
+    assert.equal(root.inFlight(), 0);
+  }
+  // a handler that throws: the fetch rejects with its message
+  {
+    const { root } = pair(undefined, { onRequest: async () => { throw new Error("boom"); } });
+    await assert.rejects(root.fetch(new Request("http://x/p")), /boom/);
+    assert.equal(root.inFlight(), 0);
+  }
+});
+
+test("handlers may answer with either Response class", async () => {
+  // @hono/node-server replaces the global Response once a listener is made, as in the root process
+  const Native = globalThis.Response;
+  getRequestListener(() => new Response("x"));
+  assert.notEqual(globalThis.Response, Native);
+  const { root } = pair(undefined, {
+    onRequest: async (req) => req.url.endsWith("/native") ? new Native("native", { status: 202 }) : new Response("light", { status: 203 }),
+  });
+  const n = await root.fetch(new Request("http://x/native"));
+  assert.equal(n.status, 202);
+  assert.equal(await n.text(), "native");
+  const l = await root.fetch(new Request("http://x/light"));
+  assert.equal(l.status, 203);
+  assert.equal(await l.text(), "light");
 });
 
 test("no stray errors", async () => {
