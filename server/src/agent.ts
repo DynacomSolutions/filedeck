@@ -5,14 +5,14 @@ import { FanWatch } from "./fanwatch.ts";
 import { agentError, registerFileRoutes } from "./agent-routes.ts";
 import * as trash from "./trash.ts";
 import { agentAuth, agentUser } from "./agent-auth.ts";
-import { sandboxSummary } from "./sandbox.ts";
+import { sandboxInfo, sandboxSummary } from "./sandbox.ts";
 import { audit, trustProxies, type AuditSink } from "./audit.ts";
 import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, hitsReadOnly } from "./readonly.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
 import { makeResolver, type AccountResolver } from "./local-accounts.ts";
-import { WorkerPool, type StartWorker } from "./worker-pool.ts";
+import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
 import { makeWorkerSpecs, workerGate, type WorkerSpecs } from "./agent-workers.ts";
 
 export interface AgentOptions {
@@ -38,6 +38,13 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
     specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [] });
     pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker });
+    void sandboxInfo().then((i) =>
+      console.error(
+        landlockForVirtual(i)
+          ? `workers: virtual accounts are confined by Landlock ABI ${i.abi}`
+          : `workers: virtual accounts are refused here (they need Landlock ABI ${MIN_VIRTUAL_ABI} or newer; this machine has ${i.state === "landlock" ? `ABI ${i.abi}` : "none usable"})`,
+      ),
+    );
   }
   app.use("*", trustProxies(cfg.trustedProxies));
   app.use("*", agentAuth(cfg.agentToken));

@@ -91,16 +91,20 @@ test("an account's thumbnail folder is its own (0700), and files its worker extr
   fs.chmodSync(root, 0o755);
   for (const p of [path.join(root, "x"), path.join(root, "x/in.zip")]) fs.chownSync(p, 1234, 1234);
   const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_THUMB_DIR: path.join(tmp, "thumbs"), FILEDECK_INDEX_DIR: path.join(tmp, "index") } as never);
+  // the thumbnail folder as an empty volume gives it: root's and open to everyone; the agent makes it 0755 at start
+  fs.mkdirSync(path.join(tmp, "thumbs"));
+  fs.chmodSync(path.join(tmp, "thumbs"), 0o777);
   const specs = makeWorkerSpecs(cfg);
+  assert.equal(fs.lstatSync(path.join(tmp, "thumbs")).mode & 0o7777, 0o755);
   const account = { name: "live3", uid: 1234, gid: 1234, groups: [1234], home: "/nonexistent" };
   const claim = { kind: "sys" as const, name: "live3", epoch: 1, iat: Date.now() };
   const p = new WorkerPool({ max: 2, idleMs: 60_000, log: () => {} });
   try {
     const spec = await specs.spec(claim, account);
-    const thumbs = fs.lstatSync(path.join(tmp, "thumbs/u1234"));
+    const thumbs = fs.lstatSync(path.join(tmp, "thumbs/accounts/u1234"));
     assert.equal(thumbs.uid, 1234);
     assert.equal(thumbs.mode & 0o7777, 0o700);
-    const parent = fs.lstatSync(path.join(tmp, "thumbs"));
+    const parent = fs.lstatSync(path.join(tmp, "thumbs/accounts"));
     assert.equal(parent.uid, 0);
     assert.equal(parent.mode & 0o7777, 0o711);
     const index = fs.lstatSync(path.join(tmp, "index/accounts/u1234"));

@@ -5,7 +5,7 @@ import path from "node:path";
 import type { UserClaim } from "./auth/identity.ts";
 import type { Config } from "./config.ts";
 import type { LocalAccount } from "./local-accounts.ts";
-import { openChecked, resolveRead } from "./paths.ts";
+import { cleanVirtual, openChecked, resolveRead } from "./paths.ts";
 import { sandboxInfo, spawnSandboxed, type Root } from "./sandbox.ts";
 
 /**
@@ -126,36 +126,75 @@ export async function keyFolder(dir: string, account: LocalAccount, hook?: Hook)
   return tmp;
 }
 
+/** `UnsafeFolders` unless the folder is this process's and not writable by group or others; it gets the search bits for others when it lacks them (it is ours, and the workers must pass through it). */
+async function ownParent(fh: fs.FileHandle, shown: string): Promise<void> {
+  const st = await fh.stat();
+  if (st.uid !== myUid() || (st.mode & 0o022) !== 0) throw new UnsafeFolders(`${shown} has owner ${st.uid} and mode ${(st.mode & 0o7777).toString(8)}; it must be this process's (${myUid()}) and not writable by group or others`);
+  if ((st.mode & 0o011) !== 0o011) await fh.chmod((st.mode & 0o7777) | 0o011);
+}
+
+/** The path that names `name` in the folder held by `fh` (or the folder itself): a later swap of any part of its path changes nothing. */
+export const inHeld = (fh: { fd: number }, name = "") => `/proc/self/fd/${fh.fd}${name ? `/${name}` : ""}`;
+
 /**
- * The parent of persistent account folders (`<thumbDir>`, `<indexDir>/accounts`), opened without following a link at its last part and held:
- * it must be this process's (root's) and not writable by group or others, else `UnsafeFolders`. A missing one is made 0711 (with its missing
- * parents). One that lacks the search bits for others gets them (it is ours, and the workers must pass through it to their folders).
+ * `<top>/accounts`, the parent of persistent account folders, held by descriptor. `top` (`<thumbDir>`, `<indexDir>`) is made 0711 when
+ * missing, then opened without following a link at its last part, and must be this process's (root's) and not writable by group or others
+ * (see `tightenTop` for the start-up step). `accounts` is made 0711 and opened through `top`'s descriptor, with the same check. Else
+ * `UnsafeFolders`.
  */
-async function cacheParent(dir: string): Promise<fs.FileHandle> {
-  await fs.mkdir(dir, { recursive: true, mode: 0o711 });
-  const fh = await openFolder(dir);
+export async function accountsParent(top: string): Promise<fs.FileHandle> {
+  await fs.mkdir(top, { recursive: true, mode: 0o711 });
+  const t = await openFolder(top);
   try {
-    const st = await fh.stat();
-    if (st.uid !== myUid() || (st.mode & 0o022) !== 0) throw new UnsafeFolders(`${dir} has owner ${st.uid} and mode ${(st.mode & 0o7777).toString(8)}; it must be this process's (${myUid()}) and not writable by group or others`);
-    if ((st.mode & 0o011) !== 0o011) await fh.chmod((st.mode & 0o7777) | 0o011);
-    return fh;
-  } catch (e) {
-    await fh.close();
-    throw e;
+    await ownParent(t, top);
+    const shown = path.join(top, "accounts");
+    await fs.mkdir(inHeld(t, "accounts"), { mode: 0o711 }).catch((e: NodeJS.ErrnoException) => {
+      if (e.code !== "EEXIST") throw e;
+    });
+    const a = await openFolder(inHeld(t, "accounts"), shown);
+    try {
+      await ownParent(a, shown);
+      return a;
+    } catch (e) {
+      await a.close();
+      throw e;
+    }
+  } finally {
+    await t.close();
   }
 }
 
-/** The path that names `name` in the folder held by `fh`: a later swap of any part of the parent's path changes nothing. */
-const inHeld = (fh: fs.FileHandle, name: string) => `/proc/self/fd/${fh.fd}/${name}`;
+/**
+ * At agent start, as root: a cache folder (`<thumbDir>`, `<indexDir>`) that is root's and writable by group or others (an emptyDir volume
+ * is 0777) is made 0755 through a descriptor opened without following a link, and one line is logged. One that belongs to someone else is
+ * left as it is (the workers' folders are then refused). Nothing happens when it is missing or the agent is not root.
+ */
+export function tightenTop(dir: string, log: (s: string) => void): void {
+  if (!dir || myUid() !== 0) return;
+  let fd: number;
+  try {
+    fd = fsc.openSync(dir, OPEN_DIR);
+  } catch {
+    return;
+  }
+  try {
+    const st = fsc.fstatSync(fd);
+    if (st.uid !== 0 || (st.mode & 0o022) === 0) return;
+    fsc.fchmodSync(fd, 0o755);
+    log(`${dir} was mode ${(st.mode & 0o7777).toString(8)}; made 0755 (it holds the accounts' caches)`);
+  } finally {
+    fsc.closeSync(fd);
+  }
+}
 
 /**
- * `<parent>/<name>`, the account's own (0700), made when missing. The parent is checked and held (`cacheParent`); the folder is made and
- * opened through it. A new folder is ours until it is handed over through its descriptor; an existing one must already be the account's and
- * not writable by group or others, and is never changed.
+ * `<top>/accounts/<name>`, the account's own (0700), made when missing. The parent is checked and held (`accountsParent`); the folder is made
+ * and opened through it. A new folder is ours until it is handed over through its descriptor; an existing one must already be the account's
+ * and not writable by group or others, and is never changed.
  */
-export async function cacheDir(parent: string, name: string, account: LocalAccount, step: "thumbs" | "index", hook?: Hook): Promise<string> {
-  const shown = path.join(parent, name);
-  const p = await cacheParent(parent);
+export async function cacheDir(top: string, name: string, account: LocalAccount, step: "thumbs" | "index", hook?: Hook): Promise<string> {
+  const shown = path.join(top, "accounts", name);
+  const p = await accountsParent(top);
   try {
     let made = true;
     try {
@@ -292,18 +331,30 @@ async function removeEntry(p: string, log: (s: string) => void, own: (p: string)
  * subfolders) is emptied by a process that runs as its owner, and then only the empty folder is removed here (`rmdir`, in a folder
  * that is this process's own, so the entry cannot be swapped). Only this process's own folders are listed here. Whatever cannot be
  * removed is logged and left; there is no fallback to a removal by root.
+ *
+ * With `held` (the area's descriptor, kept since the area was made) every step goes through that descriptor, never through the area's
+ * path: the area lies in the temporary folder, where another user may rename it and put a link in its place. The area itself is removed
+ * by its path only while that path still names the held folder.
  */
-export async function removeArea(dir: string, log: (s: string) => void, onList?: (dir: string) => void, onEmpty?: (dir: string) => void): Promise<void> {
+export async function removeArea(dir: string, log: (s: string) => void, onList?: (dir: string) => void, onEmpty?: (dir: string) => void, held?: number): Promise<void> {
   onList?.(dir);
+  const at = held !== undefined ? inHeld({ fd: held }) : dir;
   let names: string[] = [];
   try {
-    names = await fs.readdir(dir);
+    names = await fs.readdir(at);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
     log(`workers' area: ${dir}: ${(e as Error).message}; left`);
   }
   // (a key folder still root's: its start failed half-way, so it is root's alone and is walked like the area)
-  for (const n of names) await removeEntry(path.join(dir, n), log, (p) => removeArea(p, log, onList, onEmpty), onEmpty);
+  for (const n of names) await removeEntry(path.join(at, n), log, (p) => removeArea(p, log, onList, onEmpty), onEmpty);
+  if (held !== undefined) {
+    const [a, b] = await Promise.all([fs.lstat(dir).catch(() => null), Promise.resolve(fsc.fstatSync(held))]);
+    if (!a || !a.isDirectory() || a.dev !== b.dev || a.ino !== b.ino) {
+      log(`workers' area: ${dir} no longer names the area (moved away or replaced); left`);
+      return;
+    }
+  }
   await fs.rmdir(dir).catch((e: NodeJS.ErrnoException) => {
     if (e.code !== "ENOENT") log(`workers' area: ${dir}: ${e.message}; left`);
   });
@@ -311,26 +362,36 @@ export async function removeArea(dir: string, log: (s: string) => void, onList?:
 
 /**
  * Removes the index folders of a virtual account's earlier grants (`v-<owner>-<hash>` in `<indexDir>/accounts`, other than `keep`), unless
- * `inUse` says a worker still uses one. Each is removed the safe way (`removeEntry`: emptied as its owner, then `rmdir` here). Never throws.
+ * `inUse` says a worker still uses one. The parent is held by descriptor (`accountsParent`) and every step goes through it; each folder is
+ * removed the safe way (`removeEntry`: emptied as its owner, then `rmdir` here). Never throws.
  */
-export async function removeOldIndexDirs(accounts: string, owner: string, keep: string, inUse: (name: string) => boolean, log: (s: string) => void): Promise<string[]> {
+export async function removeOldIndexDirs(indexDir: string, owner: string, keep: string, inUse: (name: string) => boolean, log: (s: string) => void): Promise<string[]> {
   const re = new RegExp(`^v-${owner.replace(/[.]/g, "\\.")}-[0-9a-f]{16}$`);
   const gone: string[] = [];
-  let names: string[];
+  const say = (s: string) => log(s.replace("workers' area", "index folders"));
+  let p: fs.FileHandle;
   try {
-    names = await fs.readdir(accounts);
+    p = await accountsParent(indexDir);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") log(`index folders: ${accounts}: ${(e as Error).message}`);
+    say(`index folders: ${(e as Error).message}`);
     return gone;
   }
-  for (const n of names) {
-    if (n === keep || !re.test(n) || inUse(n)) continue;
-    // (a folder still root's is one whose hand-over failed: nothing of the account's is in it, so only an empty one is removed)
-    const own = (p: string) => fs.rmdir(p);
-    if (await removeEntry(path.join(accounts, n), (s) => log(s.replace("workers' area", "index folders")), own)) gone.push(n);
+  try {
+    for (const n of await fs.readdir(inHeld(p))) {
+      if (n === keep || !re.test(n) || inUse(n)) continue;
+      // (a folder still root's is one whose hand-over failed: nothing of the account's is in it, so only an empty one is removed)
+      if (await removeEntry(inHeld(p, n), say, (q) => fs.rmdir(q))) gone.push(n);
+    }
+  } catch (e) {
+    say(`index folders: ${(e as Error).message}`);
+  } finally {
+    await p.close();
   }
   return gone;
 }
+
+/** A grant's path in the one form paths are compared in (`/a/b`; `.` and repeated slashes dropped; `..` refused). */
+export const grantPath = (p: string): string => "/" + cleanVirtual(p).join("/");
 
 /** The Landlock roots of a virtual account's worker, as the launcher takes them. `release` closes the descriptors once the start is over. */
 export interface LandlockRoots {
@@ -387,10 +448,10 @@ export function runtimeRoots(): Promise<{ readOnly: string[]; readExec: string[]
 
 /**
  * The Landlock roots of a virtual account's worker:
- * - each grant, resolved inside the served root (`resolveRead`: links in it are followed and kept inside the root, so a grant names the folder
- *   it leads to at this moment) and opened as a folder without following a link at the last step, checked to be inside the root; read and
- *   write when the grant allows writing, else read only. A grant that cannot be opened (missing, not a folder, Filedeck's own) is left out
- *   and logged: the worker gets less, never more.
+ * - each grant, resolved inside the served root (`resolveRead`) and opened as a folder without following a link at the last step, checked to
+ *   be inside the root; read and write when the grant allows writing, else read only. A grant that is a link or runs through one (its
+ *   resolved path is not the grant's own), or that cannot be opened (missing, not a folder, Filedeck's own), is left out and logged: the
+ *   worker gets less, never more.
  * - read and write: the worker's own folders (`dirs`), opened the same way.
  * - read only: the mount table (`cfg.procMounts`, for the volumes and the read-only checks), and `runtimeRoots`.
  * Grants and folders are passed as descriptors, so the rule is attached to what was opened here, whatever happens to the path later.
@@ -407,6 +468,8 @@ export async function landlockRoots(cfg: Config, claim: UserClaim, dirs: Account
     for (const g of claim.grants ?? []) {
       try {
         const r = resolveRead(cfg.root, g.path);
+        // a grant that is a link or runs through one would follow it to wherever it leads at this moment: left out instead
+        if (r.virtual !== grantPath(g.path)) throw new Error(`it leads to ${r.virtual} through a link`);
         const fh = await openChecked(cfg.root, r.real, fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY);
         held.push(fh);
         (g.write ? readWrite : readOnly).push(fh.fd);
@@ -415,7 +478,7 @@ export async function landlockRoots(cfg: Config, claim: UserClaim, dirs: Account
       }
     }
     for (const d of [dirs.tmp, dirs.thumbs, dirs.index]) {
-      if (!d) continue;
+      if (!d || (d !== dirs.tmp && d.startsWith(dirs.tmp + "/"))) continue; // (thumbnails kept in `tmp` are covered by its rule)
       const fh = await openFolder(d);
       held.push(fh);
       readWrite.push(fh.fd);

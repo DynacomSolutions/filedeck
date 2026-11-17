@@ -9,8 +9,12 @@ import { type AccountResolver, type LocalAccount } from "./local-accounts.ts";
 import { PoolFull, StaleEpoch, type WorkerPool, type WorkerSpec } from "./worker-pool.ts";
 import { WorkerGone } from "./worker-proto.ts";
 import {
+  OPEN_DIR,
   UnsafeFolders,
   cacheDir,
+  grantPath,
+  inHeld,
+  tightenTop,
   keyDir,
   keyFolder,
   landlockRoots,
@@ -236,7 +240,13 @@ export function makeWorkerSpecs(
   const log = o.log ?? ((s) => console.error(s));
   // (an area left by an agent that was killed stays: it is root's and 0711, and removing it safely would need its accounts)
   const base = fsc.mkdtempSync(path.join(os.tmpdir(), "filedeck-workers-"));
-  fsc.chmodSync(base, process.getuid?.() === 0 ? 0o711 : 0o700);
+  // held from here on: the temporary folder may let others rename the area and put a link in its place, so the area is only used through this
+  const areaFd = fsc.openSync(base, OPEN_DIR);
+  fsc.fchmodSync(areaFd, process.getuid?.() === 0 ? 0o711 : 0o700);
+  const area = inHeld({ fd: areaFd });
+  // (as root: a cache folder on a volume made 0777 becomes 0755, so it can hold the accounts' folders)
+  tightenTop(cfg.thumbDir, log);
+  tightenTop(cfg.indexDir, log);
   /** per key folder and uid, the folders once made */
   const ready = new Map<string, Promise<AccountDirs & { removed?: string[] }>>();
   /** the index folder names being made now (not removed as old ones meanwhile) */
@@ -248,7 +258,7 @@ export function makeWorkerSpecs(
     let p = ready.get(id);
     if (!p) {
       making.set(name, (making.get(name) ?? 0) + 1);
-      p = accountDirs(cfg, base, claim, account, key, { hook: o.afterMkdir, log, inUse }).finally(() => {
+      p = accountDirs(cfg, area, claim, account, key, { hook: o.afterMkdir, log, inUse }).finally(() => {
         const n = (making.get(name) ?? 1) - 1;
         if (n > 0) making.set(name, n);
         else making.delete(name);
@@ -268,6 +278,12 @@ export function makeWorkerSpecs(
     const key = workerKey(claim);
     const { id, p } = prepare(claim, account, key);
     const d = await p;
+    // the worker gets the paths; this process opens the folders through the held area
+    const tmp = path.join(base, path.relative(area, d.tmp));
+    const thumbs = d.thumbs.startsWith(area + "/") ? path.join(base, path.relative(area, d.thumbs)) : d.thumbs;
+    const grants = claim.kind === "virt" ? (claim.grants ?? []).flatMap((g) => (validGrant(g.path) ? [{ path: grantPath(g.path), write: g.write === true }] : [])) : undefined;
+    // everything under a grant that does not allow writing is read only, also what Landlock does not cover (modes, owners, times)
+    const readOnly = grants ? [...cfg.readOnly, ...grants.filter((g) => !g.write).map((g) => g.path)] : cfg.readOnly;
     return {
       key,
       kind: claim.kind,
@@ -275,12 +291,13 @@ export function makeWorkerSpecs(
       epoch: claim.epoch,
       account,
       init: {
-        cfg: workerConfig(cfg, { thumbs: d.thumbs, index: d.index }),
+        cfg: { ...workerConfig(cfg, { thumbs, index: d.index }), readOnly },
         account: { kind: claim.kind, name: claim.name, uid: account.uid },
         trashFolder: trashFolder(claim, account),
+        ...(grants ? { grants } : {}),
       },
-      tmp: d.tmp,
-      // a virtual account is confined to its grants; a system account's limit is its uid (no Landlock)
+      tmp,
+      // a virtual account is confined to its grants (Landlock, and the worker's own grant check); a system account's limit is its uid
       openLandlock: claim.kind === "virt" ? () => landlockRoots(cfg, claim, d, log) : undefined,
       // the folders may be what failed (removed, or changed): the next start makes and checks them again
       startFailed: () => {
@@ -289,13 +306,30 @@ export function makeWorkerSpecs(
     };
   };
   let closing: Promise<void> | undefined;
-  const close = () => (closing ??= removeArea(base, log, o.onRootList, o.onEmpty));
+  const close = () =>
+    (closing ??= removeArea(base, log, o.onRootList, o.onEmpty, areaFd).finally(() => {
+      try {
+        fsc.closeSync(areaFd);
+      } catch {
+        /* already closed */
+      }
+    }));
   return { spec, base, close };
 }
 
+/** A grant path that can be compared (no `..`, no NUL); others are left out. */
+function validGrant(p: unknown): p is string {
+  try {
+    return typeof p === "string" && grantPath(p) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The folders of one key (see account-dirs.ts): `tmp` in the key folder below the workers' area `base`, `thumbs` = `<thumbDir>/u<uid>`
- * (in `tmp` when there is no thumbnail folder), and `index` = `<indexDir>/accounts/<key folder>` (empty without an index folder). For a
+ * The folders of one key (see account-dirs.ts): `tmp` in the key folder below the workers' area `base` (the held area's path, as this
+ * process uses it), `thumbs` = `<thumbDir>/accounts/u<uid>` (in `tmp` when there is no thumbnail folder), and `index` =
+ * `<indexDir>/accounts/<key folder>` (empty without an index folder). For a
  * virtual account, the index folders of its earlier grants are then removed (`removed` names them), unless `inUse`.
  */
 export async function accountDirs(
@@ -311,8 +345,7 @@ export async function accountDirs(
   const tmp = await keyFolder(path.join(base, name), account, o.hook);
   const thumbs = cfg.thumbDir ? await cacheDir(cfg.thumbDir, `u${account.uid}`, account, "thumbs", o.hook) : path.join(tmp, "thumbs");
   if (!cfg.indexDir) return { tmp, thumbs, index: "" };
-  const accounts = path.join(cfg.indexDir, "accounts");
-  const index = await cacheDir(accounts, name, account, "index", o.hook);
-  const removed = claim.kind === "virt" ? await removeOldIndexDirs(accounts, virtOwner(claim.name), name, o.inUse ?? (() => false), log) : [];
+  const index = await cacheDir(cfg.indexDir, name, account, "index", o.hook);
+  const removed = claim.kind === "virt" ? await removeOldIndexDirs(cfg.indexDir, virtOwner(claim.name), name, o.inUse ?? (() => false), log) : [];
   return { tmp, thumbs, index, removed };
 }

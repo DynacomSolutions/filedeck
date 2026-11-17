@@ -231,7 +231,7 @@ export function extractBlocked(root: string, prefixes: string[], plan: { destVir
 }
 
 /** POST routes whose paths come from the JSON body (see writeTargets). */
-const BODY_ROUTES = new Set([
+export const BODY_ROUTES = new Set([
   "/api/fs/mkdir", "/api/fs/symlink", "/api/fs/perms", "/api/fs/rename", "/api/fs/move", "/api/fs/copy", "/api/fs/trash", "/api/fs/delete",
   "/api/trash/restore", "/api/trash/delete", "/api/trash/empty", "/api/jobs/compress", "/api/jobs/extract",
 ]);

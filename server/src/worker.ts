@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { agentError, registerFileRoutes } from "./agent-routes.ts";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
 import { readOnlyGuard } from "./readonly.ts";
+import { grantGuard, type Grant } from "./grant-guard.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import { Mux } from "./worker-proto.ts";
 import type { Config } from "./config.ts";
@@ -22,6 +23,8 @@ export interface WorkerInit {
   cfg: Config;
   account: { kind: "sys" | "virt"; name: string; uid: number };
   trashFolder: string;
+  /** a virtual account's grants (paths in their compared form): every path of a request must lie inside one (grant-guard.ts) */
+  grants?: Grant[];
 }
 
 /**
@@ -29,7 +32,7 @@ export interface WorkerInit {
  * process's shared job file). Every answer carries `x-filedeck-jobs`. The root process checks the agent token and the signed user, writes the audit log, and
  * keeps `/healthz`, `/metrics`, `/api/info` and the folder sizes.
  */
-export function createWorkerApp(cfg: Config): Hono {
+export function createWorkerApp(cfg: Config, grants?: Grant[]): Hono {
   const app = new Hono();
   const jobs = makeAgentJobs({ ...cfg, jobsFile: "" });
   // every answer says how many jobs are queued or running, so the root process does not stop a worker that still has work
@@ -45,6 +48,7 @@ export function createWorkerApp(cfg: Config): Hono {
       c.res = res;
     }
   });
+  if (grants) app.use("*", grantGuard(cfg.root, grants)); // (after the job count step, so a refusal carries the count too)
   app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   app.onError(agentError);
@@ -55,6 +59,24 @@ export function createWorkerApp(cfg: Config): Hono {
     files.close();
   };
   return app;
+}
+
+/**
+ * Exits with one clear line when the worker cannot reach its own cache folders: the account must be able to pass through every folder
+ * above them (`FILEDECK_INDEX_DIR`, `FILEDECK_THUMB_DIR` and their parents need the search bit for others).
+ */
+function unreachable(cfg: Config): void {
+  for (const [name, dir] of [["index", cfg.indexDir], ["thumbnail", cfg.thumbDir]] as const) {
+    if (!dir) continue;
+    try {
+      fs.accessSync(dir, fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") continue; // (made when it is first used)
+      process.stderr.write(`worker: cannot use its ${name} folder ${dir} (${code}): the account must be able to pass through every folder above it\n`);
+      process.exit(1);
+    }
+  }
 }
 
 function fail(e: unknown): never {
@@ -77,7 +99,9 @@ async function main(): Promise<void> {
     try {
       const i = init as Partial<WorkerInit> | null;
       if (!i || typeof i.cfg !== "object" || i.cfg === null) throw new Error("bad start-up message");
-      app = createWorkerApp({ ...i.cfg, worker: true });
+      if (i.grants !== undefined && !Array.isArray(i.grants)) throw new Error("bad start-up message");
+      unreachable(i.cfg);
+      app = createWorkerApp({ ...i.cfg, worker: true }, i.grants);
       mux.ready();
     } catch (e) {
       fail(e);

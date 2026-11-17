@@ -422,10 +422,40 @@ test("removal: an account's folders are emptied as the account, never walked by 
     assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep", "nothing removed through the link");
     assert.ok(!fs.existsSync(specs.base), "the area is gone once its folders could be emptied");
     const keyDir = path.dirname(s1.tmp!);
-    assert.deepEqual(emptied, [keyDir], "the account's key folder is emptied by the account");
+    assert.deepEqual(emptied.map((d) => path.basename(d)), [path.basename(keyDir)], "the account's key folder is emptied by the account");
     assert.deepEqual(listed, [specs.base], "root lists only its own folders");
   } finally {
     fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("removal: an area renamed away and replaced by a link is removed through its descriptor; nothing behind the link is touched", async () => {
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never);
+  const account = (await accounts().resolve("alice"))!;
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-outside-"));
+  fs.writeFileSync(path.join(outside, "keep.txt"), "keep");
+  fs.mkdirSync(path.join(outside, `u${account.uid}`));
+  fs.writeFileSync(path.join(outside, `u${account.uid}`, "keep2.txt"), "keep");
+  const logs: string[] = [];
+  const specs = makeWorkerSpecs(cfg, { log: (l) => logs.push(l) });
+  const moved = `${specs.base}.moved`;
+  try {
+    const s1 = await specs.spec(sys("alice"), account);
+    fs.writeFileSync(path.join(s1.tmp!, "f"), "x");
+    if (IS_ROOT) chownForTest(s1.tmp!);
+    // another user of the temporary folder moves the area away and puts a link to its own folder in its place
+    fs.renameSync(specs.base, moved);
+    fs.symlinkSync(outside, specs.base);
+    await specs.close();
+    assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep");
+    assert.equal(fs.readFileSync(path.join(outside, `u${account.uid}`, "keep2.txt"), "utf8"), "keep");
+    assert.ok(fs.lstatSync(specs.base).isSymbolicLink(), "the link is not removed either");
+    assert.deepEqual(fs.readdirSync(moved), [], "the real area was emptied through its descriptor");
+    assert.ok(logs.some((l) => l.includes("no longer names the area")), logs.join("\n"));
+  } finally {
+    fs.rmSync(outside, { recursive: true, force: true });
+    fs.rmSync(moved, { recursive: true, force: true });
+    fs.rmSync(specs.base, { force: true });
   }
 });
 

@@ -68,6 +68,13 @@ export class PoolFull extends Error {
   }
 }
 
+/**
+ * The lowest Landlock ABI a virtual account's worker runs with: ABI 3 (Linux 6.2) is the first that also controls truncation and moving or
+ * linking files between folders (ABI 2), so a grant cannot be left or entered by a rename.
+ */
+export const MIN_VIRTUAL_ABI = 3;
+export const landlockForVirtual = (i: { state: string; abi: number }): boolean => i.state === "landlock" && i.abi >= MIN_VIRTUAL_ABI;
+
 /** how long a worker has to say READY */
 const READY_MS = 10_000;
 /** how long a stopped worker has to exit after BYE before it is killed */
@@ -446,7 +453,7 @@ export class WorkerPool {
       if (!spec.tmp) return { status: 503, error: "worker has no temporary folder" };
       if (!(await launcherAvailable())) return { status: 503, error: "workers need filedeck-sandbox" };
     }
-    if ((spec.landlock || spec.openLandlock) && (await sandboxInfo()).state !== "landlock") return { status: 503, error: "virtual accounts need Landlock on this machine" };
+    if ((spec.landlock || spec.openLandlock) && !landlockForVirtual(await sandboxInfo())) return { status: 503, error: "virtual accounts need Landlock on this machine" };
     return null;
   }
 

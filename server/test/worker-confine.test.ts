@@ -9,7 +9,7 @@ import { loadConfig } from "../src/config.ts";
 import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts";
 import { makeWorkerSpecs, type WorkerSpecs } from "../src/agent-workers.ts";
 import { runtimeRoots } from "../src/account-dirs.ts";
-import type { WorkerPool } from "../src/worker-pool.ts";
+import { landlockForVirtual, type WorkerPool } from "../src/worker-pool.ts";
 import { sandboxInfo } from "../src/sandbox.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
@@ -34,6 +34,8 @@ const HAVE_QPDF = have("qpdf");
 const tool = (ok: boolean, name: string) => (NEED ? NEED : ok ? false : `worker helpers: skipped (${name} not installed here)`);
 
 const T = "agent-secret-confine";
+/** what a zip ticket for two links that lead out of the grant gets (see the test) */
+const ZIP_TICKET_STATUS = 201;
 let work = "";
 let root = "";
 let thumbs = "";
@@ -131,14 +133,26 @@ test("grants: a write grant can be written, a read grant only read, nothing else
   const s = await get("/api/fs/text?path=/c/secret");
   assert.ok(s.status >= 400, `outside the grants: ${s.status}`);
   assert.doesNotMatch(await s.text(), /TOPSECRET/);
-  // the root of the volume: no grant there, so its listing shows nothing that is not a grant or the parent of one
+  // the root of the volume: no grant there, so it is refused before anything is listed
   const l = await get("/api/fs/list?path=/");
-  const text = await l.text();
-  if (l.status === 200) {
-    const names = ((JSON.parse(text) as { entries?: { name: string }[] }).entries ?? []).map((e) => e.name);
-    for (const n of names) assert.ok(n === "a" || n === "b", `listing / shows ${n}`);
-  } else assert.ok(l.status >= 400, text);
-  assert.doesNotMatch(text, /"c"/);
+  assert.equal(l.status, 403);
+  assert.deepEqual(await l.json(), { error: "outside your folders" });
+  // a read-only grant: no change of mode either (Landlock does not cover metadata; the worker's read-only prefixes do)
+  const before = fs.statSync(path.join(root, "b/f.txt")).mode & 0o7777;
+  const perms = await post("/api/fs/perms", { path: "/b/f.txt", mode: 0o600 });
+  assert.equal(perms.status, 403, await perms.clone().text());
+  assert.equal(fs.statSync(path.join(root, "b/f.txt")).mode & 0o7777, before, "mode unchanged");
+  // nothing about a file outside the grants: no size, owner or times (stat is not limited by Landlock)
+  for (const p of ["/api/fs/props?path=/c/secret", "/api/fs/stat?path=/c/secret", "/api/fs/stat?path=/a/out"]) {
+    const r = await get(p);
+    assert.equal(r.status, 403, p);
+    const body = await r.text();
+    assert.doesNotMatch(body, /size|mtime|uid/, `${p}: ${body}`);
+  }
+  // a change outside the grants is refused too, also in a body
+  const mv = await post("/api/fs/rename", { from: "/a/t.txt", to: "/c/t.txt" });
+  assert.equal(mv.status, 403);
+  assert.ok(fs.existsSync(path.join(root, "a/t.txt")));
   // what every worker may use to run never covers the served tree (a Node program at <folder>/bin/node must not give all of <folder>)
   const rt = await runtimeRoots();
   for (const r of [...rt.readOnly, ...rt.readExec]) assert.ok(root !== r && !root.startsWith(r + "/"), `${r} covers the served tree`);
@@ -166,12 +180,14 @@ test("link out of a grant: reading, search, thumbnail, zip and git through it fa
   }
   if (HAVE_BSDTAR) {
     const t = await post("/api/fs/zip-ticket", { dir: "/a", names: ["out", "up"] });
+    assert.equal(t.status, ZIP_TICKET_STATUS, await t.clone().text());
     if (t.status === 201) {
       const { id } = (await t.json()) as { id: string };
       const z = await get(`/api/fs/zip?ticket=${id}`);
       const body = Buffer.from(await z.arrayBuffer());
+      assert.equal(z.status, 200);
       assert.ok(!body.includes("TOPSECRET"), "the zip holds none of /c");
-    } else assert.ok(t.status >= 400);
+    }
   }
   if (HAVE_GIT) {
     const g = await get("/api/git/status?path=/a/up");
@@ -214,7 +230,7 @@ test("helpers inside: a thumbnail with ffmpeg, cached in the account's folder", 
   assert.equal(r.status, 200, await r.clone().text());
   assert.equal(r.headers.get("content-type"), "image/jpeg");
   await r.arrayBuffer();
-  const mine = path.join(thumbs, `u${me.uid}`);
+  const mine = path.join(thumbs, "accounts", `u${me.uid}`);
   const files = fs.readdirSync(mine, { recursive: true }).filter((n) => String(n).endsWith(".jpg"));
   assert.ok(files.length >= 1, `a thumbnail under ${mine}`);
   assert.equal(fs.lstatSync(mine).mode & 0o7777, 0o700);
@@ -249,7 +265,7 @@ test("index per account: one folder per set of grants, the old one removed", { s
   assert.equal(second.length, 1, second.join(", "));
   assert.notEqual(second[0], first[0]);
   // the parents are this process's and closed to others' writes
-  for (const d of [thumbs, accounts]) {
+  for (const d of [thumbs, path.join(thumbs, "accounts"), index, accounts]) {
     const p = fs.lstatSync(d);
     assert.equal(p.uid, process.getuid!());
     assert.equal(p.mode & 0o022, 0);
@@ -263,6 +279,8 @@ test("a parent of the account folders that others may write to is refused", { sk
   const bad = path.join(work, "thumbs-open");
   fs.mkdirSync(bad);
   fs.chmodSync(bad, 0o777);
+  // (as root, one that is root's is made 0755 at start, see worker-live.test.ts: here it belongs to another user)
+  if (process.getuid?.() === 0) fs.chownSync(bad, 4242, 4242);
   const other = createAgent(
     loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on", FILEDECK_THUMB_DIR: bad, FILEDECK_INDEX_DIR: index } as never),
     () => {},
@@ -318,10 +336,10 @@ test("cache folders: one swapped for a link after its mkdir is refused; one alre
       } finally {
         await specs.close();
       }
-      fs.rmSync(at === "thumbs" ? path.join(base, "thumbs", `u${account.uid}`) : path.join(base, "index/accounts"), { recursive: true, force: true });
+      fs.rmSync(at === "thumbs" ? path.join(base, "thumbs/accounts", `u${account.uid}`) : path.join(base, "index/accounts"), { recursive: true, force: true });
     }
     // a folder there already, open to others: refused and left as it is
-    const open = path.join(base, "thumbs", `u${account.uid}`);
+    const open = path.join(base, "thumbs/accounts", `u${account.uid}`);
     fs.mkdirSync(open, { recursive: true });
     fs.chmodSync(open, 0o777);
     const specs = makeWorkerSpecs(cfg);
@@ -360,4 +378,50 @@ test("an old index folder that is a link is removed as a link, nothing behind it
     await specs.close();
     fs.rmSync(outside, { recursive: true, force: true });
   }
+});
+
+test("a grant that is a link, or runs through one, is left out", { skip: NEED }, async () => {
+  fs.symlinkSync("/a", path.join(root, "lnk"));
+  const logs: string[] = [];
+  const orig = console.error;
+  console.error = (x: string) => logs.push(String(x));
+  try {
+    const claim = virt([{ path: "/lnk", write: true }, { path: "/b", write: false }], 1, "guest6");
+    const r = await get("/api/fs/text?path=/b/f.txt", claim);
+    assert.equal(r.status, 200, await r.clone().text());
+    await r.text();
+    assert.ok(logs.some((l) => l.includes("/lnk") && l.includes("link")), logs.join("\n"));
+    // the folder behind it is not reachable: not by the link (it leads out of the grant's own place), and not by the kernel
+    const w = await app.request("/api/fs/write?path=/lnk/via.txt&create=1", { method: "PUT", headers: headers(claim), body: "x" });
+    assert.equal(w.status, 403);
+    assert.ok(!fs.existsSync(path.join(root, "a/via.txt")));
+  } finally {
+    console.error = orig;
+    fs.unlinkSync(path.join(root, "lnk"));
+  }
+});
+
+test("the root process's own index files are private (0600), also ones an older version left", async () => {
+  const dir = path.join(work, "rootindex");
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, "index-t.db"), "");
+  fs.chmodSync(path.join(dir, "index-t.db"), 0o644);
+  const plain = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: dir } as never), () => {});
+  try {
+    const r = await plain.request("/api/fs/lsdir?path=/a");
+    assert.equal(r.status, 200, await r.clone().text());
+    await r.text();
+    await new Promise((res) => setTimeout(res, 200));
+    const files = fs.readdirSync(dir).filter((n) => /\.db(-wal|-shm|-journal)?$/.test(n));
+    assert.ok(files.includes("index-t.db"), files.join(", "));
+    for (const f of files) assert.equal(fs.statSync(path.join(dir, f)).mode & 0o777, 0o600, f);
+  } finally {
+    await (plain as unknown as { close(): Promise<void> }).close();
+  }
+});
+
+test("virtual accounts need Landlock ABI 3 or newer", () => {
+  assert.equal(landlockForVirtual({ state: "landlock", abi: 2 }), false);
+  assert.equal(landlockForVirtual({ state: "landlock", abi: 3 }), true);
+  assert.equal(landlockForVirtual({ state: "fallback", abi: 0 }), false);
 });
