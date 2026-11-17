@@ -74,10 +74,17 @@ test("worker config holds no secret", () => {
 
 /** a worker process from the source, with a root `Mux` on its descriptor 3 */
 function startWorker() {
-  const child = spawn(process.execPath, ["--import", "tsx", path.join(here, "../src/worker.ts")], { stdio: ["ignore", "pipe", "pipe", "pipe"] });
+  // a worker checks that its TMPDIR is its own 0700 folder with no link on its path: give it a fresh one (never the shared /tmp)
+  const own = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-worker-tmp-")));
+  fs.chmodSync(own, 0o700);
+  const child = spawn(process.execPath, ["--import", "tsx", path.join(here, "../src/worker.ts")], {
+    stdio: ["ignore", "pipe", "pipe", "pipe"],
+    env: { ...process.env, TMPDIR: own, HOME: own },
+  });
   const out = { stderr: "" };
   child.stderr!.on("data", (d) => (out.stderr += d));
   const exited = new Promise<number | null>((res) => child.once("exit", (code) => res(code)));
+  void exited.then(() => fs.rmSync(own, { recursive: true, force: true }));
   const mux = new Mux(child.stdio[3] as Duplex, "root");
   /** the exit code, or "timeout" (the child is then killed) */
   const exit = async (ms: number) => {
