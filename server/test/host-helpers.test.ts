@@ -181,6 +181,16 @@ live("runHostHelper: runs as 65534 unless asked for root, with only PATH and the
   const slow = await runHostHelper("/", extra, "sleeper", [], { timeoutMs: 300 });
   assert.equal(slow.code, null);
   assert.ok(Date.now() - started < 10_000);
+  // the caller's signal kills it too (an attempt that gave up), and the call ends when the process has exited
+  const ac = new AbortController();
+  const t1 = Date.now();
+  setTimeout(() => ac.abort(), 200);
+  const stopped = await runHostHelper("/", extra, "sleeper", [], { signal: ac.signal });
+  assert.equal(stopped.code, null);
+  assert.ok(Date.now() - t1 < 10_000);
+  const pre = new AbortController();
+  pre.abort();
+  assert.equal((await runHostHelper("/", extra, "sleeper", [], { signal: pre.signal })).code, null);
   const big = await runHostHelper("/", extra, "talker", []);
   assert.equal(big.code, null);
   assert.ok(big.stdout.length <= 64 * 1024, String(big.stdout.length));

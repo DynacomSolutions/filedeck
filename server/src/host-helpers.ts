@@ -31,18 +31,19 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
  * Runs the host helper `name` from `dir` (a folder of this process, from `hostHelperDir`) inside `root`, through the launcher: chroot,
  * the program by descriptor, no Landlock (its rules would not fit the machine's root), sockets allowed (NSS may ask SSSD or nscd over a
  * unix socket), every capability cleared except `keepCaps`, and an environment with only `PATH`. It runs as uid and gid 65534 with no
- * supplementary groups, or as root with `asRoot` (PAM needs it). Killed after `timeoutMs` (default 10 s) or when it writes more than
- * 64 KiB; `code` is then null. Output that is not valid UTF-8 is an error. `stderr` (at most 4 KiB) is for logs only.
+ * supplementary groups, or as root with `asRoot` (PAM needs it). Killed after `timeoutMs` (default 10 s), when it writes more than
+ * 64 KiB or when `signal` aborts; `code` is then null, and the call ends only when the process has exited. Output that is not valid UTF-8 is an error. `stderr` (at most 4 KiB) is for logs only.
  */
 export async function runHostHelper(
   root: string,
   dir: string,
   name: string,
   args: string[],
-  o: { stdin?: Buffer; timeoutMs?: number; keepCaps?: Capability[]; allowMetadata?: boolean; asRoot?: boolean } = {},
+  o: { stdin?: Buffer; timeoutMs?: number; keepCaps?: Capability[]; allowMetadata?: boolean; asRoot?: boolean; signal?: AbortSignal } = {},
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   if (!path.isAbsolute(dir)) throw new Error(`not a host helper folder (not absolute): ${dir}`);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) throw new Error(`not a host helper name: ${name}`);
+  if (o.signal?.aborted) return { code: null, stdout: "", stderr: "stopped before it started" };
   const child = await spawnSandboxed(path.join(dir, name), args, {
     chroot: root,
     execOutside: true,
@@ -64,6 +65,8 @@ export async function runHostHelper(
       child.kill("SIGKILL");
     };
     const timer = setTimeout(kill, o.timeoutMs ?? 10_000);
+    o.signal?.addEventListener("abort", kill, { once: true });
+    if (o.signal?.aborted) kill(); // (aborted while the launcher was starting)
     child.stdout!.on("data", (d: Buffer) => {
       if (killed) return;
       if (outLen + d.length > MAX_OUTPUT) {
@@ -83,10 +86,12 @@ export async function runHostHelper(
     }
     child.on("error", (e) => {
       clearTimeout(timer);
+      o.signal?.removeEventListener("abort", kill);
       resolve({ code: null, out: Buffer.alloc(0), stderr: e.message });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      o.signal?.removeEventListener("abort", kill);
       resolve({ code: killed ? null : code, out: Buffer.concat(out), stderr: err });
     });
   });

@@ -112,6 +112,49 @@ test("a helper that does not answer in time gives unavailable", async () => {
   assert.ok(Date.now() - t0 < 2000);
 });
 
+test("an attempt that gives up kills its helper (the signal), and its place is free only once the helper has exited", async () => {
+  const signals: AbortSignal[] = [];
+  const exits: (() => void)[] = [];
+  let started = 0;
+  const pam = new HostPam({
+    // a helper that only exits a while after its kill (as a real child does once SIGKILL lands)
+    run: (_n, _s, o) =>
+      new Promise((resolve) => {
+        started++;
+        signals.push(o.signal!);
+        o.signal!.addEventListener("abort", () => exits.push(() => resolve({ code: null })));
+      }),
+    log: () => {},
+    timeoutMs: 100,
+  });
+  const first = await Promise.all(Array.from({ length: 4 }, () => pam.check("alice", SECRET)));
+  assert.deepEqual(first, Array(4).fill("unavailable"));
+  assert.equal(signals.length, 4);
+  assert.ok(signals.every((s) => s.aborted), "every helper is killed when its attempt gives up");
+  // the killed helpers have not exited yet: they still hold the four places, so a fifth call waits
+  const fifth = pam.check("alice", SECRET);
+  await sleep(30);
+  assert.equal(started, 4);
+  exits.shift()!();
+  await sleep(10);
+  assert.equal(started, 5, "a place came free when one helper exited");
+  for (const e of exits.splice(0)) e();
+  assert.equal(await fifth, "unavailable");
+  for (const e of exits.splice(0)) e();
+});
+
+test("hostPam hands the attempt's signal to the runner", async () => {
+  let got: AbortSignal | undefined;
+  const runner = (async (_r: string, _d: string, _n: string, _a: string[], o: { signal?: AbortSignal }) => {
+    got = o.signal;
+    return new Promise((resolve) => o.signal!.addEventListener("abort", () => resolve({ code: null, stdout: "", stderr: "" })));
+  }) as unknown as typeof runHostHelper;
+  const cfg = { ...loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_AUTH: "on" }), pamService: "filedeck-x" };
+  const pam = hostPam(cfg, { root: "/host", dir: "/img/host" }, { runner, timeoutMs: 100 });
+  assert.equal(await pam.check("alice", SECRET, "203.0.113.7"), "unavailable");
+  assert.ok(got instanceof AbortSignal && got.aborted);
+});
+
 test("a name that is not a valid system name is unknown and nothing runs", async () => {
   const { pam, calls } = fake(0);
   for (const n of ["", "-x", "a/b", "..", "a b", "a\nb", "x".repeat(65), "röot"]) assert.equal(await pam.check(n, SECRET), "unknown", JSON.stringify(n));

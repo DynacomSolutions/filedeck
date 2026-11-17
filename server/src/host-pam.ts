@@ -16,6 +16,7 @@ import { validSystemName } from "./local-accounts.ts";
  * - `unavailable`: PAM cannot be used here (no helper, no library, no service file, a crash or a timeout).
  *
  * At most 4 helpers run at once; a call over that waits for a place, and its time limit counts from the call, so it never waits for long.
+ * An attempt that gives up kills its helper; the helper's place comes free when it has exited.
  */
 export type PamResult = "ok" | "fail" | "unknown" | "refused" | "unavailable";
 
@@ -27,7 +28,11 @@ export const SECOND_PROMPT_LOG = "pam: the service asked more than one question;
 /** How long one attempt may take (a slow directory server, PAM's own delay after a wrong password) before it counts as unavailable. */
 const TIMEOUT_MS = 12_000;
 
-export type PamRun = (name: string, stdin: Buffer, o: { address?: string }) => Promise<{ code: number | null; stderr?: string }>;
+/**
+ * Runs the helper once. `signal` aborts when the attempt gives up (its time ran out): the helper must then be killed, and the promise
+ * settle only once it has exited, since its place is held until then.
+ */
+export type PamRun = (name: string, stdin: Buffer, o: { address?: string; signal?: AbortSignal }) => Promise<{ code: number | null; stderr?: string }>;
 
 /**
  * A client address the helper takes for PAM_RHOST: an IPv4 or IPv6 address (`net.isIP`) of hex digits, '.' and ':' only (no zone
@@ -57,15 +62,17 @@ export class HostPam {
     if (address !== undefined && !validClientAddress(address)) return "fail";
     let timer: NodeJS.Timeout | undefined;
     let r: { code: number | null; stderr?: string };
-    let gaveUp = false;
+    // aborted when the attempt gives up: a helper that runs is killed, one that waits never starts
+    const giveUp = new AbortController();
     const attempt = (async () => {
       await this.place();
-      if (gaveUp) {
+      if (giveUp.signal.aborted) {
         this.leave();
         return { code: null }; // (its time ran out while it waited: it never starts, and the caller has had its answer)
       }
       try {
-        return await this.run(name, Buffer.from(password, "utf8"), address === undefined ? {} : { address });
+        // (the place is left when the helper has exited, also after a kill: the runner settles only then)
+        return await this.run(name, Buffer.from(password, "utf8"), { ...(address === undefined ? {} : { address }), signal: giveUp.signal });
       } finally {
         this.leave();
       }
@@ -77,7 +84,7 @@ export class HostPam {
         new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`no answer within ${this.timeoutMs} ms`)), this.timeoutMs))),
       ]);
     } catch (e) {
-      gaveUp = true;
+      giveUp.abort();
       this.log(`pam: unavailable (${(e as Error)?.message ?? String(e)})`);
       return "unavailable";
     } finally {
@@ -112,10 +119,11 @@ export class HostPam {
  * `cfg.pamService`, and the client's address as its last argument when there is one. It runs as root (pam_unix reads /etc/shadow) with only `CAP_DAC_READ_SEARCH` kept: on some distributions the
  * shadow file has mode 0000, and pam_unix's setuid fallback does not work under no-new-privileges. `runner` is for tests.
  */
-export function hostPam(cfg: Config, helpers: { root: string; dir: string }, o: { log?: (s: string) => void; runner?: typeof runHostHelper } = {}): HostPam {
+export function hostPam(cfg: Config, helpers: { root: string; dir: string }, o: { log?: (s: string) => void; runner?: typeof runHostHelper; timeoutMs?: number } = {}): HostPam {
   const runner = o.runner ?? runHostHelper;
   return new HostPam({
-    run: (name, stdin, r) => runner(helpers.root, helpers.dir, "filedeck-pam", [cfg.pamService, name, ...(r.address === undefined ? [] : [r.address])], { stdin, asRoot: true, keepCaps: ["dac_read_search"], allowMetadata: true, timeoutMs: TIMEOUT_MS - 1000 }),
+    timeoutMs: o.timeoutMs,
+    run: (name, stdin, r) => runner(helpers.root, helpers.dir, "filedeck-pam", [cfg.pamService, name, ...(r.address === undefined ? [] : [r.address])], { stdin, asRoot: true, keepCaps: ["dac_read_search"], allowMetadata: true, timeoutMs: TIMEOUT_MS - 1000, signal: r.signal }),
     log: o.log,
   });
 }
