@@ -59,3 +59,20 @@ test("a worker runs as its account, with its groups, no capabilities, no new pri
   assert.equal(field("NoNewPrivs"), "1", status);
   assert.equal(field("Seccomp"), "2", status);
 });
+
+test("a worker for another user needs its own temporary folder", { skip: ROOT_ONLY }, async () => {
+  let starts = 0;
+  const p = new WorkerPool({ max: 2, idleMs: 60_000, log: () => {}, start: async () => { starts++; throw new Error("not reached"); } });
+  try {
+    const account = { name: "live2", uid: 1235, gid: 1235, groups: [1235], home: "/nonexistent" };
+    const res = await p.fetch(
+      { key: "sys:live2", kind: "sys", name: "live2", epoch: 1, account, init: {} as never },
+      new Request("http://agent/api/fs/stat?path=/"),
+    );
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { error: "worker has no temporary folder" });
+    assert.equal(starts, 0);
+  } finally {
+    await p.close();
+  }
+});

@@ -137,6 +137,14 @@ export function defaultProcMounts(root: string): string {
   return root === "/" ? "/proc/mounts" : `${root}/proc/1/mounts`;
 }
 
+/** A setting that must be a whole number of at least 1: unset or empty gives `fallback`, anything else is refused at start-up. */
+function wholeSetting(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const v = env[name]?.trim();
+  if (!v) return fallback;
+  if (!/^[0-9]+$/.test(v) || Number(v) < 1) throw new Error(`${name} must be a whole number of at least 1, not "${v.slice(0, 40)}"`);
+  return Number(v);
+}
+
 export function loadConfig(env = process.env): Config {
   const vaultFile = env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite";
   const mode = env.FILEDECK_MODE === "hub" ? "hub" : "agent";
@@ -209,8 +217,8 @@ export function loadConfig(env = process.env): Config {
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
     hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
     worker: false,
-    maxWorkers: Number(env.FILEDECK_MAX_WORKERS ?? 6),
-    workerIdleMs: Number(env.FILEDECK_WORKER_IDLE_SECONDS ?? 600) * 1000,
+    maxWorkers: wholeSetting(env, "FILEDECK_MAX_WORKERS", 6),
+    workerIdleMs: wholeSetting(env, "FILEDECK_WORKER_IDLE_SECONDS", 600) * 1000,
   };
 }
 

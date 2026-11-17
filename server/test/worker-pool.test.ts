@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, workerConfig } from "../src/config.ts";
 import { createWorkerApp, type WorkerInit } from "../src/worker.ts";
 import { WorkerGone } from "../src/worker-proto.ts";
-import { PoolFull, WorkerPool, lineLogger, startWorkerProcess, type StartWorker, type WorkerSpec } from "../src/worker-pool.ts";
+import { BACKOFF_MS, PoolFull, WorkerPool, startWorkerProcess, workerLog, type StartWorker, type WorkerSpec } from "../src/worker-pool.ts";
+import { resetSandbox } from "../src/sandbox.ts";
 import { useSandbox } from "./sandbox-env.ts";
 import { chownForTest, testAccount } from "./worker-env.ts";
 
@@ -145,8 +146,8 @@ test("idle", async () => {
   const s = spec("sys:idle");
   await ok(await stat(p, s));
   const pid = pidOf(p, "sys:idle");
-  // stopped after 200 ms without use (checked every 200 ms); the margin is wide for a slow machine
-  assert.ok(await until(() => !alive(pid), 3000), "the idle worker is still running");
+  // stopped after 200 ms without use (checked every 200 ms), and gone within the brief's 1 s
+  assert.ok(await until(() => !alive(pid), 1000), "the idle worker is still running");
   assert.equal(p.list().length, 0);
   await ok(await stat(p, s));
   assert.notEqual(pidOf(p, "sys:idle"), pid);
@@ -266,6 +267,102 @@ test("the worker app reports its live jobs on every answer", async () => {
   }
 });
 
+test("a new start for a key waits until its old process has exited", async () => {
+  const seen: boolean[] = [];
+  let old = 0;
+  const p = pool({ start: (sp) => (seen.push(old !== 0 && alive(old)), startWorkerProcess(sp)) });
+  const s = spec("sys:restart");
+  await ok(await stat(p, s));
+  old = pidOf(p, "sys:restart");
+  const stopping = p.stopKey("sys:restart");
+  await ok(await stat(p, s));
+  await stopping;
+  assert.deepEqual(seen, [false, false]); // the second start came only after the first process had gone
+  assert.notEqual(pidOf(p, "sys:restart"), old);
+});
+
+test("stopKey during a start: the waiting request gets a fresh start", async () => {
+  const children: ChildProcess[] = [];
+  const p = pool({ start: async (sp) => { const c = await startWorkerProcess(sp); children.push(c); return c; } });
+  const s = spec("sys:stop-starting");
+  const pending = stat(p, s);
+  assert.ok(await until(() => children.length === 1, 5000));
+  await p.stopKey("sys:stop-starting");
+  assert.ok(!alive(children[0]!.pid!), "the cancelled start's process still runs");
+  await ok(await pending);
+  assert.equal(children.length, 2);
+  assert.equal(pidOf(p, "sys:stop-starting"), children[1]!.pid);
+});
+
+test("close during a start: the waiting request gets WorkerGone and nothing is left", async () => {
+  const children: ChildProcess[] = [];
+  const p = pool({ start: async (sp) => { const c = await startWorkerProcess(sp); children.push(c); return c; } });
+  const pending = stat(p, spec("sys:close-starting"));
+  pending.catch(() => {});
+  assert.ok(await until(() => children.length === 1, 5000));
+  await p.close();
+  await assert.rejects(pending, WorkerGone);
+  assert.ok(!alive(children[0]!.pid!), "the process still runs");
+  assert.equal(children.length, 1);
+  await assert.rejects(stat(p, spec("sys:close-starting")), WorkerGone);
+});
+
+test("a worker that dies soon after READY with nothing open: back-off, then a new pid", async () => {
+  let t = 1_000_000;
+  const p = pool({ now: () => t });
+  const s = spec("sys:dies");
+  await ok(await stat(p, s));
+  const pid = pidOf(p, "sys:dies");
+  process.kill(pid, "SIGKILL");
+  assert.ok(await until(() => p.list().length === 0, 5000));
+  const r = await stat(p, s);
+  assert.equal(r.status, 503);
+  assert.deepEqual(await r.json(), { error: "worker failed to start" });
+  t += BACKOFF_MS + 1;
+  await ok(await stat(p, s));
+  assert.notEqual(pidOf(p, "sys:dies"), pid);
+});
+
+test("the worker's socket is closed on exec", async () => {
+  const p = pool();
+  await ok(await stat(p, spec("sys:cloexec")));
+  const info = fs.readFileSync(`/proc/${pidOf(p, "sys:cloexec")}/fdinfo/3`, "utf8");
+  const flags = /^flags:\s*([0-7]+)$/m.exec(info)?.[1];
+  assert.ok(flags && (parseInt(flags, 8) & 0o2000000) !== 0, info);
+});
+
+test("a start the sandbox rules refuse does not stop another worker", async () => {
+  const p = pool({ max: 1 });
+  await ok(await stat(p, spec("sys:keep")));
+  const pid = pidOf(p, "sys:keep");
+  const s = spec("sys:refused");
+  s.landlock = { readOnly: [], readWrite: [], readExec: [] };
+  const saved = process.env.FILEDECK_SANDBOX;
+  process.env.FILEDECK_SANDBOX = "off"; // no Landlock: a virtual account's worker is refused
+  resetSandbox();
+  try {
+    const r = await stat(p, s);
+    assert.equal(r.status, 503);
+    assert.deepEqual(await r.json(), { error: "virtual accounts need Landlock on this machine" });
+  } finally {
+    if (saved === undefined) delete process.env.FILEDECK_SANDBOX;
+    else process.env.FILEDECK_SANDBOX = saved;
+    resetSandbox();
+  }
+  assert.equal(pidOf(p, "sys:keep"), pid);
+  assert.ok(alive(pid));
+});
+
+test("settings: empty means the default, nonsense is refused", () => {
+  const c = loadConfig({ FILEDECK_MAX_WORKERS: "", FILEDECK_WORKER_IDLE_SECONDS: "" } as never);
+  assert.equal(c.maxWorkers, 6);
+  assert.equal(c.workerIdleMs, 600_000);
+  assert.equal(loadConfig({ FILEDECK_MAX_WORKERS: "3", FILEDECK_WORKER_IDLE_SECONDS: "30" } as never).workerIdleMs, 30_000);
+  for (const [k, v] of [["FILEDECK_MAX_WORKERS", "0"], ["FILEDECK_MAX_WORKERS", "x"], ["FILEDECK_MAX_WORKERS", "2.5"], ["FILEDECK_WORKER_IDLE_SECONDS", "-1"], ["FILEDECK_WORKER_IDLE_SECONDS", "soon"]]) {
+    assert.throws(() => loadConfig({ [k!]: v } as never), new RegExp(k!));
+  }
+});
+
 /* ---- with the stand-in worker ---- */
 
 const fakeStart = (counter?: { n: number }): StartWorker => async () => {
@@ -348,35 +445,49 @@ test("the worker's stderr is logged line by line, with limits", async () => {
   assert.equal((await get(p, s, "/stderr?n=3")).status, 200);
   assert.ok(await until(() => lines.length >= 3, 3000));
   assert.deepEqual(lines.slice(0, 3), ["worker sys:noisy: line 0", "worker sys:noisy: line 1", "worker sys:noisy: line 2"]);
-  // a flood is cut off
+  // a flood is cut off (a burst of 50, then about 5 a second), and the count is said once it stops
   assert.equal((await get(p, s, "/stderr?n=5000")).status, 200);
-  await new Promise((r) => setTimeout(r, 500));
-  assert.ok(lines.length < 500, `${lines.length} lines logged`);
+  assert.ok(await until(() => lines.some((l) => /^worker sys:noisy: \(\d+ lines left out\)$/.test(l)), 5000), lines.slice(-3).join("\n"));
+  assert.ok(lines.length < 80, `${lines.length} lines logged`);
 });
 
-test("line logger: splits, cuts long lines and limits the rate", () => {
+test("worker log: splits, cuts long lines, one budget for both streams, and says what it left out", async () => {
   let t = 0;
   const out: string[] = [];
-  const l = lineLogger("k", (s) => out.push(s), { maxLine: 10, perSecond: 3, now: () => t });
-  l.write(Buffer.from("one\ntw"));
-  l.write(Buffer.from("o\r\n"));
+  const wl = workerLog("k", (s) => out.push(s), { maxLine: 10, burst: 3, perSecond: 1, now: () => t, quietMs: 30 });
+  const err = wl.stream();
+  const std = wl.stream();
+  err.write(Buffer.from("one\ntw"));
+  err.write(Buffer.from("o\r\n"));
   assert.deepEqual(out, ["worker k: one", "worker k: two"]);
-  t = 1000;
-  l.write(Buffer.from("x".repeat(25) + "\nafter\n")); // a long line is cut; what follows its end is a new line
+  t = 1000; // one more line allowed
+  err.write(Buffer.from("x".repeat(25) + "\nafter\n")); // a long line is cut; what follows its end is a new line
   assert.deepEqual(out.slice(2), ["worker k: xxxxxxxxxx…", "worker k: after"]);
-  // the rate: 3 lines per second, the rest counted and said once the next second starts
-  t = 2000;
+  // the budget is spent: stdout shares it, so nothing more until it fills again
+  t = 2000; // one line
   out.length = 0;
-  for (let i = 0; i < 10; i++) l.write(Buffer.from(`l${i}\n`));
-  assert.deepEqual(out, ["worker k: l0", "worker k: l1", "worker k: l2"]);
+  for (let i = 0; i < 4; i++) std.write(Buffer.from(`o${i}\n`));
+  for (let i = 0; i < 4; i++) err.write(Buffer.from(`e${i}\n`));
+  assert.deepEqual(out, ["worker k: o0"]);
+  // the flood stops: the count is said
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(out, ["worker k: o0", "worker k: (7 lines left out)"]);
+  // the count is also said before the next line that fits, and when a stream ends
+  out.length = 0;
+  err.write(Buffer.from("lost\n"));
   t = 3000;
-  l.write(Buffer.from("next\n"));
-  assert.deepEqual(out.slice(3), ["worker k: (7 lines left out)", "worker k: next"]);
-  // a line without an end is held only up to the limit
-  t = 4000;
+  err.write(Buffer.from("next\n"));
+  assert.deepEqual(out, ["worker k: (1 line left out)", "worker k: next"]);
   out.length = 0;
-  l.write(Buffer.from("y".repeat(100)));
-  l.write(Buffer.from("y".repeat(100)));
-  l.end();
+  err.write(Buffer.from("gone\n"));
+  err.end();
+  assert.deepEqual(out, ["worker k: (1 line left out)"]);
+  // a line without an end is held only up to the limit
+  t = 10_000;
+  out.length = 0;
+  std.write(Buffer.from("y".repeat(100)));
+  std.write(Buffer.from("y".repeat(100)));
+  std.end();
   assert.deepEqual(out, ["worker k: yyyyyyyyyy…"]);
+  wl.flush();
 });

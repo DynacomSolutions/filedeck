@@ -104,65 +104,84 @@ export const startWorkerProcess: StartWorker = (spec) =>
   });
 
 /**
- * Logs what a worker writes, one log line per line it wrote, as `worker <key>: <line>`. A worker is not trusted, so a line is cut at
- * `maxLine` characters (a line with no end is held only that far), control characters become `?`, and at most `perSecond` lines are
- * logged each second; the number of lines left out is said once the next second starts.
+ * Logs what one worker writes, one log line per line it wrote, as `worker <key>: <line>`. A worker is not trusted, so a line is cut at
+ * `maxLine` characters (a line with no end is held only that far), and control characters become `?`. Its streams (`stream()`, one for
+ * stderr and one for stdout) share one budget: a burst of `burst` lines, then `perSecond` lines a second. The number of lines left out is
+ * said before the next line that fits, when a stream ends, and `quietMs` after the last line left out (the flood has stopped).
  */
-export function lineLogger(key: string, log: (s: string) => void, o: { maxLine?: number; perSecond?: number; now?: () => number } = {}) {
+export function workerLog(
+  key: string,
+  log: (s: string) => void,
+  o: { maxLine?: number; burst?: number; perSecond?: number; now?: () => number; quietMs?: number } = {},
+) {
   const maxLine = o.maxLine ?? 1000;
-  const perSecond = o.perSecond ?? 50;
+  const burst = o.burst ?? 50;
+  const perSecond = o.perSecond ?? 5;
   const now = o.now ?? Date.now;
-  const decoder = new StringDecoder("utf8");
-  let buf = "";
-  /** the start of a line too long to hold was logged: drop the rest of it */
-  let skipping = false;
-  let second = -1;
-  let count = 0;
+  const quietMs = o.quietMs ?? 1000;
+  let tokens = burst;
+  let at = now();
   let dropped = 0;
+  let quiet: ReturnType<typeof setTimeout> | undefined;
   const cut = (s: string) => (s.length > maxLine ? s.slice(0, maxLine) + "…" : s);
+  const flush = () => {
+    clearTimeout(quiet);
+    quiet = undefined;
+    if (!dropped) return;
+    log(`worker ${key}: (${dropped} line${dropped === 1 ? "" : "s"} left out)`);
+    dropped = 0;
+  };
   const emit = (line: string) => {
-    const sec = Math.floor(now() / 1000);
-    if (sec !== second) {
-      if (dropped) log(`worker ${key}: (${dropped} lines left out)`);
-      second = sec;
-      count = 0;
-      dropped = 0;
-    }
-    if (count >= perSecond) {
+    const t = now();
+    tokens = Math.min(burst, tokens + ((t - at) / 1000) * perSecond);
+    at = t;
+    if (tokens < 1) {
       dropped++;
+      clearTimeout(quiet);
+      quiet = setTimeout(flush, quietMs);
+      quiet.unref();
       return;
     }
-    count++;
+    tokens--;
+    flush();
     log(`worker ${key}: ${cut(line.replace(/\r$/, "").replace(/[\x00-\x08\x0a-\x1f\x7f]/g, "?"))}`);
   };
-  const take = (s: string) => {
-    while (s.length) {
-      const i = s.indexOf("\n");
-      if (i < 0) {
-        if (skipping) return;
-        buf += s;
-        if (buf.length > maxLine) {
-          emit(buf);
-          buf = "";
-          skipping = true;
+  const stream = () => {
+    const decoder = new StringDecoder("utf8");
+    let buf = "";
+    /** the start of a line too long to hold was logged: drop the rest of it */
+    let skipping = false;
+    const take = (s: string) => {
+      while (s.length) {
+        const i = s.indexOf("\n");
+        if (i < 0) {
+          if (skipping) return;
+          buf += s;
+          if (buf.length > maxLine) {
+            emit(buf);
+            buf = "";
+            skipping = true;
+          }
+          return;
         }
-        return;
+        const part = s.slice(0, i);
+        s = s.slice(i + 1);
+        if (skipping) skipping = false;
+        else emit(buf + part);
+        buf = "";
       }
-      const part = s.slice(0, i);
-      s = s.slice(i + 1);
-      if (skipping) skipping = false;
-      else emit(buf + part);
-      buf = "";
-    }
+    };
+    return {
+      write: (chunk: Buffer | string) => take(typeof chunk === "string" ? chunk : decoder.write(chunk)),
+      end: () => {
+        take(decoder.end());
+        if (buf && !skipping) emit(buf);
+        buf = "";
+        flush();
+      },
+    };
   };
-  return {
-    write: (chunk: Buffer | string) => take(typeof chunk === "string" ? chunk : decoder.write(chunk)),
-    end: () => {
-      take(decoder.end());
-      if (buf && !skipping) emit(buf);
-      buf = "";
-    },
-  };
+  return { stream, flush };
 }
 
 interface Live {
@@ -178,6 +197,12 @@ interface Live {
   reserved: number;
   exited: Promise<void>;
   stopping: Promise<void> | null;
+  /** the pool chose to stop it (idle, room, its account, close); else it went by itself */
+  byPool: boolean;
+  /** when it was put in `workers` (null before) */
+  readyAt: number | null;
+  /** streams open on its mux when its connection or process ended, read before the mux fails them */
+  openAtEnd: number | undefined;
   probing: boolean;
 }
 
@@ -192,9 +217,15 @@ interface Starting {
   promise: Promise<Live | Refusal | null>;
   /** requests waiting for this start */
   waiters: number;
-  /** `stopKey`, `stopAccount` or `close` came during the start: the worker is stopped as soon as it is up, and the waiters get `WorkerGone` */
+  /**
+   * `stopKey`, `stopAccount` or `close` came during the start: the worker is stopped as soon as it is up, and the waiters start again
+   * (after that stop), or get `WorkerGone` when the pool is closing
+   */
   cancelled: boolean;
 }
+
+/** a worker that ends by itself this soon after READY, with nothing open, counts as a failed start (back-off) */
+const EARLY_EXIT_MS = 5_000;
 
 const START_FAILED: Refusal = { status: 503, error: "worker failed to start" };
 const noop = () => {};
@@ -234,6 +265,8 @@ export class WorkerPool {
   private readonly failed = new Map<string, number>();
   /** every process not yet stopped, also those out of `workers` */
   private readonly procs = new Set<Live>();
+  /** per key, the stop of its old process: a new start for the key waits for it */
+  private readonly stoppingKeys = new Map<string, Promise<void>>();
   private readonly timer: ReturnType<typeof setInterval>;
   private closed = false;
 
@@ -324,41 +357,60 @@ export class WorkerPool {
     return w.mux.inFlight() > 0 || w.jobs > 0 || w.reserved > 0;
   }
 
-  /** the live worker for the key, the start in progress, or a new start (which may first stop the least recently used idle worker) */
-  private join(spec: WorkerSpec): Promise<Live | Refusal> {
+  /**
+   * The worker for the key once it is up: the start in progress, or a new start. A new start is first checked against the back-off and
+   * the rules, and only then may stop the least recently used idle worker to make room. That stop is not awaited, so while stopped
+   * workers finish (at most `STOP_MS` after BYE, and as much again after SIGKILL) there can be up to twice `max` processes.
+   */
+  private async join(spec: WorkerSpec): Promise<Live | Refusal> {
     const key = spec.key;
     let st = this.starting.get(key);
     if (!st) {
-      const no = accountRefusal(spec.account);
+      const until = this.failed.get(key);
+      if (until !== undefined && this.now() < until) return START_FAILED;
+      const no = accountRefusal(spec.account) ?? (await this.refusal(spec));
       if (no) {
         this.log(`worker ${key}: not started: ${no.error}`);
-        return Promise.resolve(no);
+        return no;
       }
-      const until = this.failed.get(key);
-      if (until !== undefined && this.now() < until) return Promise.resolve(START_FAILED);
-      this.failed.delete(key);
-      if (this.workers.size + this.starting.size >= this.max) {
-        let lru: Live | undefined;
-        for (const w of this.workers.values()) if (!this.busy(w) && (!lru || w.lastUsed < lru.lastUsed)) lru = w;
-        if (!lru) return Promise.reject(new PoolFull());
-        void this.stop(lru);
+      // (the checks above may have waited: look again)
+      if (this.closed) throw new WorkerGone();
+      const live = this.workers.get(key);
+      if (live) {
+        live.reserved++;
+        return live;
       }
-      st = { spec, promise: null!, waiters: 0, cancelled: false };
-      // in the map before the start runs, so that a start which ends at once still finds (and removes) its own slot
-      this.starting.set(key, st);
-      st.promise = this.start(st);
+      st = this.starting.get(key);
+      if (!st) {
+        this.failed.delete(key);
+        if (this.workers.size + this.starting.size >= this.max) {
+          let lru: Live | undefined;
+          for (const w of this.workers.values()) if (!this.busy(w) && (!lru || w.lastUsed < lru.lastUsed)) lru = w;
+          if (!lru) throw new PoolFull();
+          void this.stop(lru);
+        }
+        st = { spec, promise: null!, waiters: 0, cancelled: false };
+        // in the map before the start runs, so that a start which ends at once still finds (and removes) its own slot
+        this.starting.set(key, st);
+        st.promise = this.start(st);
+      }
     }
     st.waiters++;
-    return st.promise.then((r) => {
-      if (r === null) throw new WorkerGone();
-      return r;
-    });
+    const r = await st.promise;
+    if (r !== null) return r;
+    // the start was cancelled by a stop of the key or the account: start again (it waits for that stop), unless the pool is closing
+    if (this.closed) throw new WorkerGone();
+    return this.join(spec);
   }
 
   /** what the sandbox rules refuse before anything is started, or null */
   private async refusal(spec: WorkerSpec): Promise<Refusal | null> {
     const a = spec.account;
-    if (a.uid !== process.getuid?.() && !(await launcherAvailable())) return { status: 503, error: "workers need filedeck-sandbox" };
+    if (a.uid !== process.getuid?.()) {
+      // the worker's TMPDIR and HOME: this process's own temporary folder is not the account's to use
+      if (!spec.tmp) return { status: 503, error: "worker has no temporary folder" };
+      if (!(await launcherAvailable())) return { status: 503, error: "workers need filedeck-sandbox" };
+    }
     if (spec.landlock && (await sandboxInfo()).state !== "landlock") return { status: 503, error: "virtual accounts need Landlock on this machine" };
     return null;
   }
@@ -380,11 +432,9 @@ export class WorkerPool {
     let child: ChildProcess | undefined;
     let w: Live | undefined;
     try {
-      const no = await this.refusal(spec);
-      if (no) {
-        this.log(`worker ${key}: not started: ${no.error}`);
-        return no;
-      }
+      // the key's old process (stopped for its account, or gone by itself) is out of the way first
+      const old = this.stoppingKeys.get(key);
+      if (old) await old;
       if (st.cancelled || this.closed) return null;
       try {
         child = await this.startFn(spec);
@@ -407,6 +457,7 @@ export class WorkerPool {
         return null;
       }
       w.lastUsed = this.now();
+      w.readyAt = w.lastUsed;
       w.reserved = st.waiters;
       this.workers.set(key, w);
       return w;
@@ -438,10 +489,11 @@ export class WorkerPool {
       if (child.exitCode !== null || child.signalCode !== null) res();
       else child.once("exit", () => res());
     });
-    // stdout is read only so the worker never blocks on it; both go through the same limits
+    // stdout is read only so the worker never blocks on it; both share one log budget
+    const wl = workerLog(key, this.log);
     for (const s of [child.stderr, child.stdout]) {
       if (!s) continue;
-      const l = lineLogger(key, this.log);
+      const l = wl.stream();
       s.on("data", (d: Buffer) => l.write(d));
       s.on("end", () => l.end());
       s.on("error", noop);
@@ -451,32 +503,63 @@ export class WorkerPool {
       child.kill("SIGKILL");
       throw new Error("the worker process did not start");
     }
+    // (before the mux's own listeners, which fail every open stream)
+    let w: Live | undefined;
+    const ending = () => {
+      if (w) w.openAtEnd ??= w.mux.inFlight();
+    };
+    sock.on("end", ending);
+    sock.on("close", ending);
+    sock.on("error", ending);
     const handler = this.rootHandler;
     const mux = new Mux(sock, "root", {
       onRequest: handler ? (req) => handler(spec, req) : async () => Response.json({ error: "not found" }, { status: 404 }),
     });
-    const w: Live = { key, spec, child, pid: child.pid, mux, lastUsed: this.now(), jobs: 0, reserved: 0, exited, stopping: null, probing: false };
-    this.procs.add(w);
+    const live: Live = {
+      key, spec, child, pid: child.pid, mux, lastUsed: this.now(), jobs: 0, reserved: 0, exited, stopping: null, byPool: false, readyAt: null,
+      openAtEnd: undefined, probing: false,
+    };
+    w = live;
+    this.procs.add(live);
     // the process exits, or its connection ends: the worker is gone either way
     void exited.then(() => {
-      this.procs.delete(w);
-      void this.stop(w);
+      this.procs.delete(live);
+      this.ended(live);
     });
-    void mux.closed.then(() => void this.stop(w));
-    return w;
+    void mux.closed.then(() => this.ended(live));
+    return live;
+  }
+
+  /** a worker's process or connection has ended; one that went by itself soon after READY with nothing open gets the back-off */
+  private ended(w: Live): void {
+    w.openAtEnd ??= w.mux.inFlight();
+    const up = w.readyAt === null ? Infinity : this.now() - w.readyAt;
+    if (!w.stopping && !w.byPool && !this.closed && w.openAtEnd === 0 && up < EARLY_EXIT_MS) {
+      this.log(`worker ${w.key}: exited ${Math.round(up / 1000)} s after it started; the next start waits ${BACKOFF_MS / 1000} s`);
+      this.failed.set(w.key, this.now() + BACKOFF_MS);
+    }
+    void this.stop(w, false);
   }
 
   /** out of the map first (so nothing new reaches it), then BYE, then SIGKILL after `STOP_MS`; resolves once the process has exited */
-  private stop(w: Live): Promise<void> {
+  private stop(w: Live, byPool = true): Promise<void> {
+    if (byPool && !w.stopping) w.byPool = true;
     if (this.workers.get(w.key) === w) this.workers.delete(w.key);
-    w.stopping ??= (async () => {
+    if (w.stopping) return w.stopping;
+    const stopping = (w.stopping = (async () => {
       w.mux.close();
       if (await within(w.exited, STOP_MS)) return;
       this.log(`worker ${w.key}: did not stop within ${STOP_MS / 1000} s; killed`);
       w.child.kill("SIGKILL");
       await within(w.exited, STOP_MS);
-    })();
-    return w.stopping;
+    })());
+    const prev = this.stoppingKeys.get(w.key);
+    const all = prev ? Promise.all([prev, stopping]).then(noop) : stopping;
+    this.stoppingKeys.set(w.key, all);
+    void all.then(() => {
+      if (this.stoppingKeys.get(w.key) === all) this.stoppingKeys.delete(w.key);
+    });
+    return stopping;
   }
 
   /** the idle check: stops workers idle for `idleMs`, and asks those that said they have jobs whether they still do */
