@@ -11,14 +11,21 @@ import type { ChildProcess } from "node:child_process";
  * The file is read by the machine's own `/bin/cat`, started through the launcher inside the machine's root (`--chroot`) as the user:
  * their uid, gid and groups, no capabilities, no-new-privileges and the launcher's seccomp filter. So a link in the home (also an absolute
  * one, such as `/etc/ssh/keys/alice`) resolves in the machine's root with the user's own rights, and root never opens or follows anything
- * in the user's home. A file the user cannot read, a missing file, a missing or odd `cat`, more than 256 KiB, no end within 5 seconds (a
- * FIFO, a hung network home) or output that is not UTF-8 gives `fail`, and one log line with the reason (never the key or the signature).
+ * in the user's home. A file the user cannot read, a missing file, a missing or odd `cat`, more than 256 KiB or output that is not UTF-8
+ * gives `fail`, and one log line with the reason (never the key or the signature). No end within 5 seconds from the end of the account
+ * lookup (a FIFO, a hung network home), or no account lookup within its own limit, is not an answer: the agent says `unavailable`, and
+ * the hub asks the next machine.
  */
 export type KeyResult = "ok" | "fail" | "unknown" | "refused";
 
 /** The most of `authorized_keys` that is read; a larger file is not used at all. */
 export const MAX_AUTHORIZED_KEYS = 256 * 1024;
 const TIMEOUT_MS = 5_000;
+/** The most the account lookup of a key check may take (the reader's 5 s start after it). */
+export const LOOKUP_TIMEOUT_MS = 3_000;
+
+/** A reader that did not end within its time (it is killed): no answer, so the check is unavailable rather than failed. */
+export class ReaderTimeout extends Error {}
 /**
  * Readers that may run at once. A place is given back only when the reader's process has closed, not when its answer is sent: a reader
  * stuck in the kernel after its kill (a hung NFS home in uninterruptible sleep) keeps its place, so stuck readers cannot pile up. The
@@ -32,7 +39,7 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
 /**
  * Reads `file` (a path in `root`, the machine's root) as `account`, with the machine's `/bin/cat` run inside `root` through the launcher.
  * Resolves with the text; rejects with the reason on a non-zero exit, a start that failed, more than `maxBytes`, no end within
- * `o.timeoutMs` (the reader is then killed) or output that is not UTF-8. Never runs as root. `o.closed` is called once, when the reader's
+ * `o.timeoutMs` (the reader is then killed; a `ReaderTimeout`) or output that is not UTF-8. Never runs as root. `o.closed` is called once, when the reader's
  * process has closed (or never started), which can be after the answer.
  */
 export async function readAsUser(root: string, account: LocalAccount, file: string, maxBytes: number, o: { timeoutMs: number; closed: () => void }): Promise<string> {
@@ -74,7 +81,7 @@ export async function readAsUser(root: string, account: LocalAccount, file: stri
       } else resolve(text!);
     };
     // (answered at once: a reader stuck in the kernel may take a while to go after the kill)
-    const timer = setTimeout(() => finish(new Error(`no end within the ${TIMEOUT_MS / 1000} s limit`)), Math.max(0, o.timeoutMs));
+    const timer = setTimeout(() => finish(new ReaderTimeout(`no end within the ${TIMEOUT_MS / 1000} s limit`)), Math.max(0, o.timeoutMs));
     child.stdout!.on("data", (d: Buffer) => {
       len += d.length;
       if (len > maxBytes) return finish(new Error(`larger than ${maxBytes / 1024} KiB`));
@@ -121,26 +128,28 @@ export class KeyCheck {
   private readonly read: typeof readAsUser;
   private readonly log: (s: string) => void;
   private readonly timeoutMs: number;
+  private readonly lookupTimeoutMs: number;
   private running = 0;
   private readonly waiting: (() => void)[] = [];
 
-  constructor(o: { root: string; accounts: AccountResolver; read?: typeof readAsUser; log?: (s: string) => void; timeoutMs?: number }) {
+  constructor(o: { root: string; accounts: AccountResolver; read?: typeof readAsUser; log?: (s: string) => void; timeoutMs?: number; lookupTimeoutMs?: number }) {
     this.root = o.root;
     this.accounts = o.accounts;
     this.read = o.read ?? readAsUser;
     this.log = o.log ?? ((s) => console.error(s));
     this.timeoutMs = o.timeoutMs ?? TIMEOUT_MS;
+    this.lookupTimeoutMs = o.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS;
   }
 
   /**
    * `unknown` for a name that is not a system account here, `refused` for one with uid 0, gid 0 or group 0 (nothing is read); `ok` when `message` is
    * a login message for this very name, its signature is good and the key is listed without options; else `fail`. Rejects when the
-   * account lookup fails, or when no reader place comes free within the time limit (5 s from the call): the caller answers "unavailable".
+   * account lookup fails or takes longer than its own limit (3 s), or when no reader place comes free, or the reader does not end, within
+   * the time limit (5 s from the end of the lookup): the caller answers "unavailable", and the hub asks the next machine.
    */
   async check(name: string, publicKey: string, message: Buffer, signature: Buffer): Promise<KeyResult> {
-    const deadline = Date.now() + this.timeoutMs;
     if (!validSystemName(name)) return "unknown";
-    const account = await signInAccount(this.accounts, name);
+    const account = await this.lookup(name);
     if (account === "root") return "refused";
     if (!account) return "unknown";
     // only a login message for this name counts: any other bytes the key signed (a signed commit, say) must not sign in
@@ -152,6 +161,8 @@ export class KeyCheck {
       this.log(`keys: the home of ${name} is not an absolute path`);
       return "fail";
     }
+    // (the reader's time starts here, after the lookup: a slow lookup does not eat into it)
+    const deadline = Date.now() + this.timeoutMs;
     if (!(await this.place(deadline))) throw new Error(`keys: no reader free within ${this.timeoutMs / 1000} s`);
     let left = false;
     const leave = () => {
@@ -163,10 +174,26 @@ export class KeyCheck {
     try {
       text = await this.read(this.root, account, path.posix.join(account.home, ".ssh/authorized_keys"), MAX_AUTHORIZED_KEYS, { timeoutMs: deadline - Date.now(), closed: leave });
     } catch (e) {
+      if (e instanceof ReaderTimeout) throw new Error(`keys: the authorized_keys of ${name} could not be read (${e.message})`);
       this.log(`keys: the authorized_keys of ${name} could not be read (${(e as Error)?.message ?? String(e)})`);
       return "fail";
     }
     return keyListed(text, publicKey) ? "ok" : "fail";
+  }
+
+  /** The account for sign-in, within `lookupTimeoutMs`; rejects when the lookup fails or does not answer in time. */
+  private async lookup(name: string): Promise<LocalAccount | "root" | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const looked = signInAccount(this.accounts, name);
+    looked.catch(() => undefined); // (a lookup that answers after its time is left to finish on its own)
+    try {
+      return await Promise.race([
+        looked,
+        new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`keys: no account lookup within ${this.lookupTimeoutMs / 1000} s`)), this.lookupTimeoutMs))),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** A reader place, waiting in order until `deadline`; false when the time ran out first. */

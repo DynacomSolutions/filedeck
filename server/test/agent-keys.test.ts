@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
-import { KeyCheck, keyListed, readAsUser, logLine, MAX_AUTHORIZED_KEYS, MAX_READERS } from "../src/agent-keys.ts";
+import { KeyCheck, keyListed, readAsUser, logLine, MAX_AUTHORIZED_KEYS, MAX_READERS, ReaderTimeout } from "../src/agent-keys.ts";
 import { loginMessage, parseLoginMessage } from "../src/auth/sshkey.ts";
 import type { AccountResolver, LocalAccount } from "../src/local-accounts.ts";
 import { resetSandbox } from "../src/sandbox.ts";
@@ -216,6 +216,33 @@ test("at most 4 readers at once; the place is given back when the reader is gone
   assert.ok(calls[0]!.timeoutMs > 4000 && calls[0]!.timeoutMs <= 5000, String(calls[0]!.timeoutMs));
 });
 
+test("the reader's 5 s start after the account lookup; a reader that runs out of time gives unavailable, not fail", async () => {
+  const s = signed();
+  // a lookup that takes 300 ms leaves the reader its whole time
+  const slow: AccountResolver = withSignIn({ resolve: async (name) => (await new Promise((r) => setTimeout(r, 300)), { name, uid: 1234, gid: 1234, groups: [1234], home: "/home/" + name }) });
+  const { read, calls } = fakeRead(FILE);
+  assert.equal(await new KeyCheck({ root: "/", accounts: slow, read, timeoutMs: 500 }).check("alice", ED_LINE, s.message, s.signature), "ok");
+  assert.ok(calls[0]!.timeoutMs > 450 && calls[0]!.timeoutMs <= 500, String(calls[0]!.timeoutMs));
+  // the reader's own limit: the call rejects (the route answers unavailable, and the hub asks the next machine)
+  const log: string[] = [];
+  const stuck = fakeRead(() => Promise.reject(new ReaderTimeout("no end within the 5 s limit")));
+  await assert.rejects(new KeyCheck({ root: "/", accounts: resolverWith({ alice: {} }), read: stuck.read, log: (l) => log.push(l) }).check("alice", ED_LINE, s.message, s.signature), /5 s/);
+  // any other read error is still a fail
+  const denied = fakeRead(() => Promise.reject(new Error("exit 1: Permission denied")));
+  assert.equal(await new KeyCheck({ root: "/", accounts: resolverWith({ alice: {} }), read: denied.read, log: () => {} }).check("alice", ED_LINE, s.message, s.signature), "fail");
+});
+
+test("the account lookup has its own limit: one that does not answer in time rejects (unavailable), and nothing is read", async () => {
+  const s = signed();
+  const { read, calls } = fakeRead(FILE);
+  const hang: AccountResolver = withSignIn({ resolve: () => new Promise(() => {}) });
+  const t0 = Date.now();
+  await assert.rejects(new KeyCheck({ root: "/", accounts: hang, read, lookupTimeoutMs: 150 }).check("alice", ED_LINE, s.message, s.signature), /lookup/);
+  const ms = Date.now() - t0;
+  assert.ok(ms >= 140 && ms < 2000, `${ms} ms`);
+  assert.equal(calls.length, 0);
+});
+
 // ------------------------------------------------------------------ the route
 
 const T = "agent-secret-keys";
@@ -297,6 +324,9 @@ test("key route: no token is 401, a bad body is 400 and echoes nothing, auth off
 test("key route: no key check here, or a lookup that fails, gives unavailable", async () => {
   const none = agent({ FILEDECK_AUTH: "on" });
   assert.deepEqual(await (await postKey(none, goodBody())).json(), { result: "unavailable" });
+  // a reader that runs out of time: unavailable, so the hub goes on to the next machine
+  const late = new KeyCheck({ root: "/", accounts: resolverWith({ alice: {} }), read: fakeRead(() => Promise.reject(new ReaderTimeout("no end within the 5 s limit"))).read, log: () => {} });
+  assert.deepEqual(await (await postKey(agent({ FILEDECK_AUTH: "on" }, { keys: late }), goodBody())).json(), { result: "unavailable" });
   const keys = new KeyCheck({ root: "/", accounts: withSignIn({ resolve: () => Promise.reject(new Error("helper stopped")) }), read: fakeRead(FILE).read, log: () => {} });
   const broken = agent({ FILEDECK_AUTH: "on" }, { keys });
   const r = await postKey(broken, goodBody());
@@ -399,7 +429,7 @@ test("an absolute link in the machine's root reaches the machine's file; a link 
   assert.equal(log.length, 1);
 });
 
-test("a FIFO, a large file, a file that is not UTF-8, a missing file and a missing cat each give fail", { skip: ROOT_ONLY }, async () => {
+test("a FIFO (unavailable), a large file, a file that is not UTF-8, a missing file and a missing cat (each fail)", { skip: ROOT_ONLY }, async () => {
   const base = fs.mkdtempSync(path.join(tmp, "odd-"));
   fs.chmodSync(base, 0o755);
   const m = machineRoot(base);
@@ -412,10 +442,9 @@ test("a FIFO, a large file, a file that is not UTF-8, a missing file and a missi
   execFileSync("mkfifo", ["-m", "0600", file]);
   fs.chownSync(file, USER, USER);
   const t0 = Date.now();
-  assert.equal(await check(), "fail");
+  await assert.rejects(check(), /5 s/); // (no answer in time: the route says unavailable, and the hub asks the next machine)
   const took = Date.now() - t0;
   assert.ok(took >= 4500 && took < 8000, `took ${took} ms`);
-  assert.match(log.at(-1)!, /5 s/);
   // over the limit, even with the key in its first line
   writeAs(file, `${ED_LINE}\n${"#".repeat(MAX_AUTHORIZED_KEYS)}\n`, USER, USER, 0o600);
   assert.equal(await check(), "fail");
