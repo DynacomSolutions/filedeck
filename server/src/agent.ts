@@ -11,9 +11,32 @@ import { requestGuard } from "./request-guard.ts";
 import { readOnlyGuard, hitsReadOnly } from "./readonly.ts";
 import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
+import { makeResolver, type AccountResolver } from "./local-accounts.ts";
+import { WorkerPool, type StartWorker } from "./worker-pool.ts";
+import { makeWorkerSpec, workerGate } from "./agent-workers.ts";
 
-export function createAgent(cfg: Config, auditSink?: AuditSink) {
+export interface AgentOptions {
+  /** the account lookup (sign-in on); default: `makeResolver` */
+  accounts?: AccountResolver;
+  /** how the pool starts a worker process; default: through the sandbox launcher */
+  startWorker?: StartWorker;
+}
+
+/**
+ * The agent's app. With sign-in on it also makes the account lookup (started here, awaited by the first request that needs it) and the
+ * worker pool, and sends every request that is not one of the root process's own routes to the account's worker (agent-workers.ts).
+ * Sign-in off: no lookup, no pool, no gate; every route runs here as before.
+ */
+export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptions = {}) {
   const app = new Hono();
+  let pool: WorkerPool | undefined;
+  let accounts: AccountResolver | undefined;
+  if (cfg.auth) {
+    const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : makeResolver(cfg, (s) => console.error(s)).then((r) => r.resolver);
+    found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
+    accounts = { resolve: async (name, fresh) => (await found).resolve(name, fresh) };
+    pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker });
+  }
   app.use("*", trustProxies(cfg.trustedProxies));
   app.use("*", agentAuth(cfg.agentToken));
   app.use("*", agentUser(cfg, auditSink)); // with auth on: a valid signed user header, or 401
@@ -21,6 +44,9 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   app.use("*", audit(`agent:${cfg.node}`, auditSink));
   app.use("*", (_c, next) => withReadOnly(cfg.root, cfg.readOnly, next)); // the pinned operations re-check where their descriptors really point
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
+  // sign-in on: from here on, only the root process's own routes are served in this process (the root-side checks above still apply)
+  if (pool && accounts) app.use("*", workerGate(cfg, { pool, accounts, spec: makeWorkerSpec(cfg) }));
+  (app as unknown as { pool?: WorkerPool }).pool = pool;
   const root = cfg.root;
 
   app.onError(agentError);
@@ -61,7 +87,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink) {
   let leaving: Promise<void> | undefined;
   const leave = () =>
     (leaving ??= (async () => {
-      await jobs.interrupt();
+      await Promise.all([jobs.interrupt(), pool?.close()]);
       await fan.handover();
       await sizes.releaseLease();
     })());

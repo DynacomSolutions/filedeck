@@ -25,6 +25,8 @@ const allowed = [
   /^(?:git )?sandbox live: skipped \(not running as root\)$/,
   // the worker tests (sign-in part 2) that need root to start a worker as another user skip in the unprivileged pass; the root pass runs them.
   /^worker live: skipped \(not running as root\)$/,
+  // server/test/agent-workers.test.ts: two virtual accounts with one runAs need Landlock (their workers are confined); a kernel without it skips.
+  /^sandbox live: skipped \(no Landlock on this kernel\)$/,
   // server/test/host-helpers.test.ts: the host helper tests need root (the chroot) and a glibc machine (dynamic glibc helpers);
   // the root pass sets FILEDECK_REQUIRE_HOST_HELPERS=1, which turns the glibc skip into a failure.
   /^host helpers live: skipped \(not running as root\)$/,

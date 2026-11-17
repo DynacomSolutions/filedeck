@@ -6,12 +6,27 @@ import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts";
+import { useSandboxOrOff } from "./sandbox-env.ts";
+import { chownForTest, fakeResolver, privateTmpdir } from "./worker-env.ts";
+
+await useSandboxOrOff(); // with sign-in on, the file routes run in a worker started through the sandbox launcher
 
 const T = "agent-secret-header";
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-authagent-")));
-after(() => fs.rmSync(tmp, { recursive: true, force: true }));
-const agent = (env: Record<string, string>, sink?: (l: string) => void) =>
-  createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_AGENT_TOKEN: T, ...env } as never), sink);
+fs.chmodSync(tmp, 0o755);
+chownForTest(tmp); // (a root suite runs its workers as nobody)
+const apps: { close(): Promise<void> }[] = [];
+const dropTmp = privateTmpdir(); // the workers' folders go with it
+after(async () => {
+  for (const a of apps) await a.close();
+  fs.rmSync(tmp, { recursive: true, force: true });
+  dropTmp();
+});
+const agent = (env: Record<string, string>, sink?: (l: string) => void) => {
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t", FILEDECK_AGENT_TOKEN: T, ...env } as never), sink, { accounts: fakeResolver({ guest: {} }) });
+  apps.push(app as unknown as { close(): Promise<void> });
+  return app;
+};
 const claim = (iat: number): UserClaim => ({ kind: "virt", name: "guest1", epoch: 1, runAs: "guest", grants: [{ path: "/", write: true }], iat });
 const get = (app: ReturnType<typeof agent>, p: string, header?: string) =>
   app.request(p, { headers: { authorization: `Bearer ${T}`, ...(header ? { [USER_HEADER]: header } : {}) } });

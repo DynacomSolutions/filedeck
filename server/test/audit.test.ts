@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
+import { useSandboxOrOff } from "./sandbox-env.ts";
+import { chownForTest, fakeResolver, privateTmpdir } from "./worker-env.ts";
+
+await useSandboxOrOff(); // with sign-in on, the agent's file routes run in a worker started through the sandbox launcher
 
 test("audit log records writes, never reads, never contents", async () => {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-audit-")));
@@ -74,7 +78,12 @@ test("audit user: hub and agent lines both name the account", async () => {
   const hubLines: string[] = [];
   const root = path.join(tmp, "root");
   fs.mkdirSync(root);
-  const agent = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "A", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on" } as never), (l) => agentLines.push(l));
+  fs.chmodSync(tmp, 0o755);
+  chownForTest(root); // (a root suite runs its workers as nobody)
+  const dropTmp = privateTmpdir(); // the workers' folders go with it
+  const agent = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "A", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on" } as never), (l) => agentLines.push(l), {
+    accounts: fakeResolver({ guest: {} }),
+  });
   const srv = await new Promise<ReturnType<typeof serve>>((res) => {
     const s = serve({ fetch: agent.fetch, port: 0 }, () => res(s));
   });
@@ -92,6 +101,8 @@ test("audit user: hub and agent lines both name the account", async () => {
     assert.ok(!hubLines.concat(agentLines).join("\n").includes("pw-guest1"));
   } finally {
     await hub.close();
+    await (agent as unknown as { close(): Promise<void> }).close();
+    dropTmp();
     srv.close();
     (srv as unknown as { closeAllConnections?(): void }).closeAllConnections?.();
     fs.rmSync(tmp, { recursive: true, force: true });

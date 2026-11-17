@@ -44,3 +44,20 @@ export function fakeResolver(map: Record<string, Partial<LocalAccount>> = {}): A
     },
   };
 }
+
+/**
+ * Points `TMPDIR` at a new folder for the rest of this test file, so the folders the agent makes there for its workers
+ * (`filedeck-workers/`) go with it: the returned function removes it. The folder can be passed through (0755), as a worker that runs as
+ * another account must reach its own folders below it.
+ */
+export function privateTmpdir(): () => void {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-workertmp-")));
+  fs.chmodSync(dir, 0o755);
+  const old = process.env.TMPDIR;
+  process.env.TMPDIR = dir;
+  return () => {
+    if (old === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = old;
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+}
