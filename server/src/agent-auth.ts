@@ -1,7 +1,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import { currentUser } from "./auth/context.ts";
-import { claimFor, signClaim, USER_HEADER, type Identity } from "./auth/identity.ts";
+import { claimFor, signClaim, verifyClaim, USER_HEADER, type Identity, type UserClaim } from "./auth/identity.ts";
+import type { Config } from "./config.ts";
 
 /**
  * Optional shared secret between the hub and the agents (FILEDECK_AGENT_TOKEN
@@ -20,6 +21,32 @@ export function agentAuth(token: string | undefined): MiddlewareHandler {
     if (c.req.path === "/healthz" || c.req.path === "/metrics") return next();
     const m = /^Bearer (.+)$/.exec(c.req.header("authorization") ?? "");
     if (!m || !timingSafeEqual(digest(m[1] as string), want)) return c.json({ error: "unauthorized" }, 401);
+    return next();
+  };
+}
+
+declare module "hono" {
+  /** `user`: who is behind the request. The hub stores kind and name; an agent stores the whole verified claim. Only with auth on. */
+  interface ContextVariableMap {
+    user: Pick<UserClaim, "kind" | "name"> & Partial<UserClaim>;
+  }
+}
+
+/**
+ * With auth on, every request except the two open probes (the same two paths the hub sends without a user) must carry a
+ * claim signed with the agent token and still fresh. A bad, missing or stale header gives 401 `no user`; neither the
+ * header nor its MAC is ever logged or echoed. The verified claim is stored for the audit and the routes. Part 2 enforces
+ * its `runAs` and `grants`; here it is only verified and kept. Mount it right after `agentAuth`. Off: nothing is checked.
+ */
+export function agentUser(cfg: Config): MiddlewareHandler {
+  if (!cfg.auth) return (_c, next) => next();
+  const token = cfg.agentToken;
+  return async (c, next) => {
+    if (c.req.path === "/healthz" || c.req.path === "/metrics") return next();
+    const value = c.req.header(USER_HEADER);
+    const claim = token && value ? verifyClaim(value, token, Date.now()) : null;
+    if (!claim) return c.json({ error: "no user" }, 401);
+    c.set("user", claim);
     return next();
   };
 }

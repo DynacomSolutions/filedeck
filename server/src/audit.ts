@@ -103,6 +103,12 @@ export function auditRefusal(who: string, c: import("hono").Context, status: num
   );
 }
 
+/** `sys:<name>` or `virt:<name>` of the account behind a request (set by the hub's gate or the agent's check), else nothing. */
+function userOf(c: import("hono").Context): { user?: string } {
+  const u = (c as { get(k: string): unknown }).get("user") as { kind?: string; name?: string } | undefined;
+  return u?.kind && u.name ? { user: `${u.kind}:${u.name}` } : {};
+}
+
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {
   return async (c, next) => {
     const m = c.req.method;
@@ -134,6 +140,7 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
         audit: true,
         ts: new Date(t0).toISOString(),
         who,
+        ...userOf(c),
         ...clientOf(c),
         method: m,
         route: clip(p),

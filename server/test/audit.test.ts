@@ -64,3 +64,48 @@ test("the forwarded chain is believed only as far as the configured number of pr
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("audit user: hub and agent lines both name the account", async () => {
+  const { createHub } = await import("../src/hub.ts");
+  const { serve } = await import("@hono/node-server");
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-audit-user-")));
+  const T = "agent-secret-audit";
+  const agentLines: string[] = [];
+  const hubLines: string[] = [];
+  const root = path.join(tmp, "root");
+  fs.mkdirSync(root);
+  const agent = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "A", FILEDECK_AGENT_TOKEN: T, FILEDECK_AUTH: "on" } as never), (l) => agentLines.push(l));
+  const srv = await new Promise<ReturnType<typeof serve>>((res) => {
+    const s = serve({ fetch: agent.fetch, port: 0 }, () => res(s));
+  });
+  const hub = createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `A=http://127.0.0.1:${(srv.address() as { port: number }).port}` } as never), undefined, (l) => hubLines.push(l));
+  try {
+    hub.auth!.accounts.create({ name: "guest1", password: "pw-guest1-123", admin: false, nodes: { A: { runAs: "guest", grants: [{ path: "/", write: true }] } } });
+    const cookie = `__Host-filedeck=${hub.auth!.sessions.create("virt", "guest1")}`;
+    const peer = { incoming: { socket: { remoteAddress: "127.0.0.1", encrypted: false } } };
+    const r = await hub.request("http://localhost/api/nodes/A/api/fs/mkdir", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ path: "/made" }) }, peer as never);
+    assert.equal(r.status, 201);
+    const h = hubLines.map((l) => JSON.parse(l)).find((l) => l.route.endsWith("/api/fs/mkdir"));
+    const a = agentLines.map((l) => JSON.parse(l)).find((l) => l.route === "/api/fs/mkdir");
+    assert.equal(h.user, "virt:guest1");
+    assert.equal(a.user, "virt:guest1");
+    assert.ok(!hubLines.concat(agentLines).join("\n").includes("pw-guest1"));
+  } finally {
+    await hub.close();
+    srv.close();
+    (srv as unknown as { closeAllConnections?(): void }).closeAllConnections?.();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("audit leaves the user out when there is none", async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-audit-nouser-")));
+  const lines: string[] = [];
+  try {
+    const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never), (l) => lines.push(l));
+    await app.request("/api/fs/mkdir", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/m" }) });
+    assert.ok(!("user" in JSON.parse(lines[0]!)));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
