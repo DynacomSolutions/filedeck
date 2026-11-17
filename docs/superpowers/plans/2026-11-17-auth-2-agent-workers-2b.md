@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 22, TypeScript, Hono, `node:test`; C (glibc, dynamic) with `dlopen("libpam.so.0")`; React 19.
 
-**Spec:** `docs/superpowers/specs/2026-11-17-authentication-design.md` ("Sign-in", "Acting as root", "Accounts and identity"). Needs part 2a (`docs/superpowers/plans/2026-11-17-auth-2-agent-workers.md`): `runHostHelper`, `installHostHelpers`, `AccountResolver`, `workerGate` and `ROOT_ROUTES`.
+**Spec:** `docs/superpowers/specs/2026-11-17-authentication-design.md` ("Sign-in", "Acting as root", "Accounts and identity"). Needs part 2a (`docs/superpowers/plans/2026-11-17-auth-2-agent-workers.md`): `runHostHelper` (helpers run from the image by descriptor, `--exec-outside`; nothing is copied to the host), `AccountResolver` (failures other than "unknown" reject), `workerGate` and `ROOT_ROUTES`.
 
 **State after 2b (not released):** part 2 is complete: system users and virtual accounts sign in and work with their own rights. Accounts, grants and sessions still have no admin screens (part 3), so the docs keep `FILEDECK_AUTH` marked "not ready" and the release is board row 20.160.
 
@@ -52,7 +52,7 @@
 - `host-pam.ts`:
   - `type PamResult = "ok" | "fail" | "unknown" | "unavailable"`
   - `class HostPam { constructor(o: { run: (name: string, stdin: Buffer) => Promise<{ code: number | null }>; log?: (s: string) => void }); check(name: string, password: string): Promise<PamResult> }`. Maps 0 to `ok`; 1, 2 and 3 to `fail` (3 logs `pam: the service asked more than one question; only one password prompt is supported`); 4 to `unknown`; anything else or a timeout to `unavailable`. Names failing `validSystemName` give `unknown` without running anything.
-  - `hostPam(cfg: Config, helpers: { root: string; dir: string }): HostPam`: `run` is `runHostHelper(root, dir, "filedeck-pam", [cfg.pamService, name], { stdin, keepCaps: ["dac_read_search"], allowMetadata: true })`.
+  - `hostPam(cfg: Config, helpers: { root: string; dir: string }): HostPam`: `run` is `runHostHelper(root, dir, "filedeck-pam", [cfg.pamService, name], { stdin, runs as root (no `uid`), keepCaps: ["dac_read_search"], allowMetadata: true })`.
 - `agent-auth-routes.ts`: `registerAgentAuthRoutes(app: Hono, o: { pam?: HostPam; keys?: KeyCheck; accounts: () => Promise<AccountResolver> })` (`KeyCheck` is Task 2). `POST /api/auth/password {name, password}` answers 200 `{result: PamResult}`; `unavailable` when there is no `pam`. Auth off: the routes do not exist.
 - `Config.pamService: string` (`FILEDECK_PAM_SERVICE`, default `filedeck`).
 - `createAgent` opts gain `pam?: HostPam`. With auth on and no `opts.pam`, the agent makes one from `makeResolver(...).helpers` when that is set, and logs `system sign-in: unavailable (<reason>)` otherwise.
