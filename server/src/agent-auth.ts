@@ -92,12 +92,14 @@ export class NoAccessError extends Error {
 }
 
 /**
- * Whether an account may use a node at all. A system account may use every node in this part (part 2 narrows it to the
- * machines where the account exists); a virtual account only the nodes it has access on. With auth off there is no
- * account, and every node is open as before.
+ * Whether an account may use a node at all. A system account may use every node except one where `present` (the hub's presence
+ * cache, auth/presence.ts) says the account does not exist; an unknown answer keeps the node open, and the agent itself refuses a name
+ * it does not know. A virtual account may use only the nodes it has access on. With auth off there is no account, and every node is
+ * open as before.
  */
-export function canUseNode(id: Identity | undefined, node: string): boolean {
-  if (!id || id.kind === "sys") return true;
+export function canUseNode(id: Identity | undefined, node: string, present?: (name: string, node: string) => boolean | undefined): boolean {
+  if (!id) return true;
+  if (id.kind === "sys") return present?.(id.name, node) !== false;
   return Object.hasOwn(id.nodes, node);
 }
 

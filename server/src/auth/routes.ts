@@ -53,6 +53,11 @@ export interface AuthDeps {
   system: SystemAuth;
   /** clock for the challenge limit (tests) */
   now?: () => number;
+  /**
+   * Called after each sign-in, before the answer goes out. It must not wait: the hub starts the presence refresh of a system account
+   * here (auth/presence.ts). A throw is ignored; it never fails the sign-in.
+   */
+  onSignIn?: (kind: "sys" | "virt", name: string) => void;
 }
 
 /** Notes when the request arrived, so the floor on failed sign-ins counts the time spent before the route. Put it first. */
@@ -172,6 +177,11 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     const old = getCookie(c, COOKIE);
     if (old) sessions.destroy(old);
     const raw = sessions.create(kind, name);
+    try {
+      deps.onSignIn?.(kind, name);
+    } catch {
+      /* the sign-in stands */
+    }
     const id = kind === "virt" ? accounts.identity("virt", name) : sysIdentity(cfg, accounts, name);
     const maxAge = Math.floor(cfg.sessionMaxMs / 1000);
     return c.json({ auth: true, kind, name, admin: id?.admin ?? false }, 200, { "set-cookie": `${COOKIE}=${raw}; Max-Age=${maxAge}; ${COOKIE_ATTRS}` });

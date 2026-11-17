@@ -62,7 +62,8 @@ interface Rec {
 }
 /** Every request any agent got, in order. */
 const seen: Rec[] = [];
-const authRecs = () => seen.filter((r) => r.path.startsWith("/api/auth/"));
+/** The sign-in calls the agents got. The presence lookups a sign-in starts (auth-presence.test.ts) run on their own time, so they are left out. */
+const authRecs = () => seen.filter((r) => r.path.startsWith("/api/auth/") && r.path !== "/api/auth/lookup");
 
 interface FakeAgent {
   url: string;
@@ -494,5 +495,7 @@ test("AgentSystemAuth.exists: the agent's answer, or undefined when it does not 
   assert.equal(await h.systemAuth.exists("a", "alice"), true);
   assert.equal(await h.systemAuth.exists("b", "alice"), false);
   assert.equal(await h.systemAuth.exists("b", "toor"), false);
-  for (const r of authRecs()) assert.equal(r.headers[USER_HEADER], undefined);
+  const looked = seen.filter((r) => r.path === "/api/auth/lookup");
+  assert.ok(looked.length >= 3);
+  for (const r of looked) assert.equal(r.headers[USER_HEADER], undefined);
 });

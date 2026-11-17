@@ -31,6 +31,7 @@ import { currentUser, userContext } from "./auth/context.ts";
 import { USER_HEADER } from "./auth/identity.ts";
 import { markArrival, registerAuth, registerAuthOff, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
+import { SysPresence } from "./auth/presence.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
 export interface HubAuth {
@@ -68,7 +69,7 @@ function clean(h: Headers, keepLength: boolean): Headers {
 }
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth }) {
-  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; systemAuth?: AgentSystemAuth; nodeTargets: ReadonlyMap<string, Target> };
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target> };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
   // the signed user header is keyed on the agent token, so there is no auth without one (main.ts says so first)
@@ -116,7 +117,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   if (auth && cfg.nodes.length > 0) {
     app.systemAuth = new AgentSystemAuth({ nodes: cfg.authNodes.length > 0 ? cfg.authNodes : cfg.nodes.map((n) => n.name), call: signInCall });
   }
-  if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? app.systemAuth ?? unavailableSystemAuth, now: opts?.now });
+  // Which machines a system account exists on (auth/presence.ts): asked through the same lookup call as above (agent token only), and
+  // read by `mayUse` below, so a machine where the account does not exist is hidden from every route that decides access.
+  const sysAuth = app.systemAuth;
+  const presence = sysAuth ? new SysPresence({ check: (node, name) => sysAuth.exists(node, name), nodes: cfg.nodes.map((n) => n.name), now: opts?.now }) : undefined;
+  app.presence = presence;
+  // started at sign-in without waiting: /api/nodes, usually the next request, then shares it
+  const onSignIn = (kind: "sys" | "virt", name: string) => {
+    if (kind === "sys" && presence) void presence.refresh(name);
+  };
+  if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? app.systemAuth ?? unavailableSystemAuth, now: opts?.now, onSignIn });
   else registerAuthOff(app);
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;
@@ -149,10 +159,20 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     agents.set(name, { fetch: (rest, init) => Promise.resolve(sapp.fetch(new Request("http://source" + rest, init))) });
   }
   /**
+   * What the presence cache says of a system account on a node. A stale answer still counts; a refresh is started in the background
+   * when one is due, and no request waits for it here (only /api/nodes waits, at most 2 s).
+   */
+  const present = presence
+    ? (name: string, node: string) => {
+        if (presence.due(name)) void presence.refresh(name);
+        return presence.known(name, node);
+      }
+    : undefined;
+  /**
    * Whether the person behind the current request may use a node or source. Network sources stay open to every signed-in
    * account until source grants exist (part 3). With auth off everything is open, as before.
    */
-  const mayUse = (name: string) => !cfg.auth || sources.has(name) || canUseNode(currentUser(), name);
+  const mayUse = (name: string) => !cfg.auth || sources.has(name) || canUseNode(currentUser(), name, present);
   const noAccess = (c: import("hono").Context) => c.json({ error: "no access to this machine" }, 403);
 
   // Reachability of a source is cached briefly so the sidebar poll does not open a connection per request.
@@ -186,6 +206,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.get("/healthz", (c) => c.text("ok"));
 
   app.get("/api/nodes", async (c) => {
+    // a system account sees only the machines where it exists: wait (at most 2 s) for answers that are missing or old
+    const id = currentUser();
+    if (presence && id?.kind === "sys" && presence.due(id.name)) await presence.refresh(id.name, 2000);
     const nodes = await Promise.all(
       cfg.nodes.filter((n) => mayUse(n.name)).map(async (n) => {
         try {
