@@ -245,10 +245,17 @@ test("forged asRoot: a virtual claim with asRoot, or an asRoot that is not true,
   assert.equal(verifyClaim(signClaim({ ...virt, asRoot: true }, T), T, now), null);
   assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRoot: "yes" } as unknown as UserClaim, T), T, now), null);
   assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRoot: false } as unknown as UserClaim, T), T, now), null);
-  assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRoot: true }, T), T, now)?.asRoot, true);
+  assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRoot: true, asRootUntil: now + 1000 }, T), T, now)?.asRoot, true);
+  // the switch's end goes with asRoot, as a number after the issue time; neither without the other
+  assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRoot: true } as UserClaim, T), T, now), null);
+  assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRootUntil: now + 1000 } as UserClaim, T), T, now), null);
+  assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRoot: true, asRootUntil: "soon" } as unknown as UserClaim, T), T, now), null);
+  assert.equal(verifyClaim(signClaim({ kind: "sys", name: "alice", epoch: 1, iat: now, asRoot: true, asRootUntil: now } as UserClaim, T), T, now), null);
   // claimFor: only a system identity whose switch is still on
   const sys: Identity = { kind: "sys", name: "alice", admin: true, epoch: 1, asRootUntil: now + 1000 };
   assert.equal(claimFor(sys, "A", now)?.asRoot, true);
+  assert.equal(claimFor(sys, "A", now)?.asRootUntil, now + 1000);
+  assert.equal(claimFor(sys, "A", now + 1000)?.asRootUntil, undefined);
   assert.equal(claimFor(sys, "A", now + 1000)?.asRoot, undefined);
   assert.equal(claimFor({ ...sys, asRootUntil: undefined }, "A", now)?.asRoot, undefined);
   const v = { kind: "virt", name: "vadmin", admin: true, epoch: 1, nodes: { A: { runAs: "alice", grants: [] } }, asRootUntil: now + 1000 } as unknown as Identity;
@@ -502,7 +509,7 @@ test("agent: an asRoot claim sees every root job, and its folder sizes need no a
   const hdr = (name: string, asRoot: boolean) => ({
     authorization: `Bearer ${T}`,
     "content-type": "application/json",
-    [USER_HEADER]: signClaim({ kind: "sys", name, epoch: 0, iat: Date.now(), ...(asRoot ? { asRoot: true as const } : {}) }, T),
+    [USER_HEADER]: signClaim({ kind: "sys", name, epoch: 0, iat: Date.now(), ...(asRoot ? { asRoot: true as const, asRootUntil: Date.now() + 60_000 } : {}) }, T),
   });
   const s = await A.app.request("/api/jobs/size", { method: "POST", headers: hdr("carol", false), body: JSON.stringify({ path: "/" }) });
   assert.equal(s.status, 202, await s.clone().text());
@@ -540,4 +547,86 @@ test("root only: under the switch, a file mode 0600 owned by root is read in the
   assert.match(JSON.stringify(await yes.json()), /root's own/);
   assert.equal(poolOf(A).list().length, before, "no worker started for it");
   await call(hub, "/api/auth/as-root", alice, { method: "DELETE" });
+});
+
+test("agent: archive and permission jobs started under the switch carry its end (by the agent's clock) and their owner", async () => {
+  const rootA = path.join(tmp, "root-A");
+  fs.mkdirSync(path.join(rootA, "permsdir", "sub"), { recursive: true });
+  const iat = Date.now();
+  // (erin: an admin name no other test uses; the end is 60 s after the claim was made, by the hub's clock)
+  const hdr = (asRoot: boolean) => ({
+    authorization: `Bearer ${T}`,
+    "content-type": "application/json",
+    [USER_HEADER]: signClaim({ kind: "sys", name: "erin", epoch: 0, iat: Date.now(), ...(asRoot ? { asRoot: true as const, asRootUntil: iat + 60_000 } : {}) }, T),
+  });
+  const before = Date.now();
+  const c = await A.app.request("/api/jobs/compress", { method: "POST", headers: hdr(true), body: JSON.stringify({ dir: "/", names: ["hello.txt"], format: "zip", name: "erin-hello.zip" }) });
+  assert.equal(c.status, 202, await c.clone().text());
+  const cv = (await c.json()) as { id: string; asRootUntil?: number };
+  assert.equal(typeof cv.asRootUntil, "number");
+  assert.ok(cv.asRootUntil! >= before + 59_000 && cv.asRootUntil! <= Date.now() + 60_000, `${cv.asRootUntil! - before} ms ahead`);
+  const p = await A.app.request("/api/fs/perms", { method: "POST", headers: hdr(true), body: JSON.stringify({ path: "/permsdir", mode: 0o755, recursive: true }) });
+  assert.equal(p.status, 202, await p.clone().text());
+  const pv = (await p.json()) as { id: string; asRootUntil?: number };
+  assert.equal(typeof pv.asRootUntil, "number");
+  // erin without the switch sees them as hers (so the hub can find and cancel them when the switch is turned off)
+  const mine = ((await (await A.app.request("/api/jobs", { headers: hdr(false) })).json()) as { jobs: { id: string; asRootUntil?: number }[] }).jobs;
+  for (const id of [cv.id, pv.id]) assert.ok(mine.some((j) => j.id === id && typeof j.asRootUntil === "number"), id);
+  for (const id of [cv.id, pv.id]) assert.equal((await A.app.request(`/api/jobs/${id}/cancel`, { method: "POST", headers: hdr(false) })).status, 200);
+  fs.rmSync(path.join(rootA, "erin-hello.zip"), { force: true });
+});
+
+test("hub: switching off, or signing out, cancels the admin's live root jobs on every machine, as the plain admin", async () => {
+  const { Hono } = await import("hono");
+  const seenCalls: { path: string; method: string; claim: UserClaim | null }[] = [];
+  const fake = new Hono();
+  fake.use("*", async (c, next) => {
+    const v = c.req.header(USER_HEADER);
+    seenCalls.push({ path: c.req.path, method: c.req.method, claim: v ? verifyClaim(v, T, Date.now()) : null });
+    await next();
+  });
+  const until = Date.now() + 60_000;
+  fake.get("/api/jobs", (c) =>
+    c.json({
+      jobs: [
+        { id: "root-running", state: "running", asRootUntil: until },
+        { id: "root-queued", state: "queued", asRootUntil: until },
+        { id: "root-done", state: "done", asRootUntil: until },
+        { id: "plain-running", state: "running" },
+      ],
+    }),
+  );
+  fake.post("/api/jobs/:id/cancel", (c) => c.json({ id: c.req.param("id"), state: "canceled" }));
+  fake.all("*", (c) => c.json({}));
+  const srv = await new Promise<Server>((res) => {
+    const s: Server = serve({ fetch: fake.fetch, port: 0 }, () => res(s));
+  });
+  servers.push(srv);
+  const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `F=${url},G=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-end.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-end") } as never),
+    undefined,
+    () => {},
+    { system: fakeSystem([]) },
+  );
+  closers.push(h);
+  const cancels = () => seenCalls.filter((x) => x.method === "POST" && x.path.endsWith("/cancel"));
+  for (const end of ["off", "logout"] as const) {
+    const alice = sysCookie(h, "alice");
+    // without the switch on, switching off or signing out asks no agent
+    seenCalls.length = 0;
+    assert.equal((await call(h, "/api/auth/as-root", alice, { method: "DELETE" })).status, 200);
+    assert.equal(seenCalls.filter((x) => x.path.startsWith("/api/jobs")).length, 0);
+    assert.equal((await postJson(h, "/api/auth/as-root", alice, { password: RIGHT })).status, 200);
+    seenCalls.length = 0;
+    const r = end === "off" ? await call(h, "/api/auth/as-root", alice, { method: "DELETE" }) : await call(h, "/api/auth/logout", alice, { method: "POST" });
+    assert.equal(r.status, 200, end);
+    // each machine: its job list, then a cancel for each live root job, all as alice without asRoot
+    assert.equal(seenCalls.filter((x) => x.method === "GET" && x.path === "/api/jobs").length, 2, end);
+    assert.deepEqual(cancels().map((x) => x.path).sort(), ["/api/jobs/root-queued/cancel", "/api/jobs/root-queued/cancel", "/api/jobs/root-running/cancel", "/api/jobs/root-running/cancel"], end);
+    for (const x of seenCalls.filter((y) => y.path.startsWith("/api/jobs"))) {
+      assert.equal(x.claim?.name, "alice");
+      assert.equal(x.claim?.asRoot, undefined, `${x.path} goes without asRoot`);
+    }
+  }
 });

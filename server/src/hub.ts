@@ -70,6 +70,9 @@ function clean(h: Headers, keepLength: boolean): Headers {
   return out;
 }
 
+/** The most the hub waits for the agents when act as root is turned off early and it cancels the account's root jobs there. */
+const END_ROOT_JOBS_MS = 3_000;
+
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target> };
   // Sign-in state, only with auth on (off, nothing is opened or created).
@@ -139,7 +142,44 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const onSignIn = (kind: "sys" | "virt", name: string) => {
     if (kind === "sys" && presence) void presence.refresh(name);
   };
-  if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? app.systemAuth ?? unavailableSystemAuth, now: opts?.now, onSignIn });
+  /**
+   * Act as root was turned off early (or its session signed out): every machine is asked, as the plain system user, for the account's
+   * jobs, and each live one started under the switch (`asRootUntil` in its view: it runs as root in the agent's root process) is
+   * cancelled through the usual cancel route. The agents also cancel such jobs on their own at the switch's end; this covers the time
+   * before it. At most `END_ROOT_JOBS_MS` in all; a machine that does not answer is left to that end (one log line).
+   */
+  const endRootJobs = async (name: string): Promise<void> => {
+    if (!auth) return;
+    const id: Identity = { kind: "sys", name, admin: cfg.admins.includes(name), epoch: auth.accounts.epochOf("sys", name) };
+    const signal = AbortSignal.timeout(END_ROOT_JOBS_MS);
+    await Promise.all(
+      cfg.nodes.map((n) =>
+        userContext.run(id, async () => {
+          try {
+            const r = await agentCall(n, "/api/jobs", { signal });
+            if (!r.ok) {
+              await r.body?.cancel().catch(() => undefined);
+              return;
+            }
+            const v = (await r.json()) as { jobs?: unknown };
+            const live = (Array.isArray(v?.jobs) ? v.jobs : []).filter(
+              (j): j is { id: string } =>
+                !!j && typeof j === "object" && typeof j.id === "string" && typeof j.asRootUntil === "number" && (j.state === "queued" || j.state === "running"),
+            );
+            await Promise.all(
+              live.map(async (j) => {
+                const c = await agentCall(n, `/api/jobs/${encodeURIComponent(j.id)}/cancel`, { method: "POST", signal });
+                await c.body?.cancel().catch(() => undefined);
+              }),
+            );
+          } catch (e) {
+            console.error(`act as root: the root jobs of ${name} on ${n.name} were not cancelled (${String((e as Error)?.message ?? e).split("\n")[0]}); they stop at the switch's end`);
+          }
+        }),
+      ),
+    );
+  };
+  if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? app.systemAuth ?? unavailableSystemAuth, now: opts?.now, onSignIn, onAsRootEnd: endRootJobs });
   else registerAuthOff(app);
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;

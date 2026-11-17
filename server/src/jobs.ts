@@ -30,6 +30,11 @@ export interface JobView {
   finishedAt?: number;
   /** CLI du jobs: when a client last waited on or polled the job (see Jobs.abandonMs) */
   seenAt?: number;
+  /**
+   * A job started under act as root (agent, sign-in on): when the switch ends, by this process's clock. The job is canceled then; the hub
+   * also looks for it when the switch is turned off early, to cancel it at once.
+   */
+  asRootUntil?: number;
   /** queued jobs only: what is ahead of this one (with sign-in on, another account's job is only its state: agent-jobs.ts) */
   queue?: { position: number; ahead: { id?: string; title?: string; state: JobState }[] };
 }
@@ -90,6 +95,13 @@ const rowOwner = (r: JobRow): string | undefined => {
     return undefined;
   }
 };
+/** The act-as-root end kept in a job's stored params (see `Jobs.create`). */
+const untilIn = (params: unknown): number | undefined => {
+  const u = params && typeof params === "object" ? (params as { asRootUntil?: unknown }).asRootUntil : undefined;
+  return typeof u === "number" && Number.isFinite(u) ? u : undefined;
+};
+/** setTimeout's longest delay */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 /** Stored views from before origins existed: a du job came from the CLI, anything else from the UI. */
 const rowView = (r: JobRow): JobView => {
   const v = JSON.parse(r.view) as JobView;
@@ -182,13 +194,18 @@ export class Jobs {
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
    * `owner` (sign-in on: `<kind>:<name>` of the account) is kept in the stored params as `owner`, so the shared store and a process that
    * adopts the job keep it; an adopted job takes it from there. A job without params keeps it in this process only.
+   * `until` (a job started under act as root): the job is canceled at that time, queued or running, and the time is kept in the stored
+   * params as `asRootUntil` in the same way, so an adopted job is canceled at the same time. It shows in the view as `asRootUntil`.
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string }): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string; until?: number }): JobView {
     const owner = meta?.owner ?? ownerIn(meta?.params);
-    const params = meta?.params !== undefined && owner !== undefined && typeof meta.params === "object" && meta.params !== null ? { ...meta.params, owner } : meta?.params;
+    const until = meta?.until ?? untilIn(meta?.params);
+    const extra = { ...(owner !== undefined ? { owner } : {}), ...(until !== undefined ? { asRootUntil: until } : {}) };
+    const params = meta?.params !== undefined && Object.keys(extra).length > 0 && typeof meta.params === "object" && meta.params !== null ? { ...meta.params, ...extra } : meta?.params;
     const job: Job = {
       id: meta?.id ?? randomUUID(),
       ...(owner !== undefined ? { owner } : {}),
+      ...(until !== undefined ? { asRootUntil: until } : {}),
       params: params === undefined ? null : JSON.stringify(params),
       kind,
       title,
@@ -222,9 +239,22 @@ export class Jobs {
         )
         .finally(() => this.pump());
     }
+    if (until !== undefined) this.endAt(job, until);
     this.prune();
     this.pump();
     return this.view(job);
+  }
+
+  /** Cancels `job` at `until` (act as root has ended) if it is still queued or running in this process then. */
+  private endAt(job: Job, until: number): void {
+    const fire = () => {
+      const left = until - Date.now();
+      if (left > 0) return void setTimeout(fire, Math.min(left, MAX_TIMER_MS)).unref();
+      if (this.jobs.get(job.id) === job && live(job.state)) this.cancel(job.id);
+    };
+    const left = until - Date.now();
+    if (left <= 0) queueMicrotask(fire);
+    else setTimeout(fire, Math.min(left, MAX_TIMER_MS)).unref();
   }
 
   private view(j: Job): JobView {

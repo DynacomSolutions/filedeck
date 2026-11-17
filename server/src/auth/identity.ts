@@ -32,6 +32,11 @@ export interface UserClaim {
   grants?: Grant[];
   /** the request runs in the agent's root process (act as root); only ever `true`, only on a `sys` claim */
   asRoot?: true;
+  /**
+   * with `asRoot` only, and always with it: when the switch ends, ms since the epoch by the hub's clock (after `iat`). The agent cancels
+   * a job started under the switch then (it counts from `iat`, so the two clocks need not agree).
+   */
+  asRootUntil?: number;
   /** issue time, ms since the epoch */
   iat: number;
 }
@@ -43,7 +48,10 @@ const MAX_SKEW_MS = 5_000;
 
 /** The claim for one node, or null when a virtual account has no access there. */
 export function claimFor(id: Identity, node: string, now: number): UserClaim | null {
-  if (id.kind === "sys") return { kind: "sys", name: id.name, epoch: id.epoch, ...((id.asRootUntil ?? 0) > now ? { asRoot: true as const } : {}), iat: now };
+  if (id.kind === "sys") {
+    const root = id.asRootUntil !== undefined && id.asRootUntil > now ? { asRoot: true as const, asRootUntil: id.asRootUntil } : {};
+    return { kind: "sys", name: id.name, epoch: id.epoch, ...root, iat: now };
+  }
   const access = Object.hasOwn(id.nodes, node) ? id.nodes[node] : undefined;
   if (!access) return null;
   return { kind: "virt", name: id.name, epoch: id.epoch, runAs: access.runAs, grants: access.grants.map((g) => ({ ...g })), iat: now };
@@ -79,6 +87,9 @@ export function verifyClaim(value: string, agentToken: string, now: number): Use
     if (typeof c.name !== "string" || typeof c.epoch !== "number") return null;
     // act as root: only `true`, and never on a virtual account's claim
     if (c.asRoot !== undefined && (c.asRoot !== true || c.kind !== "sys")) return null;
+    // and its end, a number after the issue time, goes with it: neither without the other
+    if ((c.asRoot === true) !== (c.asRootUntil !== undefined)) return null;
+    if (c.asRootUntil !== undefined && (typeof c.asRootUntil !== "number" || !Number.isFinite(c.asRootUntil) || c.asRootUntil <= c.iat)) return null;
     if (c.kind === "virt") {
       if (typeof c.runAs !== "string" || !Array.isArray(c.grants)) return null;
       for (const g of c.grants) {

@@ -13,6 +13,7 @@ import type { Config } from "./config.ts";
 import { stream } from "hono/streaming";
 import { SizeStore, type DuEntry } from "./size-store.ts";
 import { spillPath } from "./index-cache.ts";
+import { requestJobMeta } from "./job-meta.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -743,7 +744,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
     if (plan.recursive) {
       const what = [plan.mode !== undefined ? `mode ${plan.mode.toString(8)}` : "", plan.uid !== undefined || plan.gid !== undefined ? "owner" : ""].filter(Boolean).join(" and ");
       const { path: p, mode, owner, group, recursive, scope } = req; // allowlist, never the raw body
-      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope } });
+      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope }, ...requestJobMeta(c) });
       return c.json(job, 202);
     }
     return c.json(await applyPerms(cfg, plan));

@@ -61,6 +61,12 @@ export interface AuthDeps {
    * here (auth/presence.ts). A throw is ignored; it never fails the sign-in.
    */
   onSignIn?: (kind: "sys" | "virt", name: string) => void;
+  /**
+   * Called when a session's act-as-root switch is turned off early (`DELETE /api/auth/as-root`, or signing out while it is on), after
+   * the switch is cleared and before the answer goes out: the hub cancels the jobs the account started on the agents under the switch,
+   * which run there as root. It must settle within a few seconds; a rejection is ignored.
+   */
+  onAsRootEnd?: (name: string) => Promise<void>;
 }
 
 /**
@@ -331,16 +337,33 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     return c.json({ asRootUntil: until, asRootLeftMs: AS_ROOT_MS });
   });
 
-  app.delete("/api/auth/as-root", (c) => {
+  /** The system account whose act-as-root switch the session of `raw` holds now, or undefined. */
+  const asRootOf = (raw: string): string | undefined => {
+    const s = sessions.lookup(raw);
+    return s?.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() ? s.name : undefined;
+  };
+  /** The switch of `name` was turned off early: its root jobs on the agents are cancelled (a failure is only logged by the hub). */
+  const rootEnded = async (name: string | undefined) => {
+    if (name !== undefined && deps.onAsRootEnd) await deps.onAsRootEnd(name).catch(() => undefined);
+  };
+
+  app.delete("/api/auth/as-root", async (c) => {
     const raw = getCookie(c, COOKIE);
     if (!currentUser() || !raw) return signedOut(c);
+    const was = asRootOf(raw);
     sessions.setAsRoot(raw, null);
+    await rootEnded(was);
     return c.json({ ok: true });
   });
 
-  app.post("/api/auth/logout", (c) => {
+  app.post("/api/auth/logout", async (c) => {
     const raw = getCookie(c, COOKIE);
-    if (raw) sessions.destroy(raw);
+    let was: string | undefined;
+    if (raw) {
+      was = asRootOf(raw);
+      sessions.destroy(raw);
+    }
+    await rootEnded(was);
     return c.json({ ok: true }, 200, { "set-cookie": `${COOKIE}=; Max-Age=0; ${COOKIE_ATTRS}` });
   });
 }
