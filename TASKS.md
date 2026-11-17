@@ -263,7 +263,7 @@ ETA: 2026-11-17 22:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 156 | Design for sign-in and per-user access approved | done | claude-20261117-auth-design | auth-design | | 2026-11-17 22:00 ICT | Approach A (one worker per user on each agent) chosen<br>Decided: same name on every machine, the host's own PAM and NSS through a chroot helper, admins can switch on "act as root", no root sign-in<br>Approved 17 Nov 2026; build plan next |
-| 157 | Part 1: sign-in, accounts and sessions at the hub (plan docs/superpowers/plans/2026-11-17-auth-1-hub-sign-in.md) | todo | | auth-hub-sign-in | 20.156 | | Not released on its own: agents still work as root until part 2 |
-| 158 | Part 2: per-user workers on agents, PAM and NSS through the host, system-user keys, act as root, per-user trash, compare index per account | todo | | | 20.157 | | Plan written after part 1 is built |
+| 157 | Part 1: sign-in, accounts and sessions at the hub (plan docs/superpowers/plans/2026-11-17-auth-1-hub-sign-in.md) | in progress | claude | auth-hub-sign-in | 20.156 | | Tasks 1-5 of 9 done. Not released on its own: agents still work as root until part 2 |
+| 158 | Part 2: per-user workers on agents, PAM and NSS through the host, system-user keys, act as root, per-user trash, compare index per account | todo | | | 20.157 | | Plan written after part 1 is built. Must refuse any name resolving to uid 0 at sign-in (part 1 refuses only the name "root", routes.ts) |
 | 159 | Part 3: admin API and screens for accounts, grants and sessions; grants on network sources | todo | | | 20.157 | | Plan written after part 1 is built |
 | 160 | Docs, chart values and release of sign-in | todo | | | 20.158, 20.159 | | |
