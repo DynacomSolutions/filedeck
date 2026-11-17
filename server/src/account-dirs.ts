@@ -474,6 +474,11 @@ const ownAreas = new Set<string>();
 /** Notes an area this process has made, so that `removeOldAreas` never takes it. */
 export const ownArea = (p: string): void => void ownAreas.add(p);
 
+/**
+ * Whether the agent with this pid still runs. Pids are of this process's pid namespace: two agents that share one temporary folder from
+ * different pid namespaces (two containers on one shared /tmp) could take each other's live area for an old one. Each agent needs a
+ * temporary folder of its own (the chart gives each pod its own empty volume).
+ */
 const running = (pid: number): boolean => {
   // (an earlier process with this process's own pid, as after a container restart, has stopped)
   if (pid === process.pid) return false;
