@@ -4,7 +4,9 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import * as ops from "./fsops.ts";
 import { listMounts } from "./mounts.ts";
-import { resolveRead } from "./paths.ts";
+import { constants as FS } from "node:fs";
+import { openChecked, resolveRead } from "./paths.ts";
+import { insideGrants, type Grant } from "./grant-guard.ts";
 import { Watches } from "./watch.ts";
 import { registerArchiveRoutes } from "./archive-routes.ts";
 import { registerPdfRoutes } from "./pdf.ts";
@@ -40,6 +42,42 @@ export function agentError(e: Error, c: Context): Response {
   // 401 password_required / password_incorrect carry a machine-readable code for the client's prompt
   const extra = e instanceof ops.FsError && (e.status === 401 || e.extra?.copyComplete === true) ? e.extra : undefined; // a move whose copy is complete says so
   return c.json({ error: message, ...extra }, status as 400);
+}
+
+/** the most paths one `/_worker/can-list` request may ask about */
+export const MAX_CAN_LIST = 512;
+
+/**
+ * The worker's own routes, for the root process only: a worker gets them over its connection, and the root process's gate refuses every
+ * HTTP request whose path starts with `/_` (agent-workers.ts), so a person never reaches them. Registered in a worker only.
+ *
+ * `POST /_worker/can-list {paths: string[]}` (at most `MAX_CAN_LIST` virtual paths) answers `{ok: boolean[]}`: true where the folder
+ * opens here (`O_RDONLY | O_DIRECTORY`, so the account's file modes and, for a virtual account, its Landlock rules both apply) and, with
+ * `grants`, lies inside one of them. The root process uses it to filter folder sizes (props.ts).
+ */
+export function registerWorkerRoutes(app: Hono, cfg: Config, grants?: Grant[]): void {
+  app.post("/_worker/can-list", async (c) => {
+    let paths: unknown;
+    try {
+      paths = ((await c.req.json()) as { paths?: unknown } | null)?.paths;
+    } catch {
+      paths = undefined;
+    }
+    if (!Array.isArray(paths) || paths.length > MAX_CAN_LIST || paths.some((p) => typeof p !== "string")) return c.json({ error: "paths must be a list of at most 512 paths" }, 400);
+    const one = async (p: string): Promise<boolean> => {
+      try {
+        if (grants && !insideGrants(cfg.root, grants, p)) return false;
+        const fh = await openChecked(cfg.root, resolveRead(cfg.root, p).real, FS.O_RDONLY | FS.O_DIRECTORY);
+        await fh.close();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const ok: boolean[] = [];
+    for (let i = 0; i < paths.length; i += 32) ok.push(...(await Promise.all((paths as string[]).slice(i, i + 32).map(one))));
+    return c.json({ ok });
+  });
 }
 
 /**

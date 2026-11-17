@@ -37,11 +37,17 @@ import { JOBS_HEADER } from "./worker.ts";
  */
 
 /**
- * The routes the root process keeps: the probes, the node's own information, the folder sizes, and the job list (Task 9 merges it
- * with the workers' jobs). Part 2b adds `/api/auth/*`. Archive jobs (`POST /api/jobs/compress`, `/api/jobs/extract`) run as the
- * account, in its worker.
+ * The routes the root process keeps: the probes, the node's own information, the folder sizes, and the job list and job routes (they
+ * also reach the account's worker for its jobs: agent-jobs.ts). Part 2b adds `/api/auth/*`. Archive jobs (`POST /api/jobs/compress`,
+ * `/api/jobs/extract`) run as the account, in its worker.
  */
 export const ROOT_ROUTES: readonly RegExp[] = [/^\/healthz$/, /^\/metrics$/, /^\/api\/info$/, /^\/api\/du$/, /^\/api\/jobs$/, /^\/api\/jobs\/[^/]+(?:\/cancel)?$/];
+
+/**
+ * The paths that exist only between the root process and a worker, over the worker's connection (`/_worker/*`, `/_root/*`, and any
+ * other path that starts with `/_`): an HTTP request for one is refused by the gate.
+ */
+export const isMuxOnly = (p: string): boolean => p.replace(/\/{2,}/g, "/").startsWith("/_");
 
 /** Whether the root process answers this request itself. */
 export function isRootRoute(method: string, p: string): boolean {
@@ -124,9 +130,11 @@ export function clientResponse(res: Response, key: string, log: (s: string) => v
  *
  * The local account is `claim.name` for a system account and `claim.runAs` for a virtual one, looked up fresh when no worker runs for
  * the key. Epochs: the highest seen per `kind:name` is kept; a higher one first stops every worker of that account (a running worker
- * would otherwise keep serving the old account), a lower one is refused.
+ * would otherwise keep serving the old account), a lower one is refused. The epoch rule also holds for a root route that carries a claim
+ * (the job and size routes reach the account's worker: agent-jobs.ts); the rules are `accountWorkers`, shared with those routes.
  *
- * Answers of its own: 401 `account changed`, 403 `no account on this machine` (unknown, or root), 503 `account lookup failed; try
+ * Answers of its own: 404 `not found` for every path that starts with `/_` (`isMuxOnly`: the routes between the root process and a
+ * worker exist only over the worker's connection), 401 `account changed`, 403 `no account on this machine` (unknown, or root), 503 `account lookup failed; try
  * again` (the lookup failed: never 403), 503 `too many people are using this machine; try again` with `Retry-After: 5` (`PoolFull`),
  * 503 `worker stopped` (`WorkerGone` before the head), 503 `worker folders are not safe` (`UnsafeFolders`), and 500 `worker error` for
  * any other failure (its text only in the log).
@@ -142,8 +150,80 @@ export function workerGate(
     accounts: AccountResolver;
     spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
     log?: (s: string) => void;
+    /** the account rules to use (the agent shares one with its job and size routes); default: made here from the above */
+    workers?: AccountWorkers;
   },
 ): MiddlewareHandler {
+  const log = o.log ?? ((s) => console.error(s));
+  const aw = o.workers ?? accountWorkers(o);
+  return async (c, next) => {
+    // (a worker's own routes, and the root process's routes for its workers, exist only over the worker's connection)
+    if (isMuxOnly(c.req.path)) return json("not found", 404);
+    const claim = c.get("user") as UserClaim | undefined;
+    const valid = !!claim && (claim.kind === "sys" || claim.kind === "virt") && typeof claim.epoch === "number";
+    if (isRootRoute(c.req.method, c.req.path)) {
+      // (the epoch rule holds here too: the job and size routes reach the account's worker)
+      const no = valid ? await aw.epoch(claim!) : null;
+      return no ?? next();
+    }
+    // (agentUser has refused a request without a claim already; this is the last line)
+    if (!valid) return json("no user", 401);
+    const no = await aw.epoch(claim!);
+    if (no) return no;
+    let spec: WorkerSpec;
+    try {
+      spec = await aw.specFor(claim!);
+    } catch (e) {
+      if (e instanceof GateAnswer) return e.res;
+      throw e;
+    }
+    const raw = c.req.raw;
+    const headers = new Headers(raw.headers);
+    for (const h of DROP_REQUEST) headers.delete(h);
+    const hasBody = raw.method !== "GET" && raw.method !== "HEAD" && raw.body !== null;
+    // the client's signal goes with it: a client that goes away ends the request in the worker and frees its slot
+    const req = new Request(raw.url, { method: raw.method, headers, body: hasBody ? raw.body : null, signal: raw.signal, duplex: "half" } as RequestInit);
+    let res: Response;
+    try {
+      res = await o.pool.fetch(spec, req);
+    } catch (e) {
+      return aw.poolError(e, spec.key, raw.signal);
+    }
+    return clientResponse(res, spec.key, log, raw.signal, raw.method);
+  };
+}
+
+/** An answer of the gate's own (`AccountWorkers.specFor`), thrown so that a route can pass it on as it is (the agent's error handler does). */
+export class GateAnswer extends Error {
+  constructor(
+    public readonly res: Response,
+    message = "refused",
+  ) {
+    super(message);
+    this.name = "GateAnswer";
+  }
+}
+
+/** The account rules of the gate, shared with the root routes that reach an account's worker (job list, folder sizes). */
+export interface AccountWorkers {
+  /** the epoch rule for a claim: a lower epoch than seen gets 401 `account changed`; a higher one first stops the account's workers. Null: go on. */
+  epoch(claim: UserClaim): Promise<Response | null>;
+  /**
+   * The spec of the claim's worker: the local account (looked up fresh when no worker runs for the key) and its folders. Throws a
+   * `GateAnswer`: 503 `account lookup failed; try again`, 403 `no account on this machine`, 503 `worker folders are not safe` or
+   * `worker failed to start`, 401 `account changed` (the epoch rose meanwhile). Call `epoch` first.
+   */
+  specFor(claim: UserClaim): Promise<WorkerSpec>;
+  /** a failure of `pool.fetch` (or `fetchLive`) as the client gets it; the text of an unknown one is only logged */
+  poolError(e: unknown, key: string, signal?: AbortSignal): Response;
+}
+
+export function accountWorkers(o: {
+  pool: WorkerPool;
+  accounts: AccountResolver;
+  spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
+  log?: (s: string) => void;
+}): AccountWorkers {
   const log = o.log ?? ((s) => console.error(s));
   /** per `kind:name`, the highest epoch seen */
   const epochs = new Map<string, number>();
@@ -163,57 +243,53 @@ export function workerGate(
     }
     return p;
   };
-  return async (c, next) => {
-    if (isRootRoute(c.req.method, c.req.path)) return next();
-    const claim = c.get("user") as UserClaim | undefined;
-    // (agentUser has refused a request without a claim already; this is the last line)
-    if (!claim || (claim.kind !== "sys" && claim.kind !== "virt") || typeof claim.epoch !== "number") return json("no user", 401);
-    const who = `${claim.kind}:${claim.name}`;
-    const seen = epochs.get(who);
-    if (seen !== undefined && claim.epoch < seen) return json("account changed", 401);
-    if (seen === undefined || claim.epoch > seen) {
-      epochs.set(who, claim.epoch); // (before the wait, so a second request at the new epoch does not stop the account again)
-      // the pool takes the old workers out of its map at once, so this request cannot reach one; a new start waits for their exit
-      // (with the epoch, so a request at the old one that already waits inside the pool for a start is refused there too)
-      if (seen !== undefined) await o.pool.stopAccount(claim.kind, claim.name, claim.epoch);
-    }
-    const key = workerKey(claim);
-    const name = claim.kind === "sys" ? claim.name : claim.runAs;
-    let account: LocalAccount | null;
-    try {
-      account = typeof name === "string" ? await lookup(key, name) : null;
-    } catch (e) {
-      log(`worker ${key}: account lookup failed: ${e instanceof Error ? e.message : String(e)}`);
-      return json("account lookup failed; try again", 503);
-    }
-    if (!account || account.uid === 0 || account.gid === 0) return json("no account on this machine", 403);
-    let spec: WorkerSpec;
-    try {
-      spec = await o.spec(claim, account);
-    } catch (e) {
-      log(`worker ${key}: not started: ${e instanceof Error ? e.message : String(e)}`);
-      return json(e instanceof UnsafeFolders ? "worker folders are not safe" : "worker failed to start", 503);
-    }
-    // the epoch may have risen while this request waited above: it must not start (or reach) a worker for the old one
-    if (epochs.get(who) !== claim.epoch) return json("account changed", 401);
-    const raw = c.req.raw;
-    const headers = new Headers(raw.headers);
-    for (const h of DROP_REQUEST) headers.delete(h);
-    const hasBody = raw.method !== "GET" && raw.method !== "HEAD" && raw.body !== null;
-    // the client's signal goes with it: a client that goes away ends the request in the worker and frees its slot
-    const req = new Request(raw.url, { method: raw.method, headers, body: hasBody ? raw.body : null, signal: raw.signal, duplex: "half" } as RequestInit);
-    let res: Response;
-    try {
-      res = await o.pool.fetch(spec, req);
-    } catch (e) {
+  const refuse = (error: string, status: number): never => {
+    throw new GateAnswer(json(error, status), error);
+  };
+  return {
+    async epoch(claim) {
+      const who = `${claim.kind}:${claim.name}`;
+      const seen = epochs.get(who);
+      if (seen !== undefined && claim.epoch < seen) return json("account changed", 401);
+      if (seen === undefined || claim.epoch > seen) {
+        epochs.set(who, claim.epoch); // (before the wait, so a second request at the new epoch does not stop the account again)
+        // the pool takes the old workers out of its map at once, so this request cannot reach one; a new start waits for their exit
+        // (with the epoch, so a request at the old one that already waits inside the pool for a start is refused there too)
+        if (seen !== undefined) await o.pool.stopAccount(claim.kind, claim.name, claim.epoch);
+      }
+      return null;
+    },
+    async specFor(claim) {
+      const who = `${claim.kind}:${claim.name}`;
+      const key = workerKey(claim);
+      const name = claim.kind === "sys" ? claim.name : claim.runAs;
+      let account: LocalAccount | null;
+      try {
+        account = typeof name === "string" ? await lookup(key, name) : null;
+      } catch (e) {
+        log(`worker ${key}: account lookup failed: ${e instanceof Error ? e.message : String(e)}`);
+        return refuse("account lookup failed; try again", 503);
+      }
+      if (!account || account.uid === 0 || account.gid === 0) return refuse("no account on this machine", 403);
+      let spec: WorkerSpec;
+      try {
+        spec = await o.spec(claim, account);
+      } catch (e) {
+        log(`worker ${key}: not started: ${e instanceof Error ? e.message : String(e)}`);
+        return refuse(e instanceof UnsafeFolders ? "worker folders are not safe" : "worker failed to start", 503);
+      }
+      // the epoch may have risen while this request waited above: it must not start (or reach) a worker for the old one
+      if (epochs.get(who) !== claim.epoch) return refuse("account changed", 401);
+      return spec;
+    },
+    poolError(e, key, signal) {
       if (e instanceof StaleEpoch) return json("account changed", 401);
       if (e instanceof PoolFull) return json("too many people are using this machine; try again", 503, { "retry-after": "5" });
       if (e instanceof WorkerGone) return json("worker stopped", 503);
-      if (raw.signal.aborted) return new Response(null, { status: 499 });
+      if (signal?.aborted) return new Response(null, { status: 499 });
       log(`worker ${key}: request failed: ${e instanceof Error ? e.message : String(e)}`);
       return json("worker error", 500);
-    }
-    return clientResponse(res, key, log, raw.signal, raw.method);
+    },
   };
 }
 
@@ -326,7 +402,7 @@ export function makeWorkerSpecs(
 }
 
 /** A virtual account's grants in their compared form (a grant whose path cannot be compared is left out). */
-const grantsOf = (claim: UserClaim) => (claim.grants ?? []).flatMap((g) => (validGrant(g.path) ? [{ path: grantPath(g.path), write: g.write === true }] : []));
+export const grantsOf = (claim: UserClaim) => (claim.grants ?? []).flatMap((g) => (validGrant(g.path) ? [{ path: grantPath(g.path), write: g.write === true }] : []));
 
 /** A grant path that can be compared (no `..`, no NUL); others are left out. */
 function validGrant(p: unknown): p is string {

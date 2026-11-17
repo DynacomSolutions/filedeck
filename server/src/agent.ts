@@ -13,7 +13,8 @@ import { withReadOnly } from "./pinwalk.ts";
 import type { Config } from "./config.ts";
 import { makeResolver, type AccountResolver } from "./local-accounts.ts";
 import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
-import { makeWorkerSpecs, rootRequests, workerGate, type WorkerSpecs } from "./agent-workers.ts";
+import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
+import { registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
 
 export interface AgentOptions {
   /** the account lookup (sign-in on); default: `makeResolver` */
@@ -32,6 +33,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   let pool: WorkerPool | undefined;
   let accounts: AccountResolver | undefined;
   let specs: WorkerSpecs | undefined;
+  let workers: AccountWorkers | undefined;
   if (cfg.auth) {
     const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : makeResolver(cfg, (s) => console.error(s)).then((r) => r.resolver);
     found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
@@ -39,6 +41,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     specs = makeWorkerSpecs(cfg, { live: () => pool?.list().map((w) => w.key) ?? [] });
     // (a worker's own requests to this process, such as its trash folder, are served over its connection only)
     pool = new WorkerPool({ max: cfg.maxWorkers, idleMs: cfg.workerIdleMs, start: opts.startWorker, rootHandler: rootRequests(cfg) });
+    // (one set of account rules, epochs included, for the gate and for the root routes that reach a worker)
+    workers = accountWorkers({ pool, accounts, spec: specs.spec });
     void sandboxInfo().then((i) =>
       console.error(
         landlockForVirtual(i)
@@ -56,19 +60,22 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   app.use("*", readOnlyGuard(cfg.root, cfg.readOnly));
   // sign-in on: from here on, only the root process's own routes are served in this process. The checks above still run as root first
   // (so `readOnlyGuard` answers for read-only volumes before the worker is asked; see workerGate).
-  if (pool && accounts && specs) app.use("*", workerGate(cfg, { pool, accounts, spec: specs.spec }));
+  if (pool && accounts && specs) app.use("*", workerGate(cfg, { pool, accounts, spec: specs.spec, workers }));
   Object.assign(app, { pool, workerBase: specs?.base, workerSpecs: specs });
   const root = cfg.root;
 
-  app.onError(agentError);
+  app.onError((e, c) => (e instanceof GateAnswer ? e.res : agentError(e, c))); // (a GateAnswer: the account rules refused, sign-in on)
 
   app.get("/healthz", (c) => c.text("ok"));
   app.get("/api/info", async (c) => c.json({ node: cfg.node, root: cfg.root, watches: files.watches.size, readOnly: cfg.readOnly, sandbox: await sandboxSummary() }));
   // The jobs of this process (kept in the shared job file when there is one), the file routes, the folder sizes and the job list, all over the same jobs
   const jobs = makeAgentJobs(cfg);
   const files = registerFileRoutes(app, cfg, jobs);
-  const sizes = registerSizeRoutes(app, cfg, jobs);
-  registerJobRoutes(app, jobs);
+  // sign-in on: sizes and jobs follow the account (agent-jobs.ts); off: as before
+  let follows: ((c: import("hono").Context, id: string) => void) | undefined;
+  const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers ? sizeAccess(cfg, { pool, workers, follows: (c, id) => follows?.(c, id) }) : undefined);
+  if (pool && workers) follows = registerOwnedJobRoutes(app, jobs, { pool, workers }).follows;
+  else registerJobRoutes(app, jobs);
   // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only these two 0/1 gauges may ever be served here): 1 when it answers from its file, and whether its file is damaged beyond repair (an operator must move it aside)
   app.get("/metrics", (c) => {
     const h = sizes.health();

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import fs from "node:fs";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
-import { agentError, registerFileRoutes } from "./agent-routes.ts";
+import { agentError, registerFileRoutes, registerWorkerRoutes } from "./agent-routes.ts";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
 import { isReadOnly, readOnlyGuard } from "./readonly.ts";
 import { grantGuard, insideGrants, mayChange, mountsInGrants, type Grant } from "./grant-guard.ts";
@@ -58,6 +58,7 @@ export function createWorkerApp(cfg: Config, grants?: Grant[]): Hono {
   app.onError(agentError);
   // a virtual account sees only the mounts at or below its grants (registered first, so this answers instead of the general route)
   if (grants) app.get("/api/mounts", async (c) => c.json({ mounts: mountsInGrants(await listMounts(cfg.root, cfg.procMounts), grants).map((m) => (isReadOnly(cfg.readOnly, m.mountpoint) ? { ...m, readOnly: true } : m)) }));
+  registerWorkerRoutes(app, cfg, grants); // (for the root process only: its gate refuses /_ paths over HTTP)
   const files = registerFileRoutes(app, cfg, jobs);
   registerJobRoutes(app, jobs);
   (app as unknown as { close: () => Promise<void> }).close = async () => {

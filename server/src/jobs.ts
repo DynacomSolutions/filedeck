@@ -63,6 +63,8 @@ export interface JobsStore {
 }
 
 interface Job extends JobView {
+  /** with sign-in on, the account that started it (`<kind>:<name>`); kept in the stored params too, so an adopted job keeps it */
+  owner?: string;
   /** JSON of the allowlisted params, null = not rebuildable */
   params?: string | null;
   /** the last write to the store was skipped */
@@ -76,6 +78,18 @@ interface Job extends JobView {
 }
 
 const live = (s: string) => s === "queued" || s === "running";
+/** The owner kept in a job's stored params (see `Jobs.create`). */
+const ownerIn = (params: unknown): string | undefined => {
+  const o = params && typeof params === "object" ? (params as { owner?: unknown }).owner : undefined;
+  return typeof o === "string" ? o : undefined;
+};
+const rowOwner = (r: JobRow): string | undefined => {
+  try {
+    return r.params ? ownerIn(JSON.parse(r.params)) : undefined;
+  } catch {
+    return undefined;
+  }
+};
 /** Stored views from before origins existed: a du job came from the CLI, anything else from the UI. */
 const rowView = (r: JobRow): JobView => {
   const v = JSON.parse(r.view) as JobView;
@@ -166,11 +180,16 @@ export class Jobs {
   /**
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
+   * `owner` (sign-in on: `<kind>:<name>` of the account) is kept in the stored params as `owner`, so the shared store and a process that
+   * adopts the job keep it; an adopted job takes it from there. A job without params keeps it in this process only.
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin }): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string }): JobView {
+    const owner = meta?.owner ?? ownerIn(meta?.params);
+    const params = meta?.params !== undefined && owner !== undefined && typeof meta.params === "object" && meta.params !== null ? { ...meta.params, owner } : meta?.params;
     const job: Job = {
       id: meta?.id ?? randomUUID(),
-      params: meta?.params === undefined ? null : JSON.stringify(meta.params),
+      ...(owner !== undefined ? { owner } : {}),
+      params: params === undefined ? null : JSON.stringify(params),
       kind,
       title,
       state: "queued",
@@ -209,7 +228,7 @@ export class Jobs {
   }
 
   private view(j: Job): JobView {
-    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, dirty: _y, ...v } = j;
+    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, dirty: _y, owner: _o, ...v } = j;
     const out: JobView = { ...v, progress: { ...j.progress } };
     if (j.state === "queued") {
       const all = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -220,10 +239,13 @@ export class Jobs {
     return out;
   }
 
-  /** Other processes' jobs are read from the store (during a rollout the old pod still runs what the new one is polled for). */
-  list(): JobView[] {
-    const own = [...this.jobs.values()].map((j) => this.view(j));
-    const other = (this.shared?.store.list(this.shared.scope) ?? []).filter((r) => !this.jobs.has(r.id)).map(rowView);
+  /**
+   * Other processes' jobs are read from the store (during a rollout the old pod still runs what the new one is polled for).
+   * With `owner`, only the jobs of that owner (a job without one is nobody's).
+   */
+  list(owner?: string): JobView[] {
+    const own = [...this.jobs.values()].filter((j) => owner === undefined || j.owner === owner).map((j) => this.view(j));
+    const other = (this.shared?.store.list(this.shared.scope) ?? []).filter((r) => !this.jobs.has(r.id) && (owner === undefined || rowOwner(r) === owner)).map(rowView);
     return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
   }
 
@@ -258,6 +280,14 @@ export class Jobs {
       }
       return r.state === "running" || r.created_at < self.createdAt || (r.created_at === self.createdAt && r.id < self.id);
     });
+  }
+
+  /** The account that started a job (`create`'s `owner`), of this process or only in the shared store; undefined for none or an unknown id. */
+  ownerOf(id: string): string | undefined {
+    const j = this.jobs.get(id);
+    if (j) return j.owner;
+    const r = this.shared?.store.get(id, this.shared.scope);
+    return r ? rowOwner(r) : undefined;
   }
 
   get(id: string): JobView | undefined {

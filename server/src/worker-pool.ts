@@ -347,6 +347,26 @@ export class WorkerPool {
     return res;
   }
 
+  /**
+   * Sends `req` to the worker for `who.key` only when one is live; undefined when none is (nothing is started, and a start in progress
+   * is not waited for). Throws `StaleEpoch` and `WorkerGone` as `fetch` does. It does not count as use of the worker: a job list that a
+   * page polls does not keep an idle worker alive (one with live jobs is busy anyway).
+   */
+  async fetchLive(who: Pick<WorkerSpec, "key" | "kind" | "name" | "epoch">, req: Request): Promise<Response | undefined> {
+    if (this.closed) return undefined;
+    this.checkEpoch(who);
+    const w = this.workers.get(who.key);
+    if (!w) return undefined;
+    const res = await w.mux.fetch(req);
+    w.jobs = jobsOf(res.headers.get(JOBS_HEADER));
+    try {
+      res.headers.delete(JOBS_HEADER);
+    } catch {
+      /* headers that cannot change: the caller filters them */
+    }
+    return res;
+  }
+
   /** Stops the worker for `key` (and a start of it), and waits until its process has exited. */
   async stopKey(key: string): Promise<void> {
     await this.stopWhere((s) => s.key === key);
@@ -366,7 +386,7 @@ export class WorkerPool {
   }
 
   /** throws `StaleEpoch` for a spec under its account's lowest allowed epoch */
-  private checkEpoch(spec: WorkerSpec): void {
+  private checkEpoch(spec: Pick<WorkerSpec, "kind" | "name" | "epoch">): void {
     const min = this.minEpoch.get(`${spec.kind}:${spec.name}`);
     if (min !== undefined && spec.epoch < min) throw new StaleEpoch();
   }

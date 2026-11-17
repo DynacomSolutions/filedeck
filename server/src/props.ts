@@ -11,7 +11,7 @@ import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
 import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { stream } from "hono/streaming";
-import { SizeStore } from "./size-store.ts";
+import { SizeStore, type DuEntry } from "./size-store.ts";
 import { spillPath } from "./index-cache.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
@@ -377,10 +377,28 @@ async function json<T>(c: Context): Promise<T> {
 }
 
 /**
- * Folder sizes (`POST /api/jobs/size`, `GET /api/du`) and their jobs. The size store lives next to the compare index; its `du` is a bounded, cancellable walk
- * that reuses unchanged folders. It stays in the agent's root process (one store and one change watcher per machine).
+ * Sign-in on: how the size routes follow the person behind a request (agent-jobs.ts). The store and its scans are the machine's; what a
+ * person gets of them is filtered here.
  */
-export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStore {
+export interface SizeAccess {
+  /** which of these folders (virtual paths, at most 512) the person can open; a false one is left out of an answer, and refused when asked for */
+  canList?: (c: Context, paths: string[]) => Promise<boolean[]>;
+  /** checked first, on the path as the request names it; throws to refuse it (a virtual account outside its grants) */
+  inside?: (c: Context, path: string) => void | Promise<void>;
+  /** the owner a new size or du job gets */
+  owner?: (c: Context) => string | undefined;
+  /** the request is answered with a job to follow (one it joined may be another person's: they may follow it too) */
+  follows?: (c: Context, id: string) => void;
+}
+
+/** entries of a du answer checked with one `canList` call */
+const FILTER_BATCH = 256;
+
+/**
+ * Folder sizes (`POST /api/jobs/size`, `GET /api/du`) and their jobs. The size store lives next to the compare index; its `du` is a bounded, cancellable walk
+ * that reuses unchanged folders. It stays in the agent's root process (one store and one change watcher per machine). With `o` (sign-in on), see `SizeAccess`.
+ */
+export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAccess = {}): SizeStore {
   jobs.abandonMs = cfg.duAbandonMs;
   const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : spillPath("sizes"), { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
 
@@ -415,12 +433,12 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStor
       },
     };
   };
-  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; untrusted: boolean; extra?: T }) => void, origin: JobOrigin = "ui") => {
+  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; untrusted: boolean; extra?: T }) => void, origin: JobOrigin = "ui", owner?: string) => {
     // a scan remembers when it began: a restart keeps the folders it already read (a rescan keeps only those)
     const since = Date.now();
     const freshSince = fresh ? since : undefined;
     const p = scanParts(kind, virtual, freshSince ?? false, since, after, done);
-    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh, freshSince, since }, origin });
+    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh, freshSince, since }, origin, owner });
   };
   // An adopted scan runs again under its id, confined again and without `after` (a du client repeats its request once the job is done).
   for (const kind of ["size", "du"] as const) {
@@ -445,11 +463,19 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStor
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
     const r = resolveRead(cfg.root, b.path);
+    await o.inside?.(c, b.path);
+    if (o.canList) {
+      // a folder the person can open, or a file in one (whether a name there is a folder they cannot open is theirs to see)
+      const [self, up] = await o.canList(c, r.virtual === "/" ? ["/"] : [r.virtual, path.posix.dirname(r.virtual)]);
+      if (!self && (!up || (await fs.stat(r.real)).isDirectory())) throw new ops.FsError(403, "permission denied");
+    }
     await fs.stat(r.real);
     if (stopping()) throw leaving();
     // one live size job per path (while another process holds the store's writer lease the job waits for it: see the gate): a second request attaches to it
     const same = liveScan(r.virtual, b.fresh === true);
-    return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
+    const v = same ?? startScan("size", r.virtual, b.fresh === true, undefined, undefined, "ui", o.owner?.(c));
+    o.follows?.(c, v.id);
+    return c.json(v, 202);
   });
 
   // GET /api/du?path=&depth=&all=&fresh=&cachedOnly=: unchanged folders are validated (one lstat each), changed ones re-read, then the
@@ -464,32 +490,54 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStor
    * The answer, streamed from the store as it is read (SizeStore.treeEach): an agent never holds a whole answer, whatever its size. The JSON is
    * {path, cached, watched, entries: [...], truncated, partial?, stale?, error?}; what is known only at the end comes after the entries. `recheck` runs after the
    * last entry (stale when it says no); `done` always runs once (a lock held for the read is released there). An error after the first byte cannot change the status: it ends the answer with `error`.
+   * With `canList` (sign-in on), the entries go out in batches of `FILTER_BATCH`, without each folder the person cannot open and each file whose folder they cannot open.
    */
-  const answerTree = (c: Context, virtual: string, depth: number, all: boolean, head: { cached: boolean; watched: boolean; stale?: boolean }, o: { recheck?: () => Promise<boolean>; done?: () => void } = {}) => {
+  const answerTree = (c: Context, virtual: string, depth: number, all: boolean, head: { cached: boolean; watched: boolean; stale?: boolean }, t: { recheck?: () => Promise<boolean>; done?: () => void } = {}) => {
     c.header("Content-Type", "application/json; charset=UTF-8");
     let ended = false;
     const end = () => {
-      if (!ended) (ended = true), o.done?.();
+      if (!ended) (ended = true), t.done?.();
     };
+    const canList = o.canList;
     return stream(c, async (s) => {
       s.onAbort(end);
       let buf = `{"path":${JSON.stringify(virtual)},"cached":${head.cached},"watched":${head.watched},"entries":[`;
       let first = true;
+      let found = false;
       let tail: Record<string, unknown> = {};
+      const put = async (e: DuEntry) => {
+        buf += (first ? "" : ",") + JSON.stringify(e);
+        first = false;
+        if (buf.length >= 64 * 1024) {
+          const b = buf;
+          buf = "";
+          await s.write(b);
+          if (s.aborted) throw new ops.FsError(400, "canceled");
+        }
+      };
+      let batch: DuEntry[] = [];
+      /** the folder that decides whether an entry is shown: the folder itself, or a file's folder */
+      const folderOf = (e: DuEntry) => (e.type === "dir" || e.type === "mount" ? e.path : path.posix.dirname(e.path));
+      const flush = async () => {
+        if (!canList || !batch.length) return;
+        const out = batch;
+        batch = [];
+        const asked = [...new Set(out.map(folderOf))];
+        const ok = await canList(c, asked);
+        const yes = new Set(asked.filter((_, i) => ok[i] === true));
+        for (const e of out) if (yes.has(folderOf(e))) await put(e);
+      };
       try {
         const r = await sizes.treeEach(virtual, depth, all, async (e) => {
-          buf += (first ? "" : ",") + JSON.stringify(e);
-          first = false;
-          if (buf.length >= 64 * 1024) {
-            const b = buf;
-            buf = "";
-            await s.write(b);
-            if (s.aborted) throw new ops.FsError(400, "canceled");
-          }
+          found = true;
+          if (!canList) return put(e);
+          batch.push(e);
+          if (batch.length >= FILTER_BATCH) await flush();
         });
+        await flush();
         // the folder's rows went between the check before the answer and its read (a change removed them): never an empty answer that looks complete
-        if (first) throw new ops.FsError(404, "the sizes of this folder were removed while the answer was read; ask again");
-        const stale = head.stale || (o.recheck ? !(await o.recheck()) : false);
+        if (!found) throw new ops.FsError(404, "the sizes of this folder were removed while the answer was read; ask again");
+        const stale = head.stale || (t.recheck ? !(await t.recheck()) : false);
         tail = { truncated: r.truncated, ...(r.partial ? { partial: true } : {}), ...(stale ? { stale: true } : {}) };
       } catch (e) {
         tail = { truncated: true, error: e instanceof Error ? e.message : String(e) };
@@ -508,6 +556,9 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStor
     if (!Number.isInteger(depth) || depth < 0 || depth > 64) throw bad("depth must be an integer between 0 and 64");
     for (const k of ["all", "fresh", "cachedOnly"]) if (q(k) !== undefined && q(k) !== "0" && q(k) !== "1") throw bad(`${k} must be 0 or 1`);
     const r = resolveRead(cfg.root, q("path") ?? "/");
+    // (sign-in on: before anything about the folder is told)
+    await o.inside?.(c, q("path") ?? "/");
+    if (o.canList && !(await o.canList(c, [r.virtual]))[0]) throw new ops.FsError(403, "permission denied");
     if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
@@ -545,7 +596,7 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStor
       run = mine;
       // joined: the reply tree is read once that job is done. While stopping, only a new job is refused: the answer of a finished or running one is still good
       // (refusing it would send the repeat to the next process, which walks the whole tree again).
-      v = liveScan(r.virtual, fresh) ?? (stopping() ? (() => { throw leaving(); })() : startScan("du", r.virtual, fresh, undefined, (x) => (mine.out = { read: x.read, untrusted: x.untrusted }), "cli"));
+      v = liveScan(r.virtual, fresh) ?? (stopping() ? (() => { throw leaving(); })() : startScan("du", r.virtual, fresh, undefined, (x) => (mine.out = { read: x.read, untrusted: x.untrusted }), "cli", o.owner?.(c)));
       mine.id = v.id;
       duRuns.set(key, mine);
     }
@@ -565,6 +616,7 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStor
       if (v!.state === "queued" || v!.state === "running") {
         // keep the entry for the repeat request; the job goes on whether or not this client is still there
         run.detached = true;
+        o.follows?.(c, id);
         return c.json({ jobId: id, state: v!.state }, 202);
       }
       // (a job the shutdown interrupted is not cancelled: the client retries against the next process)
@@ -591,6 +643,7 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStor
         if (!ac.signal.aborted) throw e;
         run.detached = true; // the repeat request is answered from this finished scan
         keep = true;
+        o.follows?.(c, id);
         return c.json({ jobId: id, state: "done" }, 202);
       } finally {
         clearTimeout(timer);
