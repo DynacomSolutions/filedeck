@@ -68,7 +68,7 @@ function clean(h: Headers, keepLength: boolean): Headers {
   return out;
 }
 
-export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth }) {
+export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number }) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target> };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
@@ -122,7 +122,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const sysAuth = app.systemAuth;
   const presence = sysAuth ? new SysPresence({ check: (node, name) => sysAuth.exists(node, name), nodes: cfg.nodes.map((n) => n.name), now: opts?.now }) : undefined;
   app.presence = presence;
-  // started at sign-in without waiting: /api/nodes, usually the next request, then shares it
+  // started at sign-in without waiting: /api/nodes, usually the next request, then shares it. Every sign-in asks again on purpose (an
+  // account added or removed on a machine shows at once); the sign-in limiter caps how often that can happen.
   const onSignIn = (kind: "sys" | "virt", name: string) => {
     if (kind === "sys" && presence) void presence.refresh(name);
   };
@@ -158,16 +159,18 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const sapp = createSourceApp(name, s.backend, { ...sourceOpts, indexFile: cfg.indexDir ? path.join(cfg.indexDir, `source-${name}.db`) : "" });
     agents.set(name, { fetch: (rest, init) => Promise.resolve(sapp.fetch(new Request("http://source" + rest, init))) });
   }
+  const nodeNames = new Set(cfg.nodes.map((n) => n.name));
   /**
    * What the presence cache says of a system account on a node. A stale answer still counts; a refresh is started in the background
    * when one is due, and no request waits for it here (only /api/nodes waits, at most 2 s).
    */
-  const present = presence
-    ? (name: string, node: string) => {
-        if (presence.due(name)) void presence.refresh(name);
-        return presence.known(name, node);
-      }
-    : undefined;
+  const present = (name: string, node: string): boolean | undefined => {
+    // a name that is not a machine answers as a hidden one (403, not 404), so a system account cannot learn hidden names by trying
+    if (!nodeNames.has(node)) return false;
+    if (!presence) return undefined;
+    if (presence.due(name)) void presence.refresh(name);
+    return presence.known(name, node);
+  };
   /**
    * Whether the person behind the current request may use a node or source. Network sources stay open to every signed-in
    * account until source grants exist (part 3). With auth off everything is open, as before.
@@ -208,7 +211,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.get("/api/nodes", async (c) => {
     // a system account sees only the machines where it exists: wait (at most 2 s) for answers that are missing or old
     const id = currentUser();
-    if (presence && id?.kind === "sys" && presence.due(id.name)) await presence.refresh(id.name, 2000);
+    if (presence && id?.kind === "sys" && presence.due(id.name)) await presence.refresh(id.name, opts?.nodesWaitMs ?? 2000);
     const nodes = await Promise.all(
       cfg.nodes.filter((n) => mayUse(n.name)).map(async (n) => {
         try {

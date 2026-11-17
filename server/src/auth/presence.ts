@@ -85,7 +85,7 @@ export class SysPresence {
     // newest last: re-inserted, and the oldest names dropped past the limit
     this.entries.delete(name);
     this.entries.set(name, e);
-    while (this.entries.size > this.maxNames) this.entries.delete(this.entries.keys().next().value as string);
+    this.trim();
     await Promise.all(
       this.nodes.map(async (node) => {
         try {
@@ -96,5 +96,14 @@ export class SysPresence {
         }
       }),
     );
+    // dropped (the cache was full) while the asks ran: put the answers back as the newest name
+    if (!this.entries.has(name)) {
+      this.entries.set(name, e);
+      this.trim();
+    }
+  }
+
+  private trim(): void {
+    while (this.entries.size > this.maxNames) this.entries.delete(this.entries.keys().next().value as string);
   }
 }

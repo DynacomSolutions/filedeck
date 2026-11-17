@@ -158,6 +158,24 @@ test("presence: at most maxNames names; the oldest is dropped", async () => {
   for (const n of ["n1", "n3", "n4"]) assert.equal(p.known(n, "a"), false, n);
 });
 
+test("presence: a name dropped while its refresh runs gets its answers back", async () => {
+  let open = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const answers: Record<string, boolean> = { n1: false, n2: true, n3: true };
+  // n1's ask is held; the others answer at once
+  const p = new SysPresence({ check: async (_node, name) => (name === "n1" && (await gate), answers[name]), nodes: ["a"], maxNames: 1 });
+  const r1 = p.refresh("n1");
+  await p.refresh("n2"); // n1 is dropped from the full cache while its ask runs
+  assert.equal(p.known("n2", "a"), true);
+  open();
+  await r1;
+  assert.equal(p.known("n1", "a"), false, "n1 is put back with its answer");
+  assert.equal(p.known("n2", "a"), undefined, "still at most maxNames names");
+  await p.refresh("n3");
+  assert.equal(p.known("n3", "a"), true);
+  assert.equal(p.known("n1", "a"), undefined);
+});
+
 test("canUseNode: a system account is refused only where the presence says no", () => {
   const sys: Identity = { kind: "sys", name: "alice", admin: false, epoch: 0 };
   const present = (_n: string, node: string) => ({ a: true, b: false } as Record<string, boolean | undefined>)[node];
@@ -229,12 +247,12 @@ const A = await agent("a", { alice: {}, zed: {}, bob: {} });
 const B = await agent("b", { zed: { uid: 0 }, bob: {} });
 
 type Hub = ReturnType<typeof createHub>;
-function makeHub(nodes: string, env: Record<string, string> = {}, now?: () => number): Hub {
+function makeHub(nodes: string, env: Record<string, string> = {}, now?: () => number, nodesWaitMs?: number): Hub {
   const h = createHub(
     loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: nodes, FILEDECK_DIFF_DIR: path.join(tmp, `diff-${closers.length}`), ...env } as never),
     undefined,
     () => {},
-    now ? { now } : undefined,
+    { now, nodesWaitMs },
   );
   closers.push(h);
   return h;
@@ -354,7 +372,7 @@ test("sign-in does not wait for the presence; /api/nodes waits at most 2 s; virt
   let open = () => {};
   B.holdLookup = new Promise<void>((r) => (open = r));
   try {
-    const h = makeHub(`a=${A.url},b=${B.url}`);
+    const h = makeHub(`a=${A.url},b=${B.url}`, {}, undefined, 300);
     const t0 = performance.now();
     const cookie = await signIn(h, "alice");
     const ms = performance.now() - t0;
@@ -362,7 +380,7 @@ test("sign-in does not wait for the presence; /api/nodes waits at most 2 s; virt
     const t1 = performance.now();
     const names = (await nodesOf(h, cookie)).map((n) => n.name);
     const ns = performance.now() - t1;
-    assert.ok(ns >= 1500 && ns < 3500, `/api/nodes took ${ns} ms`);
+    assert.ok(ns >= 250 && ns < 1500, `/api/nodes took ${ns} ms (it waits 300 ms here, 2 s by default)`);
     assert.deepEqual(names, ["a", "b"], "b gave no answer in time: unknown, listed");
   } finally {
     open();
@@ -377,6 +395,28 @@ test("sign-in does not wait for the presence; /api/nodes waits at most 2 s; virt
   const cookie = await signIn(h, "vic");
   await req(h, "/api/nodes", { headers: { cookie } });
   assert.deepEqual(lookups(), []);
+});
+
+test("a name that is not a machine answers 403 like a hidden one (no 404 to tell them apart); 404 with auth off", async () => {
+  const h = makeHub(`a=${A.url},b=${B.url}`);
+  const cookie = await signIn(h, "alice");
+  await nodesOf(h, cookie);
+  const H = { cookie };
+  const deny = async (r: Response, what: string) => {
+    assert.equal(r.status, 403, what);
+    assert.deepEqual(await r.json(), { error: "no access to this machine" }, what);
+  };
+  for (const node of ["nosuch", "b"]) {
+    await deny(await req(h, `/api/nodes/${node}/api/fs/list?path=/`, { headers: H }), `proxy ${node}`);
+    await deny(await postJson(h, "/api/transfer", { src: { node: "a", path: "/x" }, dst: { node, dir: "/" } }, H), `transfer ${node}`);
+    await deny(await postJson(h, "/api/ops/jobs", { op: "copy", items: [{ node: "a", path: "/x" }], dst: { node, dir: "/" } }, H), `ops ${node}`);
+    await deny(await postJson(h, "/api/diff/jobs", { left: { node: "a", path: "/" }, right: { node, path: "/" } }, H), `diff ${node}`);
+  }
+  const off = createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, NODES: `a=${A.url}` } as never), undefined, () => {});
+  closers.push(off);
+  assert.equal((await req(off, "/api/nodes/nosuch/api/fs/list?path=/")).status, 404);
+  assert.equal((await postJson(off, "/api/transfer", { src: { node: "a", path: "/x" }, dst: { node: "nosuch", dir: "/" } })).status, 404);
+  assert.equal((await postJson(off, "/api/ops/jobs", { op: "copy", items: [{ node: "a", path: "/x" }], dst: { node: "nosuch", dir: "/" } })).status, 404);
 });
 
 test("auth off: nothing changes (both listed, no lookup)", async () => {
