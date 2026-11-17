@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/images/banner.webp" alt="Filedeck: one file manager for all your machines, in the browser" width="900"></p>
+<p align="center"><img src="docs/images/banner.webp" alt="Filedeck: one file manager for all your machines" width="900"></p>
 
 <p align="center"><img src="docs/images/hero.webp" alt="Filedeck with two panels: holiday photos on a workstation and backups on a NAS" width="900"></p>
 
