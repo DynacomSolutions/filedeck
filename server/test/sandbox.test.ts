@@ -739,6 +739,10 @@ int main(void) {
   printf("unix %s\\n", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 ? "ok" : strerror(errno));
   printf("inet %s\\n", socketpair(AF_INET, SOCK_STREAM, 0, sv) == 0 ? "ok" : strerror(errno));
   printf("unix-plus %s\\n", socketpair(AF_UNIX | 0x100, SOCK_STREAM, 0, sv) == 0 ? "ok" : strerror(errno));
+  printf("dgram %s\\n", socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0 ? "ok" : strerror(errno));
+  printf("seqpacket %s\\n", socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) == 0 ? "ok" : strerror(errno));
+  printf("stream-flags %s\\n", socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sv) == 0 ? "ok" : strerror(errno));
+  printf("stream-proto %s\\n", socketpair(AF_UNIX, SOCK_STREAM, 1, sv) == 0 ? "ok" : strerror(errno));
   return 0;
 }
 `);
@@ -747,10 +751,16 @@ int main(void) {
   assert.equal(cc.status, 0, cc.stderr);
   const free = spawnSync(bin, [], { encoding: "utf8" }).stdout;
   assert.match(free, /unix ok/, "control");
+  for (const k of ["dgram", "seqpacket", "stream-flags"]) assert.match(free, new RegExp(`^${k} ok$`, "m"), `control: ${k}`);
   const pairs = await run(bin, [], { readExec: [tmp], allowSocketpair: true });
   assert.match(pairs.stdout, /^unix ok$/m, pairs.stderr);
   assert.match(pairs.stdout, /^inet Permission denied$/m);
   assert.match(pairs.stdout, /^unix-plus Permission denied$/m);
+  // a datagram (or seqpacket) pair could send to any named or abstract socket with sendto/sendmsg: stream pairs only, protocol 0 only
+  assert.match(pairs.stdout, /^dgram Permission denied$/m);
+  assert.match(pairs.stdout, /^seqpacket Permission denied$/m);
+  assert.match(pairs.stdout, /^stream-proto Permission denied$/m);
+  assert.match(pairs.stdout, /^stream-flags ok$/m, "SOCK_CLOEXEC and SOCK_NONBLOCK still work");
   const none = await run(bin, [], { readExec: [tmp] });
   assert.match(none.stdout, /^unix Permission denied$/m, "without the flag: refused as before");
   const sockets = await run(bin, [], { readExec: [tmp], allowSocketpair: true, allowSockets: true });

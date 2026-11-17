@@ -50,7 +50,7 @@ export interface SandboxInfo {
  * this launcher knows controls UDP bind/connect before the kernel's newest one, so there UDP stays open to a confined program,
  * with one extra layer: unless `allowSockets` is set the launcher installs a seccomp filter that makes `socket()`,
  * `socketpair()`, `connect()`, `bind()`, `listen()`, `accept()` and io_uring fail with EACCES (x32 system call numbers end the
- * process; with `allowSocketpair` a unix socket pair is let through, nothing else), on every kernel, so a confined program can neither reach UDP nor connect to a pathname unix socket (such as a
+ * process; with `allowSocketpair` a unix stream socket pair is let through, nothing else), on every kernel, so a confined program can neither reach UDP nor connect to a pathname unix socket (such as a
  * container runtime's) under the served root; it uses the descriptors it was given. That layer is best effort: a kernel without
  * seccomp filters, or an architecture other than x86-64 and arm64, leaves it off, which `SandboxInfo.seccomp`, the start-up
  * log line and `/api/info` report. Landlock never restricts
@@ -183,7 +183,11 @@ export interface SandboxOpts extends Omit<SpawnOptions, "uid" | "gid"> {
    * what was opened outside the folder, so callers that chroot also pass `landlock: false`.
    */
   chroot?: string;
-  /** let the program make unix socket pairs (Node makes the stdio pipes of its own children that way); every other socket call stays refused */
+  /**
+   * let the program make unix stream socket pairs (Node makes the stdio pipes of its own children that way). Stream pairs only: a datagram or
+   * seqpacket pair can send to any named or abstract unix socket with an address, which nothing else stops when Landlock is off. Every other
+   * socket call stays refused.
+   */
   allowSocketpair?: boolean;
   /** `false`: no Landlock ruleset even where Landlock works (`--no-landlock`); the user change, the capability steps and the seccomp filter still apply */
   landlock?: false;
@@ -266,6 +270,7 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
   // No Landlock rules (state off or fallback): the privilege drop and the working folder still must not depend on the mode, so the
   // launcher, when there is one, runs `--no-landlock` with them (it also clears the supplementary groups, or sets `groups`, which spawn's uid option does not).
   if (info.state === "off" || info.state === "fallback") {
+    // `allowSocketpair` and `keepStdio` do not call for the launcher here: without it there is no filter to relax, and spawn hands every stdio slot on as it is
     const helper = owner || cwdFd !== undefined || keepCaps.length || chroot !== undefined ? await helperPath(info) : null;
     if (helper) {
       const flags = ["--no-landlock"];

@@ -352,9 +352,11 @@ static int caps_work(void) {
  *  - sockets (unless --allow-sockets): socket(), socketpair(), connect(), bind(), listen(), accept() and accept4() fail with EACCES, and so does
  *    io_uring (which can do the same without those calls). A program that is meant to talk to nobody (git, bsdtar, 7-Zip) needs none of them:
  *    it uses the descriptors it was given. Name lookups degrade to numeric ids (the lookup's socket() fails, then it reads /etc/passwd).
- *    --allow-socketpair lets socketpair() through when its first argument (the family) is AF_UNIX, and only then: a program that starts
- *    its own children (Node makes their stdio pipes with a unix socket pair) needs it. A pair is not connected to anything outside the
- *    process. Every other socket call is still refused. With --allow-sockets it changes nothing.
+ *    --allow-socketpair lets socketpair() through for a unix stream pair only (family AF_UNIX, type SOCK_STREAM with or without
+ *    SOCK_CLOEXEC and SOCK_NONBLOCK, protocol 0): a program that starts its own children (Node makes their stdio pipes with such a pair)
+ *    needs it. A stream pair is connected only to its other end. A datagram or seqpacket pair is refused: sendto() and sendmsg() with an
+ *    address on such a socket deliver to any pathname or abstract unix socket, which nothing else stops when Landlock is off. Every other
+ *    socket call is still refused. With --allow-sockets it changes nothing.
  *  - always: mount and the new mount API, umount2, pivot_root, chroot, the setuid/setgid family, capset, ptrace, process_vm_readv/writev,
  *    kexec, bpf, unshare, setns, mknod/mknodat fail with EPERM; clone3 fails with ENOSYS (as container runtimes do, so the C library falls back
  *    to clone), and clone with a new-namespace flag fails with EPERM.
@@ -436,41 +438,54 @@ static int build_filter(struct sock_filter *f, int allow_sockets, int allow_sock
   f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, SB_NR_LIMIT, 0, 1); /* x32 (and any other out-of-range) numbers */
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
 #endif
-  /* tail layout, after the n list entries:  clone3 test, socketpair test (3 instructions, with pair_unix only), clone test (3 instructions),
+  /* tail layout, after the n list entries:  clone3 test, socketpair test (8 instructions, with pair_unix only), clone test (3 instructions),
    * allow, EPERM, EACCES, ENOSYS */
   /* a list entry at index e jumps to the EPERM return; sockets use EACCES as before, so they get their own return */
   int first = k;
   int tail = first + n;          /* clone3 test */
-  int t_allow = tail + 1 + (pair_unix ? 3 : 0) + 3; /* after the socketpair and clone tests */
+  int t_allow = tail + 1 + (pair_unix ? 8 : 0) + 3; /* after the socketpair and clone tests */
   int t_eperm = t_allow + 1;
   int t_eacces = t_eperm + 1;
   int t_enosys = t_eacces + 1;
+  /* a jump offset from instruction k to `target` (1 when it does not fit the 8 bits a jump holds: the filter is then refused below) */
+  int bad_jump = 0;
+#define JUMP_TO(target) (((target) - k - 1 < 0 || (target) - k - 1 > 255) ? (bad_jump = 1, 0) : (uint8_t)((target) - k - 1))
   for (int i = 0; i < n; i++) {
     int is_sock = 0;
     for (int j = 0; j < ns; j++) if (sock[j] == all[i]) is_sock = 1;
     int target = is_sock ? t_eacces : t_eperm;
-    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)all[i], (uint8_t)(target - k - 1), 0);
+    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)all[i], JUMP_TO(target), 0);
     k++;
   }
-  f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone3, (uint8_t)(t_enosys - k - 1), 0);
+  f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone3, JUMP_TO(t_enosys), 0);
   k++;
   if (pair_unix) {
-    /* not socketpair: skip the load and the family test, onto the clone test. The family is an int: the kernel reads the low 32 bits of
-     * the argument, which is the word at args[0] on these little-endian architectures (as for the clone flags below). */
-    f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_socketpair, 0, 2);
+    /* unix stream pairs only (see the note above). Not socketpair: skip the seven instructions of the test, onto the clone test. Each argument
+     * is an int: the kernel reads the low 32 bits, which is the word at args[N] on these little-endian architectures (as for the clone flags
+     * below). The type's low four bits are the kind; the flags above them (SOCK_CLOEXEC, SOCK_NONBLOCK) are allowed. */
+    f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_socketpair, 0, 7);
     f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
-    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, (uint8_t)(t_allow - k - 1), (uint8_t)(t_eacces - k - 1));
+    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 0, JUMP_TO(t_eacces));
+    k++;
+    f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[1]));
+    f[k++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0xf);
+    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SOCK_STREAM, 0, JUMP_TO(t_eacces));
+    k++;
+    f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2]));
+    f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, JUMP_TO(t_allow), JUMP_TO(t_eacces));
     k++;
   }
   f[k++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)__NR_clone, 0, 2); /* not clone: skip the load and the flag test, onto ALLOW (a jump of 2 from here lands two after the next instruction) */
   f[k++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0]));
-  f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, SB_NS_FLAGS, (uint8_t)(t_eperm - k - 1), 0);
+  f[k] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, SB_NS_FLAGS, JUMP_TO(t_eperm), 0);
   k++;
+#undef JUMP_TO
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM);
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EACCES);
   f[k++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOSYS);
-  if (k != t_enosys + 1) return -1; /* the layout above and the jump targets disagree: install nothing rather than a wrong filter */
+  /* the layout above and the jump targets disagree, or a target is out of a jump's reach: install nothing rather than a wrong filter */
+  if (k != t_enosys + 1 || bad_jump) return -1;
   return k;
 }
 #endif
