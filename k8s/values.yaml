@@ -1,5 +1,5 @@
 # Generic defaults: a working single-agent install on any cluster. A deployment overrides them with its own values
-# file (nodes, image, hosts, branding); see "Install with Helm" in the Filedeck README.
+# file (nodes, image, hosts, branding); see docs/install.md in the Filedeck repository.
 
 # Name of the hub Deployment/Service and prefix of the other objects. Empty means the chart name ("filedeck").
 fullnameOverride: ""

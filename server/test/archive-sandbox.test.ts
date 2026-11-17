@@ -152,7 +152,7 @@ live(
 
 /* ---- the third case: reserved folders created or renamed after the scan ---- */
 
-live("reserved folders that appear in the selection after the scan are left out of a bsdtar archive (exclude patterns); the choice for 7-Zip is in the README", async () => {
+live("reserved folders that appear in the selection after the scan are left out of a bsdtar archive (exclude patterns); the choice for 7-Zip is in docs/security.md", async () => {
   const s = scene("late-reserved");
   fs.mkdirSync(path.join(s.src, "sel/deep"), { recursive: true });
   fs.writeFileSync(path.join(s.src, "sel/keep.txt"), "keep");
