@@ -210,7 +210,8 @@ test("a slow regular expression runs off the event loop and is cut off at a tota
     assert.ok(performance.now() - t0 < 60_000, `took ${performance.now() - t0} ms`); // only a hang guard
     assert.ok(pings >= 3, `only ${pings} health checks were answered while the search ran: the event loop was blocked`);
     // many chunks, each costing some time: the deadline is for the whole search, not for each chunk.
-    // One line costs about `cost` ms to match here; the budget is 2.5 times that, and the file has 8 chunks with such a line.
+    // One line costs about `cost` ms to match here; the budget is 2.5 times that, and the file has 32 chunks with such a line,
+    // so the search still overruns when the worker runs several times faster than this measurement (it is taken under load).
     const re = /^(a|a)*b$/;
     let n = 16;
     let cost = 0;
@@ -223,7 +224,7 @@ test("a slow regular expression runs off the event loop and is cut off at a tota
     const slowLine = "a".repeat(n) + "\n";
     let block = slowLine;
     while (block.length + 100 <= 65536) block += "x".repeat(99) + "\n";
-    write("slowre2/chunks.txt", block.padEnd(65536, "y").repeat(8));
+    write("slowre2/chunks.txt", block.padEnd(65536, "y").repeat(32));
     searchLimits.regexTotalMs = Math.max(300, cost * 2.5);
     const t1 = performance.now();
     const big = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never)); // the shared agent skips files over 1000 bytes
