@@ -46,10 +46,11 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     const found: Promise<AccountResolver> = opts.accounts ? Promise.resolve(opts.accounts) : made!.then((r) => r.resolver);
     found.catch(() => undefined); // (a failure is answered per request, as a failed lookup)
     // system sign-in: `filedeck-pam` beside the `filedeck-id` that answered; without it every password check answers `unavailable`
+    // (an account lookup passed in, as tests do, comes without host helpers: no PAM, and nothing to log)
     pam = opts.pam
       ? Promise.resolve(opts.pam)
-      : (made ?? Promise.resolve({ helpers: undefined, reason: "the account lookup was passed in, so no host helpers are known" }))
-          .then(async (r) => {
+      : made
+          ?.then(async (r) => {
             if (!r.helpers) throw new Error(r.reason ?? "no host helpers");
             if (!(await executable(path.join(r.helpers.dir, "filedeck-pam")))) throw new Error(`no filedeck-pam in ${r.helpers.dir}`);
             return hostPam(cfg, r.helpers);

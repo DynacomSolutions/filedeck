@@ -120,3 +120,27 @@ test("audit leaves the user out when there is none", async () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("a sign-in body keeps only its name: a string or an array body gives no body, never the secret", async () => {
+  const { createHub } = await import("../src/hub.ts");
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-audit-signin-")));
+  const lines: string[] = [];
+  const hub = createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: "agent-secret-signin", FILEDECK_STATIC: tmp } as never), undefined, (l) => lines.push(l));
+  const SECRET = "pw-audit-signin-secret";
+  const peer = { incoming: { socket: { remoteAddress: "127.0.0.1", encrypted: false } } };
+  try {
+    for (const body of [SECRET, [SECRET, "alice"], { name: "alice", password: SECRET }, { name: ["x", SECRET], password: SECRET }]) {
+      lines.length = 0;
+      await hub.request("http://localhost/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, peer as never);
+      const line = lines.map((l) => JSON.parse(l)).find((l) => l.route === "/api/auth/login");
+      assert.ok(line, `an audit line for ${JSON.stringify(body)}`);
+      assert.ok(line.body === undefined || JSON.stringify(Object.keys(line.body)) === '["name"]', JSON.stringify(line.body));
+      if (!Array.isArray(body) && typeof body === "object" && typeof body.name === "string") assert.deepEqual(line.body, { name: "alice" });
+      else assert.equal(line.body, undefined);
+      assert.ok(!lines.join("\n").includes(SECRET), JSON.stringify(body));
+    }
+  } finally {
+    await hub.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

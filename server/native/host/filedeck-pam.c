@@ -14,7 +14,8 @@
  *   4   no such account, or an account with uid 0 (it never signs in here)
  *   5   PAM cannot be used: no libpam.so.0, no service file, a lookup or PAM system error
  *   64  usage error
- * A reason goes to stderr for the agent's log (never the password).
+ * A reason goes to stderr for the agent's log (never the password). The very first step makes the process undumpable (no core file,
+ * no ptrace by other processes of its uid); when that fails it exits 1 before it reads anything.
  *
  * It runs inside the machine's root as root, with only CAP_DAC_READ_SEARCH (pam_unix may need to read a mode-0000 /etc/shadow), started
  * from the image by descriptor (`filedeck-sandbox --chroot --exec-outside`, server/src/host-helpers.ts and host-pam.ts). It loads the
@@ -29,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -107,7 +109,8 @@ fail:
 static int has_service(const char *service) {
   struct stat st;
   if (stat("/etc/pam.d", &st) != 0 || !S_ISDIR(st.st_mode)) return 1; /* /etc/pam.conf only: PAM decides */
-  static const char *dirs[] = {"/etc/pam.d/", "/usr/lib/pam.d/", "/usr/share/pam.d/"};
+  /* the order Linux-PAM looks in: the machine's own folder, then the vendor folders (/usr/lib/pam.d; /usr/etc/pam.d on older openSUSE) */
+  static const char *dirs[] = {"/etc/pam.d/", "/usr/lib/pam.d/", "/usr/etc/pam.d/", "/usr/share/pam.d/"};
   char p[128];
   for (size_t i = 0; i < sizeof dirs / sizeof *dirs; i++) {
     snprintf(p, sizeof p, "%s%s", dirs[i], service);
@@ -123,6 +126,12 @@ typedef const char *(*strerror_fn)(pam_handle_t *, int);
 typedef int (*get_item_fn)(const pam_handle_t *, int, const void **);
 
 int main(int argc, char **argv) {
+  /* first of all: not dumpable, so no core file (a crashing PAM module) and no other process of this uid can read the password out of
+     this process. A core pattern that pipes to a program ignores RLIMIT_CORE, so the limit alone would not do. */
+  if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+    fprintf(stderr, "filedeck-pam: cannot make the process undumpable\n");
+    return 1;
+  }
   if (argc != 3 || !plain(argv[1], 1) || !plain(argv[2], 0)) {
     fprintf(stderr, "usage: filedeck-pam SERVICE NAME (the password on stdin)\n");
     return 64;

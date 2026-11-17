@@ -117,6 +117,41 @@ test("a 1025-byte password is sent as it is: the helper cuts it, not the caller"
   assert.deepEqual(calls[0]!.stdin, Buffer.from(long));
 });
 
+test("at most 4 helpers run at once; a call over the limit waits, and the time limit still bounds it", async () => {
+  let running = 0;
+  let most = 0;
+  let calls = 0;
+  const gates: (() => void)[] = [];
+  const pam = new HostPam({
+    run: async () => {
+      calls++;
+      running++;
+      most = Math.max(most, running);
+      await new Promise<void>((r) => gates.push(r));
+      running--;
+      return { code: 0 };
+    },
+    log: () => {},
+    timeoutMs: 5000,
+  });
+  const all = Array.from({ length: 6 }, () => pam.check("alice", SECRET));
+  await sleep(50);
+  assert.equal(calls, 4, "two wait for a place");
+  while (gates.length || calls < 6) {
+    gates.shift()?.();
+    await sleep(5);
+  }
+  assert.deepEqual(await Promise.all(all), Array(6).fill("ok"));
+  assert.equal(most, 4);
+
+  // the limit counts against the time limit: a call that waits too long is unavailable and never runs
+  let started = 0;
+  const stuck = new HostPam({ run: () => (started++, new Promise(() => {})), log: () => {}, timeoutMs: 100 });
+  assert.deepEqual(await Promise.all(Array.from({ length: 5 }, () => stuck.check("alice", SECRET))), Array(5).fill("unavailable"));
+  await sleep(150);
+  assert.equal(started, 4, "the fifth gave up while it waited");
+});
+
 test("an unavailable helper is logged with its reason, never the password", async () => {
   const log: string[] = [];
   const pam = new HostPam({ run: async () => ({ code: 5, stderr: "filedeck-pam: no PAM service file for filedeck\n" }), log: (s) => log.push(s) });
@@ -142,6 +177,7 @@ const MOD_SERVICES = (mod: string): Record<string, string> => ({
   "filedeck-test-len": `auth required ${mod} len=1024\naccount required pam_permit.so\n`,
   "filedeck-test-acct": `auth required pam_permit.so\naccount required ${mod} expired\n`,
   "filedeck-test-sleep": `auth required ${mod} sleep\naccount required pam_permit.so\n`,
+  "filedeck-test-dumpable": `auth required ${mod} undumpable\naccount required pam_permit.so\n`,
 });
 const written: string[] = [];
 after(() => {
@@ -157,6 +193,7 @@ const MODULE = String.raw`
 #include <security/pam_modules.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 static int ask(pam_handle_t *h, int style, const char *text, char **out) {
   const struct pam_conv *conv = NULL;
@@ -182,6 +219,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *h, int flags, int argc, const c
   else if (!strncmp(mode, "len=", 4)) ok = pw && strlen(pw) == (size_t)atoi(mode + 4);
   else if (!strcmp(mode, "sleep")) { sleep(2); ok = 1; }
   else if (!strcmp(mode, "info")) ok = 1;
+  else if (!strcmp(mode, "undumpable")) ok = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0;
   free(pw);
   return ok ? PAM_SUCCESS : PAM_AUTH_ERR;
 }
@@ -266,6 +304,10 @@ live("the password ends at the first newline and at 1024 bytes; the account stag
   assert.equal(await pamFor(built, "filedeck-test-acct").check("nobody", SECRET), "fail");
   // an empty password never reaches the stack as a success through a null token
   assert.equal(await pamFor(built, "filedeck-test-check").check("nobody", ""), "fail");
+});
+
+live("the helper is not dumpable while PAM holds the password (no core file can hold it)", async ({ built }) => {
+  assert.equal(await pamFor(built, "filedeck-test-dumpable").check("nobody", SECRET), "ok");
 });
 
 live("the password is not in the helper's arguments, its environment or any log line", async ({ built }) => {
