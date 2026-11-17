@@ -12,7 +12,7 @@ import { loadConfig } from "../src/config.ts";
 import { signClaim, USER_HEADER, type UserClaim } from "../src/auth/identity.ts";
 import { accountWorkers, isRootRoute, makeWorkerSpecs, workerGate, workerKey } from "../src/agent-workers.ts";
 import { landlockRoots } from "../src/account-dirs.ts";
-import { PoolFull, StaleEpoch, startWorkerProcess, type StartWorker, type WorkerPool, type WorkerSpec } from "../src/worker-pool.ts";
+import { MAX_ACCOUNTS, PoolFull, StaleEpoch, startWorkerProcess, type StartWorker, type WorkerPool, type WorkerSpec } from "../src/worker-pool.ts";
 import { WorkerGone } from "../src/worker-proto.ts";
 import { sandboxInfo } from "../src/sandbox.ts";
 import type { AccountResolver } from "../src/local-accounts.ts";
@@ -545,12 +545,16 @@ test("Landlock roots: a grant whose path is changed between its check and its op
 
 test("bounded maps: epochs for a bounded number of accounts; an account's folders are checked again once its worker has stopped", async () => {
   const fakePool = { stopAccount: async () => {}, list: () => [] } as unknown as WorkerPool;
-  const aw = accountWorkers({ pool: fakePool, accounts: accounts(), spec: async () => assert.fail("not used"), maxAccounts: 2 });
-  assert.equal(await aw.epoch(sys("a", 5)), null);
-  assert.equal(await aw.epoch(sys("b", 5)), null);
-  assert.equal(await aw.epoch(sys("c", 5)), null);
-  assert.equal(await aw.epoch(sys("a", 3)), null, "a, the least recently seen, is forgotten");
-  assert.equal((await aw.epoch(sys("c", 3)))?.status, 401, "c is kept");
+  let t = 1_000_000;
+  const aw = accountWorkers({ pool: fakePool, accounts: accounts(), spec: async () => assert.fail("not used"), now: () => t });
+  assert.equal(await aw.epoch(sys("first", 5)), null);
+  // more accounts than the bound, all within 65 s (a claim lives 60 s, plus 5 s of clock skew): nothing is dropped
+  for (let i = 0; i < MAX_ACCOUNTS; i++) assert.equal(await aw.epoch(sys(`n${i}`, 1)), null);
+  assert.equal((await aw.epoch(sys("first", 3)))?.status, 401, "an old claim for the first account is still refused");
+  t += 66_000;
+  assert.equal(await aw.epoch(sys("late", 1)), null); // (past the bound, entries raised more than 65 s ago may go now)
+  assert.equal(await aw.epoch(sys("first", 3)), null, "the old entry was dropped");
+  assert.equal((await aw.epoch(sys("late", 0)))?.status, 401, "a young entry is kept");
   // the folders of an account whose worker has stopped are not held as made: its next start checks them again
   const specs = makeWorkerSpecs(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
   try {
