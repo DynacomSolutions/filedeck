@@ -13,7 +13,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
-import { canUseNode, isOpenProbe, NoAccessError, withAgentToken } from "./agent-auth.ts";
+import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, withAgentToken } from "./agent-auth.ts";
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
@@ -30,6 +30,7 @@ import { LoginLimiter } from "./auth/limiter.ts";
 import { currentUser, userContext } from "./auth/context.ts";
 import { USER_HEADER } from "./auth/identity.ts";
 import { markArrival, registerAuth, registerAuthOff, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
+import { AgentSystemAuth } from "./auth/system.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
 export interface HubAuth {
@@ -67,11 +68,12 @@ function clean(h: Headers, keepLength: boolean): Headers {
 }
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth }) {
-  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth };
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; systemAuth?: AgentSystemAuth };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
   // the signed user header is keyed on the agent token, so there is no auth without one (main.ts says so first)
   if (cfg.auth && !cfg.agentToken) throw new Error("FILEDECK_AUTH=on needs FILEDECK_AGENT_TOKEN");
+  if (cfg.auth) for (const n of cfg.authNodes) if (!cfg.nodes.some((x) => x.name === n)) throw new Error(`FILEDECK_AUTH_NODES names an unknown node: ${n}`);
   if (cfg.auth) {
     const db = new AuthDb(cfg.authFile);
     const accounts = new Accounts(db);
@@ -103,7 +105,18 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.use("*", requestGuard({ forward: true, allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
   app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined));
-  if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? unavailableSystemAuth, now: opts?.now });
+  // System sign-in asks the agents in the sign-in order (auth/system.ts). Each call carries the agent token and nothing else of the
+  // request: no user (nobody is signed in yet), no cookie, no client header; the body is built here.
+  const signInCall = (node: string, rest: string, body: unknown, signal?: AbortSignal): Promise<Response> => {
+    const n = cfg.nodes.find((x) => x.name === node);
+    if (!n) return Promise.reject(new Error(`unknown node ${node}`));
+    const init: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal };
+    return userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name)));
+  };
+  if (auth && cfg.nodes.length > 0) {
+    app.systemAuth = new AgentSystemAuth({ nodes: cfg.authNodes.length > 0 ? cfg.authNodes : cfg.nodes.map((n) => n.name), call: signInCall });
+  }
+  if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? app.systemAuth ?? unavailableSystemAuth, now: opts?.now });
   else registerAuthOff(app);
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;
@@ -117,7 +130,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // Every call to an agent names the person behind it (with auth on, a call with nobody behind it throws). Only the open
   // probes go out without a user header: they carry no data and are made for nobody in particular.
   // With auth on the client's cookie (its session) never goes to an agent, whatever path built the headers.
+  // The agents' sign-in routes are the hub's alone (signInCall above): no person's request ever reaches them through here.
   const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) => {
+    if (cfg.auth && isAgentAuthPath(rest)) return Promise.reject(new Error("the agents' sign-in routes are not forwarded"));
     if (cfg.auth) init = withoutCookie(init);
     return isOpenProbe(rest) ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name))) : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth));
   };
@@ -356,6 +371,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const url = new URL(c.req.url);
     // the node segment is matched as sent: its decoded form can have another length
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
+    // the agents' sign-in routes answer only the hub (they would be a way past its limiter)
+    if (cfg.auth && isAgentAuthPath(rest)) return c.json({ error: "not found" }, 404);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));

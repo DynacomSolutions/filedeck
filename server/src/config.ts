@@ -72,6 +72,8 @@ export interface Config {
   apiToken: string | undefined;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
+  /** hub, sign-in on: the nodes asked for a system sign-in, in order (FILEDECK_AUTH_NODES); empty = the order of `nodes` */
+  authNodes: string[];
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
   sources: SourceConfig[];
   sourceSecretDir: string;
@@ -203,6 +205,7 @@ export function loadConfig(env = process.env): Config {
     allowedHosts: (env.FILEDECK_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
     apiToken: mode === "hub" ? readSecret(env, "FILEDECK_API_TOKEN") : undefined,
     nodes: parseNodes(env.NODES),
+    authNodes: [...new Set((env.FILEDECK_AUTH_NODES ?? "").split(",").map((n) => n.trim()).filter(Boolean))],
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",
     vaultFile,
@@ -255,6 +258,7 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     authFile: "",
     vaultFile: "",
     nodes: [],
+    authNodes: [],
     sources: [],
     sourceSecretDir: "",
     jobsFile: "",

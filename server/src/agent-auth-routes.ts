@@ -1,15 +1,18 @@
 import type { Hono } from "hono";
 import type { HostPam } from "./host-pam.ts";
-import type { KeyCheck } from "./agent-keys.ts";
-import { validSystemName, type AccountResolver } from "./local-accounts.ts";
+import { logLine, type KeyCheck } from "./agent-keys.ts";
+import { validSystemName, type AccountResolver, type LocalAccount } from "./local-accounts.ts";
 
 /**
  * The agent's sign-in routes (sign-in on only; with it off they do not exist). The hub calls them with the agent token and no user
  * (`isAgentAuthRoute`), and the root process answers them itself. Each answers 200 with a result; the hub decides what the person sees.
  *
- * - `POST /api/auth/password {name, password}`: `{result}` from the machine's PAM (`HostPam`); `unavailable` when PAM cannot be used here.
+ * - `POST /api/auth/password {name, password}`: `{result}` from the machine's PAM (`HostPam`); `unavailable` when PAM cannot be used here
+ *   or the account lookup fails. A name that does not resolve, or resolves to uid 0, gid 0 or group 0, is `unknown` before PAM runs.
  * - `POST /api/auth/key {name, publicKey, message, signature}` (`message` and `signature` base64): `{result}` from `KeyCheck` (the key
  *   listed in the user's own authorized_keys, read as the user); `unavailable` when there is no key check here or the account lookup fails.
+ * - `POST /api/auth/lookup {name}`: `{exists}`; false for uid 0, gid 0 or group 0, and for a lookup that fails (one log line). The hub
+ *   asks it for the machines a system user may see; it never passes a client's request on to it, so its rate is the hub's.
  *
  * The password, the key and the signature are never logged, never put in an audit line (an `/api/auth/` body keeps only its `name`) and
  * never echoed in an error.
@@ -29,7 +32,29 @@ export function registerAgentAuthRoutes(
     const { name, password } = (body && typeof body === "object" && !Array.isArray(body) ? body : {}) as { name?: unknown; password?: unknown };
     if (typeof name !== "string" || typeof password !== "string") return c.json({ error: "name and password are needed" }, 400);
     const pam = await o.pam;
-    return c.json({ result: pam ? await pam.check(name, password) : "unavailable" });
+    if (!pam) return c.json({ result: "unavailable" });
+    // uid 0 is refused here too, whatever the helper would say (it refuses it as well)
+    let account: LocalAccount | null;
+    try {
+      account = validSystemName(name) ? await (await o.accounts()).resolve(name) : null;
+    } catch (e) {
+      log(`pam: unavailable (${logLine((e as Error)?.message ?? String(e))})`);
+      return c.json({ result: "unavailable" });
+    }
+    if (!usable(account)) return c.json({ result: "unknown" });
+    return c.json({ result: await pam.check(name, password) });
+  });
+
+  app.post("/api/auth/lookup", async (c) => {
+    const body = (await c.req.json().catch(() => undefined)) as unknown;
+    const name = body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 1 ? (body as { name?: unknown }).name : undefined;
+    if (typeof name !== "string" || !validSystemName(name)) return c.json({ error: "a name is needed" }, 400);
+    try {
+      return c.json({ exists: usable(await (await o.accounts()).resolve(name)) });
+    } catch (e) {
+      log(`lookup: ${name} could not be resolved (${logLine((e as Error)?.message ?? String(e))})`);
+      return c.json({ exists: false });
+    }
   });
 
   app.post("/api/auth/key", async (c) => {
@@ -46,6 +71,9 @@ export function registerAgentAuthRoutes(
     }
   });
 }
+
+/** An account that may sign in: one that resolved, and not uid 0, gid 0 or a member of group 0. */
+const usable = (a: LocalAccount | null): boolean => a !== null && a.uid !== 0 && a.gid !== 0 && !a.groups.includes(0);
 
 /** Base64 of at most `max` decoded bytes (padded, the standard alphabet), or null. */
 function base64(v: unknown, max: number): Buffer | null {

@@ -14,6 +14,16 @@ export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)
  */
 export const isAgentAuthRoute = (p: string) => /^\/api\/auth\/[a-z-]+$/.test(p);
 
+/**
+ * Whether a path (a query string allowed) the hub would send to an agent could reach the agent's sign-in routes, read the wide way:
+ * percent escapes decoded (the agent's router decodes them), letters in any case and repeated slashes as one. Only the hub's own
+ * sign-in calls may go there, so the proxy and every other agent call refuse these paths.
+ */
+export function isAgentAuthPath(pathAndQuery: string): boolean {
+  const p = (pathAndQuery.split("?")[0] ?? "").replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+  return /^\/api\/auth(\/|$)/.test(p.toLowerCase().replace(/\/{2,}/g, "/"));
+}
+
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
 /**
