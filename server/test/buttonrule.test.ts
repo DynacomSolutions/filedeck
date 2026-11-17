@@ -22,7 +22,7 @@ test("no anchor renders an action unless it is a button-styled download or marke
       if (!nav && !btn) bad.push(`${n}: <a${tag.slice(0, 60)}`);
     }
   }
-  assert.deepEqual(bad, [], "use <button> (or the btn-a download button); see Contributing in README");
+  assert.deepEqual(bad, [], "use <button> (or the btn-a download button); see CONTRIBUTING.md");
 });
 
 test("no link-styled buttons: no className=\"link\" and no underline or link-coloured button rules", () => {

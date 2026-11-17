@@ -1571,7 +1571,7 @@ const O_PATH = 0o10000000; // Linux: a descriptor that names the inode and can d
  *  - More items than that (or more than this process may hold open): the pinned source folder itself (`wholeFolder`). bsdtar is told the
  *    names explicitly and stores links as links, so it archives only the selection, but it can read unselected siblings.
  * Folders inside an entry cannot be taken out of its grant (Landlock allows by hierarchy), so Filedeck's own folders found inside an entry are
- * kept out by the tools' exclude patterns, not by the kernel (see the README).
+ * kept out by the tools' exclude patterns, not by the kernel (see docs/security.md).
  */
 /** Where the grant fallbacks are reported (tests replace it). */
 export const grantHooks = { log: (m: string) => console.warn(m) };
