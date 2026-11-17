@@ -1,0 +1,192 @@
+import { DatabaseSync } from "node:sqlite";
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import type { Identity, NodeAccess } from "./identity.ts";
+
+/**
+ * Account store (hub). Virtual accounts, their public keys and the epochs that
+ * let the hub cancel every session of one account. System accounts have no row
+ * of their own: only their epoch is kept, in `sys_users`.
+ */
+
+export class AccountError extends Error {}
+
+const NAME_RE = /^[a-z_][a-z0-9_.-]{0,31}$/;
+
+export class AuthDb {
+  readonly db: DatabaseSync;
+  readonly hubId: string;
+
+  constructor(file: string) {
+    if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    this.db = new DatabaseSync(file);
+    if (file !== ":memory:") {
+      try {
+        fs.chmodSync(file, 0o600);
+      } catch {
+        /* a volume that does not support modes */
+      }
+    }
+    this.db.exec(`
+      PRAGMA busy_timeout = 5000;
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS meta (hub_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS accounts (
+        name TEXT PRIMARY KEY,
+        password_hash TEXT,
+        admin INTEGER NOT NULL,
+        epoch INTEGER NOT NULL DEFAULT 0,
+        nodes TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS account_keys (
+        name TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        PRIMARY KEY (name, public_key)
+      );
+      CREATE TABLE IF NOT EXISTS sys_users (
+        name TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    const row = this.db.prepare("SELECT hub_id FROM meta LIMIT 1").get() as { hub_id: string } | undefined;
+    if (row) this.hubId = row.hub_id;
+    else {
+      this.hubId = randomBytes(16).toString("hex");
+      this.db.prepare("INSERT INTO meta (hub_id) VALUES (?)").run(this.hubId);
+    }
+  }
+
+  close() {
+    this.db.close();
+  }
+}
+
+/* ------------------------------------------------------------- passwords */
+
+const LOG_N = 15;
+const R = 8;
+const P = 1;
+const MAXMEM = 64 * 1024 * 1024;
+
+function derive(pw: string, salt: Buffer, logN: number, r: number, p: number): Buffer {
+  return scryptSync(pw, salt, 32, { N: 2 ** logN, r, p, maxmem: MAXMEM });
+}
+
+/** `scrypt$15$8$1$<salt b64>$<hash b64>` */
+export function hashPassword(pw: string): string {
+  const salt = randomBytes(16);
+  return `scrypt$${LOG_N}$${R}$${P}$${salt.toString("base64")}$${derive(pw, salt, LOG_N, R, P).toString("base64")}`;
+}
+
+const DUMMY = hashPassword("filedeck dummy password");
+
+/** Same work whether or not a hash is stored. With no stored hash it hashes against a fixed dummy, then answers false. */
+export function checkPassword(pw: string, stored: string | null): boolean {
+  const ok = verify(pw, stored ?? DUMMY);
+  return stored !== null && ok;
+}
+
+function verify(pw: string, stored: string): boolean {
+  try {
+    const [tag, n, r, p, salt, hash] = stored.split("$");
+    if (tag !== "scrypt" || !n || !r || !p || !salt || !hash) return false;
+    const logN = Number(n);
+    if (!Number.isInteger(logN) || logN < 1 || logN > 20) return false;
+    const want = Buffer.from(hash, "base64");
+    const got = derive(pw, Buffer.from(salt, "base64"), logN, Number(r), Number(p));
+    return got.length === want.length && timingSafeEqual(got, want);
+  } catch {
+    return false;
+  }
+}
+
+/* -------------------------------------------------------------- accounts */
+
+export interface AccountRecord {
+  name: string;
+  admin: boolean;
+  epoch: number;
+  nodes: Record<string, NodeAccess>;
+  passwordHash: string | null;
+}
+
+interface AccountRow {
+  name: string;
+  password_hash: string | null;
+  admin: number;
+  epoch: number;
+  nodes: string;
+}
+
+export class Accounts {
+  constructor(private store: AuthDb) {}
+
+  private get db() {
+    return this.store.db;
+  }
+
+  create(a: { name: string; password?: string; passwordHash?: string; admin: boolean; nodes: Record<string, NodeAccess> }): void {
+    if (!NAME_RE.test(a.name) || a.name === "root") throw new AccountError("invalid name");
+    if (this.get(a.name)) throw new AccountError("exists");
+    const hash = a.passwordHash ?? (a.password !== undefined ? hashPassword(a.password) : null);
+    this.db
+      .prepare("INSERT INTO accounts (name, password_hash, admin, epoch, nodes) VALUES (?, ?, ?, 0, ?)")
+      .run(a.name, hash, a.admin ? 1 : 0, JSON.stringify(a.nodes));
+  }
+
+  get(name: string): AccountRecord | undefined {
+    const r = this.db.prepare("SELECT name, password_hash, admin, epoch, nodes FROM accounts WHERE name = ?").get(name) as AccountRow | undefined;
+    if (!r) return undefined;
+    return {
+      name: r.name,
+      admin: r.admin === 1,
+      epoch: r.epoch,
+      nodes: JSON.parse(r.nodes) as Record<string, NodeAccess>,
+      passwordHash: r.password_hash,
+    };
+  }
+
+  addKey(name: string, publicKeyLine: string): void {
+    this.db.prepare("INSERT OR IGNORE INTO account_keys (name, public_key) VALUES (?, ?)").run(name, publicKeyLine);
+  }
+
+  keys(name: string): string[] {
+    const rows = this.db.prepare("SELECT public_key FROM account_keys WHERE name = ? ORDER BY rowid").all(name) as { public_key: string }[];
+    return rows.map((r) => r.public_key);
+  }
+
+  bumpEpoch(kind: "sys" | "virt", name: string): number {
+    if (kind === "sys") {
+      this.epochOf("sys", name);
+      this.db.prepare("UPDATE sys_users SET epoch = epoch + 1 WHERE name = ?").run(name);
+    } else {
+      this.db.prepare("UPDATE accounts SET epoch = epoch + 1 WHERE name = ?").run(name);
+    }
+    return this.epochOf(kind, name);
+  }
+
+  epochOf(kind: "sys" | "virt", name: string): number {
+    if (kind === "sys") {
+      this.db.prepare("INSERT OR IGNORE INTO sys_users (name, epoch) VALUES (?, 0)").run(name);
+      return (this.db.prepare("SELECT epoch FROM sys_users WHERE name = ?").get(name) as { epoch: number }).epoch;
+    }
+    const r = this.db.prepare("SELECT epoch FROM accounts WHERE name = ?").get(name) as { epoch: number } | undefined;
+    return r?.epoch ?? 0;
+  }
+
+  identity(kind: "virt", name: string): Identity | undefined {
+    const a = this.get(name);
+    if (!a) return undefined;
+    return { kind, name: a.name, admin: a.admin, epoch: a.epoch, nodes: a.nodes };
+  }
+}
+
+/** Creates the first admin from a JSON file, only when that name is free. Never changes an existing account. */
+export function bootstrapAdmin(acc: Accounts, file: string | undefined): void {
+  if (!file) return;
+  const j = JSON.parse(fs.readFileSync(file, "utf8")) as { name?: unknown; passwordHash?: unknown };
+  if (typeof j.name !== "string" || typeof j.passwordHash !== "string") throw new Error("admin bootstrap file needs name and passwordHash");
+  if (acc.get(j.name)) return;
+  acc.create({ name: j.name, passwordHash: j.passwordHash, admin: true, nodes: {} });
+}
