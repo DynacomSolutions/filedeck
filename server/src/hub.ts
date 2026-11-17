@@ -23,6 +23,20 @@ import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } fr
 import { audit, clientOf, trustProxies, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
+import { Accounts, AuthDb, bootstrapAdmin } from "./auth/store.ts";
+import { Sessions } from "./auth/sessions.ts";
+import { Challenges } from "./auth/sshkey.ts";
+import { LoginLimiter } from "./auth/limiter.ts";
+import { identityFor, markArrival, registerAuth, registerAuthOff, unavailableSystemAuth } from "./auth/routes.ts";
+
+/** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
+export interface HubAuth {
+  db: AuthDb;
+  accounts: Accounts;
+  sessions: Sessions;
+  challenges: Challenges;
+  limiter: LoginLimiter;
+}
 
 /** Where a request for a node or a network source goes. Agents are HTTP; sources run inside the hub. */
 export interface Target {
@@ -42,8 +56,25 @@ function clean(h: Headers, keepLength: boolean): Headers {
   return out;
 }
 
-export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink) {
-  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault };
+export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number }) {
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth };
+  // Sign-in state, only with auth on (off, nothing is opened or created).
+  let auth: HubAuth | undefined;
+  if (cfg.auth) {
+    const db = new AuthDb(cfg.authFile);
+    const accounts = new Accounts(db);
+    bootstrapAdmin(accounts, cfg.bootstrapAdminFile);
+    auth = {
+      db,
+      accounts,
+      sessions: new Sessions(db, accounts, { idleMs: cfg.sessionIdleMs, maxMs: cfg.sessionMaxMs, now: opts?.now }),
+      challenges: new Challenges(opts?.now),
+      limiter: new LoginLimiter(opts?.now),
+    };
+    app.auth = auth;
+    // first, so the floor on failed sign-ins counts from when the request arrived
+    app.use("*", markArrival());
+  }
   // Optional allowlist of Host values (DNS-rebinding guard); /healthz stays open for probes that use the pod address.
   if (cfg.allowedHosts.length) {
     app.use("*", async (c, next) => {
@@ -59,13 +90,17 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // editor saves are limited by the agent that takes them (its own maxEdit), not here
   app.use("*", requestGuard({ forward: true, allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
-  app.use("*", apiTokenAuth(cfg.apiToken));
+  const tokenAccount = cfg.apiTokenAccount;
+  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => (tokenAccount ? identityFor(cfg, auth.accounts, tokenAccount) : undefined) : undefined));
+  if (auth) registerAuth(app, { cfg, ...auth, system: unavailableSystemAuth, now: opts?.now });
+  else registerAuthOff(app);
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;
   let opq: OpQueue | undefined;
   app.close = async () => {
     await opq?.interrupt(); // stop at an item boundary and hand the running jobs over
     vault.close();
+    auth?.db.close();
     await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined)));
   };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: (rest, init) => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken)) }]));
