@@ -120,7 +120,8 @@ export class HostAccounts implements AccountResolver {
 /**
  * Accounts from `<root>/etc/passwd` and `<root>/etc/group` only (no LDAP or SSSD), for a machine where the host helper cannot run:
  * a virtual account's `runAs` then still resolves when it is a local account. The groups are the primary one and every group whose
- * member list names the account. The files are read again on every call (they are small, and this way a change is seen at once).
+ * member list names the account. The files are read again on every call (they are small, and this way a change is seen at once). A
+ * passwd file that cannot be read rejects; a missing group file means no groups beyond the primary one.
  */
 export class FilesAccounts implements AccountResolver {
   private readonly dropped: (name: string) => void;
@@ -134,8 +135,10 @@ export class FilesAccounts implements AccountResolver {
 
   async resolve(name: string): Promise<LocalAccount | null> {
     if (!validSystemName(name)) return null;
-    const passwd = await fs.readFile(path.join(this.root, "etc/passwd"), "utf8").catch(() => null);
-    if (passwd === null) return null;
+    // an account file that cannot be read is an error (the caller answers "unavailable"), never "no such account"
+    const passwd = await fs.readFile(path.join(this.root, "etc/passwd"), "utf8").catch((e: Error) => {
+      throw new Error(`account lookup for ${name} failed: etc/passwd: ${e.message}`);
+    });
     let entry: string[] | undefined;
     for (const line of passwd.split("\n")) {
       const f = line.split(":");
@@ -149,7 +152,11 @@ export class FilesAccounts implements AccountResolver {
     const gid = id(entry[3]!);
     if (uid === null || gid === null) return null;
     const groups = [gid];
-    const group = await fs.readFile(path.join(this.root, "etc/group"), "utf8").catch(() => "");
+    // no group file at all: no groups beyond the primary one; one that exists and cannot be read is an error
+    const group = await fs.readFile(path.join(this.root, "etc/group"), "utf8").catch((e: NodeJS.ErrnoException) => {
+      if (e.code === "ENOENT") return "";
+      throw new Error(`account lookup for ${name} failed: etc/group: ${e.message}`);
+    });
     for (const line of group.split("\n")) {
       const f = line.split(":");
       if (f.length < 4) continue;

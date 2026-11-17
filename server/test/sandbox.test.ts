@@ -835,6 +835,7 @@ test("--exec-outside: needs --chroot and an absolute program path (exit 64), and
     ["--no-landlock", "--exec-outside", "--", "/bin/true"], // no --chroot
     ["--no-landlock", "--chroot", "/", "--exec-outside", "--", "true"], // a relative path
     ["--no-landlock", "--chroot", "/", "--exec-outside", "--", "./true"],
+    ["--chroot", "/", "--exec-outside", "--", "/bin/true"], // Landlock on: its rules would not fit the new root
   ]) {
     const r = st(...bad);
     assert.equal(r.status, 64, `${bad.join(" ")}: ${r.stderr}`);
@@ -843,6 +844,16 @@ test("--exec-outside: needs --chroot and an absolute program path (exit 64), and
   const usage = st("--exec-outside");
   assert.equal(usage.status, 64);
   assert.ok(usage.stderr.startsWith("usage: ") && usage.stderr.includes("--exec-outside"), usage.stderr);
+});
+
+test("--exec-outside: a FIFO (or anything not a regular file) is refused at once (exit 71), the launcher does not wait on it", () => {
+  const fifo = path.join(tmp, "exec-fifo");
+  execFileSync("mkfifo", [fifo]);
+  const started = Date.now();
+  const r = spawnSync(box.bin, ["--no-landlock", "--chroot", "/", "--exec-outside", "--", fifo], { encoding: "utf8", timeout: 5000 });
+  assert.equal(r.status, 71, `${r.status} ${r.signal} ${r.stderr}`);
+  assert.match(r.stderr, /not a regular file/);
+  assert.ok(Date.now() - started < 5000);
 });
 
 test("--exec-outside: the program comes from outside the new root, by descriptor; a folder or a missing file stops the launcher (exit 71)", { skip: ROOT_ONLY }, async () => {
@@ -863,6 +874,10 @@ test("--exec-outside: the program comes from outside the new root, by descriptor
     assert.match(r.stderr, /filedeck-sandbox:/);
   }
   await assert.rejects(spawnSandboxed(prog, [], { execOutside: true, landlock: false }), (e: { status?: number }) => e.status === 500, "execOutside without a chroot");
+  await assert.rejects(spawnSandboxed(prog, [], { execOutside: true, chroot: jail }), (e: { status?: number }) => e.status === 500, "execOutside with Landlock on");
+  // the program's descriptor never lands on a kept slot: with --keep-fd 3 and no descriptor 3, the program sees no descriptor 3
+  const sh = spawnSync(box.bin, ["--no-landlock", "--chroot", "/", "--exec-outside", "--keep-fd", "3", "--", "/bin/sh", "-c", "if [ -e /proc/self/fd/3 ]; then echo open; else echo closed; fi"], { encoding: "utf8" });
+  assert.deepEqual([sh.status, sh.stdout], [0, "closed\n"], sh.stderr);
 });
 
 test("require without Landlock: a caller that asks for no Landlock still runs, through the launcher; one that wants Landlock is refused", async () => {
@@ -872,6 +887,7 @@ test("require without Landlock: a caller that asks for no Landlock still runs, t
   write(fake, `#!/bin/sh\n[ "$1" = --probe ] && exit ${EXIT_LANDLOCK_UNSUPPORTED}\nprintf '%s\\n' "$@" > ${JSON.stringify(argsFile)}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n`);
   fs.chmodSync(fake, 0o755);
   const prevHelper = process.env.FILEDECK_SANDBOX_HELPER;
+  const prevMode = process.env.FILEDECK_SANDBOX;
   try {
     process.env.FILEDECK_SANDBOX_HELPER = fake;
     process.env.FILEDECK_SANDBOX = "require";
@@ -887,7 +903,8 @@ test("require without Landlock: a caller that asks for no Landlock still runs, t
     resetSandbox();
     await assert.rejects(spawnSandboxed("echo", ["hi"], { landlock: false }), (e: Error & { status?: number }) => e.status === 503);
   } finally {
-    delete process.env.FILEDECK_SANDBOX;
+    if (prevMode === undefined) delete process.env.FILEDECK_SANDBOX;
+    else process.env.FILEDECK_SANDBOX = prevMode;
     if (prevHelper === undefined) delete process.env.FILEDECK_SANDBOX_HELPER;
     else process.env.FILEDECK_SANDBOX_HELPER = prevHelper;
     resetSandbox();

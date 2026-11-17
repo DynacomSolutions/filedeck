@@ -256,7 +256,7 @@ export async function spawnSandboxed(cmd: string, args: string[], opts: SandboxO
   // still runs, through the launcher only, which applies the user change, the capability steps and the seccomp filter
   const noLandlockLauncher = info.state === "unavailable" && landlock === false ? await helperPath(info) : null;
   if (info.state === "unavailable" && !noLandlockLauncher) throw sandboxRequiredError();
-  if (execOutside && (chroot === undefined || !cmd.startsWith("/"))) throw new FsError(500, "execOutside needs a chroot and an absolute program path");
+  if (execOutside && (chroot === undefined || landlock !== false || !cmd.startsWith("/"))) throw new FsError(500, "execOutside needs a chroot, landlock: false and an absolute program path");
   if ((uid === 0 || gid === 0) && uid !== process.getuid?.()) throw new FsError(500, "refusing to run a confined program as root");
   if (groups) {
     if (groups.includes(0)) throw new FsError(500, "refusing to run a confined program as root");

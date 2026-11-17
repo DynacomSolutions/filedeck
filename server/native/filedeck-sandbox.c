@@ -16,8 +16,9 @@
  *               the chroot, must be a regular file, and is executed from that descriptor (execveat with AT_EMPTY_PATH) after every other
  *               step. Its ELF interpreter is then looked up inside DIR, so a dynamic program shipped beside this launcher runs against
  *               the libraries of DIR, and nothing has to be copied into DIR. A script cannot be run this way (its interpreter would need
- *               the descriptor, which is closed on exec). Exit 64 without --chroot or with a relative path, 71 when the file cannot be opened
- *               or is not a regular file.
+ *               the descriptor, which is closed on exec). The descriptor is placed above every --keep-fd number, so the program never gets
+ *               it. Exit 64 without --chroot or --no-landlock, or with a relative path; 71 when the file cannot be opened or is not a
+ *               regular file (a FIFO or a device is opened without waiting, then refused).
  *   --keep-fd N keep descriptor N open for COMMAND (repeatable): for a descriptor the caller means the command to use, such as an
  *               archive opened read-only, which it then reads as a file descriptor in every mode. Every other descriptor above 2 is
  *               closed on exec. Landlock does not restrict a descriptor that is already open: hand over only what COMMAND should use.
@@ -719,6 +720,10 @@ int main(int argc, char **argv) {
     fprintf(stderr, "filedeck-sandbox: --exec-outside needs --chroot\n");
     return EXIT_USAGE;
   }
+  if (exec_outside && !no_landlock) {
+    fprintf(stderr, "filedeck-sandbox: --exec-outside needs --no-landlock (Landlock rules made outside the new root would not fit it)\n");
+    return EXIT_USAGE;
+  }
   if (exec_outside && argv[i][0] != '/') {
     fprintf(stderr, "filedeck-sandbox: --exec-outside needs an absolute path for the command\n");
     return EXIT_USAGE;
@@ -786,11 +791,23 @@ int main(int argc, char **argv) {
   /* the program from outside the new root: opened here, while the current root is still this process's own, and run by descriptor below */
   if (exec_outside) {
     struct stat st;
-    exec_fd = open(argv[i], O_RDONLY | O_CLOEXEC);
+    /* O_NONBLOCK: a FIFO or a device at that path must not hold the launcher here; it is refused just below */
+    exec_fd = open(argv[i], O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (exec_fd < 0 || fstat(exec_fd, &st) < 0 || !S_ISREG(st.st_mode)) {
       fprintf(stderr, "filedeck-sandbox: %s: %s\n", argv[i], exec_fd < 0 ? strerror(errno) : "not a regular file");
       return EXIT_FAILED;
     }
+    /* above every --keep-fd number: on a kept slot the close-on-exec step would hand this descriptor to the program */
+    long above = 2;
+    for (int k = 0; k < nkeep; k++)
+      if (keep_fds[k] > above) above = keep_fds[k];
+    int moved = fcntl(exec_fd, F_DUPFD_CLOEXEC, (int)above + 1);
+    if (moved < 0) {
+      fprintf(stderr, "filedeck-sandbox: %s: %s\n", argv[i], strerror(errno));
+      return EXIT_FAILED;
+    }
+    close(exec_fd);
+    exec_fd = moved;
   }
   /* the new root: after the roots are opened (outside it) and before the capability steps (chroot needs its capability) */
   if (chroot_dir && (chroot(chroot_dir) < 0 || chdir("/") < 0)) {

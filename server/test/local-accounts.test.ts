@@ -133,6 +133,15 @@ test("local files: groups come from the member lists, root and a uid 0 alias nev
   for (const name of ["root", "toor", "wheelie", "broken", "ghost", "-x", "+nisuser"]) assert.equal(await f.resolve(name), null, name);
 });
 
-test("local files: a missing passwd file gives no account", async () => {
-  assert.equal(await new FilesAccounts(path.join(tmp, "nothing")).resolve("alice"), null);
+test("local files: a missing or unreadable passwd file is an error, a missing group file means no extra groups", async () => {
+  await assert.rejects(new FilesAccounts(path.join(tmp, "nothing")).resolve("alice"), /passwd/);
+  const dirAsFile = path.join(tmp, "passwd-folder");
+  fs.mkdirSync(path.join(dirAsFile, "etc/passwd"), { recursive: true }); // a folder where the file should be: reading fails
+  await assert.rejects(new FilesAccounts(dirAsFile).resolve("alice"), /passwd/);
+  const noGroup = path.join(tmp, "nogroup");
+  fs.mkdirSync(path.join(noGroup, "etc"), { recursive: true });
+  fs.writeFileSync(path.join(noGroup, "etc/passwd"), "alice:x:1000:1000::/home/a:/bin/sh\n");
+  assert.deepEqual((await new FilesAccounts(noGroup).resolve("alice"))?.groups, [1000]);
+  fs.mkdirSync(path.join(noGroup, "etc/group")); // a group file that exists but cannot be read is an error too
+  await assert.rejects(new FilesAccounts(noGroup).resolve("alice"), /group/);
 });
