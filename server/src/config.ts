@@ -92,6 +92,8 @@ export interface Config {
   sessionMaxMs: number;
   /** hub: account the `filedeck du` API token acts as; unset = none */
   apiTokenAccount: string | undefined;
+  /** agent, sign-in on: folder that holds the host helpers (`filedeck-id`); unset = the image's folder, else the built one (host-helpers.ts) */
+  hostHelpers: string | undefined;
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -199,5 +201,6 @@ export function loadConfig(env = process.env): Config {
     sessionIdleMs: Number(env.FILEDECK_SESSION_IDLE_SECONDS ?? 8 * 3600) * 1000,
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
+    hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
   };
 }

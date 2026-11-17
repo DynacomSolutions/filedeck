@@ -25,6 +25,10 @@ const allowed = [
   /^(?:git )?sandbox live: skipped \(not running as root\)$/,
   // the worker tests (sign-in part 2) that need root to start a worker as another user skip in the unprivileged pass; the root pass runs them.
   /^worker live: skipped \(not running as root\)$/,
+  // server/test/host-helpers.test.ts: the host helper tests need root (a folder under /run, the chroot) and, live, a glibc machine;
+  // the root pass sets FILEDECK_REQUIRE_HOST_HELPERS=1, which turns the glibc skip into a failure.
+  /^host helpers live: skipped \(not running as root\)$/,
+  /^host helpers live: skipped \(no glibc here\)$/,
   // server/test/sandbox.test.ts: the x32 system call tests exist only on x86-64, and only where the kernel has x32 calls enabled.
   /^sandbox live: skipped \(x32 calls exist on x86-64 only\)$/,
   /^sandbox live: skipped \(this kernel has x32 calls disabled(?:: .*)?\)$/,

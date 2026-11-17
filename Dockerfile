@@ -1,5 +1,22 @@
 # One image, two modes: FILEDECK_MODE=agent (per node, hostPath mounted at /host)
 # or FILEDECK_MODE=hub (serves the SPA and proxies to the agents).
+
+# The host helpers (server/native/host: filedeck-id) run inside the machine's own root against its glibc and NSS modules
+# (server/src/host-helpers.ts), so they are dynamic glibc programs built against an old glibc: the build fails when they need
+# a symbol version newer than GLIBC_2.17, so that they start on old machines too. libpam0g-dev is for the PAM helper of a later part.
+FROM debian:bullseye-slim@sha256:e5b6442dd2e9684cf5e87d8338b5968f3b348636fc0be6d7850a381e3731a2bd AS hostbuild
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev libpam0g-dev binutils \
+ && rm -rf /var/lib/apt/lists/*
+COPY server/native/host /src/host
+RUN set -e; mkdir /out; \
+    for f in /src/host/*.c; do gcc -O2 -Wall -o "/out/$(basename "$f" .c)" "$f"; done; \
+    newest=$(objdump -T /out/* | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1); \
+    echo "host helpers: newest glibc symbol version $newest"; \
+    if [ -z "$newest" ] || [ "$(printf '%s\nGLIBC_2.17\n' "$newest" | sort -V | tail -1)" != "GLIBC_2.17" ]; then \
+      echo "host helpers: need ${newest:-no glibc symbols}, the limit is GLIBC_2.17" >&2; exit 1; \
+    fi
+
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 WORKDIR /src
 # bsdtar (libarchive), 7zip and qpdf are needed by the archive and PDF integration tests too; ffmpeg by the thumbnail tests; git by the pull request diff tests;
@@ -48,6 +65,8 @@ COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwa
 COPY --from=build /usr/local/bin/filedeck-sandbox /usr/local/bin/filedeck-sandbox
 # No-replace rename: places a folder (and a file where the filesystem has no hard links) in a move or copy without overwrite.
 COPY --from=build /usr/local/bin/filedeck-rename /usr/local/bin/filedeck-rename
+# Host helpers (sign-in on): copied into the machine's /run and started there through the launcher's chroot (server/src/host-helpers.ts).
+COPY --from=hostbuild /out/ /usr/local/lib/filedeck/host/
 COPY --from=build /src/node_modules node_modules
 # Dependencies npm could not hoist to the root (a version the web workspace does not share) live beside the server.
 COPY --from=build /src/server/node_modules server/node_modules
