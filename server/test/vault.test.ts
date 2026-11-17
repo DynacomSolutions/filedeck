@@ -249,6 +249,31 @@ test("owners: a vault file made before owners existed is moved over, its entries
   c.close();
 });
 
+test("owners: a put that meets a row another process added replaces it, one row per owner and place", () => {
+  const file = path.join(dir, "v-race", "vault.sqlite");
+  const a = new Vault({ file, secret: KEY });
+  const b = new Vault({ file, secret: KEY });
+  a.put("n", "/r.zip", "from-a", { owner: "virt:a" });
+  b.put("n", "/r.zip", "from-b", { owner: "virt:a" });
+  a.put("n", "/r.zip", "none-a");
+  b.put("n", "/r.zip", "none-b");
+  assert.equal(a.list().length, 2, "one row for the owner, one without an owner");
+  assert.equal(a.get("n", "/r.zip", undefined, true, "virt:a")?.password, "from-b");
+  assert.equal(a.get("n", "/r.zip", undefined, true, "virt:b"), undefined);
+  a.close();
+  b.close();
+});
+
+test("owners: an old file opened after another process moved it over is not copied again", () => {
+  const file = path.join(dir, "v-twice", "vault.sqlite");
+  const a = new Vault({ file, secret: KEY });
+  a.put("n", "/kept.zip", "pw", { owner: "virt:a" });
+  a.close();
+  const b = new Vault({ file, secret: KEY });
+  assert.equal(b.get("n", "/kept.zip", undefined, true, "virt:a")?.password, "pw", "the owner survives a second open");
+  b.close();
+});
+
 /* ------------------------------------------------------------ hub flow (live) */
 
 const HAVE = spawnSync("bsdtar", ["--version"]).status === 0 && haveSevenZip();

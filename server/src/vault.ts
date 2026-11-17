@@ -151,7 +151,8 @@ export class Vault {
       CREATE UNIQUE INDEX IF NOT EXISTS entries_key ON entries (ifnull(owner, ''), node, scope, path);
       CREATE INDEX IF NOT EXISTS entries_fid ON entries (node, fid);
     `;
-    const cols = (this.db.prepare("PRAGMA table_info(entries)").all() as { name: string }[]).map((c) => c.name);
+    const columns = () => (this.db.prepare("PRAGMA table_info(entries)").all() as { name: string }[]).map((c) => c.name);
+    const cols = columns();
     if (cols.length === 0) {
       this.db.exec(table("entries") + ";" + indexes);
       return;
@@ -162,6 +163,13 @@ export class Vault {
     }
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // Another process may have moved the table over while this one waited for the lock; copying again would drop
+      // the owners of the entries saved since.
+      if (columns().includes("owner")) {
+        this.db.exec("COMMIT");
+        this.db.exec(indexes);
+        return;
+      }
       this.db.exec(`
         ${table("entries_new")};
         INSERT INTO entries_new (id, node, scope, path, fid, owner, remembered, created, last_used, blob)
@@ -238,14 +246,20 @@ export class Vault {
     const pth = normPath(p);
     const t = this.now();
     const owner = o.owner ?? null;
-    const prev = this.db.prepare("SELECT * FROM entries WHERE node = ? AND scope = ? AND path = ? AND owner IS ?").get(node, scope, pth, owner) as Row | undefined;
+    const prev = this.db.prepare("SELECT id FROM entries WHERE node = ? AND scope = ? AND path = ? AND owner IS ?").get(node, scope, pth, owner) as Pick<Row, "id"> | undefined;
     const id = prev?.id ?? randomUUID();
     const remembered = o.remember ? 1 : 0;
     const created = t; // typing a password again starts a fresh lifetime (and replaces a remembered one when Remember is off)
     const blob = this.seal(id, password);
     const fid = scope === "file" ? o.fid ?? null : null;
-    if (prev) this.db.prepare("UPDATE entries SET fid = ?, remembered = ?, created = ?, last_used = ?, blob = ? WHERE id = ?").run(fid, remembered, created, t, blob, id);
-    else this.db.prepare("INSERT INTO entries (id, node, scope, path, fid, owner, remembered, created, last_used, blob) VALUES (?,?,?,?,?,?,?,?,?,?)").run(id, node, scope, pth, fid, owner, remembered, created, t, blob);
+    // One statement, so a row another process added meanwhile is replaced, not a UNIQUE error. The id goes with the
+    // blob (it is the blob's authenticated data); it changes only when such a row came in between.
+    this.db
+      .prepare(
+        `INSERT INTO entries (id, node, scope, path, fid, owner, remembered, created, last_used, blob) VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (ifnull(owner, ''), node, scope, path) DO UPDATE SET id = excluded.id, fid = excluded.fid, remembered = excluded.remembered, created = excluded.created, last_used = excluded.last_used, blob = excluded.blob`,
+      )
+      .run(id, node, scope, pth, fid, owner, remembered, created, t, blob);
     return this.view({ id, node, scope, path: pth, fid, owner, remembered, created, last_used: t, blob });
   }
 
