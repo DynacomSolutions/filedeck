@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync, sign } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -98,16 +99,29 @@ async function agent(node: string, auth: boolean, names: string[]): Promise<Serv
 
 const poolOf = (a: Served) => (a.app as unknown as { pool: WorkerPool }).pool;
 
-/** A fake system sign-in: alice's password is RIGHT; every key is refused. It notes the names it was asked for. */
+/** An Ed25519 key in OpenSSH form, as the browser sends it (`line`), and its private half for signing. */
+function sshKey() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const raw = Buffer.from(publicKey.export({ format: "jwk" }).x as string, "base64url");
+  const f = (b: Buffer) => {
+    const l = Buffer.alloc(4);
+    l.writeUInt32BE(b.length);
+    return Buffer.concat([l, b]);
+  };
+  return { line: `ssh-ed25519 ${Buffer.concat([f(Buffer.from("ssh-ed25519")), f(raw)]).toString("base64")}`, privateKey };
+}
+const ALICE_KEY = sshKey();
+
+/** A fake system sign-in: alice's password is RIGHT, and ALICE_KEY is listed for her; every other key is refused. It notes the names it was asked for. */
 function fakeSystem(asked: string[]): SystemAuth {
   return {
     async password(name, pw) {
       asked.push(name);
       return name === "alice" && pw === RIGHT;
     },
-    async key(name) {
+    async key(name, pub) {
       asked.push(name);
-      return false;
+      return name === "alice" && pub === ALICE_KEY.line;
     },
   };
 }
@@ -174,6 +188,53 @@ test("admins only: a virtual admin and a system user who is not an admin get 403
   assert.equal((await me(hub, alice)).asRootUntil, undefined);
 });
 
+test("key proof: a real signature over the hub's message turns the switch on; a used challenge or one for another name does not", async () => {
+  // (a hub of its own: the failures here would otherwise count against alice in the shared hub's sign-in limiter)
+  const h5 = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `A=${A.url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth5.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff5") } as never),
+    undefined,
+    () => {},
+    { now: () => clock, system: fakeSystem([]) },
+  );
+  closers.push(h5);
+  const hub = h5;
+  clock = Date.now();
+  const alice = sysCookie(hub, "alice");
+  const challenge = async (name: string) => (await (await postJson(hub, "/api/auth/challenge", alice, { name })).json()) as { challenge: string; hubId: string };
+  const proof = (ch: { challenge: string; hubId: string }, signedName = "alice") => ({
+    publicKey: ALICE_KEY.line,
+    challenge: ch.challenge,
+    signature: sign(null, loginMessage(ch.hubId, signedName, Buffer.from(ch.challenge, "base64")), ALICE_KEY.privateKey).toString("base64"),
+  });
+  const c1 = await challenge("alice");
+  const ok = await postJson(hub, "/api/auth/as-root", alice, proof(c1));
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.equal(((await ok.json()) as { asRootUntil: number }).asRootUntil, clock + FIFTEEN_MIN);
+  assert.ok((await me(hub, alice)).asRootUntil);
+  assert.equal((await call(hub, "/api/auth/as-root", alice, { method: "DELETE" })).status, 200);
+  // the same challenge again: used up
+  const again = await postJson(hub, "/api/auth/as-root", alice, proof(c1));
+  assert.equal(again.status, 401);
+  assert.deepEqual(await again.json(), { error: "sign-in failed" });
+  // a challenge the hub issued for another name, signed for that name or for alice: refused either way
+  const cb = await challenge("bob");
+  assert.equal((await postJson(hub, "/api/auth/as-root", alice, proof(cb, "bob"))).status, 401);
+  const cb2 = await challenge("bob");
+  assert.equal((await postJson(hub, "/api/auth/as-root", alice, proof(cb2, "alice"))).status, 401);
+  assert.equal((await me(hub, alice)).asRootUntil, undefined);
+});
+
+test("epoch rise at the gate: raising alice's epoch ends her session and the switch with it", async () => {
+  clock = Date.now();
+  const alice = sysCookie(hub, "alice");
+  assert.equal((await postJson(hub, "/api/auth/as-root", alice, { password: RIGHT })).status, 200);
+  assert.ok((await me(hub, alice)).asRootUntil);
+  hub.auth!.accounts.bumpEpoch("sys", "alice");
+  assert.equal((await call(hub, "/api/auth/me", alice)).status, 401);
+  // a new session after the rise starts without the switch
+  assert.equal((await me(hub, sysCookie(hub, "alice"))).asRootUntil, undefined);
+});
+
 test("forged asRoot: a virtual claim with asRoot, or an asRoot that is not true, fails verifyClaim; the agent refuses it", async () => {
   const now = Date.now();
   const virt: UserClaim = { kind: "virt", name: "vadmin", epoch: 1, runAs: "alice", grants: [{ path: "/", write: true }], iat: now };
@@ -193,7 +254,15 @@ test("forged asRoot: a virtual claim with asRoot, or an asRoot that is not true,
   assert.equal(r.status, 401);
   // a stored job owner with a bad asRootUntil reads back without it
   assert.equal((ownerFrom(JSON.stringify({ kind: "sys", name: "alice", admin: true, epoch: 1, asRootUntil: "soon" })) as { asRootUntil?: unknown }).asRootUntil, undefined);
-  assert.equal((ownerFrom(JSON.stringify({ kind: "sys", name: "alice", admin: true, epoch: 1, asRootUntil: 5 })) as { asRootUntil?: unknown }).asRootUntil, 5);
+  // both the end and its session, or neither; never on a virtual owner
+  const back = ownerFrom(JSON.stringify({ kind: "sys", name: "alice", admin: true, epoch: 1, asRootUntil: 5, asRootSession: "k" })) as { asRootUntil?: unknown; asRootSession?: unknown };
+  assert.deepEqual([back.asRootUntil, back.asRootSession], [5, "k"]);
+  const half = ownerFrom(JSON.stringify({ kind: "sys", name: "alice", admin: true, epoch: 1, asRootUntil: 5 })) as { asRootUntil?: unknown };
+  assert.equal(half.asRootUntil, undefined);
+  const bad = ownerFrom(JSON.stringify({ kind: "sys", name: "alice", admin: true, epoch: 1, asRootUntil: 5, asRootSession: 7 })) as { asRootUntil?: unknown; asRootSession?: unknown };
+  assert.deepEqual([bad.asRootUntil, bad.asRootSession], [undefined, undefined]);
+  const virtOwner = ownerFrom(JSON.stringify({ kind: "virt", name: "v", admin: true, epoch: 1, nodes: {}, asRootUntil: 5, asRootSession: "k" })) as { asRootUntil?: unknown; asRootSession?: unknown };
+  assert.deepEqual([virtOwner.asRootUntil, virtOwner.asRootSession], [undefined, undefined]);
 });
 
 test("root for 15 minutes: requests run in the root process, every machine is open, then the worker again at until + 1 ms; DELETE ends it", async () => {
@@ -302,57 +371,116 @@ test("audit: lines under the switch have asRoot:true on hub and agent; lines bef
   assert.equal(aUnder.user, "sys:alice");
 });
 
-test("job outlives the switch: a copy job started under it carries asRoot only until the switch's end", async (t) => {
-  const h4 = createHub(
-    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `C=${C.url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth4.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff4") } as never),
-    undefined,
-    () => {},
-    { system: fakeSystem([]) },
-  );
-  closers.push(h4);
+/**
+ * A copy job (4 items, on C) started under the switch, with the hub's own injected clock. At the 2nd `/api/fs/copy`, `mid` runs before
+ * the agent answers; every call before that point must carry `asRoot`, every call after it must not. `restart`: the hub is closed there
+ * instead, and `restart()` makes the hub that carries the job on (same job and auth files).
+ */
+let jobRun = 0;
+async function jobUnderSwitch(o: { mid?: (h: Hub, cookie: string, until: number, setClock: (t: number) => void) => Promise<void>; restart?: (files: Record<string, string>) => Hub }) {
+  const n = jobRun++;
+  let hclock = Date.now();
+  const files = { FILEDECK_AUTH_FILE: path.join(tmp, `authj${n}.db`), FILEDECK_JOBS_FILE: path.join(tmp, `jobsj${n}.db`) };
+  const env = { FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `C=${C.url}`, FILEDECK_ADMINS: "alice", FILEDECK_DIFF_DIR: path.join(tmp, `diffj${n}`), ...files };
+  let h = createHub(loadConfig(env as never), undefined, () => {}, { now: () => hclock, system: fakeSystem([]) });
+  closers.push(h);
   const rootC = path.join(tmp, "root-C");
-  fs.mkdirSync(path.join(rootC, "jsrc"));
-  for (let i = 0; i < 4; i++) fs.writeFileSync(path.join(rootC, "jsrc", `f${i}.txt`), `file ${i}\n`);
-  fs.mkdirSync(path.join(rootC, "jdst"));
-
-  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
-  const alice = sysCookie(h4, "alice");
-  const on = await postJson(h4, "/api/auth/as-root", alice, { password: RIGHT });
+  const src = `jsrc${n}`;
+  const dst = `jdst${n}`;
+  fs.mkdirSync(path.join(rootC, src));
+  for (let i = 0; i < 4; i++) fs.writeFileSync(path.join(rootC, src, `f${i}.txt`), `file ${i}\n`);
+  fs.mkdirSync(path.join(rootC, dst));
+  const alice = sysCookie(h, "alice");
+  const on = await postJson(h, "/api/auth/as-root", alice, { password: RIGHT });
   assert.equal(on.status, 200);
   const until = ((await on.json()) as { asRootUntil: number }).asRootUntil;
   let copies = 0;
-  let tickAt = -1;
+  let cutAt = -1;
+  let reached!: () => void;
+  const second = new Promise<void>((r) => (reached = r));
   C.recs.length = 0;
   C.hook = async (req) => {
-    const p = new URL(req.url).pathname;
-    if (p === "/api/fs/copy" && ++copies === 2) {
-      tickAt = C.recs.length; // this call and the ones before it were made before the end
-      t.mock.timers.tick(until - Date.now() + 1);
+    if (new URL(req.url).pathname !== "/api/fs/copy") return;
+    if (++copies === 2) {
+      cutAt = C.recs.length; // this call and the ones before it were made before the cut
+      if (o.mid) await o.mid(h, alice, until, (t) => (hclock = t));
+      reached();
+      if (o.restart) await new Promise((r) => setTimeout(r, 150));
     }
   };
   try {
-    const items = [0, 1, 2, 3].map((i) => ({ node: "C", path: `/jsrc/f${i}.txt` }));
-    const res = await postJson(h4, "/api/ops/jobs", alice, { op: "copy", items, dst: { node: "C", dir: "/jdst" }, conflict: "overwrite" });
+    const items = [0, 1, 2, 3].map((i) => ({ node: "C", path: `/${src}/f${i}.txt` }));
+    const res = await postJson(h, "/api/ops/jobs", alice, { op: "copy", items, dst: { node: "C", dir: `/${dst}` }, conflict: "overwrite" });
     assert.equal(res.status, 202, await res.clone().text());
     const { id } = (await res.json()) as { id: string };
-    for (let i = 0; i < 400; i++) {
-      const v = (await (await call(h4, `/api/ops/jobs/${id}`, alice)).json()) as { state: string };
-      if (v.state !== "running" && v.state !== "queued") break;
+    if (o.restart) {
+      await second;
+      await h.close(); // stops at the next item boundary and hands the job over
+      closers.splice(closers.indexOf(h), 1);
+      h = o.restart({ ...env } as Record<string, string>);
+      closers.push(h);
+    }
+    // polled with a new session each time (the job's own session may be gone, and an epoch rise ends older ones)
+    let state = "";
+    for (let i = 0; i < 600; i++) {
+      const poll = `__Host-filedeck=${h.auth!.sessions.create("sys", "alice")}`;
+      state = ((await (await call(h, `/api/ops/jobs/${id}`, poll)).json()) as { state: string }).state;
+      if (state === "done" || state === "failed" || state === "canceled") break;
       await new Promise((r) => setTimeout(r, 25));
     }
+    assert.equal(state, "done");
   } finally {
     C.hook = undefined;
   }
-  assert.ok(tickAt > 0, `the job reached a second copy (${copies})`);
+  assert.ok(cutAt > 0, `the job reached a second copy (${copies})`);
   const made = C.recs.filter((r) => r.path !== "/healthz" && r.path !== "/metrics");
-  const beforeEnd = made.slice(0, tickAt);
-  const afterEnd = made.slice(tickAt);
-  assert.ok(beforeEnd.length > 0 && afterEnd.length > 0);
-  for (const r of beforeEnd) assert.equal(r.claim?.asRoot, true, `${r.path} before the end`);
-  for (const r of afterEnd) assert.equal(r.claim?.asRoot, undefined, `${r.path} after the end`);
+  const before = made.slice(0, cutAt);
+  const afterCut = made.slice(cutAt);
+  assert.ok(before.length > 0 && afterCut.some((r) => r.path === "/api/fs/copy"), "calls on both sides of the cut");
+  for (const r of before) assert.equal(r.claim?.asRoot, true, `${r.path} before the cut`);
+  for (const r of afterCut) {
+    assert.ok(r.claim, `${r.path} still names alice`);
+    assert.equal(r.claim?.name, "alice");
+    assert.equal(r.claim?.asRoot, undefined, `${r.path} after the cut`);
+  }
+}
+
+test("job and the switch's end: calls after the end carry no asRoot", async () => {
+  await jobUnderSwitch({ mid: async (_h, _c, until, setClock) => setClock(until + 1) });
+});
+
+test("job and DELETE: switching off mid-job ends asRoot on the next agent call", async () => {
+  await jobUnderSwitch({
+    mid: async (h, cookie) => {
+      assert.equal((await call(h, "/api/auth/as-root", cookie, { method: "DELETE" })).status, 200);
+    },
+  });
+});
+
+test("job and sign-out: signing out mid-job ends asRoot on the next agent call", async () => {
+  await jobUnderSwitch({
+    mid: async (h, cookie) => {
+      assert.equal((await call(h, "/api/auth/logout", cookie, { method: "POST" })).status, 200);
+    },
+  });
+});
+
+test("job and an epoch rise: raising the account epoch mid-job ends asRoot on the next agent call", async () => {
+  await jobUnderSwitch({
+    mid: async (h) => {
+      h.auth!.accounts.bumpEpoch("sys", "alice");
+    },
+  });
+});
+
+test("job and FILEDECK_ADMINS: a hub that carries the job on without alice in its admins sends no asRoot", async () => {
+  await jobUnderSwitch({
+    restart: (env) => createHub(loadConfig({ ...env, FILEDECK_ADMINS: "" } as never), undefined, () => {}, { system: fakeSystem([]) }),
+  });
 });
 
 test("agent: an asRoot claim sees every root job, and its folder sizes need no account and no worker", async () => {
+  // (dave: an admin name no other test uses, so the agent's epoch for alice is left alone)
   const hdr = (name: string, asRoot: boolean) => ({
     authorization: `Bearer ${T}`,
     "content-type": "application/json",
@@ -362,10 +490,10 @@ test("agent: an asRoot claim sees every root job, and its folder sizes need no a
   assert.equal(s.status, 202, await s.clone().text());
   const job = (await s.json()) as { id: string };
   const list = async (name: string, asRoot: boolean) => ((await (await A.app.request("/api/jobs", { headers: hdr(name, asRoot) })).json()) as { jobs: { id: string }[] }).jobs;
-  assert.ok(!(await list("alice", false)).some((j) => j.id === job.id), "not alice's without the switch");
-  assert.ok((await list("alice", true)).some((j) => j.id === job.id), "every root job under the switch");
-  assert.equal((await A.app.request(`/api/jobs/${job.id}`, { headers: hdr("alice", false) })).status, 404);
-  assert.equal((await A.app.request(`/api/jobs/${job.id}`, { headers: hdr("alice", true) })).status, 200);
+  assert.ok(!(await list("dave", false)).some((j) => j.id === job.id), "not dave's without the switch");
+  assert.ok((await list("dave", true)).some((j) => j.id === job.id), "every root job under the switch");
+  assert.equal((await A.app.request(`/api/jobs/${job.id}`, { headers: hdr("dave", false) })).status, 404);
+  assert.equal((await A.app.request(`/api/jobs/${job.id}`, { headers: hdr("dave", true) })).status, 200);
   // a name with no account on this machine: the root process answers, no lookup, no worker
   const du = await A.app.request("/api/du?path=/", { headers: hdr("zed", true) });
   assert.equal(du.status, 200, await du.clone().text());
@@ -385,7 +513,8 @@ test("root only: under the switch, a file mode 0600 owned by root is read in the
   fs.chownSync(path.join(rootA, "private", "secret.txt"), 0, 0);
   const alice = sysCookie(hub, "alice");
   const no = await call(hub, "/api/nodes/A/api/fs/text?path=/private/secret.txt", alice);
-  assert.notEqual(no.status, 200);
+  assert.equal(no.status, 403);
+  assert.deepEqual(await no.json(), { error: "permission denied" });
   assert.equal((await postJson(hub, "/api/auth/as-root", alice, { password: RIGHT })).status, 200);
   const before = poolOf(A).list().length;
   const yes = await call(hub, "/api/nodes/A/api/fs/text?path=/private/secret.txt", alice);

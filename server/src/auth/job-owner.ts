@@ -18,9 +18,10 @@ export function ownerFrom(json: string | null | undefined): Identity | undefined
   try {
     const o = JSON.parse(json) as unknown;
     if (!plainObject(o) || typeof o.name !== "string" || typeof o.admin !== "boolean" || typeof o.epoch !== "number") return undefined;
-    // (the act-as-root end goes with a system owner only, and only as a number)
-    const { asRootUntil, ...rest } = o;
-    if (o.kind === "sys") return (typeof asRootUntil === "number" ? { ...rest, asRootUntil } : rest) as Identity;
+    // (the act-as-root end and its session go with a system owner only, both or neither, as a number and a string)
+    const { asRootUntil, asRootSession, ...rest } = o;
+    if (o.kind === "sys")
+      return (typeof asRootUntil === "number" && typeof asRootSession === "string" ? { ...rest, asRootUntil, asRootSession } : rest) as Identity;
     if (o.kind === "virt" && plainObject(o.nodes)) return rest as Identity;
     return undefined;
   } catch {

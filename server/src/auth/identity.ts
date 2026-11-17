@@ -15,10 +15,12 @@ export interface NodeAccess {
 /**
  * Who a request belongs to. `sys` is a system account; `virt` is a virtual account with per-node access. `asRootUntil` (system
  * administrators only): the end of the act-as-root switch, set by the hub's gate only while it is in the future and the name is in
- * FILEDECK_ADMINS. A hub job keeps it in its stored owner, so the job's calls carry `asRoot` only until then.
+ * FILEDECK_ADMINS. `asRootSession` (hub only: never in a claim, an audit line or a log) is the key of the session the switch belongs
+ * to. A hub job keeps both in its stored owner; before each agent call the hub checks the switch again (`withAgentToken`'s `asRootOk`),
+ * so switching off, signing out, an epoch rise or leaving FILEDECK_ADMINS also ends it for a running job.
  */
 export type Identity =
-  | { kind: "sys"; name: string; admin: boolean; epoch: number; asRootUntil?: number }
+  | { kind: "sys"; name: string; admin: boolean; epoch: number; asRootUntil?: number; asRootSession?: string }
   | { kind: "virt"; name: string; admin: boolean; epoch: number; nodes: Record<string, NodeAccess> };
 
 /** The signed statement the hub sends to one agent about the person behind a request. */

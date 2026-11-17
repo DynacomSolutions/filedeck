@@ -6,7 +6,7 @@ import type { Config } from "../config.ts";
 import { clientOf } from "../audit.ts";
 import type { Identity } from "./identity.ts";
 import { checkPassword, type Accounts, type AuthDb } from "./store.ts";
-import type { Sessions } from "./sessions.ts";
+import { sessionKey, type Sessions } from "./sessions.ts";
 import { loginMessage, parsePublicKey, verifyLogin, type Challenges } from "./sshkey.ts";
 import { RateWindow, addressKey, type LoginLimiter } from "./limiter.ts";
 import { currentUser, runAs } from "./context.ts";
@@ -124,7 +124,9 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (s.kind === "virt") return accounts.identity("virt", s.name);
     const id = sysIdentity(cfg, accounts, s.name);
     // act as root: only while the switch is still on and the name is still in FILEDECK_ADMINS (checked on every request)
-    if (id.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() && cfg.admins.includes(s.name)) return { ...id, asRootUntil: s.asRootUntil };
+    if (id.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() && cfg.admins.includes(s.name)) {
+      return { ...id, asRootUntil: s.asRootUntil, asRootSession: sessionKey(raw) };
+    }
     return id;
   };
 
@@ -299,6 +301,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
       const cb = ch === undefined ? undefined : Buffer.from(ch, "base64");
       const taken = cb !== undefined && challenges.take(name, cb);
       if (taken && cb && pub !== undefined && sig !== undefined) {
+        // (the same message as a key sign-in, on purpose: the challenge is used up once taken and is bound to this name, so a
+        // signature made for one use cannot serve for the other)
         const msg = loginMessage(deps.db.hubId, name, cb);
         const sb = Buffer.from(sig, "base64");
         const given = parsePublicKey(pub);

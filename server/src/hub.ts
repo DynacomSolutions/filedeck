@@ -30,6 +30,7 @@ import { LoginLimiter } from "./auth/limiter.ts";
 import { currentUser, userContext } from "./auth/context.ts";
 import { USER_HEADER } from "./auth/identity.ts";
 import { markArrival, registerAuth, registerAuthOff, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
+import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
 import { SysPresence } from "./auth/presence.ts";
 
@@ -138,6 +139,18 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     auth?.db.close();
     await Promise.all([...sources.values()].map((s) => s.backend.close().catch(() => undefined)));
   };
+  /**
+   * Act as root, checked again before each agent call (also a job's, whose owner was stored when it started, maybe before a restart): the
+   * session the switch belongs to still holds it with the same end, the name is still in FILEDECK_ADMINS, the account epoch has not
+   * risen, and the end is still ahead. Otherwise the call goes as the plain system user.
+   */
+  const asRootOk = (id: Identity & { kind: "sys" }): boolean => {
+    if (!auth || !id.asRootSession || id.asRootUntil === undefined) return false;
+    const now = (opts?.now ?? Date.now)();
+    return (
+      auth.sessions.asRootOf(id.asRootSession) === id.asRootUntil && cfg.admins.includes(id.name) && auth.accounts.epochOf("sys", id.name) === id.epoch && now < id.asRootUntil
+    );
+  };
   // Every call to an agent names the person behind it (with auth on, a call with nobody behind it throws). Only the open
   // probes go out without a user header: they carry no data and are made for nobody in particular.
   // With auth on the client's cookie (its session) never goes to an agent, whatever path built the headers.
@@ -145,7 +158,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) => {
     if (cfg.auth && isAgentAuthPath(rest)) return Promise.reject(new Error("the agents' sign-in routes are not forwarded"));
     if (cfg.auth) init = withoutCookie(init);
-    return isOpenProbe(rest) ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name))) : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth));
+    return isOpenProbe(rest)
+      ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name)))
+      : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk));
   };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));
   app.nodeTargets = agents; // (tests reach the agent calls through it)
@@ -169,7 +184,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     if (!nodeNames.has(node)) return false;
     // act as root: every configured machine is open, also one without the account (the agent then needs no account)
     const id = currentUser();
-    if (id?.kind === "sys" && id.name === name && (id.asRootUntil ?? 0) > (opts?.now ?? Date.now)()) return true;
+    if (id?.kind === "sys" && id.name === name && asRootOk(id)) return true;
     if (!presence) return undefined;
     if (presence.due(name)) void presence.refresh(name);
     return presence.known(name, node);

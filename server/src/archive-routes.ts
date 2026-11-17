@@ -56,7 +56,6 @@ export function makeAgentJobs(cfg: Config): Jobs {
   return new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
 }
 
-/** Listing, polling, cancelling and dismissing the jobs of `jobs`, whatever their kind. */
 /**
  * The owner of a job a request starts: `<kind>:<name>` of the claim the agent's check stored (sign-in on). Only the root process has
  * one, and there only for a request made under act as root (all others go to a worker); with sign-in off, and in a worker, none.
@@ -66,6 +65,7 @@ const requestOwner = (c: import("hono").Context): string | undefined => {
   return u?.kind && u.name ? `${u.kind}:${u.name}` : undefined;
 };
 
+/** Listing, polling, cancelling and dismissing the jobs of `jobs`, whatever their kind. */
 export function registerJobRoutes(app: Hono, jobs: Jobs): void {
   app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));
   app.get("/api/jobs/:id", (c) => {

@@ -14,6 +14,9 @@ const TOUCH_MS = 60_000;
 
 const sha = (raw: string) => createHash("sha256").update(raw).digest("hex");
 
+/** The key a session is kept under (the SHA-256 of the cookie value): the hub binds an act-as-root identity to it, never to the cookie. */
+export const sessionKey = sha;
+
 interface SessionRow {
   kind: "sys" | "virt";
   name: string;
@@ -75,6 +78,18 @@ export class Sessions {
     if (this.acc.epochOf(r.kind, r.name) > r.epoch) return gone();
     if (t - r.last_used >= TOUCH_MS) this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ?").run(t, id);
     return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}) };
+  }
+
+  /**
+   * The act-as-root end stored for the session kept under `key` (`sessionKey`), while the session still holds by its idle and absolute
+   * limits; undefined otherwise. Read only: it never writes `last_used` and never deletes (the hub asks it before each agent call).
+   */
+  asRootOf(key: string): number | undefined {
+    const r = this.db.prepare("SELECT created, last_used, as_root_until FROM sessions WHERE id = ?").get(key) as Pick<SessionRow, "created" | "last_used" | "as_root_until"> | undefined;
+    if (!r || typeof r.as_root_until !== "number") return undefined;
+    const t = this.now();
+    if (t - r.last_used > this.o.idleMs || t - r.created >= this.o.maxMs) return undefined;
+    return r.as_root_until;
   }
 
   /** Sets (or, with null, clears) the end of the act-as-root switch of a session. An unknown session is left as it is. */

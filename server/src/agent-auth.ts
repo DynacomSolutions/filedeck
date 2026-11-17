@@ -107,16 +107,24 @@ export function canUseNode(id: Identity | undefined, node: string, present?: (na
  * Headers for a hub request to an agent: the caller's own Authorization is replaced, never forwarded. When a person is
  * behind the call (`currentUser()`), it also carries their signed claim for `node`; any copy already in `init` is replaced.
  * `requireUser` (the hub passes `cfg.auth`) turns a call with nobody behind it into an error, so a code path that lost the
- * identity fails loudly instead of reaching the agent unnamed.
+ * identity fails loudly instead of reaching the agent unnamed. An identity acting as root keeps `asRoot` in its claim only when
+ * `asRootOk` (the hub's check of the switch as it is now) says so; otherwise, and without the check, the call goes as the plain system user.
  */
-export function withAgentToken(init: RequestInit | undefined, token: string | undefined, node: string, requireUser = false): RequestInit | undefined {
-  const id = currentUser();
+export function withAgentToken(
+  init: RequestInit | undefined,
+  token: string | undefined,
+  node: string,
+  requireUser = false,
+  asRootOk?: (id: Identity & { kind: "sys" }) => boolean,
+): RequestInit | undefined {
+  let id = currentUser();
   if (requireUser && !id) throw new Error("agent call without an identity");
   if (!token) return init;
   const headers = new Headers(init?.headers);
   headers.set("authorization", `Bearer ${token}`);
   headers.delete(USER_HEADER);
   if (id) {
+    if (id.kind === "sys" && id.asRootUntil !== undefined && !asRootOk?.(id)) id = { kind: "sys", name: id.name, admin: id.admin, epoch: id.epoch };
     const claim = claimFor(id, node, Date.now());
     if (!claim) throw new NoAccessError();
     headers.set(USER_HEADER, signClaim(claim, token));
