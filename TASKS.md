@@ -262,4 +262,4 @@ Sign-in for system users (PAM, SSH key) and virtual accounts, with file work tha
 ETA: 2026-11-17 22:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 156 | Design for sign-in and per-user access approved | review | claude-20261117-auth-design | auth-design | | 2026-11-17 22:00 ICT | Approach A (one worker per user on each agent) chosen<br>Decided: same name on every machine, the host's own PAM and NSS through a chroot helper, admins can switch on "act as root", no root sign-in<br>Waiting for approval of the written design |
+| 156 | Design for sign-in and per-user access approved | done | claude-20261117-auth-design | auth-design | | 2026-11-17 22:00 ICT | Approach A (one worker per user on each agent) chosen<br>Decided: same name on every machine, the host's own PAM and NSS through a chroot helper, admins can switch on "act as root", no root sign-in<br>Approved 17 Nov 2026; build plan next |

@@ -1,6 +1,6 @@
 # Authentication and per-user access: design
 
-Status: draft for approval, 17 Nov 2026.
+Status: approved, 17 Nov 2026.
 
 ## Intent
 
