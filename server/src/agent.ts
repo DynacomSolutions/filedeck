@@ -91,6 +91,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const leave = () =>
     (leaving ??= (async () => {
       await Promise.all([jobs.interrupt(), pool?.close()]);
+      specs?.close(); // (no worker runs any more)
       await fan.handover();
       await sizes.releaseLease();
     })());
@@ -123,7 +124,6 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     await leave();
     files.close();
     sizes.close();
-    specs?.close(); // (the pool has stopped every worker in `leave`)
   };
 
   return app;

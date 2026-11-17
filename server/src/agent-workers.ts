@@ -51,7 +51,7 @@ const json = (error: string, status: number, headers?: Record<string, string>) =
  * (also every header that its `connection` header names) are dropped, and so is a `content-length` that is not a plain number. A body that fails after the head ends with an error that holds
  * none of the worker's text; the text is logged (not when `signal`, the client's, has aborted: then the client ended it).
  */
-export function clientResponse(res: Response, key: string, log: (s: string) => void, signal?: AbortSignal): Response {
+export function clientResponse(res: Response, key: string, log: (s: string) => void, signal?: AbortSignal, method = "GET"): Response {
   if (!Number.isInteger(res.status) || res.status < 200 || res.status > 599) {
     void res.body?.cancel().catch(() => {});
     log(`worker ${key}: answer with status ${res.status}`);
@@ -64,7 +64,8 @@ export function clientResponse(res: Response, key: string, log: (s: string) => v
   const headers = new Headers();
   for (const [k, v] of res.headers) if (!DROP_RESPONSE.has(k) && !k.startsWith("proxy-") && !named.has(k)) headers.append(k, v);
   if (length === undefined) headers.delete("content-length");
-  if (NULL_BODY.has(res.status) || !res.body) {
+  // (an answer to HEAD has no body, whatever the stream says; its length is the one a GET would get)
+  if (NULL_BODY.has(res.status) || !res.body || method === "HEAD") {
     void res.body?.cancel().catch(() => {});
     return new Response(null, { status: res.status, headers });
   }
@@ -189,7 +190,7 @@ export function workerGate(
       log(`worker ${key}: request failed: ${e instanceof Error ? e.message : String(e)}`);
       return json("worker error", 500);
     }
-    return clientResponse(res, key, log, raw.signal);
+    return clientResponse(res, key, log, raw.signal, raw.method);
   };
 }
 
@@ -203,14 +204,43 @@ export class UnsafeFolders extends Error {
 
 const OPEN_DIR = fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY | fsc.constants.O_NOFOLLOW;
 
+type Hook = (step: "key" | "tmp" | "thumbs" | "index", p: string) => void | Promise<void>;
+
+const SUBFOLDERS = ["tmp", "thumbs", "index"] as const;
+
+/** Opens a folder without following a link; a link, a file or a missing entry is `UnsafeFolders`. */
+async function openDir(dir: string): Promise<fs.FileHandle> {
+  try {
+    return await fs.open(dir, OPEN_DIR);
+  } catch (e) {
+    throw new UnsafeFolders(`${dir}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+  }
+}
+
+/** `UnsafeFolders` unless the folder's owner is `uid` and its mode lets nobody else in (`mask`: the bits that must be clear). */
+async function expect(fh: fs.FileHandle, dir: string, uid: number, mask: number): Promise<void> {
+  const st = await fh.stat();
+  if (st.uid !== uid || (st.mode & mask) !== 0) throw new UnsafeFolders(`${dir} has owner ${st.uid} and mode ${(st.mode & 0o7777).toString(8)}; expected owner ${uid}`);
+}
+
 /**
- * One folder of an account below the workers' area, mode 0700 and owned by the account. A folder this call makes is given to the account
- * (as root) through a descriptor. One that is already there is never changed: it must be the account's own and not writable by group or
- * others, else `UnsafeFolders`. This is enough because the area is root's alone (0711), so the account cannot replace its own key folder;
- * it can replace only the last part of a path in its own folder, and the open without following a link (`O_NOFOLLOW`, `O_DIRECTORY`)
- * refuses a link or a file there.
+ * The key folder of an account below the workers' area, and its `tmp`, `thumbs` and `index`, all 0700 and the account's.
+ *
+ * A new key folder is made and filled while it is still this process's own: the key folder, then each subfolder (made, opened without
+ * following a link, checked to be ours and closed to others, then given to the account through the descriptor), and only then the key
+ * folder itself is given to the account (through the descriptor opened right after its mkdir). The area is root's alone (0711), so no one
+ * else can make or swap anything in it or in the new key folder meanwhile; the checks after each open are a second guard.
+ *
+ * A key folder that is already there is never changed: it and its three subfolders must be the account's and not writable by group or
+ * others, else `UnsafeFolders`. A subfolder missing there is refused too, not made: the key folder is the account's by then, so a folder
+ * made in it could be swapped between the mkdir and the open.
  */
-async function accountDir(dir: string, account: LocalAccount): Promise<void> {
+async function accountDirs(dir: string, account: LocalAccount, hook?: Hook): Promise<void> {
+  const me = process.getuid?.() ?? 0;
+  const give = async (fh: fs.FileHandle) => {
+    if (me === 0) await fh.chown(account.uid, account.gid);
+    await fh.chmod(0o700);
+  };
   let made = true;
   try {
     await fs.mkdir(dir, { mode: 0o700 });
@@ -218,22 +248,38 @@ async function accountDir(dir: string, account: LocalAccount): Promise<void> {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     made = false;
   }
-  let fh: fs.FileHandle;
-  try {
-    fh = await fs.open(dir, OPEN_DIR);
-  } catch (e) {
-    throw new UnsafeFolders(`${dir}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
-  }
-  try {
-    const st = await fh.stat();
-    if (made) {
-      if (process.getuid?.() === 0 && (st.uid !== account.uid || st.gid !== account.gid)) await fh.chown(account.uid, account.gid);
-      await fh.chmod(0o700);
-    } else if (st.uid !== account.uid || (st.mode & 0o022) !== 0) {
-      throw new UnsafeFolders(`${dir} has owner ${st.uid} and mode ${(st.mode & 0o7777).toString(8)}; the account is ${account.uid}`);
+  if (!made) {
+    for (const d of [dir, ...SUBFOLDERS.map((n) => path.join(dir, n))]) {
+      const fh = await openDir(d);
+      try {
+        await expect(fh, d, account.uid, 0o022);
+      } finally {
+        await fh.close();
+      }
     }
+    return;
+  }
+  await hook?.("key", dir);
+  const key = await openDir(dir);
+  try {
+    await expect(key, dir, me, 0o077);
+    for (const n of SUBFOLDERS) {
+      const sub = path.join(dir, n);
+      await fs.mkdir(sub, { mode: 0o700 }).catch((e: NodeJS.ErrnoException) => {
+        throw e.code === "EEXIST" ? new UnsafeFolders(`${sub} is there already`) : e;
+      });
+      await hook?.(n, sub);
+      const fh = await openDir(sub);
+      try {
+        await expect(fh, sub, me, 0o077);
+        await give(fh);
+      } finally {
+        await fh.close();
+      }
+    }
+    await give(key); // last: from here on the account may change what is in it
   } finally {
-    await fh.close();
+    await key.close();
   }
 }
 
@@ -259,6 +305,39 @@ function keyDir(claim: UserClaim, account: LocalAccount, key: string): string {
   return claim.kind === "sys" ? owner : `${owner}-${key.slice(key.lastIndexOf(":") + 1)}`;
 }
 
+/**
+ * Removes the workers' areas of agents that are gone (killed before they could remove their own): only as root, only an area named
+ * `filedeck-workers-<pid>-*` whose pid runs no process, that is a real folder (not a link) and root's. Anything else is left alone.
+ */
+function removeStaleAreas(): void {
+  if (process.getuid?.() !== 0) return;
+  const tmp = os.tmpdir();
+  let names: string[];
+  try {
+    names = fsc.readdirSync(tmp);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    const m = /^filedeck-workers-(\d{1,10})-[^/]+$/.exec(n);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    try {
+      process.kill(pid, 0);
+      continue; // its agent may still run
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ESRCH") continue;
+    }
+    const p = path.join(tmp, n);
+    try {
+      const st = fsc.lstatSync(p);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === 0) fsc.rmSync(p, { recursive: true, force: true });
+    } catch {
+      /* gone meanwhile, or not ours to remove */
+    }
+  }
+}
+
 export interface WorkerSpecs {
   /** the `spec` of `workerGate` */
   spec: (claim: UserClaim, account: LocalAccount) => Promise<WorkerSpec>;
@@ -271,12 +350,14 @@ export interface WorkerSpecs {
 /**
  * The specs of the workers: the start-up message from `workerConfig` (no secret), and per key a temporary, a thumbnail and an index
  * folder in `<key folder>/` below an area made new for this agent (`mkdtemp` in the temporary folder: root's and 0711 when the agent
- * runs as root, else 0700), kept while it runs and removed by `close`. An area that exists already is never used. The folders of a key
+ * runs as root, else 0700), kept while it runs and removed by `close` (the agent calls it in `leave`). An area that exists already is never used. The folders of a key
  * are made once (also while several requests wait for them) and made again only after a start with them failed. Task 7 replaces these
  * folders (`accountDirs`, which must follow the same rules) and adds Landlock for virtual accounts; until then no spec has Landlock.
  */
-export function makeWorkerSpecs(cfg: Config): WorkerSpecs {
-  const base = fsc.mkdtempSync(path.join(os.tmpdir(), "filedeck-workers-"));
+export function makeWorkerSpecs(cfg: Config, o: { afterMkdir?: Hook } = {}): WorkerSpecs {
+  removeStaleAreas();
+  // (the agent's pid in the name tells a later agent whether the area's agent is gone)
+  const base = fsc.mkdtempSync(path.join(os.tmpdir(), `filedeck-workers-${process.pid}-`));
   fsc.chmodSync(base, process.getuid?.() === 0 ? 0o711 : 0o700);
   /** per key folder and uid, the folders once made */
   const ready = new Map<string, Promise<{ tmp: string; thumbs: string; index: string }>>();
@@ -285,10 +366,8 @@ export function makeWorkerSpecs(cfg: Config): WorkerSpecs {
     let p = ready.get(id);
     if (!p) {
       p = (async () => {
-        await accountDir(dir, account);
-        const d = { tmp: path.join(dir, "tmp"), thumbs: path.join(dir, "thumbs"), index: path.join(dir, "index") };
-        for (const sub of [d.tmp, d.thumbs, d.index]) await accountDir(sub, account);
-        return d;
+        await accountDirs(dir, account, o.afterMkdir);
+        return { tmp: path.join(dir, "tmp"), thumbs: path.join(dir, "thumbs"), index: path.join(dir, "index") };
       })();
       ready.set(id, p);
       p.catch(() => ready.get(id) === p && ready.delete(id)); // a failure is tried again on the next request

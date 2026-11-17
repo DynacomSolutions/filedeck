@@ -397,6 +397,8 @@ export class WorkerPool {
       const until = this.failed.get(key);
       if (until !== undefined && this.now() < until) return START_FAILED;
       const no = accountRefusal(spec.account) ?? (await this.refusal(spec));
+      // (the start rules may have waited while the account's epoch rose: checked again with no wait before a live worker or a new start)
+      this.checkEpoch(spec);
       if (no) {
         this.log(`worker ${key}: not started: ${no.error}`);
         return no;
@@ -417,8 +419,6 @@ export class WorkerPool {
           if (!lru) throw new PoolFull();
           void this.stop(lru);
         }
-        // (the start rules above may have waited while the account's epoch rose: checked again with no wait before the new start)
-        this.checkEpoch(spec);
         st = { spec, promise: null!, waiters: 0, cancelled: false };
         // in the map before the start runs, so that a start which ends at once still finds (and removes) its own slot
         this.starting.set(key, st);

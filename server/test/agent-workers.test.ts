@@ -302,6 +302,119 @@ test("worker folders: made once per key, made again after a failed start; one na
   }
 });
 
+test("HEAD through the gate: 200, the length kept, nothing logged as failed", async () => {
+  const logs: string[] = [];
+  const orig = console.error;
+  console.error = (x: string) => logs.push(String(x));
+  try {
+    const app = agent();
+    const r = await app.request("/api/fs/read?path=/a.txt", { method: "HEAD", headers: headers(sys("alice")) });
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("content-length"), "6");
+    assert.equal(await r.text(), "");
+    await new Promise((res) => setTimeout(res, 50));
+    assert.ok(!logs.some((l) => l.includes("failed")), logs.join("\n"));
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("a new key folder: its subfolders are made while it is still root's, and a folder swapped in is refused, never changed", async () => {
+  const cfg = loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never);
+  const account = (await accounts().resolve("alice"))!;
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-swapped-"));
+  fs.chmodSync(other, 0o755);
+  if (IS_ROOT) fs.chownSync(other, 65534, 65534);
+  try {
+    for (const at of ["key", "tmp"]) {
+      // the account (owner of the key folder once it is handed over) swaps a link in right after the mkdir
+      const seen: { step: string; owner: number }[] = [];
+      const specs = makeWorkerSpecs(cfg, {
+        afterMkdir: (step, p) => {
+          seen.push({ step, owner: fs.lstatSync(path.dirname(p)).uid });
+          if (step !== at) return;
+          fs.rmdirSync(p);
+          fs.symlinkSync(other, p);
+        },
+      });
+      try {
+        await assert.rejects(specs.spec(sys("alice"), account), { name: "UnsafeFolders" });
+        const st = fs.statSync(other);
+        assert.equal(st.mode & 0o7777, 0o755, "the swapped-in folder is not changed");
+        assert.equal(st.uid, IS_ROOT ? 65534 : me);
+      } finally {
+        specs.close();
+      }
+      // a real folder swapped in (not ours, or open to others) is refused too
+      const specs2 = makeWorkerSpecs(cfg, {
+        afterMkdir: (step, p) => {
+          if (step !== at) return;
+          fs.rmdirSync(p);
+          fs.mkdirSync(p, { mode: 0o755 });
+          fs.chmodSync(p, 0o755);
+          if (IS_ROOT) fs.chownSync(p, 65534, 65534);
+        },
+      });
+      try {
+        await assert.rejects(specs2.spec(sys("alice"), account), { name: "UnsafeFolders" });
+      } finally {
+        specs2.close();
+      }
+      if (at === "key") continue;
+      // the subfolders were made while the key folder still belonged to this process
+      const specs3 = makeWorkerSpecs(cfg, { afterMkdir: (step, p) => void seen.push({ step, owner: fs.lstatSync(path.dirname(p)).uid }) });
+      seen.length = 0;
+      try {
+        await specs3.spec(sys("alice"), account);
+        assert.deepEqual(seen.map((x) => x.step), ["key", "tmp", "thumbs", "index"]);
+        for (const x of seen.slice(1)) assert.equal(x.owner, me, "the key folder is still ours while its subfolders are made");
+        const key = fs.lstatSync(path.join(specs3.base, `u${account.uid}`));
+        assert.equal(key.uid, account.uid);
+        assert.equal(key.mode & 0o7777, 0o700);
+      } finally {
+        specs3.close();
+      }
+    }
+  } finally {
+    fs.rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test("an existing key folder with a subfolder missing is refused, not filled in", async () => {
+  const specs = makeWorkerSpecs(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
+  try {
+    const account = (await accounts().resolve("alice"))!;
+    const s1 = await specs.spec(sys("alice"), account);
+    fs.rmdirSync(s1.tmp!);
+    s1.startFailed!();
+    await assert.rejects(specs.spec(sys("alice"), account), { name: "UnsafeFolders" });
+    assert.ok(!fs.existsSync(s1.tmp!));
+  } finally {
+    specs.close();
+  }
+});
+
+test("areas left by an agent that is gone are removed at start (as root, root's own, not links); others stay", async () => {
+  const gone = path.join(os.tmpdir(), "filedeck-workers-999999999-left");
+  const link = path.join(os.tmpdir(), "filedeck-workers-999999998-link");
+  const live = path.join(os.tmpdir(), `filedeck-workers-${process.pid}-live`);
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-target-"));
+  fs.mkdirSync(gone);
+  fs.mkdirSync(live);
+  fs.symlinkSync(target, link);
+  try {
+    const app = agent();
+    await (app as unknown as { leave(): Promise<void> }).leave();
+    assert.ok(!fs.existsSync(baseOf(app)!), "leave removes the area");
+    assert.equal(fs.existsSync(gone), !IS_ROOT, IS_ROOT ? "removed" : "kept: not root");
+    assert.ok(fs.lstatSync(link).isSymbolicLink(), "a link is kept");
+    assert.ok(fs.existsSync(target));
+    assert.ok(fs.existsSync(live), "an area of a running agent is kept");
+  } finally {
+    for (const p of [gone, link, live, target]) fs.rmSync(p, { recursive: true, force: true });
+  }
+});
+
 test("auth off", async () => {
   let starts = 0;
   let lookups = 0;
