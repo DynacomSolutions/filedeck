@@ -36,7 +36,7 @@ const MAX_SKEW_MS = 5_000;
 /** The claim for one node, or null when a virtual account has no access there. */
 export function claimFor(id: Identity, node: string, now: number): UserClaim | null {
   if (id.kind === "sys") return { kind: "sys", name: id.name, epoch: id.epoch, iat: now };
-  const access = id.nodes[node];
+  const access = Object.hasOwn(id.nodes, node) ? id.nodes[node] : undefined;
   if (!access) return null;
   return { kind: "virt", name: id.name, epoch: id.epoch, runAs: access.runAs, grants: access.grants.map((g) => ({ ...g })), iat: now };
 }
