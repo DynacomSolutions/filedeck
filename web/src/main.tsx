@@ -34,7 +34,7 @@ installSignedOutWatch(() => {
  */
 async function afterSignIn(shownAs: string | undefined, setView: (v: View) => void) {
   const m = shownAs ? await me().catch(() => null) : null;
-  if (m && m !== "signed-out" && m.auth && m.name === shownAs) {
+  if (m && m !== "signed-out" && m.auth && `${m.kind}:${m.name}` === shownAs) {
     signedOut = false;
     setView(m);
   } else location.reload();
@@ -43,7 +43,7 @@ async function afterSignIn(shownAs: string | undefined, setView: (v: View) => vo
 /** The app when sign-in is off or done, else the sign-in screen. */
 function Root() {
   const [view, setView] = useState<View>("loading");
-  /** the account the app was last shown for */
+  /** the account the app was last shown for, as kind:name */
   const shownAs = useRef<string | undefined>(undefined);
   useEffect(() => {
     show = setView;
@@ -54,7 +54,7 @@ function Root() {
       .catch(() => setView((v) => (v === "sign-in" ? v : { auth: false })));
   }, []);
   useEffect(() => {
-    if (typeof view === "object" && view.auth) shownAs.current = view.name;
+    if (typeof view === "object" && view.auth) shownAs.current = `${view.kind}:${view.name}`;
   }, [view]);
   if (view === "loading") return null;
   if (view === "sign-in") return <Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense>;
