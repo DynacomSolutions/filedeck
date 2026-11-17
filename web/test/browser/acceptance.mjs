@@ -91,8 +91,27 @@ async function installFixture(page, opts = {}) {
       }
       if (opts.session.out) return json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' });
     }
+    // opts.kind / opts.admin: the signed-in account's kind and admin flag (default a virtual non-admin). opts.asRoot ({ until }):
+    // the act-as-root switch; a POST with the password 'fixture-root-password' turns it on for 15 minutes, DELETE turns it off.
+    if (opts.asRoot && pathname === '/api/auth/as-root') {
+      if (req.method() === 'DELETE') {
+        opts.asRoot.until = undefined;
+        opts.asRoot.stopped = (opts.asRoot.stopped ?? 0) + 1;
+        return json({ ok: true });
+      }
+      const b = JSON.parse(req.postData() || '{}');
+      opts.asRoot.bodies = [...(opts.asRoot.bodies ?? []), Object.keys(b).sort().join(',')];
+      if (b.password !== 'fixture-root-password') return json({ error: 'sign-in failed' }, 401);
+      opts.asRoot.until = Date.now() + (opts.asRoot.lasts ?? 15 * 60_000);
+      return json({ asRootUntil: opts.asRoot.until });
+    }
     if (pathname === '/api/auth/me') {
-      if (opts.account) return json({ auth: true, kind: 'virt', name: opts.account, admin: false });
+      if (opts.account) {
+        const kind = opts.kind ?? 'virt';
+        const until = opts.asRoot?.until;
+        opts.meCalls = (opts.meCalls ?? 0) + 1;
+        return json({ auth: true, kind, name: opts.account, admin: opts.admin === true, ...(until !== undefined && until > Date.now() ? { asRootUntil: until } : {}) });
+      }
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
     if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
@@ -1542,6 +1561,135 @@ async function verifySignIn(browser) {
   assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
 }
 
+// Act as root (a system administrator only): the "Act as root…" item opens a dialog with the sign-in fields; while the switch is
+// on the header shows "Acting as root until HH:MM" with Stop. Banner and open dialog pass axe in light and dark and fit at 390x844
+// and 320x568; the password is cleared after a failed attempt and is never stored. Stop and the end time hide the banner and
+// ask the hub again. Non-admins and virtual accounts never see the item or the banner.
+async function verifyActAsRoot(browser) {
+  const failures = [];
+  const hhmm = (t) => page0.evaluate((u) => { const d = new Date(u); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }, t);
+  let page0;
+  const overflow = async (page, what) => {
+    const o = await page.evaluate(() => {
+      const right = (sel) => Math.max(0, ...[...document.querySelectorAll(sel)].map((e) => e.getBoundingClientRect().right));
+      return { scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, body: document.body.scrollWidth, banner: right('.asroot-banner'), dialog: right('[role=dialog]') };
+    });
+    if (o.scroll > o.client + 1 || o.body > o.client + 1 || o.banner > o.client + 1 || o.dialog > o.client + 1) failures.push({ view: what, rule: 'horizontal overflow', ...o });
+  };
+  const openDialog = async (page) => {
+    await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+    await page.getByRole('menuitem', { name: 'Act as root…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Act as root' });
+    await dialog.waitFor({ state: 'visible' });
+    return dialog;
+  };
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
+      const asRoot = { until: Date.now() + 10 * 60_000 };
+      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture: { account: 'fixture-admin', kind: 'sys', admin: true, asRoot } });
+      page0 = page;
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      try {
+        const banner = page.getByRole('status').filter({ hasText: 'Acting as root until' });
+        await banner.waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal((await banner.innerText()).replace(/\s+/g, ' ').trim(), `Acting as root until ${await hhmm(asRoot.until)} Stop`, `the banner names the end time (${label})`);
+        await page.waitForTimeout(150);
+        await overflow(page, `banner ${label}`);
+        await runAxe(page, `act as root banner ${label}`, failures);
+        const dialog = await openDialog(page);
+        await page.waitForTimeout(150);
+        await overflow(page, `dialog ${label}`);
+        await runAxe(page, `act as root dialog ${label}`, failures);
+        await dialog.getByLabel('Password', { exact: true }).fill('not-the-password');
+        await dialog.getByRole('button', { name: 'Act as root' }).click();
+        await dialog.getByRole('alert').filter({ hasText: 'Sign-in failed' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(await dialog.getByLabel('Password', { exact: true }).inputValue(), '', 'the password is cleared after a failed attempt');
+        await runAxe(page, `act as root dialog error ${label}`, failures);
+        await dialog.getByRole('radio', { name: 'Key file' }).click();
+        await dialog.getByLabel('Key file').waitFor({ state: 'visible' });
+        await overflow(page, `dialog key file ${label}`);
+        await runAxe(page, `act as root dialog key file ${label}`, failures);
+        const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+        if (stored.includes('not-the-password')) failures.push({ view: label, rule: 'password kept in storage' });
+        await page.keyboard.press('Escape');
+        await dialog.waitFor({ state: 'hidden' });
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  // Stop, then turn it on again with the password; the end time hides the banner and the app asks the hub again.
+  {
+    const asRoot = { until: Date.now() + 10 * 60_000 };
+    const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    page0 = page;
+    try {
+      const banner = page.getByRole('status').filter({ hasText: 'Acting as root until' });
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      const before = fixture.meCalls;
+      await banner.getByRole('button', { name: 'Stop' }).click();
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      assert.equal(asRoot.stopped, 1, 'Stop turns the switch off on the hub');
+      await expectPoll(() => fixture.meCalls > before, 'Stop asks the hub who is signed in again');
+      const dialog = await openDialog(page);
+      await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
+      await dialog.getByRole('button', { name: 'Act as root' }).click();
+      await dialog.waitFor({ state: 'hidden', timeout: 8000 });
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      assert.deepEqual(asRoot.bodies, ['password'], 'the dialog sends the password and nothing else');
+      // the hub ends the switch 4 seconds from now; the banner goes at that time and the app asks the hub again
+      asRoot.until = Date.now() + 4000;
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      await banner.filter({ hasText: `until ${await hhmm(asRoot.until)}` }).waitFor({ state: 'visible', timeout: 8000 });
+      const ended = fixture.meCalls;
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      await expectPoll(() => fixture.meCalls > ended, 'the end time asks the hub who is signed in again');
+    } finally {
+      await context.close();
+    }
+  }
+  // the end time the hub gave when the switch was turned on hides the banner on its own (one timer, nothing asked first)
+  {
+    const asRoot = { lasts: 3000 };
+    const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    try {
+      const banner = page.getByRole('status').filter({ hasText: 'Acting as root until' });
+      const dialog = await openDialog(page);
+      await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
+      await dialog.getByRole('button', { name: 'Act as root' }).click();
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      const before = fixture.meCalls;
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      await expectPoll(() => fixture.meCalls > before, 'the end time asks the hub who is signed in again');
+    } finally {
+      await context.close();
+    }
+  }
+  // a system account that is not an administrator, and a virtual account, never see the item or the banner
+  for (const fixture of [{ account: 'fixture-admin', kind: 'sys', admin: false, asRoot: { until: Date.now() + 600_000 } }, { account: 'fixture-admin', kind: 'virt', admin: false, asRoot: { until: Date.now() + 600_000 } }]) {
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+      await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
+      assert.equal(await page.getByRole('menuitem', { name: 'Act as root…' }).count(), 0, `no "Act as root…" for a ${fixture.kind} account that is not an administrator`);
+      if (fixture.kind === 'sys') assert.equal(await page.locator('.asroot-banner').count(), 0, 'no banner for a non-administrator');
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'the act-as-root banner and dialog pass axe and fit the window');
+}
+
+async function expectPoll(fn, message) {
+  for (let i = 0; i < 80; i++) {
+    if (fn()) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.fail(message);
+}
+
 // The session ends while a file is being edited. Signing in again as the same account brings the app back without a
 // page load, and the unsaved text is still in the editor.
 async function verifyResumeAfterSessionEnds(browser) {
@@ -1705,6 +1853,7 @@ const checks = [
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],
   ['axe-core A and AA in every view', verifyAxeViews],
   ['sign-in screen and account menu', verifySignIn],
+  ['act as root from the account menu', verifyActAsRoot],
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
 

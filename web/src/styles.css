@@ -1047,7 +1047,16 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 .signin-form h1{margin:0;font-size:1rem;font-weight:700;letter-spacing:-.01em}
 .signin-seg{margin:0}
 .signin-seg button{min-height:32px;font-size:.82rem}
-.signin-form input[type=file]{width:100%;border:0;padding:.2rem 0;background:transparent;box-shadow:none;min-width:0;font:inherit;font-size:.82rem;color:var(--fg);text-transform:none;letter-spacing:0}
+.signin-form input[type=file],.modal input[type=file].signin-file{width:100%;border:0;padding:.2rem 0;background:transparent;box-shadow:none;min-width:0;font:inherit;font-size:.82rem;color:var(--fg);text-transform:none;letter-spacing:0}
 .signin-note{margin:0;font-size:.78rem;color:var(--muted)}
 .signin-err{margin:0;color:var(--accent-text);font-size:.82rem;font-weight:500;overflow-wrap:anywhere}
 .signin-err:empty{display:none}
+/* act as root: the editor banner look, as a pill in the header, kept to one line */
+.site-header .asroot-banner{flex:none;flex-wrap:nowrap;gap:.5rem;padding:.15rem .2rem .15rem .6rem;border:1px solid var(--accent-line);border-radius:var(--radius-btn);white-space:nowrap}
+.asroot-banner button{gap:var(--btn-gap)}
+/* a phone header has no room beside the actions: the banner takes a row of its own under them */
+@media(max-width:700px),(max-height:500px) and (max-width:1000px){
+  .site-header__inner:has(>.asroot-banner){height:auto;flex-wrap:wrap;row-gap:.3rem;padding-block:.2rem .4rem}
+  .site-header__inner:has(>.asroot-banner)>:not(.asroot-banner){min-height:36px}
+  .site-header .asroot-banner{order:1;flex:1 1 100%;justify-content:space-between;min-width:0}
+}

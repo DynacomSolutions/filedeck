@@ -2,7 +2,8 @@
  * Sign-in calls to the hub (server/src/auth/routes.ts) and the signed-out signal. With auth off the hub answers
  * `GET /api/auth/me` with `{auth:false}` and nothing else here is used.
  */
-export type Account = { auth: true; kind: "sys" | "virt"; name: string; admin: boolean };
+/** `asRootUntil` (ms since the epoch, the hub's clock): a system administrator's act-as-root switch is on until then. */
+export type Account = { auth: true; kind: "sys" | "virt"; name: string; admin: boolean; asRootUntil?: number };
 export type Me = { auth: false } | Account;
 
 /** A sign-in that did not work; the message is ready to show. */
@@ -18,7 +19,11 @@ export async function me(): Promise<Me | "signed-out"> {
   if (isSignedOut(r)) return "signed-out";
   if (!r.ok) throw new Error(`/api/auth/me answered ${r.status}`);
   const b = (await r.json()) as Partial<Account>;
-  return b.auth === true && typeof b.name === "string" ? { auth: true, kind: b.kind === "virt" ? "virt" : "sys", name: b.name, admin: b.admin === true } : { auth: false };
+  if (b.auth !== true || typeof b.name !== "string") return { auth: false };
+  const kind = b.kind === "virt" ? "virt" : "sys";
+  // only a system account can act as root; a virtual account never carries the switch
+  const asRoot = kind === "sys" && typeof b.asRootUntil === "number" && Number.isFinite(b.asRootUntil) ? { asRootUntil: b.asRootUntil } : {};
+  return { auth: true, kind, name: b.name, admin: b.admin === true, ...asRoot };
 }
 
 /** The line to show for a failed sign-in answer. */
@@ -66,6 +71,39 @@ export async function loginKey(name: string, keyText: string, passphrase?: strin
   const { signLogin, toBase64 } = await import("./sshkey");
   const { publicKey, signature } = await signLogin(keyText, passphrase, hubId, name, ch);
   return signedIn(await reach(() => fetch("/api/auth/login-key", { method: "POST", ...jsonBody({ name, publicKey, challenge, signature: toBase64(signature) }) })));
+}
+
+/** A fresh proof for act as root: the password, or a key file (its text and passphrase stay here) for the signed-in account's own name. */
+export type RootProof = { password: string } | { keyText: string; passphrase?: string; name: string };
+
+/**
+ * Turns on act as root for this session (system administrators only). The password goes in the JSON body only; a key
+ * file signs a fresh challenge for `name` (the hub checks it against the session's own name) and only the public key
+ * line and the signature are sent. Failures throw SignInError with the same messages as sign-in, or KeyFileError.
+ */
+export async function startAsRoot(proof: RootProof): Promise<{ asRootUntil: number }> {
+  let r: Response;
+  if ("password" in proof) {
+    r = await reach(() => fetch("/api/auth/as-root", { method: "POST", ...jsonBody({ password: proof.password }) }));
+  } else {
+    const c = await reach(() => fetch("/api/auth/challenge", { method: "POST", ...jsonBody({ name: proof.name }) }));
+    if (!c.ok) throw new SignInError(await signInMessage(c));
+    const { challenge, hubId } = (await c.json()) as { challenge: string; hubId: string };
+    const ch = Uint8Array.from(atob(challenge), (x) => x.charCodeAt(0));
+    const { signLogin, toBase64 } = await import("./sshkey");
+    const { publicKey, signature } = await signLogin(proof.keyText, proof.passphrase, hubId, proof.name, ch);
+    r = await reach(() => fetch("/api/auth/as-root", { method: "POST", ...jsonBody({ publicKey, challenge, signature: toBase64(signature) }) }));
+  }
+  if (!r.ok) throw new SignInError(await signInMessage(r));
+  const b = (await r.json()) as { asRootUntil?: unknown };
+  if (typeof b.asRootUntil !== "number") throw new SignInError("Act as root failed");
+  return { asRootUntil: b.asRootUntil };
+}
+
+/** Turns act as root off for this session. Throws when the hub does not confirm it. */
+export async function stopAsRoot(): Promise<void> {
+  const r = await fetch("/api/auth/as-root", { method: "DELETE", credentials: "same-origin" });
+  if (!r.ok) throw new Error(`stopping act as root failed (${r.status})`);
 }
 
 export async function logout(): Promise<void> {

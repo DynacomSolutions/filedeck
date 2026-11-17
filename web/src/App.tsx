@@ -28,6 +28,7 @@ import { useDialogFocus } from "./dialogFocus";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
 import { AccountMenu } from "./AccountMenu";
+import { AsRootBanner, useAsRoot } from "./AsRootBanner";
 import type { Account } from "./auth";
 
 /** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = swap places). */
@@ -244,6 +245,7 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
 
 export function App({ account }: { account?: Account } = {}) {
   const nodesState = useNodes();
+  const asRoot = useAsRoot(account);
   const phone = usePhone();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
@@ -606,6 +608,7 @@ export function App({ account }: { account?: Account } = {}) {
             onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
             onStatus={setStatus}
           />
+          {asRoot.until !== undefined && <AsRootBanner until={asRoot.until} onStop={asRoot.stop} onEnd={asRoot.end} />}
           <div className="site-header__actions">
             {diffMark && (
               <Tip label="Clear diff mark">
@@ -620,7 +623,7 @@ export function App({ account }: { account?: Account } = {}) {
               </Tip>
             )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
-            {account && <AccountMenu name={account.name} />}
+            {account && <AccountMenu account={account} onAsRoot={asRoot.start} />}
           </div>
         </div>
       </header>
