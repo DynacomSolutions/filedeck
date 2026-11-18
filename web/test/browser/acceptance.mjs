@@ -84,6 +84,9 @@ async function installFixture(page, opts = {}) {
     const json = (body, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
     // opts.requests: every API request the page makes, as path and query
     opts.requests?.push(pathname + url.search);
+    // opts.nodesBody / opts.lists: a check's own node list and folder listings (by path), answered before the shared fixtures
+    if (opts.nodesBody && pathname === '/api/nodes') return json(opts.nodesBody);
+    if (opts.lists?.[url.searchParams.get('path')] && pathname.includes('/api/fs/list')) return json({ path: url.searchParams.get('path'), entries: opts.lists[url.searchParams.get('path')], truncated: false });
     // Sign-in is off unless a check asks for a signed-out or signed-in hub. opts.session ({ out }) lets a check end the
     // session while the app is open: every API call is then the gate's 401 until a password sign-in starts a new one.
     if (opts.session) {
@@ -1648,6 +1651,59 @@ async function verifyVirtualAccount(browser) {
       await offer.click();
       await page.waitForFunction((p) => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p === p, share, { timeout: 8000 });
       await offer.waitFor({ state: 'detached', timeout: 8000 }); // the offer goes once the home folder is listed
+    } finally {
+      await context.close();
+    }
+  }
+  // Saved state from elsewhere: a node list saved with sign-in off (no roots), one saved by another account and one in the format
+  // from before accounts, plus a bookmark of / on the machine. None of them may make the page list / or ask for mounts. Then
+  // "Copy to folder..." on a second machine opens at that machine's granted folder.
+  {
+    const dest = '/srv/dest';
+    const plainList = [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }];
+    const fixture = {
+      account: 'fixture-guest', kind: 'virt', roots: [share, dest], requests: [],
+      nodesBody: { nodes: [{ name: nodeName, online: true, roots: [share] }, { name: 'fixture-dest', online: true, roots: [dest] }] },
+      lists: { [share]: [entry(`${share}/report.txt`)] },
+    };
+    const { context, page } = await openPage(browser, { state: '/', fixture });
+    try {
+      // each load starts from the saved list chosen below (kept in sessionStorage, which outlives the navigation) and the bookmark
+      await page.addInitScript((node) => {
+        const seed = sessionStorage.getItem('fixture-seed-swr');
+        if (seed) localStorage.setItem('filedeck.swr.v1', seed);
+        localStorage.setItem('filedeck.bookmarks', JSON.stringify([{ node, path: '/' }]));
+      }, nodeName);
+      const seeds = [
+        JSON.stringify({ owner: 'anon', entries: [['nodes', { data: plainList }]] }),
+        JSON.stringify({ owner: 'virt:someone-else', entries: [['nodes', { data: [{ name: nodeName, online: true, roots: ['/srv/other'] }] }]] }),
+        JSON.stringify([['nodes', { data: plainList }]]),
+      ];
+      for (const [round, seed] of seeds.entries()) {
+        await page.evaluate((v) => sessionStorage.setItem('fixture-seed-swr', v), seed);
+        fixture.requests.length = 0;
+        await page.goto(new URL('/', baseURL).toString(), { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction((p) => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p === p, share, { timeout: 10000 });
+        await page.getByRole('tree', { name: 'Navigation' }).getByRole('treeitem', { name: share }).waitFor({ state: 'visible' });
+        await page.waitForTimeout(500);
+        const bad = fixture.requests.filter((r) => r.includes('/api/mounts') || (r.includes('/api/fs/list?') && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === '/'));
+        assert.deepEqual(bad, [], `saved state ${round} from elsewhere: no list of / and no mounts request`);
+        const kept = await page.evaluate(() => localStorage.getItem('filedeck.swr.v1') ?? '');
+        assert.ok(!kept.includes('/srv/other') && !kept.includes('"anon"') && !kept.startsWith('['), `saved state ${round}: the list saved elsewhere is dropped`);
+      }
+      fixture.requests.length = 0;
+      await page.locator('[data-path="/srv/share/report.txt"]').click();
+      await page.keyboard.press('Shift+F10');
+      await page.getByRole('menu').last().getByRole('menuitem', { name: 'Copy to folder...', exact: true }).press('Enter');
+      const dialog = page.getByRole('dialog', { name: 'Copy to folder' });
+      await dialog.waitFor({ state: 'visible' });
+      await chooseDestinationNode(page, dialog, 'fixture-dest');
+      await dialog.getByText(`fixture-dest:${dest}`).waitFor({ state: 'visible' });
+      assert.equal(await dialog.getByRole('button', { name: 'Up one destination folder' }).isDisabled(), true, 'up is disabled at the granted folder in the dialog');
+      const listed = fixture.requests.filter((r) => r.includes('/api/fs/list?')).map((r) => r.slice(0, r.indexOf('/api/fs/list')) + ' ' + new URLSearchParams(r.slice(r.indexOf('?'))).get('path'));
+      assert.deepEqual(listed.filter((l) => l.endsWith(' /')), [], 'switching the machine in "Copy to folder" lists no /');
+      assert.ok(listed.includes(`/api/nodes/fixture-dest ${dest}`), 'the second machine opens at its granted folder');
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
     } finally {
       await context.close();
     }
