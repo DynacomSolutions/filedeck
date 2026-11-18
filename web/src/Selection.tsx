@@ -1,6 +1,6 @@
 // Selection that spans panels: every panel reports what it has selected, App merges the reports,
 // and the actions here run on the combined list (hub jobs take items from any node).
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, canEdit, fileUrl, zipFitsInUrl, zipTicketUrl, zipUrl, type Entry, type OpSpec } from "./api";
 import { setClip } from "./clipboard";
@@ -8,6 +8,8 @@ import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { CompressDialog } from "./ArchiveDialog";
 import { ConfirmDialog } from "./Dialogs";
 import { Tip } from "./Tooltip";
+import { usePhone } from "./viewport";
+import { phoneActionsFit } from "./phoneBar";
 import * as Ic from "lucide-react";
 
 export interface SelRef {
@@ -106,6 +108,9 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [compress, setCompress] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const phone = usePhone();
+  const barRef = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState(Infinity);
   const queue = async (label: string, spec: OpSpec) => {
     try {
       await api.startOp(spec);
@@ -131,11 +136,28 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
   const clip = (mode: "copy" | "cut") => () => (setClip({ mode, items: refs.map((r) => ({ node: r.node, path: r.path })) }), onStatus(`${mode === "copy" ? "Copied" : "Cut"} ${refs.length} item(s) to the file clipboard`));
   const doTrash = () => void queue("Trash", trashSpec(refs));
   const primary = [
-    { id: "copy", label: "Copy", tip: "Copy the selection to the file clipboard", icon: <Ic.Copy />, run: clip("copy") },
-    { id: "cut", label: "Cut", tip: "Cut the selection to the file clipboard", icon: <Ic.Scissors />, run: clip("cut") },
-    { id: "download", label: "Download", tip: "Download the selection (several items or folders as a zip)", icon: <Ic.Download />, run: () => downloadRefs(refs, onStatus) },
-    { id: "trash", label: "Trash", tip: "Move the selection to the trash", icon: <Ic.Trash2 />, run: doTrash },
+    { id: "copy", label: "Copy", tip: "Copy the selection to the file clipboard", icon: <Ic.Copy />, mIcon: Ic.Copy, run: clip("copy") },
+    { id: "cut", label: "Cut", tip: "Cut the selection to the file clipboard", icon: <Ic.Scissors />, mIcon: Ic.Scissors, run: clip("cut") },
+    { id: "download", label: "Download", tip: "Download the selection (several items or folders as a zip)", icon: <Ic.Download />, mIcon: Ic.Download, run: () => downloadRefs(refs, onStatus) },
+    { id: "trash", label: "Trash", tip: "Move the selection to the trash", icon: <Ic.Trash2 />, mIcon: Ic.Trash2, run: doTrash },
   ];
+  // On a phone the bar is only as wide as the space between the menu and Jobs buttons: show the actions that fit, put the rest in More.
+  const hasSel = refs.length > 0;
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!phone || !el || !hasSel) return setFit(Infinity);
+    const measure = () => {
+      const count = el.querySelector("b");
+      setFit(phoneActionsFit(el.clientWidth, count ? count.scrollWidth : 0, primary.length));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [phone, hasSel, refs.length, primary.length]);
+  const shown = primary.slice(0, fit);
+  const hidden = primary.slice(shown.length);
   const openMore = (e: React.MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const diffItem: MenuItem = { label: "Diff files", icon: Ic.Diff, ...(diffable ? { onSelect: () => onDiff(refs[0]!, refs[1]!) } : { disabled: true }) };
@@ -143,6 +165,8 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
       x: r.left,
       y: r.bottom + 2,
       items: [
+        ...hidden.map((a): MenuItem => ({ label: a.label, icon: a.mIcon, onSelect: a.run, ...(a.id === "trash" ? { danger: true } : {}) })),
+        ...(hidden.length ? ["sep" as const] : []),
         { label: "Copy to...", icon: Ic.CopyPlus, sub: destItems("copy") },
         { label: "Move to...", icon: Ic.FolderInput, sub: destItems("move") },
         { label: "Compress...", icon: Ic.Archive, onSelect: () => setCompress(true) },
@@ -155,11 +179,11 @@ export function SelectionBar({ refs, panelCount, picked, dests, onClear, onDiff,
   };
   return (
     // Lives inside the page header (fixed height, always present): nothing moves when a selection starts or ends.
-    <div className="selbar" role="region" aria-label="Selection across panels">
+    <div className="selbar" ref={barRef} role="region" aria-label="Selection across panels">
       <Tip label={detail}><b role="status" className={refs.length || nPick ? undefined : "selbar-none"}>{text}</b></Tip>
       {(refs.length > 0 || nPick > 0) && (
         <span className="selbar-actions">
-          {refs.length > 0 && primary.map((a) => (
+          {refs.length > 0 && shown.map((a) => (
             <Tip key={a.id} label={a.tip}>
               <button aria-label={a.label} onClick={a.run}>{a.icon} <span className="bl">{a.label}</span></button>
             </Tip>
