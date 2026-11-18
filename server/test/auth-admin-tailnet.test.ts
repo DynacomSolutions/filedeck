@@ -28,15 +28,21 @@ after(async () => {
   }
 });
 
-/** A fake agent whose account lookup answers from `users`; a name missing there gets 503 (no answer). */
-async function fakeAgent(): Promise<{ url: string; users: Record<string, boolean> }> {
-  const f = { url: "", users: {} as Record<string, boolean> };
+/**
+ * A fake agent whose account lookup answers from `users`; a name missing there gets 503 (no answer). While `lookupGate` is set, a lookup
+ * waits for it before it answers; `onLookup` is called when one arrives.
+ */
+type Agent = { url: string; users: Record<string, boolean>; lookupGate?: Promise<void>; onLookup?: () => void };
+async function fakeAgent(): Promise<Agent> {
+  const f: Agent = { url: "", users: {} };
   const srv = http.createServer((req, res) => {
     let body = "";
     req.on("data", (d: Buffer) => (body += d.toString()));
-    req.on("end", () => {
+    req.on("end", async () => {
       res.setHeader("content-type", "application/json");
       if (req.url === "/api/auth/lookup") {
+        f.onLookup?.();
+        if (f.lookupGate) await f.lookupGate;
         const name = (JSON.parse(body || "{}") as { name?: string }).name ?? "";
         if (!Object.hasOwn(f.users, name)) {
           res.statusCode = 503;
@@ -321,12 +327,55 @@ test("lock-out counts links: an administrator with only a link lets another admi
   assert.deepEqual(d2.json, { error: NO_ADMIN });
 });
 
+test("system user: an administrator demoted or signed out while the machines are asked gets 403, and no link is written", async () => {
+  const a = await fakeAgent();
+  const w = await world("socket", { env: { NODES: `a=${a.url}` } });
+  w.acc.create({ name: "boss2", passwordHash: HASH, admin: true, nodes: {} });
+  a.users = { alice: true };
+  /** Sends the link change while the lookup waits, runs `meanwhile`, then lets the lookup answer. */
+  const held = async (cookie: string, meanwhile: () => Promise<unknown> | unknown) => {
+    let open = () => {};
+    a.lookupGate = new Promise<void>((r) => (open = r));
+    const asked = new Promise<void>((r) => (a.onLookup = r));
+    const r = w.send("PUT", "/api/admin/system/alice/tailnet", cookie, { links: ["alice@github"] });
+    await asked;
+    await meanwhile();
+    open();
+    const out = await r;
+    a.lookupGate = undefined;
+    a.onLookup = undefined;
+    return out;
+  };
+  // demoted in the store while the machines are asked
+  const cookie = await w.login("boss2");
+  const demoted = await held(cookie, () => w.acc.update("boss2", { admin: false }));
+  assert.equal(demoted.status, 403, demoted.text);
+  assert.deepEqual(demoted.json, { error: "administrators only" });
+  assert.deepEqual(w.h.auth!.links.forAccount("sys", "alice"), []);
+  // signed out meanwhile: the session no longer holds
+  w.acc.update("boss2", { admin: true });
+  const again = await w.login("boss2");
+  const out = await held(again, () => w.send("POST", "/api/auth/logout", again));
+  assert.equal(out.status, 403, out.text);
+  assert.deepEqual(w.h.auth!.links.forAccount("sys", "alice"), []);
+  assert.equal(w.changed.length, 0);
+});
+
+test("lock-out counts links: no source, a PATCH that keeps a login link and removes the password is refused", async () => {
+  const w = await world(null, { boss: { links: ["boss@github"] } });
+  const r = await w.send("PATCH", "/api/admin/accounts/boss", await w.login("boss"), { password: null, tailnet: ["boss@github"] });
+  assert.equal(r.status, 409);
+  assert.deepEqual(r.json, { error: NO_ADMIN });
+  assert.notEqual(w.acc.get("boss")!.passwordHash, null);
+});
+
 test("lockOut on its own: links count by mode, and the changed account's kept links are used when given", async () => {
   const w = await world(null);
   const cfg = loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: "/nonexistent", NODES: "a=http://127.0.0.1:9", FILEDECK_ADMINS: "" } as never);
   const links = w.h.auth!.links;
   links.setForAccount("virt", "boss", [{ subject: "tag:boss", kind: "tag" }]);
   assert.equal(lockOut(cfg, w.acc, links, null, { name: "boss", password: null }), true);
+  assert.equal(lockOut(cfg, w.acc, links, null, { name: "boss", password: null, links: [{ subject: "boss@github", kind: "login" }] }), true);
   assert.equal(lockOut(cfg, w.acc, links, "socket", { name: "boss", password: null }), false);
   assert.equal(lockOut(cfg, w.acc, links, "headers", { name: "boss", password: null }), true);
   assert.equal(lockOut(cfg, w.acc, links, "headers", { name: "boss", password: null, links: [{ subject: "boss@github", kind: "login" }] }), false);
