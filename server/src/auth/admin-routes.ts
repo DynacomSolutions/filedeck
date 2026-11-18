@@ -203,6 +203,13 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       sessions: counts.get(`virt:${a.name}`) ?? 0,
     };
   };
+  /** A system user as administrators see it. */
+  const systemView = (name: string, counts = sessionCounts()): SystemView => ({
+    name,
+    admin: cfg.admins.includes(name),
+    sources: deps.sourceGrants.forAccount("sys", name),
+    sessions: counts.get(`sys:${name}`) ?? 0,
+  });
   /** The view after a change, or 404 when the account went meanwhile (another administrator deleted it). */
   const answer = (c: Context, name: string, status: 200 | 201 = 200) => {
     const v = view(name);
@@ -261,9 +268,7 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     const list = accounts.list().flatMap((a) => view(a.name, counts) ?? []);
     const names = new Set<string>([...cfg.admins, ...deps.sourceGrants.accounts("sys")]);
     for (const s of sessions.list()) if (s.kind === "sys") names.add(s.name);
-    const system: SystemView[] = [...names]
-      .sort()
-      .map((name) => ({ name, admin: cfg.admins.includes(name), sources: deps.sourceGrants.forAccount("sys", name), sessions: counts.get(`sys:${name}`) ?? 0 }));
+    const system: SystemView[] = [...names].sort().map((name) => systemView(name, counts));
     return c.json({ accounts: list, system });
   });
 
@@ -403,6 +408,29 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       // sessions, streams and jobs end (epochOf now reads the retired epoch)
       await deps.changed(before);
       return c.json({ ok: true });
+    }),
+  );
+
+  /* ------------------------------------------------------------------------------------------------------------------- system users */
+
+  // A system user's network sources, replaced as a whole (`{}` takes them all away). Never root. The change ends the user's sessions,
+  // streams and jobs, as every account change does.
+  app.put(
+    "/api/admin/system/:name/sources",
+    checked(async (c) => {
+      const name = systemName(c.req.param("name") ?? "");
+      const b = await objectBody(c);
+      const sources = sourceAccess(b.sources, knownSources());
+      // the check and every write in one transaction, the epoch raised last; `changed` after the commit
+      const before = accounts.tx((): Identity => {
+        callerHolds(c);
+        const id: Identity = { kind: "sys", name, admin: cfg.admins.includes(name), epoch: accounts.epochOf("sys", name) };
+        deps.sourceGrants.setForAccount("sys", name, sources);
+        accounts.bumpEpoch("sys", name);
+        return id;
+      });
+      await deps.changed(before);
+      return c.json(systemView(name));
     }),
   );
 

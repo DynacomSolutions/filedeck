@@ -35,8 +35,8 @@ import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
 import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
 import { SysPresence } from "./auth/presence.ts";
-import { SourceGrants } from "./auth/source-grants.ts";
-import { registerAdmin, registerAdminOff } from "./auth/admin-routes.ts";
+import { SourceGrants, type SourceAccess } from "./auth/source-grants.ts";
+import { isAdmin, registerAdmin, registerAdminOff } from "./auth/admin-routes.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
 export interface HubAuth {
@@ -72,6 +72,9 @@ function clean(h: Headers, keepLength: boolean): Headers {
   });
   return out;
 }
+
+/** The answer of a network source to a change asked for with a read-only grant. */
+const SOURCE_READ_ONLY = "this network source is read-only for you";
 
 /** The most the hub waits for the agents when act as root is turned off early and it cancels the account's root jobs there. */
 const END_ROOT_JOBS_MS = 3_000;
@@ -286,11 +289,34 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   for (const [name, backend] of Object.entries(injected ?? {})) {
     sources.set(name, { config: { name, type: backend.type, host: "test", root: "/" }, backend });
   }
+  /**
+   * What an account may do on a network source (sign-in on): read-write for an administrator now (FILEDECK_ADMINS or the stored flag,
+   * read at each call, never the identity's own `admin`), else its source grant; undefined without a grant or without an identity.
+   */
+  const sourceGrants = auth ? new SourceGrants(auth.db) : undefined;
+  const sourceAccessOf = (id: Identity | undefined, source: string): SourceAccess | undefined => {
+    if (!auth || !sourceGrants || !id) return undefined;
+    if (isAdmin(cfg, auth.accounts, id)) return { write: true };
+    return sourceGrants.get(source, id.kind, id.name);
+  };
   const sourceOpts = { maxUpload: cfg.maxUpload, maxEdit: cfg.maxEdit, hashConcurrency: cfg.hashConcurrency, walkMaxEntries: cfg.walkMaxEntries, searchConcurrency: cfg.searchConcurrency, searchMaxFileBytes: cfg.searchMaxFileBytes, searchMaxBytes: cfg.searchMaxBytes, thumbs: makeThumbnailer(cfg) };
   for (const [name, s] of sources) {
     if (agents.has(name)) throw new Error(`source ${name} collides with a node of the same name`);
     const sapp = createSourceApp(name, s.backend, { ...sourceOpts, indexFile: cfg.indexDir ? path.join(cfg.indexDir, `source-${name}.db`) : "" });
-    agents.set(name, { fetch: (rest, init) => Promise.resolve(sapp.fetch(new Request("http://source" + rest, init))) });
+    // With sign-in on, every call is checked here against the account behind it (a hub job runs as its owner), so the proxy, hub jobs,
+    // transfers, compares and the vault routes are all covered, and a grant taken away stops a running job at its next call. A
+    // read-only grant lets only GET and HEAD through; a change is refused before the source app sees it.
+    agents.set(name, {
+      fetch: (rest, init) => {
+        if (cfg.auth) {
+          const access = sourceAccessOf(currentUser(), name);
+          if (!access) return Promise.reject(new NoAccessError());
+          const method = (init?.method ?? "GET").toUpperCase();
+          if (!access.write && method !== "GET" && method !== "HEAD") return Promise.resolve(Response.json({ error: SOURCE_READ_ONLY }, { status: 403 }));
+        }
+        return Promise.resolve(sapp.fetch(new Request("http://source" + rest, init)));
+      },
+    });
   }
   const nodeNames = new Set(cfg.nodes.map((n) => n.name));
   /**
@@ -308,10 +334,10 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     return presence.known(name, node);
   };
   /**
-   * Whether the person behind the current request may use a node or source. Network sources stay open to every signed-in
-   * account until source grants exist (part 3). With auth off everything is open, as before.
+   * Whether the person behind the current request may use a node or source. A network source needs a grant (or an administrator,
+   * `sourceAccessOf`). With auth off everything is open, as before.
    */
-  const mayUse = (name: string) => !cfg.auth || sources.has(name) || canUseNode(currentUser(), name, present);
+  const mayUse = (name: string) => !cfg.auth || (sources.has(name) ? sourceAccessOf(currentUser(), name) !== undefined : canUseNode(currentUser(), name, present));
   const noAccess = (c: import("hono").Context) => c.json({ error: "no access to this machine" }, 403);
 
   // Reachability of a source is cached briefly so the sidebar poll does not open a connection per request.
@@ -358,11 +384,18 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
         }
       }),
     );
+    // with sign-in on, only the sources the caller has access to; one it may only read says so
     const srcs = await Promise.all(
-      [...sources.values()].map(async ({ config }) => {
-        const s = await sourceOnline(config.name);
-        return { name: config.name, type: config.type, host: config.host, online: s.ok, ...(s.reason ? { offlineReason: s.reason } : {}) };
-      }),
+      [...sources.values()]
+        .flatMap(({ config }) => {
+          if (!cfg.auth) return [{ config, readOnly: false }];
+          const access = sourceAccessOf(id, config.name);
+          return access ? [{ config, readOnly: !access.write }] : [];
+        })
+        .map(async ({ config, readOnly }) => {
+          const s = await sourceOnline(config.name);
+          return { name: config.name, type: config.type, host: config.host, online: s.ok, ...(s.reason ? { offlineReason: s.reason } : {}), ...(readOnly ? { readOnly: true } : {}) };
+        }),
     );
     return c.json({ nodes, sources: srcs });
   });
@@ -387,12 +420,12 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   // The admin routes (auth/admin-routes.ts): only with sign-in on; off, /api/admin/* is 404. `changed` is read at each call, so tests
   // can wrap app.accountChanged.
-  if (auth)
+  if (auth && sourceGrants)
     registerAdmin(app, {
       cfg,
       accounts: auth.accounts,
       sessions: auth.sessions,
-      sourceGrants: new SourceGrants(auth.db),
+      sourceGrants,
       vault,
       nodes: cfg.nodes.map((n) => n.name),
       sources: [...sources.values()].map(({ config }) => ({ name: config.name, type: config.type })),
