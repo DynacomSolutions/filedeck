@@ -14,8 +14,12 @@ interface FetchEvent extends ExtendableEvent {
 interface NotificationEvent extends ExtendableEvent {
   notification: Notification;
 }
+interface PushEvent extends ExtendableEvent {
+  data: { json(): unknown } | null;
+}
 interface WindowClientLike {
   url: string;
+  visibilityState?: DocumentVisibilityState;
   focus(): Promise<unknown>;
 }
 interface SwScope {
@@ -31,6 +35,9 @@ interface SwScope {
   addEventListener(type: "install" | "activate", fn: (e: ExtendableEvent) => void): void;
   addEventListener(type: "fetch", fn: (e: FetchEvent) => void): void;
   addEventListener(type: "notificationclick", fn: (e: NotificationEvent) => void): void;
+  addEventListener(type: "push", fn: (e: PushEvent) => void): void;
+  addEventListener(type: "pushsubscriptionchange", fn: (e: ExtendableEvent) => void): void;
+  registration: ServiceWorkerRegistration;
   addEventListener(type: "message", fn: (e: MessageEvent) => void): void;
 }
 
@@ -113,5 +120,43 @@ sw.addEventListener("notificationclick", (e) => {
       if (own) await own.focus();
       else await sw.clients.openWindow("/");
     })(),
+  );
+});
+
+// A job ended (the hub's push watch, push/watch.ts on the hub). Shown unless a Filedeck window is on screen: its jobs tray already
+// shows the end there (browsers do not ask for a notification while a page of the site is visible).
+sw.addEventListener("push", (e) => {
+  e.waitUntil(
+    (async () => {
+      let n: { title?: unknown; body?: unknown; tag?: unknown } = {};
+      try {
+        n = (e.data?.json() ?? {}) as typeof n;
+      } catch {
+        /* not JSON: shown with the plain title */
+      }
+      const wins = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
+      if (wins.some((w) => w.visibilityState === "visible" && new URL(w.url).origin === ORIGIN)) return;
+      await sw.registration.showNotification(typeof n.title === "string" ? n.title : "A job ended", {
+        body: typeof n.body === "string" ? n.body : "",
+        tag: typeof n.tag === "string" ? n.tag : "filedeck-jobs",
+        icon: "/icon-192.png",
+        badge: "/icon-monochrome.png",
+      });
+    })(),
+  );
+});
+
+// The browser replaced the subscription (expired, keys rotated): subscribe again with the same key and give the hub the new one. The
+// request carries this browser's session cookie; a session that has ended makes the hub refuse it, and the next sign-in sends it again.
+sw.addEventListener("pushsubscriptionchange", (e) => {
+  e.waitUntil(
+    (async () => {
+      const k = await fetch("/api/push/key");
+      if (!k.ok) return;
+      const key = (await k.json()) as { publicKey: string };
+      const raw = atob(key.publicKey.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (key.publicKey.length % 4)) % 4));
+      const sub = await sw.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, (c) => c.charCodeAt(0)) });
+      await fetch("/api/push/subscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sub.toJSON()) });
+    })().catch(() => undefined),
   );
 });

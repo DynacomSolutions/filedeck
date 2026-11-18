@@ -234,6 +234,12 @@ async function installFixture(page, opts = {}) {
       opCalls.push(req.postDataJSON());
       return json({ id: `fixture-op-${opCalls.length}`, state: 'queued' });
     }
+    // Web Push at the fake hub: a fixed P-256 public key; each subscribe and delete body goes to opts.pushLog when given
+    if (pathname === '/api/push/key') return json({ publicKey: 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8' });
+    if (pathname === '/api/push/subscribe' && (req.method() === 'POST' || req.method() === 'DELETE')) {
+      opts.pushLog?.push({ method: req.method(), body: req.postDataJSON() });
+      return json(req.method() === 'POST' ? { ok: true } : { removed: 1 });
+    }
     // opts.opJobs: a check's own hub job list (the jobs tray polls it)
     if (pathname === '/api/ops/jobs') return json({ jobs: opts.opJobs ? opts.opJobs() : [] });
     if (pathname.endsWith('/api/trash/list')) return json({ volumes: [{ volume: '/', items: trashItems, truncated: false }] });
@@ -2440,8 +2446,29 @@ function pwaSpies() {
   if (window.ServiceWorkerRegistration) {
     ServiceWorkerRegistration.prototype.showNotification = async function (title, o) { log.shown.push({ title, body: o?.body ?? '', tag: o?.tag ?? '' }); };
   }
+  // Push: headless browsers have no push service. `__pushMode` 'fail' (the default) makes subscribe fail as there; 'ok' gives a
+  // stand-in subscription on a push service address, so the page hands it to the hub.
+  window.__pushMode = 'fail';
+  const push = (window.__push = { subscribed: 0, current: null });
+  if (window.PushManager) {
+    PushManager.prototype.getSubscription = async function () { return push.current; };
+    PushManager.prototype.subscribe = async function (o) {
+      if (window.__pushMode !== 'ok') throw new DOMException('push service not available', 'AbortError');
+      push.subscribed += 1;
+      const keys = { p256dh: 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4', auth: 'BTBZMqHH6r4Tts7J_aSIgg' };
+      const endpoint = 'https://fcm.googleapis.com/fcm/send/acceptance-stand-in';
+      push.current = { endpoint, options: { applicationServerKey: o.applicationServerKey.buffer ?? o.applicationServerKey }, toJSON: () => ({ endpoint, keys }), unsubscribe: async () => { push.current = null; return true; } };
+      return push.current;
+    };
+  }
   window.__hidden = false;
   Object.defineProperty(Document.prototype, 'visibilityState', { get: () => (window.__hidden ? 'hidden' : 'visible'), configurable: true });
+}
+
+/** Waits up to 10 s for `ok()` (a test-side condition, such as a request seen), else fails with `what`. */
+async function waitFor(ok, what) {
+  for (const end = Date.now() + 10000; Date.now() < end; await new Promise((r) => setTimeout(r, 100))) if (ok()) return;
+  assert.fail(`timed out: ${what}`);
 }
 
 const fixtureOp = (state) => ({
@@ -2494,7 +2521,8 @@ async function hubDoor() {
 async function verifyInstallableApp(browser) {
   const failures = [];
   let op = fixtureOp('running');
-  const fixture = { opJobs: () => [op] };
+  const pushLog = [];
+  const fixture = { opJobs: () => [op], pushLog };
   const door = await hubDoor();
   const { context, page } = await openPage(browser, { serviceWorkers: 'allow', fixture, initScripts: [pwaSpies], origin: door.origin });
   try {
@@ -2568,6 +2596,8 @@ async function verifyInstallableApp(browser) {
     await dialog.locator('label.set-opt', { hasText: 'Notify me when a job ends' }).click();
     await page.waitForFunction(() => window.__notify.asked === 1);
     await expectChecked(sw);
+    // no push service here: the switch stays on and says notifications come only while a tab is open
+    await dialog.getByText(/cannot send notifications while Filedeck is closed/).waitFor({ timeout: 10000 });
     await runAxe(page, 'Settings App section (light)', failures);
     await page.keyboard.press('Escape');
     await page.evaluate(() => { window.__hidden = true; });
@@ -2576,6 +2606,36 @@ async function verifyInstallableApp(browser) {
     await page.waitForTimeout(1500);
     assert.deepEqual(await page.evaluate(() => window.__notify.shown), [{ title: 'Copy tracked.txt finished', body: '1 done', tag: 'filedeck-job:o:fixture-op-pwa' }], 'one notification for the job that ended while hidden');
     await page.evaluate(() => { window.__hidden = false; });
+
+    // Web Push where the browser has a push service: the switch subscribes with the hub's key and hands the subscription to the hub;
+    // turning it off removes it there and in the browser.
+    const pushCalls = [];
+    const onPush = (r) => { if (new URL(r.url()).pathname.startsWith('/api/push/')) pushCalls.push(`${r.method()} ${new URL(r.url()).pathname}`); };
+    page.on('request', onPush);
+    try {
+      await page.evaluate(() => { window.__pushMode = 'ok'; });
+      await page.getByRole('button', { name: 'Settings' }).click();
+      const label = dialog.locator('label.set-opt', { hasText: 'Notify me when a job ends' });
+      await label.click();
+      await page.waitForFunction(() => !document.querySelector('[role=dialog] input[role=switch]')?.checked);
+      await label.click();
+      await expectChecked(sw);
+      await page.waitForFunction(() => window.__push.subscribed === 1);
+      await waitFor(() => pushCalls.includes('POST /api/push/subscribe'), 'the subscription is sent to the hub');
+      const posted = pushLog.find((x) => x.method === 'POST')?.body;
+      assert.equal(posted?.endpoint, 'https://fcm.googleapis.com/fcm/send/acceptance-stand-in');
+      assert.ok(posted?.keys?.p256dh && posted?.keys?.auth, 'with its keys');
+      assert.equal(await dialog.getByText(/cannot send notifications while Filedeck is closed/).count(), 0, 'no fallback note when push works');
+      const key = await page.evaluate(async () => (await (await fetch('/api/push/key')).json()).publicKey);
+      assert.equal(atob(key.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (key.length % 4)) % 4)).length, 65, 'the hub has a P-256 public key');
+      await label.click();
+      await waitFor(() => pushCalls.includes('DELETE /api/push/subscribe'), 'turning off removes the subscription at the hub');
+      assert.deepEqual(pushLog.filter((x) => x.method === 'DELETE').map((x) => x.body), [{ endpoint: 'https://fcm.googleapis.com/fcm/send/acceptance-stand-in' }]);
+      assert.equal(await page.evaluate(() => window.__push.current), null, 'and in the browser');
+      await page.keyboard.press('Escape');
+    } finally {
+      page.off('request', onPush);
+    }
 
     // A new build: the changed worker waits, the page offers Reload and does not reload by itself; Reload switches.
     door.swSuffix = '\n// next build\n';
