@@ -549,7 +549,7 @@ test("root only: under the switch, a file mode 0600 owned by root is read in the
   await call(hub, "/api/auth/as-root", alice, { method: "DELETE" });
 });
 
-test("agent: archive and permission jobs started under the switch carry its end (by the agent's clock) and their owner", async () => {
+test("agent: archive (compress, extract) and permission jobs started under the switch carry its end (by the agent's clock) and their owner", async () => {
   const rootA = path.join(tmp, "root-A");
   fs.mkdirSync(path.join(rootA, "permsdir", "sub"), { recursive: true });
   const iat = Date.now();
@@ -569,11 +569,20 @@ test("agent: archive and permission jobs started under the switch carry its end 
   assert.equal(p.status, 202, await p.clone().text());
   const pv = (await p.json()) as { id: string; asRootUntil?: number };
   assert.equal(typeof pv.asRootUntil, "number");
+  // extracting: the zip made above, waited for, then extracted into a folder of its own
+  for (let i = 0; i < 200 && ((await (await A.app.request(`/api/jobs/${cv.id}`, { headers: hdr(true) })).json()) as { state: string }).state !== "done"; i++) await new Promise((r) => setTimeout(r, 10));
+  fs.mkdirSync(path.join(rootA, "erin-out"), { recursive: true });
+  const x = await A.app.request("/api/jobs/extract", { method: "POST", headers: hdr(true), body: JSON.stringify({ path: "/erin-hello.zip", destDir: "/erin-out" }) });
+  assert.equal(x.status, 202, await x.clone().text());
+  const xv = (await x.json()) as { id: string; asRootUntil?: number };
+  assert.equal(typeof xv.asRootUntil, "number");
+  assert.ok(xv.asRootUntil! >= before + 59_000 && xv.asRootUntil! <= Date.now() + 60_000, `${xv.asRootUntil! - before} ms ahead`);
   // erin without the switch sees them as hers (so the hub can find and cancel them when the switch is turned off)
   const mine = ((await (await A.app.request("/api/jobs", { headers: hdr(false) })).json()) as { jobs: { id: string; asRootUntil?: number }[] }).jobs;
-  for (const id of [cv.id, pv.id]) assert.ok(mine.some((j) => j.id === id && typeof j.asRootUntil === "number"), id);
-  for (const id of [cv.id, pv.id]) assert.equal((await A.app.request(`/api/jobs/${id}/cancel`, { method: "POST", headers: hdr(false) })).status, 200);
+  for (const id of [cv.id, pv.id, xv.id]) assert.ok(mine.some((j) => j.id === id && typeof j.asRootUntil === "number"), id);
+  for (const id of [cv.id, pv.id, xv.id]) assert.equal((await A.app.request(`/api/jobs/${id}/cancel`, { method: "POST", headers: hdr(false) })).status, 200);
   fs.rmSync(path.join(rootA, "erin-hello.zip"), { force: true });
+  fs.rmSync(path.join(rootA, "erin-out"), { recursive: true, force: true });
 });
 
 test("hub: switching off, or signing out, cancels the admin's live root jobs on every machine, as the plain admin", async () => {
