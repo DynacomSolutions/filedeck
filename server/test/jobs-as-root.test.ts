@@ -36,14 +36,34 @@ test("a root job is canceled at its end, running or queued; the end shows in its
   jobs.cancel(plain.id);
 });
 
-test("an end that has passed cancels the job at once; a job that finished first is left as it is", async () => {
+test("an end that has passed: the job is canceled and never runs; a job that finished first is left as it is", async () => {
   const jobs = new Jobs(2);
-  const late = jobs.create("compress", "late", hang, undefined, undefined, { owner: "sys:alice", until: Date.now() - 1 });
+  let ran = false;
+  let dropped = false;
+  const late = jobs.create("compress", "late", async () => void (ran = true), () => void (dropped = true), undefined, { owner: "sys:alice", until: Date.now() - 1 });
+  assert.equal(late.state, "canceled");
   await sleep(20);
   assert.equal(jobs.get(late.id)?.state, "canceled");
+  assert.equal(ran, false, "its run never started");
+  assert.equal(dropped, true, "its onDrop ran, as for any queued job that is canceled");
   const quick = jobs.create("compress", "quick", async () => "ok", undefined, undefined, { owner: "sys:alice", until: Date.now() + 50 });
   await sleep(100);
   assert.equal(jobs.get(quick.id)?.state, "done");
+});
+
+test("a job adopted after its end has passed is canceled and never runs", async () => {
+  const f = path.join(tmp, "jobs-late.db");
+  let ran = false;
+  const mk = (rebuild?: Record<string, (p: unknown) => Promise<{ run: (ctl: { signal: AbortSignal }) => Promise<unknown> }>>) =>
+    new Jobs(2, 100, undefined, undefined, { store: new JobStore(f), scope: "n", leaseMs: 50, tickMs: 3_600_000, rebuild });
+  const a = mk();
+  const v = a.create("compress", "root job", hang, undefined, undefined, { params: { dir: "/" }, owner: "sys:alice", until: Date.now() + 60 });
+  const b = mk({ compress: async () => ({ run: async () => void (ran = true) }) });
+  await sleep(100);
+  b.tick();
+  await sleep(50);
+  assert.equal(b.get(v.id)?.state, "canceled");
+  assert.equal(ran, false);
 });
 
 test("the end is kept in the stored params: a job adopted after a restart is canceled at the same time", async () => {

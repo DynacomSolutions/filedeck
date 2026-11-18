@@ -218,6 +218,16 @@ export class Jobs {
       abort: new AbortController(),
     };
     this.jobs.set(job.id, job);
+    // an end that has already passed (a job adopted after it): canceled as it is made, and never run
+    if (until !== undefined && until <= Date.now()) {
+      job.state = "canceled";
+      job.finishedAt = Date.now();
+      job.abort.abort();
+      this.save(job);
+      onDrop?.();
+      this.prune();
+      return this.view(job);
+    }
     if (!this.reaper && this.abandonable(kind, job.origin)) {
       this.reaper = setInterval(() => this.reap(), Math.max(50, Math.min(5000, this.abandonMs / 4)));
       this.reaper.unref();
@@ -252,9 +262,7 @@ export class Jobs {
       if (left > 0) return void setTimeout(fire, Math.min(left, MAX_TIMER_MS)).unref();
       if (this.jobs.get(job.id) === job && live(job.state)) this.cancel(job.id);
     };
-    const left = until - Date.now();
-    if (left <= 0) queueMicrotask(fire);
-    else setTimeout(fire, Math.min(left, MAX_TIMER_MS)).unref();
+    setTimeout(fire, Math.min(Math.max(0, until - Date.now()), MAX_TIMER_MS)).unref();
   }
 
   private view(j: Job): JobView {
