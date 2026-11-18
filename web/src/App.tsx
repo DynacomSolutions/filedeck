@@ -723,7 +723,7 @@ export function App({ account }: { account?: Account } = {}) {
             <Tip label="Jobs">
               <button type="button" className={"jobs-btn" + (jobsInfo.asking ? " attn" : "")} data-drawer-toggle aria-controls="jobs-panel" aria-expanded={jobsShown} onClick={toggleJobs}>
                 <Ic.Activity /> <span className="bl">Jobs</span>
-                {(jobsInfo.asking || jobsInfo.running > 0) && <><span className="jobs-badge">{jobsInfo.asking ? "!" : jobsInfo.running}</span><span className="visually-hidden">{jobsInfo.asking ? " needs an answer" : " running"}</span></>}
+                {(jobsInfo.asking || jobsInfo.running > 0) && <><span className="jobs-badge">{jobsInfo.asking ? "!" : jobsInfo.running}</span><span className="sr-only">{jobsInfo.asking ? " needs an answer" : " running"}</span></>}
               </button>
             </Tip>
           </div>
