@@ -179,7 +179,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const now = deps.now ?? Date.now;
 
   const signedOut = (c: Context) => c.json({ error: "signed out" }, 401, { "x-filedeck-auth": "signed-out" });
-  const unavailable = (c: Context) => c.json({ error: "tailnet identity unavailable" }, 503);
+  // (the header lets the page tell this 503 from any other: it keeps the session and asks again)
+  const unavailable = (c: Context) => c.json({ error: "tailnet identity unavailable" }, 503, { "x-filedeck-auth": "tailnet-unavailable" });
   const tailnetMode = deps.tailnet?.mode ?? null;
   const sourcePart = (): Pick<AuditTailnet, "source"> => (tailnetMode ? { source: tailnetMode } : {});
 

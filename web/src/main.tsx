@@ -10,24 +10,30 @@ import "./phone.css";
 import { AccessibilityChrome } from "./AccessibilityChrome";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { installViewportTracking } from "./viewport";
-import { installSignedOutWatch, me, retryDelayMs, TailnetUnavailableError, type Me } from "./auth";
+import { installSignedOutWatch, logout, me, TailnetUnavailableError, type Me } from "./auth";
+import { TailnetRetry, type RetryView } from "./tailnetRetry";
+import { TailnetBanner, TailnetWaiting } from "./TailnetWait";
 
 installViewportTracking();
 
 const SignIn = lazy(() => import("./SignIn").then((m) => ({ default: m.SignIn })));
-const TailnetWaiting = lazy(() => import("./SignIn").then((m) => ({ default: m.TailnetWaiting })));
 
-/** "waiting": `me` answered 503 (a Tailscale session while tailscaled does not answer); asked again with a growing wait. */
+/** "waiting": the first `me` answered the hub's tailnet 503 (a Tailscale session while tailscaled does not answer). */
 type View = "loading" | "sign-in" | "waiting" | Me;
 
 // Installed before the first request, so a session that ends while the app is open shows the sign-in screen.
-// Only the gate's signed-out header counts; an archive's password 401 still reaches its prompt.
+// Only the gate's signed-out header counts; an archive's password 401 still reaches its prompt. The gate's tailnet
+// 503 (its own header) starts the "trying again" banner while the app is open.
 let show: (v: View) => void = () => {};
+let tailnetDown: () => void = () => {};
 let signedOut = false;
-installSignedOutWatch(() => {
-  signedOut = true;
-  show("sign-in");
-});
+installSignedOutWatch(
+  () => {
+    signedOut = true;
+    show("sign-in");
+  },
+  () => tailnetDown(),
+);
 
 /**
  * After a sign-in: the first one reloads the page (the URL keeps the layout). When the session ended while the app
@@ -42,47 +48,75 @@ async function afterSignIn(shownAs: string | undefined, setView: (v: View) => vo
   } else location.reload();
 }
 
-/** The app when sign-in is off or done, else the sign-in screen. */
+/**
+ * The app when sign-in is off or done, else the sign-in screen. While a Tailscale session's tailscaled does not answer
+ * (the hub's tailnet 503, which keeps the session), `me` is asked again with a growing wait (tailnetRetry.ts): before the
+ * app was shown on a waiting screen, after it in a banner over the app, which stays mounted. Both offer Sign out.
+ */
 function Root() {
   const [view, setView] = useState<View>("loading");
+  /** the retry loop's state while it runs, else null */
+  const [retry, setRetry] = useState<RetryView | null>(null);
   /** the account the app was last shown for, as kind:name */
   const shownAs = useRef<string | undefined>(undefined);
-  /** asks `me` again at once (the waiting screen's "Try now") */
-  const askNow = useRef<() => void>(() => {});
+  const current = useRef<View>(view);
+  current.current = view;
+  const [loop] = useState(
+    () =>
+      new TailnetRetry({
+        onView: setRetry,
+        onResult: (m) => {
+          setRetry(null);
+          setView((v) => (v === "sign-in" ? v : m === "signed-out" ? "sign-in" : m));
+        },
+      }),
+  );
   useEffect(() => {
-    show = setView;
+    show = (v) => {
+      if (v === "sign-in") {
+        loop.stop();
+        setRetry(null);
+      }
+      setView(v);
+    };
+    // only while the app is open: the sign-in screen's own Tailscale calls report a 503 themselves
+    tailnetDown = () => {
+      const v = current.current;
+      if (typeof v === "object" && v.auth) loop.start();
+    };
     if (signedOut) return setView("sign-in");
     let gone = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let tries = 0;
-    const ask = () => {
-      clearTimeout(timer);
-      me()
-        .then((m) => !gone && setView((v) => (v === "sign-in" ? v : m === "signed-out" ? "sign-in" : m)))
-        .catch((e: unknown) => {
-          if (gone) return;
-          // a Tailscale session whose tailscaled does not answer: the hub keeps the session, so wait and ask again
-          if (e instanceof TailnetUnavailableError) {
-            setView((v) => (v === "sign-in" ? v : "waiting"));
-            timer = setTimeout(ask, retryDelayMs(tries++));
-            return;
-          }
-          // An older hub or a failed request: show the app as before; its own requests report what is wrong.
-          setView((v) => (v === "sign-in" ? v : { auth: false }));
-        });
-    };
-    askNow.current = ask;
-    ask();
+    me()
+      .then((m) => !gone && setView((v) => (v === "sign-in" ? v : m === "signed-out" ? "sign-in" : m)))
+      .catch((e: unknown) => {
+        if (gone) return;
+        if (e instanceof TailnetUnavailableError) {
+          setView((v) => (v === "sign-in" ? v : "waiting"));
+          loop.start();
+          return;
+        }
+        // An older hub or a failed request: show the app as before; its own requests report what is wrong.
+        setView((v) => (v === "sign-in" ? v : { auth: false }));
+      });
     return () => {
       gone = true;
-      clearTimeout(timer);
+      loop.stop();
     };
-  }, []);
+  }, [loop]);
   useEffect(() => {
     if (typeof view === "object" && view.auth) shownAs.current = `${view.kind}:${view.name}`;
   }, [view]);
+  /** The way to the password form while tailscaled stays down: ends the session on the hub, then the sign-in screen. */
+  const signOut = async () => {
+    loop.stop();
+    await logout().catch(() => {});
+    setRetry(null);
+    signedOut = true;
+    setView("sign-in");
+  };
+  const waitProps = { view: retry ?? { trying: false, failures: 0 }, onRetry: () => loop.tryNow(), onSignOut: () => void signOut() };
   if (view === "loading") return null;
-  if (view === "waiting") return <Suspense fallback={null}><TailnetWaiting onRetry={() => askNow.current()} /></Suspense>;
+  if (view === "waiting") return <TailnetWaiting {...waitProps} />;
   if (view === "sign-in") return <Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense>;
   return (
     <>
@@ -90,6 +124,7 @@ function Root() {
       <ErrorBoundary what="Filedeck" scope="root">
         <App account={view.auth ? view : undefined} />
       </ErrorBoundary>
+      {retry && <TailnetBanner {...waitProps} />}
     </>
   );
 }

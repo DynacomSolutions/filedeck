@@ -1055,8 +1055,16 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 .signin-note{margin:0;font-size:.78rem;color:var(--muted)}
 .signin-err{margin:0;color:var(--accent-text);font-size:.82rem;font-weight:500;overflow-wrap:anywhere}
 .signin-err:empty{display:none}
+.signin-tailnet-wrap{display:flex;flex-direction:column;gap:.8rem}
+.signin-tailnet-pending{visibility:hidden}
+.signin-tailnet-pending .signin-tailnet-btn{display:block;box-shadow:none;background:transparent}
 .signin-tailnet{display:flex;flex-direction:column;gap:.35rem}
 .signin-tailnet-btn{width:100%;min-height:38px;justify-content:center;gap:var(--btn-gap);font-size:.85rem;font-weight:700}
+.signin-tailnet-btn[aria-disabled=true],.tailnet-banner button[aria-disabled=true],.signin button[aria-disabled=true]{opacity:.7;cursor:progress}
+/* Tailscale not answering while the app is open: a status over the app, which stays as it was */
+.tailnet-banner{position:fixed;z-index:55;left:50%;bottom:16px;transform:translateX(-50%);box-sizing:border-box;width:max-content;max-width:calc(100vw - 32px);display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .8rem;padding:.6rem .8rem;background:var(--surface);border:1px solid var(--accent-line);border-radius:var(--radius);box-shadow:var(--shadow);font-size:.82rem}
+.tailnet-banner p{margin:0;font-weight:600;overflow-wrap:anywhere}
+.tailnet-banner-acts{display:flex;gap:.5rem}
 .signin-as{overflow-wrap:anywhere}
 .signin-or{display:flex;align-items:center;gap:.6rem;margin:0;font-size:.78rem;color:var(--muted)}
 .signin-or::before,.signin-or::after{content:"";flex:1;border-top:1px solid var(--border-strong)}

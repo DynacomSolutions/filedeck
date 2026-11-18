@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { LogIn, RefreshCw } from "lucide-react";
+import { LogIn } from "lucide-react";
 import { brand } from "./brand";
 import { login, loginKey, loginTailscale, tailnet, type Tailnet } from "./auth";
 import { ProofFields, useProofFields } from "./ProofFields";
@@ -10,12 +10,20 @@ import "./archive.css";
  * their secret handling are shared with the act-as-root dialog (ProofFields): a key file is read here and never sent,
  * only the public key line and a signature go to the hub, the secrets are dropped from state after each attempt
  * (after a wrong passphrase only the passphrase, so the file need not be chosen again), and nothing is stored.
+ *
+ * When the hub sees a tailnet identity for this request (`GET /api/auth/tailnet`, asked once), a "Sign in with Tailscale"
+ * button shows above the form. It is never pressed for the person: nothing signs in on load, and focus stays on the
+ * name field. While that request is pending its space is kept (empty), so a button that comes late does not move the
+ * form under a tap meant for it. It shares the fields' busy state and error line; while busy it is aria-disabled, not
+ * disabled, so focus stays on it after a refusal. The login, display name, tags and device name come from the
+ * tailnet, so they are shown as text in <bdi>.
  */
 export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [name, setName] = useState("");
   const f = useProofFields<"name">();
   const nameRef = useRef<HTMLInputElement>(null);
-  const [tn, setTn] = useState<Tailnet>(null);
+  /** undefined while GET /api/auth/tailnet is pending */
+  const [tn, setTn] = useState<Tailnet | undefined>(undefined);
   const asId = useId();
 
   useEffect(() => {
@@ -28,6 +36,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   }, []);
 
   const withTailscale = async () => {
+    if (f.busy) return;
     const ok = await f.runWithoutProof(() => loginTailscale().then(() => undefined));
     if (ok) onSignedIn();
   };
@@ -45,18 +54,27 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
     <main className="signin">
       <form className="modal signin-form" aria-labelledby={`${f.errId}-h`} onSubmit={(e) => void submit(e)} noValidate>
         <h1 id={`${f.errId}-h`}>Sign in to {brand.title}</h1>
-        {tn && "unavailable" in tn ? (
+        {tn === undefined ? (
+          // the button's space, kept while the request is pending
+          <div className="signin-tailnet-wrap signin-tailnet-pending" aria-hidden="true">
+            <div className="signin-tailnet">
+              <span className="signin-tailnet-btn" />
+              <p className="signin-note">&nbsp;</p>
+            </div>
+            <p className="signin-or">&nbsp;</p>
+          </div>
+        ) : tn && "unavailable" in tn ? (
           <p className="signin-note">Tailscale sign-in is not available now.</p>
         ) : tn ? (
-          <>
+          <div className="signin-tailnet-wrap">
             <div className="signin-tailnet">
-              <button type="button" className="signin-tailnet-btn" disabled={f.busy} aria-describedby={asId} onClick={() => void withTailscale()}>
-                <LogIn aria-hidden="true" /> Sign in with Tailscale
+              <button type="button" className="signin-tailnet-btn" aria-disabled={f.busy || undefined} aria-describedby={asId} onClick={() => void withTailscale()}>
+                <LogIn aria-hidden="true" /> {f.busy ? "Signing in..." : "Sign in with Tailscale"}
               </button>
               <p id={asId} className="signin-note signin-as"><TailnetAs t={tn} /></p>
             </div>
             <p className="signin-or">or</p>
-          </>
+          </div>
         ) : null}
         <label>
           Name
@@ -86,27 +104,5 @@ function TailnetAs({ t }: { t: Exclude<Tailnet, null | { unavailable: true }> })
     <>
       as this device{t.node !== undefined && <> (<bdi>{t.node}</bdi>)</>}: {(t.tags ?? []).map((g, i) => <span key={g}>{i > 0 && ", "}<bdi>{g}</bdi></span>)}
     </>
-  );
-}
-
-/**
- * Shown instead of the app while `GET /api/auth/me` answers 503: a Tailscale session whose tailscaled does not answer.
- * The hub keeps the session, so this is not the sign-in screen; the caller asks again with a growing wait, and
- * "Try now" asks at once.
- */
-export function TailnetWaiting({ onRetry }: { onRetry: () => void }) {
-  useEffect(() => {
-    document.title = brand.title;
-  }, []);
-  return (
-    <main className="signin">
-      <div className="modal signin-form" role="group" aria-labelledby="tailnet-wait-h">
-        <h1 id="tailnet-wait-h">{brand.title}</h1>
-        <p className="pad0" role="status">Tailscale is not answering, trying again.</p>
-        <div className="modal-actions">
-          <button type="button" onClick={onRetry}><RefreshCw aria-hidden="true" /> Try now</button>
-        </div>
-      </div>
-    </main>
   );
 }

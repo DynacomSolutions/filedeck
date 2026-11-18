@@ -53,6 +53,7 @@ test("button data: the identity of a listed peer's request, {} otherwise, 503 wh
   s.api!.state.down = true;
   const down = await s.req("/api/auth/tailnet");
   assert.equal(down.status, 503);
+  assert.equal(down.headers.get("x-filedeck-auth"), "tailnet-unavailable", "the page can tell this 503 from any other");
   assert.deepEqual(await down.json(), { error: "tailnet identity unavailable" });
   const none = await rig(null);
   const n = await none.req("/api/auth/tailnet", { headers: { "tailscale-user-login": "alice@github" } });
@@ -236,6 +237,7 @@ test("socket down at sign-in: 503, not counted as a failure", async () => {
   for (let i = 0; i < 7; i++) {
     const res = await r.req("/api/auth/login-tailscale", { method: "POST" });
     assert.equal(res.status, 503);
+    assert.equal(res.headers.get("x-filedeck-auth"), "tailnet-unavailable");
     assert.deepEqual(await res.json(), { error: "tailnet identity unavailable" });
   }
   assert.equal(r.h.auth!.limiter.check("", ADDR, "tailnet").ok, true);
@@ -279,10 +281,12 @@ test("binding: the same login is admitted; another login ends the session; no id
     for (let i = 0; i < 3; i++) {
       const down = await r.req("/api/nodes", { cookie: c });
       assert.equal(down.status, 503);
+      assert.equal(down.headers.get("x-filedeck-auth"), "tailnet-unavailable", "the gate's 503 is marked, so the page shows its banner");
       assert.deepEqual(await down.json(), { error: "tailnet identity unavailable" });
     }
     const me = await r.req("/api/auth/me", { cookie: c });
     assert.equal(me.status, 503, "me says unavailable too, so the page does not sign the person out");
+    assert.equal(me.headers.get("x-filedeck-auth"), "tailnet-unavailable");
     assert.equal(r.h.auth!.sessions.list().length, 1);
     r.api!.state.down = false;
     assert.equal((await r.req("/api/nodes", { cookie: c })).status, 200);
