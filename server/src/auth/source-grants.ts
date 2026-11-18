@@ -9,6 +9,9 @@ import { inTransaction } from "./tx.ts";
 
 export type SourceAccess = { write: boolean };
 
+/** The answer to a change asked of a network source by an account with a read-only grant. */
+export const SOURCE_READ_ONLY = "this network source is read-only for you";
+
 type Kind = "sys" | "virt";
 
 export class SourceGrants {

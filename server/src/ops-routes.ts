@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { OpQueue, OpError, type OpQueueDeps, type Choice, type ConflictPolicy, type Loc, type OpSpec, type SyncStep } from "./ops-queue.ts";
 import type { Target } from "./hub.ts";
 import { currentUser } from "./auth/context.ts";
+import { SOURCE_READ_ONLY } from "./auth/source-grants.ts";
 
 const MAX_ITEMS = 10_000;
 const POLICIES = new Set(["ask", "skip", "overwrite", "rename"]);
@@ -17,9 +18,11 @@ const POLICIES = new Set(["ask", "skip", "overwrite", "rename"]);
  *
  * With auth on, a job belongs to the account that started it: it runs as that account, and only that account and admins see
  * or steer it (a job someone else may not see answers 404, as if it did not exist). `mayUse` says whether the caller may use
- * a node; a job naming one it may not is refused with 403 before it starts.
+ * a node; a job naming one it may not is refused with 403 before it starts. `mayChange` says whether the caller may change things
+ * there (false for a network source it has read-only): a job that would remove from such a source (a move's items, trash, delete, a
+ * sync's trash step) is refused with 403 before it starts, so a move out of it copies nothing.
  */
-export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (node: string) => boolean, shared?: OpQueueDeps["shared"], mayUse: (node: string) => boolean = () => true): OpQueue {
+export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (node: string) => boolean, shared?: OpQueueDeps["shared"], mayUse: (node: string) => boolean = () => true, mayChange: (node: string) => boolean = () => true): OpQueue {
   const queue = new OpQueue({ agents, isSource, shared });
 
   const abs = (p: unknown, what: string): string => {
@@ -47,6 +50,12 @@ export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (n
     return v.map(f);
   };
 
+  /** A location the job removes from or renames on: refused when the caller has that network source read-only. */
+  const changes = <T extends { node: string }>(l: T): T => {
+    if (!mayChange(l.node)) throw new OpError(403, SOURCE_READ_ONLY);
+    return l;
+  };
+
   function parse(b: unknown): OpSpec {
     const o = b as Record<string, unknown> | null;
     if (!o || typeof o !== "object") throw new OpError(400, "invalid JSON body");
@@ -55,15 +64,22 @@ export function registerOps(app: Hono, agents: Map<string, Target>, isSource: (n
       case "move": {
         const conflict = (o.conflict ?? "ask") as string;
         if (!POLICIES.has(conflict)) throw new OpError(400, "conflict must be ask, skip, overwrite or rename");
-        return { op: o.op, items: list(o.items, "items", (x) => loc(x, "item")), dst: dest(o.dst), conflict: conflict as ConflictPolicy, preserveTimes: o.preserveTimes === true };
+        const items = list(o.items, "items", (x) => loc(x, "item"));
+        // a move removes its items at the end
+        if (o.op === "move") items.forEach(changes);
+        return { op: o.op, items, dst: dest(o.dst), conflict: conflict as ConflictPolicy, preserveTimes: o.preserveTimes === true };
       }
       case "trash":
       case "delete":
-        return { op: o.op, items: list(o.items, "items", (x) => loc(x, "item")) };
+        return { op: o.op, items: list(o.items, "items", (x) => changes(loc(x, "item"))) };
       case "sync": {
         const steps = list(o.steps, "steps", (x): SyncStep => {
           const s = x as Record<string, unknown> | null;
-          if (s?.kind === "mkdir" || s?.kind === "trash") return { kind: s.kind, ...(({ node: n, path: p }) => ({ node: node(n), path: abs(p, "path") }))(s as { node: unknown; path: unknown }) };
+          if (s?.kind === "mkdir" || s?.kind === "trash") {
+            const step: SyncStep & { node: string } = { kind: s.kind, node: node(s.node), path: abs(s.path, "path") };
+            // a trash step removes from its node
+            return step.kind === "trash" ? changes(step) : step;
+          }
           if (s?.kind === "copy") {
             const bytes = typeof s.bytes === "number" && s.bytes >= 0 ? s.bytes : undefined;
             return { kind: "copy", src: loc(s.src, "src"), dst: dest(s.dst), ...(bytes !== undefined ? { bytes } : {}) };

@@ -35,7 +35,7 @@ import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
 import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
 import { SysPresence } from "./auth/presence.ts";
-import { SourceGrants, type SourceAccess } from "./auth/source-grants.ts";
+import { SOURCE_READ_ONLY, SourceGrants, type SourceAccess } from "./auth/source-grants.ts";
 import { isAdmin, registerAdmin, registerAdminOff } from "./auth/admin-routes.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
@@ -72,9 +72,6 @@ function clean(h: Headers, keepLength: boolean): Headers {
   });
   return out;
 }
-
-/** The answer of a network source to a change asked for with a read-only grant. */
-const SOURCE_READ_ONLY = "this network source is read-only for you";
 
 /** The most the hub waits for the agents when act as root is turned off early and it cancels the account's root jobs there. */
 const END_ROOT_JOBS_MS = 3_000;
@@ -292,10 +289,14 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   /**
    * What an account may do on a network source (sign-in on): read-write for an administrator now (FILEDECK_ADMINS or the stored flag,
    * read at each call, never the identity's own `admin`), else its source grant; undefined without a grant or without an identity.
+   * An identity whose epoch is not the account's epoch in the store now has no access at all, administrator or not: a job that
+   * outlived a change of its account (a deleted name reads its retired epoch, a name made again starts above it) never uses the
+   * grants of what the account is now.
    */
   const sourceGrants = auth ? new SourceGrants(auth.db) : undefined;
   const sourceAccessOf = (id: Identity | undefined, source: string): SourceAccess | undefined => {
     if (!auth || !sourceGrants || !id) return undefined;
+    if (auth.accounts.epochOf(id.kind, id.name) !== id.epoch) return undefined;
     if (isAdmin(cfg, auth.accounts, id)) return { write: true };
     return sourceGrants.get(source, id.kind, id.name);
   };
@@ -338,6 +339,12 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
    * `sourceAccessOf`). With auth off everything is open, as before.
    */
   const mayUse = (name: string) => !cfg.auth || (sources.has(name) ? sourceAccessOf(currentUser(), name) !== undefined : canUseNode(currentUser(), name, present));
+  /**
+   * Whether the person behind the current request may change things on a node or source: false only for a network source the caller
+   * has read-only. Checked up front where a request would remove from or rename on it (a move, trash, delete), so a move out of it is
+   * refused before anything is copied. Access as such is `mayUse`'s question.
+   */
+  const mayChange = (name: string) => !cfg.auth || !sources.has(name) || sourceAccessOf(currentUser(), name)?.write !== false;
   const noAccess = (c: import("hono").Context) => c.json({ error: "no access to this machine" }, 403);
 
   // Reachability of a source is cached briefly so the sidebar poll does not open a connection per request.
@@ -403,7 +410,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // Folder diff jobs run here: the hub reads both agents' listings and asks each agent to hash its own files.
   const diffs = registerHubDiff(app, agents, cfg.mode === "hub" ? cfg.diffDir : "", { mayUse });
   // Bulk copy/move/trash/delete/sync run as hub jobs (survive the browser closing, pausable, conflict policy).
-  opq = registerOps(app, agents, (n) => sources.has(n), cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), leaseMs: 30_000 } : undefined, mayUse);
+  opq = registerOps(app, agents, (n) => sources.has(n), cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), leaseMs: 30_000 } : undefined, mayUse, mayChange);
   const ops = opq;
   /**
    * An account changed (password, keys, admin flag, machines, grants, sources, deletion, "end all sessions"): its epoch rises, which ends
@@ -550,6 +557,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     } | null;
     // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
     for (const end of [b?.src, b?.dst]) if (typeof end?.node === "string" && !mayUse(end.node)) return noAccess(c);
+    // a move removes the source at the end: out of a read-only source it is refused before anything is copied
+    if (b?.op === "move" && typeof b.src?.node === "string" && !mayChange(b.src.node)) return c.json({ error: SOURCE_READ_ONLY }, 403);
     const src = b?.src && agents.get(b.src.node);
     const dst = b?.dst && agents.get(b.dst.node);
     if (!b?.src || !b.dst || !src || !dst) return c.json({ error: "unknown node" }, 404);

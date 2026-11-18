@@ -145,6 +145,8 @@ function world(): World {
       FILEDECK_AUTH_FILE: path.join(tmp, `auth-${n}.db`),
       FILEDECK_DIFF_DIR: path.join(tmp, `diff-${n}`),
       FILEDECK_VAULT_FILE: path.join(tmp, `vault-${n}.db`),
+      // its own job store (the default sits next to the vault file and would be shared by every hub in this file)
+      FILEDECK_JOBS_FILE: path.join(tmp, `jobs-${n}.db`),
     } as never),
     { s1, s2 },
     () => {},
@@ -400,4 +402,104 @@ test("system user grants: PUT /api/admin/system/:name/sources gives a system use
   assert.equal(off.status, 200);
   const alice2 = await signIn(h, "alice");
   assert.deepEqual(await sourcesSeen(h, alice2), []);
+});
+
+test("a move, trash or delete out of a read-only source is refused up front: nothing is copied and nothing is removed", async () => {
+  const { h, s1, s2, grants } = world();
+  grants.setForAccount("virt", "guest", { s1: { write: false }, s2: { write: true } });
+  const guest = await signIn(h, "guest");
+  const before1 = s1.paths();
+  const before2 = s2.paths();
+  for (const body of [
+    { op: "move", items: [{ node: "s1", path: "/in-s1.txt" }], dst: { node: "s2", dir: "/" }, conflict: "skip" },
+    { op: "move", items: [{ node: "s1", path: "/in-s1.txt" }], dst: { node: "s1", dir: "/" }, conflict: "rename" },
+    { op: "trash", items: [{ node: "s1", path: "/in-s1.txt" }] },
+    { op: "delete", items: [{ node: "s1", path: "/in-s1.txt" }] },
+    { op: "sync", steps: [{ kind: "trash", node: "s1", path: "/in-s1.txt" }] },
+  ]) {
+    const r = await send(h, "POST", "/api/ops/jobs", guest, body);
+    assert.equal(r.status, 403, `${JSON.stringify(body)}: ${r.text}`);
+    assert.deepEqual(r.json, { error: READ_ONLY });
+  }
+  const tr = await send(h, "POST", "/api/transfer", guest, { src: { node: "s1", path: "/in-s1.txt" }, dst: { node: "s2", dir: "/" }, op: "move" });
+  assert.equal(tr.status, 403, tr.text);
+  assert.deepEqual(tr.json, { error: READ_ONLY });
+  assert.deepEqual(s1.paths(), before1);
+  assert.deepEqual(s2.paths(), before2);
+  assert.deepEqual((await send(h, "GET", "/api/ops/jobs", guest)).json.jobs, []);
+  // a copy out of it still works, and a move out of the read-write source too
+  assert.equal((await send(h, "POST", "/api/transfer", guest, { src: { node: "s1", path: "/in-s1.txt" }, dst: { node: "s2", dir: "/" } })).status, 201);
+  assert.equal((await send(h, "POST", "/api/transfer", guest, { src: { node: "s2", path: "/f.txt" }, dst: { node: "s2", dir: "/d" }, op: "move" })).status, 201);
+  assert.ok(s2.entries.has("/d/f.txt") && !s2.entries.has("/f.txt"));
+  // an administrator may move out of it
+  const admin = await signIn(h, "sadmin");
+  assert.equal((await send(h, "POST", "/api/transfer", admin, { src: { node: "s1", path: "/in-s1.txt" }, dst: { node: "s2", dir: "/d" }, op: "move" })).status, 201);
+  assert.ok(!s1.entries.has("/in-s1.txt"));
+});
+
+/** Starts a copy of s1's `/big` into s2 as `cookie` and waits until it is writing. */
+async function longCopy(h: Hub, cookie: string, s2: MemSource): Promise<string> {
+  const job = await send(h, "POST", "/api/ops/jobs", cookie, { op: "copy", items: [{ node: "s1", path: "/big" }], dst: { node: "s2", dir: "/" }, conflict: "skip" });
+  assert.equal(job.status, 202, job.text);
+  const at = s2.writes;
+  await until("the copy to start writing", () => s2.writes >= at + 2);
+  return job.json.id as string;
+}
+
+test("an old epoch has no access: a job of a deleted name, made again with the same grants, stops at its next call", async () => {
+  const { h, s1, s2, grants } = world();
+  bigFolder(s1, 30);
+  s2.writeMs = 50;
+  grants.setForAccount("virt", "guest", { s1: { write: false }, s2: { write: true } });
+  const guest = await signIn(h, "guest");
+  const id = await longCopy(h, guest, s2);
+  // deleted and made again straight in the store (no `changed`: as if the cancel had not reached the hub that holds the job)
+  const accounts = h.auth!.accounts;
+  accounts.tx(() => {
+    grants.removeAccount("virt", "guest");
+    accounts.bumpEpoch("virt", "guest");
+    accounts.remove("guest");
+  });
+  accounts.create({ name: "guest", passwordHash: hashPassword(PW), admin: false, nodes: {} });
+  grants.setForAccount("virt", "guest", { s1: { write: false }, s2: { write: true } });
+  const written = s2.writes;
+  const admin = await signIn(h, "sadmin");
+  const end = await jobEnd(h, admin, id);
+  assert.equal(end.state, "failed");
+  assert.match(end.error ?? "", new RegExp(NO_ACCESS));
+  assert.ok(s2.writes <= written + 1, `the copy went on: ${s2.writes} files, ${written} at the delete`);
+  // the new account, at its own epoch, has its grants
+  const fresh = await signIn(h, "guest");
+  assert.equal((await send(h, "GET", "/api/nodes/s2/api/fs/list?path=/", fresh)).status, 200);
+});
+
+test("a matching epoch is unaffected: system users, also administrators, run jobs to the end; a raised epoch stops an administrator's job too", async () => {
+  const { h, s1, s2, grants } = world();
+  bigFolder(s1, 6);
+  grants.setForAccount("sys", "alice", { s1: { write: false }, s2: { write: true } });
+  const alice = await signIn(h, "alice");
+  const admin = await signIn(h, "sadmin");
+  for (const [cookie, dir] of [
+    [alice, "/by-alice"],
+    [admin, "/by-sadmin"],
+  ] as const) {
+    assert.equal((await mkdir(h, cookie, "s2", dir)).status, 201);
+    const job = await send(h, "POST", "/api/ops/jobs", cookie, { op: "copy", items: [{ node: "s1", path: "/big" }], dst: { node: "s2", dir }, conflict: "skip" });
+    assert.equal(job.status, 202, job.text);
+    assert.equal((await jobEnd(h, cookie, job.json.id)).state, "done");
+    assert.ok(s2.entries.has(`${dir}/big/f05.txt`));
+  }
+  // the system administrator's epoch rises in the store (no `changed`): its running job stops at the next call
+  bigFolder(s1, 30);
+  s2.writeMs = 50;
+  const id = await longCopy(h, admin, s2);
+  h.auth!.accounts.bumpEpoch("sys", "sadmin");
+  const written = s2.writes;
+  const again = await signIn(h, "sadmin");
+  const end = await jobEnd(h, again, id);
+  assert.equal(end.state, "failed");
+  assert.match(end.error ?? "", new RegExp(NO_ACCESS));
+  assert.ok(s2.writes <= written + 1, `the copy went on: ${s2.writes} files, ${written} at the rise`);
+  // signed in again, at the new epoch, the administrator uses every source
+  assert.equal((await mkdir(h, again, "s1", "/after-rise")).status, 201);
 });
