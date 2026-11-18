@@ -122,10 +122,13 @@ test("the editor pane has no second close button that would drop unsaved edits",
   assert.match(fp, /\{!gitDiff && !editing && \(\s*<Tip label=\{propsOpen && !editing/);
 });
 
-test("phone selection bar scrolls instead of clipping, and Clear is pinned", () => {
+test("phone selection bar clips nothing: it measures what fits and puts the rest in More", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-  assert.match(css, /\.selbar\{overflow-x:auto;/);
-  assert.match(css, /\.selbar-actions \.tip:last-child\{position:sticky;right:0/);
+  assert.match(css, /\.selbar\{overflow:hidden;gap:0 \.3rem\}/);
+  assert.match(css, /\.selbar-actions button,\.selbar-actions button\.selbar-clear\{padding:0;width:44px;min-width:44px/);
+  const bar = readFileSync(new URL("../src/Selection.tsx", import.meta.url), "utf8");
+  assert.match(bar, /phoneActionsFit\(/);
+  assert.match(bar, /\.\.\.hidden\.map\(/);
   const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(app, /className="hide-phone" onClick/);
   assert.match(app, /phone-only side-set" aria-label="Keyboard shortcuts"/);
