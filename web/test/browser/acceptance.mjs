@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 import http from 'node:http';
+import https from 'node:https';
 
 const require = createRequire(import.meta.url);
 const axePath = require.resolve('axe-core/axe.min.js');
@@ -2463,7 +2464,7 @@ async function hubDoor() {
     const nextSw = door.swSuffix && req.url.startsWith('/sw.js');
     const headers = { ...req.headers, host: target.host };
     if (nextSw) delete headers['accept-encoding'];
-    const up = http.request({ host: target.hostname, port: target.port, path: req.url, method: req.method, headers }, (r) => {
+    const up = (target.protocol === 'https:' ? https : http).request({ host: target.hostname, port: target.port || undefined, path: req.url, method: req.method, headers }, (r) => {
       if (!nextSw) {
         res.writeHead(r.statusCode ?? 502, r.headers);
         return r.pipe(res);
