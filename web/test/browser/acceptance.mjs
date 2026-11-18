@@ -122,13 +122,15 @@ async function installFixture(page, opts = {}) {
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
     if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
-    // opts.adminApi ({ posts, conflict }): the hub's admin routes. One virtual account exists; a POST of a new account is kept in
-    // `posts` and answers 409 "exists" while `conflict` is set, else 201 with the new account.
+    // opts.adminApi ({ posts, conflict }): the hub's admin routes. Two virtual accounts exist: fixture-guest, with a machine and a
+    // source that are no longer configured, and the signed-in fixture-admin. A POST of a new account is kept in `posts` and answers
+    // 409 "exists" while `conflict` is set, else 201 with the new account.
     if (opts.adminApi && pathname.startsWith('/api/admin/')) {
       const a = opts.adminApi;
-      const guest = { name: 'fixture-guest', admin: false, hasPassword: true, keys: [{ fingerprint: 'SHA256:fixture', type: 'ssh-ed25519', comment: 'fixture laptop' }], nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: true }] } }, sources: {}, sessions: 1 };
+      const guest = { name: 'fixture-guest', admin: false, hasPassword: true, keys: [{ fingerprint: 'SHA256:fixture', type: 'ssh-ed25519', comment: 'fixture laptop' }], nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: true }, { path: '/', write: false }] }, 'fixture-retired': { runAs: 'fixture-run', grants: [{ path: '/old', write: false }] } }, sources: { 'fixture-s3': { write: false }, 'fixture-gone': { write: true } }, sessions: 1 };
+      const self = { name: 'fixture-admin', admin: true, hasPassword: true, keys: [], nodes: {}, sources: {}, sessions: 1 };
       if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: 0 });
-      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [guest, ...(a.created ? [a.created] : [])], system: [] });
+      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : [])], system: [] });
       if (pathname === '/api/admin/accounts' && req.method() === 'POST') {
         const b = req.postDataJSON();
         a.posts.push(b);
@@ -1713,9 +1715,14 @@ async function verifyVirtualAccount(browser) {
 
 // Accounts (administrators): "Accounts…" in the account menu opens the view; "New account" with a name, a password, a run-as user
 // and a folder picked in the folder picker sends one POST /api/admin/accounts with exactly that body; the hub's 409 shows its text
-// in the alert next to the button, and a second try creates the account. axe passes on the list, the editor and the picker in light
-// and dark, none of them overflows sideways at 1365x900, 390x844 and 320x568, and the password never reaches a URL or storage.
-// A system administrator gets the menu item too; an account that is not an administrator does not.
+// in the alert next to the button, and a second try creates the account and opens its editor. axe passes on the list, the editor
+// and the picker in light and dark, none of them overflows sideways at 1365x900, 390x844 and 320x568, and the password never
+// reaches a URL or storage. At 1365x900 also: the overlay (and Settings) fits the window without scrolling the page; axe passes on
+// an existing account's editor (with a machine and a source no longer configured), "Discard changes?", the delete confirm, one's
+// own account's editor and its confirm; Settings closes Accounts. A system administrator gets the menu item too; an account that
+// is not an administrator does not.
+// A dialog fades in: axe measures colours as they are on screen, so it waits for running animations and transitions to end.
+const settled = (page) => page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity), null, { timeout: 8000 });
 async function verifyAccounts(browser) {
   const failures = [];
   const password = 'fixture account password';
@@ -1761,6 +1768,7 @@ async function verifyAccounts(browser) {
         await page.waitForFunction(() => document.querySelector('.acc-pick-path input')?.value === '/work', null, { timeout: 8000 });
         await picker.getByRole('region', { name: 'Folders' }).and(page.locator('[aria-busy=false]')).waitFor({ timeout: 8000 });
         await overflow('picker');
+        await settled(page);
         await runAxe(page, `folder picker ${label}`, failures);
         await picker.getByRole('button', { name: 'Add folder', exact: true }).click();
         await picker.waitFor({ state: 'detached', timeout: 8000 });
@@ -1779,18 +1787,76 @@ async function verifyAccounts(browser) {
         assert.deepEqual(adminApi.posts, [expected], `one POST with the form's body (${label})`);
         await runAxe(page, `account editor, refused ${label}`, failures);
 
+        // created: the new account's editor opens (for its keys), focus on its heading; Escape with no changes goes back to the list
         adminApi.conflict = false;
         await view.getByRole('button', { name: 'Create account' }).click();
-        await view.getByRole('cell', { name: 'fixture-new', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        await view.getByRole('heading', { name: 'Edit fixture-new' }).waitFor({ state: 'visible', timeout: 8000 });
         assert.equal(adminApi.posts.length, 2, `the second try sends the second POST (${label})`);
         await view.getByRole('status').filter({ hasText: 'Account fixture-new created.' }).waitFor({ state: 'visible' });
+        await page.waitForFunction(() => document.activeElement?.textContent === 'Edit fixture-new', null, { timeout: 8000 });
+        await page.keyboard.press('Escape');
+        await view.getByRole('cell', { name: 'fixture-new', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent === 'Virtual accounts', null, { timeout: 8000 });
 
         if (fixture.requests.some((r) => r.includes(encodeURIComponent(password)) || r.includes(password))) failures.push({ view: label, rule: 'password in a URL' });
         const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
         if (stored.includes(password)) failures.push({ view: label, rule: 'password kept in storage' });
 
-        await page.keyboard.press('Escape');
-        await view.waitFor({ state: 'detached', timeout: 8000 });
+        if (viewport.width === 1365) {
+          // the overlay fits the window and opening it scrolled nothing (Accounts here, Settings below)
+          const fits = (sel) => page.evaluate((s) => ({ top: document.scrollingElement.scrollTop, bottom: document.querySelector(s)?.getBoundingClientRect().bottom ?? 0, height: innerHeight }), sel);
+          const fit = await fits('.acc-view');
+          if (fit.top !== 0 || fit.bottom > fit.height + 1) failures.push({ view: `Accounts ${label}`, rule: 'overlay scrolls the page or ends below the window', ...fit });
+
+          // an existing account with a machine and a source that are no longer configured; unsaved changes ask before they go
+          await view.getByRole('button', { name: 'Edit fixture-guest' }).click();
+          await view.getByRole('heading', { name: 'Edit fixture-guest' }).waitFor({ state: 'visible', timeout: 8000 });
+          await view.locator('.acc-machine').filter({ hasText: 'fixture-retired' }).getByText('(not configured now)').waitFor({ state: 'visible' });
+          await view.locator('.acc-sources li').filter({ hasText: 'fixture-gone' }).getByText('(not configured now)').waitFor({ state: 'visible' });
+          await runAxe(page, `existing account editor ${label}`, failures);
+          await view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' }).fill('fixture-other');
+          await page.keyboard.press('Escape');
+          const discard = page.getByRole('dialog', { name: 'Discard changes?' });
+          await discard.waitFor({ state: 'visible', timeout: 8000 });
+          await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+          await settled(page);
+          await runAxe(page, `discard changes ${label}`, failures);
+          await discard.getByRole('button', { name: 'Keep editing' }).click();
+          await discard.waitFor({ state: 'detached', timeout: 8000 });
+          await view.getByRole('button', { name: 'Cancel', exact: true }).click();
+          await discard.getByRole('button', { name: 'Discard' }).click();
+          await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+
+          await view.getByRole('button', { name: 'Delete fixture-guest' }).click();
+          const del = page.getByRole('dialog', { name: 'Delete account' });
+          await del.waitFor({ state: 'visible', timeout: 8000 });
+          await settled(page);
+          await runAxe(page, `delete confirm ${label}`, failures);
+          await del.getByRole('button', { name: 'Cancel' }).click();
+          await del.waitFor({ state: 'detached', timeout: 8000 });
+
+          // one's own account: the banner, and Save asks first
+          await view.getByRole('button', { name: 'Edit fixture-admin' }).click();
+          await view.getByText('This is your own account.').waitFor({ state: 'visible', timeout: 8000 });
+          await runAxe(page, `own account editor ${label}`, failures);
+          await view.getByRole('button', { name: 'Save', exact: true }).click();
+          const own = page.getByRole('dialog', { name: 'Change your own account' });
+          await own.waitFor({ state: 'visible', timeout: 8000 });
+          await settled(page);
+          await runAxe(page, `own account confirm ${label}`, failures);
+          await own.getByRole('button', { name: 'Cancel' }).click();
+          await own.waitFor({ state: 'detached', timeout: 8000 });
+
+          // one view at a time: Settings closes Accounts, and it too fits the window without scrolling the page
+          await page.getByRole('button', { name: 'Settings', exact: true }).click();
+          await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible', timeout: 8000 });
+          await view.waitFor({ state: 'detached', timeout: 8000 });
+          const sfit = await fits('.settings.over');
+          if (sfit.top !== 0 || sfit.bottom > sfit.height + 1) failures.push({ view: `Settings ${label}`, rule: 'overlay scrolls the page or ends below the window', ...sfit });
+        } else {
+          await page.keyboard.press('Escape');
+          await view.waitFor({ state: 'detached', timeout: 8000 });
+        }
       } finally {
         await context.close();
       }

@@ -168,8 +168,8 @@ export function AccountEditor({
       </h2>
       {self && <p className="acc-warn" id={ids.self}><Ic.TriangleAlert aria-hidden="true" /> This is your own account. {SELF_WARNING}</p>}
 
-      {/* disabled as a whole while a change is with the hub, Dropdowns and buttons included */}
-      <fieldset className="acc-fs" disabled={busy !== ""} aria-busy={busy !== "" || undefined}>
+      {/* disabled as a whole while a change is with the hub, Dropdowns and buttons included; inert under its own dialogs */}
+      <fieldset className="acc-fs" disabled={busy !== ""} aria-busy={busy !== "" || undefined} inert={picking !== null || asking !== null || discarding || undefined}>
         <section className="set-sec" aria-labelledby={ids.name + "-s"}>
           <h3 id={ids.name + "-s"}>Sign-in</h3>
           {!existing && (
