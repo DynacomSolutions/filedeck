@@ -425,7 +425,7 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
   return (
     <>
     {announcer}
-    <aside ref={rootRef} id="jobs-panel" className={"jobs-panel" + (shown ? " open" : "")} {...(modal ? { role: "dialog", "aria-label": "Jobs" } : { "aria-label": "Jobs" })}>
+    <aside ref={rootRef} id="jobs-panel" className={"jobs-panel" + (shown ? " open" : "")} {...(modal ? { role: "dialog", "aria-label": "Jobs", tabIndex: -1 } : { "aria-label": "Jobs" })}>
     <section className="jobs" aria-labelledby="jobs-title">
       <h2 id="jobs-title" className="jobs-title">
         Jobs

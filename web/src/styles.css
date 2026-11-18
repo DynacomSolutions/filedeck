@@ -1077,3 +1077,6 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .site-header .asroot-banner{order:1;flex:1 1 100%;flex-wrap:wrap;justify-content:space-between;min-width:0}
   .asroot-err{flex:1 1 100%;max-width:none}
 }
+
+/* Containers that take focus by script (Settings, Trash, Accounts, the diff view, the phone drawers) show no ring of their own; the controls inside keep theirs. */
+.ed[tabindex="-1"]:focus,.ed[tabindex="-1"]:focus-visible,.side[tabindex="-1"]:focus,.side[tabindex="-1"]:focus-visible,.jobs-panel[tabindex="-1"]:focus,.jobs-panel[tabindex="-1"]:focus-visible{outline:none}

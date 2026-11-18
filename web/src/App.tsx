@@ -222,8 +222,8 @@ function DrawerGuard({ root, onClose }: { root: React.RefObject<HTMLElement | nu
     const frame = requestAnimationFrame(() => {
       const el = root.current;
       if (!el || el.contains(document.activeElement)) return;
-      const first = Array.from(el.querySelectorAll<HTMLElement>("button:not([disabled]),input:not([disabled]),a[href],[tabindex]:not([tabindex='-1'])")).find((x) => x.getClientRects().length > 0 && getComputedStyle(x).visibility !== "hidden");
-      (first ?? el).focus({ preventScroll: true });
+      // The container itself, not its first control: no ring lands on a row; Tab then enters the drawer.
+      el.focus({ preventScroll: true });
     });
     const key = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && onClose();
     const outside = (e: PointerEvent) => {
@@ -257,7 +257,7 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
   return (
     <>
     {drawer && <DrawerGuard root={root} onClose={onCloseDrawer} />}
-    <aside ref={root} id="side-drawer" className={"side" + (drawer ? " open" : "")} {...(drawer ? { role: "dialog", "aria-label": "Navigation" } : {})}>
+    <aside ref={root} id="side-drawer" className={"side" + (drawer ? " open" : "")} {...(drawer ? { role: "dialog", "aria-label": "Navigation", tabIndex: -1 } : {})}>
       <div className="side-brand">
         <span className="brand-name">
           <BrandMark />
