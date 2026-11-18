@@ -277,3 +277,14 @@ ETA: 2026-11-19 12:00 ICT
 |---|---|---|---|---|---|---|---|
 | 163 | PWA: manifest, icons (maskable, monochrome), service worker (shell only, never `/api/`), hub-unreachable screen, update prompt, job notifications from a Settings switch, Install app | done | claude-20261118-pwa | filedeck-pwa | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/235 as 1d3cd1d. Released as v0.4.1 (PR https://github.com/DynacomSolutions/filedeck/pull/236, a904b17) and deployed 18 Nov: hub and all agents on 0.4.1, manifest, sw.js and icons served<br>CI: all 7 checks passed on b02a86a (also fixed the slow test-tools install that failed main CI).<br>Local run: web 328 tests, server 1439 pass 0 fail (private TMPDIR), typecheck, check:neutral, browser 40/40 in Chromium and in Firefox (new installable-app check: Chromium installability errors none, no `/api` in caches, offline start, update prompt, notification)<br>Review: no path for API data into the cache; 3 low findings fixed (update check when the hub answers again, manifest not cached, no notification while another tab is on screen)<br>Local notifications only. Share target and file handling not built (need a destination picker). Lighthouse 12 has no PWA category; the Chromium installability check replaces it |
 | 164 | Web Push while the app is closed, with VAPID keys and per-session subscriptions | blocked_on_owner | | | 21.163 | | Proposed in the design doc: VAPID keys from config, subscriptions per account and per session at the hub, ended with the session or account change<br>Needs the owner's confirmation before it is built |
+
+## 22. Jobs panel and phone header layout
+- Jobs move out of the sidebar into their own panel; the phone header gets the logo and two drawer toggles.
+ETA: 2026-11-18 20:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 165 | Settings and other overlays hide the active panel outline | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 20:00 ICT | `.fp::after` (z-index 40) paints over `.ed.over` (z-index 20) |
+| 166 | Desktop: jobs in a collapsible right panel, toggled by a header button with a running count | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 20:00 ICT | Background jobs sit inside the panel |
+| 167 | Phone: jobs button at the top right opens a full-width jobs drawer from the right, under the header | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 20:00 ICT | Removes the jobs space under the file list |
+| 168 | Phone: navigation drawer is full width, under the header, and the menu button toggles it | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 20:00 ICT | |
+| 169 | Phone: Filedeck logo in the middle of the header | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 20:00 ICT | |
