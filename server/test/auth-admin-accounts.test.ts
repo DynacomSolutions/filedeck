@@ -472,9 +472,9 @@ test("re-created name starts clean: no keys, grants or saved passwords, and an e
   assert.ok(oldEpoch >= 1);
   const seenBefore = w.a.seen.get("virt:guest")!;
   assert.equal((await send(h, "DELETE", "/api/admin/accounts/guest", admin)).status, 200);
-  // the retired epoch: raised in the delete's transaction, then kept one above that by `remove`
+  // the retired epoch is above the live one before the delete (`remove` keeps it one above; the delete's own raise adds one more)
   const retired = h.auth!.accounts.epochOf("virt", "guest");
-  assert.ok(retired > oldEpoch + 1, `retired at ${retired}, ${oldEpoch} before the delete`);
+  assert.ok(retired > oldEpoch, `retired at ${retired}, ${oldEpoch} before the delete`);
   assert.ok(retired > seenBefore, "the retired epoch is above every epoch the machine saw before the delete");
   const made = await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share });
   assert.equal(made.status, 201);

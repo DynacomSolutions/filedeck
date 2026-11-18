@@ -1,9 +1,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import type { AddressInfo } from "node:net";
 import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 import { hashPassword } from "../src/auth/store.ts";
@@ -42,6 +44,10 @@ class MemSource implements SourceBackend {
   readonly type = "sftp";
   readonly entries = new Map<string, { type: "file" | "dir"; data: Buffer; mtime: number }>([["/", { type: "dir", data: Buffer.alloc(0), mtime: 0 }]]);
   writeMs = 0;
+  /** slows every file read down (a long download) */
+  readMs = 0;
+  /** how many file writes have begun */
+  started = 0;
   /** how many file writes have finished */
   writes = 0;
   private parent(p: string): string {
@@ -82,9 +88,21 @@ class MemSource implements SourceBackend {
   async read(p: string, range?: { start: number; end: number }): Promise<Readable> {
     const e = this.entries.get(p);
     if (!e || e.type !== "file") throw new FsError(404, "not found");
-    return Readable.from([range ? e.data.subarray(range.start, range.end + 1) : e.data]);
+    const data = range ? e.data.subarray(range.start, range.end + 1) : e.data;
+    if (!this.readMs) return Readable.from([data]);
+    // a slow download: 16 KiB at a time, `readMs` apart
+    const ms = this.readMs;
+    return Readable.from(
+      (async function* () {
+        for (let at = 0; at < data.length; at += 16_384) {
+          yield data.subarray(at, at + 16_384);
+          await sleep(ms);
+        }
+      })(),
+    );
   }
   async write(p: string, body: Readable, o: { overwrite: boolean; mtime?: number }): Promise<number> {
+    this.started++;
     this.mustDir(this.parent(p));
     if (this.entries.has(p) && !o.overwrite) throw new FsError(409, "already exists");
     const chunks: Buffer[] = [];
@@ -127,7 +145,8 @@ interface World {
   changed: Identity[];
 }
 let n = 0;
-function world(): World {
+/** A hub with sources s1 and s2; `nodes` is its NODES (none by default). */
+function world(nodes = ""): World {
   n++;
   const s1 = new MemSource();
   const s2 = new MemSource();
@@ -140,7 +159,7 @@ function world(): World {
       FILEDECK_AUTH: "on",
       FILEDECK_AGENT_TOKEN: T,
       FILEDECK_STATIC: tmp,
-      NODES: "",
+      NODES: nodes,
       FILEDECK_ADMINS: "sadmin",
       FILEDECK_AUTH_FILE: path.join(tmp, `auth-${n}.db`),
       FILEDECK_DIFF_DIR: path.join(tmp, `diff-${n}`),
@@ -502,4 +521,211 @@ test("a matching epoch is unaffected: system users, also administrators, run job
   assert.ok(s2.writes <= written + 1, `the copy went on: ${s2.writes} files, ${written} at the rise`);
   // signed in again, at the new epoch, the administrator uses every source
   assert.equal((await mkdir(h, again, "s1", "/after-rise")).status, 201);
+});
+
+/** A request body that sends `first`, then holds until `release()`, then sends `rest` and ends. `cancelled` turns true when its reader gives up. */
+function heldBody(first: Uint8Array, rest: Uint8Array): { body: ReadableStream<Uint8Array>; release: () => void; cancelled: () => boolean } {
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  let sent = false;
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start: (c) => c.enqueue(first),
+    pull: async (c) => {
+      if (sent) return;
+      sent = true;
+      await held;
+      c.enqueue(rest);
+      c.close();
+    },
+    cancel: () => {
+      cancelled = true;
+    },
+  });
+  return { body, release, cancelled: () => cancelled };
+}
+/** A proxied request with a streamed body, not awaited. */
+function streamed(h: Hub, method: string, p: string, cookie: string, body: ReadableStream<Uint8Array>, type = "application/octet-stream"): Promise<Response> {
+  return Promise.resolve(h.request("https://localhost" + p, { method, headers: { cookie, "content-type": type }, body, duplex: "half" } as RequestInit, peer as never));
+}
+
+test("an upload to a source in flight when the grant goes fails, and nothing of it stays on the source", async () => {
+  const { h, s2, grants } = world();
+  grants.setForAccount("virt", "guest", { s2: { write: true } });
+  const guest = await signIn(h, "guest");
+  const admin = await signIn(h, "sadmin");
+  const b = heldBody(new Uint8Array(1000).fill(1), new Uint8Array(1000).fill(2));
+  const up = streamed(h, "PUT", "/api/nodes/s2/api/fs/upload?dir=/&name=up.bin", guest, b.body);
+  await until("the upload to reach the source", () => s2.started === 1);
+  const off = await send(h, "PATCH", "/api/admin/accounts/guest", admin, { sources: {} });
+  assert.equal(off.status, 200, off.text);
+  b.release();
+  const r = await up;
+  await r.body?.cancel().catch(() => undefined);
+  assert.notEqual(r.status, 201, "the upload finished after the grant went");
+  await sleep(50);
+  assert.equal(s2.writes, 0);
+  assert.deepEqual(s2.paths(), ["/", "/d", "/d/inner.txt", "/f.txt"]);
+});
+
+test("a download from a source in flight when the account changes is cut", async () => {
+  const { h, s2, grants } = world();
+  grants.setForAccount("virt", "guest", { s2: { write: false } });
+  const size = 1024 * 1024;
+  s2.put("/big.bin", "x".repeat(size));
+  s2.readMs = 20;
+  const guest = await signIn(h, "guest");
+  const admin = await signIn(h, "sadmin");
+  const r = await h.request("https://localhost/api/nodes/s2/api/fs/download?path=/big.bin", { headers: { cookie: guest } }, peer as never);
+  assert.equal(r.status, 200);
+  const reader = r.body!.getReader();
+  let got = (await reader.read()).value?.length ?? 0;
+  assert.ok(got > 0);
+  assert.equal((await send(h, "POST", "/api/admin/end-sessions", admin, { kind: "virt", name: "guest" })).status, 200);
+  let failed = false;
+  try {
+    for (;;) {
+      const c = await reader.read();
+      if (c.done) break;
+      got += c.value.length;
+    }
+  } catch {
+    failed = true;
+  }
+  assert.ok(got < size, `the whole file came through: ${got} bytes`);
+  assert.ok(failed, "the cut download ended as if complete");
+});
+
+/** A fake agent: answers the lookups and the job list; an upload is read slowly and recorded as finished or cut. */
+async function fakeAgent(): Promise<{ url: string; uploads: { started: number; finished: number; cut: number }; close: () => void }> {
+  const uploads = { started: 0, finished: 0, cut: 0 };
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url ?? "/", "http://x");
+    res.setHeader("content-type", "application/json");
+    if (u.pathname === "/healthz") return void res.end("ok");
+    if (u.pathname === "/api/auth/lookup") return void res.end(JSON.stringify({ exists: true }));
+    if (u.pathname === "/api/jobs") return void res.end(JSON.stringify({ jobs: [] }));
+    if (u.pathname === "/api/fs/upload") {
+      uploads.started++;
+      req.on("data", () => undefined);
+      req.on("end", () => {
+        uploads.finished++;
+        res.statusCode = 201;
+        res.end(JSON.stringify({ path: "/up.bin" }));
+      });
+      req.on("close", () => {
+        if (!req.complete) uploads.cut++;
+      });
+      return;
+    }
+    res.end(JSON.stringify({ entries: [] }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  return {
+    url: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+    uploads,
+    close: () => {
+      srv.close();
+      srv.closeAllConnections();
+    },
+  };
+}
+
+test("an upload to a machine in flight when the account changes is cut at the hub, at once", async () => {
+  const agent = await fakeAgent();
+  try {
+    const { h } = world(`a=${agent.url}`);
+    h.auth!.accounts.update("guest", { nodes: { a: { runAs: "nobody", grants: [{ path: "/", write: true }] } } });
+    const guest = await signIn(h, "guest");
+    const admin = await signIn(h, "sadmin");
+    const b = heldBody(new Uint8Array(1000).fill(1), new Uint8Array(1000).fill(2));
+    const up = streamed(h, "PUT", "/api/nodes/a/api/fs/upload?dir=/&name=up.bin", guest, b.body);
+    await until("the upload to reach the machine", () => agent.uploads.started === 1);
+    assert.equal((await send(h, "POST", "/api/admin/end-sessions", admin, { kind: "virt", name: "guest" })).status, 200);
+    await until("the machine to see the upload cut", () => agent.uploads.cut === 1, 2_000);
+    b.release();
+    const r = await up;
+    await r.body?.cancel().catch(() => undefined);
+    assert.notEqual(r.status, 201);
+    assert.equal(agent.uploads.finished, 0);
+  } finally {
+    agent.close();
+  }
+});
+
+test("system user sources: an administrator demoted while the request runs is refused, also just before the transaction", async () => {
+  const { h, grants } = world();
+  const accounts = h.auth!.accounts;
+  const vadmin = await signIn(h, "vadmin");
+  // a slow body: the request guard reads a JSON body before the admin gate, so the gate sees the flag gone
+  const text = new TextEncoder().encode(JSON.stringify({ sources: { s1: { write: true } } }));
+  const b = heldBody(text.subarray(0, 5), text.subarray(5));
+  const put = streamed(h, "PUT", "/api/admin/system/alice/sources", vadmin, b.body, "application/json");
+  await sleep(100);
+  // the flag goes straight in the store: no epoch rise, so the session itself stays valid
+  accounts.update("vadmin", { admin: false });
+  b.release();
+  const r = await put;
+  assert.equal(r.status, 403, await r.text());
+  assert.deepEqual(grants.forAccount("sys", "alice"), {});
+  // past the gate, the flag goes just before the route's store transaction (as another hub could take it away): the check inside it refuses
+  accounts.update("vadmin", { admin: true });
+  const tx = accounts.tx.bind(accounts);
+  accounts.tx = <T>(fn: () => T): T => {
+    accounts.tx = tx;
+    accounts.update("vadmin", { admin: false });
+    return tx(fn);
+  };
+  const late = await send(h, "PUT", "/api/admin/system/alice/sources", vadmin, { sources: { s1: { write: true } } });
+  accounts.tx = tx;
+  assert.equal(late.status, 403, late.text);
+  assert.deepEqual(late.json, { error: "administrators only" });
+  assert.deepEqual(grants.forAccount("sys", "alice"), {});
+});
+
+test("system user sources: the epoch rises in the transaction, so the old sessions end even when accountChanged fails after it", async () => {
+  const { h, grants } = world();
+  const admin = await signIn(h, "sadmin");
+  const alice = await signIn(h, "alice");
+  h.accountChanged = async () => {
+    throw new Error("the hub stopped after the commit");
+  };
+  const r = await send(h, "PUT", "/api/admin/system/alice/sources", admin, { sources: { s1: { write: true } } });
+  assert.notEqual(r.status, 200);
+  assert.deepEqual(grants.forAccount("sys", "alice"), { s1: { write: true } });
+  assert.equal((await send(h, "GET", "/api/nodes", alice)).status, 401);
+});
+
+test("a transfer in flight when the account changes is cut: the file being written fails and nothing of it stays", async () => {
+  const { h, s1, s2, grants } = world();
+  grants.setForAccount("virt", "guest", { s1: { write: false }, s2: { write: true } });
+  s1.put("/big.bin", "y".repeat(1024 * 1024));
+  s1.readMs = 20;
+  const guest = await signIn(h, "guest");
+  const admin = await signIn(h, "sadmin");
+  const tr = send(h, "POST", "/api/transfer", guest, { src: { node: "s1", path: "/big.bin" }, dst: { node: "s2", dir: "/" } });
+  await until("the transfer to reach the destination", () => s2.started === 1);
+  assert.equal((await send(h, "POST", "/api/admin/end-sessions", admin, { kind: "virt", name: "guest" })).status, 200);
+  const r = await tr;
+  assert.notEqual(r.status, 201, r.text);
+  await sleep(50);
+  assert.equal(s2.writes, 0);
+  assert.ok(!s2.entries.has("/big.bin"));
+});
+
+test("calls that end on their own are forgotten: none stays tracked", async () => {
+  const { h, s2, grants } = world();
+  grants.setForAccount("virt", "guest", { s2: { write: true } });
+  const guest = await signIn(h, "guest");
+  assert.equal((await send(h, "GET", "/api/nodes/s2/api/fs/list?path=/", guest)).status, 200);
+  assert.equal((await send(h, "GET", "/api/nodes/s2/api/fs/download?path=/f.txt", guest)).text, "file in s2");
+  assert.equal((await send(h, "PUT", "/api/nodes/s2/api/fs/upload?dir=/&name=ok.txt", guest, undefined, "fine")).status, 201);
+  assert.equal((await send(h, "GET", "/api/nodes/s2/api/fs/stat?path=/missing", guest)).status, 404);
+  assert.equal((await send(h, "POST", "/api/transfer", guest, { src: { node: "s2", path: "/f.txt" }, dst: { node: "s2", dir: "/d" } })).status, 201);
+  // a download whose reader gives up early
+  const r = await h.request("https://localhost/api/nodes/s2/api/fs/download?path=/f.txt", { headers: { cookie: guest } }, peer as never);
+  await r.body?.cancel();
+  await sleep(20);
+  assert.equal(h.accountCalls.size(), 0);
+  assert.equal(s2.entries.get("/ok.txt")?.data.toString(), "fine");
 });

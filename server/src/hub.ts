@@ -37,6 +37,7 @@ import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
 import { SysPresence } from "./auth/presence.ts";
 import { SOURCE_READ_ONLY, SourceGrants, type SourceAccess } from "./auth/source-grants.ts";
 import { isAdmin, registerAdmin, registerAdminOff } from "./auth/admin-routes.ts";
+import { AccountCalls, cuttableResponse, cuttableTarget, type AccountCall } from "./auth/account-calls.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
 export interface HubAuth {
@@ -122,7 +123,7 @@ class RootCalls {
 }
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
-  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target>; accountChanged(before: Identity): Promise<void> };
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target>; accountChanged(before: Identity): Promise<void>; accountCalls: AccountCalls };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
   // the signed user header is keyed on the agent token, so there is no auth without one (main.ts says so first)
@@ -421,9 +422,19 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
    * (so the agent also stops its workers), to cancel its jobs there. `before` is the identity from before the change, so a machine the
    * change took away is still asked. A system account is asked on every machine.
    */
+  /** Each account's proxied requests and transfers in flight (sign-in on), cut when the account changes (auth/account-calls.ts). */
+  const calls = new AccountCalls();
+  app.accountCalls = calls; // (tests count them)
+  /** A call of the current account starts: undefined with sign-in off or nobody behind the request. */
+  const startCall = (): AccountCall | undefined => {
+    const id = cfg.auth ? currentUser() : undefined;
+    return id ? calls.start(id.kind, id.name) : undefined;
+  };
   app.accountChanged = async (before: Identity): Promise<void> => {
     if (!auth) return;
     auth.sessions.endAll(before.kind, before.name);
+    // its proxied requests and transfers in flight, to machines and sources alike, are cut now (uploads fail, downloads stop)
+    calls.endAccount(before.kind, before.name);
     const id: Identity = { ...before, epoch: auth.accounts.epochOf(before.kind, before.name) };
     const nodes = before.kind === "sys" ? cfg.nodes.map((n) => n.name) : Object.keys(before.nodes).filter((x) => nodeNames.has(x));
     await endAccountWork({ id, nodes, ops, diffs, call: callNode });
@@ -562,12 +573,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     for (const end of [b?.src, b?.dst]) if (typeof end?.node === "string" && !mayUse(end.node)) return noAccess(c);
     // a move removes the source at the end: out of a read-only source it is refused before anything is copied
     if (b?.op === "move" && typeof b.src?.node === "string" && !mayChange(b.src.node)) return c.json({ error: SOURCE_READ_ONLY }, 403);
-    const src = b?.src && agents.get(b.src.node);
-    const dst = b?.dst && agents.get(b.dst.node);
-    if (!b?.src || !b.dst || !src || !dst) return c.json({ error: "unknown node" }, 404);
+    const srcTarget = b?.src && agents.get(b.src.node);
+    const dstTarget = b?.dst && agents.get(b.dst.node);
+    if (!b?.src || !b.dst || !srcTarget || !dstTarget) return c.json({ error: "unknown node" }, 404);
     if (typeof b.src.path !== "string" || typeof b.dst.dir !== "string" || !b.src.path.startsWith("/") || b.src.path === "/") {
       return c.json({ error: "invalid path" }, 400);
     }
+    // cut when the account changes: the call in flight fails (a file being written fails, not cut short) and no further call is made
+    const call = startCall();
+    const src = call ? cuttableTarget(srcTarget, call.signal) : srcTarget;
+    const dst = call ? cuttableTarget(dstTarget, call.signal) : dstTarget;
     try {
       const tally: Tally = { skipped: 0 };
       const res = await transferTree(src, b.src.path, dst, b.dst.dir, { overwrite: b.overwrite === true, preserveTimes: b.preserveTimes === true, move: b.op === "move" }, tally);
@@ -589,6 +604,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       if (e instanceof NoAccessError) return noAccess(c);
       if ((e as Error)?.name === "AbortError") return new Response(null, { status: 499 });
       return c.json({ error: "transfer failed" }, 502);
+    } finally {
+      call?.done();
     }
   });
 
@@ -613,8 +630,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   app.all("/api/nodes/:node/*", async (c) => {
     // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
     if (!mayUse(c.req.param("node"))) return noAccess(c);
-    const target = agents.get(c.req.param("node"));
-    if (!target) return c.json({ error: "unknown node" }, 404);
+    const base = agents.get(c.req.param("node"));
+    if (!base) return c.json({ error: "unknown node" }, 404);
     const url = new URL(c.req.url);
     // the node segment is matched as sent: its decoded form can have another length
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
@@ -646,14 +663,19 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       const len = c.req.header("content-length");
       if (len) (init.headers as Headers).set("content-length", len);
     }
+    // With sign-in on, every proxied request is the account's until its answer body is over, whatever its method: when the account
+    // changes it is cut (a body on its way up fails, so the agent or source drops a partial upload; the answer stops).
+    const call = startCall();
+    const target = call ? cuttableTarget(base, call.signal) : base;
+    const cut = (res: Response) => (call ? cuttableResponse(res, call.signal, call.done) : res);
     try {
       if (isPasswordRoute(c.req.method, rest)) {
         // encrypted archives / PDFs: the vault supplies (and saves) the password
         const r = await proxyWithVault({ vault, owner: cfg.auth ? vaultOwner() : undefined, ownerHolds: ownerHoldsFor(currentUser()), node: c.req.param("node"), target, method: c.req.method, rest, search: url.search, headers: init.headers as Headers, body: c.req.raw.body, signal: c.req.raw.signal });
-        return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
+        return cut(new Response(r.body, { status: r.status, headers: clean(r.headers, true) }));
       }
       const r = await target.fetch(rest + url.search, init);
-      const out = new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
+      const out = cut(new Response(r.body, { status: r.status, headers: clean(r.headers, true) }));
       const id = currentUser();
       if (app.streams && session !== undefined && upstream && id && (r.headers.get("content-type") ?? "").toLowerCase().startsWith("text/event-stream")) {
         // a stream opened under the act-as-root switch ends with the switch too (turned off, its end passed, or no longer held). The gate
@@ -664,6 +686,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       }
       return out;
     } catch (e) {
+      call?.done();
       if ((e as Error).name === "AbortError") return new Response(null, { status: 499 });
       if (e instanceof NoAccessError) return noAccess(c);
       if (isBodyTooLarge(e)) return c.json({ error: "request body too large" }, 413);
