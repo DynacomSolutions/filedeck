@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { generateKeyPairSync } from "node:crypto";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { Hono } from "hono";
 import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
@@ -17,6 +19,7 @@ import { keyFingerprint } from "../src/auth/sshkey.ts";
 import { runAs } from "../src/auth/context.ts";
 import type { Identity } from "../src/auth/identity.ts";
 import type { SystemAuth } from "../src/auth/routes.ts";
+import { USER_HEADER, verifyClaim, type UserClaim } from "../src/auth/identity.ts";
 
 /**
  * The admin gate (part 3, Task 4): every /api/admin/ call needs a session whose account is an administrator at that very moment (read
@@ -470,4 +473,126 @@ test("audit: keys are written as their fingerprints only, and a password only as
     assert.ok(!all.includes(b64), "no key text");
     assert.ok(!all.includes(b64.slice(30, 60)), "no part of the key text");
   }
+});
+
+test("ending a session ends its act-as-root switch as signing out does: its root jobs on the machines are cancelled", async () => {
+  // a fake machine: it lists the jobs of the switch (and others) and records every call with its claim
+  const calls: { method: string; path: string; claim: UserClaim | null }[] = [];
+  let until = 0;
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url ?? "/", "http://x");
+    const v = req.headers[USER_HEADER];
+    calls.push({ method: req.method ?? "GET", path: u.pathname, claim: typeof v === "string" ? verifyClaim(v, T, Date.now()) : null });
+    res.setHeader("content-type", "application/json");
+    if (u.pathname === "/api/jobs")
+      return void res.end(
+        JSON.stringify({
+          jobs: [
+            { id: "root-running", state: "running", asRootUntil: until },
+            { id: "root-done", state: "done", asRootUntil: until },
+            { id: "other-switch", state: "running", asRootUntil: until - 1 },
+            { id: "plain", state: "running" },
+          ],
+        }),
+      );
+    const m = /^\/api\/jobs\/([^/]+)\/cancel$/.exec(u.pathname);
+    if (m) return void res.end(JSON.stringify({ id: m[1], state: "canceled" }));
+    res.end("{}");
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const h = makeHub({ NODES: `a=http://127.0.0.1:${(srv.address() as AddressInfo).port}` });
+    const admin = await signIn(h, "vadmin");
+    const alice = await signIn(h, "alice");
+    const raw = alice.slice(alice.indexOf("=") + 1);
+    until = Date.now() + 10 * 60_000;
+    h.auth!.sessions.setAsRoot(raw, until);
+    const id = h.auth!.sessions.publicId(h.auth!.sessions.keyOf(raw));
+    calls.length = 0;
+    const r = await send(h, "DELETE", `/api/admin/sessions/${id}`, admin);
+    assert.equal(r.status, 200);
+    const cancels = calls.filter((c) => c.method === "POST" && c.path.endsWith("/cancel"));
+    assert.deepEqual(
+      cancels.map((c) => c.path),
+      ["/api/jobs/root-running/cancel"],
+      "only the live jobs of that switch, before the answer",
+    );
+    // (the presence lookup that alice's sign-in started may arrive meanwhile: only the job calls are the cancel's)
+    const jobCalls = calls.filter((c) => c.path.startsWith("/api/jobs"));
+    assert.equal(jobCalls.filter((c) => c.method === "GET").length, 1, "the machine's jobs listed once");
+    for (const c of jobCalls) {
+      assert.equal(c.claim?.name, "alice");
+      assert.equal(c.claim?.asRoot, undefined, "asked as the plain system user");
+    }
+    assert.equal((await call(h, "/api/auth/me", alice)).status, 401);
+    // a session without the switch asks no machine
+    const bob = await signIn(h, "bob");
+    calls.length = 0;
+    assert.equal((await send(h, "DELETE", `/api/admin/sessions/${h.auth!.sessions.publicId(h.auth!.sessions.keyOf(bob.slice(bob.indexOf("=") + 1)))}`, admin)).status, 200);
+    assert.equal(calls.filter((c) => c.path.startsWith("/api/jobs")).length, 0);
+  } finally {
+    srv.close();
+    srv.closeAllConnections();
+  }
+});
+
+test("audit: /api/admin without a slash, a HEAD and a call with no session each write a line", async () => {
+  const lines: string[] = [];
+  const h = makeHub({}, lines);
+  const admin = await signIn(h, "vadmin");
+  lines.length = 0;
+  const bare = await call(h, "/api/admin", admin);
+  assert.equal(bare.status, 404);
+  assert.deepEqual(await bare.json(), { error: "not found" });
+  const b = auditOf(lines, "GET", "/api/admin");
+  assert.equal(b.length, 1);
+  assert.equal(b[0]!.user, "virt:vadmin");
+  assert.equal(b[0]!.status, 404);
+  // a non-admin on the bare path is refused by the gate, and written too
+  const user = await signIn(h, "vuser");
+  assert.equal((await call(h, "/api/admin", user)).status, 403);
+  assert.equal(auditOf(lines, "GET", "/api/admin").length, 2);
+
+  assert.equal((await call(h, "/api/admin/overview", admin, { method: "HEAD" })).status, 200);
+  const head = auditOf(lines, "HEAD", "/api/admin/overview");
+  assert.equal(head.length, 1);
+  assert.equal(head[0]!.user, "virt:vadmin");
+
+  assert.equal((await call(h, "/api/admin/sessions")).status, 401);
+  const none = auditOf(lines, "GET", "/api/admin/sessions");
+  assert.equal(none.length, 1);
+  assert.equal(none[0]!.status, 401);
+  assert.equal(none[0]!.user, undefined);
+  // a path that is only like it is not an admin path: a GET there is not written
+  lines.length = 0;
+  await call(h, "/api/administrators", admin);
+  assert.equal(lines.length, 0);
+});
+
+test("audit: an admin call refused for its Host still writes a line; another path refused so does not", async () => {
+  const lines: string[] = [];
+  const h = makeHub({ FILEDECK_ALLOWED_HOSTS: "files.test" }, lines);
+  const host = (v: string) => ({ headers: { host: v } });
+  const login = await call(h, "/api/auth/login", undefined, { method: "POST", body: JSON.stringify({ name: "vadmin", password: PW }), ...host("files.test") });
+  assert.equal(login.status, 200);
+  const admin = (login.headers.get("set-cookie") ?? "").split(";")[0]!;
+  assert.equal((await call(h, "/api/admin/overview", admin, host("files.test"))).status, 200);
+  lines.length = 0;
+  for (const [m, p] of [
+    ["GET", "/api/admin/overview"],
+    ["DELETE", "/api/admin/vault/unowned"],
+    ["GET", "/api/admin"],
+  ] as const) {
+    const r = await call(h, p, admin, { method: m, ...host("elsewhere.test") });
+    assert.equal(r.status, 421, `${m} ${p}`);
+    const l = auditOf(lines, m, p);
+    assert.equal(l.length, 1, `${m} ${p} is written`);
+    assert.equal(l[0]!.status, 421);
+    assert.equal(l[0]!.refused, true);
+  }
+  // other paths refused for their Host write nothing, as before
+  lines.length = 0;
+  assert.equal((await call(h, "/api/nodes", admin, host("elsewhere.test"))).status, 421);
+  assert.equal((await call(h, "/api/auth/logout", admin, { method: "POST", ...host("elsewhere.test") })).status, 421);
+  assert.equal(lines.length, 0);
 });

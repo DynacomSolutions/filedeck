@@ -28,6 +28,11 @@ export interface AdminDeps {
   sources: { name: string; type: string }[];
   /** Whether a system user exists on a machine: true, false, or undefined when the machine did not answer. */
   systemExists?: (node: string, name: string) => Promise<boolean | undefined>;
+  /**
+   * Called when an ended session held an act-as-root switch (the hub's `onAsRootEnd`, as at sign-out): the jobs started under that
+   * switch are cancelled on the machines. A rejection is ignored.
+   */
+  onAsRootEnd?: (name: string, until: number) => Promise<void>;
   /** The hub's `accountChanged`: epoch raised, sessions and streams ended, hub and agent jobs cancelled. `before` is from before the change. */
   changed: (before: Identity) => Promise<void>;
 }
@@ -81,8 +86,16 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     return c.json({ sessions: list });
   });
 
-  // One session ends (its streams too); the account epoch stays and its jobs go on: they belong to the account, not the session.
-  app.delete("/api/admin/sessions/:id", (c) => (sessions.endById(c.req.param("id")) ? c.json({ ok: true }) : notFound(c)));
+  // One session ends (its streams too); the account epoch stays and its jobs go on: they belong to the account, not the session. Its
+  // act-as-root switch ends with it exactly as at sign-out: read first, then the session goes, then the switch's root jobs are cancelled.
+  app.delete("/api/admin/sessions/:id", async (c) => {
+    const id = c.req.param("id");
+    const s = sessions.list().find((x) => x.id === id);
+    const was = s?.kind === "sys" && s.asRootUntil !== undefined ? { name: s.name, until: s.asRootUntil } : undefined;
+    if (!sessions.endById(id)) return notFound(c);
+    if (was && deps.onAsRootEnd) await deps.onAsRootEnd(was.name, was.until).catch(() => undefined);
+    return c.json({ ok: true });
+  });
 
   // Every session of one account ends: through `changed`, so its epoch rises and its jobs are cancelled too.
   app.post(

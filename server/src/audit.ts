@@ -42,6 +42,9 @@ function signInBody(v: unknown): { name: string } | undefined {
   return typeof name === "string" ? { name: clip(name) } : undefined;
 }
 
+/** Whether `p` is an admin path (`/api/admin` or below it): every call there is written, whatever its method or its outcome. */
+export const isAdminPath = (p: string): boolean => p === "/api/admin" || p.startsWith("/api/admin/");
+
 /** The most nodes, grants per node and sources an admin audit line keeps (the admin routes take at most 64 grants per node). */
 const MAX_ADMIN_ITEMS = 64;
 /** The most keys of a `keys` list an admin audit line looks at (an account holds at most 32). */
@@ -190,7 +193,7 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
     const m = c.req.method;
     const p = c.req.path;
     // every admin call is written, whatever its method: reading the accounts and sessions is recorded too
-    const admin = p.startsWith("/api/admin/");
+    const admin = isAdminPath(p);
     if (!admin && (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/"))) return next();
     const t0 = Date.now();
     let body: unknown;

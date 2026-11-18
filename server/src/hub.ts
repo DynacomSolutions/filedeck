@@ -20,7 +20,7 @@ import { apiTokenAuth } from "./api-token.ts";
 import { renderIndex } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
 import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
-import { audit, clientOf, trustProxies, type AuditSink } from "./audit.ts";
+import { audit, auditRefusal, clientOf, isAdminPath, trustProxies, type AuditSink } from "./audit.ts";
 import { Vault } from "./vault.ts";
 import { isPasswordRoute, proxyWithVault, registerVaultRoutes } from "./vault-proxy.ts";
 import { Accounts, AuthDb, bootstrapAdmin } from "./auth/store.ts";
@@ -159,6 +159,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       if (c.req.path === "/healthz") return next();
       const host = (c.req.header("host") ?? "").toLowerCase();
       if (matchesHostList(host, cfg.allowedHosts)) return next();
+      // an admin call is written even when refused here, before the audit middleware (other paths stay unwritten, as before)
+      if (isAdminPath(c.req.path)) auditRefusal("hub", c, 421, auditSink);
       return c.json({ error: "unknown host" }, 421);
     });
   }
@@ -394,6 +396,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       vault,
       nodes: cfg.nodes.map((n) => n.name),
       sources: [...sources.values()].map(({ config }) => ({ name: config.name, type: config.type })),
+      onAsRootEnd: endRootJobs,
       changed: (before) => app.accountChanged(before),
     });
   else registerAdminOff(app);
