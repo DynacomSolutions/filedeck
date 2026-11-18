@@ -19,7 +19,7 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `agent.readOnlyPaths` | Virtual paths no agent may change (default `/proc`, `/sys`) |
 | `agentToken.secretName`, `agentToken.generate` | Shared hub-to-agent token: name an existing Secret, or set `generate: true` and a hook Job creates a random one (never rotated); empty and off = none |
 | `hub.networkPolicy.enabled`, `hub.networkPolicy.from` | Optional NetworkPolicy for the hub: only the listed peers (for example your ingress controller) may connect; off by default |
-| `auth.enabled`, `auth.workers.*`, `auth.agentMemoryLimit` | Sign-in; off by default and not ready to turn on yet (see below) |
+| `auth.enabled`, `auth.workers.*`, `auth.agentMemoryLimit` | Sign-in; off by default (see [Turning sign-in on](#turning-sign-in-on)) |
 | `apiToken.secretName` | Existing Secret holding the read-only token for `filedeck du` (empty = feature off) |
 | `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key before the hub starts; check vault health after installation |
 | `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
@@ -34,7 +34,7 @@ By default (sign-in off) agents run as root with the node's `/` mounted read-wri
 
 ## Turning sign-in on
 
-Sign-in is not ready to turn on yet: there is no screen to make accounts or to give them machines and folders, and network sources are open to every signed-in account (see [Sign-in and sessions](security.md#sign-in-and-sessions)). When it is, `auth.enabled: true` sets `FILEDECK_AUTH=on` on the hub and on every agent. It needs the agent token: set `agentToken.secretName` or `agentToken.generate: true`, or the chart refuses to render with `auth.enabled needs agentToken`. With sign-in on, each agent runs every signed-in request in a worker process as that person's own user (`auth.workers.max`, default 6 at once; `auth.workers.idleSeconds`, default 600), and each worker has a heap of up to 96 MiB. So the agent's memory limit rises from 512Mi to 1Gi (`auth.agentMemoryLimit`, which replaces `agent.resources.limits.memory`), and the agent container gets the `SYS_CHROOT` capability, which it uses only to run its account lookup helper inside the node's root (`/host`), with the node's own libc and NSS; the helper is run from the image, and nothing is written on the node. Virtual accounts need Landlock ABI 3 or newer on the node (Linux 6.2); the agent logs at start whether it has it. Keep the thumbnail and index folders as the chart sets them (see [Configuration](configuration.md)): pointing them at a shared folder such as `/tmp` makes every worker start fail. The agent sets the sticky bit on the chart's `/tmp` volume at start, because the workers' temporary folders are made there. With sign-in off, none of this is rendered.
+`auth.enabled: true` sets `FILEDECK_AUTH=on` on the hub and on every agent. It needs the agent token: set `agentToken.secretName` or `agentToken.generate: true`, or the chart refuses to render with `auth.enabled needs agentToken`. With sign-in on, each agent runs every signed-in request in a worker process as that person's own user (`auth.workers.max`, default 6 at once; `auth.workers.idleSeconds`, default 600), and each worker has a heap of up to 96 MiB. So the agent's memory limit rises from 512Mi to 1Gi (`auth.agentMemoryLimit`, which replaces `agent.resources.limits.memory`), and the agent container gets the `SYS_CHROOT` capability, which it uses only to run its account lookup helper inside the node's root (`/host`), with the node's own libc and NSS; the helper is run from the image, and nothing is written on the node. Virtual accounts need Landlock ABI 3 or newer on the node (Linux 6.2); the agent logs at start whether it has it. Keep the thumbnail and index folders as the chart sets them (see [Configuration](configuration.md)): pointing them at a shared folder such as `/tmp` makes every worker start fail. The agent sets the sticky bit on the chart's `/tmp` volume at start, because the workers' temporary folders are made there. With sign-in off, none of this is rendered.
 
 ### System sign-in (PAM)
 
@@ -57,6 +57,16 @@ account  include system-auth
 ```
 
 Use no `session` lines. Only one hidden password prompt is answered: a stack that asks for a second factor (a one-time code) fails the attempt. The name `root` (uid 0) never signs in.
+
+### First steps after turning sign-in on
+
+1. Sign in as the first administrator: the virtual account that `auth.bootstrapAdmin` creates, or a system user named in `auth.admins` (it needs the machine's PAM service, see above). Sign-in needs HTTPS.
+2. Open the account menu (your name in the header) and choose "Accounts…".
+3. Make the other accounts. A virtual account gets a password or keys, and for each machine it may use, the system user it runs as and its folders. It sees no machine and no folder you do not give it. A system user needs nothing on the hub: it signs in with the account it has on the machines, and sees only what that account may open.
+4. Give network sources. A network source is open only to administrators until you give an account a grant for it (read only, or read and write). Give a system user a grant in the "System users" tab.
+5. Passwords saved while sign-in was off serve nobody now. The Accounts view shows how many there are, and you may forget them.
+
+Every change to an account signs it out and cancels its running jobs. The hub waits for the machines before it answers, up to about 10 seconds when a machine is down. Any ingress, proxy or client timeout in front of the hub must therefore be above 10 seconds. The chart's Mapping has no request timeout; with another ingress, check its own timeout. See [Administrators](security.md#administrators) for what each change ends.
 
 ## Vault storage
 

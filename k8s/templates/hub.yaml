@@ -57,7 +57,7 @@ spec:
             - name: PORT
               value: {{ .Values.port | quote }}
             {{- if .Values.auth.enabled }}
-            # Sign-in (not ready to turn on yet; see docs/security.md).
+            # Sign-in (see "Turning sign-in on" in docs/install.md).
             - name: FILEDECK_AUTH
               value: "on"
             {{- with .Values.auth.admins }}
