@@ -20,6 +20,7 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `agentToken.secretName`, `agentToken.generate` | Shared hub-to-agent token: name an existing Secret, or set `generate: true` and a hook Job creates a random one (never rotated); empty and off = none |
 | `hub.networkPolicy.enabled`, `hub.networkPolicy.from` | Optional NetworkPolicy for the hub: only the listed peers (for example your ingress controller) may connect; off by default |
 | `auth.enabled`, `auth.workers.*`, `auth.agentMemoryLimit` | Sign-in; off by default (see [Turning sign-in on](#turning-sign-in-on)) |
+| `auth.tailscale.*` | Sign-in with Tailscale: the headers source, the socket, the listed proxies and an optional tailscaled sidecar; all off by default (see [Tailscale sign-in](#tailscale-sign-in)) |
 | `apiToken.secretName` | Existing Secret holding the read-only token for `filedeck du` (empty = feature off) |
 | `vault.*` | Saved-password vault: key Secret, volume size and class, entry lifetime. `vault.keyJob` creates the key before the hub starts; check vault health after installation |
 | `hub.nodeSelector` | Pin the hub (its vault volume is ReadWriteOnce) |
@@ -68,7 +69,54 @@ Before you turn it on, let the running hub jobs (copies, moves, syncs in the Job
 4. Give network sources. A network source is open only to administrators until you give an account a grant for it (read only, or read and write). Give a system user a grant in the "System users" tab.
 5. Passwords saved while sign-in was off serve nobody now. The Accounts view shows how many there are, and you may forget them.
 
+6. Optional: sign-in with Tailscale (see [Tailscale sign-in](#tailscale-sign-in)).
+
+If you are locked out: the bootstrap file is used once, so it cannot make a new first administrator. Add a system user to `auth.admins` (it signs in with PAM or its key) and upgrade the release, which restarts the hub. Or turn sign-in off for a moment (`auth.enabled: false`), which needs no account, fix the settings, and turn it on again. This can happen when the only administrator signs in with a Tailscale link and the Tailscale source stops working or is turned off: the link then counts for nothing until the source works again.
+
 Every change to an account signs it out and cancels its running jobs. The hub waits for the machines before it answers, up to about 11 seconds when a machine is down (8 seconds for the machines, then up to 3 seconds to cancel jobs started with "act as root"). Any ingress, proxy or client timeout in front of the hub must therefore be above 15 seconds. The chart's Mapping has no request timeout; with another ingress, check its own timeout. See [Administrators](security.md#administrators) for what each change ends.
+
+### Tailscale sign-in
+
+A person on your tailnet can sign in with one click and no password, when an administrator has linked their tailnet login (for example `alice@github`), or a tag of their device (for example `tag:server`), to an account. See [Tailscale sign-in](security.md#tailscale-sign-in) for how it works and what it risks. It needs `auth.enabled: true`; the chart refuses to render with `auth.tailscale needs auth.enabled` otherwise. Everything here is off by default.
+
+The hub serves plain HTTP, and sign-in needs HTTPS. So the hub is reached through a proxy that ends TLS, also on the tailnet. Set `hub.trustedProxies: 1` so that the hub reads `X-Forwarded-Proto` from it. You list the proxies that carry tailnet traffic in `auth.tailscale.proxies`. **A listed proxy must carry only tailnet traffic and must overwrite the Tailscale identity headers.** A proxy that also takes public traffic lets anyone sign in as any linked login.
+
+**With a tailscaled sidecar (the socket source).** The chart adds a tailscaled container to the hub pod. It runs in userspace mode, with no added capability and no tun device, and its socket is in a folder that the hub container shares. The chart sets `FILEDECK_TAILSCALE_SOCKET` to it and adds `127.0.0.1/32` and `::1/128` to the listed proxies. With `serve: true` (the default), tailscaled answers HTTPS on port 443 of its device and passes the requests to the hub's port. This source gives logins and tags.
+
+1. Make a Secret with a Tailscale auth key. Use an ephemeral key. Never put the key in Git or in a values file:
+   ```sh
+   kubectl -n filedeck create secret generic tailscale-authkey --from-file=authkey=/path/to/keyfile
+   ```
+2. Set the values. You pick and pin the image: use one that starts tailscaled as the official image does. The image has no default.
+   ```yaml
+   hub:
+     trustedProxies: 1
+     allowedHosts: [files.example, files-tailnet.example.ts.net]
+   auth:
+     enabled: true
+     tailscale:
+       sidecar:
+         enabled: true
+         image: {repository: example/tailscale, tag: "1.0.0"}   # or a digest
+         authKey: {secretName: tailscale-authkey}
+         hostname: files-tailnet
+   ```
+3. Without `stateSecret`, tailscaled keeps its state in an `emptyDir`, so the device is new at each pod start: this is why the key should be ephemeral. To keep the device, make an empty Secret and name it in `stateSecret`. The chart then adds a ServiceAccount, a Role and a RoleBinding for that one Secret, and the service account token reaches only the tailscaled container.
+
+The chart refuses to render with the sidecar on and sign-in off (`auth.tailscale needs auth.enabled`), without `authKey.secretName` (`auth.tailscale.sidecar needs authKey.secretName`) or without an image (`auth.tailscale.sidecar needs image.repository`, and a tag or a digest). With `headers` or `socket` set and no sidecar, `proxies` is needed (`auth.tailscale.headers or socket needs proxies`).
+
+**A public ingress next to it.** When the hub is also reached through a public ingress, the ingress is not a listed proxy and has no tailnet identity, and the sign-in page there shows no Tailscale button. The ingress needs the same hop count as the sidecar (`hub.trustedProxies` is one number for both paths). Use separate host names for the two paths, so that the session cookies stay apart, and list both in `hub.allowedHosts`. The cookie of a Tailscale session, used through the public ingress, gets 401.
+
+**With the Kubernetes operator's ingress (the headers source).** Set `auth.tailscale.headers: true` and put the addresses of the operator's proxy pods in `auth.tailscale.proxies` (an address or a range that holds only those pods). The hub then reads the identity headers from them. This source gives logins only. A tag link does not work there, and a tagged device is refused. Link only logins. The ingress must be the only thing that can reach the hub from the listed addresses, so also set `hub.networkPolicy`.
+
+**First steps.**
+
+1. Sign in as an administrator, open "Accounts…" and link a login or a tag to an account (the editor has a "Tailscale" section). Keep a password or a key on at least one administrator.
+2. Open the hub at the tailnet address of the device (for example `https://files-tailnet.example.ts.net`; the name comes from your tailnet, and `hub.allowedHosts` must list it), not the public one.
+3. The sign-in page shows "Sign in with Tailscale as alice@github". Press the button. Nothing signs in until you do.
+4. A refused sign-in shows "Sign-in failed". The audit log of the hub names the reason.
+
+When tailscaled does not answer, the page shows "Tailscale is not answering, trying again", with "Sign out" and "Try now", and the password and key sign-in still work. If an administrator has only a link, see the recovery path in [First steps after turning sign-in on](#first-steps-after-turning-sign-in-on).
 
 ### Going back to v0.4.x
 

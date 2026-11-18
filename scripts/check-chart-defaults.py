@@ -13,6 +13,8 @@ checks = {
     "no deployment-specific sealed data is embedded": "  sealed: {}" in values,
     "the fanotify watcher (extra capability) is off by default": "  fanotify:\n    enabled: false" in values,
     "the du API token is off by default": "apiToken:\n  secretName: \"\"" in values,
+    "the tailscale sidecar is off by default": "    sidecar:\n      enabled: false" in values,
+    "tailscale headers are off by default": "    headers: false" in values,
     "the default node does not bind to a machine name": '    nodeName: ""' in values,
 }
 failed = [name for name, ok in checks.items() if not ok]

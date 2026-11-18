@@ -61,6 +61,33 @@ auth:
   session: {idleSeconds: 28800, maxSeconds: 604800}
   # Account the `filedeck du` token acts as (FILEDECK_API_TOKEN_ACCOUNT)
   apiTokenAccount: ""
+  # Sign-in with Tailscale (needs auth.enabled; everything here is off by default). Read docs/install.md, "Tailscale sign-in",
+  # before you turn any of it on: a listed proxy must carry only tailnet traffic.
+  tailscale:
+    # FILEDECK_TAILSCALE_HEADERS=on: read the Tailscale Serve identity headers (logins only, no tags). Ignored when a socket is used.
+    headers: false
+    # FILEDECK_TAILSCALE_SOCKET: path of tailscaled's LocalAPI socket (logins and tags). The sidecar below sets it for you.
+    socket: ""
+    # FILEDECK_TAILSCALE_PROXIES: IP addresses and CIDR ranges of proxies that carry only tailnet traffic. With the sidecar on,
+    # 127.0.0.1/32 and ::1/128 are added for you. Needed when `headers` or `socket` is set.
+    proxies: []
+    # for example (the pods of an operator ingress): proxies: ["10.42.0.0/16"]
+    # An optional tailscaled container in the hub pod, in userspace mode (no added capability, no tun device).
+    sidecar:
+      enabled: false
+      # You pick and pin the image (a `digest` wins over `tag`). It must start tailscaled as the official image does (containerboot).
+      image: {repository: "", tag: "", digest: ""}
+      # A Secret you make out of band (never in Git) that holds a Tailscale auth key under `key`. Prefer an ephemeral key.
+      authKey: {secretName: "", key: authkey}
+      # The device name on the tailnet; empty = the pod name
+      hostname: ""
+      # tailscale serve: HTTPS on port 443 of the device to the hub's port (adds the identity headers and X-Forwarded-For)
+      serve: true
+      # Optional Secret (made out of band, may be empty) for tailscaled's state; adds a Role for that one Secret only.
+      # Empty = an emptyDir: the device is new at each pod start, so use an ephemeral auth key.
+      stateSecret: ""
+      extraArgs: []   # added to TS_EXTRA_ARGS (arguments of `tailscale up`)
+      resources: {}
 
 # Optional read-only token for the `filedeck du` CLI (hub). Name an existing Secret (created out of band, never in Git)
 # that holds a long random value under `key`; the hub then lets a request with the header `X-Filedeck-Token: <token>` call only GET /api/du and

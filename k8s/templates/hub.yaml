@@ -1,3 +1,7 @@
+{{- include "filedeck.tailscaleChecks" . }}
+{{- $ts := .Values.auth.tailscale }}
+{{- $sc := $ts.sidecar }}
+{{- $tsOn := and .Values.auth.enabled (or $sc.enabled $ts.headers $ts.socket) }}
 {{- $withSecrets := false }}
 {{- range .Values.sources }}{{ if .secretRef }}{{ $withSecrets = true }}{{ end }}{{ end }}
 apiVersion: apps/v1
@@ -20,13 +24,21 @@ spec:
       labels:
         {{- include "filedeck.labels" . | nindent 8 }}
         app.kubernetes.io/component: hub
-      {{- if .Values.brand.cssContent }}
+      {{- if or .Values.brand.cssContent (and $sc.enabled $sc.serve) }}
       annotations:
+        {{- if .Values.brand.cssContent }}
         checksum/brand-css: {{ .Values.brand.cssContent | sha256sum | quote }}
+        {{- end }}
+        {{- if and $sc.enabled $sc.serve }}
+        checksum/tailscale-serve: {{ include "filedeck.tailscaleServe" . | sha256sum | quote }}
+        {{- end }}
       {{- end }}
     spec:
       terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
+      {{- if and $sc.enabled $sc.stateSecret }}
+      serviceAccountName: {{ include "filedeck.name" . }}-hub-tailscale
+      {{- end }}
       nodeSelector:
         {{- toYaml .Values.hub.nodeSelector | nindent 8 }}
       # A surging hub must run on the old hub's node: the vault is SQLite on a ReadWriteOnce volume that only one node
@@ -80,6 +92,22 @@ spec:
             - name: FILEDECK_BOOTSTRAP_ADMIN_FILE
               value: /var/run/filedeck/bootstrap/{{ .Values.auth.bootstrapAdmin.key }}
             {{- end }}
+            {{- end }}
+            {{- if $tsOn }}
+            # Sign-in with Tailscale (see "Tailscale sign-in" in docs/install.md).
+            {{- if $sc.enabled }}
+            - name: FILEDECK_TAILSCALE_SOCKET
+              value: {{ include "filedeck.tailscaleSocketDir" . }}/tailscaled.sock
+            {{- else if $ts.socket }}
+            - name: FILEDECK_TAILSCALE_SOCKET
+              value: {{ $ts.socket | quote }}
+            {{- end }}
+            {{- if $ts.headers }}
+            - name: FILEDECK_TAILSCALE_HEADERS
+              value: "on"
+            {{- end }}
+            - name: FILEDECK_TAILSCALE_PROXIES
+              value: {{ include "filedeck.tailscaleProxies" . | quote }}
             {{- end }}
             {{- if .Values.hub.trustedProxies }}
             - name: FILEDECK_TRUSTED_PROXIES
@@ -175,6 +203,10 @@ spec:
               mountPath: /var/lib/filedeck-vault
             - name: cache
               mountPath: /var/cache/filedeck
+            {{- if and .Values.auth.enabled $sc.enabled }}
+            - name: tailscale-socket
+              mountPath: {{ include "filedeck.tailscaleSocketDir" . }}
+            {{- end }}
             {{- if and .Values.auth.enabled .Values.auth.bootstrapAdmin.secretName }}
             - name: bootstrap-admin
               mountPath: /var/run/filedeck/bootstrap
@@ -198,7 +230,97 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+        {{- if and .Values.auth.enabled $sc.enabled }}
+        - name: tailscaled
+          image: {{ if $sc.image.digest }}{{ printf "%s@%s" $sc.image.repository $sc.image.digest | quote }}{{ else }}{{ printf "%s:%v" $sc.image.repository $sc.image.tag | quote }}{{ end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # tailscaled in userspace mode: no added capability and no tun device. Its socket is in a folder the hub container shares.
+          env:
+            - name: TS_USERSPACE
+              value: "true"
+            - name: TS_SOCKET
+              value: {{ include "filedeck.tailscaleSocketDir" . }}/tailscaled.sock
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $sc.authKey.secretName }}
+                  key: {{ $sc.authKey.key }}
+            {{- if $sc.stateSecret }}
+            - name: TS_KUBE_SECRET
+              value: {{ $sc.stateSecret | quote }}
+            {{- else }}
+            - name: TS_STATE_DIR
+              value: /var/lib/tailscale
+            {{- end }}
+            {{- with $sc.hostname }}
+            - name: TS_HOSTNAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $sc.serve }}
+            - name: TS_SERVE_CONFIG
+              value: /etc/tailscale-serve/serve.json
+            {{- end }}
+            {{- with $sc.extraArgs }}
+            - name: TS_EXTRA_ARGS
+              value: {{ join " " . | quote }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+            {{- toYaml $sc.resources | nindent 12 }}
+          volumeMounts:
+            - name: tailscale-socket
+              mountPath: {{ include "filedeck.tailscaleSocketDir" . }}
+            {{- if not $sc.stateSecret }}
+            - name: tailscale-state
+              mountPath: /var/lib/tailscale
+            {{- end }}
+            {{- if $sc.serve }}
+            - name: tailscale-serve
+              mountPath: /etc/tailscale-serve
+              readOnly: true
+            {{- end }}
+            {{- if $sc.stateSecret }}
+            # the service account for the one state Secret, in this container only (the pod mounts no token)
+            - name: tailscale-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            {{- end }}
+        {{- end }}
       volumes:
+        {{- if and .Values.auth.enabled $sc.enabled }}
+        - name: tailscale-socket
+          emptyDir: {}
+        {{- if not $sc.stateSecret }}
+        - name: tailscale-state
+          emptyDir: {}
+        {{- end }}
+        {{- if $sc.serve }}
+        - name: tailscale-serve
+          configMap:
+            name: {{ include "filedeck.name" . }}-hub-tailscale
+        {{- end }}
+        {{- if $sc.stateSecret }}
+        - name: tailscale-api
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: ca.crt}]
+              - downwardAPI:
+                  items:
+                    - {path: namespace, fieldRef: {fieldPath: metadata.namespace}}
+        {{- end }}
+        {{- end }}
         - name: vault
           persistentVolumeClaim:
             claimName: {{ include "filedeck.name" . }}-vault
