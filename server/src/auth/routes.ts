@@ -64,9 +64,10 @@ export interface AuthDeps {
   /**
    * Called when a session's act-as-root switch is turned off early (`DELETE /api/auth/as-root`, or signing out while it is on), after
    * the switch is cleared and before the answer goes out: the hub cancels the jobs the account started on the agents under the switch,
-   * which run there as root. It must settle within a few seconds; a rejection is ignored.
+   * which run there as root. `until` is the ended switch's end, which names it: only that switch's jobs are cancelled. It must settle
+   * within a few seconds; a rejection is ignored.
    */
-  onAsRootEnd?: (name: string) => Promise<void>;
+  onAsRootEnd?: (name: string, until: number) => Promise<void>;
 }
 
 /**
@@ -343,14 +344,14 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     return c.json({ asRootUntil: until, asRootLeftMs: AS_ROOT_MS });
   });
 
-  /** The system account whose act-as-root switch the session of `raw` holds now, or undefined. */
-  const asRootOf = (raw: string): string | undefined => {
+  /** The system account whose act-as-root switch the session of `raw` holds now, and that switch's end; or undefined. */
+  const asRootOf = (raw: string): { name: string; until: number } | undefined => {
     const s = sessions.lookup(raw);
-    return s?.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() ? s.name : undefined;
+    return s?.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() ? { name: s.name, until: s.asRootUntil } : undefined;
   };
-  /** The switch of `name` was turned off early: its root jobs on the agents are cancelled (a failure is only logged by the hub). */
-  const rootEnded = async (name: string | undefined) => {
-    if (name !== undefined && deps.onAsRootEnd) await deps.onAsRootEnd(name).catch(() => undefined);
+  /** The switch was turned off early: its root jobs on the agents are cancelled (a failure is only logged by the hub). */
+  const rootEnded = async (was: { name: string; until: number } | undefined) => {
+    if (was !== undefined && deps.onAsRootEnd) await deps.onAsRootEnd(was.name, was.until).catch(() => undefined);
   };
 
   app.delete("/api/auth/as-root", async (c) => {
@@ -364,7 +365,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
 
   app.post("/api/auth/logout", async (c) => {
     const raw = getCookie(c, COOKIE);
-    let was: string | undefined;
+    let was: { name: string; until: number } | undefined;
     if (raw) {
       was = asRootOf(raw);
       sessions.destroy(raw);

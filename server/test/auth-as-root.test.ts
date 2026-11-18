@@ -594,13 +594,15 @@ test("hub: switching off, or signing out, cancels the admin's live root jobs on 
     seenCalls.push({ path: c.req.path, method: c.req.method, claim: v ? verifyClaim(v, T, Date.now()) : null });
     await next();
   });
-  const until = Date.now() + 60_000;
+  // (the jobs carry the end of the switch being ended, which the test learns when it turns the switch on; one of an older switch is left)
+  let until = 0;
   fake.get("/api/jobs", (c) =>
     c.json({
       jobs: [
         { id: "root-running", state: "running", asRootUntil: until },
         { id: "root-queued", state: "queued", asRootUntil: until },
         { id: "root-done", state: "done", asRootUntil: until },
+        { id: "root-other-switch", state: "running", asRootUntil: until - 1 },
         { id: "plain-running", state: "running" },
       ],
     }),
@@ -626,7 +628,9 @@ test("hub: switching off, or signing out, cancels the admin's live root jobs on 
     seenCalls.length = 0;
     assert.equal((await call(h, "/api/auth/as-root", alice, { method: "DELETE" })).status, 200);
     assert.equal(seenCalls.filter((x) => x.path.startsWith("/api/jobs")).length, 0);
-    assert.equal((await postJson(h, "/api/auth/as-root", alice, { password: RIGHT })).status, 200);
+    const onAnswer = await postJson(h, "/api/auth/as-root", alice, { password: RIGHT });
+    assert.equal(onAnswer.status, 200);
+    until = ((await onAnswer.json()) as { asRootUntil: number }).asRootUntil;
     seenCalls.length = 0;
     const r = end === "off" ? await call(h, "/api/auth/as-root", alice, { method: "DELETE" }) : await call(h, "/api/auth/logout", alice, { method: "POST" });
     assert.equal(r.status, 200, end);
@@ -648,7 +652,6 @@ test("hub: switching off waits for root calls still in flight before it lists th
   let holdUntilListed = false;
   let compressSeen = 0;
   const fake = new Hono();
-  const until = Date.now() + 60_000;
   fake.get("/api/jobs", (c) => {
     const body = { jobs: jobsList.map((j) => ({ ...j })) };
     queueMicrotask(() => listsAnswered++);
@@ -662,8 +665,9 @@ test("hub: switching off waits for root calls still in flight before it lists th
       for (let i = 0; i < 600 && listsAnswered === seen; i++) await new Promise((r) => setTimeout(r, 10)); // (at most 6 s)
     } else await new Promise((r) => setTimeout(r, 200));
     const id = holdUntilListed ? "root-late" : "root-quick";
-    jobsList.push({ id, state: "running", asRootUntil: until });
-    return c.json({ id, state: "running", asRootUntil: until }, 202);
+    const claimUntil = verifyClaim(c.req.header(USER_HEADER) ?? "", T, Date.now())?.asRootUntil;
+    jobsList.push({ id, state: "running", asRootUntil: claimUntil });
+    return c.json({ id, state: "running", asRootUntil: claimUntil }, 202);
   });
   fake.post("/api/jobs/:id/cancel", (c) => {
     cancelled.push(c.req.param("id"));
@@ -710,4 +714,128 @@ test("hub: switching off waits for root calls still in flight before it lists th
   assert.equal((await late.done).status, 202);
   for (let i = 0; i < 300 && !cancelled.includes("root-late"); i++) await new Promise((r) => setTimeout(r, 10));
   assert.ok(cancelled.includes("root-late"), JSON.stringify(cancelled));
+});
+
+/**
+ * A fake agent for the switch-identity tests: `POST /api/jobs/compress` makes a running job that carries the claim's `asRootUntil` (as
+ * the real agent's job view does), and is held while `hold` says so until the test releases it.
+ */
+async function switchAgent() {
+  const { Hono } = await import("hono");
+  const st = {
+    jobs: [] as { id: string; state: string; asRootUntil?: number }[],
+    cancelled: [] as string[],
+    seen: 0,
+    holdNext: false,
+    releases: [] as (() => void)[],
+  };
+  const fake = new Hono();
+  fake.get("/api/jobs", (c) => c.json({ jobs: st.jobs.map((j) => ({ ...j })) }));
+  fake.post("/api/jobs/compress", async (c) => {
+    const claim = verifyClaim(c.req.header(USER_HEADER) ?? "", T, Date.now());
+    const { id } = (await c.req.json()) as { id: string };
+    st.seen++;
+    if (st.holdNext) {
+      st.holdNext = false;
+      await new Promise<void>((r) => st.releases.push(r));
+    }
+    st.jobs.push({ id, state: "running", ...(claim?.asRootUntil !== undefined ? { asRootUntil: claim.asRootUntil } : {}) });
+    return c.json({ id, state: "running" }, 202);
+  });
+  fake.post("/api/jobs/:id/cancel", (c) => {
+    st.cancelled.push(c.req.param("id"));
+    const j = st.jobs.find((x) => x.id === c.req.param("id"));
+    if (j) j.state = "canceled";
+    return c.json({ id: c.req.param("id"), state: "canceled" });
+  });
+  fake.all("*", (c) => c.json({}));
+  const srv = await new Promise<Server>((res) => {
+    const s: Server = serve({ fetch: fake.fetch, port: 0 }, () => res(s));
+  });
+  servers.push(srv);
+  return { st, url: `http://127.0.0.1:${(srv.address() as AddressInfo).port}` };
+}
+
+test("hub: the late relist after Stop belongs to the ended switch; a new switch's jobs and calls are never touched by it", async () => {
+  const { st, url } = await switchAgent();
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `F=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-switch.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-switch") } as never),
+    undefined,
+    () => {},
+    { system: fakeSystem([]) },
+  );
+  closers.push(h);
+  const start = async (cookie: string, id: string, hold = false) => {
+    const before = st.seen;
+    st.holdNext = hold;
+    const p = postJson(h, "/api/nodes/F/api/jobs/compress", cookie, { id, dir: "/", names: ["x"], format: "zip" });
+    while (st.seen === before) await new Promise((r) => setTimeout(r, 5));
+    return { done: p };
+  };
+  const on = async (cookie: string) => assert.equal((await postJson(h, "/api/auth/as-root", cookie, { password: RIGHT })).status, 200);
+  const off = async (cookie: string) => {
+    const t0 = Date.now();
+    assert.equal((await call(h, "/api/auth/as-root", cookie, { method: "DELETE" })).status, 200);
+    return Date.now() - t0;
+  };
+
+  const a = sysCookie(h, "alice");
+  await on(a);
+  const s1 = await start(a, "s1-job", true); // held past Stop
+  const waited = await off(a);
+  assert.ok(waited >= 1_800 && waited < 4_000, `Stop waited ${waited} ms for the call in flight`);
+  await new Promise((r) => setTimeout(r, 5));
+  await on(a); // a new switch, with its own end
+  const s2 = await start(a, "s2-job");
+  assert.equal((await s2.done).status, 202);
+  st.releases.shift()!(); // the old switch's call settles now: its relist runs
+  assert.equal((await s1.done).status, 202);
+  for (let i = 0; i < 300 && !st.cancelled.includes("s1-job"); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(st.cancelled.includes("s1-job"), `the old switch's job is cancelled: ${JSON.stringify(st.cancelled)}`);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(!st.cancelled.includes("s2-job"), "the new switch's job is left alone");
+
+  // a call in flight under another switch of the same account (another session) does not hold this Stop
+  const b = sysCookie(h, "alice");
+  await on(b);
+  const s3 = await start(b, "s3-job", true);
+  const quick = await off(a);
+  assert.ok(quick < 1_500, `Stop of the first session waited ${quick} ms for the other switch's call`);
+  assert.ok(st.cancelled.includes("s2-job"), "the ended switch's own job is cancelled at once");
+  st.releases.shift()!();
+  assert.equal((await s3.done).status, 202);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(!st.cancelled.includes("s3-job"), "the other switch's job is left alone");
+  await off(b);
+  assert.ok(st.cancelled.includes("s3-job"));
+});
+
+test("hub: a late relist due after the hub has closed does nothing, and rejects nothing", async () => {
+  const { st, url } = await switchAgent();
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `F=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-closed.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-closed") } as never),
+    undefined,
+    () => {},
+    { system: fakeSystem([]) },
+  );
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => void unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const a = sysCookie(h, "alice");
+    assert.equal((await postJson(h, "/api/auth/as-root", a, { password: RIGHT })).status, 200);
+    st.holdNext = true;
+    const p = postJson(h, "/api/nodes/F/api/jobs/compress", a, { id: "c-job", dir: "/", names: ["x"], format: "zip" });
+    while (st.seen === 0) await new Promise((r) => setTimeout(r, 5));
+    assert.equal((await call(h, "/api/auth/as-root", a, { method: "DELETE" })).status, 200);
+    await h.close();
+    const listed = st.cancelled.length;
+    st.releases.shift()!();
+    await Promise.resolve(p).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(unhandled, []);
+    assert.equal(st.cancelled.length, listed, "no relist after close");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });

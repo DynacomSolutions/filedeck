@@ -84,3 +84,24 @@ test("the end is kept in the stored params: a job adopted after a restart is can
   await sleep(250);
   assert.equal(b.get(v.id)?.state, "canceled");
 });
+
+test("the switch's own end (the hub's clock) names the job in its view and its params; the local end only times the cancel", async () => {
+  const f = path.join(tmp, "jobs-switch.db");
+  const mk = (rebuild?: Record<string, (p: unknown) => Promise<{ run: (ctl: { signal: AbortSignal }) => Promise<unknown> }>>) =>
+    new Jobs(2, 100, undefined, undefined, { store: new JobStore(f), scope: "n", leaseMs: 50, tickMs: 3_600_000, rebuild });
+  const a = mk();
+  const until = Date.now() + 250;
+  const rootSwitch = 1_700_000_123_456;
+  const v = a.create("compress", "root job", hang, undefined, undefined, { params: { dir: "/" }, owner: "sys:alice", until, rootSwitch });
+  assert.equal(v.asRootUntil, rootSwitch);
+  const seen: unknown[] = [];
+  const b = mk({ compress: async (p) => (seen.push(p), { run: hang }) });
+  await sleep(70);
+  b.tick();
+  await sleep(30);
+  assert.deepEqual([(seen[0] as { asRootEndsAt?: number }).asRootEndsAt, (seen[0] as { asRootUntil?: number }).asRootUntil], [until, rootSwitch]);
+  assert.equal(b.get(v.id)?.asRootUntil, rootSwitch);
+  assert.equal(b.get(v.id)?.state, "running");
+  await sleep(250);
+  assert.equal(b.get(v.id)?.state, "canceled");
+});

@@ -77,24 +77,30 @@ const ROOT_CALLS_WAIT_MS = 2_000;
 /** How long, after the answer, it still waits for such calls before it lists the jobs once more; the agents' own end covers the rest. */
 const ROOT_CALLS_LATE_MS = 5 * 60_000;
 
-/** The agent calls made under act as root that have not settled yet (no answer head, no error), per account. */
+/**
+ * The agent calls made under act as root that have not settled yet (no answer head, no error), per switch: the account and the
+ * switch's own end (`asRootUntil`, unique per switch), so a new switch's calls never hold or start the relist of one that ended.
+ */
 class RootCalls {
   private readonly open = new Map<string, { n: number; idle: (() => void)[] }>();
-  track(name: string, p: Promise<unknown>): void {
-    let e = this.open.get(name);
-    if (!e) this.open.set(name, (e = { n: 0, idle: [] }));
+  static key(name: string, until: number): string {
+    return `${name}\n${until}`;
+  }
+  track(key: string, p: Promise<unknown>): void {
+    let e = this.open.get(key);
+    if (!e) this.open.set(key, (e = { n: 0, idle: [] }));
     const entry = e;
     entry.n++;
     const done = () => {
       if (--entry.n > 0) return;
-      this.open.delete(name);
+      this.open.delete(key);
       for (const f of entry.idle.splice(0)) f();
     };
     p.then(done, done);
   }
-  /** Resolves true once none of `name`'s calls is in flight, or false when `ms` pass first. */
-  settled(name: string, ms: number): Promise<boolean> {
-    const e = this.open.get(name);
+  /** Resolves true once none of the calls under `key` (`RootCalls.key`) is in flight, or false when `ms` pass first. */
+  settled(key: string, ms: number): Promise<boolean> {
+    const e = this.open.get(key);
     if (!e) return Promise.resolve(true);
     return new Promise((resolve) => {
       const go = () => {
@@ -190,16 +196,23 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
    * line). Calls still in flight then do not hold the answer: once they settle, the jobs are listed and cancelled once more.
    */
   const rootCalls = new RootCalls();
-  const endRootJobs = async (name: string): Promise<void> => {
+  const endRootJobs = async (name: string, until: number): Promise<void> => {
     if (!auth) return;
     const t0 = Date.now();
     // a call made under the switch may still be starting a job (the switch is off now, so no new one starts): wait for it first
-    const settled = await rootCalls.settled(name, ROOT_CALLS_WAIT_MS);
-    await cancelRootJobs(name, Math.max(500, END_ROOT_JOBS_MS - (Date.now() - t0)));
-    // still in flight: the answer does not wait any longer, but the jobs are listed again once those calls have settled
-    if (!settled) void rootCalls.settled(name, ROOT_CALLS_LATE_MS).then(() => cancelRootJobs(name, END_ROOT_JOBS_MS));
+    const key = RootCalls.key(name, until);
+    const settled = await rootCalls.settled(key, ROOT_CALLS_WAIT_MS);
+    await cancelRootJobs(name, until, Math.max(500, END_ROOT_JOBS_MS - (Date.now() - t0)));
+    // still in flight: the answer does not wait any longer, but the jobs are listed again once those calls have settled (not when they
+    // are still in flight at the late limit, nor after the hub has closed: the agents' own end covers those)
+    if (!settled)
+      void rootCalls
+        .settled(key, ROOT_CALLS_LATE_MS)
+        .then((late) => (late && !closed ? cancelRootJobs(name, until, END_ROOT_JOBS_MS) : undefined))
+        .catch(() => undefined);
   };
-  const cancelRootJobs = async (name: string, ms: number): Promise<void> => {
+  /** Cancels the live jobs of `name` started under the switch that ended at `until` (their `asRootUntil` is that very value). */
+  const cancelRootJobs = async (name: string, until: number, ms: number): Promise<void> => {
     if (!auth) return;
     const id: Identity = { kind: "sys", name, admin: cfg.admins.includes(name), epoch: auth.accounts.epochOf("sys", name) };
     const signal = AbortSignal.timeout(ms);
@@ -215,7 +228,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
             const v = (await r.json()) as { jobs?: unknown };
             const live = (Array.isArray(v?.jobs) ? v.jobs : []).filter(
               (j): j is { id: string } =>
-                !!j && typeof j === "object" && typeof j.id === "string" && typeof j.asRootUntil === "number" && (j.state === "queued" || j.state === "running"),
+                !!j && typeof j === "object" && typeof j.id === "string" && j.asRootUntil === until && (j.state === "queued" || j.state === "running"),
             );
             await Promise.all(
               live.map(async (j) => {
@@ -235,7 +248,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;
   let opq: OpQueue | undefined;
+  let closed = false;
   app.close = async () => {
+    closed = true;
     app.streams?.close();
     await opq?.interrupt(); // stop at an item boundary and hand the running jobs over
     vault.close();
@@ -265,7 +280,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const p = agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk));
     // (a call under act as root is counted until it settles, so switching off can wait for a job that is still being started)
     const id = currentUser();
-    if (id?.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id)) rootCalls.track(id.name, p);
+    if (id?.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id)) rootCalls.track(RootCalls.key(id.name, id.asRootUntil), p);
     return p;
   };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));

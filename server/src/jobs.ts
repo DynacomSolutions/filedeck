@@ -31,8 +31,9 @@ export interface JobView {
   /** CLI du jobs: when a client last waited on or polled the job (see Jobs.abandonMs) */
   seenAt?: number;
   /**
-   * A job started under act as root (agent, sign-in on): when the switch ends, by this process's clock. The job is canceled then; the hub
-   * also looks for it when the switch is turned off early, to cancel it at once.
+   * A job started under act as root (agent, sign-in on): the switch's end as the hub gave it (by the hub's clock). It names the switch:
+   * when that switch is turned off early, the hub cancels the jobs that carry this very value, and no other. The job is also canceled
+   * at the switch's end by this process's own clock (`Jobs.create`'s `until`).
    */
   asRootUntil?: number;
   /** queued jobs only: what is ahead of this one (with sign-in on, another account's job is only its state: agent-jobs.ts) */
@@ -95,9 +96,9 @@ const rowOwner = (r: JobRow): string | undefined => {
     return undefined;
   }
 };
-/** The act-as-root end kept in a job's stored params (see `Jobs.create`). */
-const untilIn = (params: unknown): number | undefined => {
-  const u = params && typeof params === "object" ? (params as { asRootUntil?: unknown }).asRootUntil : undefined;
+/** The act-as-root ends kept in a job's stored params (see `Jobs.create`). */
+const numberIn = (params: unknown, key: "asRootEndsAt" | "asRootUntil"): number | undefined => {
+  const u = params && typeof params === "object" ? (params as Record<string, unknown>)[key] : undefined;
   return typeof u === "number" && Number.isFinite(u) ? u : undefined;
 };
 /** setTimeout's longest delay */
@@ -194,18 +195,20 @@ export class Jobs {
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
    * `owner` (sign-in on: `<kind>:<name>` of the account) is kept in the stored params as `owner`, so the shared store and a process that
    * adopts the job keep it; an adopted job takes it from there. A job without params keeps it in this process only.
-   * `until` (a job started under act as root): the job is canceled at that time, queued or running, and the time is kept in the stored
-   * params as `asRootUntil` in the same way, so an adopted job is canceled at the same time. It shows in the view as `asRootUntil`.
+   * `until` (a job started under act as root): the job is canceled at that time (this process's clock), queued or running; `rootSwitch`
+   * is the switch's end as the hub gave it, which names the switch (the view's `asRootUntil`; `until` when not given). Both are kept in
+   * the stored params (`asRootEndsAt`, `asRootUntil`) in the same way as `owner`, so an adopted job is canceled at the same time.
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string; until?: number }): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string; until?: number; rootSwitch?: number }): JobView {
     const owner = meta?.owner ?? ownerIn(meta?.params);
-    const until = meta?.until ?? untilIn(meta?.params);
-    const extra = { ...(owner !== undefined ? { owner } : {}), ...(until !== undefined ? { asRootUntil: until } : {}) };
+    const until = meta?.until ?? numberIn(meta?.params, "asRootEndsAt") ?? numberIn(meta?.params, "asRootUntil");
+    const rootSwitch = until === undefined ? undefined : (meta?.rootSwitch ?? numberIn(meta?.params, "asRootUntil") ?? until);
+    const extra = { ...(owner !== undefined ? { owner } : {}), ...(until !== undefined ? { asRootEndsAt: until, asRootUntil: rootSwitch } : {}) };
     const params = meta?.params !== undefined && Object.keys(extra).length > 0 && typeof meta.params === "object" && meta.params !== null ? { ...meta.params, ...extra } : meta?.params;
     const job: Job = {
       id: meta?.id ?? randomUUID(),
       ...(owner !== undefined ? { owner } : {}),
-      ...(until !== undefined ? { asRootUntil: until } : {}),
+      ...(rootSwitch !== undefined ? { asRootUntil: rootSwitch } : {}),
       params: params === undefined ? null : JSON.stringify(params),
       kind,
       title,

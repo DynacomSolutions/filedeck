@@ -19,9 +19,13 @@ export const requestRootEnd = (c: Context): number | undefined => {
   if (u?.asRoot !== true || typeof u.asRootUntil !== "number" || typeof u.iat !== "number") return undefined;
   return Date.now() + Math.max(0, u.asRootUntil - u.iat);
 };
-/** The job meta of a request: its owner and, under act as root, its end. */
-export const requestJobMeta = (c: Context): { owner?: string; until?: number } => {
+/**
+ * The job meta of a request: its owner and, under act as root, its end by this process's clock (`until`) and the switch's end as the hub
+ * gave it (`rootSwitch`), which names the switch.
+ */
+export const requestJobMeta = (c: Context): { owner?: string; until?: number; rootSwitch?: number } => {
   const owner = requestOwner(c);
   const until = requestRootEnd(c);
-  return { ...(owner !== undefined ? { owner } : {}), ...(until !== undefined ? { until } : {}) };
+  const rootSwitch = until === undefined ? undefined : (c.get("user") as { asRootUntil?: number }).asRootUntil;
+  return { ...(owner !== undefined ? { owner } : {}), ...(until !== undefined ? { until, rootSwitch } : {}) };
 };
