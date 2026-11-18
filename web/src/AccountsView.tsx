@@ -4,10 +4,13 @@ import { Tip } from "./Tooltip";
 import { Modal } from "./ArchiveDialog";
 import { useDialogFocus } from "./dialogFocus";
 import { AccountEditor } from "./AccountEditor";
-import { deleteAccount, listAccounts, overview, type AccountView, type Overview } from "./admin";
+import { SessionsTab, ConfirmDialog } from "./SessionsTab";
+import { SystemUsersTab } from "./SystemUsersTab";
+import { deleteAccount, forgetUnownedPasswords, listAccounts, overview, type AccountView, type Overview } from "./admin";
 import type { Account } from "./auth";
 import "./archive.css";
 import "./accounts.css";
+import "./sessions.css";
 
 type Tab = "accounts" | "sessions" | "system";
 const TABS: { id: Tab; label: string; Icon: Ic.LucideIcon }[] = [
@@ -18,7 +21,8 @@ const TABS: { id: Tab; label: string; Icon: Ic.LucideIcon }[] = [
 
 /**
  * The Accounts view for administrators (overlay like Settings): the virtual accounts, who is signed in and the system users the hub
- * knows of. Every name and path is shown as text in <bdi>, never as HTML.
+ * knows of. Every name, path and address is shown as text in <bdi>, never as HTML. The tabs are a tablist: arrow keys, Home and End move
+ * between them. The Accounts tab stays mounted (hidden) while another is shown, so an open editor keeps what was typed.
  */
 export function AccountsView({ account, onClose }: { account: Account; onClose: () => void }) {
   const root = useRef<HTMLDivElement>(null);
@@ -33,6 +37,11 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
   /** the editor: a new account, or the account being edited */
   const [editing, setEditing] = useState<{ v?: AccountView } | null>(null);
   const [deleting, setDeleting] = useState<AccountView | null>(null);
+  /** the "Forget them" confirm for the saved passwords from before sign-in was on */
+  const [forgetting, setForgetting] = useState(false);
+  const panel = useRef<HTMLDivElement>(null);
+  /** a tab was opened by click or Enter (not an arrow key): focus then goes to the panel's heading */
+  const opened = useRef(false);
   /** a change is with the hub: the editor is disabled, and Close and Escape wait */
   const [busy, setBusy] = useState(false);
   /** the editor's own close, which asks first when there are unsaved changes */
@@ -53,6 +62,12 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
     if (wasEditing.current && !editing) listHeading.current?.focus({ preventScroll: true });
     wasEditing.current = editing !== null;
   }, [editing]);
+  useEffect(() => {
+    if (!opened.current) return;
+    opened.current = false;
+    // the visible heading: the Accounts panel is hidden while another tab shows
+    [...(panel.current?.querySelectorAll<HTMLElement>("h2") ?? [])].find((h) => h.getClientRects().length > 0)?.focus({ preventScroll: true });
+  }, [tab]);
   /** Back to the list from the editor; the list is read again, since keys may have changed meanwhile. */
   const closeEditor = () => {
     setEditing(null);
@@ -84,7 +99,7 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
         // a dialog on top of this one (the folder picker, a confirmation) handles its own Escape
         if ((e.target as Element | null)?.closest('[role="dialog"]') !== root.current) return;
         if (busy) return;
-        if (editing) editorClose.current?.();
+        if (editing && tab === "accounts") editorClose.current?.();
         else onClose();
       }}
     >
@@ -104,18 +119,19 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
             aria-controls={`${uid}-panel`}
             tabIndex={tab === t.id ? 0 : -1}
             className={tab === t.id ? "on" : ""}
-            onClick={() => setTab(t.id)}
+            onClick={() => ((opened.current = true), setTab(t.id))}
           >
             <t.Icon aria-hidden="true" /> {t.label}
           </button>
         ))}
       </div>
-      <div className="ed-body set-body acc-body" id={`${uid}-panel`} role="tabpanel" aria-labelledby={`${uid}-tab-${tab}`}>
+      <div className="ed-body set-body acc-body" id={`${uid}-panel`} ref={panel} role="tabpanel" aria-labelledby={`${uid}-tab-${tab}`}>
+        {tab === "sessions" && <SessionsTab account={account} />}
+        {tab === "system" && <SystemUsersTab account={account} />}
+        <div hidden={tab !== "accounts"}>
         {/* above the list and the editor alike: "created" shows while the new account's editor is open */}
-        <div className="acc-status" role="status">{tab === "accounts" ? status : ""}</div>
-        {tab !== "accounts" ? (
-          <p className="muted">This list is not available yet.</p>
-        ) : editing && data ? (
+        <div className="acc-status" role="status">{status}</div>
+        {editing && data ? (
           <AccountEditor
             key={editing.v?.name ?? ""}
             existing={editing.v}
@@ -140,6 +156,17 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
           <section className="set-sec acc-list" aria-labelledby={`${uid}-list`}>
             <h2 id={`${uid}-list`} ref={listHeading} tabIndex={-1}>Virtual accounts</h2>
             <p className="muted">Accounts that exist only in Filedeck. Each one acts as a system user on the machines it may use, and sees only the folders given to it.</p>
+            {data && data.overview.unownedPasswords > 0 && (
+              <section className="acc-warn acc-notice" aria-label="Old saved passwords">
+                <Ic.KeyRound aria-hidden="true" />
+                <span className="acc-notice-text">
+                  {data.overview.unownedPasswords === 1
+                    ? "1 saved password from before sign-in was on is kept but not used."
+                    : `${data.overview.unownedPasswords} saved passwords from before sign-in was on are kept but not used.`}
+                </span>
+                <button type="button" onClick={() => (setStatus(""), setForgetting(true))}><Ic.Trash2 aria-hidden="true" /> Forget them</button>
+              </section>
+            )}
             <div className="vault-bar">
               <button type="button" className="primary" disabled={!data} onClick={() => (setStatus(""), setEditing({}))}><Ic.UserPlus aria-hidden="true" /> New account</button>
               <Tip label="Reload the list"><button type="button" onClick={load}><Ic.RefreshCw aria-hidden="true" /> Refresh</button></Tip>
@@ -192,7 +219,22 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
             </div>
           </section>
         )}
+        </div>
       </div>
+      {forgetting && data && (
+        <ForgetPasswords
+          count={data.overview.unownedPasswords}
+          onClose={() => setForgetting(false)}
+          onForgotten={(n) => {
+            setForgetting(false);
+            // the notice goes at once; focus goes to the list's heading, since the button that opened the confirm is gone
+            setData((d) => d && { ...d, overview: { ...d.overview, unownedPasswords: 0 } });
+            setStatus(`${n} saved ${n === 1 ? "password" : "passwords"} forgotten.`);
+            requestAnimationFrame(() => listHeading.current?.focus({ preventScroll: true }));
+            load();
+          }}
+        />
+      )}
       {deleting && (
         <DeleteAccount
           v={deleting}
@@ -245,5 +287,31 @@ function DeleteAccount({ v, self, onClose, onDeleted }: { v: AccountView; self: 
         </button>
       </div>
     </Modal>
+  );
+}
+
+/** Asks before forgetting the passwords saved while sign-in was off (nobody can use them now), and forgets them. */
+function ForgetPasswords({ count, onClose, onForgotten }: { count: number; onClose: () => void; onForgotten: (removed: number) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const sending = useRef(false);
+  const go = async () => {
+    if (sending.current) return;
+    sending.current = true;
+    setBusy(true);
+    setErr("");
+    try {
+      onForgotten(await forgetUnownedPasswords());
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+  };
+  return (
+    <ConfirmDialog title="Forget saved passwords" confirm="Forget them" busy={busy} error={err} onClose={onClose} onConfirm={() => void go()}>
+      Forget {count === 1 ? "the 1 saved password" : `the ${count} saved passwords`} from before sign-in was on? Nobody can use {count === 1 ? "it" : "them"} now, and this cannot be undone.
+    </ConfirmDialog>
   );
 }

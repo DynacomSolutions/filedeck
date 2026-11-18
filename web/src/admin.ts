@@ -120,3 +120,24 @@ export async function endAccountSessions(kind: "sys" | "virt", name: string): Pr
 export async function forgetUnownedPasswords(): Promise<number> {
   return (await answer<{ removed: number }>(() => fetch("/api/admin/vault/unowned", { method: "DELETE", ...same }))).removed;
 }
+
+/** The client's twin of the hub's system user name check (never root); the hub checks again and its text is what is shown. "" when fine. */
+export function systemUserProblem(raw: string): string {
+  const name = raw.trim();
+  if (name === "") return "Give the system user's name.";
+  if (name === "root") return "root cannot be given sources here.";
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,63}$/.test(name)) return "This is not a valid system user name.";
+  return "";
+}
+
+/** The sessions of each account together, accounts in the order they first appear (the hub lists the most recently used first). */
+export function sessionsByAccount(list: SessionInfo[]): { kind: "sys" | "virt"; name: string; sessions: SessionInfo[] }[] {
+  const groups = new Map<string, { kind: "sys" | "virt"; name: string; sessions: SessionInfo[] }>();
+  for (const s of list) {
+    const key = `${s.kind}:${s.name}`;
+    const g = groups.get(key) ?? { kind: s.kind, name: s.name, sessions: [] };
+    g.sessions.push(s);
+    groups.set(key, g);
+  }
+  return [...groups.values()];
+}

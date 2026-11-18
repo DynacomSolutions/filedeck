@@ -1,0 +1,27 @@
+/* Signed in and System users tabs, and the notice about old saved passwords */
+.sess-list{max-width:64rem}
+.sess-table{table-layout:auto;min-width:46rem;width:100%}
+.sess-table td,.sess-table th{white-space:nowrap}
+.sess-table td.sess-addr{overflow:hidden;text-overflow:ellipsis;max-width:14rem}
+.sess-table th.sess-group{text-align:left;background:var(--surface-2);font-weight:600}
+.sess-group-in{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem .8rem;white-space:normal}
+.sess-group-in .pill{margin-left:.1rem}
+.sess-group-in .sess-spacer{flex:1}
+.sess-table .sess-c-act{text-align:right;width:6rem}
+.sess-table .pill+.pill{margin-left:.3rem}
+.sys-table{table-layout:auto;min-width:40rem;width:100%}
+.sys-table td,.sys-table th{white-space:nowrap}
+.sys-table td.sys-c-name{color:var(--fg);font-weight:600}
+.sys-table td.sys-c-src{white-space:normal;overflow-wrap:anywhere}
+.sys-table .sys-c-num{text-align:right}
+.sys-table .sys-c-act{text-align:right;width:9rem}
+.sys-add{display:flex;flex-direction:column;gap:.5rem;max-width:30rem}
+.sys-add label{font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.sys-add input{width:100%;min-width:0;color:var(--fg);border:0;border-radius:var(--radius-btn);background:var(--surface-2);box-shadow:var(--shadow-1);padding:.4rem .6rem;font:inherit;font-size:.88rem}
+.sys-add .sys-row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.sys-editor{display:flex;flex-direction:column;gap:1.2rem;max-width:42rem}
+.sys-editor .acc-title{margin:0}
+.sess-view h2:focus{outline:none}.sess-view h2:focus-visible{outline:2px solid var(--focus-ring,var(--accent));outline-offset:2px}
+.acc-notice{max-width:64rem;align-items:center;flex-wrap:wrap}
+.acc-notice .acc-notice-text{flex:1 1 14rem;min-width:0}
+.acc-notice button{margin-left:auto}

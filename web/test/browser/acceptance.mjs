@@ -129,8 +129,25 @@ async function installFixture(page, opts = {}) {
       const a = opts.adminApi;
       const guest = { name: 'fixture-guest', admin: false, hasPassword: true, keys: [{ fingerprint: 'SHA256:fixture', type: 'ssh-ed25519', comment: 'fixture laptop' }], nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: true }, { path: '/', write: false }] }, 'fixture-retired': { runAs: 'fixture-run', grants: [{ path: '/old', write: false }] } }, sources: { 'fixture-s3': { write: false }, 'fixture-gone': { write: true } }, sessions: 1 };
       const self = { name: 'fixture-admin', admin: true, hasPassword: true, keys: [], nodes: {}, sources: {}, sessions: 1 };
-      if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: 0 });
-      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : [])], system: [] });
+      // sessions: the caller's own and fixture-guest's; ended / endedAll / puts / forgot keep what the page sent
+      a.sessions ??= [
+        { id: 'aa11aa11', kind: 'virt', name: 'fixture-admin', created: Date.now() - 7_200_000, lastUsed: Date.now() - 60_000, address: '203.0.113.7', current: true },
+        { id: 'bb22bb22', kind: 'virt', name: 'fixture-guest', created: Date.now() - 86_400_000, lastUsed: Date.now() - 3_600_000, address: '198.51.100.9', asRootUntil: undefined },
+      ];
+      a.unowned ??= 2;
+      a.ended ??= []; a.endedAll ??= []; a.puts ??= []; a.forgot ??= 0; a.sessionCalls ??= 0;
+      if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: a.unowned });
+      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : [])], system: [{ name: 'fixture-root', admin: true, sources: {}, sessions: 0 }, ...(a.puts.length ? [{ name: 'alice', admin: false, sources: a.puts.at(-1).sources, sessions: 0 }] : [])] });
+      if (pathname === '/api/admin/sessions' && req.method() === 'GET') { a.sessionCalls++; return json({ sessions: a.sessions }); }
+      if (pathname.startsWith('/api/admin/sessions/') && req.method() === 'DELETE') {
+        const id = pathname.split('/').pop();
+        a.ended.push(id);
+        a.sessions = a.sessions.filter((x) => x.id !== id);
+        return json({ ok: true });
+      }
+      if (pathname === '/api/admin/end-sessions' && req.method() === 'POST') { a.endedAll.push(req.postDataJSON()); return json({ ok: true }); }
+      if (pathname === '/api/admin/vault/unowned' && req.method() === 'DELETE') { a.forgot++; const removed = a.unowned; a.unowned = 0; return json({ removed }); }
+      if (pathname === '/api/admin/system/alice/sources' && req.method() === 'PUT') { const b = req.postDataJSON(); a.puts.push(b); return json({ name: 'alice', admin: false, sources: b.sources, sessions: 0 }); }
       if (pathname === '/api/admin/accounts' && req.method() === 'POST') {
         const b = req.postDataJSON();
         a.posts.push(b);
@@ -256,7 +273,7 @@ let currentCheck = 'check';
 let pendingShots = [];
 
 // clockOffsetMs: the page's Date runs that far ahead of the fake hub's clock (timers are untouched).
-async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {}, clockOffsetMs = 0 } = {}) {
+async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {}, clockOffsetMs = 0, fakeClock = false } = {}) {
   // bypassCSP only lets the harness inject axe-core into the page; the app's own scripts are unaffected.
   const context = await browser.newContext({ viewport, colorScheme, bypassCSP: true });
   const page = await context.newPage();
@@ -286,6 +303,8 @@ async function openPage(browser, { viewport = { width: 1365, height: 900 }, colo
       };
     }, clockOffsetMs);
   }
+  // fakeClock: timers run in real time until a check moves them on with page.clock.fastForward
+  if (fakeClock) await context.clock.install();
   await installFixture(page, fixture);
   await page.goto(new URL(state, baseURL).toString(), { waitUntil: 'domcontentloaded' });
   await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
@@ -1731,6 +1750,11 @@ async function focusStaysOn(page, loc, why) {
   const at = await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120));
   assert.ok(await on(), `${why} (focus is on ${at})`);
 }
+// Polls `read` for a value above `than` (a few seconds at most).
+async function expectMore(read, than, why) {
+  for (let i = 0; i < 80 && !(read() > than); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.ok(read() > than, why);
+}
 async function verifyAccounts(browser) {
   const failures = [];
   const password = 'fixture account password';
@@ -1739,7 +1763,7 @@ async function verifyAccounts(browser) {
       const label = `${viewport.width}x${viewport.height} ${scheme}`;
       const adminApi = { posts: [], conflict: true };
       const fixture = { account: 'fixture-admin', kind: 'virt', admin: true, adminApi, requests: [] };
-      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture });
+      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture, fakeClock: true });
       try {
         const overflow = async (what) => {
           const o = await page.evaluate(() => ({
@@ -1759,7 +1783,102 @@ async function verifyAccounts(browser) {
         await view.waitFor({ state: 'visible', timeout: 8000 });
         await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
         await overflow('list');
+        // old saved passwords: the notice counts them; its axe run is the list's
+        const notice = view.getByRole('region', { name: 'Old saved passwords' });
+        await notice.getByText('2 saved passwords from before sign-in was on are kept but not used.').waitFor({ state: 'visible', timeout: 8000 });
         await runAxe(page, `accounts list ${label}`, failures);
+
+        // forget the old passwords after a confirm; the notice goes away and focus goes to the list's heading
+        await notice.getByRole('button', { name: 'Forget them' }).click();
+        const forget = page.getByRole('dialog', { name: 'Forget saved passwords' });
+        await forget.waitFor({ state: 'visible', timeout: 8000 });
+        await settled(page);
+        await runAxe(page, `forget confirm ${label}`, failures);
+        assert.equal(adminApi.forgot, 0, `nothing is sent before the confirm (${label})`);
+        await forget.getByRole('button', { name: 'Forget them' }).click();
+        await notice.waitFor({ state: 'detached', timeout: 8000 });
+        assert.equal(adminApi.forgot, 1, `one DELETE of the old passwords (${label})`);
+        await page.waitForFunction(() => document.activeElement?.textContent === 'Virtual accounts', null, { timeout: 8000 });
+
+        // the tabs are a tablist: aria-selected, arrow keys, and a tabpanel named by the tab
+        const tabs = view.getByRole('tablist', { name: 'Accounts sections' });
+        assert.deepEqual(await tabs.getByRole('tab').evaluateAll((els) => els.map((e) => [e.textContent.trim(), e.getAttribute('aria-selected')])), [['Accounts', 'true'], ['Signed in', 'false'], ['System users', 'false']], `tabs (${label})`);
+        await tabs.getByRole('tab', { name: 'Accounts' }).focus();
+        await page.keyboard.press('ArrowRight');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Signed in' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
+        const panel = view.getByRole('tabpanel', { name: 'Signed in' });
+        const rowOf = (address) => panel.getByRole('row').filter({ hasText: address });
+        await panel.getByRole('heading', { name: 'Signed in' }).waitFor({ state: 'visible', timeout: 8000 });
+        const mine = panel.getByRole('row').filter({ hasText: 'This session' });
+        await mine.getByText('203.0.113.7').waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(await panel.getByText('This session').count(), 1, `the caller's session is marked once (${label})`);
+        assert.equal(await panel.locator('bdi', { hasText: '198.51.100.9' }).count(), 1, `an address is isolated in bdi (${label})`);
+        await overflow('sessions');
+        await runAxe(page, `signed in tab ${label}`, failures);
+        // End all sessions asks first, says jobs are cancelled, and sending nothing until confirmed
+        await panel.getByRole('button', { name: 'End all sessions of fixture-guest' }).click();
+        const endAll = page.getByRole('dialog', { name: 'End all sessions' });
+        await endAll.waitFor({ state: 'visible', timeout: 8000 });
+        await endAll.getByText(/jobs are cancelled/).waitFor({ state: 'visible' });
+        assert.equal(await endAll.getByText(/signed out too/).count(), 0, `no own-account warning for another account (${label})`);
+        assert.deepEqual(adminApi.endedAll, [], `nothing is sent before the confirm (${label})`);
+        await settled(page);
+        await runAxe(page, `end all sessions confirm ${label}`, failures);
+        await endAll.getByRole('button', { name: 'Cancel' }).click();
+        await endAll.waitFor({ state: 'detached', timeout: 8000 });
+        await focusStaysOn(page, panel.getByRole('button', { name: 'End all sessions of fixture-guest' }), `focus returns to the button that opened the confirm (${label})`);
+        // your own account: the confirm warns that you are signed out too
+        await panel.getByRole('button', { name: 'End all sessions of fixture-admin' }).click();
+        await endAll.waitFor({ state: 'visible', timeout: 8000 });
+        await endAll.getByText(/signed out too/).waitFor({ state: 'visible' });
+        await endAll.getByRole('button', { name: 'Cancel' }).click();
+        await endAll.waitFor({ state: 'detached', timeout: 8000 });
+        // End on the other session sends its DELETE and the row goes away
+        await rowOf('198.51.100.9').getByRole('button', { name: 'End', exact: true }).click();
+        await page.waitForFunction(() => ![...document.querySelectorAll('tr')].some((r) => r.textContent.includes('198.51.100.9')), null, { timeout: 8000 });
+        assert.deepEqual(adminApi.ended, ['bb22bb22'], `End sends one DELETE for that session (${label})`);
+        // the caller's own End asks first (and reloads the page after it: not run here, the fixture page would lose its state)
+        await mine.getByRole('button', { name: 'End', exact: true }).click();
+        const endOwn = page.getByRole('dialog', { name: 'End your own session' });
+        await endOwn.waitFor({ state: 'visible', timeout: 8000 });
+        await endOwn.getByRole('button', { name: 'Cancel' }).click();
+        await endOwn.waitFor({ state: 'detached', timeout: 8000 });
+        assert.deepEqual(adminApi.ended, ['bb22bb22'], `Cancel on one's own session sends nothing (${label})`);
+        // the list refreshes every 30 s only while its tab is shown
+        const polled = adminApi.sessionCalls;
+        await page.clock.fastForward(31_000);
+        await expectMore(() => adminApi.sessionCalls, polled, `the list refreshes while the tab is shown (${label})`);
+
+        await tabs.getByRole('tab', { name: 'Signed in' }).focus();
+        await page.keyboard.press('ArrowRight');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'System users', null, { timeout: 8000 });
+        const sys = view.getByRole('tabpanel', { name: 'System users' });
+        await sys.getByRole('heading', { name: 'System users' }).waitFor({ state: 'visible', timeout: 8000 });
+        await sys.getByRole('cell', { name: 'fixture-root', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        const afterAway = adminApi.sessionCalls;
+        await page.clock.fastForward(95_000);
+        await page.waitForTimeout(300);
+        assert.equal(adminApi.sessionCalls, afterAway, `the list does not refresh while another tab is shown (${label})`);
+        await overflow('system users');
+        await runAxe(page, `system users tab ${label}`, failures);
+        await sys.getByRole('button', { name: 'Add system user' }).click();
+        const nameField = sys.getByRole('textbox', { name: 'System user name' });
+        await nameField.fill('root');
+        await sys.getByRole('button', { name: 'Continue' }).click();
+        await sys.getByRole('alert').filter({ hasText: 'root' }).waitFor({ state: 'visible', timeout: 8000 });
+        await nameField.fill('alice');
+        await sys.getByRole('button', { name: 'Continue' }).click();
+        await sys.getByRole('heading', { name: 'Sources of alice' }).waitFor({ state: 'visible', timeout: 8000 });
+        await sys.getByRole('button', { name: /^Access to fixture-s3/ }).click();
+        await page.getByRole('menuitemradio', { name: 'Read only' }).click();
+        await overflow('system user sources');
+        await runAxe(page, `system user sources ${label}`, failures);
+        await sys.getByRole('button', { name: 'Save', exact: true }).click();
+        await sys.getByRole('cell', { name: 'alice', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.deepEqual(adminApi.puts, [{ sources: { 'fixture-s3': { write: false } } }], `one PUT with the source (${label})`);
+        await tabs.getByRole('tab', { name: 'Accounts' }).click();
+        await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+
 
         await view.getByRole('button', { name: 'New account' }).click();
         await view.getByRole('textbox', { name: 'Name' }).fill('fixture-new');
@@ -1878,6 +1997,26 @@ async function verifyAccounts(browser) {
       } finally {
         await context.close();
       }
+    }
+  }
+  // closing the view clears the refresh: with the Signed in tab shown, close, move the clock on, and no list is asked for
+  {
+    const adminApi = { posts: [] };
+    const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-admin', kind: 'virt', admin: true, adminApi }, fakeClock: true });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+      await page.getByRole('menuitem', { name: 'Accounts…' }).click();
+      const view = page.getByRole('dialog', { name: 'Accounts' });
+      await view.getByRole('tab', { name: 'Signed in' }).click();
+      await view.getByRole('tabpanel', { name: 'Signed in' }).getByText('This session').waitFor({ state: 'visible', timeout: 8000 });
+      await page.keyboard.press('Escape');
+      await view.waitFor({ state: 'detached', timeout: 8000 });
+      const n = adminApi.sessionCalls;
+      await page.clock.fastForward(95_000);
+      await page.waitForTimeout(300);
+      assert.equal(adminApi.sessionCalls, n, 'closing the view stops the refresh');
+    } finally {
+      await context.close();
     }
   }
   for (const [who, fixture, has] of [

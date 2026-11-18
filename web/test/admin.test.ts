@@ -102,3 +102,37 @@ test("a server that cannot be reached throws AdminError", async (t) => {
   });
   await assert.rejects(admin.deleteAccount("guest"), (e: unknown) => e instanceof AdminError && e.message === "Cannot reach the server");
 });
+
+test("endSession and endAccountSessions name their target in the URL and body", async (t) => {
+  const calls = fakeFetch(t, (url) => (url === "/api/admin/vault/unowned" ? json({ removed: 2 }) : json({ ok: true })));
+  await admin.endSession("ab12");
+  await admin.endAccountSessions("sys", "alice");
+  assert.equal(await admin.forgetUnownedPasswords(), 2);
+  assert.deepEqual(
+    calls.map((c) => [method(c), c.url, sent(c)]),
+    [
+      ["DELETE", "/api/admin/sessions/ab12", undefined],
+      ["POST", "/api/admin/end-sessions", { kind: "sys", name: "alice" }],
+      ["DELETE", "/api/admin/vault/unowned", undefined],
+    ],
+  );
+});
+
+test("systemUserProblem refuses root and names the hub would refuse", () => {
+  assert.equal(admin.systemUserProblem("alice"), "");
+  assert.equal(admin.systemUserProblem("  alice  "), "");
+  assert.equal(admin.systemUserProblem("Alice_1.x@dom-2"), "");
+  assert.match(admin.systemUserProblem(""), /name/i);
+  assert.match(admin.systemUserProblem("root"), /root/);
+  assert.match(admin.systemUserProblem(" root "), /root/);
+  for (const bad of ["a b", "-lead", ".lead", "a/b", "a".repeat(65), "tab\tname", "ünï"]) assert.match(admin.systemUserProblem(bad), /not a valid/, bad);
+});
+
+test("sessionsByAccount groups by account and keeps the order of first appearance", () => {
+  const s = (id: string, kind: "sys" | "virt", name: string) => ({ id, kind, name, created: 1, lastUsed: 2 });
+  const groups = admin.sessionsByAccount([s("1", "virt", "bob"), s("2", "sys", "bob"), s("3", "virt", "bob"), s("4", "sys", "alice")]);
+  assert.deepEqual(
+    groups.map((g) => [g.kind, g.name, g.sessions.map((x) => x.id)]),
+    [["virt", "bob", ["1", "3"]], ["sys", "bob", ["2"]], ["sys", "alice", ["4"]]],
+  );
+});
