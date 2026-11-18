@@ -5,6 +5,20 @@
 // This module opens one stream per watched folder however many panels show it, keeps at most `maxStreams` open, lets the
 // folders beyond that fall back to a slow poll, and drops every stream while the page is hidden (one catch-up notification on return).
 // No browser imports at module level: the tests pass a fake `open`.
+// Every notification is the app's own doing, never the person's: listeners get `{ background: true }` and send what they ask then with
+// `BACKGROUND_HEADER`, so the hub does not count it as use of the session.
+
+import { BACKGROUND_HEADER } from "./api";
+
+/** What a listener hears: a notification of the change hub is always automatic. */
+export type ChangeNote = { background: true };
+const NOTE: ChangeNote = Object.freeze({ background: true as const });
+
+/** Asks the hub who is signed in, as a background request: when the session has ended, the signed-out watch (auth.ts) sees the 401. */
+export const checkSignedIn = (): Promise<void> => fetch("/api/auth/me", { headers: BACKGROUND_HEADER }).then(
+  () => undefined,
+  () => undefined,
+);
 
 export interface StreamSource {
   addEventListener(type: string, fn: (e: { data?: unknown }) => void): void;
@@ -35,7 +49,7 @@ const DROP_MS = 10_000;
 
 interface Entry {
   url: string;
-  listeners: Set<() => void>;
+  listeners: Set<(note: ChangeNote) => void>;
   src?: StreamSource;
   poll?: unknown;
   /** the server refused the stream (for example its watch limit): never reopen it, poll instead */
@@ -63,7 +77,7 @@ export function createChangeHub(o: ChangeHubOptions) {
     o.onDrop();
   };
 
-  const notify = (en: Entry) => en.listeners.forEach((fn) => fn());
+  const notify = (en: Entry) => en.listeners.forEach((fn) => fn(NOTE));
   const stop = (en: Entry) => {
     en.src?.close();
     en.src = undefined;
@@ -127,7 +141,7 @@ export function createChangeHub(o: ChangeHubOptions) {
 
   return {
     /** call `fn` whenever the folder may have changed; returns the unsubscribe function */
-    subscribe(node: string, path: string, fn: () => void): () => void {
+    subscribe(node: string, path: string, fn: (note: ChangeNote) => void): () => void {
       const url = o.url(node, path);
       let en = entries.get(url);
       if (!en) entries.set(url, (en = { url, listeners: new Set() }));
@@ -169,7 +183,7 @@ export function changeHub() {
     clearInterval: (id) => window.clearInterval(id as number),
     url: (node, path) => `/api/nodes/${encodeURIComponent(node)}/api/events?path=${encodeURIComponent(path)}`,
     // asks the hub who is signed in: when the session has ended, the signed-out watch (auth.ts) sees the 401 and shows the sign-in screen
-    onDrop: () => void fetch("/api/auth/me").catch(() => undefined),
+    onDrop: () => void checkSignedIn(),
   });
   document.addEventListener("visibilitychange", () => shared!.setVisible(document.visibilityState !== "hidden"));
   return shared;

@@ -211,8 +211,9 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     }
     const id0 = s.kind === "virt" ? accounts.identity("virt", s.name) : undefined;
     if (s.kind === "virt" && !id0) return undefined;
-    // (opening a change feed is not use: a browser reconnects one by itself, which must not keep an idle session alive)
-    if (!isFeedOpen(c.req.method, c.req.path)) sessions.touch(raw);
+    // Only what a person does counts as use. Opening a change feed is not (a browser reconnects one by itself), nor is a request the
+    // web app marks as its own (`x-filedeck-background: 1`: a refresh after a feed event or a poll, the sign-in check after a drop).
+    if (!isFeedOpen(c.req.method, c.req.path) && c.req.header("x-filedeck-background") !== "1") sessions.touch(raw);
     c.set("authSession" as never, sessions.keyOf(raw) as never);
     c.set("authHow" as never, { method: s.method, tailnet: s.method === "tailscale" ? s.tailnetSubject : undefined } as never);
     if (id0) return id0;

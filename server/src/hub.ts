@@ -705,7 +705,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       bound: async () => {
         const s = a.sessions.recordOf(key);
         if (!s) return "end";
-        const b = tailnetBinding(await src.identifyInput(input), s, a.links);
+        const b = tailnetBinding(await src.identifyInput(input, { background: true }), s, a.links);
         if (b === "ok" || b === "unavailable") return "ok";
         if (b === "none") return "end";
         a.sessions.endKey(key);

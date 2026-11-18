@@ -569,3 +569,29 @@ test("readTailnet: the peer and X-Forwarded-For are read when it runs; a later m
     await api.close();
   }
 });
+
+test("background checks never take the last free slots: with tailscaled hung for them, a foreground identify still gets a slot at once", async () => {
+  const api = await fakeLocalApi((addr) => (addr === "100.101.102.103" ? whois("alice@github") : "hang"));
+  try {
+    const src = new TailnetSource({ socket: api.socket, headers: false, proxies: proxies(), log: () => {} });
+    const input = (addr: string) => ({ peer: LISTED, forwardedFor: addr, login: { count: 0, value: null }, name: { count: 0, value: null } });
+    // ten streams' checks at once, each for its own address
+    const bg = Array.from({ length: 10 }, (_, i) => src.identifyInput(input(`100.64.2.${i + 1}`), { background: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(api.calls.length <= 6, `background calls: ${api.calls.length}`);
+    // those that found no free slot answered at once, as unavailable (the stream stays)
+    const early = await Promise.race([Promise.all(bg.slice(6)), new Promise((r) => setTimeout(() => r("late"), 50))]);
+    assert.deepEqual(early, Array(4).fill({ unavailable: true }));
+    const t0 = Date.now();
+    const fg = await src.identifyInput(input("100.101.102.103"));
+    assert.equal((fg as { login?: string }).login, "alice@github");
+    assert.ok(Date.now() - t0 < 1_000, `${Date.now() - t0} ms`);
+    // a background failure is kept briefly: the next tick asks again only for addresses whose failure is older
+    await Promise.all(bg);
+    const before = api.calls.length;
+    await src.identifyInput(input("100.64.2.1"), { background: true });
+    assert.equal(api.calls.length, before, "a recent background failure is not asked again at once");
+  } finally {
+    await api.close();
+  }
+});

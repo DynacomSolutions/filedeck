@@ -762,3 +762,34 @@ test("mount order: readTailnet right after trustProxies, stripTailnetHeaders rig
   assert.equal(at("stripTailnetHeaders"), at("readTailnet") + 1);
   for (const later of ["webHeaders", "requestGuard", "audit"]) assert.ok(at(later) > at("stripTailnetHeaders"), later);
 });
+
+test("background requests (x-filedeck-background: 1) are not use: forced reconnects and their follow-ups do not keep an idle session alive", async () => {
+  const fa = await feedAgent();
+  try {
+    for (const background of [true, false]) {
+      const r = await rig("headers", { env: { NODES: fa.nodes, FILEDECK_SESSION_IDLE_SECONDS: "600" }, streamCheckMs: 50 });
+      r.h.auth!.accounts.create({ name: "guest", admin: false, nodes: ACCESS });
+      link(r.h, "virt", "guest", "alice@github");
+      r.devices.set(ADDR, { login: "alice@github" });
+      const c = await r.signIn();
+      let last = 0;
+      for (let i = 0; i < 20; i++) {
+        r.clock.t += 61_000;
+        const feed = await r.req(FEED, { cookie: c, headers: feedHeaders });
+        await feed.body?.cancel().catch(() => undefined);
+        const me = await r.req("/api/auth/me", { cookie: c, headers: background ? { "x-filedeck-background": "1" } : {} });
+        last = me.status;
+        if (last === 401) break;
+      }
+      if (background) {
+        assert.equal(last, 401, "the session idled out");
+        assert.equal(r.h.auth!.sessions.list().length, 0);
+      } else {
+        assert.equal(last, 200, "a person's requests keep it alive (1220 s with an idle limit of 600 s)");
+        assert.equal(r.h.auth!.sessions.list().length, 1);
+      }
+    }
+  } finally {
+    fa.close();
+  }
+});

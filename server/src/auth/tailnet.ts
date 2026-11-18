@@ -145,6 +145,13 @@ function occurrences(c: Context, name: string): number {
 
 type Whois = TailnetIdentity | TailnetNone;
 
+/** whois calls at once */
+const MAX_CALLS = 8;
+/** call slots a background check never takes, so a foreground identify finds one free */
+const FOREGROUND_SLOTS = 2;
+/** a background check does not ask again this soon for an address its last call found unavailable */
+const BACKGROUND_FAIL_MS = 5_000;
+
 /**
  * What the sources read from a request, taken in one go (`TailnetSource.inputOf`): the TCP peer, the X-Forwarded-For chain and the
  * login and name headers with how often each came. `readTailnet` takes it before any later middleware runs, so none of them can change
@@ -172,6 +179,8 @@ export class TailnetSource {
   private running = 0;
   private queue: (() => void)[] = []; // waiters for a call slot, first come first served
   private loggedAt = -Infinity;
+  /** when a background check last found the source unavailable, per address (insertion order = oldest first) */
+  private backgroundFailed = new Map<string, number>();
 
   constructor(o: {
     socket?: string;
@@ -215,13 +224,18 @@ export class TailnetSource {
     return this.identifyInput(input);
   }
 
-  /** The identity of a request from what `inputOf` read. Never throws. */
-  async identifyInput(input: TailnetInput): Promise<TailnetAnswer> {
+  /**
+   * The identity of a request from what `inputOf` read. Never throws. `background`: a check nobody waits for (the hub's check of an open
+   * stream). It never waits for a call slot and never takes the last `FOREGROUND_SLOTS` of them, so a sign-in or a request is not queued
+   * behind it; with no slot free, or a failure of its own for the address within `BACKGROUND_FAIL_MS`, it answers `unavailable` at once
+   * (which keeps the stream).
+   */
+  async identifyInput(input: TailnetInput, o: { background?: boolean } = {}): Promise<TailnetAnswer> {
     try {
       if (this.mode === null) return NONE;
       const peer = input.peer;
       if (!peer || !this.proxies.has(peer)) return NONE; // only the TCP peer decides, never a header
-      return this.mode === "headers" ? this.fromHeaders(input) : await this.fromSocket(input);
+      return this.mode === "headers" ? this.fromHeaders(input) : await this.fromSocket(input, o.background === true);
     } catch {
       return this.mode === "socket" ? UNAVAILABLE : NONE;
     }
@@ -236,7 +250,7 @@ export class TailnetSource {
     return { login, ...(displayName ? { displayName } : {}), tags: [], source: "headers" };
   }
 
-  private async fromSocket(input: TailnetInput): Promise<TailnetAnswer> {
+  private async fromSocket(input: TailnetInput, background = false): Promise<TailnetAnswer> {
     // the address the listed proxy wrote: the last entry, whatever FILEDECK_TRUSTED_PROXIES says
     const chain = input.forwardedFor;
     const last = chain ? hopAddress(chain.split(",").at(-1)) : undefined;
@@ -246,10 +260,21 @@ export class TailnetSource {
     if (hit && this.now() - hit.at < this.cacheMs) return hit.answer;
     let p = this.inflight.get(addr);
     if (!p) {
+      if (background) {
+        const failed = this.backgroundFailed.get(addr);
+        if (failed !== undefined && this.now() - failed < BACKGROUND_FAIL_MS) return UNAVAILABLE;
+        if (this.running >= MAX_CALLS - FOREGROUND_SLOTS) return UNAVAILABLE; // no free slot for it: skip this round
+      }
       p = this.whois(addr).finally(() => this.inflight.delete(addr));
       this.inflight.set(addr, p);
     }
-    return p;
+    const a = await p;
+    if (background && "unavailable" in a) {
+      this.backgroundFailed.delete(addr);
+      this.backgroundFailed.set(addr, this.now());
+      while (this.backgroundFailed.size > this.maxCache) this.backgroundFailed.delete(this.backgroundFailed.keys().next().value!);
+    }
+    return a;
   }
 
   /**
@@ -257,7 +282,7 @@ export class TailnetSource {
    * given back goes straight to the next waiter, and a waiter that gives up leaves the queue, so no slot is ever lost.
    */
   private slot(deadline: number): Promise<boolean> {
-    if (this.running < 8) {
+    if (this.running < MAX_CALLS) {
       this.running++;
       return Promise.resolve(true);
     }
