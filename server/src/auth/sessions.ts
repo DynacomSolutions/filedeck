@@ -299,6 +299,19 @@ export class Sessions {
     return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}), ...howOf(r) };
   }
 
+  /**
+   * What the binding check of a Tailscale session needs, for a session that is valid or only idle (push subscriptions outlive the idle
+   * limit): its record and the address it signed in from. Read only; undefined for another method or a session that is gone.
+   */
+  tailnetOf(key: string): { record: SessionRecord; address?: string } | undefined {
+    if (this.state(key).state === "gone") return undefined;
+    const r = this.db
+      .prepare("SELECT kind, name, created, last_used, epoch, as_root_until, address, method, tailnet_subject, tailnet_login, tailnet_node FROM sessions WHERE id = ?")
+      .get(key) as SessionRow | undefined;
+    if (!r || r.method !== "tailscale") return undefined;
+    return { record: { kind: r.kind, name: r.name, ...howOf(r) }, ...(r.address !== null ? { address: r.address } : {}) };
+  }
+
   /** Ends the session kept under `key` (its streams end through `onEnd`), as `destroy` does for a cookie value. */
   endKey(key: string): void {
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(key);

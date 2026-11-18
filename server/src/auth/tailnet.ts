@@ -262,6 +262,19 @@ export class TailnetSource {
     }
   }
 
+  /**
+   * The identity the socket source gives for a tailnet address now, with no request (a background check, through the same cache and
+   * call slots as a stream's). Undefined mode answers `none`; the headers source cannot be asked without a request, so it also answers `none`.
+   */
+  async identifyAddress(address: string): Promise<TailnetAnswer> {
+    if (this.mode !== "socket") return NONE;
+    try {
+      return await this.fromSocket({ peer: undefined, listener: false, forwardedFor: address, login: { count: 0, value: null }, name: { count: 0, value: null } }, true);
+    } catch {
+      return UNAVAILABLE;
+    }
+  }
+
   private fromHeaders(input: TailnetInput): TailnetAnswer {
     if (input.login.count !== 1) return NONE;
     const login = cleanLogin(input.login.value ?? "");

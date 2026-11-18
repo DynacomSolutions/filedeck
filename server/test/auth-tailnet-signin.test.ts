@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
-import { createHub, tailnetListener } from "../src/hub.ts";
+import { createHub, pushBound, tailnetListener } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 import { ADDR, closeRigs, fakeSystem, NODE_NAME, rig, type Mode } from "./tailnet-env.ts";
 
@@ -379,6 +379,49 @@ test("a session ended by the binding check on a GET writes exactly one audit lin
   assert.equal(ls[0]?.method, "GET");
   assert.deepEqual(ls[0]?.tailnet, { subject: "tag:ci", source: "socket", reason: "tag-conflict" });
   assert.equal(r.h.auth!.sessions.list().length, 0);
+});
+
+test("push: a Tailscale session is checked again before a push (socket source); the headers source ends it with the idle limit", async () => {
+  const r = await rig("socket");
+  r.h.auth!.accounts.create({ name: "ci", admin: false, nodes: {} });
+  link(r.h, "virt", "ci", "tag:ci");
+  r.devices.set(ADDR, { tags: ["tag:ci"] });
+  const c = await r.signIn();
+  const key = r.h.auth!.sessions.list().length === 1 ? r.h.auth!.sessions.keyOf(c.split("=")[1]!) : "";
+  const a = r.h.auth!;
+  assert.equal(await pushBound(a, key), "ok");
+  r.devices.delete(ADDR);
+  r.pastCache();
+  assert.equal(await pushBound(a, key), "drop", "the address is no longer known to the tailnet");
+  r.devices.set(ADDR, { tags: ["tag:ci", "tag:db"] });
+  link(r.h, "sys", "c", "tag:db");
+  r.pastCache();
+  assert.equal(await pushBound(a, key), "drop", "a second linked tag now matches another account");
+  r.devices.set(ADDR, { tags: ["tag:ci"] });
+  r.pastCache();
+  assert.equal(await pushBound(a, key), "ok");
+  r.api!.state.down = true;
+  r.pastCache();
+  assert.equal(await pushBound(a, key), "wait", "tailscaled does not answer: no push now, the subscription stays");
+  r.api!.state.down = false;
+  // a password session is not asked
+  assert.equal(await pushBound(a, "no-such-session"), "ok");
+});
+
+test("push: with the headers source, an idle Tailscale session loses its push subscriptions; a password session keeps them", async () => {
+  const r = await rig("headers");
+  guest(r.h);
+  link(r.h, "virt", "guest", "alice@github");
+  r.devices.set(ADDR, { login: "alice@github" });
+  const c = await r.signIn();
+  const a = r.h.auth!;
+  const key = a.sessions.keyOf(c.split("=")[1]!);
+  assert.equal(await pushBound(a, key), "ok");
+  const push = (r.h as unknown as { push: { store: { add(o: object): unknown; of(o: string): unknown[] } } }).push;
+  push.store.add({ endpoint: "https://fcm.googleapis.com/fcm/send/x1", p256dh: "p", auth: "a", owner: "virt:guest", session: key });
+  r.clock.t += 9 * 3600_000; // past the 8 hour idle limit, before the absolute end
+  await (r.h as unknown as { push: { watch: { tick(): Promise<void> } } }).push.watch.tick();
+  assert.equal(push.store.of("virt:guest").length, 0);
 });
 
 test("audit: a Tailscale session's requests carry the subject and the source; a password session's carry nothing", async () => {

@@ -64,6 +64,11 @@ export interface PushWatchDeps {
   signIn: boolean;
   /** sign-in on: the session kept under a key (sessions.ts `state`) */
   sessionState?: (session: string) => SessionState;
+  /**
+   * sign-in on: a check made again before a push goes to a subscription of a session: `ok`, `wait` (cannot be checked now: no push this
+   * pass, the subscription stays) or `drop` (the session's binding is lost: the subscription goes). Left out: every session is `ok`.
+   */
+  bound?: (session: string) => Promise<"ok" | "wait" | "drop">;
   /** sign-in on: the identity of `sys:<name>` / `virt:<name>` now, or undefined when the account is gone */
   identityOf: (owner: string) => Identity | undefined;
   /** the account's jobs from every list, asked as `id` (undefined: sign-in off); `signal` ends the wait when the hub stops */
@@ -156,7 +161,14 @@ export class PushWatch {
       if (!ends.length || this.stopping.signal.aborted) return;
       // the sessions are looked at again: one may have ended while the jobs were listed
       const still = new Set(this.live(owner).map((s) => s.endpoint));
-      await Promise.all(subs.filter((s) => still.has(s.endpoint)).map((s) => this.sendTo(s, ends)));
+      const sends: PushSub[] = [];
+      for (const s of subs) {
+        if (!still.has(s.endpoint)) continue;
+        const b = s.session && this.d.bound ? await this.d.bound(s.session).catch(() => "wait" as const) : "ok";
+        if (b === "drop") store.removeSession(s.session!);
+        else if (b === "ok") sends.push(s);
+      }
+      await Promise.all(sends.map((s) => this.sendTo(s, ends)));
     } catch (e) {
       if (!this.stopping.signal.aborted) this.logOnce(`owner:${owner}`, `push: job watch for an account failed: ${String((e as Error)?.message ?? e).split("\n")[0]}`);
     }

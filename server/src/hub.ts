@@ -167,6 +167,22 @@ export function tailnetListener(app: { fetch: (req: Request, env?: unknown) => R
   return server;
 }
 
+/**
+ * The binding of a Tailscale session, asked again before a push goes to one of its subscriptions (the app may be closed, so no request
+ * checks it). Socket source: whois for the address the session signed in from, through the cache of `TailnetSource`, with the gate's own
+ * `tailnetBinding`. A session that does not hold (another login or device, a tag or link removed) or an address the tailnet no longer
+ * knows is dropped; a source that does not answer waits. Not a Tailscale session: nothing to ask. Headers source: see `sessionState`.
+ */
+export async function pushBound(auth: HubAuth, key: string): Promise<"ok" | "wait" | "drop"> {
+  const t = auth.sessions.tailnetOf(key);
+  if (!t) return "ok";
+  if (auth.tailnet.mode === null) return "drop"; // no source is on any more: nothing can vouch for the session
+  if (auth.tailnet.mode === "headers") return "ok"; // nothing to ask without a request: the idle rule in `sessionState` ends it
+  if (!t.address) return "drop";
+  const b = tailnetBinding(await auth.tailnet.identifyAddress(t.address), t.record, auth.links);
+  return b === "ok" ? "ok" : b === "unavailable" ? "wait" : "drop";
+}
+
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target>; accountChanged(before: Identity): Promise<void>; accountCalls: AccountCalls };
   // Sign-in state, only with auth on (off, nothing is opened or created).
@@ -573,7 +589,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       store,
       subject: cfg.pushSubject,
       signIn: !!auth,
-      sessionState: auth ? (k) => auth!.sessions.state(k) : undefined,
+      sessionState: auth
+        ? (k) => {
+            const st = auth!.sessions.state(k);
+            // A Tailscale session with the headers source cannot be checked again without a request: once it is idle (the app is closed), its
+            // subscriptions go with it. The socket source is asked again before each push (`bound`).
+            if (st.state === "idle" && auth!.tailnet.mode !== "socket" && auth!.sessions.tailnetOf(k)) return { state: "gone" } as const;
+            return st;
+          }
+        : undefined,
+      bound: auth ? (k) => pushBound(auth!, k) : undefined,
       identityOf: toId,
       listJobs,
     });
