@@ -5,6 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { createHub } from "../src/hub.ts";
 import { createSourceApp } from "../src/sources/source-app.ts";
@@ -12,7 +13,7 @@ import { loadConfig } from "../src/config.ts";
 import { hashPassword } from "../src/auth/store.ts";
 import { SourceGrants } from "../src/auth/source-grants.ts";
 import { FsError } from "../src/fsops.ts";
-import { AccountCalls } from "../src/auth/account-calls.ts";
+import { AccountCalls, CallCut, cuttableTarget } from "../src/auth/account-calls.ts";
 import type { SystemAuth } from "../src/auth/routes.ts";
 import { USER_HEADER, verifyClaim, type Identity } from "../src/auth/identity.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "../src/sources/types.ts";
@@ -913,10 +914,8 @@ test("hub: the calls that start an agent job are known by route", async () => {
   for (const [method, rest] of [
     ["POST", "/api/jobs/compress"],
     ["POST", "/api/jobs/extract"],
-    ["POST", "/api/jobs/size"],
     ["POST", "/api/fs/perms"],
-    ["GET", "/api/du"],
-    ["GET", "/api/du?path=/srv"],
+    ["POST", "/api/fs/perms?x=1"],
   ] as const) assert.equal(startsAgentJob(method, rest), true, `${method} ${rest}`);
   for (const [method, rest] of [
     ["PUT", "/api/fs/upload"],
@@ -925,6 +924,10 @@ test("hub: the calls that start an agent job are known by route", async () => {
     ["GET", "/api/fs/perms"],
     ["POST", "/api/fs/mkdir"],
     ["GET", "/api/dux"],
+    // size scans are made without the switch's end, so the switch's cancel never reaches them: these calls are cut like others
+    ["POST", "/api/jobs/size"],
+    ["GET", "/api/du"],
+    ["GET", "/api/du?path=/srv"],
   ] as const) assert.equal(startsAgentJob(method, rest), false, `${method} ${rest}`);
 });
 
@@ -1014,4 +1017,95 @@ test("source app: a download aborted while the backend is still opening it destr
     await r; // (the answer, if any, is never read)
     await until(`the read stream of ${rest} to close`, () => s.readsClosed === s.readsOpened, 2_000);
   }
+});
+
+test("act as root: a du answer streaming at Stop is cut (a size scan is not a job the switch's cancel reaches)", async () => {
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  let duAsked = 0;
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url ?? "/", "http://x");
+    if (u.pathname === "/api/du") {
+      duAsked++;
+      res.setHeader("content-type", "application/x-ndjson");
+      res.write(JSON.stringify({ first: true }) + "\n");
+      void held.then(() => {
+        if (!res.destroyed) res.end(JSON.stringify({ last: true }) + "\n");
+      });
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    if (u.pathname === "/healthz") return void res.end("ok");
+    if (u.pathname === "/api/auth/lookup") return void res.end(JSON.stringify({ exists: true }));
+    res.end(JSON.stringify({ jobs: [] }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const { h } = world(`a=http://127.0.0.1:${(srv.address() as AddressInfo).port}`);
+    const root = await signIn(h, "sadmin");
+    assert.equal((await send(h, "POST", "/api/auth/as-root", root, { password: PW })).status, 200);
+    const r = await h.request("https://localhost/api/nodes/a/api/du?path=/", { headers: { cookie: root } }, peer as never);
+    assert.equal(r.status, 200);
+    const reader = r.body!.getReader();
+    let text = new TextDecoder().decode((await reader.read()).value);
+    assert.match(text, /first/);
+    assert.equal((await send(h, "DELETE", "/api/auth/as-root", root)).status, 200);
+    release();
+    let cut = false;
+    try {
+      for (;;) {
+        const c = await reader.read();
+        if (c.done) break;
+        text += new TextDecoder().decode(c.value);
+      }
+    } catch {
+      cut = true;
+    }
+    assert.equal(duAsked, 1);
+    assert.ok(cut, "the du answer ended as if complete");
+    assert.doesNotMatch(text, /last/);
+  } finally {
+    srv.close();
+    srv.closeAllConnections();
+  }
+});
+
+test("source app: a download or hash aborted while it opens answers 400 canceled, not a clean 200", async () => {
+  const s = new MemSource();
+  s.put("/big.bin", "v".repeat(1024 * 1024));
+  s.openMs = 150;
+  const app = createSourceApp("mem", s, { maxUpload: 1 << 30, maxEdit: 1 << 20, hashConcurrency: 2, walkMaxEntries: 1000 });
+  for (const rest of ["/api/fs/download?path=/big.bin", "/api/fs/hash?path=/big.bin"]) {
+    const ac = new AbortController();
+    const opening = s.opening;
+    const p = Promise.resolve(app.fetch(new Request("http://source" + rest, { signal: ac.signal })));
+    await until("the read to start opening", () => s.opening === opening + 1);
+    ac.abort();
+    const r = await p;
+    // a plain "canceled", not a clean 200 with an empty body, and not a 500 from wrapping a destroyed stream
+    assert.equal(r.status, 400, `${rest} answered ${r.status} after the abort`);
+    assert.deepEqual(await r.json(), { error: "canceled" });
+  }
+  // the hash cut short was not kept: asked again, it is the file's real hash
+  const again = (await (await app.fetch(new Request("http://source/api/fs/hash?path=/big.bin"))).json()) as { sha256: string; cached: boolean };
+  assert.equal(again.sha256, createHash("sha256").update(Buffer.from("v".repeat(1024 * 1024))).digest("hex"));
+});
+
+test("cuttableTarget: a call after the cut rejects without calling the target, and closes a body nobody will read", async () => {
+  const ac = new AbortController();
+  let called = 0;
+  const target: { fetch(rest: string, init?: RequestInit): Promise<Response> } = { fetch: async () => (called++, new Response("x")) };
+  const t = cuttableTarget(target, ac.signal);
+  ac.abort();
+  let cancelled = 0;
+  const body = new ReadableStream<Uint8Array>({ pull: (c) => c.enqueue(new Uint8Array(1)), cancel: () => void cancelled++ });
+  await assert.rejects(t.fetch("/api/fs/upload", { method: "PUT", body, duplex: "half" } as RequestInit), (e: Error) => e instanceof CallCut);
+  assert.equal(called, 0);
+  assert.equal(cancelled, 1);
+  // a body someone already reads is left to its reader
+  const locked = new ReadableStream<Uint8Array>({ cancel: () => void cancelled++ });
+  const reader = locked.getReader();
+  await assert.rejects(t.fetch("/x", { method: "PUT", body: locked, duplex: "half" } as RequestInit));
+  assert.equal(cancelled, 1);
+  reader.releaseLock();
 });

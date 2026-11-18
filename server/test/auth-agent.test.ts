@@ -78,7 +78,11 @@ test("a refused request is audited with the account; a missing claim is audited 
   assert.equal(ref.refused, true);
   assert.equal(ref.user, "virt:guest1");
   lines.length = 0;
-  const forged = value.slice(0, -2) + "xx";
+  // one character in the middle of the signature changed for another: the last ones may already be the replacement, or differ only
+  // in the bits base64url leaves unused, and then the "forgery" still verifies
+  const dot = value.indexOf(".");
+  const at = dot + 1 + Math.floor((value.length - dot - 1) / 2);
+  const forged = value.slice(0, at) + (value[at] === "A" ? "B" : "A") + value.slice(at + 1);
   assert.equal((await get(app, "/api/fs/stat?path=/", forged)).status, 401);
   const no = JSON.parse(lines[0]!);
   assert.equal(no.status, 401);

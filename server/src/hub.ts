@@ -75,16 +75,17 @@ function clean(h: Headers, keepLength: boolean): Headers {
 }
 
 /**
- * Whether a proxied call starts a job on the agent (found by the routes that make one with `jobs.create`, not by path prefix):
- * compress, extract, the size scan, a permission change (a job when recursive; the hub cannot see the body, so every one counts) and
- * the `du` walk. Such a call under act as root is not cut when the switch ends (see `startCall` in `createHub`). `rest` may carry a
- * query string.
+ * Whether a proxied call starts an agent job that the end of an act-as-root switch cancels (one the agent makes with the switch's end,
+ * `asRootUntil`): compress, extract and a permission change (a job when recursive). Found from the agent routes that call `jobs.create`
+ * with that end, not by path prefix. Such a call under the switch is not cut when the switch ends (see `startCall` in `createHub`): the
+ * hub waits for it and cancels the job it made. The size scan (`POST /api/jobs/size`) and `GET /api/du` make jobs without that end, so
+ * the switch's cancel never reaches them: those calls are cut like any other. The hub cannot see a streamed body, so every
+ * `POST /api/fs/perms` counts, also one that is not recursive: such a request still arriving when the switch ends is not cut, and its
+ * one change can still run as root. `rest` may carry a query string.
  */
 export function startsAgentJob(method: string, rest: string): boolean {
   const p = rest.split("?")[0];
-  if (method === "POST") return p === "/api/jobs/compress" || p === "/api/jobs/extract" || p === "/api/jobs/size" || p === "/api/fs/perms";
-  if (method === "GET") return p === "/api/du";
-  return false;
+  return method === "POST" && (p === "/api/jobs/compress" || p === "/api/jobs/extract" || p === "/api/fs/perms");
 }
 
 /** The most the hub waits for the agents when act as root is turned off early and it cancels the account's root jobs there. */

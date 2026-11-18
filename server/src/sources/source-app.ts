@@ -153,6 +153,8 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     if (s.size === 0) return new Response(null, { status: 200, headers: { ...headers, "Content-Length": "0" } });
     const stream = await backend.read(p, range ?? undefined);
     whenAborted(c.req.raw.signal, () => stream.destroy());
+    // aborted while the backend opened it: no answer at all rather than a clean one with nothing in it
+    if (c.req.raw.signal.aborted) throw new FsError(400, "canceled");
     const body = Readable.toWeb(stream) as ReadableStream;
     if (range) {
       return new Response(body, {
@@ -399,6 +401,8 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
         if (s.size > 0) {
           const stream = await backend.read(p);
           whenAborted(signal, () => stream.destroy());
+          // (aborted while it opened: never a hash of nothing, which the index would keep)
+          if (signal.aborted) throw new FsError(400, "canceled");
           for await (const ch of stream as AsyncIterable<Buffer>) h.update(ch);
         }
         return h.digest("hex");
