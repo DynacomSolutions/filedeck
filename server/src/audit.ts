@@ -218,6 +218,9 @@ export type AuditTailnet = {
   accounts?: string[];
 };
 
+/** Marks that this request ended a Tailscale session, so a read is written to the audit log too. */
+export const markSessionEnded = (c: import("hono").Context): void => c.set("auditSessionEnded" as never, true as never);
+
 /** Sets the tailnet part of this request's audit line (the hub's sign-in routes and gate). */
 export const setAuditTailnet = (c: import("hono").Context, t: AuditTailnet): void => c.set("auditTailnet" as never, t as never);
 
@@ -232,7 +235,16 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
     const p = c.req.path;
     // every admin call is written, whatever its method: reading the accounts and sessions is recorded too
     const admin = isAdminPath(p);
-    if (!admin && (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/"))) return next();
+    const unlogged = !admin && (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/"));
+    if (unlogged) {
+      // A read is not written, except one that ended a Tailscale session (its binding no longer holds): that is an event, whatever the method.
+      const t = Date.now();
+      await next();
+      const ended = (c.get("auditTailnet" as never) as AuditTailnet | undefined)?.reason;
+      if (ended === undefined || !c.get("auditSessionEnded" as never)) return;
+      sink(JSON.stringify({ audit: true, ts: new Date(t).toISOString(), who, event: "session-ended", ...userOf(c), ...clientOf(c), method: m, route: clip(p), ...tailnetPart(c), status: c.res.status, ms: Date.now() - t }));
+      return;
+    }
     const t0 = Date.now();
     let body: unknown;
     // The body was parsed once by the request guard and is shared through the body cache; without it (a bare audit

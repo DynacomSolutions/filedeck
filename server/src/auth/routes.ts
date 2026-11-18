@@ -3,7 +3,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Config } from "../config.ts";
-import { clientOf, setAuditTailnet, type AuditTailnet } from "../audit.ts";
+import { clientOf, markSessionEnded, setAuditTailnet, type AuditTailnet } from "../audit.ts";
 import type { Identity } from "./identity.ts";
 import { checkPassword, type Accounts, type AuthDb } from "./store.ts";
 import { sessionKey, type SessionRecord, type Sessions, type SignInHow } from "./sessions.ts";
@@ -206,6 +206,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
       if (b !== "ok") {
         sessions.destroy(raw);
         setAuditTailnet(c, { ...part, reason: b.reason });
+        markSessionEnded(c); // a read is not audited otherwise
         return undefined;
       }
       setAuditTailnet(c, part);

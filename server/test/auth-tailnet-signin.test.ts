@@ -360,6 +360,27 @@ test("tag set changes: a tag taken off ends the session within 10 s; a conflicti
   assert.deepEqual(r.audits("/api/auth/as-root").at(-1)?.tailnet, { subject: "tag:ci", source: "socket", reason: "changed" });
 });
 
+test("a session ended by the binding check on a GET writes exactly one audit line with the reason", async () => {
+  const r = await rig("socket");
+  r.h.auth!.accounts.create({ name: "ci", admin: false, nodes: {} });
+  link(r.h, "virt", "ci", "tag:ci");
+  r.devices.set(ADDR, { tags: ["tag:ci"] });
+  const c = await r.signIn();
+  r.lines.length = 0;
+  assert.equal((await r.req("/api/auth/me", { cookie: c })).status, 200);
+  assert.equal(r.lines.length, 0, "a read that holds is not audited");
+  r.devices.set(ADDR, { tags: ["tag:ci", "tag:db"] });
+  link(r.h, "sys", "c", "tag:db");
+  r.pastCache();
+  assert.equal((await r.req("/api/auth/me", { cookie: c })).status, 401);
+  const ls = r.lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(ls.length, 1, r.lines.join("\n"));
+  assert.equal(ls[0]?.event, "session-ended");
+  assert.equal(ls[0]?.method, "GET");
+  assert.deepEqual(ls[0]?.tailnet, { subject: "tag:ci", source: "socket", reason: "tag-conflict" });
+  assert.equal(r.h.auth!.sessions.list().length, 0);
+});
+
 test("audit: a Tailscale session's requests carry the subject and the source; a password session's carry nothing", async () => {
   const r = await rig("socket");
   guest(r.h);
