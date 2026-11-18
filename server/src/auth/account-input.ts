@@ -3,6 +3,8 @@ import { OWNER_NAME, PathError, cleanVirtual, isReservedName } from "../paths.ts
 import type { Grant, NodeAccess } from "./identity.ts";
 import type { SourceAccess } from "./source-grants.ts";
 import { parsePublicKey } from "./sshkey.ts";
+import { cleanLogin, cleanTag } from "./tailnet.ts";
+import type { Link } from "./tailnet-links.ts";
 
 /**
  * Checks what an administrator sends to the admin routes. Each function takes the raw JSON value and gives back the cleaned value, or
@@ -14,6 +16,8 @@ export const MIN_PASSWORD = 12;
 export const MAX_PASSWORD = 1024;
 export const MAX_GRANTS = 64;
 export const MAX_KEYS = 32;
+/** The most tailnet links (logins and tags together) one account may have. */
+export const MAX_TAILNET_LINKS = 16;
 /**
  * The most one machine's grants may take as JSON. They travel in the signed user header to the agent, whose server takes headers up to
  * 16 KiB in all; past that every request to the machine would fail with 431.
@@ -137,4 +141,33 @@ export function publicKey(v: unknown): string {
     .join("")
     .trim();
   return comment ? `${m[1]} ${m[2]} ${comment}` : `${m[1]} ${m[2]}`;
+}
+
+const TAILNET_LINK_MESSAGE = "a tailnet link must be a login such as alice@github or a tag such as tag:server (letters, digits and dashes)";
+
+/**
+ * One tailnet link: trimmed and lowercased, then a tag when it starts with `tag:` (`cleanTag`), else a login (`cleanLogin`, never
+ * `tagged-devices`). Gives the cleaned subject with its kind.
+ */
+export function tailnetLink(v: unknown): Link {
+  if (typeof v !== "string") throw new InputError(TAILNET_LINK_MESSAGE);
+  const isTag = v.trim().toLowerCase().startsWith("tag:");
+  const subject = isTag ? cleanTag(v) : cleanLogin(v);
+  if (subject === null) throw new InputError(TAILNET_LINK_MESSAGE);
+  return { subject, kind: isTag ? "tag" : "login" };
+}
+
+/** The whole list of an account's tailnet links: each cleaned, duplicates merged at the place of the first, at most 16 after that. */
+export function tailnetLinks(v: unknown): Link[] {
+  if (!Array.isArray(v)) throw new InputError("tailnet links must be a list");
+  const out: Link[] = [];
+  const seen = new Set<string>();
+  for (const x of v) {
+    const l = tailnetLink(x);
+    if (seen.has(l.subject)) continue;
+    seen.add(l.subject);
+    out.push(l);
+    if (out.length > MAX_TAILNET_LINKS) throw new InputError(`at most ${MAX_TAILNET_LINKS} tailnet links per account`);
+  }
+  return out;
 }

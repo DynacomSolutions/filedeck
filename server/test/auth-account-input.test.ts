@@ -6,6 +6,7 @@ import {
   MAX_GRANTS,
   MAX_KEYS,
   MAX_PASSWORD,
+  MAX_TAILNET_LINKS,
   MIN_PASSWORD,
   accountName,
   grants,
@@ -14,6 +15,8 @@ import {
   publicKey,
   sourceAccess,
   systemName,
+  tailnetLink,
+  tailnetLinks,
 } from "../src/auth/account-input.ts";
 
 const str = (b: Buffer | string) => {
@@ -197,4 +200,33 @@ test("keys", () => {
   inputError(() => publicKey("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ"));
   inputError(() => publicKey(42));
   inputError(() => publicKey(""));
+});
+
+test("tailnetLink: a login or a tag, trimmed and lowercased, with its kind", () => {
+  assert.deepEqual(tailnetLink(" Alice@GitHub "), { subject: "alice@github", kind: "login" });
+  assert.deepEqual(tailnetLink("TAG:Server"), { subject: "tag:server", kind: "tag" });
+  assert.deepEqual(tailnetLink(" tag:web-1 "), { subject: "tag:web-1", kind: "tag" });
+  assert.deepEqual(tailnetLink("bob@passkey"), { subject: "bob@passkey", kind: "login" });
+  const longest = "a@" + "b".repeat(249) + ".io";
+  assert.deepEqual(tailnetLink(longest), { subject: longest, kind: "login" }, "254 characters pass");
+  for (const bad of ["tagged-devices", "tag:", "tag:a_b", "tag:a.b", "alice", "@github", "alice@", "a\n@github", "", "a@" + "b".repeat(250) + ".io", 5, null, undefined, ["a@x"]]) {
+    const msg = inputError(() => tailnetLink(bad));
+    assert.match(msg, /tailnet link/, `${JSON.stringify(bad)} is refused with the link message`);
+  }
+});
+
+test("tailnetLinks: a list, each cleaned, duplicates merged, at most 16", () => {
+  assert.equal(MAX_TAILNET_LINKS, 16);
+  assert.deepEqual(tailnetLinks(["a@x", "A@X", " Tag:S "]), [
+    { subject: "a@x", kind: "login" },
+    { subject: "tag:s", kind: "tag" },
+  ]);
+  assert.deepEqual(tailnetLinks([]), []);
+  const sixteen = Array.from({ length: 16 }, (_, i) => `u${i}@x`);
+  assert.equal(tailnetLinks(sixteen).length, 16);
+  assert.match(inputError(() => tailnetLinks([...sixteen, "u16@x"])), /16/);
+  assert.equal(tailnetLinks([...sixteen, "U0@X"]).length, 16, "a duplicate does not count towards the 16");
+  inputError(() => tailnetLinks("a@x"));
+  inputError(() => tailnetLinks({ 0: "a@x" }));
+  inputError(() => tailnetLinks(["a@x", "nope"]));
 });
