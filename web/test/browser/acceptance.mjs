@@ -4,6 +4,7 @@ import { isEnhancedContrastFailure } from './contrast.mjs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 
 const require = createRequire(import.meta.url);
 const axePath = require.resolve('axe-core/axe.min.js');
@@ -232,7 +233,8 @@ async function installFixture(page, opts = {}) {
       opCalls.push(req.postDataJSON());
       return json({ id: `fixture-op-${opCalls.length}`, state: 'queued' });
     }
-    if (pathname === '/api/ops/jobs') return json({ jobs: [] });
+    // opts.opJobs: a check's own hub job list (the jobs tray polls it)
+    if (pathname === '/api/ops/jobs') return json({ jobs: opts.opJobs ? opts.opJobs() : [] });
     if (pathname.endsWith('/api/trash/list')) return json({ volumes: [{ volume: '/', items: trashItems, truncated: false }] });
     if (pathname.endsWith('/api/fs/read')) return route.fulfill({ status: 200, contentType: 'text/markdown; charset=utf-8', body: markdownText });
     if (pathname.endsWith('/api/fs/text')) return json({ path: url.searchParams.get('path'), content: url.searchParams.get('path')?.endsWith('.md') ? markdownText : url.searchParams.get('path')?.endsWith('/mixed.txt') ? 'one\r\ntwo\r\nthree\nfour\r\n' : 'saved text\n', size: 12, mtime: 1791264000000, etag: 'etag-1' });
@@ -274,9 +276,11 @@ let currentCheck = 'check';
 let pendingShots = [];
 
 // clockOffsetMs: the page's Date runs that far ahead of the fake hub's clock (timers are untouched).
-async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {}, clockOffsetMs = 0, fakeClock = false } = {}) {
+// serviceWorkers: 'block' (the default) keeps the app's service worker out of every check but the installable-app one,
+// so those checks see the page exactly as before it had one. initScripts: functions run in the page before its own scripts.
+async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {}, clockOffsetMs = 0, fakeClock = false, serviceWorkers = 'block', initScripts = [], origin = baseURL } = {}) {
   // bypassCSP only lets the harness inject axe-core into the page; the app's own scripts are unaffected.
-  const context = await browser.newContext({ viewport, colorScheme, bypassCSP: true });
+  const context = await browser.newContext({ viewport, colorScheme, bypassCSP: true, serviceWorkers });
   const page = await context.newPage();
   // The last screenshot of each page is kept in memory and written only when its check fails.
   const realClose = context.close.bind(context);
@@ -306,8 +310,9 @@ async function openPage(browser, { viewport = { width: 1365, height: 900 }, colo
   }
   // fakeClock: timers run in real time until a check moves them on with page.clock.fastForward
   if (fakeClock) await context.clock.install();
+  for (const f of initScripts) await page.addInitScript(f);
   await installFixture(page, fixture);
-  await page.goto(new URL(state, baseURL).toString(), { waitUntil: 'domcontentloaded' });
+  await page.goto(new URL(state, origin).toString(), { waitUntil: 'domcontentloaded' });
   await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
   return { context, page, diagnostics };
 }
@@ -2419,6 +2424,193 @@ async function verifyMixedLineEndingsNotice(browser) {
   }
 }
 
+// ---- Installable app -------------------------------------------------------------------------------------------------
+
+// Spies installed before the app's scripts: notification permission starts as "default" and is granted when asked (the
+// count shows whether the app asked, and when); notifications shown through the service worker are recorded; the page
+// can be made to look hidden (window.__hidden) without leaving the tab.
+function pwaSpies() {
+  const log = (window.__notify = { asked: 0, shown: [] });
+  let perm = 'default';
+  if (window.Notification) {
+    Object.defineProperty(window.Notification, 'permission', { get: () => perm, configurable: true });
+    window.Notification.requestPermission = async () => { log.asked += 1; perm = 'granted'; return perm; };
+  }
+  if (window.ServiceWorkerRegistration) {
+    ServiceWorkerRegistration.prototype.showNotification = async function (title, o) { log.shown.push({ title, body: o?.body ?? '', tag: o?.tag ?? '' }); };
+  }
+  window.__hidden = false;
+  Object.defineProperty(Document.prototype, 'visibilityState', { get: () => (window.__hidden ? 'hidden' : 'visible'), configurable: true });
+}
+
+const fixtureOp = (state) => ({
+  id: 'fixture-op-pwa', kind: 'ops', op: 'copy', title: 'Copy tracked.txt', state,
+  progress: { bytes: state === 'done' ? 128 : 64, totalBytes: 128, entries: 1, totalEntries: 1, current: '' }, speed: 0,
+  counts: { total: 1, done: state === 'done' ? 1 : 0, skipped: 0, failed: 0 }, createdAt: Date.now() - 5000, startedAt: Date.now() - 4000,
+  ...(state === 'done' ? { finishedAt: Date.now() } : {}),
+});
+
+// A local port that forwards to FILEDECK_URL and can be stopped and started again on the same port, so the browser
+// meets a hub that really cannot be reached (connection refused) without stopping the hub other checks use. Browser
+// offline emulation is not used: Firefox's refuses page loads before a service worker sees them, which a dropped
+// network does not do.
+async function hubDoor() {
+  const target = new URL(baseURL);
+  const sockets = new Set();
+  const door = { swSuffix: '' };
+  const server = http.createServer((req, res) => {
+    // door.swSuffix: /sw.js answered with that text appended, as a new build would change it
+    const nextSw = door.swSuffix && req.url.startsWith('/sw.js');
+    const headers = { ...req.headers, host: target.host };
+    if (nextSw) delete headers['accept-encoding'];
+    const up = http.request({ host: target.hostname, port: target.port, path: req.url, method: req.method, headers }, (r) => {
+      if (!nextSw) {
+        res.writeHead(r.statusCode ?? 502, r.headers);
+        return r.pipe(res);
+      }
+      const parts = [];
+      r.on('data', (d) => parts.push(d));
+      r.on('end', () => {
+        const body = Buffer.concat([...parts, Buffer.from(door.swSuffix)]);
+        const h = { ...r.headers, 'content-length': String(body.length) };
+        res.writeHead(r.statusCode ?? 502, h);
+        res.end(body);
+      });
+    });
+    up.on('error', () => res.destroy());
+    req.pipe(up);
+  });
+  server.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  return Object.assign(door, {
+    origin: `http://127.0.0.1:${port}`,
+    close: () => new Promise((r) => { server.close(() => r()); for (const s of sockets) s.destroy(); }),
+    open: () => new Promise((r) => server.listen(port, '127.0.0.1', r)),
+  });
+}
+
+async function verifyInstallableApp(browser) {
+  const failures = [];
+  let op = fixtureOp('running');
+  const fixture = { opJobs: () => [op] };
+  const door = await hubDoor();
+  const { context, page } = await openPage(browser, { serviceWorkers: 'allow', fixture, initScripts: [pwaSpies], origin: door.origin });
+  try {
+    // The worker takes control of the first page load (clients.claim), so the next start works without a network.
+    await page.waitForFunction(() => !!navigator.serviceWorker?.controller, null, { timeout: 15000 });
+
+    // Manifest, icons and headers
+    const m = await page.evaluate(async () => {
+      const r = await fetch('/site.webmanifest');
+      const sw = await fetch('/sw.js');
+      const body = await r.json();
+      const icons = [];
+      for (const i of body.icons) {
+        if (!i.type.startsWith('image/png')) continue;
+        const img = new Image();
+        img.src = i.src;
+        await img.decode();
+        icons.push({ src: i.src, purpose: i.purpose, sizes: i.sizes, w: img.naturalWidth, h: img.naturalHeight });
+      }
+      return { body, icons, type: r.headers.get('content-type'), cache: r.headers.get('cache-control'), swCache: sw.headers.get('cache-control'), theme: document.querySelector('meta[name="theme-color"]')?.content };
+    });
+    assert.match(m.type, /^application\/manifest\+json/, 'the manifest is served as a manifest');
+    assert.equal(m.cache, 'no-cache', 'the manifest is revalidated');
+    assert.equal(m.swCache, 'no-cache', 'the service worker script is revalidated');
+    for (const [k, v] of Object.entries({ id: '/', name: 'Filedeck', short_name: 'Filedeck', start_url: '/', scope: '/', display: 'standalone', theme_color: '#151518', background_color: '#0c0c0e' })) assert.equal(m.body[k], v, `manifest ${k}`);
+    assert.ok(m.body.categories.includes('productivity'), 'manifest categories');
+    for (const [purpose, size] of [['any', 192], ['any', 512], ['maskable', 192], ['maskable', 512], ['monochrome', 512]]) {
+      const icon = m.icons.find((i) => i.purpose === purpose && i.sizes === `${size}x${size}`);
+      assert.ok(icon, `a ${purpose} icon of ${size} px is listed`);
+      assert.deepEqual([icon.w, icon.h], [size, size], `${icon.src} is ${size} px`);
+    }
+    assert.equal(m.theme, '#ffffff', 'the title bar takes the light theme colour');
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+    assert.equal(await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content), '#151518', 'the title bar follows a switch to the dark theme');
+    await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+
+    if (engineName === 'chromium') {
+      const cdp = await context.newCDPSession(page);
+      const { installabilityErrors } = await cdp.send('Page.getInstallabilityErrors');
+      assert.deepEqual(installabilityErrors, [], 'Chromium finds the app installable');
+      const { errors } = await cdp.send('Page.getAppManifest');
+      assert.deepEqual(errors, [], 'Chromium reads the manifest without errors');
+    }
+
+    // Nothing under /api is stored, though the page has listed folders and polled jobs by now.
+    const stored = await page.evaluate(async () => {
+      const out = [];
+      for (const k of await caches.keys()) for (const r of await (await caches.open(k)).keys()) out.push(new URL(r.url).pathname);
+      return out;
+    });
+    assert.ok(stored.includes('/'), 'the shell is stored');
+    assert.ok(stored.some((p) => /^\/assets\/index-[\w-]{8}\.js$/.test(p)), 'the entry script is stored');
+    assert.deepEqual(stored.filter((p) => /^\/api(\/|$)/i.test(p)), [], 'no API answer is stored');
+
+    // Notifications: never asked on load; the Settings switch asks; a job that ends while hidden notifies once.
+    assert.equal(await page.evaluate(() => window.__notify.asked), 0, 'permission is not asked on load');
+    await page.getByRole('button', { name: 'Settings' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Settings' });
+    const sw = dialog.getByRole('switch', { name: /Notify me when a job ends/ });
+    await sw.waitFor({ state: 'attached' });
+    assert.equal(await sw.isChecked(), false, 'the switch starts off');
+    assert.equal(await page.evaluate(() => window.__notify.asked), 0, 'opening Settings does not ask');
+    await dialog.locator('label.set-opt', { hasText: 'Notify me when a job ends' }).click();
+    await page.waitForFunction(() => window.__notify.asked === 1);
+    await expectChecked(sw);
+    await runAxe(page, 'Settings App section (light)', failures);
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { window.__hidden = true; });
+    op = fixtureOp('done');
+    await page.waitForFunction(() => window.__notify.shown.length > 0, null, { timeout: 15000 });
+    await page.waitForTimeout(1500);
+    assert.deepEqual(await page.evaluate(() => window.__notify.shown), [{ title: 'Copy tracked.txt finished', body: '1 done', tag: 'filedeck-job:o:fixture-op-pwa' }], 'one notification for the job that ended while hidden');
+    await page.evaluate(() => { window.__hidden = false; });
+
+    // A new build: the changed worker waits, the page offers Reload and does not reload by itself; Reload switches.
+    door.swSuffix = '\n// next build\n';
+    await page.evaluate(() => { window.__sameLoad = true; return navigator.serviceWorker.getRegistration().then((r) => r.update()); });
+    const banner = page.getByRole('status').filter({ hasText: 'A new version of Filedeck is ready.' });
+    await banner.waitFor({ state: 'visible', timeout: 15000 });
+    await page.waitForTimeout(1000);
+    assert.equal(await page.evaluate(() => window.__sameLoad), true, 'the page does not reload before Reload is pressed');
+    await runAxe(page, 'update banner (light)', failures);
+    await Promise.all([page.waitForEvent('load', { timeout: 15000 }), banner.getByRole('button', { name: 'Reload' }).click()]);
+    await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
+    assert.equal(await page.evaluate(() => window.__sameLoad), undefined, 'Reload loads the page again');
+    assert.equal(await page.getByText('A new version of Filedeck is ready.').count(), 0, 'the new version runs, no banner');
+
+    // Without a hub: a reload opens the stored shell and says the hub is not reachable, in both themes and at 320 px.
+    await page.unroute('**/api/**');
+    await door.close();
+    for (const scheme of ['light', 'dark']) {
+      await page.evaluate((t) => localStorage.setItem('filedeck-theme', t), scheme);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.getByRole('heading', { name: 'Filedeck hub not reachable' }).waitFor({ state: 'visible', timeout: 15000 });
+      // the card fades in; contrast is measured once it is fully shown
+      await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'));
+      await runAxe(page, `hub not reachable (${scheme})`, failures);
+    }
+    await page.setViewportSize({ width: 320, height: 568 });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'the hub-not-reachable screen fits 320 px');
+    await page.setViewportSize({ width: 1365, height: 900 });
+    await door.open();
+    await installFixture(page, fixture);
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
+  } finally {
+    await context.close();
+    await door.close().catch(() => {});
+  }
+  assert.deepEqual(failures, [], 'axe-core on the installable-app views');
+}
+
+async function expectChecked(locator) {
+  for (let i = 0; i < 50 && !(await locator.isChecked()); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(await locator.isChecked(), true, 'the switch is on after permission is granted');
+}
+
 // ---- Runner ---------------------------------------------------------------------------------------------------------
 
 const checks = [
@@ -2455,6 +2647,7 @@ const checks = [
   ['act as root from the account menu', verifyActAsRoot],
   ['Virtual account opens its first granted folder', verifyVirtualAccount],
   ['Accounts', verifyAccounts],
+  ['installable app: manifest, worker, offline start, notifications', verifyInstallableApp],
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
 
