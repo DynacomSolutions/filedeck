@@ -566,8 +566,8 @@ test("limiter families: password attempts with the name tailnet:<login> do not b
   assert.equal(res.status, 200, "alice's Tailscale sign-in is not");
 });
 
-test("event streams of a Tailscale session go back through the gate at least once a minute; a password session's stay", async () => {
-  // a fake agent with a change feed that stays open
+/** A fake agent whose change feed stays open; `open` holds the feeds it serves. */
+async function feedAgent() {
   const open = new Set<http.ServerResponse>();
   const agent = http.createServer((req, res) => {
     if ((req.url ?? "").startsWith("/api/events")) {
@@ -581,39 +581,151 @@ test("event streams of a Tailscale session go back through the gate at least onc
     res.end("{}");
   });
   await new Promise<void>((res) => agent.listen(0, "127.0.0.1", res));
+  return {
+    nodes: `t=http://127.0.0.1:${(agent.address() as AddressInfo).port}`,
+    close: () => {
+      for (const o of open) o.destroy();
+      agent.closeAllConnections();
+      agent.close();
+    },
+  };
+}
+
+const ACCESS = { t: { runAs: "nobody", grants: [{ path: "/", write: false }] } };
+const FEED = "/api/nodes/t/api/events?path=/";
+const feedHeaders = { accept: "text/event-stream" };
+
+async function until(cond: () => boolean, what: string, ms = 5_000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test("streams, socket source: the binding is checked again while the stream is open; a tag taken off ends the stream and the session", async () => {
+  const fa = await feedAgent();
   try {
-    const port = (agent.address() as AddressInfo).port;
-    const r = await rig("socket", { env: { NODES: `t=http://127.0.0.1:${port}` }, streamCheckMs: 50 });
-    r.h.auth!.accounts.create({ name: "ci", admin: false, nodes: { t: { runAs: "nobody", grants: [{ path: "/", write: false }] } } });
-    r.h.auth!.accounts.create({ name: "guest", password: "pw-guest", admin: false, nodes: { t: { runAs: "nobody", grants: [{ path: "/", write: false }] } } });
+    const r = await rig("socket", { env: { NODES: fa.nodes }, streamCheckMs: 50 });
+    r.h.auth!.accounts.create({ name: "ci", admin: false, nodes: ACCESS });
+    r.h.auth!.accounts.create({ name: "guest", password: "pw-guest", admin: false, nodes: ACCESS });
     link(r.h, "virt", "ci", "tag:ci");
     r.devices.set(ADDR, { tags: ["tag:ci"] });
     const c = await r.signIn();
     const pw = await r.req("/api/auth/login", { method: "POST", addr: "100.64.5.5", body: { name: "guest", password: "pw-guest" } });
     const pc = (pw.headers.get("set-cookie") ?? "").split(";")[0];
-    const ts = await r.req("/api/nodes/t/api/events?path=/", { cookie: c, headers: { accept: "text/event-stream" } });
-    const ps = await r.req("/api/nodes/t/api/events?path=/", { cookie: pc, addr: "100.64.5.5", headers: { accept: "text/event-stream" } });
+    const ts = await r.req(FEED, { cookie: c, headers: feedHeaders });
+    const ps = await r.req(FEED, { cookie: pc, addr: "100.64.5.5", headers: feedHeaders });
     assert.equal(ts.status, 200);
     assert.equal(ps.status, 200);
     assert.equal(r.h.streams!.size(), 2);
-    // the tag is taken off: no request comes, but the stream ends once its minute is up
+    // no cap: past a minute with the binding still holding, the stream stays
+    r.clock.t += 61_000;
+    await new Promise((res) => setTimeout(res, 300));
+    assert.equal(r.h.streams!.size(), 2, "a holding binding keeps the stream past a minute");
+    // the tag is taken off: once the cached answer is older than 10 s, the next check ends the stream and the session
     r.devices.set(ADDR, { tags: ["tag:web"] });
-    r.clock.t += 30_000;
-    await new Promise((res) => setTimeout(res, 200));
-    assert.equal(r.h.streams!.size(), 2, "within the minute it stays");
-    r.clock.t += 31_000;
-    const end = Date.now() + 5_000;
-    while (r.h.streams!.size() !== 1 && Date.now() < end) await new Promise((res) => setTimeout(res, 20));
-    assert.equal(r.h.streams!.size(), 1, "the Tailscale stream ended; the password one stays");
-    // reconnecting goes through the gate, which ends the session
-    const again = await r.req("/api/nodes/t/api/events?path=/", { cookie: c, headers: { accept: "text/event-stream" } });
-    assert.equal(again.status, 401);
+    r.pastCache();
+    await until(() => r.h.streams!.size() === 1, "the Tailscale stream to end");
+    assert.deepEqual(
+      r.h.auth!.sessions.list().map((s) => s.name),
+      ["guest"],
+      "the Tailscale session ended; the password session stays",
+    );
+    const line = r.lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.event === "session-ended");
+    assert.deepEqual(line?.tailnet, { subject: "tag:ci", source: "socket", reason: "unlinked" });
+    assert.equal(line?.user, "virt:ci");
+    assert.equal((await r.req(FEED, { cookie: c, headers: feedHeaders })).status, 401);
     await ts.body?.cancel().catch(() => undefined);
     await ps.body?.cancel().catch(() => undefined);
   } finally {
-    for (const o of open) o.destroy();
-    agent.closeAllConnections();
-    agent.close();
+    fa.close();
+  }
+});
+
+test("streams, socket source: unavailable keeps the stream; another device ends it; a device gone (404) ends the stream but keeps the session", async () => {
+  const fa = await feedAgent();
+  try {
+    const r = await rig("socket", { env: { NODES: fa.nodes }, streamCheckMs: 50 });
+    r.h.auth!.accounts.create({ name: "guest", admin: false, nodes: ACCESS });
+    link(r.h, "virt", "guest", "alice@github");
+    r.devices.set(ADDR, { login: "alice@github" });
+    let c = await r.signIn();
+    let s = await r.req(FEED, { cookie: c, headers: feedHeaders });
+    assert.equal(r.h.streams!.size(), 1);
+    r.api!.state.down = true;
+    r.pastCache();
+    await new Promise((res) => setTimeout(res, 300));
+    assert.equal(r.h.streams!.size(), 1, "tailscaled down: the stream stays");
+    assert.equal(r.h.auth!.sessions.list().length, 1);
+    r.api!.state.down = false;
+    r.devices.delete(ADDR);
+    r.pastCache();
+    await until(() => r.h.streams!.size() === 0, "the stream of a device gone to end");
+    assert.equal(r.h.auth!.sessions.list().length, 1, "as at the gate, the session is kept");
+    await s.body?.cancel().catch(() => undefined);
+    r.h.auth!.sessions.endAll("virt", "guest");
+    r.devices.set(ADDR, { login: "alice@github" });
+    r.pastCache();
+    c = await r.signIn();
+    s = await r.req(FEED, { cookie: c, headers: feedHeaders });
+    assert.equal(r.h.streams!.size(), 1);
+    r.devices.set(ADDR, { login: "alice@github", stable: "nOther" });
+    r.pastCache();
+    await until(() => r.h.streams!.size() === 0, "the stream to end for another device");
+    assert.equal(r.h.auth!.sessions.list().length, 0);
+    await s.body?.cancel().catch(() => undefined);
+  } finally {
+    fa.close();
+  }
+});
+
+test("streams: the check never counts as use, so a Tailscale session with only a stream open ends at the idle limit", async () => {
+  const fa = await feedAgent();
+  try {
+    const r = await rig("socket", { env: { NODES: fa.nodes, FILEDECK_SESSION_IDLE_SECONDS: "600" }, streamCheckMs: 50 });
+    r.h.auth!.accounts.create({ name: "guest", admin: false, nodes: ACCESS });
+    link(r.h, "virt", "guest", "alice@github");
+    r.devices.set(ADDR, { login: "alice@github" });
+    const c = await r.signIn();
+    const s = await r.req(FEED, { cookie: c, headers: feedHeaders });
+    for (let i = 0; i < 3; i++) {
+      r.clock.t += 200_000; // each step past the cache: the check asks whois again, and the binding holds
+      await new Promise((res) => setTimeout(res, 200));
+    }
+    assert.equal(r.h.streams!.size(), 1, "600 s: not yet past the limit");
+    r.clock.t += 1_000;
+    await until(() => r.h.streams!.size() === 0, "the stream to end at the idle limit");
+    assert.equal((await r.req("/api/nodes", { cookie: c })).status, 401);
+    await s.body?.cancel().catch(() => undefined);
+  } finally {
+    fa.close();
+  }
+});
+
+test("streams, headers source: a stream ends after a minute so the reconnect is checked; reconnects alone do not keep the session alive", async () => {
+  const fa = await feedAgent();
+  try {
+    const r = await rig("headers", { env: { NODES: fa.nodes, FILEDECK_SESSION_IDLE_SECONDS: "600" }, streamCheckMs: 50 });
+    r.h.auth!.accounts.create({ name: "guest", admin: false, nodes: ACCESS });
+    link(r.h, "virt", "guest", "alice@github");
+    r.devices.set(ADDR, { login: "alice@github" });
+    const c = await r.signIn();
+    const s = await r.req(FEED, { cookie: c, headers: feedHeaders });
+    assert.equal(r.h.streams!.size(), 1);
+    r.clock.t += 61_000;
+    await until(() => r.h.streams!.size() === 0, "the headers-source stream to end after a minute");
+    await s.body?.cancel().catch(() => undefined);
+    // the browser reconnects every minute or so; with no other request the session still ends at the idle limit
+    for (let i = 0; i < 9; i++) {
+      r.clock.t += 61_000;
+      const again = await r.req(FEED, { cookie: c, headers: feedHeaders });
+      await again.body?.cancel().catch(() => undefined);
+      if (again.status === 401) break;
+    }
+    assert.equal(r.h.auth!.sessions.list().length, 0, "the session idled out");
+  } finally {
+    fa.close();
   }
 });
 

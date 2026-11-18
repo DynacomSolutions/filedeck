@@ -9,6 +9,8 @@
 export interface StreamSource {
   addEventListener(type: string, fn: (e: { data?: unknown }) => void): void;
   close(): void;
+  /** EventSource's state: 2 (CLOSED) once the browser has given up reconnecting (a non-200 answer such as 401 or 503) */
+  readonly readyState?: number;
 }
 
 export interface ChangeHubOptions {
@@ -38,7 +40,16 @@ interface Entry {
   poll?: unknown;
   /** the server refused the stream (for example its watch limit): never reopen it, poll instead */
   refused?: boolean;
+  /** the browser gave up on the stream (CLOSED): poll, and open it again no sooner than this */
+  retryAt?: number;
+  /** streams given up on in a row, for the wait before the next try; a `ready` resets it */
+  fails?: number;
 }
+
+/** EventSource.CLOSED */
+const CLOSED = 2;
+/** The longest wait before a stream the browser gave up on is opened again. */
+const MAX_RETRY_MS = 5 * 60_000;
 
 export function createChangeHub(o: ChangeHubOptions) {
   const entries = new Map<string, Entry>();
@@ -69,12 +80,20 @@ export function createChangeHub(o: ChangeHubOptions) {
         continue;
       }
       if (en.src) continue;
-      if (!en.refused && streams() < o.maxStreams) {
+      if (!en.refused && (en.retryAt === undefined || now() >= en.retryAt) && streams() < o.maxStreams) {
         if (en.poll !== undefined) o.clearInterval(en.poll);
         en.poll = undefined;
+        en.retryAt = undefined;
         const src = o.open(en.url);
         en.src = src;
         src.addEventListener("change", () => notify(en));
+        // The agent says "ready" each time the stream (re)starts. After a reconnect, changes made while it was down were never sent, so
+        // every ready but the first tells the listeners to look again.
+        let readies = 0;
+        src.addEventListener("ready", () => {
+          en.fails = 0;
+          if (readies++ > 0) notify(en);
+        });
         // A server-sent "error" event carries data; a dropped connection does not and is retried by the browser itself (the hub is
         // asked who is signed in, as the drop may be the session's end).
         src.addEventListener("error", (e) => {
@@ -83,10 +102,25 @@ export function createChangeHub(o: ChangeHubOptions) {
             en.src = undefined;
             en.refused = true;
             rebalance();
-          } else if (typeof e.data !== "string") dropped();
+          } else if (typeof e.data !== "string") {
+            dropped();
+            // CLOSED: the browser will not reconnect (the hub answered 503 while tailscaled was down, say). Poll meanwhile, and open it
+            // again after a wait that doubles with each failure in a row.
+            if (src.readyState === CLOSED && en.src === src) {
+              src.close();
+              en.src = undefined;
+              en.fails = (en.fails ?? 0) + 1;
+              en.retryAt = now() + Math.min(MAX_RETRY_MS, o.pollMs * 2 ** (en.fails - 1));
+              rebalance();
+            }
+          }
         });
       } else if (en.poll === undefined) {
-        en.poll = o.setInterval(() => notify(en), o.pollMs);
+        en.poll = o.setInterval(() => {
+          notify(en);
+          // a stream given up on is opened again once its wait is over (rebalance moves it from the poll back to a stream)
+          if (en.retryAt !== undefined && now() >= en.retryAt) rebalance();
+        }, o.pollMs);
       }
     }
   }

@@ -430,6 +430,7 @@ function named<T extends (...a: never[]) => unknown>(name: string, fn: T): T {
 
 /** The context key of a request's tailnet identity (`readTailnet`). */
 const KEY = "tailnet";
+const INPUT_KEY = "tailnetInput";
 
 /**
  * Reads the request's tailnet identity once, before `stripTailnetHeaders` removes the headers, and keeps it on the context for
@@ -447,6 +448,7 @@ export function readTailnet(src: TailnetSource | undefined): MiddlewareHandler {
       } catch {
         input = undefined;
       }
+      if (input) c.set(INPUT_KEY as never, input as never);
       const ask = (): Promise<TailnetAnswer> => (input ? src.identifyInput(input) : Promise.resolve(src.mode === "socket" ? UNAVAILABLE : NONE));
       let p: Promise<TailnetAnswer> | undefined = src.mode === "headers" ? Promise.resolve(await ask()) : undefined;
       const get = () => (p ??= ask());
@@ -455,6 +457,9 @@ export function readTailnet(src: TailnetSource | undefined): MiddlewareHandler {
     await next();
   });
 }
+
+/** What `readTailnet` read from this request (`TailnetInput`), for a later check with `identifyInput`; undefined with no source. */
+export const tailnetInputOf = (c: Context): TailnetInput | undefined => c.get(INPUT_KEY as never) as TailnetInput | undefined;
 
 /** The identity `readTailnet` read for this request (asked once, shared); undefined when no source is configured. */
 export function tailnetOf(c: Context): Promise<TailnetAnswer> | undefined {

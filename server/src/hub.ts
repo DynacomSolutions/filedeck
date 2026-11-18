@@ -27,12 +27,12 @@ import { Accounts, AuthDb, bootstrapAdmin } from "./auth/store.ts";
 import { Sessions } from "./auth/sessions.ts";
 import { Challenges } from "./auth/sshkey.ts";
 import { LoginLimiter } from "./auth/limiter.ts";
-import { ProxyList, readTailnet, stripTailnetHeaders, TailnetSource } from "./auth/tailnet.ts";
+import { ProxyList, readTailnet, stripTailnetHeaders, tailnetInputOf, TailnetSource } from "./auth/tailnet.ts";
 import { TailnetLinks } from "./auth/tailnet-links.ts";
 import { currentUser, userContext } from "./auth/context.ts";
 import { USER_HEADER } from "./auth/identity.ts";
 import { LiveStreams } from "./auth/streams.ts";
-import { markArrival, registerAuth, registerAuthOff, sessionKeyOf, sessionMethodOf, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
+import { markArrival, registerAuth, registerAuthOff, sessionKeyOf, sessionMethodOf, tailnetBinding, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
 import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
@@ -99,7 +99,11 @@ const END_ROOT_JOBS_MS = 3_000;
 const ROOT_CALLS_WAIT_MS = 2_000;
 /** How long, after the answer, it still waits for such calls before it lists the jobs once more; the agents' own end covers the rest. */
 const ROOT_CALLS_LATE_MS = 5 * 60_000;
-/** The longest an event stream of a Tailscale session stays open before the browser has to reconnect through the gate (its binding check). */
+/**
+ * The longest an event stream of a Tailscale session stays open with the headers source, before the browser has to reconnect through the
+ * gate: that source has nothing to ask again without a request. With the socket source the hub checks the binding while the stream is
+ * open (`LiveStreams` `bound`), and there is no such limit.
+ */
 const TAILNET_STREAM_MS = 60_000;
 
 /**
@@ -166,7 +170,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     app.auth = auth;
     // Event streams end with their session (auth/streams.ts): told to by the session store, or found out by the check every minute.
     const sessions = auth.sessions;
-    const streams = new LiveStreams({ peek: (key) => sessions.peek(key), checkMs: opts?.streamCheckMs, now: opts?.now });
+    const streams = new LiveStreams({ peek: (key) => sessions.peek(key), checkMs: opts?.streamCheckMs, bindCheckMs: opts?.streamCheckMs, now: opts?.now });
     sessions.onEnd((e) => {
       if ("key" in e) {
         if (e.asRoot) streams.endAsRoot(e.key);
@@ -683,6 +687,43 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   registerVaultRoutes(app, vault, (n) => cfg.nodes.some((x) => x.name === n), cfg.auth ? { owner: vaultOwner, mayUse } : undefined);
 
+  /**
+   * How an event stream of a Tailscale session keeps to the session's binding (spec decision 2). Socket source: the binding is checked
+   * again while the stream is open, from what the stream's own request carried (`tailnetInputOf`), through the same cached whois and the
+   * same `tailnetBinding` as the gate; it never counts as use. A refusal ends the session (one audit line, with the reason), and so the
+   * stream; `none` (the device gone from the tailnet) ends only the stream, as the gate keeps the session; `unavailable` keeps both.
+   * Headers source: nothing can be asked again without a request, so the stream ends after `TAILNET_STREAM_MS` and the browser's
+   * reconnect goes through the gate.
+   */
+  const tailnetStream = (c: import("hono").Context, key: string): { endsAt?: number; bound?: () => Promise<"ok" | "end"> } => {
+    if (!auth) return {};
+    const src = auth.tailnet;
+    const input = tailnetInputOf(c);
+    if (src.mode !== "socket" || !input) return { endsAt: (opts?.now ?? Date.now)() + TAILNET_STREAM_MS };
+    const a = auth;
+    return {
+      bound: async () => {
+        const s = a.sessions.recordOf(key);
+        if (!s) return "end";
+        const b = tailnetBinding(await src.identifyInput(input), s, a.links);
+        if (b === "ok" || b === "unavailable") return "ok";
+        if (b === "none") return "end";
+        a.sessions.endKey(key);
+        (auditSink ?? ((l: string) => console.log(l)))(
+          JSON.stringify({
+            audit: true,
+            ts: new Date().toISOString(),
+            who: "hub",
+            event: "session-ended",
+            user: `${s.kind}:${s.name}`,
+            tailnet: { ...(s.tailnetSubject !== undefined ? { subject: s.tailnetSubject } : {}), source: "socket", reason: b.reason },
+          }),
+        );
+        return "end";
+      },
+    };
+  };
+
   // Reverse proxy: /api/nodes/<node>/<rest> -> <agent>/<rest>
   app.all("/api/nodes/:node/*", async (c) => {
     // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
@@ -739,11 +780,10 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
         // gave the identity the switch, so the agent call may have carried it: the stream counts as one, and track ends it at once if the
         // switch is already gone.
         const asRoot = id.kind === "sys" && id.asRootUntil !== undefined ? { until: id.asRootUntil, ok: () => asRootOk(id) } : undefined;
-        // a Tailscale session's binding is checked only by the gate: its stream ends within a minute, and the browser's reconnect goes
-        // through the gate again (a tag taken off the device, say, then ends the session)
         const absolute = auth?.sessions.endsAt(session);
-        const endsAt = sessionMethodOf(c) === "tailscale" ? Math.min(absolute ?? Infinity, (opts?.now ?? Date.now)() + TAILNET_STREAM_MS) : absolute;
-        return app.streams.track(session, id.kind, id.name, out, { abort: () => upstream.abort(), asRoot, endsAt });
+        const ts = sessionMethodOf(c) === "tailscale" ? tailnetStream(c, session) : {};
+        const endsAt = ts.endsAt !== undefined ? Math.min(absolute ?? Infinity, ts.endsAt) : absolute;
+        return app.streams.track(session, id.kind, id.name, out, { abort: () => upstream.abort(), asRoot, endsAt, ...(ts.bound ? { bound: ts.bound } : {}) });
       }
       return out;
     } catch (e) {

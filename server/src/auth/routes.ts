@@ -141,6 +141,31 @@ function peerOf(c: Context): string | undefined {
   }
 }
 
+/**
+ * The binding of a Tailscale session (spec decision 2), checked by the gate on every request it makes and by the hub for each of its
+ * open event streams: the identity (through the 10-second whois cache) must resolve again to the session's account and subject, with
+ * the same login and, when the session has one, the same device. `unavailable` (the source cannot answer) and `none` (the request did
+ * not come over the tailnet, or whois does not know the address) keep the session; anything else ends it, with the reason for the audit
+ * line (`changed`, or a refusal of `resolve`; `unlinked` also when whois knows the session's device but it has no valid login or tag).
+ */
+export function tailnetBinding(a: TailnetAnswer, s: SessionRecord, links: Pick<TailnetLinks, "owner"> | undefined): "ok" | "unavailable" | "none" | { reason: string } {
+  if ("unavailable" in a) return "unavailable";
+  // whois knows the session's own device, but it has no valid login or tag any more (its last tag was taken off): the session ends
+  if ("none" in a) return a.node !== undefined && s.tailnetNode !== undefined && a.node.stableId === s.tailnetNode ? { reason: "unlinked" } : "none";
+  const r = links ? resolve(a, links) : ({ ok: false, reason: "unlinked" } as const);
+  if (!r.ok) return { reason: r.reason };
+  const same =
+    r.kind === s.kind &&
+    r.name === s.name &&
+    r.subject === s.tailnetSubject &&
+    a.login === s.tailnetLogin &&
+    (s.tailnetNode === undefined || a.node?.stableId === s.tailnetNode);
+  return same ? "ok" : { reason: "changed" };
+}
+
+/** A change feed opened through the hub (`GET /api/nodes/<node>/api/events`): opening one is not counted as use of the session. */
+const isFeedOpen = (m: string, p: string) => m === "GET" && /^\/api\/nodes\/[^/]+\/api\/events$/.test(p);
+
 /** Auth off: only `GET /api/auth/me`, which says so. */
 export function registerAuthOff(app: Hono): void {
   app.get("/api/auth/me", (c) => c.json({ auth: false }));
@@ -158,28 +183,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const tailnetMode = deps.tailnet?.mode ?? null;
   const sourcePart = (): Pick<AuditTailnet, "source"> => (tailnetMode ? { source: tailnetMode } : {});
 
-  /**
-   * The binding of a Tailscale session (spec decision 2), checked on every request it makes: the request's identity (through the
-   * 10-second whois cache) must resolve again to the session's account and subject, with the same login and, when the session has one,
-   * the same device. `unavailable` (the source cannot answer) and `none` (the request did not come over the tailnet, or whois does not
-   * know the address) keep the session; anything else ends it, with the reason for the audit line (`changed`, or a refusal of
-   * `resolve`; `unlinked` also when whois knows the session's device but it has no valid login or tag).
-   */
-  const binding = async (c: Context, s: SessionRecord): Promise<"ok" | "unavailable" | "none" | { reason: string }> => {
-    const a = (await tailnetOf(c)) ?? NO_IDENTITY;
-    if ("unavailable" in a) return "unavailable";
-    // whois knows the session's own device, but it has no valid login or tag any more (its last tag was taken off): the session ends
-    if ("none" in a) return a.node !== undefined && s.tailnetNode !== undefined && a.node.stableId === s.tailnetNode ? { reason: "unlinked" } : "none";
-    const r = deps.links ? resolve(a, deps.links) : ({ ok: false, reason: "unlinked" } as const);
-    if (!r.ok) return { reason: r.reason };
-    const same =
-      r.kind === s.kind &&
-      r.name === s.name &&
-      r.subject === s.tailnetSubject &&
-      a.login === s.tailnetLogin &&
-      (s.tailnetNode === undefined || a.node?.stableId === s.tailnetNode);
-    return same ? "ok" : { reason: "changed" };
-  };
+  const binding = async (c: Context, s: SessionRecord) => tailnetBinding((await tailnetOf(c)) ?? NO_IDENTITY, s, deps.links);
 
   /**
    * The identity of the session cookie; `unavailable` for a Tailscale session whose identity source cannot answer now (the session is
@@ -207,7 +211,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     }
     const id0 = s.kind === "virt" ? accounts.identity("virt", s.name) : undefined;
     if (s.kind === "virt" && !id0) return undefined;
-    sessions.touch(raw);
+    // (opening a change feed is not use: a browser reconnects one by itself, which must not keep an idle session alive)
+    if (!isFeedOpen(c.req.method, c.req.path)) sessions.touch(raw);
     c.set("authSession" as never, sessions.keyOf(raw) as never);
     c.set("authHow" as never, { method: s.method, tailnet: s.method === "tailscale" ? s.tailnetSubject : undefined } as never);
     if (id0) return id0;

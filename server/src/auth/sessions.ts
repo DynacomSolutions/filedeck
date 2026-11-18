@@ -258,6 +258,24 @@ export class Sessions {
     return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}), ...howOf(r) };
   }
 
+  /**
+   * The session kept under `key` as `lookup` gives it, while `peek` finds it valid; undefined otherwise. Read only: it never writes
+   * `last_used` and never deletes (the hub asks it for each open event stream of a Tailscale session).
+   */
+  recordOf(key: string): SessionRecord | undefined {
+    const r = this.db
+      .prepare("SELECT kind, name, created, last_used, epoch, as_root_until, method, tailnet_subject, tailnet_login, tailnet_node FROM sessions WHERE id = ?")
+      .get(key) as Omit<SessionRow, "address"> | undefined;
+    if (!r || !this.holds(r, this.now())) return undefined;
+    return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}), ...howOf(r) };
+  }
+
+  /** Ends the session kept under `key` (its streams end through `onEnd`), as `destroy` does for a cookie value. */
+  endKey(key: string): void {
+    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(key);
+    this.ended({ key });
+  }
+
   /** Writes the session's last use now (at most once a minute, as `lookup` does). An unknown session is left as it is. */
   touch(raw: string): void {
     const t = this.now();
