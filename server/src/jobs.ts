@@ -87,7 +87,8 @@ const live = (s: string) => s === "queued" || s === "running";
 /** The owner kept in a job's stored params (see `Jobs.create`). */
 const ownerIn = (params: unknown): string | undefined => {
   const o = params && typeof params === "object" ? (params as { owner?: unknown }).owner : undefined;
-  return typeof o === "string" ? o : undefined;
+  // (only an account, `<kind>:<name>`: a perms job stored before its file owner became `fileOwner` kept a user name here)
+  return typeof o === "string" && /^(sys|virt):/.test(o) ? o : undefined;
 };
 const rowOwner = (r: JobRow): string | undefined => {
   try {

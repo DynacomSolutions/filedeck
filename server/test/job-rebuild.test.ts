@@ -204,3 +204,38 @@ test("origin: an adopted job keeps its stored origin; old rows without one defau
   assert.equal(JSON.parse(new JobStore(a.jobsFile).get("o-watch", "t")!.view).origin, "watcher");
   await a.close();
 });
+
+test("an adopted perms job: the file owner to set is `fileOwner`; `owner` is the job's account and is never chowned to", async () => {
+  const a = agent();
+  const me = String(process.getuid!());
+  // as a job stored now: the account in `owner` (added by the job queue), the file owner in `fileOwner`
+  const now = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o750, fileOwner: me, recursive: true, owner: "sys:alice" }, "p-new").id);
+  assert.equal(now.state, "done", now.error);
+  assert.equal(fs.statSync(path.join(a.root, "tree/sub")).mode & 0o777, 0o750);
+  // stored before the rename with an account owner: no chown to "sys:alice", the mode is still set
+  const acct = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o755, recursive: true, owner: "sys:alice" }, "p-acct").id);
+  assert.equal(acct.state, "done", acct.error);
+  assert.equal(fs.statSync(path.join(a.root, "tree/sub")).mode & 0o777, 0o755);
+  // stored before the rename with sign-in off: `owner` was the file owner, and still is
+  const old = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", owner: me, recursive: true }, "p-old").id);
+  assert.equal(old.state, "done", old.error);
+  // and one that names an owner that does not exist fails on that name, not on an account
+  const bad = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", fileOwner: "no-such-user-xyz", recursive: true, owner: "sys:alice" }, "p-bad").id);
+  assert.equal(bad.state, "failed");
+  assert.match(bad.error ?? "", /no-such-user-xyz/);
+  await a.close();
+});
+
+test("a perms job made now stores the file owner as `fileOwner`", async () => {
+  const a = agent();
+  const me = String(process.getuid!());
+  const r = await post(a, "/api/fs/perms", { path: "/tree", owner: me, recursive: true });
+  assert.equal(r.status, 202, await r.clone().text());
+  const { id } = (await r.json()) as { id: string };
+  await done(a, id);
+  const row = new JobStore(a.jobsFile).get(id, "t");
+  const params = JSON.parse(row!.params!) as Record<string, unknown>;
+  assert.equal(params.fileOwner, me);
+  assert.equal(params.owner, undefined);
+  await a.close();
+});

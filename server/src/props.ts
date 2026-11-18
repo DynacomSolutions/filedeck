@@ -733,6 +733,17 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
   return sizes;
 }
 
+/**
+ * The change a stored perms job asks for. The file owner to set is `fileOwner`; `owner` is the account the job belongs to
+ * (`<kind>:<name>`, added by the job queue). A job stored before the rename has the file owner in `owner`: it is taken from there only
+ * when it cannot be an account (a user name or id never holds a `:`).
+ */
+export function permsParams(p: unknown): PermsRequest {
+  const { fileOwner, owner, ...rest } = (p && typeof p === "object" ? p : {}) as PermsRequest & { fileOwner?: string | number };
+  const file = fileOwner ?? (typeof owner === "string" && /^(sys|virt):/.test(owner) ? undefined : owner);
+  return { ...rest, ...(file !== undefined ? { owner: file } : {}) } as PermsRequest;
+}
+
 /** Properties (`GET /api/fs/props`) and permission changes (`POST /api/fs/perms`); a recursive change runs as a job of `jobs`. */
 export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
   app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
@@ -744,7 +755,8 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
     if (plan.recursive) {
       const what = [plan.mode !== undefined ? `mode ${plan.mode.toString(8)}` : "", plan.uid !== undefined || plan.gid !== undefined ? "owner" : ""].filter(Boolean).join(" and ");
       const { path: p, mode, owner, group, recursive, scope } = req; // allowlist, never the raw body
-      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope }, ...requestJobMeta(c) });
+      // (the file owner to set is `fileOwner`: `owner` in a job's params is the account the job belongs to)
+      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, fileOwner: owner, group, recursive, scope }, ...requestJobMeta(c) });
       return c.json(job, 202);
     }
     return c.json(await applyPerms(cfg, plan));
@@ -757,10 +769,10 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
   // Planned again, so confinement and read-only checks apply to the moment of the restart; a refusal fails the job with its message.
   jobs.register("perms", async (p) => {
     try {
-      const req = p as PermsRequest;
+      const req = permsParams(p);
       // a recursive change reaches everything below: an ancestor of a read-only prefix is refused too (also for a job stored before the prefix was configured)
       if (hitsReadOnly(cfg.root, cfg.readOnly, req.path) || (req.recursive === true && reachesReadOnly(cfg.root, cfg.readOnly, req.path, true))) throw new ops.FsError(403, "read-only volume");
-      const plan = await planPerms(cfg, p as PermsRequest);
+      const plan = await planPerms(cfg, req);
       return { run: (ctl) => runPerms(plan, ctl) };
     } catch (e) {
       return { run: async () => Promise.reject(e) };
