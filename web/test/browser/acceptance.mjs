@@ -1723,6 +1723,14 @@ async function verifyVirtualAccount(browser) {
 // is not an administrator does not.
 // A dialog fades in: axe measures colours as they are on screen, so it waits for running animations and transitions to end.
 const settled = (page) => page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity), null, { timeout: 8000 });
+// Focus reaches `loc` within 4 s and is still there 300 ms later (nothing moves it on afterwards).
+async function focusStaysOn(page, loc, why) {
+  const on = () => loc.evaluate((el) => el === document.activeElement);
+  for (let i = 0; i < 40 && !(await on()); i++) await page.waitForTimeout(100);
+  await page.waitForTimeout(300);
+  const at = await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120));
+  assert.ok(await on(), `${why} (focus is on ${at})`);
+}
 async function verifyAccounts(browser) {
   const failures = [];
   const password = 'fixture account password';
@@ -1779,6 +1787,7 @@ async function verifyAccounts(browser) {
         await page.waitForFunction(() => document.activeElement?.closest('[role=dialog]')?.getAttribute('aria-label') === 'Add folder', null, { timeout: 8000 });
         await page.keyboard.press('Escape');
         await picker.waitFor({ state: 'detached', timeout: 8000 });
+        await focusStaysOn(page, machine.getByRole('button', { name: 'Add folder…' }), `Escape in the picker returns focus to "Add folder…" (${label})`);
         assert.equal(await view.getByRole('textbox', { name: 'Name' }).inputValue(), 'fixture-new', `the editor stays open (${label})`);
 
         await view.getByRole('button', { name: 'Create account' }).click();
@@ -1814,16 +1823,25 @@ async function verifyAccounts(browser) {
           await view.locator('.acc-machine').filter({ hasText: 'fixture-retired' }).getByText('(not configured now)').waitFor({ state: 'visible' });
           await view.locator('.acc-sources li').filter({ hasText: 'fixture-gone' }).getByText('(not configured now)').waitFor({ state: 'visible' });
           await runAxe(page, `existing account editor ${label}`, failures);
-          await view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' }).fill('fixture-other');
+          const runAs = view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' });
+          await runAs.fill('fixture-other');
           await page.keyboard.press('Escape');
           const discard = page.getByRole('dialog', { name: 'Discard changes?' });
           await discard.waitFor({ state: 'visible', timeout: 8000 });
           await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
           await settled(page);
           await runAxe(page, `discard changes ${label}`, failures);
+          // "Keep editing" gives focus back to what opened the prompt: the field Escape was pressed in, then the Cancel button
           await discard.getByRole('button', { name: 'Keep editing' }).click();
           await discard.waitFor({ state: 'detached', timeout: 8000 });
-          await view.getByRole('button', { name: 'Cancel', exact: true }).click();
+          await focusStaysOn(page, runAs, `"Keep editing" returns focus to the field Escape was pressed in (${label})`);
+          const cancel = view.getByRole('button', { name: 'Cancel', exact: true });
+          await cancel.click();
+          await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+          await page.keyboard.press('Enter');
+          await discard.waitFor({ state: 'detached', timeout: 8000 });
+          await focusStaysOn(page, cancel, `"Keep editing" returns focus to Cancel (${label})`);
+          await cancel.click();
           await discard.getByRole('button', { name: 'Discard' }).click();
           await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
 

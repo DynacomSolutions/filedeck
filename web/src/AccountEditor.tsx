@@ -85,6 +85,23 @@ export function AccountEditor({
 
   useEffect(() => heading.current?.focus({ preventScroll: true }), []);
 
+  /**
+   * The control that opened one of the editor's dialogs (the folder picker, a confirmation). The form is inert while a dialog is
+   * open, so focus can only go back once that is lifted: the effect below runs after the commit that removes `inert`, whatever
+   * order the dialog's own focus return took.
+   */
+  const opener = useRef<HTMLElement | null>(null);
+  const noteOpener = () => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  };
+  const dialogOpen = picking !== null || asking !== null || discarding;
+  useEffect(() => {
+    if (dialogOpen) return;
+    const el = opener.current;
+    opener.current = null;
+    if (el?.isConnected && document.activeElement !== el) el.focus({ preventScroll: true });
+  }, [dialogOpen]);
+
   const set = (patch: Partial<AccountForm>) => setForm((f) => ({ ...f, ...patch }));
   const setMachine = (node: string, change: (m: AccountForm["machines"][number]) => AccountForm["machines"][number]) =>
     setForm((f) => ({ ...f, machines: f.machines.map((m) => (m.node === node ? change(m) : m)) }));
@@ -92,7 +109,10 @@ export function AccountEditor({
   /** Back to the list; with unsaved changes (the form differs, a password typed, "Remove password" set) it asks first. */
   const requestClose = () => {
     if (sending.current) return;
-    if (removePassword || formChanged(start, form)) setDiscarding(true);
+    if (removePassword || formChanged(start, form)) {
+      noteOpener();
+      setDiscarding(true);
+    }
     else onClose();
   };
   if (closeRef) closeRef.current = requestClose;
@@ -114,7 +134,10 @@ export function AccountEditor({
   };
   const guarded = (what: "save" | "key", call: () => Promise<boolean>) => {
     if (sending.current) return;
-    if (self) setAsking(() => () => run(what, call));
+    if (self) {
+      noteOpener();
+      setAsking(() => () => run(what, call));
+    }
     else void run(what, call);
   };
 
@@ -169,7 +192,7 @@ export function AccountEditor({
       {self && <p className="acc-warn" id={ids.self}><Ic.TriangleAlert aria-hidden="true" /> This is your own account. {SELF_WARNING}</p>}
 
       {/* disabled as a whole while a change is with the hub, Dropdowns and buttons included; inert under its own dialogs */}
-      <fieldset className="acc-fs" disabled={busy !== ""} aria-busy={busy !== "" || undefined} inert={picking !== null || asking !== null || discarding || undefined}>
+      <fieldset className="acc-fs" disabled={busy !== ""} aria-busy={busy !== "" || undefined} inert={dialogOpen || undefined}>
         <section className="set-sec" aria-labelledby={ids.name + "-s"}>
           <h3 id={ids.name + "-s"}>Sign-in</h3>
           {!existing && (
@@ -289,7 +312,7 @@ export function AccountEditor({
                 )}
                 {!isGone && (
                   <div className="acc-row">
-                    <button type="button" onClick={() => setPicking(m.node)}><Ic.FolderPlus aria-hidden="true" /> Add folder…</button>
+                    <button type="button" onClick={() => (noteOpener(), setPicking(m.node))}><Ic.FolderPlus aria-hidden="true" /> Add folder…</button>
                   </div>
                 )}
               </fieldset>
