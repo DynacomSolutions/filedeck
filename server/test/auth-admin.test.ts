@@ -407,7 +407,9 @@ test("audit: every admin call writes a line with its user; a body's password and
     admin: true,
     nodes: { a: { runAs: "guest", grants: [{ path: "/srv/share", write: false }] } },
     sources: { s1: { write: true } },
+    password: "set",
     fingerprint: keyFingerprint(key),
+    keys: [keyFingerprint(key)],
   });
   assert.equal(post[0]!.user, "virt:vadmin");
   // the response holds no secret either
@@ -418,13 +420,54 @@ test("adminBody keeps only the named fields, of the right types, and never a key
   assert.equal(adminBody(null), undefined);
   assert.equal(adminBody([{ name: "x" }]), undefined);
   assert.equal(adminBody("password"), undefined);
-  assert.deepEqual(adminBody({ password: "x", publicKey: "not a key", passwordHash: "scrypt$" }), {});
+  assert.deepEqual(adminBody({ password: "x", publicKey: "not a key", passwordHash: "scrypt$" }), { password: "set" });
   assert.deepEqual(adminBody({ name: 5, kind: {}, admin: "yes", nodes: [], sources: "s" }), {});
-  // a null password (removing it) is not written either
-  assert.deepEqual(adminBody({ name: "a", password: null }), { name: "a" });
+  // a password is only said to be set or removed, never its value; another type says nothing
+  assert.deepEqual(adminBody({ name: "a", password: null }), { name: "a", password: "removed" });
+  assert.deepEqual(adminBody({ name: "a", password: "x".repeat(20) }), { name: "a", password: "set" });
+  for (const pw of [5, true, {}, ["p"]]) assert.deepEqual(adminBody({ name: "a", password: pw }), { name: "a" });
   const many = Array.from({ length: 100 }, (_, i) => ({ path: `/p${i}`, write: i % 2 === 0 }));
   const out = adminBody({ nodes: { a: { runAs: "u", grants: many } } }) as { nodes: { a: { grants: unknown[] } } };
   assert.ok(out.nodes.a.grants.length <= 65, "a long list is bounded");
   const long = adminBody({ name: "n".repeat(5000) }) as { name: string };
   assert.ok(long.name.length < 600, "a long string is clipped");
+});
+
+test("audit: keys are written as their fingerprints only, and a password only as set or removed", async () => {
+  const k1 = edLine(" one");
+  const k2 = edLine(" two");
+  const k3 = edLine();
+  const pw = "another-password-not-to-show";
+  // a list of keys (as the create route will take them), with a line that is not a key: only the readable ones, as fingerprints
+  const out = adminBody({ name: "g", password: pw, keys: [k1, "ssh-ed25519 not-a-key", 7, k2] });
+  assert.deepEqual(out, { name: "g", password: "set", keys: [keyFingerprint(k1), keyFingerprint(k2)] });
+  // keys and publicKey together: every fingerprint once, the list first
+  assert.deepEqual(adminBody({ keys: [k1], publicKey: k3 }), { fingerprint: keyFingerprint(k3), keys: [keyFingerprint(k1), keyFingerprint(k3)] });
+  assert.deepEqual(adminBody({ keys: [k1, k1] }), { keys: [keyFingerprint(k1)] });
+  assert.deepEqual(adminBody({ keys: "x" }), {});
+  const many = Array.from({ length: 40 }, () => edLine());
+  assert.ok((adminBody({ keys: many }) as { keys: string[] }).keys.length <= 33, "bounded");
+
+  // through the hub: the line holds neither the password nor any key's base64
+  const lines: string[] = [];
+  const h = makeHub({}, lines);
+  const admin = await signIn(h, "vadmin");
+  lines.length = 0;
+  for (const body of [
+    { kind: "virt", name: "vuser", password: pw, keys: [k1, k2] },
+    { kind: "virt", name: "vuser", password: null, publicKey: k3 },
+  ])
+    assert.equal((await send(h, "POST", "/api/admin/end-sessions", admin, body)).status, 200);
+  const posts = auditOf(lines, "POST", "/api/admin/end-sessions");
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts.map((l) => (l.body as Record<string, unknown>).password), ["set", "removed"]);
+  assert.deepEqual((posts[0]!.body as { keys: string[] }).keys, [keyFingerprint(k1), keyFingerprint(k2)]);
+  assert.deepEqual((posts[1]!.body as { keys: string[] }).keys, [keyFingerprint(k3)]);
+  const all = lines.join("\n");
+  assert.ok(!all.includes(pw), "no password");
+  for (const k of [k1, k2, k3]) {
+    const b64 = k.split(" ")[1]!;
+    assert.ok(!all.includes(b64), "no key text");
+    assert.ok(!all.includes(b64.slice(30, 60)), "no part of the key text");
+  }
 });

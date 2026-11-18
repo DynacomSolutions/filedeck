@@ -44,12 +44,15 @@ function signInBody(v: unknown): { name: string } | undefined {
 
 /** The most nodes, grants per node and sources an admin audit line keeps (the admin routes take at most 64 grants per node). */
 const MAX_ADMIN_ITEMS = 64;
+/** The most keys of a `keys` list an admin audit line looks at (an account holds at most 32). */
+const MAX_ADMIN_KEYS = 32;
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /**
  * An admin body (`/api/admin/*`) as its audit line keeps it: `name`, `kind`, `admin`, `nodes` as `{ <node>: { runAs, grants: [{path,
- * write}] } }`, `sources` as `{ <source>: { write } }`, and for a `publicKey` its `fingerprint` (as OpenSSH prints it). Nothing else, of
+ * write}] } }`, `sources` as `{ <source>: { write } }`, for a `publicKey` its `fingerprint` (as OpenSSH prints it), `keys` as the
+ * fingerprints of every key in a `keys` list and `publicKey`, and `password` as "set" (a string) or "removed" (null). Nothing else, of
  * the expected types only: never a password, a password hash or the key text. Strings are clipped and lists bounded. A body that is not
  * an object gives nothing.
  */
@@ -83,9 +86,18 @@ export function adminBody(v: unknown): Record<string, unknown> | undefined {
         .map(([source, a]) => [clip(source), isPlainObject(a) && typeof a.write === "boolean" ? { write: a.write } : {}]),
     );
   }
+  // whether a password was set or removed, never the value
+  if (typeof v.password === "string") out.password = "set";
+  else if (v.password === null) out.password = "removed";
   if (typeof v.publicKey === "string") {
     const fp = keyFingerprint(v.publicKey);
     if (fp) out.fingerprint = fp;
+  }
+  // every key the body holds (a `keys` list, then `publicKey`), as its fingerprint only; a line that is not a key is left out
+  if (Array.isArray(v.keys) || typeof v.publicKey === "string") {
+    const lines = [...(Array.isArray(v.keys) ? v.keys.slice(0, MAX_ADMIN_KEYS) : []), v.publicKey];
+    const fps = lines.map((k) => (typeof k === "string" ? keyFingerprint(k) : null)).filter((fp): fp is string => fp !== null);
+    if (fps.length > 0) out.keys = [...new Set(fps)];
   }
   return out;
 }
