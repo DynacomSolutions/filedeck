@@ -10,12 +10,14 @@ test("stored view preferences keep valid values and replace invalid ones indepen
     sort: { key: "mtime", asc: false },
     view: "grid",
     treeFold: 4,
+    notifyJobs: true,
   })), {
     upRow: "up",
     showHidden: true,
     sort: { key: "mtime", asc: false },
     view: "grid",
     treeFold: 4,
+    notifyJobs: true,
   });
   assert.deepEqual(settingsFromStorage(JSON.stringify({
     upRow: "unexpected",
@@ -23,6 +25,7 @@ test("stored view preferences keep valid values and replace invalid ones indepen
     sort: { key: "path", asc: 1 },
     view: "table",
     treeFold: 1,
+    notifyJobs: "yes",
   })), DEFAULT_SETTINGS);
   assert.deepEqual(settingsFromStorage("not JSON"), DEFAULT_SETTINGS);
 });

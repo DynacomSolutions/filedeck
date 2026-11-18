@@ -50,8 +50,8 @@ jobs:
 
       - name: Install test tools
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libarchive-tools 7zip qpdf ffmpeg git smbclient
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install --no-install-recommends -y libarchive-tools 7zip qpdf ffmpeg git smbclient
           if ! command -v 7zz >/dev/null 2>&1; then
             sudo ln -s "$(command -v 7z)" /usr/local/bin/7zz
           fi

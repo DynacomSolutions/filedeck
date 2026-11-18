@@ -26,10 +26,17 @@ export function onAccountKnown(fn: (m: Me) => void): void {
 }
 
 /** Who is signed in, `{auth:false}` when the hub has no sign-in, or "signed-out". Other failures throw. */
+/** `/api/auth/me` answered with an error status (a network failure rejects with a TypeError instead). */
+export class HubAnswerError extends Error {
+  constructor(readonly status: number) {
+    super(`/api/auth/me answered ${status}`);
+  }
+}
+
 export async function me(): Promise<Me | "signed-out"> {
   const r = await fetch("/api/auth/me", { credentials: "same-origin" });
   if (isSignedOut(r)) return "signed-out";
-  if (!r.ok) throw new Error(`/api/auth/me answered ${r.status}`);
+  if (!r.ok) throw new HubAnswerError(r.status);
   const b = (await r.json()) as Partial<Account>;
   const m = whoFrom(b);
   for (const f of accountListeners) f(m);

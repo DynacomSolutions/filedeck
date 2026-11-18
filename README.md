@@ -48,6 +48,8 @@ Filedeck lets you browse, preview, edit and move files on many machines from one
 
 <p align="center"><img src="docs/images/phone.webp" alt="Filedeck on a phone, showing a photo grid" width="260"></p>
 
+Install it as an app from the browser (Settings, "Install app", or the browser's own menu) to get the Filedeck icon on the home screen and a window of its own. It opens without a network and says when the hub cannot be reached, offers "Reload" when a new version is deployed, and can notify you when a copy, move, compress, extract, sync or compare ends while it is in the background (switch it on in Settings). The service worker stores only the app itself, never file contents or anything the API answers.
+
 ## How it works
 
 Filedeck is one container image that runs in two modes:

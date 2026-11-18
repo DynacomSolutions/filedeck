@@ -1,0 +1,21 @@
+/* Installable app: the "hub not reachable" screen and the update banner (PwaScreens.tsx). */
+.pwa-offline{align-items:flex-start}
+.pwa-offline h1{margin:0;font-size:1rem;font-weight:700;letter-spacing:-.01em}
+.pwa-offline h1:focus{outline:none}
+/* the heading takes focus on arrival so a screen reader reads it; it is not a control, so it shows no ring */
+.pwa-offline .modal-actions{align-self:stretch}
+.pwa-mark{width:32px;height:32px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.pwa-update{position:fixed;z-index:1000;left:50%;bottom:max(12px,env(safe-area-inset-bottom));transform:translateX(-50%);box-sizing:border-box;max-width:calc(100vw - 24px);display:flex;align-items:center;flex-wrap:wrap;gap:.5rem .8rem;padding:.5rem .5rem .5rem .9rem;background:var(--surface);color:var(--fg);border:1px solid var(--border-strong);border-radius:var(--radius);box-shadow:var(--shadow);font-size:.85rem}
+.pwa-update span{flex:1 1 14rem;min-width:0}
+.pwa-update button{display:inline-flex;align-items:center;gap:var(--btn-gap);min-height:36px;padding:0 .9rem;font-weight:700}
+.pwa-update svg{width:16px;height:16px}
+.set-app-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem}
+/* An on/off switch among the Settings options (which mark a choice with a radio circle): a track whose knob sits left
+   when off and right when on, so the state shows by position as well as colour. */
+.set-opt.set-switch::after{width:32px;height:18px;border-radius:9px;border:2px solid var(--a11y-control-boundary);background:radial-gradient(circle at 7px 50%,var(--a11y-control-boundary) 4px,transparent 4.5px)}
+.set-opt.set-switch.on::after{border:2px solid var(--sel-mark);background:radial-gradient(circle at calc(100% - 7px) 50%,var(--surface) 4px,transparent 4.5px) var(--sel-mark)}
+.set-opt.set-switch:has(input:disabled){cursor:not-allowed;opacity:.7}
+@media (forced-colors:active){
+  .set-opt.set-switch::after{forced-color-adjust:none;border-color:ButtonText;background:radial-gradient(circle at 7px 50%,ButtonText 4px,transparent 4.5px) Canvas}
+  .set-opt.set-switch.on::after{border-color:Highlight;background:radial-gradient(circle at calc(100% - 7px) 50%,Canvas 4px,transparent 4.5px) Highlight}
+}

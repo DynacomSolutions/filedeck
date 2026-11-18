@@ -20,6 +20,6 @@ Account folders of workers (sign-in on; part 2): each account's worker keeps its
 
 Connection timeouts (fixed, not settings): the hub and the agent keep an idle HTTP connection open for 65 seconds, and the hub's client drops an idle pooled connection after 30 seconds (sooner when the server announces a shorter keep-alive time), so the server is not the side that closes a connection the client is about to reuse. The header timeout is 70 seconds, above the keep-alive time as Node requires; a connection that is slow to send its request headers can therefore stay open for about 100 seconds instead of about 60. The hub repeats a hub-to-agent read (GET, HEAD) once on a new connection if a pooled one was closed under it; it never repeats a request that changes something.
 
-`FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help).
+`FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help). The hub also writes `name` into the installed app's name under its icon (the manifest's `short_name` and the iOS home-screen title) and `title` into the manifest's `name`; the icons stay the bundled ones.
 
 [Back to the README](../README.md)
