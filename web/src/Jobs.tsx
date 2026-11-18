@@ -7,6 +7,7 @@ import * as Ic from "lucide-react";
 import { splitByOrigin } from "./jobOrigin";
 import { gaveUp } from "./jobPoll";
 import { etaText, jobLines, statusPill } from "./jobRow";
+import { notifyJobsEnded } from "./pwa";
 import { HISTORY_KEY, IDLE_COLLAPSE_MS, addToHistory, announceEnded, endTime, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
 
 const COLLAPSE_KEY = "filedeck-jobs-collapsed";
@@ -281,7 +282,10 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     const all = [...finished.current.values()].map((f) => f.entry).filter((e) => !cleared.current.has(e.key));
     setHistory((h) => addToHistory(h, all));
     const ended = justEnded.current.splice(0);
-    if (ended.length) setAnnounce(announceEnded(ended));
+    if (ended.length) {
+      setAnnounce(announceEnded(ended));
+      notifyJobsEnded(ended);
+    }
   }, []);
 
   const poll = useCallback(async () => {

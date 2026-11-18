@@ -2,6 +2,9 @@
 // bar colour, and job notifications. The decisions are in pwaState.ts and jobNotify.ts.
 import { useSyncExternalStore } from "react";
 import { THEME_COLOR, nextUpdate, type UpdateState } from "./pwaState";
+import { notificationsFor } from "./jobNotify";
+import type { HistoryEntry } from "./jobHistory";
+import { currentSettings } from "./settings";
 
 type Listener = () => void;
 function store<T>(initial: T) {
@@ -155,6 +158,12 @@ export async function showNotification(n: { title: string; body: string; tag: st
   } catch {
     /* this browser shows notifications only through a worker */
   }
+}
+
+/** Jobs that just ended (the jobs tray): notify when the page is hidden and the Settings switch is on. */
+export function notifyJobsEnded(ended: HistoryEntry[]) {
+  const ctx = { hidden: document.visibilityState === "hidden", enabled: currentSettings().notifyJobs, permission: notifySupport() };
+  for (const n of notificationsFor(ended, ctx)) void showNotification(n);
 }
 
 /** Called once at start-up. The worker is registered only in a production build (the dev server has no /sw.js). */
