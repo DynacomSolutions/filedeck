@@ -487,7 +487,7 @@ export class SizeStore {
   private q!: Record<"get" | "put" | "kidPage" | "getKids" | "touch" | "delTree" | "delDirty", StatementSync>;
   /** deepest frame stack of the latest walk (tests: memory follows depth, not width) */
   lastWalkFrames = 0;
-  private held: { path: string; probe?: boolean; done: Promise<void> }[] = [];
+  private held: { path: string; probe?: boolean; done: Promise<void>; since: number; granted: boolean }[] = [];
   private file = ":memory:";
   /** the name the store was given: generation 0, and the stem of every later generation (see size-gen.ts) */
   private base = ":memory:";
@@ -1241,8 +1241,9 @@ export class SizeStore {
     const canceled = () => new FsError(400, "canceled");
     if (signal?.aborted) throw canceled();
     let release!: () => void;
-    const h = { path: virtual, probe, done: new Promise<void>((r) => (release = r)) };
+    const h = { path: virtual, probe, done: new Promise<void>((r) => (release = r)), since: Date.now(), granted: false };
     const ahead = this.held.filter(overlaps);
+    h.granted = ahead.length === 0;
     this.held.push(h);
     this.recentLocks.push({ seq: ++this.lockSeq, path: virtual, ...(probe ? { probe } : {}) });
     if (this.recentLocks.length > 256) this.recentLocks.shift();
@@ -1266,8 +1267,40 @@ export class SizeStore {
       } finally {
         off();
       }
+      h.granted = true;
     }
     return free;
+  }
+
+  /**
+   * The lock of `virtual` if no overlapping lock is held or waited for, else null. It never waits and holds nothing when it fails (the try is still counted in `recentLocks`),
+   * so a caller that must not queue (the watcher) never blocks the answers that come after it.
+   */
+  tryLock(virtual: string): (() => void) | null {
+    const overlaps = (h: { path: string }) => h.path === virtual || h.path === "/" || virtual === "/" || h.path.startsWith(virtual + "/") || virtual.startsWith(h.path + "/");
+    if (this.held.some(overlaps)) {
+      // not held, but asked for: `lockedSince` tells an answer read without the lock that a change came meanwhile
+      this.recentLocks.push({ seq: ++this.lockSeq, path: virtual });
+      if (this.recentLocks.length > 256) this.recentLocks.shift();
+      return null;
+    }
+    let release!: () => void;
+    const h = { path: virtual, probe: false, done: new Promise<void>((r) => (release = r)), since: Date.now(), granted: true };
+    this.held.push(h);
+    this.recentLocks.push({ seq: ++this.lockSeq, path: virtual });
+    if (this.recentLocks.length > 256) this.recentLocks.shift();
+    return () => {
+      const i = this.held.indexOf(h);
+      if (i >= 0) this.held.splice(i, 1);
+      release();
+    };
+  }
+
+  /** Age in seconds of the oldest lock that waits and is not yet granted; 0 when none waits. */
+  oldestLockWaitSeconds(now = Date.now()): number {
+    let oldest = Infinity;
+    for (const h of this.held) if (!h.granted && h.since < oldest) oldest = h.since;
+    return oldest === Infinity ? 0 : Math.max(0, (now - oldest) / 1000);
   }
 
   private toRow(r: Record<string, unknown>): Row {
@@ -1911,7 +1944,15 @@ export class SizeStore {
         // The start folder is gone: its rows (and its share of the parent) are trimmed after this lock is released,
         // never while holding it, because that takes another lock and a job slot must not wait on one.
         release();
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") void this.applyChanged(r.virtual).catch(() => undefined);
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+          // never queue for the parent's lock (it can be "/"): a waiting lock blocks every walk asked after it. A busy parent gets a stale mark instead.
+          void this.applyChanged(r.virtual, undefined, { wait: false }).then(
+            (done) => {
+              if (!done) this.markStale(parentOf(r.virtual) || r.virtual);
+            },
+            () => undefined,
+          );
+        }
         throw e;
       }
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0, untrusted: false };
@@ -1934,31 +1975,48 @@ export class SizeStore {
    * child folders are walked, vanished ones are dropped with their subtrees, and the difference is added to
    * every ancestor. Other stored child folders are trusted. An unknown folder re-reads its parent when that is stored.
    */
-  async applyChanged(virtual: string, ctl: JobCtl = noCtl()): Promise<void> {
+  async applyChanged(virtual: string, ctl: JobCtl = noCtl(), opts?: { wait?: boolean }): Promise<boolean> {
+    const wait = opts?.wait !== false;
     let v = resolveRead(this.o.root, virtual).virtual;
-    let release = await this.lock(parentOf(v) || v);
+    // `wait: false` (the watcher): a busy lock takes nothing and changes nothing, the caller records the folder as dirty. It never queues, so it never blocks the walks after it.
+    let release: (() => void) | null = wait ? await this.lock(parentOf(v) || v) : this.tryLock(parentOf(v) || v);
+    if (!release) return false;
     try {
       const known = await this.has(v);
-      if (known === null) return this.markStale(parentOf(v) || v); // busy: the event must not be lost, the next scan re-reads
+      if (known === null) {
+        this.markStale(parentOf(v) || v); // busy: the event must not be lost, the next scan re-reads
+        return true;
+      }
       if (!known) {
         const p = parentOf(v);
         const pk = p ? await this.has(p) : false;
-        if (pk === null) return this.markStale(p);
+        if (pk === null) {
+          this.markStale(p);
+          return true;
+        }
         if (!pk) {
           // neither it nor its parent is stored, but rows below it may be (a folder validated alone): those are no longer vouched for
           if ((await this.read("below", "SELECT 1 FROM sizes WHERE path > ? AND path < ? LIMIT 1", [...below(v)], null))?.length) this.markStale(v);
-          return;
+          return true;
         }
         v = p;
       }
       // a folder that is gone re-reads its parent: climb one level at a time, taking the lock of the level we climb to
       for (let up = await this.changed(v, ctl); up; up = await this.changed(v, ctl)) {
         release();
+        release = null;
         v = up;
-        release = await this.lock(parentOf(v) || v);
+        const next: (() => void) | null = wait ? await this.lock(parentOf(v) || v) : this.tryLock(parentOf(v) || v);
+        if (!next) {
+          // the level above is busy: record it durably (the next walk that reaches it re-reads it), the event is not lost
+          if (!(await this.markDirty([v]))) this.markStale(v);
+          return true;
+        }
+        release = next;
       }
+      return true;
     } finally {
-      release();
+      release?.();
     }
   }
 

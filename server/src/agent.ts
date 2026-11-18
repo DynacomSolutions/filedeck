@@ -116,9 +116,10 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
   if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
-  // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only these two 0/1 gauges may ever be served here): 1 when it answers from its file, and whether its file is damaged and not yet replaced by a new one
+  // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only counts and ages may ever be served here, nothing that names a path, a node or a size): whether the size store answers from its file, whether its file is damaged and not yet replaced, the queued jobs and the oldest wait
   app.get("/metrics", (c) => {
     const h = sizes.health();
+    const q = jobs.queuedStats();
     return c.text(
       [
         "# HELP filedeck_size_store_available 1 when the folder-size store answers from its file, 0 when sizes are not cached",
@@ -127,6 +128,15 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_size_store_damaged 1 when the store file is damaged and the agent has not yet replaced it with a new one",
         "# TYPE filedeck_size_store_damaged gauge",
         `filedeck_size_store_damaged ${h.damaged ? 1 : 0}`,
+        "# HELP filedeck_jobs_queued Jobs of this process that wait to run",
+        "# TYPE filedeck_jobs_queued gauge",
+        `filedeck_jobs_queued ${q.count}`,
+        "# HELP filedeck_jobs_oldest_queued_seconds Age in seconds of the oldest queued job of this process, 0 when none",
+        "# TYPE filedeck_jobs_oldest_queued_seconds gauge",
+        `filedeck_jobs_oldest_queued_seconds ${q.oldestSeconds.toFixed(3)}`,
+        "# HELP filedeck_size_lock_oldest_wait_seconds Age in seconds of the oldest size-store lock that waits and is not yet granted, 0 when none",
+        "# TYPE filedeck_size_lock_oldest_wait_seconds gauge",
+        `filedeck_size_lock_oldest_wait_seconds ${sizes.oldestLockWaitSeconds().toFixed(3)}`,
         "",
       ].join("\n"),
       200,

@@ -42,8 +42,12 @@ export interface FanWatchOptions {
   sessionMs?: number;
 }
 
+/** a changed folder whose lock was busy is tried again after this long (ms) */
+const RETRY_MS = 1000;
+
 export interface ChangeSink {
-  applyChanged(virtual: string): Promise<void>;
+  /** false when `wait` is false and an overlapping walk holds or waits for the lock: nothing was applied, the caller tries the folder again later */
+  applyChanged(virtual: string, ctl?: undefined, opts?: { wait?: boolean }): Promise<boolean | void>;
   markStale(virtual: string): void;
   /** keep changed folders on disk: false when that is not possible (the watcher then keeps them in memory) */
   notePending?(items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number): Promise<boolean>;
@@ -456,6 +460,18 @@ export class FanWatch {
     }
   }
 
+  /** Folders that were busy (an overlapping walk holds the lock): due again after RETRY_MS, on disk when possible, else in memory. */
+  private async retryLater(paths: string[]) {
+    const dueAt = Date.now() + RETRY_MS;
+    const items = paths.map((path) => ({ path, dueAt, modify: false }));
+    try {
+      if (this.store.notePending && (await this.store.notePending(items, this.modifyMs))) return void (this.activeUntil = Math.max(this.activeUntil, dueAt + this.modifyMs + this.settleMs));
+    } catch {
+      /* in memory below */
+    }
+    this.keepInMemory(items);
+  }
+
   /** Apply the folders whose time has come, one after the other, taking them from the store a batch at a time. */
   private async drain() {
     if (this.draining) return;
@@ -491,10 +507,13 @@ export class FanWatch {
         if (!batch.length) break;
         for (const v of batch) this.taken.set(v, false);
         const ends: [string, number][] = [];
+        // folders whose lock was busy: never queue behind a long walk (that would block every walk asked after it), try them again soon.
+        // (Not a dirty mark: a folder that is not stored yet has no row to mark, and a stale mark would collapse on a long busy spell.)
+        const busy: string[] = [];
         for (const v of batch) {
           if (this.stopped || this.handingOver) break;
           try {
-            await this.store.applyChanged(v);
+            if ((await this.store.applyChanged(v, undefined, { wait: false })) === false) busy.push(v);
           } catch {
             /* a folder that vanished or cannot be read: the next scan deals with it */
           }
@@ -507,6 +526,7 @@ export class FanWatch {
           for (const v of rest) this.taken.delete(v);
         }
         await this.ran(ends); // before the next take, so a row noted during the batch is held until modifyMs after its folder's end
+        if (busy.length) await this.retryLater(busy); // after `ran`: that makes the rows idle, this gives them their new due time
         if (this.store.takeDue) this.activeUntil = Math.max(this.activeUntil, Date.now() + this.modifyMs + this.settleMs); // rows may remain after a slow batch
       }
     } finally {

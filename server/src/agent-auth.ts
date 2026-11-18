@@ -37,7 +37,7 @@ const digest = (s: string) => createHash("sha256").update(s).digest();
  * Optional shared secret between the hub and the agents (FILEDECK_AGENT_TOKEN
  * on both). When set, an agent answers 401 to every request that does not
  * carry `Authorization: Bearer <token>`, except the unauthenticated liveness
- * probe `/healthz` and `/metrics`. `/metrics` is scraped by pod IP without credentials and exposes only the two 0/1 size-store gauges (keep it that way:
+ * probe `/healthz` and `/metrics`. `/metrics` is scraped by pod IP without credentials and exposes only counts and ages (keep it that way:
  * nothing that names a path, a node or a size may be added to it). It sits behind the NetworkPolicy as a second layer: a pod
  * that is allowed to reach an agent still cannot use it without the secret.
  */

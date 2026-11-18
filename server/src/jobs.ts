@@ -372,6 +372,18 @@ export class Jobs {
     return this.jobs.delete(id);
   }
 
+  /** Queued jobs of this process, and the age in seconds of the oldest (0 when none): for the metrics, nothing that names a job. */
+  queuedStats(now = Date.now()): { count: number; oldestSeconds: number } {
+    let count = 0;
+    let oldest = Infinity;
+    for (const j of this.jobs.values()) {
+      if (j.state !== "queued") continue;
+      count++;
+      if (j.createdAt < oldest) oldest = j.createdAt;
+    }
+    return { count, oldestSeconds: count ? Math.max(0, (now - oldest) / 1000) : 0 };
+  }
+
   get active(): number {
     return [...this.jobs.values()].filter((j) => j.state === "queued" || j.state === "running").length;
   }
