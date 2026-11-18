@@ -212,7 +212,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const signIn = (c: Context, kind: "sys" | "virt", name: string) => {
     const old = getCookie(c, COOKIE);
     if (old) sessions.destroy(old);
-    const raw = sessions.create(kind, name);
+    const raw = sessions.create(kind, name, clientOf(c).ip);
     try {
       deps.onSignIn?.(kind, name);
     } catch {

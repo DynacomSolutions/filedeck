@@ -100,6 +100,17 @@ test("password sign-in sets the cookie, and /api/auth/me knows the name", async 
   assert.equal((await get(h, "/api/nodes", cookieOf(r))).status, 200);
 });
 
+test("sign-in keeps the client address with the session", async () => {
+  const { h } = makeHub();
+  h.auth!.accounts.create({ name: "guest1", password: "pw-guest-1", admin: false, nodes: {} });
+  const r = await post(h, "/api/auth/login", { name: "guest1", password: "pw-guest-1" }, { addr: "::1" });
+  assert.equal(r.status, 200);
+  const l = h.auth!.sessions.list();
+  assert.equal(l.length, 1);
+  assert.equal(l[0]?.name, "guest1");
+  assert.equal(l[0]?.address, "::1");
+});
+
 test("a TLS socket needs no loopback peer; an https URL on a plain socket is not HTTPS", async () => {
   const { h } = makeHub();
   h.auth!.accounts.create({ name: "boss", password: "pw-boss", admin: true, nodes: {} });

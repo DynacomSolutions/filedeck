@@ -1,4 +1,4 @@
-import { createPublicKey, randomBytes, timingSafeEqual, verify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, timingSafeEqual, verify, type KeyObject } from "node:crypto";
 
 /**
  * SSH public-key sign-in check. A stored key is an `authorized_keys`-style line with no options. Only ssh-ed25519 and
@@ -46,6 +46,13 @@ export function parsePublicKey(line: string): PublicKey | null {
   } catch {
     return null; // for example a point that is not on the curve
   }
+}
+
+/** The key's fingerprint as OpenSSH prints it: `SHA256:` and the unpadded base64 of the SHA-256 of the key blob. Null when the line is no key `parsePublicKey` accepts. */
+export function keyFingerprint(line: string): string | null {
+  const pub = parsePublicKey(line);
+  if (!pub) return null;
+  return "SHA256:" + createHash("sha256").update(pub.blob).digest("base64").replace(/=+$/, "");
 }
 
 const field = (b: Buffer | string): Buffer => {

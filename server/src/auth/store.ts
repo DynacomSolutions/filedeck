@@ -3,11 +3,14 @@ import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Identity, NodeAccess } from "./identity.ts";
+import { keyFingerprint } from "./sshkey.ts";
 
 /**
  * Account store (hub). Virtual accounts, their public keys and the epochs that
  * let the hub cancel every session of one account. System accounts have no row
- * of their own: only their epoch is kept, in `sys_users`.
+ * of their own: only their epoch is kept, in `sys_users`. A deleted virtual
+ * account leaves its epoch in `retired_accounts`, so a new account of the same
+ * name starts above it and no agent takes it for the old one.
  */
 
 export class AccountError extends Error {}
@@ -48,6 +51,10 @@ export class AuthDb {
       CREATE TABLE IF NOT EXISTS sys_users (
         name TEXT PRIMARY KEY,
         epoch INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS retired_accounts (
+        name TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL
       );
     `);
     const row = this.db.prepare("SELECT hub_id FROM meta LIMIT 1").get() as { hub_id: string } | undefined;
@@ -120,6 +127,16 @@ interface AccountRow {
   nodes: string;
 }
 
+function record(r: AccountRow): AccountRecord {
+  return {
+    name: r.name,
+    admin: r.admin === 1,
+    epoch: r.epoch,
+    nodes: JSON.parse(r.nodes) as Record<string, NodeAccess>,
+    passwordHash: r.password_hash,
+  };
+}
+
 export class Accounts {
   constructor(private store: AuthDb) {}
 
@@ -127,14 +144,32 @@ export class Accounts {
     return this.store.db;
   }
 
+  /** Runs `fn` in one transaction (rolled back when it throws). */
+  private tx<T>(fn: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   create(a: { name: string; password?: string; passwordHash?: string; admin: boolean; nodes: Record<string, NodeAccess> }): void {
     if (!NAME_RE.test(a.name) || a.name === "root") throw new AccountError("invalid name");
     if (this.get(a.name)) throw new AccountError("exists");
     const hash = a.passwordHash ?? (a.password !== undefined ? hashPassword(a.password) : null);
     try {
-      this.db
-        .prepare("INSERT INTO accounts (name, password_hash, admin, epoch, nodes) VALUES (?, ?, ?, 0, ?)")
-        .run(a.name, hash, a.admin ? 1 : 0, JSON.stringify(a.nodes));
+      // A name that was deleted starts above the epoch it had, and the retired row goes.
+      this.tx(() => {
+        const old = this.db.prepare("SELECT epoch FROM retired_accounts WHERE name = ?").get(a.name) as { epoch: number } | undefined;
+        this.db
+          .prepare("INSERT INTO accounts (name, password_hash, admin, epoch, nodes) VALUES (?, ?, ?, ?, ?)")
+          .run(a.name, hash, a.admin ? 1 : 0, old ? old.epoch + 1 : 0, JSON.stringify(a.nodes));
+        this.db.prepare("DELETE FROM retired_accounts WHERE name = ?").run(a.name);
+      });
     } catch (e) {
       if (/UNIQUE|PRIMARY KEY/i.test((e as Error).message)) throw new AccountError("exists");
       throw e;
@@ -143,14 +178,38 @@ export class Accounts {
 
   get(name: string): AccountRecord | undefined {
     const r = this.db.prepare("SELECT name, password_hash, admin, epoch, nodes FROM accounts WHERE name = ?").get(name) as AccountRow | undefined;
-    if (!r) return undefined;
-    return {
-      name: r.name,
-      admin: r.admin === 1,
-      epoch: r.epoch,
-      nodes: JSON.parse(r.nodes) as Record<string, NodeAccess>,
-      passwordHash: r.password_hash,
-    };
+    return r ? record(r) : undefined;
+  }
+
+  /** Every virtual account, ordered by name. */
+  list(): AccountRecord[] {
+    const rows = this.db.prepare("SELECT name, password_hash, admin, epoch, nodes FROM accounts ORDER BY name").all() as unknown as AccountRow[];
+    return rows.map(record);
+  }
+
+  /**
+   * Changes what the patch names. `password: null` removes the password; a string is hashed. It does not raise the epoch: the caller
+   * (`accountChanged` in the hub) does, so sessions, streams and jobs end with it.
+   */
+  update(name: string, patch: { password?: string | null; admin?: boolean; nodes?: Record<string, NodeAccess> }): void {
+    if (!this.get(name)) throw new AccountError("no such account");
+    const sets: string[] = [];
+    const args: (string | number | null)[] = [];
+    if (patch.password !== undefined) {
+      sets.push("password_hash = ?");
+      args.push(patch.password === null ? null : hashPassword(patch.password));
+    }
+    if (patch.admin !== undefined) {
+      sets.push("admin = ?");
+      args.push(patch.admin ? 1 : 0);
+    }
+    if (patch.nodes !== undefined) {
+      sets.push("nodes = ?");
+      args.push(JSON.stringify(patch.nodes));
+    }
+    if (sets.length === 0) return;
+    const r = this.db.prepare(`UPDATE accounts SET ${sets.join(", ")} WHERE name = ?`).run(...args, name);
+    if (r.changes === 0) throw new AccountError("no such account");
   }
 
   addKey(name: string, publicKeyLine: string): void {
@@ -161,6 +220,33 @@ export class Accounts {
   keys(name: string): string[] {
     const rows = this.db.prepare("SELECT public_key FROM account_keys WHERE name = ? ORDER BY rowid").all(name) as { public_key: string }[];
     return rows.map((r) => r.public_key);
+  }
+
+  /** Removes the key of the account whose fingerprint (`keyFingerprint`) is `fingerprint`. False when it has no such key. */
+  removeKey(name: string, fingerprint: string): boolean {
+    let removed = false;
+    for (const line of this.keys(name)) {
+      if (keyFingerprint(line) !== fingerprint) continue;
+      this.db.prepare("DELETE FROM account_keys WHERE name = ? AND public_key = ?").run(name, line);
+      removed = true;
+    }
+    return removed;
+  }
+
+  /**
+   * Deletes the account and its keys, and keeps its epoch in `retired_accounts` (the larger of the one kept there and the current one).
+   * Its sessions end by themselves (a session of a virtual account that no longer exists is invalid). Unknown name: `AccountError`.
+   */
+  remove(name: string): void {
+    this.tx(() => {
+      const r = this.db.prepare("SELECT epoch FROM accounts WHERE name = ?").get(name) as { epoch: number } | undefined;
+      if (!r) throw new AccountError("no such account");
+      this.db
+        .prepare("INSERT INTO retired_accounts (name, epoch) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET epoch = max(epoch, excluded.epoch)")
+        .run(name, r.epoch);
+      this.db.prepare("DELETE FROM account_keys WHERE name = ?").run(name);
+      this.db.prepare("DELETE FROM accounts WHERE name = ?").run(name);
+    });
   }
 
   bumpEpoch(kind: "sys" | "virt", name: string): number {
