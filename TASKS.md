@@ -305,8 +305,9 @@ ETA: 2026-11-18 21:00 ICT
 
 ## 24. Size scans never wait behind unrelated walks
 A long size walk made every later du scan wait, even of unrelated folders, because the change watcher queued a broad lock behind it.
-ETA: 2026-11-19 05:00 ICT
+ETA: 2026-11-20 12:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 178 | Watcher never queues behind a walk; metrics for queued jobs and lock waits | done | claude-20261119-du-queue-stuck | du-queue-stuck | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/253 (223b4b0); CI green.<br>Watcher retries busy folders instead of waiting; new queue and lock-wait gauges. |
-| 179 | Release and deploy 24.178 and add the stalled-queue alert | in_progress | claude-20261119-du-queue-stuck | release-v0.5.1 | 24.178 | 2026-11-19 05:00 ICT | Releasing v0.5.1.<br>Alert PR https://github.com/DynacomSolutions/.cluster/pull/2602 |
+| 179 | Release and deploy 24.178 and add the stalled-queue alert | done | claude-20261119-du-queue-stuck | release-v0.5.1 | 24.178 | | v0.5.1 released (PR https://github.com/DynacomSolutions/filedeck/pull/254); all agents run 0.5.1.<br>Alert PR https://github.com/DynacomSolutions/.cluster/pull/2602 merged; gauges scraped.<br>Proof: du of a 2.9G folder in 5.6 s. |
+| 180 | Find why an agent exited with SIGBUS at start during a rollout | todo | | | | | Seen once on the 0.5.1 rollout, exit 135 7 s after start while the old pod handed over; restarted fine.<br>Suspect the shared store file during hand-over. |
