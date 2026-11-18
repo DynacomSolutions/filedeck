@@ -37,7 +37,7 @@ import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
 import { SysPresence } from "./auth/presence.ts";
 import { SOURCE_READ_ONLY, SourceGrants, type SourceAccess } from "./auth/source-grants.ts";
 import { isAdmin, registerAdmin, registerAdminOff } from "./auth/admin-routes.ts";
-import { AccountCalls, cuttableResponse, cuttableTarget, type AccountCall } from "./auth/account-calls.ts";
+import { AccountCalls, closableBody, cuttableResponse, cuttableTarget, type AccountCall } from "./auth/account-calls.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
 export interface HubAuth {
@@ -72,6 +72,19 @@ function clean(h: Headers, keepLength: boolean): Headers {
     out.set(k, v);
   });
   return out;
+}
+
+/**
+ * Whether a proxied call starts a job on the agent (found by the routes that make one with `jobs.create`, not by path prefix):
+ * compress, extract, the size scan, a permission change (a job when recursive; the hub cannot see the body, so every one counts) and
+ * the `du` walk. Such a call under act as root is not cut when the switch ends (see `startCall` in `createHub`). `rest` may carry a
+ * query string.
+ */
+export function startsAgentJob(method: string, rest: string): boolean {
+  const p = rest.split("?")[0];
+  if (method === "POST") return p === "/api/jobs/compress" || p === "/api/jobs/extract" || p === "/api/jobs/size" || p === "/api/fs/perms";
+  if (method === "GET") return p === "/api/du";
+  return false;
 }
 
 /** The most the hub waits for the agents when act as root is turned off early and it cancels the account's root jobs there. */
@@ -429,9 +442,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
    */
   /**
    * A call of the current account starts: undefined with sign-in off or nobody behind the request. One made under a live act-as-root
-   * switch is tagged with it, so the switch's end cuts it (and only it) as well; but not a call to the agent's job routes
-   * (`jobRoute`): cutting a job start would not keep the agent from starting the job, and it would end the wait in `endRootJobs` early,
-   * so its listing could miss that job. Those calls are short, and that wait and the late relist cover them.
+   * switch is tagged with it, so the switch's end cuts it (and only it) as well; but not a call that starts an agent job (`jobRoute`,
+   * `startsAgentJob`): cutting it would not keep the agent from starting the job, and it would end the wait in `endRootJobs` early, so
+   * its listing could miss that job. Those calls are short, and that wait and the late relist cover them.
    */
   const startCall = (jobRoute = false): AccountCall | undefined => {
     const id = cfg.auth ? currentUser() : undefined;
@@ -521,12 +534,21 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const headers: Record<string, string> = {};
     const len = down.headers.get("content-length");
     if (len !== null) headers["content-length"] = len;
-    const up = await dst.fetch(
-      `/api/fs/upload?dir=${q(dir)}&name=${q(name)}` + (o.overwrite ? "&overwrite=1" : "") + (o.preserveTimes && st.mtime ? `&mtime=${Math.floor(st.mtime)}` : ""),
-      { method: "PUT", body: down.body ?? "", duplex: "half", headers } as RequestInit,
-    );
+    // the download goes up through a body this function can always close: when the destination fails before reading it (unreachable,
+    // a refusal) or after reading part of it, the source's read stream is closed, whoever holds the body's reader
+    const body = down.body ? closableBody(down.body) : undefined;
+    let up: Response;
+    try {
+      up = await dst.fetch(
+        `/api/fs/upload?dir=${q(dir)}&name=${q(name)}` + (o.overwrite ? "&overwrite=1" : "") + (o.preserveTimes && st.mtime ? `&mtime=${Math.floor(st.mtime)}` : ""),
+        { method: "PUT", body: body?.stream ?? "", duplex: "half", headers } as RequestInit,
+      );
+    } catch (e) {
+      body?.close();
+      throw e;
+    }
     if (!up.ok) {
-      await down.body?.cancel().catch(() => undefined);
+      body?.close();
       throw await failed(up, "destination write");
     }
     return (await up.json()) as { path: string };
@@ -674,7 +696,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     }
     // With sign-in on, every proxied request is the account's until its answer body is over, whatever its method: when the account
     // changes it is cut (a body on its way up fails, so the agent or source drops a partial upload; the answer stops).
-    const call = startCall(rest === "/api/jobs" || rest.startsWith("/api/jobs/"));
+    const call = startCall(startsAgentJob(c.req.method, rest));
     const target = call ? cuttableTarget(base, call.signal) : base;
     const cut = (res: Response) => (call ? cuttableResponse(res, call.signal, call.done) : res);
     try {

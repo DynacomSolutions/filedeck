@@ -7,13 +7,14 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import type { AddressInfo } from "node:net";
 import { createHub } from "../src/hub.ts";
+import { createSourceApp } from "../src/sources/source-app.ts";
 import { loadConfig } from "../src/config.ts";
 import { hashPassword } from "../src/auth/store.ts";
 import { SourceGrants } from "../src/auth/source-grants.ts";
 import { FsError } from "../src/fsops.ts";
 import { AccountCalls } from "../src/auth/account-calls.ts";
 import type { SystemAuth } from "../src/auth/routes.ts";
-import type { Identity } from "../src/auth/identity.ts";
+import { USER_HEADER, verifyClaim, type Identity } from "../src/auth/identity.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "../src/sources/types.ts";
 
 /**
@@ -49,6 +50,9 @@ class MemSource implements SourceBackend {
   readMs = 0;
   /** read streams handed out, and those closed since (a stream left open holds the backend, as an smbclient child) */
   readsOpened = 0;
+  /** reads begun (before the stream exists), and a delay before each stream is opened */
+  opening = 0;
+  openMs = 0;
   readsClosed = 0;
   /** how many file writes have begun */
   started = 0;
@@ -93,6 +97,8 @@ class MemSource implements SourceBackend {
     const e = this.entries.get(p);
     if (!e || e.type !== "file") throw new FsError(404, "not found");
     const data = range ? e.data.subarray(range.start, range.end + 1) : e.data;
+    this.opening++;
+    if (this.openMs) await sleep(this.openMs);
     // a slow download: 16 KiB at a time, `readMs` apart
     const ms = this.readMs;
     const out = !ms
@@ -814,4 +820,198 @@ test("AccountCalls: a call under an act-as-root switch is cut by endRoot with it
   assert.ok(!plain.signal.aborted);
   for (const c of [a, b, plain]) c.done();
   assert.equal(calls.size(), 0);
+});
+
+test("a cut while the source download is still opening: the read stream is closed as soon as it exists", async () => {
+  const { h, s1, s2, grants } = world();
+  grants.setForAccount("virt", "guest", { s1: { write: false }, s2: { write: true } });
+  s1.put("/big.bin", "o".repeat(1024 * 1024));
+  s1.readMs = 5;
+  s1.openMs = 300;
+  const guest = await signIn(h, "guest");
+  const admin = await signIn(h, "sadmin");
+  const tr = send(h, "POST", "/api/transfer", guest, { src: { node: "s1", path: "/big.bin" }, dst: { node: "s2", dir: "/" } });
+  await until("the download to start opening", () => s1.opening === 1);
+  assert.equal((await send(h, "POST", "/api/admin/end-sessions", admin, { kind: "virt", name: "guest" })).status, 200);
+  const r = await tr;
+  assert.notEqual(r.status, 201, r.text);
+  await until("the read stream to be opened", () => s1.readsOpened === 1, 2_000);
+  await until("the read stream to be closed", () => s1.readsClosed === s1.readsOpened, 2_000);
+  assert.equal(s2.started, 0);
+});
+
+/**
+ * A fake agent with jobs: `POST /api/fs/perms` answers after `permsMs`, and only then makes its job (with the switch's end from the
+ * claim, as a real agent does); the job list and the cancel route work on those jobs.
+ */
+async function jobsAgent(permsMs: number): Promise<{ url: string; asked: () => number; jobs: { id: string; state: string; asRootUntil?: number }[]; cancelled: string[]; close: () => void }> {
+  const jobs: { id: string; state: string; asRootUntil?: number }[] = [];
+  const cancelled: string[] = [];
+  let asked = 0;
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url ?? "/", "http://x");
+    res.setHeader("content-type", "application/json");
+    let body = "";
+    req.on("data", (d: Buffer) => (body += d.toString()));
+    req.on("end", async () => {
+      if (u.pathname === "/healthz") return void res.end("ok");
+      if (u.pathname === "/api/auth/lookup") return void res.end(JSON.stringify({ exists: true }));
+      if (u.pathname === "/api/jobs" && req.method === "GET") return void res.end(JSON.stringify({ jobs }));
+      const m = /^\/api\/jobs\/([^/]+)\/cancel$/.exec(u.pathname);
+      if (m && req.method === "POST") {
+        cancelled.push(m[1]!);
+        const j = jobs.find((x) => x.id === m[1]);
+        if (j) j.state = "canceled";
+        return void res.end(JSON.stringify({ id: m[1], state: "canceled" }));
+      }
+      if (u.pathname === "/api/fs/perms" && req.method === "POST") {
+        asked++;
+        const claim = verifyClaim(String(req.headers[USER_HEADER] ?? ""), T, Date.now());
+        await sleep(permsMs);
+        // the job exists whether or not the hub still waits for the answer (a cut call does not stop the agent)
+        const id = `perms-${asked}`;
+        jobs.push({ id, state: "running", ...(claim?.asRootUntil !== undefined ? { asRootUntil: claim.asRootUntil } : {}) });
+        if (!res.destroyed) res.end(JSON.stringify({ job: id }));
+        return;
+      }
+      res.end(JSON.stringify({}));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  return {
+    url: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+    asked: () => asked,
+    jobs,
+    cancelled,
+    close: () => {
+      srv.close();
+      srv.closeAllConnections();
+    },
+  };
+}
+
+test("act as root: a recursive permission change in flight at Stop is waited for, and the job it starts is cancelled", async () => {
+  const agent = await jobsAgent(400);
+  try {
+    const { h } = world(`a=${agent.url}`);
+    const root = await signIn(h, "sadmin");
+    assert.equal((await send(h, "POST", "/api/auth/as-root", root, { password: PW })).status, 200);
+    const perms = send(h, "POST", "/api/nodes/a/api/fs/perms", root, { path: "/srv", mode: "755", recursive: true });
+    await until("the change to reach the machine", () => agent.asked() === 1);
+    assert.equal((await send(h, "DELETE", "/api/auth/as-root", root)).status, 200);
+    await perms;
+    assert.equal(agent.jobs.length, 1);
+    await until("the root job to be cancelled", () => agent.cancelled.includes("perms-1"), 3_000);
+    assert.equal(agent.jobs[0]!.state, "canceled");
+  } finally {
+    agent.close();
+  }
+});
+
+test("hub: the calls that start an agent job are known by route", async () => {
+  const { startsAgentJob } = (await import("../src/hub.ts")) as unknown as { startsAgentJob: (method: string, rest: string) => boolean };
+  for (const [method, rest] of [
+    ["POST", "/api/jobs/compress"],
+    ["POST", "/api/jobs/extract"],
+    ["POST", "/api/jobs/size"],
+    ["POST", "/api/fs/perms"],
+    ["GET", "/api/du"],
+    ["GET", "/api/du?path=/srv"],
+  ] as const) assert.equal(startsAgentJob(method, rest), true, `${method} ${rest}`);
+  for (const [method, rest] of [
+    ["PUT", "/api/fs/upload"],
+    ["GET", "/api/fs/download"],
+    ["GET", "/api/jobs"],
+    ["GET", "/api/fs/perms"],
+    ["POST", "/api/fs/mkdir"],
+    ["GET", "/api/dux"],
+  ] as const) assert.equal(startsAgentJob(method, rest), false, `${method} ${rest}`);
+});
+
+/** A port nothing listens on. */
+async function deadPort(): Promise<number> {
+  const s = http.createServer();
+  await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
+  const port = (s.address() as AddressInfo).port;
+  await new Promise<void>((r) => s.close(() => r()));
+  return port;
+}
+
+test("sign-in off: a transfer or a hub job whose destination fails before reading the body closes the source's read stream", async () => {
+  const refusing = http.createServer((req, res) => {
+    // answers an upload at once, without reading it
+    res.statusCode = req.url?.startsWith("/api/fs/upload") ? 403 : 200;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(res.statusCode === 403 ? { error: "read-only volume" } : {}));
+  });
+  await new Promise<void>((r) => refusing.listen(0, "127.0.0.1", r));
+  // answers a stat with 404 (nothing there yet) and drops the connection on an upload, unread: the upload call itself fails
+  const dropping = http.createServer((req, res) => {
+    if (req.url?.startsWith("/api/fs/upload")) return void req.socket.destroy();
+    res.statusCode = req.url?.startsWith("/api/fs/stat") ? 404 : 200;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(res.statusCode === 404 ? { error: "not found" } : {}));
+  });
+  await new Promise<void>((r) => dropping.listen(0, "127.0.0.1", r));
+  try {
+    n++;
+    const s1 = new MemSource();
+    s1.put("/big.bin", "q".repeat(1024 * 1024));
+    s1.readMs = 5;
+    const h = createHub(
+      loadConfig({
+        FILEDECK_MODE: "hub",
+        FILEDECK_STATIC: tmp,
+        NODES: `dead=http://127.0.0.1:${await deadPort()},refusing=http://127.0.0.1:${(refusing.address() as AddressInfo).port},dropping=http://127.0.0.1:${(dropping.address() as AddressInfo).port}`,
+        FILEDECK_DIFF_DIR: path.join(tmp, `diff-${n}`),
+        FILEDECK_VAULT_FILE: path.join(tmp, `vault-${n}.db`),
+        FILEDECK_JOBS_FILE: path.join(tmp, `jobs-${n}.db`),
+      } as never),
+      { s1 },
+    );
+    hubs.push(h);
+    for (const node of ["dead", "refusing", "dropping"]) {
+      const closed = s1.readsClosed;
+      const r = await h.request("http://localhost/api/transfer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ src: { node: "s1", path: "/big.bin" }, dst: { node, dir: "/" } }) }, peer as never);
+      assert.ok(r.status >= 400, `${node}: ${r.status}`);
+      await r.body?.cancel();
+      await until(`the read stream of the transfer to ${node} to close`, () => s1.readsClosed === closed + 1, 5_000);
+    }
+    // a hub job copying to the machine that drops the upload: its read stream is closed too
+    const closed = s1.readsClosed;
+    const opened = s1.readsOpened;
+    const job = await h.request("http://localhost/api/ops/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ op: "copy", items: [{ node: "s1", path: "/big.bin" }], dst: { node: "dropping", dir: "/" }, conflict: "skip" }) }, peer as never);
+    assert.equal(job.status, 202);
+    const id = ((await job.json()) as { id: string }).id;
+    for (const end = Date.now() + 10_000; ; ) {
+      const v = (await (await h.request(`http://localhost/api/ops/jobs/${id}`, {}, peer as never)).json()) as { state: string };
+      if (!["queued", "running", "paused", "waiting"].includes(v.state)) break;
+      assert.ok(Date.now() < end, "the job did not end");
+      await sleep(20);
+    }
+    assert.ok(s1.readsOpened > opened, "the job's copy read the source");
+    await until("the read streams of the job's copy to close", () => s1.readsClosed - closed === s1.readsOpened - opened, 5_000);
+  } finally {
+    for (const srv of [refusing, dropping]) {
+      srv.close();
+      srv.closeAllConnections();
+    }
+  }
+});
+
+test("source app: a download aborted while the backend is still opening it destroys the stream at once (and a hash too)", async () => {
+  const s = new MemSource();
+  s.put("/big.bin", "w".repeat(1024 * 1024));
+  s.readMs = 5;
+  s.openMs = 200;
+  const app = createSourceApp("mem", s, { maxUpload: 1 << 30, maxEdit: 1 << 20, hashConcurrency: 2, walkMaxEntries: 1000 });
+  for (const rest of ["/api/fs/download?path=/big.bin", "/api/fs/hash?path=/big.bin"]) {
+    const ac = new AbortController();
+    const opening = s.opening;
+    const r = Promise.resolve(app.fetch(new Request("http://source" + rest, { signal: ac.signal }))).catch(() => undefined);
+    await until("the read to start opening", () => s.opening === opening + 1);
+    ac.abort();
+    await r; // (the answer, if any, is never read)
+    await until(`the read stream of ${rest} to close`, () => s.readsClosed === s.readsOpened, 2_000);
+  }
 });

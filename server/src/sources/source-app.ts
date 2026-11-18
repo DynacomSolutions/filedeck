@@ -12,6 +12,7 @@ import { walkResponse } from "../diff-routes.ts";
 import { IndexCache, spillPath, type IdxEntry } from "../index-cache.ts";
 import { THUMB_MAX_IMAGE_BYTES, thumbKind, thumbResponse, type Thumbnailer } from "../thumbs.ts";
 import { SearchGate, parseSearch, searchTree } from "../search.ts";
+import { whenAborted } from "../abort.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "./types.ts";
 
 const SAFE_HEADERS = {
@@ -151,7 +152,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
     if (c.req.method === "HEAD") return new Response(null, { status: 200, headers: { ...headers, "Content-Length": String(s.size) } });
     if (s.size === 0) return new Response(null, { status: 200, headers: { ...headers, "Content-Length": "0" } });
     const stream = await backend.read(p, range ?? undefined);
-    c.req.raw.signal.addEventListener("abort", () => stream.destroy(), { once: true });
+    whenAborted(c.req.raw.signal, () => stream.destroy());
     const body = Readable.toWeb(stream) as ReadableStream;
     if (range) {
       return new Response(body, {
@@ -397,7 +398,7 @@ export function createSourceApp(name: string, backend: SourceBackend, o: SourceA
         const h = createHash("sha256");
         if (s.size > 0) {
           const stream = await backend.read(p);
-          signal.addEventListener("abort", () => stream.destroy(), { once: true });
+          whenAborted(signal, () => stream.destroy());
           for await (const ch of stream as AsyncIterable<Buffer>) h.update(ch);
         }
         return h.digest("hex");

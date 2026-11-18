@@ -158,6 +158,7 @@ function workerTester(src: string, flags: string, budget: RegexBudget, signal?: 
   };
   const onAbort = () => fail(new FsError(400, "canceled"));
   signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort(); // (a listener added to a signal that has aborted already never fires)
   worker.on("message", (m: { id: number; out: Uint8Array }) => {
     const p = pending.get(m.id);
     pending.delete(m.id);
@@ -289,6 +290,7 @@ async function* searchWith(
     }
     const onAbort = () => stream.destroy();
     signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort(); // (a listener added to a signal that has aborted already never fires)
     let first: { l: number; x: string } | null = null;
     let n = 0;
     let lineNo = 0;

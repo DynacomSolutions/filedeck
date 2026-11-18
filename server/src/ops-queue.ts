@@ -1222,6 +1222,8 @@ export class OpQueue {
         }
       } catch (e) {
         j.progress.bytes -= sent; // the file will be retried or reported; do not count it twice
+        // a destination that failed without reading the body (unreachable, no access): the source's read stream is closed here
+        await reader?.cancel().catch(() => undefined);
         throw e;
       }
     };

@@ -91,7 +91,7 @@ export class AccountCalls {
 }
 
 /** A cuttable body, and `close`, which ends it and closes the inner body whether it was read or not. */
-interface CuttableBody {
+export interface CuttableBody {
   stream: ReadableStream<Uint8Array>;
   /** ends it (its reader sees it fail) and closes the inner body; nothing when it is over already */
   close(): void;
@@ -159,6 +159,14 @@ function cuttable(body: ReadableStream<Uint8Array>, signal: AbortSignal, onEnd?:
   return { stream, close: () => fail(new Error("the body was not read")) };
 }
 
+/**
+ * `body` passed through, with `close()`: ends it and closes `body` whether it was read or not. For a body handed to a call that may
+ * fail before reading it, or read only part of it (`transferFile`): its owner can then always close the stream it came from.
+ */
+export function closableBody(body: ReadableStream<Uint8Array>): CuttableBody {
+  return cuttable(body, new AbortController().signal);
+}
+
 /** `body` passed through until `signal` aborts (see `cuttable`). */
 export function cuttableBody(body: ReadableStream<Uint8Array>, signal: AbortSignal, onEnd?: () => void): ReadableStream<Uint8Array> {
   return cuttable(body, signal, onEnd).stream;
@@ -173,7 +181,12 @@ export function cuttableTarget<T extends { fetch(rest: string, init?: RequestIni
   return {
     ...t,
     fetch: (rest: string, init?: RequestInit) => {
-      if (signal.aborted) return Promise.reject(new CallCut());
+      if (signal.aborted) {
+        // cut before the call: a body handed in (a source's download, in a transfer) is closed here, as nobody will read it
+        const b = init?.body;
+        if (b instanceof ReadableStream && !b.locked) b.cancel(new CallCut()).catch(() => undefined);
+        return Promise.reject(new CallCut());
+      }
       const body = init?.body instanceof ReadableStream ? cuttable(init.body as ReadableStream<Uint8Array>, signal) : undefined;
       const sig = init?.signal ? AbortSignal.any([init.signal, signal]) : signal;
       let p: Promise<Response>;
