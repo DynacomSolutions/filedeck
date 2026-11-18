@@ -91,6 +91,14 @@ export interface Config {
   bootstrapAdminFile: string | undefined;
   /** hub: SQLite file for accounts (`:memory:` when no vault volume is configured) */
   authFile: string;
+  /** hub: job notifications by Web Push (FILEDECK_PUSH, on unless "off") */
+  push: boolean;
+  /** hub: SQLite file for the push key pair and subscriptions (`:memory:` when no vault volume is configured) */
+  pushFile: string;
+  /** hub: the VAPID contact the push services see (FILEDECK_PUSH_SUBJECT, a mailto: or https: URL) */
+  pushSubject: string;
+  /** hub: push service hosts allowed besides the browsers' own (FILEDECK_PUSH_HOSTS) */
+  pushHosts: string[];
   sessionIdleMs: number;
   sessionMaxMs: number;
   /** hub: account the `filedeck du` API token acts as; unset = none */
@@ -250,6 +258,10 @@ export function loadConfig(env = process.env): Config {
     bootstrapAdminFile: env.FILEDECK_BOOTSTRAP_ADMIN_FILE || undefined,
     // next to the vault, only where the vault volume is configured, so tests never touch /var/lib
     authFile: env.FILEDECK_AUTH_FILE || (env.FILEDECK_VAULT_FILE ? path.join(path.dirname(env.FILEDECK_VAULT_FILE), "auth.sqlite") : ":memory:"),
+    push: env.FILEDECK_PUSH !== "off",
+    pushFile: env.FILEDECK_PUSH_FILE || (env.FILEDECK_VAULT_FILE ? path.join(path.dirname(env.FILEDECK_VAULT_FILE), "push.sqlite") : ":memory:"),
+    pushSubject: env.FILEDECK_PUSH_SUBJECT || "https://github.com/DynacomSolutions/filedeck",
+    pushHosts: (env.FILEDECK_PUSH_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
     sessionIdleMs: Number(env.FILEDECK_SESSION_IDLE_SECONDS ?? 8 * 3600) * 1000,
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
@@ -290,6 +302,9 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     // account and vault files) are dropped, an agent never uses them
     admins: [],
     authFile: "",
+    push: false,
+    pushFile: "",
+    pushHosts: [],
     vaultFile: "",
     nodes: [],
     authNodes: [],

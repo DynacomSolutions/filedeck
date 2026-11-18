@@ -82,9 +82,10 @@ export function publicId(key: string): string {
 
 /**
  * What `onEnd` hears: `key` when one session ended (sign-out, a sign-in that replaced it, or a lookup that found it expired), with
- * `asRoot` when only its act-as-root switch was set or cleared; `kind` and `name` when every session of an account was ended.
+ * `asRoot` when only its act-as-root switch was set or cleared, `idle` (with `until`, its absolute end) when it ended by the idle limit
+ * alone; `kind` and `name` when every session of an account was ended.
  */
-export type SessionEnd = { key: string; asRoot?: true } | { kind: "sys" | "virt"; name: string };
+export type SessionEnd = { key: string; asRoot?: true; idle?: true; until?: number } | { kind: "sys" | "virt"; name: string };
 
 export class Sessions {
   private now: () => number;
@@ -159,6 +160,19 @@ export class Sessions {
     return r ? this.holds(r, this.now()) : false;
   }
 
+  /**
+   * The session kept under `key`: `valid` as `peek` finds it, `idle` when only the idle limit has passed (account and epoch still hold;
+   * `until` its absolute end), else `gone`. Read only. Push subscriptions use it: a closed app goes idle, and its notifications go on.
+   */
+  state(key: string): { state: "valid" | "idle"; until: number } | { state: "gone" } {
+    const r = this.db.prepare("SELECT kind, name, created, last_used, epoch FROM sessions WHERE id = ?").get(key) as Pick<SessionRow, "kind" | "name" | "created" | "last_used" | "epoch"> | undefined;
+    if (!r) return { state: "gone" };
+    const t = this.now();
+    const until = r.created + this.o.maxMs;
+    if (this.holds(r, t)) return { state: "valid", until };
+    return t < until && this.holds({ ...r, last_used: t }, t) ? { state: "idle", until } : { state: "gone" };
+  }
+
   /** `peek`'s test for one row. */
   private holds(r: Pick<SessionRow, "kind" | "name" | "created" | "last_used" | "epoch">, t: number): boolean {
     if (t - r.last_used > this.o.idleMs || t - r.created >= this.o.maxMs) return false;
@@ -200,11 +214,14 @@ export class Sessions {
    * deletes it and `list` leaves it out. Each one deleted is told to `onEnd`.
    */
   private prune(t: number): void {
-    const gone = this.db.prepare("SELECT id FROM sessions WHERE ? - last_used > ? OR ? - created >= ?").all(t, this.o.idleMs, t, this.o.maxMs) as { id: string }[];
+    const gone = this.db.prepare("SELECT id, created FROM sessions WHERE ? - last_used > ? OR ? - created >= ?").all(t, this.o.idleMs, t, this.o.maxMs) as { id: string; created: number }[];
     if (gone.length === 0) return;
     const del = this.db.prepare("DELETE FROM sessions WHERE id = ?");
     for (const g of gone) del.run(g.id);
-    for (const g of gone) this.ended({ key: g.id });
+    for (const g of gone) {
+      const until = g.created + this.o.maxMs;
+      this.ended(t < until ? { key: g.id, idle: true, until } : { key: g.id });
+    }
   }
 
   /** Every session that `peek` finds valid, newest `lastUsed` first. Read only, like `peek`. */
@@ -257,14 +274,15 @@ export class Sessions {
       .get(id) as Omit<SessionRow, "address"> | undefined;
     if (!r) return undefined;
     const t = this.now();
-    const gone = () => {
+    const gone = (idle?: true) => {
       this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
-      this.ended({ key: id });
+      this.ended(idle ? { key: id, idle, until: r.created + this.o.maxMs } : { key: id });
       return undefined;
     };
-    if (t - r.last_used > this.o.idleMs || t - r.created >= this.o.maxMs) return gone();
+    if (t - r.created >= this.o.maxMs) return gone();
     if (r.kind === "virt" && !this.acc.get(r.name)) return gone();
     if (this.acc.epochOf(r.kind, r.name) > r.epoch) return gone();
+    if (t - r.last_used > this.o.idleMs) return gone(true);
     if (o.touch !== false && t - r.last_used >= TOUCH_MS) this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ?").run(t, id);
     return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}), ...howOf(r) };
   }

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { SavedPasswords } from "./SavedPasswords";
 import { PresentationSettings } from "./PresentationSettings";
+import { AppSettings } from "./AppSettings";
 import { Tip } from "./Tooltip";
 import { TREE_FOLDS, UP_ROWS, setSettings, useSettings, type TreeFold, type UpRow } from "./settings";
 import * as Ic from "lucide-react";
@@ -67,6 +68,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
           </div>
         </section>
         <PresentationSettings />
+        <AppSettings />
         <SavedPasswords />
       </div>
     </div>

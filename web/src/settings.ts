@@ -16,8 +16,10 @@ export interface Settings {
   view: ViewMode;
   /** Rows kept at the end of a long chain of open sidebar folders; 0 shows every folder. */
   treeFold: TreeFold;
+  /** Notify when a job ends while the page is hidden (jobNotify.ts); turned on only after the browser granted permission. */
+  notifyJobs: boolean;
 }
-export const DEFAULT_SETTINGS: Settings = { upRow: "dots", showHidden: false, sort: { key: "name", asc: true }, view: "list", treeFold: 2 };
+export const DEFAULT_SETTINGS: Settings = { upRow: "dots", showHidden: false, sort: { key: "name", asc: true }, view: "list", treeFold: 2, notifyJobs: false };
 export const UP_ROWS: { value: UpRow; label: string; help: string }[] = [
   { value: "dots", label: "Dots", help: "A row named .. at the top of every folder that has a parent" },
   { value: "up", label: "Up", help: "The same row, labelled Up" },
@@ -43,6 +45,7 @@ export function normalizeSettings(value: unknown): Settings {
       ? { key: sort.key, asc: sort.asc }
       : DEFAULT_SETTINGS.sort,
     view: v.view === "grid" || v.view === "list" ? v.view : DEFAULT_SETTINGS.view,
+    notifyJobs: v.notifyJobs === true,
     treeFold: v.treeFold === 0 || v.treeFold === 2 || v.treeFold === 3 || v.treeFold === 4 || v.treeFold === 5 ? v.treeFold : DEFAULT_SETTINGS.treeFold,
   };
 }
@@ -99,5 +102,7 @@ const subscribe = (f: () => void) => {
   subs.add(f);
   return () => void subs.delete(f);
 };
+/** The current settings outside React (the jobs tray's notifications). */
+export const currentSettings = (): Settings => current;
 /** The current settings; re-renders on change (this tab or another). */
 export const useSettings = (): Settings => useSyncExternalStore(subscribe, () => current);

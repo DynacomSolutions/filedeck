@@ -17,7 +17,7 @@ import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, withAgentToken
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
-import { renderIndex } from "./brand.ts";
+import { renderIndex, renderManifest } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
 import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
 import { audit, auditRefusal, clientOf, isAdminPath, trustProxies, type AuditSink } from "./audit.ts";
@@ -39,6 +39,10 @@ import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
 import { SysPresence } from "./auth/presence.ts";
 import { SOURCE_READ_ONLY, SourceGrants, type SourceAccess } from "./auth/source-grants.ts";
 import { isAdmin, registerAdmin, registerAdminOff } from "./auth/admin-routes.ts";
+import { runAs } from "./auth/context.ts";
+import { PushStore } from "./push/store.ts";
+import { registerPush } from "./push/routes.ts";
+import { PushWatch, type SourcedJob } from "./push/watch.ts";
 import { AccountCalls, closableBody, cuttableResponse, cuttableTarget, type AccountCall } from "./auth/account-calls.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
@@ -286,8 +290,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   }
   let opq: OpQueue | undefined;
   let closed = false;
+  let push: { store: PushStore; watch: PushWatch; listJobs: (who: Identity | undefined) => Promise<SourcedJob[]> } | undefined;
   app.close = async () => {
     closed = true;
+    await push?.watch.stop();
+    push?.store.close();
     app.streams?.close();
     await opq?.interrupt(); // stop at an item boundary and hand the running jobs over
     vault.close();
@@ -508,6 +515,75 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       changed: (before) => app.accountChanged(before),
     });
   else registerAdminOff(app);
+  // Job notifications by Web Push (push/): the hub keeps the browsers' subscriptions per account and session, and its watch lists each
+  // subscribed account's jobs as that account (hub operations, compares, each machine's jobs) and sends one push per job that ended.
+  if (cfg.push) {
+    const store = new PushStore(cfg.pushFile);
+    const toId = (owner: string): Identity | undefined => {
+      if (!auth) return undefined;
+      const i = owner.indexOf(":");
+      const kind = owner.slice(0, i);
+      const name = owner.slice(i + 1);
+      if (kind === "virt") return auth.accounts.identity("virt", name) ?? undefined;
+      if (kind === "sys" && name) return { kind: "sys", name, admin: false, epoch: auth.accounts.epochOf("sys", name) };
+      return undefined;
+    };
+    const listJobs = async (who: Identity | undefined, signal?: AbortSignal): Promise<SourcedJob[]> => {
+      // an administrator sees everyone's jobs: the push is about the account's own, so it lists as a plain member (and never as root)
+      const id: Identity | undefined = who ? (who.kind === "sys" ? { kind: "sys", name: who.name, admin: false, epoch: who.epoch } : { ...who, admin: false }) : undefined;
+      const as = <T>(f: () => T): T => (id ? runAs(id, f) : f());
+      const out: SourcedJob[] = [];
+      const add = (source: string, v: { id: string; title: string; state: string; origin?: string; finishedAt?: number; error?: string }) =>
+        out.push({ source, id: v.id, title: v.title, state: v.state, origin: v.origin, finishedAt: v.finishedAt, error: v.error });
+      for (const v of ops.list(id)) add("ops", v);
+      for (const v of as(() => diffs.visible())) add("diff", v);
+      const names = !id || id.kind === "sys" ? cfg.nodes.map((n) => n.name) : Object.keys(id.nodes).filter((x) => nodeNames.has(x));
+      await Promise.all(
+        names.map(async (node) => {
+          try {
+            const r = await as(() => callNode(node, "/api/jobs", { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000) }));
+            if (!r.ok) return void (await r.body?.cancel().catch(() => undefined));
+            const v = (await r.json()) as { jobs?: unknown };
+            for (const j of Array.isArray(v?.jobs) ? v.jobs : [])
+              if (j && typeof j === "object" && typeof j.id === "string" && typeof j.title === "string" && typeof j.state === "string") add(`node:${node}`, j);
+          } catch {
+            /* a machine that is down has no news: asked again at the next pass */
+          }
+        }),
+      );
+      return out;
+    };
+    const watch = new PushWatch({
+      store,
+      subject: cfg.pushSubject,
+      signIn: !!auth,
+      sessionState: auth ? (k) => auth!.sessions.state(k) : undefined,
+      identityOf: toId,
+      listJobs,
+    });
+    // a session that ends (sign-out, the absolute limit, ended by an administrator) and an account that changes take their subscriptions
+    // with them. A session that only went idle (the app is closed) keeps them until its absolute end: notifications while the app is
+    // closed are the point. The end of an act-as-root switch leaves the session, and its subscriptions, as they are.
+    auth?.sessions.onEnd((e) => {
+      if ("key" in e) {
+        if (e.idle && e.until) store.detach(e.key, e.until);
+        else if (!e.asRoot) store.removeSession(e.key);
+      } else store.removeOwner(`${e.kind}:${e.name}`);
+    });
+    push = { store, watch, listJobs };
+    // (tests read the store through this)
+    Object.assign(app, { push });
+    if (!closed) watch.start();
+  }
+  registerPush(app, { store: push?.store, signIn: !!auth, hosts: cfg.pushHosts });
+  if (cfg.pushFile && cfg.pushFile !== ":memory:")
+    for (const f of [cfg.pushFile, cfg.pushFile + "-wal", cfg.pushFile + "-shm"]) {
+      try {
+        fs.chmodSync(f, 0o600);
+      } catch {
+        /* not created */
+      }
+    }
   for (const f of cfg.jobsFile ? [cfg.jobsFile, cfg.jobsFile + "-wal", cfg.jobsFile + "-shm"] : []) {
     try {
       fs.chmodSync(f, 0o600);
@@ -807,6 +883,17 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   app.get("/", page);
   app.get("/index.html", page);
+  // the app manifest carries the deployment's name (brand.ts); its own type so every browser reads it as a manifest
+  const manifest = path.join(cfg.staticDir, "site.webmanifest");
+  app.get("/site.webmanifest", async (c, next) => {
+    let body: string;
+    try {
+      body = renderManifest(await readFile(manifest, "utf8"), cfg.brand);
+    } catch {
+      return next();
+    }
+    return c.body(body, 200, { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" });
+  });
   app.use(
     "/*",
     serveStatic({

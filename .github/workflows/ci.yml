@@ -61,7 +61,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # tests take about 10 minutes; the rest is room for a slow Ubuntu mirror in "Install test tools" (up to 15)
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -73,10 +74,12 @@ jobs:
           cache: npm
         timeout-minutes: 5
       - name: Install test tools
-        timeout-minutes: 5
+        # the Ubuntu mirror is sometimes slow (single packages taking 20 s or more), which pushed this step past 5 minutes;
+        # retries and a per-connection timeout get past a stalled download instead of waiting on it
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev
           if ! command -v 7zz >/dev/null 2>&1; then
             sudo ln -s "$(command -v 7z)" /usr/local/bin/7zz
           fi

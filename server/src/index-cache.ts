@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { direntsOf } from "./dirnames.ts";
+import { rwUri } from "./size-gen.ts";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
@@ -56,7 +57,7 @@ export interface IndexStats {
 }
 
 let sqlite: typeof import("node:sqlite") | null | undefined;
-function loadSqlite(): typeof import("node:sqlite") | null {
+export function loadSqlite(): typeof import("node:sqlite") | null {
   if (sqlite !== undefined) return sqlite;
   try {
     // Loaded lazily (and without the ExperimentalWarning on stderr) so processes that never index never pay for it.
@@ -121,14 +122,14 @@ export function dropSpill(f: string) {
 }
 
 /** Open a SQLite database tuned for a cache (WAL, relaxed sync, small page cache). Null when SQLite is unavailable. */
-export function openDb(file: string, cacheKiB = 8192, scratch = false): DatabaseSync | null {
+export function openDb(file: string, cacheKiB = 8192, scratch = false, /** the file must exist: it is never created (see size-gen.ts) */ existing = false): DatabaseSync | null {
   const s = loadSqlite();
   if (!s) return null;
   if (file !== ":memory:") {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    privateDbFile(file);
+    privateDbFile(file, !existing);
   }
-  const db = new s.DatabaseSync(file);
+  const db = new s.DatabaseSync(existing && file !== ":memory:" ? rwUri(file) : file);
   // A scratch file (compare spill) is thrown away on restart: no journal, no syncs. A cache keeps WAL (a process crash cannot
   // corrupt it) without syncs (an OS crash might; IndexCache then starts a fresh file).
   db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`);

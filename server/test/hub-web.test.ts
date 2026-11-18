@@ -29,6 +29,8 @@ before(async () => {
   fs.writeFileSync(path.join(stat, "index.html"), INDEX);
   fs.writeFileSync(path.join(stat, "assets/index-AbCd1234.js"), "console.log('x');\n".repeat(500));
   fs.writeFileSync(path.join(stat, "assets/theme.css"), "body{margin:0}\n".repeat(200));
+  fs.writeFileSync(path.join(stat, "sw.js"), "self.addEventListener('fetch', () => {});\n");
+  fs.writeFileSync(path.join(stat, "site.webmanifest"), JSON.stringify({ name: "Filedeck", short_name: "Filedeck", start_url: "/" }));
   for (let i = 0; i < 80; i++) fs.writeFileSync(path.join(root, `a-rather-long-file-name-number-${i}.txt`), "x");
   fs.writeFileSync(path.join(root, "big.txt"), "line of text\n".repeat(2000));
   agentSrv = await open(createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never)) as never);
@@ -122,6 +124,18 @@ test("hashed build files are immutable, the rest is not, and a missing build fil
   assert.equal(gone.status, 404);
   assert.ok(!gone.body.toString().includes("<!doctype"));
   assert.equal((await get(hubPort, "/assets/deep/missing.css")).status, 404);
+});
+
+test("the service worker and the manifest are revalidated on every load, the manifest with its own type", async () => {
+  const sw = await get(hubPort, "/sw.js", { "accept-encoding": "identity" });
+  assert.equal(sw.status, 200);
+  assert.equal(sw.headers["cache-control"], "no-cache");
+  assert.match(String(sw.headers["content-type"]), /javascript/);
+  const mf = await get(hubPort, "/site.webmanifest", { "accept-encoding": "identity" });
+  assert.equal(mf.status, 200);
+  assert.equal(mf.headers["cache-control"], "no-cache");
+  assert.match(String(mf.headers["content-type"]), /^application\/manifest\+json/);
+  assert.equal(JSON.parse(mf.body.toString()).name, "Filedeck");
 });
 
 test("with an allowlist the hub answers only to listed hosts (healthz stays open)", async () => {
