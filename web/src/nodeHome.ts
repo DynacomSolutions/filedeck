@@ -26,3 +26,18 @@ export function rowOpens(kind: string, n: Pick<NodeInfo, "roots"> | undefined, p
 export function canGoUp(n: Pick<NodeInfo, "roots"> | undefined, path: string): boolean {
   return path !== "/" && !n?.roots?.includes(path);
 }
+
+/** The address bar's first crumb for a base path: a granted folder shows its path, any other base the root sign `/`. */
+export function firstCrumb(n: Pick<NodeInfo, "roots"> | undefined, basePath: string): { label: string; granted: boolean } {
+  return n?.roots?.includes(basePath) ? { label: basePath, granted: true } : { label: "/", granted: false };
+}
+
+/**
+ * The home folder to offer when listing `path` failed: only for a machine with granted folders, only for a refusal (403), and not
+ * when the folder is the home itself. Otherwise null, and the plain error stands.
+ */
+export function noAccessHome(n: Pick<NodeInfo, "roots"> | undefined, path: string, err: unknown): string | null {
+  if (!n?.roots?.length || (err as { status?: unknown } | null)?.status !== 403) return null;
+  const home = homeOf(n);
+  return path === home ? null : home;
+}

@@ -7,7 +7,7 @@ import { fetchNodes, NODES_KEY, swrCache } from "./data";
 import { addressBase, baseRemainder, crumbsOverflow, fmtAddr, fuzzy, itemUri, parseAddress, resolveBasePath, splitTyped, type AddressBase, type Where } from "./address";
 import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
-import { homeOf } from "./nodeHome";
+import { firstCrumb, homeOf, noAccessHome } from "./nodeHome";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 
@@ -402,6 +402,12 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
       else onGo(p.node, parent(p.path), p.path);
       end(true);
     } catch (e) {
+      // a folder refused on a machine with granted folders opens as asked: the panel says so and offers the home folder
+      if (noAccessHome(known.find((n) => n.name === p.node), p.path, e)) {
+        onGo(p.node, p.path);
+        end(true);
+        return;
+      }
       setError(`Cannot open ${fmtAddr(p.node, p.path)}: ${(e as Error).message || "not found"}`);
       setBusy(false);
     }
@@ -505,7 +511,9 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
   );
 
   const remainderCrumbs = baseRemainder(currentBase, path).split("/").filter(Boolean);
-  const segs = [{ label: "/", path: currentBase.path }, ...remainderCrumbs.map((c, i) => ({ label: c, path: resolveBasePath(currentBase, remainderCrumbs.slice(0, i + 1).join("/")) }))];
+  // the first crumb is the root sign, or, on a machine with granted folders, the granted folder's path
+  const first = firstCrumb(nodes.find((n) => n.name === currentBase.node), currentBase.path);
+  const segs = [{ label: first.label, path: currentBase.path }, ...remainderCrumbs.map((c, i) => ({ label: c, path: resolveBasePath(currentBase, remainderCrumbs.slice(0, i + 1).join("/")) }))];
   const maxFold = Math.max(0, segs.length - 2);
   const segKey = segs.map((x) => x.path).join("\0") + "\0" + currentBase.label;
   // Collapse by measurement: start from the full path, fold one more middle segment while the crumbs still overflow (settles before paint).
@@ -606,10 +614,10 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
                 </button>
               </Tip>
             )}
-            <Tip label={i === 0 ? `Root of ${currentBase.label}` : sg.path}>
+            <Tip label={i === 0 ? (first.granted ? <>Granted folder on <bdi>{currentBase.node}</bdi></> : `Root of ${currentBase.label}`) : <bdi>{sg.path}</bdi>}>
               <button type="button" className={i === segs.length - 1 ? "here" : ""} onClick={() => onGo(currentBase.node, sg.path)} onContextMenu={(e) => onCrumbMenu(e, sg.path)}>
                 {i === 0 ? <Ic.HardDrive aria-hidden="true" /> : null}
-                <span className="crumb-t">{sg.label}</span>
+                <span className="crumb-t"><bdi>{sg.label}</bdi></span>
               </button>
             </Tip>
             <Tip label={`Folders in ${sg.path}`}>

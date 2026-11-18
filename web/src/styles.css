@@ -107,6 +107,7 @@ input[type=checkbox]{accent-color:var(--accent)}
 /* messages overlay the bottom of the panel instead of pushing the list */
 .fp-err,.fp-filter{position:absolute;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--border)}
 .fp-err{padding:.35rem .8rem;color:var(--accent-text);font-size:.8rem;font-weight:500}
+.fp-noaccess{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem .8rem}.fp-noaccess button{min-height:32px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fp-scroll{height:100%;min-height:0;overflow:auto}
 .fp>div[data-group]{flex:1;min-height:0}
 .fp-actions button.marked{border-color:var(--accent-line);background:var(--accent-tint)}

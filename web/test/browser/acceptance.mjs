@@ -133,6 +133,8 @@ async function installFixture(page, opts = {}) {
     }
     if (pathname.includes('/api/fs/list')) {
       const path = url.searchParams.get('path') || '/';
+      // a virtual account may list only its granted folders and what is below them
+      if (opts.roots && !opts.roots.some((r) => path === r || path.startsWith(`${r}/`))) return json({ error: 'no access to this path' }, 403);
       if (pathname.includes('/fixture-dest/')) {
         const rows = path === '/' ? [{ name: 'destination', path: '/destination', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }] : [];
         return json({ path, entries: rows, truncated: false });
@@ -159,6 +161,9 @@ async function installFixture(page, opts = {}) {
     }
     if (pathname.endsWith('/api/fs/stat')) {
       const path = url.searchParams.get('path') || tracked;
+      // a virtual account: its granted folders are folders, and nothing outside them can be read
+      if (opts.roots?.includes(path)) return json({ name: path.split('/').at(-1), path, type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 });
+      if (opts.roots && !opts.roots.some((r) => path.startsWith(`${r}/`))) return json({ error: 'no access to this path' }, 403);
       return json(entry(path, path === tracked ? fakeMode : originalMode));
     }
     if (pathname.endsWith('/api/git/info')) return json(gitInfo(url.searchParams.get('path') || '/', opts.worktrees));
@@ -1603,6 +1608,30 @@ async function verifyVirtualAccount(browser) {
       const bad = fixture.requests.filter((r) => r === `/api/nodes/${node}/api/mounts` || (r.startsWith(`/api/nodes/${node}/api/fs/list?`) && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === '/'));
       assert.deepEqual(bad, [], `no list of / and no mounts request (${scheme})`);
       assert.ok(fixture.requests.some((r) => r.startsWith(`/api/nodes/${node}/api/fs/list?`) && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === share), `the granted folder is listed (${scheme})`);
+      // the address bar's first crumb is the granted folder, not the root sign
+      const panel = page.locator('.fp').first();
+      assert.equal((await panel.locator('.crumbs .crumb').first().locator('.crumb-t').textContent())?.trim(), share, 'the first crumb shows the granted folder');
+      // "/" typed against the granted folder's base stays in it; the machine's / typed in full is refused (the fixture answers 403):
+      // the panel offers the home folder instead of the bare error, and does not move by itself
+      const go = async (text) => {
+        await panel.getByRole('button', { name: 'Edit address' }).click();
+        const box = panel.getByRole('combobox', { name: 'Address' });
+        await box.fill(text);
+        await box.press('Enter');
+        await box.waitFor({ state: 'detached' });
+      };
+      await go('/');
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p), share, `"/" stays in the granted folder (${scheme})`);
+      await go(`${nodeName}:/`);
+      const offer = panel.getByRole('button', { name: `Open ${share}`, exact: true });
+      await offer.waitFor({ state: 'visible', timeout: 8000 });
+      await panel.getByRole('alert').filter({ hasText: 'You have no access to this folder.' }).waitFor({ state: 'visible' });
+      assert.equal(await page.evaluate(() => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p), '/', 'no silent redirect');
+      await runAxe(page, `virtual account, no access (${scheme})`, failures);
+      await offer.click();
+      await page.waitForFunction((p) => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p === p, share, { timeout: 8000 });
+      await offer.waitFor({ state: 'detached', timeout: 8000 }); // the offer goes once the home folder is listed
     } finally {
       await context.close();
     }

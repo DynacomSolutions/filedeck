@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canGoUp, homeOf, openPath, rowOpens } from "../src/nodeHome.ts";
+import { canGoUp, firstCrumb, homeOf, noAccessHome, openPath, rowOpens } from "../src/nodeHome.ts";
 
 test("a machine's home is its first granted folder, else /", () => {
   assert.equal(homeOf({ roots: ["/srv/b", "/srv/a"] }), "/srv/b");
@@ -33,4 +33,26 @@ test("up stops at / and at a granted folder", () => {
   assert.equal(canGoUp(undefined, "/"), false);
   assert.equal(canGoUp(undefined, "/srv/b"), true);
   assert.equal(canGoUp({}, "/srv"), true);
+});
+
+test("the address bar's first crumb names a granted folder by its path; elsewhere it is the root", () => {
+  const n = { roots: ["/srv/b", "/srv/a"] };
+  assert.deepEqual(firstCrumb(n, "/srv/a"), { label: "/srv/a", granted: true });
+  assert.deepEqual(firstCrumb(n, "/"), { label: "/", granted: false });
+  assert.deepEqual(firstCrumb(undefined, "/"), { label: "/", granted: false });
+  assert.deepEqual(firstCrumb({}, "/mnt/data"), { label: "/", granted: false });
+});
+
+test("a folder the account may not list offers the home folder, for a machine with roots only", () => {
+  const n = { roots: ["/srv/b"] };
+  const denied = Object.assign(new Error("no access"), { status: 403 });
+  assert.equal(noAccessHome(n, "/", denied), "/srv/b");
+  assert.equal(noAccessHome(n, "/etc", denied), "/srv/b");
+  // other failures, and machines without roots, keep the plain error
+  assert.equal(noAccessHome(n, "/", Object.assign(new Error("gone"), { status: 404 })), null);
+  assert.equal(noAccessHome(n, "/", new Error("network")), null);
+  assert.equal(noAccessHome({}, "/", denied), null);
+  assert.equal(noAccessHome(undefined, "/", denied), null);
+  // at the home folder itself there is nowhere better to send the account
+  assert.equal(noAccessHome(n, "/srv/b", denied), null);
 });
