@@ -7,12 +7,32 @@ import type { AccountInput, AccountView, NodeAccess, SourceAccess } from "./admi
 
 export type SourceChoice = "none" | "read" | "write";
 export type MachineForm = { node: string; runAs: string; grants: { path: string; write: boolean }[] };
-export type AccountForm = { name: string; password: string; admin: boolean; machines: MachineForm[]; sources: Record<string, SourceChoice> };
+export type AccountForm = { name: string; password: string; admin: boolean; machines: MachineForm[]; sources: Record<string, SourceChoice>; tailnet: string[] };
 
 /** The same rule as the hub's account names. */
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
 export const MIN_PASSWORD = 12;
 export const MAX_PASSWORD = 1024;
+/** The hub's limit on tailnet links per account. */
+export const MAX_LINKS = 16;
+
+/** The same rules as the hub's links (server/src/auth/tailnet.ts): printable ASCII, trimmed and lowercased. */
+const LOGIN = /^[a-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*$/;
+const TAG = /^tag:[a-z0-9-]{1,63}$/;
+
+/** One link as the hub keeps it: ASCII white space trimmed, lowercased. Not checked. */
+export const cleanLink = (v: string): string => v.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").toLowerCase();
+
+/** What a value is as a tailnet link: a login, a tag, or null when it is neither (the client twin of the hub's `tailnetLink`). */
+export function linkKind(v: string): "login" | "tag" | null {
+  const s = cleanLink(v);
+  if (!/^[\x21-\x7e]*$/.test(s)) return null;
+  if (s.startsWith("tag:")) return TAG.test(s) ? "tag" : null;
+  return s.length <= 254 && LOGIN.test(s) ? "login" : null;
+}
+
+/** The links of a list, cleaned, empty ones dropped and duplicates merged at the first place. */
+export const cleanLinks = (list: readonly string[]): string[] => [...new Set(list.map(cleanLink).filter((x) => x !== ""))];
 
 /** A machine counts once it has a run-as user or a folder; an untouched section is left out. */
 const used = (m: MachineForm) => m.runAs.trim() !== "" || m.grants.some((g) => g.path.trim() !== "");
@@ -42,7 +62,7 @@ export function toInput(f: AccountForm, known?: Configured): AccountInput {
   const sources: Record<string, SourceAccess> = {};
   for (const [name, choice] of Object.entries(f.sources)) if (choice !== "none" && (!known || known.sources.includes(name))) sources[name] = { write: choice === "write" };
   // a password is sent as typed: spaces at its ends are part of it
-  return { name: f.name.trim(), ...(f.password !== "" ? { password: f.password } : {}), admin: f.admin, nodes, sources };
+  return { name: f.name.trim(), ...(f.password !== "" ? { password: f.password } : {}), admin: f.admin, nodes, sources, tailnet: cleanLinks(f.tailnet) };
 }
 
 /** The form for an existing account. Its password is never known here, so the field starts empty. */
@@ -55,6 +75,7 @@ export function fromView(v: AccountView): AccountForm {
     admin: v.admin,
     machines: Object.entries(v.nodes).map(([node, a]) => ({ node, runAs: a.runAs, grants: a.grants.map((g) => ({ path: g.path, write: g.write })) })),
     sources,
+    tailnet: v.tailnet.map((l) => l.subject),
   };
 }
 
@@ -62,7 +83,7 @@ export function fromView(v: AccountView): AccountForm {
 export function formChanged(start: AccountForm, now: AccountForm): boolean {
   if (now.password !== "") return true;
   const norm = (f: AccountForm) =>
-    JSON.stringify([f.name.trim(), f.admin, f.machines.map((m) => [m.node, m.runAs.trim(), m.grants]), Object.entries(f.sources).filter(([, c]) => c !== "none").sort(([a], [b]) => (a < b ? -1 : 1))]);
+    JSON.stringify([f.name.trim(), f.admin, f.machines.map((m) => [m.node, m.runAs.trim(), m.grants]), Object.entries(f.sources).filter(([, c]) => c !== "none").sort(([a], [b]) => (a < b ? -1 : 1)), cleanLinks(f.tailnet)]);
   return norm(start) !== norm(now);
 }
 
@@ -81,5 +102,8 @@ export function formProblems(f: AccountForm): string[] {
     if (m.runAs.trim() !== "" && grants.length === 0) out.push(`Give at least one folder on ${m.node}, or clear its run-as user.`);
     for (const g of grants) if (!g.path.trim().startsWith("/")) out.push(`A folder on ${m.node} must start with /: ${g.path.trim()}`);
   }
+  const links = cleanLinks(f.tailnet);
+  for (const l of links) if (linkKind(l) === null) out.push(`This is not a tailnet login or tag: ${l}`);
+  if (links.length > MAX_LINKS) out.push(`At most ${MAX_LINKS} tailnet links per account.`);
   return out;
 }

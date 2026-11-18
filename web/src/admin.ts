@@ -11,6 +11,9 @@ export type NodeAccess = { runAs: string; grants: Grant[] };
 /** Access to one network source: read-only, or read and write. */
 export type SourceAccess = { write: boolean };
 
+/** One tailnet link: a login (`alice@github`) or a tag (`tag:server`) that may sign in as an account. */
+export type TailnetLink = { subject: string; kind: "login" | "tag" };
+
 /** A virtual account as administrators see it: never its password hash, keys only as fingerprint, type and comment. */
 export type AccountView = {
   name: string;
@@ -20,17 +23,19 @@ export type AccountView = {
   nodes: Record<string, NodeAccess>;
   sources: Record<string, SourceAccess>;
   sessions: number;
+  tailnet: TailnetLink[];
 };
 
-/** A system user the hub knows of: named in FILEDECK_ADMINS, given a source grant, or signed in now. */
-export type SystemView = { name: string; admin: boolean; sources: Record<string, SourceAccess>; sessions: number };
+/** A system user the hub knows of: named in FILEDECK_ADMINS, given a source grant or a tailnet link, or signed in now. */
+export type SystemView = { name: string; admin: boolean; sources: Record<string, SourceAccess>; sessions: number; tailnet: TailnetLink[] };
 
-/** One signed-in session. `id` is derived from the session key and leads back to neither it nor the cookie. `current` marks the caller's. */
-export type SessionInfo = { id: string; kind: "sys" | "virt"; name: string; created: number; lastUsed: number; address?: string; asRootUntil?: number; current?: true };
+/** One signed-in session. `method` is how it signed in and `tailnet` the login or tag that matched for a Tailscale session; `tailnetSource` and `tailnetDevice` are shown when the hub gives them. `id` is derived from the session key and leads back to neither it nor the cookie. `current` marks the caller's. */
+export type SessionInfo = { id: string; kind: "sys" | "virt"; name: string; created: number; lastUsed: number; address?: string; asRootUntil?: number; current?: true; method?: "password" | "key" | "tailscale"; tailnet?: string; tailnetSource?: "socket" | "headers"; tailnetDevice?: string };
 
-export type Overview = { nodes: string[]; sources: { name: string; type: string }[]; systemAdmins: string[]; unownedPasswords: number };
+/** `tailscale` is the configured Tailscale source, or null when Tailscale sign-in is off on this hub. */
+export type Overview = { nodes: string[]; sources: { name: string; type: string }[]; systemAdmins: string[]; unownedPasswords: number; tailscale: "socket" | "headers" | null };
 
-export type AccountInput = { name: string; password?: string; admin: boolean; nodes: Record<string, NodeAccess>; sources: Record<string, SourceAccess> };
+export type AccountInput = { name: string; password?: string; admin: boolean; nodes: Record<string, NodeAccess>; sources: Record<string, SourceAccess>; tailnet?: string[] };
 
 /** A refused or failed admin call; the message is ready to show. `status` is 0 when the server could not be reached. */
 export class AdminError extends Error {
@@ -100,6 +105,11 @@ export function removeKey(name: string, fingerprint: string): Promise<AccountVie
 /** A system user's network sources, replaced as a whole (`{}` takes them all away). */
 export function setSystemSources(name: string, sources: Record<string, SourceAccess>): Promise<SystemView> {
   return answer(() => fetch(`/api/admin/system/${seg(name)}/sources`, { method: "PUT", ...jsonBody({ sources }) }));
+}
+
+/** A system user's tailnet links (logins and tags), replaced as a whole (`[]` takes them all away). Ends the sessions that came through a removed link. */
+export function setSystemTailnet(name: string, links: string[]): Promise<SystemView> {
+  return answer(() => fetch(`/api/admin/system/${seg(name)}/tailnet`, { method: "PUT", ...jsonBody({ links }) }));
 }
 
 export async function listSessions(): Promise<SessionInfo[]> {

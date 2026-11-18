@@ -1,6 +1,6 @@
 /* Signed in and System users tabs, and the notice about old saved passwords */
 .sess-list{max-width:64rem}
-.sess-table{table-layout:auto;min-width:46rem;width:100%}
+.sess-table{table-layout:auto;min-width:52rem;width:100%}
 .sess-table td,.sess-table th{white-space:nowrap}
 .sess-table td.sess-addr{overflow:hidden;text-overflow:ellipsis;max-width:14rem}
 .sess-table th.sess-group{text-align:left;background:var(--surface-2);font-weight:600}
@@ -25,3 +25,5 @@
 .acc-notice{max-width:64rem;align-items:center;flex-wrap:wrap}
 .acc-notice .acc-notice-text{flex:1 1 14rem;min-width:0}
 .acc-notice button{margin-left:auto}
+.sess-table td.sess-method{white-space:normal;overflow-wrap:anywhere;min-width:8rem}
+.sess-sub{display:block;font-size:.78rem}

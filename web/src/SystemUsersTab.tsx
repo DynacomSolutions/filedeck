@@ -4,7 +4,9 @@ import { Tip } from "./Tooltip";
 import { Dropdown } from "./Dropdown";
 import { Modal } from "./ArchiveDialog";
 import { ConfirmDialog } from "./SessionsTab";
-import { listAccounts, overview, setSystemSources, systemUserProblem, type Overview, type SourceAccess, type SystemView } from "./admin";
+import { TailnetLinks } from "./TailnetLinks";
+import { cleanLinks, linkKind } from "./accountForm";
+import { AdminError, listAccounts, overview, setSystemSources, setSystemTailnet, systemUserProblem, type Overview, type SourceAccess, type SystemView } from "./admin";
 import type { Account } from "./auth";
 import "./archive.css";
 import "./accounts.css";
@@ -35,7 +37,7 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
   const [name, setName] = useState("");
   const [nameErr, setNameErr] = useState("");
   /** the editor for one user's sources */
-  const [editing, setEditing] = useState<{ name: string; admin: boolean; start: Record<string, Choice> } | null>(null);
+  const [editing, setEditing] = useState<{ name: string; admin: boolean; start: Record<string, Choice>; links: string[] } | null>(null);
   const listHeading = useRef<HTMLHeadingElement>(null);
   const editHeading = useRef<HTMLHeadingElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
@@ -80,7 +82,7 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
     setStatus("");
     const start: Record<string, Choice> = {};
     for (const [s, a] of Object.entries(u.sources)) start[s] = choiceOf(a);
-    setEditing({ name: u.name, admin: u.admin, start });
+    setEditing({ name: u.name, admin: u.admin, start, links: u.tailnet.map((l) => l.subject) });
   };
 
   const closeAdd = () => {
@@ -102,7 +104,7 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
     setNameErr("");
     setName("");
     if (known) edit(known);
-    else setEditing({ name: n, admin: data?.overview.systemAdmins.includes(n) ?? false, start: {} });
+    else setEditing({ name: n, admin: data?.overview.systemAdmins.includes(n) ?? false, start: {}, links: [] });
   };
 
   if (editing && data) {
@@ -117,7 +119,7 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
         onCancel={() => setEditing(null)}
         onSaved={(n) => {
           setEditing(null);
-          setStatus(`Sources of ${n} saved. Its sessions have ended.`);
+          setStatus(`Sources and Tailscale links of ${n} saved. Its sessions have ended.`);
           load();
         }}
       />
@@ -170,6 +172,7 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
               <th>Name</th>
               <th>Administrator</th>
               <th>Sources</th>
+              <th>Tailscale</th>
               <th className="sys-c-num">Sessions</th>
               <th className="sys-c-act"><span className="visually-hidden">Actions</span></th>
             </tr>
@@ -188,6 +191,15 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
                     ))
                   )}
                 </td>
+                <td className="sys-c-src">
+                  {u.tailnet.length === 0 ? (
+                    <span className="muted">None</span>
+                  ) : (
+                    u.tailnet.map((l, i) => (
+                      <span key={l.subject}>{i > 0 && ", "}<bdi>{l.subject}</bdi> <span className="muted">{l.kind === "tag" ? "tag" : "login"}</span></span>
+                    ))
+                  )}
+                </td>
                 <td className="sys-c-num">{u.sessions}</td>
                 <td className="sys-c-act">
                   <button type="button" aria-label={`Edit sources of ${u.name}`} onClick={() => edit(u)}><Ic.Pencil aria-hidden="true" /> Edit</button>
@@ -195,7 +207,7 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
               </tr>
             ))}
             {data && data.system.length === 0 && (
-              <tr><td colSpan={5} className="muted vault-empty">No system users are known yet.</td></tr>
+              <tr><td colSpan={6} className="muted vault-empty">No system users are known yet.</td></tr>
             )}
           </tbody>
         </table>
@@ -207,7 +219,7 @@ export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React
 /** The sources of one system user: one select per source, saved as a whole. Saving ends the user's sessions, so one's own asks first. */
 function SourcesEditor({ account, user, overview: ov, headingRef, closeRef, onCancel, onSaved }: {
   account: Account;
-  user: { name: string; admin: boolean; start: Record<string, Choice> };
+  user: { name: string; admin: boolean; start: Record<string, Choice>; links: string[] };
   overview: Overview;
   headingRef: React.RefObject<HTMLHeadingElement | null>;
   closeRef: React.MutableRefObject<((then?: () => void) => void) | null>;
@@ -215,6 +227,9 @@ function SourcesEditor({ account, user, overview: ov, headingRef, closeRef, onCa
   onSaved: (name: string) => void;
 }) {
   const [choices, setChoices] = useState<Record<string, Choice>>(user.start);
+  const [links, setLinks] = useState<string[]>(user.links);
+  /** what the hub holds now: moves on when one of the two calls of a save went through and the other did not */
+  const [base, setBase] = useState({ sources: user.start, links: user.links });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState(false);
@@ -224,11 +239,12 @@ function SourcesEditor({ account, user, overview: ov, headingRef, closeRef, onCa
   const afterDiscard = useRef<(() => void) | null>(null);
   const opener = useRef<HTMLElement | null>(null);
   const norm = (c: Record<string, Choice>) => JSON.stringify(Object.entries(c).filter(([, v]) => v !== "none").sort(([a], [b]) => (a < b ? -1 : 1)));
+  const sourcesOf = (l: string[]) => JSON.stringify(cleanLinks(l));
   /** Back to the list, or on to `then`; with unsaved changes it asks "Discard changes?" first. */
   const requestClose = (then?: () => void) => {
     if (sending.current) return;
     const go = then ?? onCancel;
-    if (norm(choices) !== norm(user.start)) {
+    if (norm(choices) !== norm(base.sources) || sourcesOf(links) !== sourcesOf(base.links)) {
       opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       afterDiscard.current = go;
       setDiscarding(true);
@@ -254,8 +270,22 @@ function SourcesEditor({ account, user, overview: ov, headingRef, closeRef, onCa
     const sources: Record<string, SourceAccess> = {};
     // only configured sources go to the hub: it refuses the others, and saving ends those grants
     for (const s of known) if ((choices[s] ?? "none") !== "none") sources[s] = { write: choices[s] === "write" };
+    const list = cleanLinks(links);
+    const bad = list.find((l) => linkKind(l) === null);
+    const sourcesChanged = norm(choices) !== norm(base.sources);
+    const linksChanged = sourcesOf(links) !== sourcesOf(base.links);
     try {
-      await setSystemSources(user.name, sources);
+      if (bad !== undefined) throw new AdminError(`This is not a tailnet login or tag: ${bad}`, 0);
+      // each call ends the user's sessions: one's own account cannot make a second call after the first
+      if (self && sourcesChanged && linksChanged) throw new AdminError("Your own sessions end with each change. Save the sources and the Tailscale links one after the other.", 0);
+      if (sourcesChanged) {
+        await setSystemSources(user.name, sources);
+        setBase((b) => ({ ...b, sources: choices }));
+      }
+      if (linksChanged) {
+        await setSystemTailnet(user.name, list);
+        setBase((b) => ({ ...b, links: list }));
+      }
       if (self) location.reload();
       else onSaved(user.name);
     } catch (e) {
@@ -288,6 +318,7 @@ function SourcesEditor({ account, user, overview: ov, headingRef, closeRef, onCa
         {gone.length > 0 && (
           <p className="muted">Not configured now: {gone.map((s, i) => <span key={s}>{i > 0 && ", "}<bdi>{s}</bdi></span>)}. Saving leaves these grants out, which ends them.</p>
         )}
+        <TailnetLinks links={links} mode={ov.tailscale} disabled={busy} start={base.links} onChange={setLinks} />
         <div className="acc-actions">
           <div className="ad-err acc-err" role="alert" id={errId}>{err}</div>
           <button type="button" onClick={() => requestClose()}><Ic.X aria-hidden="true" /> Cancel</button>
@@ -298,7 +329,7 @@ function SourcesEditor({ account, user, overview: ov, headingRef, closeRef, onCa
       </fieldset>
       {discarding && (
         <Modal title="Discard changes?" onClose={() => setDiscarding(false)} describedBy={errId + "-d"}>
-          <p id={errId + "-d"} className="pad0">The changes to these sources have not been saved.</p>
+          <p id={errId + "-d"} className="pad0">The changes to these sources and links have not been saved.</p>
           <div className="modal-actions">
             <button type="button" autoFocus onClick={() => setDiscarding(false)}><Ic.Undo2 aria-hidden="true" /> Keep editing</button>
             <button type="submit" className="danger" onClick={() => (setDiscarding(false), (afterDiscard.current ?? onCancel)())}><Ic.Trash2 aria-hidden="true" /> Discard</button>

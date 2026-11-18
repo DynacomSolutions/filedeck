@@ -3,6 +3,7 @@ import * as Ic from "lucide-react";
 import { Modal } from "./ArchiveDialog";
 import { Dropdown } from "./Dropdown";
 import { GrantPicker } from "./GrantPicker";
+import { TailnetLinks, linkCounts } from "./TailnetLinks";
 import { addKey, createAccount, removeKey, updateAccount, type AccountView, type Overview } from "./admin";
 import { formChanged, formProblems, fromView, MAX_PASSWORD, MIN_PASSWORD, notConfigured, toInput, type AccountForm, type Configured, type SourceChoice } from "./accountForm";
 import "./archive.css";
@@ -18,7 +19,7 @@ const SELF_WARNING = "Saving signs this account out everywhere, also here.";
 
 /** The empty form for a new account, with one section per machine. */
 function blank(ov: Overview): AccountForm {
-  return { name: "", password: "", admin: false, machines: ov.nodes.map((node) => ({ node, runAs: "", grants: [] })), sources: {} };
+  return { name: "", password: "", admin: false, machines: ov.nodes.map((node) => ({ node, runAs: "", grants: [] })), sources: {}, tailnet: [] };
 }
 
 /** The form of an existing account, with a section for every machine: the configured ones first, then any the account still names. */
@@ -192,7 +193,7 @@ export function AccountEditor({
       }
     });
 
-  const canSignIn = (hasPassword && !removePassword) || form.password !== "" || keys.length > 0;
+  const canSignIn = (hasPassword && !removePassword) || form.password !== "" || keys.length > 0 || form.tailnet.some((l) => linkCounts(l, overview.tailscale));
   return (
     // not a <form>: the folder picker and the confirmations are forms of their own (Modal)
     <div className="acc-editor" role="group" aria-labelledby={ids.name + "-h"}>
@@ -240,7 +241,7 @@ export function AccountEditor({
           <Check checked={form.admin} onChange={(admin) => set({ admin })}>
             Administrator <span className="muted">Can manage accounts and use every network source.</span>
           </Check>
-          {!canSignIn && <p className="muted acc-help">Without a password or a key this account cannot sign in.</p>}
+          {!canSignIn && <p className="muted acc-help">Without a password, a key or a tailnet link that works now, this account cannot sign in.</p>}
         </section>
 
         <section className="set-sec" aria-labelledby={ids.key + "-s"}>
@@ -282,6 +283,8 @@ export function AccountEditor({
             </>
           )}
         </section>
+
+        <TailnetLinks links={form.tailnet} mode={overview.tailscale} disabled={busy !== ""} start={start.tailnet} onChange={(tailnet) => set({ tailnet })} />
 
         <section className="set-sec" aria-labelledby={ids.name + "-m"}>
           <h3 id={ids.name + "-m"}>Machines</h3>

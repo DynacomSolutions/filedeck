@@ -140,23 +140,25 @@ async function installFixture(page, opts = {}) {
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
     if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
-    // opts.adminApi ({ posts, conflict }): the hub's admin routes. Two virtual accounts exist: fixture-guest, with a machine and a
+    // opts.adminApi ({ posts, conflict, tailscale, patchConflict }): the hub's admin routes. Two virtual accounts exist: fixture-guest, with a machine and a
     // source that are no longer configured, and the signed-in fixture-admin. A POST of a new account is kept in `posts` and answers
     // 409 "exists" while `conflict` is set, else 201 with the new account.
     if (opts.adminApi && pathname.startsWith('/api/admin/')) {
       const a = opts.adminApi;
-      const guest = { name: 'fixture-guest', admin: false, hasPassword: true, keys: [{ fingerprint: 'SHA256:fixture', type: 'ssh-ed25519', comment: 'fixture laptop' }], nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: true }, { path: '/', write: false }] }, 'fixture-retired': { runAs: 'fixture-run', grants: [{ path: '/old', write: false }] } }, sources: { 'fixture-s3': { write: false }, 'fixture-gone': { write: true } }, sessions: 1 };
-      const self = { name: 'fixture-admin', admin: true, hasPassword: true, keys: [], nodes: {}, sources: {}, sessions: 1 };
+      const kinds = (list) => list.map((subject) => ({ subject, kind: subject.startsWith('tag:') ? 'tag' : 'login' }));
+      const guest = { name: 'fixture-guest', admin: false, hasPassword: true, keys: [{ fingerprint: 'SHA256:fixture', type: 'ssh-ed25519', comment: 'fixture laptop' }], nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: true }, { path: '/', write: false }] }, 'fixture-retired': { runAs: 'fixture-run', grants: [{ path: '/old', write: false }] } }, sources: { 'fixture-s3': { write: false }, 'fixture-gone': { write: true } }, sessions: 1, tailnet: kinds(a.guestLinks ?? []) };
+      const self = { name: 'fixture-admin', admin: true, hasPassword: true, keys: [], nodes: {}, sources: {}, sessions: 1, tailnet: [] };
       // sessions: the caller's own and fixture-guest's; ended / endedAll / puts / forgot keep what the page sent
       a.sessions ??= [
-        { id: 'aa11aa11', kind: 'virt', name: 'fixture-admin', created: Date.now() - 7_200_000, lastUsed: Date.now() - 60_000, address: '203.0.113.7', current: true },
-        { id: 'bb22bb22', kind: 'virt', name: 'fixture-guest', created: Date.now() - 86_400_000, lastUsed: Date.now() - 3_600_000, address: '198.51.100.9' },
-        { id: 'cc33cc33', kind: 'virt', name: 'fixture-guest', created: Date.now() - 90_000_000, lastUsed: Date.now() - 7_200_000, address: '192.0.2.5' },
+        { id: 'aa11aa11', kind: 'virt', name: 'fixture-admin', created: Date.now() - 7_200_000, lastUsed: Date.now() - 60_000, address: '203.0.113.7', current: true, method: 'password' },
+        { id: 'bb22bb22', kind: 'virt', name: 'fixture-guest', created: Date.now() - 86_400_000, lastUsed: Date.now() - 3_600_000, address: '198.51.100.9', method: 'key' },
+        { id: 'cc33cc33', kind: 'virt', name: 'fixture-guest', created: Date.now() - 90_000_000, lastUsed: Date.now() - 7_200_000, address: '192.0.2.5', method: 'tailscale', tailnet: 'alice@github' },
+        { id: 'ee55ee55', kind: 'virt', name: 'fixture-ci', created: Date.now() - 3_600_000, lastUsed: Date.now() - 120_000, address: '100.64.0.9', method: 'tailscale', tailnet: 'tag:ci', tailnetSource: 'socket', tailnetDevice: 'ci-runner' },
       ];
       a.unowned ??= 2;
-      a.ended ??= []; a.endedAll ??= []; a.puts ??= []; a.forgot ??= 0; a.sessionCalls ??= 0;
-      if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: a.unowned });
-      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : [])], system: [{ name: 'fixture-root', admin: true, sources: {}, sessions: 0 }, ...(a.puts.length ? [{ name: 'alice', admin: false, sources: a.puts.at(-1).sources, sessions: 0 }] : [])] });
+      a.ended ??= []; a.endedAll ??= []; a.puts ??= []; a.tputs ??= []; a.patches ??= []; a.forgot ??= 0; a.sessionCalls ??= 0;
+      if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: a.unowned, tailscale: a.tailscale === undefined ? 'socket' : a.tailscale });
+      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : [])], system: [{ name: 'fixture-root', admin: true, sources: {}, sessions: 0, tailnet: [] }, ...(a.puts.length ? [{ name: 'alice', admin: false, sources: a.puts.at(-1).sources, sessions: 0, tailnet: kinds(a.tputs.at(-1)?.links ?? []) }] : [])] });
       if (pathname === '/api/admin/sessions' && req.method() === 'GET') { a.sessionCalls++; return json({ sessions: a.sessions }); }
       if (pathname.startsWith('/api/admin/sessions/') && req.method() === 'DELETE') {
         const id = pathname.split('/').pop();
@@ -166,12 +168,20 @@ async function installFixture(page, opts = {}) {
       }
       if (pathname === '/api/admin/end-sessions' && req.method() === 'POST') { const b = req.postDataJSON(); a.endedAll.push(b); a.sessions = a.sessions.filter((x) => !(x.kind === b.kind && x.name === b.name)); return json({ ok: true }); }
       if (pathname === '/api/admin/vault/unowned' && req.method() === 'DELETE') { a.forgot++; const removed = a.unowned; a.unowned = 0; return json({ removed }); }
-      if (pathname === '/api/admin/system/alice/sources' && req.method() === 'PUT') { const b = req.postDataJSON(); a.puts.push(b); return json({ name: 'alice', admin: false, sources: b.sources, sessions: 0 }); }
+      if (pathname === '/api/admin/system/alice/sources' && req.method() === 'PUT') { const b = req.postDataJSON(); a.puts.push(b); return json({ name: 'alice', admin: false, sources: b.sources, sessions: 0, tailnet: [] }); }
+      if (pathname === '/api/admin/system/alice/tailnet' && req.method() === 'PUT') { const b = req.postDataJSON(); a.tputs.push(b); return json({ name: 'alice', admin: false, sources: {}, sessions: 0, tailnet: kinds(b.links) }); }
+      if (pathname === '/api/admin/accounts/fixture-guest' && req.method() === 'PATCH') {
+        const b = req.postDataJSON();
+        a.patches.push(b);
+        if (a.patchConflict) return json({ error: 'this tag is linked to virt:fixture-other' }, 409);
+        a.guestLinks = b.tailnet;
+        return json({ ...guest, tailnet: kinds(b.tailnet) });
+      }
       if (pathname === '/api/admin/accounts' && req.method() === 'POST') {
         const b = req.postDataJSON();
         a.posts.push(b);
         if (a.conflict) return json({ error: 'exists' }, 409);
-        a.created = { name: b.name, admin: b.admin, hasPassword: typeof b.password === 'string', keys: [], nodes: b.nodes, sources: b.sources, sessions: 0 };
+        a.created = { name: b.name, admin: b.admin, hasPassword: typeof b.password === 'string', keys: [], nodes: b.nodes, sources: b.sources, sessions: 0, tailnet: kinds(b.tailnet ?? []) };
         return json(a.created, 201);
       }
       return json({ error: 'not found' }, 404);
@@ -2008,6 +2018,14 @@ async function verifyAccounts(browser) {
         await mine.getByText('203.0.113.7').waitFor({ state: 'visible', timeout: 8000 });
         assert.equal(await panel.getByText('This session').count(), 1, `the caller's session is marked once (${label})`);
         assert.equal(await panel.locator('bdi', { hasText: '198.51.100.9' }).count(), 1, `an address is isolated in bdi (${label})`);
+        // how each session signed in: the method, and for Tailscale the source, the login or tag that matched and the device (all in <bdi>)
+        const ciRow = rowOf('100.64.0.9');
+        assert.match(await ciRow.innerText(), /Tailscale \(socket\)/, `a Tailscale session names its source (${label})`);
+        assert.equal(await ciRow.locator('bdi', { hasText: 'tag:ci' }).count(), 1, `the matched tag is isolated in bdi (${label})`);
+        assert.equal(await ciRow.locator('bdi', { hasText: 'ci-runner' }).count(), 1, `the device is isolated in bdi (${label})`);
+        assert.match(await rowOf('192.0.2.5').innerText(), /Tailscale\s+alice@github/, `a Tailscale session without a known source names the login (${label})`);
+        assert.match(await rowOf('198.51.100.9').innerText(), /\bKey\b/, `a key session says Key (${label})`);
+        assert.match(await mine.innerText(), /\bPassword\b/, `a password session says Password (${label})`);
         await overflow('sessions');
         await runAxe(page, `signed in tab ${label}`, failures);
         // End all sessions asks first, says jobs are cancelled, and sending nothing until confirmed
@@ -2074,6 +2092,11 @@ async function verifyAccounts(browser) {
         await sys.getByRole('heading', { name: 'Sources of alice' }).waitFor({ state: 'visible', timeout: 8000 });
         await sys.getByRole('button', { name: /^Access to fixture-s3/ }).click();
         await page.getByRole('menuitemradio', { name: 'Read only' }).click();
+        // the same Tailscale section as the account editor: a login is added with Enter and saved with one PUT of its own
+        const sysLinks = sys.getByRole('region', { name: 'Tailscale' });
+        await sysLinks.getByRole('textbox', { name: 'Tailnet login or tag' }).fill('Alice@GitHub');
+        await sysLinks.getByRole('button', { name: 'Add', exact: true }).click();
+        await sysLinks.getByRole('list', { name: 'Tailnet links' }).getByText('Login', { exact: true }).waitFor({ state: 'visible' });
         await overflow('system user sources');
         // unsaved sources ask before Escape or Close drops them
         await page.keyboard.press('Escape');
@@ -2091,9 +2114,91 @@ async function verifyAccounts(browser) {
         await sys.getByRole('button', { name: 'Save', exact: true }).click();
         await sys.getByRole('cell', { name: 'alice', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
         assert.deepEqual(adminApi.puts, [{ sources: { 'fixture-s3': { write: false } } }], `one PUT with the source (${label})`);
+        assert.deepEqual(adminApi.tputs, [{ links: ['alice@github'] }], `one PUT with the link (${label})`);
+        assert.equal(await sys.getByRole('row').filter({ hasText: 'alice' }).locator('bdi', { hasText: 'alice@github' }).count(), 1, `the list shows the link in bdi (${label})`);
         await tabs.getByRole('tab', { name: 'Accounts' }).click();
         await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
 
+        // the link editor of an existing account: a login and a tag are listed with their kind, the tag with its warning
+        await view.getByRole('button', { name: 'Edit fixture-guest' }).click();
+        await view.getByRole('heading', { name: 'Edit fixture-guest' }).waitFor({ state: 'visible', timeout: 8000 });
+        const links = view.getByRole('region', { name: 'Tailscale' });
+        const linkField = links.getByRole('textbox', { name: 'Tailnet login or tag' });
+        const linkList = links.getByRole('list', { name: 'Tailnet links' });
+        const RISK = 'Anyone who may apply this tag in your tailnet can make a device that signs in as this account.';
+        await links.getByText('For example alice@github or tag:server.').waitFor({ state: 'visible' });
+        await linkField.fill('tag:ci');
+        assert.equal(await links.getByText(RISK).count(), 1, `typing a tag shows the warning before it is added (${label})`);
+        await linkField.fill('tag:a_b');
+        await links.getByRole('button', { name: 'Add', exact: true }).click();
+        await links.getByRole('alert').filter({ hasText: 'not a tailnet login or tag' }).waitFor({ state: 'visible' });
+        assert.equal(await linkField.getAttribute('aria-invalid'), 'true', `the bad value marks the field (${label})`);
+        assert.ok((await linkField.getAttribute('aria-describedby')).split(' ').includes(await links.getByRole('alert').getAttribute('id')), `the error is tied to the field (${label})`);
+        assert.equal(await linkList.count(), 0, `a bad value is not added (${label})`);
+        await linkField.fill('alice@github');
+        await links.getByRole('button', { name: 'Add', exact: true }).click();
+        await linkField.fill('TAG:CI');
+        await linkField.press('Enter');
+        await linkField.fill('alice@github');
+        await links.getByRole('button', { name: 'Add', exact: true }).click();
+        await links.getByRole('alert').filter({ hasText: 'already in the list' }).waitFor({ state: 'visible' });
+        assert.deepEqual(await linkList.getByRole('listitem').evaluateAll((els) => els.map((e) => e.querySelector('.pill').textContent + ':' + e.querySelector('bdi').textContent)), ['Login:alice@github', 'Tag:tag:ci'], `the links are listed with their kind (${label})`);
+        assert.equal(await linkList.locator('bdi').count(), 2, `each subject is in bdi (${label})`);
+        assert.equal(await linkList.getByText(RISK).count(), 1, `the listed tag shows the warning (${label})`);
+        await overflow('link editor');
+        await runAxe(page, `link editor ${label}`, failures);
+        // a refusal of the hub shows its text in the alert next to Save, and nothing is closed
+        adminApi.patchConflict = true;
+        await view.getByRole('button', { name: 'Save', exact: true }).click();
+        await view.getByRole('alert').filter({ hasText: 'this tag is linked to virt:fixture-other' }).waitFor({ state: 'visible', timeout: 8000 });
+        await runAxe(page, `link editor, refused ${label}`, failures);
+        adminApi.patchConflict = false;
+        await view.getByRole('button', { name: 'Save', exact: true }).click();
+        await view.getByRole('status').filter({ hasText: 'Account fixture-guest saved.' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(adminApi.patches.length, 2, `each Save sends one PATCH (${label})`);
+        assert.deepEqual(adminApi.patches.map((b) => b.tailnet), [['alice@github', 'tag:ci'], ['alice@github', 'tag:ci']], `the PATCH carries the links (${label})`);
+        await view.getByRole('row').filter({ hasText: 'fixture-guest' }).getByText('Tailscale', { exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+
+        // the notes follow the hub's source: off, then headers with a tag listed
+        adminApi.tailscale = null;
+        await view.getByRole('button', { name: 'Refresh' }).click();
+        await page.waitForTimeout(300);
+        await view.getByRole('button', { name: 'Edit fixture-guest' }).click();
+        await view.getByText('Tailscale sign-in is off on this hub. Links are kept and work once it is turned on.').waitFor({ state: 'visible', timeout: 8000 });
+        await runAxe(page, `link editor, Tailscale off ${label}`, failures);
+        await view.getByRole('button', { name: 'Cancel', exact: true }).click();
+        adminApi.tailscale = 'headers';
+        await view.getByRole('button', { name: 'Refresh' }).click();
+        await page.waitForTimeout(300);
+        await view.getByRole('button', { name: 'Edit fixture-guest' }).click();
+        await view.getByText('Tag links need the socket source; they do not work on this hub now.').waitFor({ state: 'visible', timeout: 8000 });
+        await overflow('link editor, headers');
+        await runAxe(page, `link editor, headers ${label}`, failures);
+        // keyboard only: the field, Add and each Remove are reached with Tab and work with Enter; focus goes back to the field
+        const active = () => page.evaluate(() => document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent?.trim());
+        await linkField.focus();
+        await page.keyboard.type('bob@github');
+        await page.keyboard.press('Tab');
+        assert.equal(await active(), 'Add', `Tab from the field reaches Add (${label})`);
+        await page.keyboard.press('Enter');
+        await linkList.getByText('bob@github').waitFor({ state: 'visible' });
+        await linkField.focus();
+        await page.keyboard.press('Shift+Tab');
+        assert.equal(await active(), 'Remove login bob@github', `Shift+Tab from the field reaches the last Remove (${label})`);
+        assert.equal(await links.getByText(/Removing a link ends the sessions/).count(), 0, `a link that was never saved says nothing about sessions (${label})`);
+        await page.keyboard.press('Enter');
+        await linkList.getByText('bob@github').waitFor({ state: 'detached' });
+        await focusStaysOn(page, linkField, `removing a link returns focus to the field (${label})`);
+        // taking off a saved link says before saving that its sessions end
+        await linkList.getByRole('button', { name: 'Remove tag tag:ci' }).click();
+        await links.getByText('Removing a link ends the sessions that signed in through it when you save.').waitFor({ state: 'visible' });
+        await runAxe(page, `link editor, link removed ${label}`, failures);
+        await view.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await page.getByRole('dialog', { name: 'Discard changes?' }).getByRole('button', { name: 'Discard' }).click();
+        await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        adminApi.tailscale = 'socket';
+        await view.getByRole('button', { name: 'Refresh' }).click();
+        await page.waitForTimeout(300);
 
         await view.getByRole('button', { name: 'New account' }).click();
         await view.getByRole('textbox', { name: 'Name' }).fill('fixture-new');
@@ -2126,7 +2231,7 @@ async function verifyAccounts(browser) {
 
         await view.getByRole('button', { name: 'Create account' }).click();
         await view.getByRole('alert').filter({ hasText: 'exists' }).waitFor({ state: 'visible', timeout: 8000 });
-        const expected = { name: 'fixture-new', password, admin: false, nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: false }] } }, sources: {} };
+        const expected = { name: 'fixture-new', password, admin: false, nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: false }] } }, sources: {}, tailnet: [] };
         assert.deepEqual(adminApi.posts, [expected], `one POST with the form's body (${label})`);
         await runAxe(page, `account editor, refused ${label}`, failures);
 

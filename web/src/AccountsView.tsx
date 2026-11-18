@@ -210,7 +210,10 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
                     <tr key={a.name}>
                       <td className="acc-c-name"><bdi>{a.name}</bdi>{self(a.name) && <span className="pill">You</span>}</td>
                       <td>{a.admin ? "Yes" : "No"}</td>
-                      <td>{a.hasPassword || a.keys.length > 0 ? "Can sign in" : "Cannot sign in"}</td>
+                      <td>
+                        {a.hasPassword || a.keys.length > 0 || (data.overview.tailscale !== null && a.tailnet.length > 0) ? "Can sign in" : "Cannot sign in"}
+                        {a.tailnet.length > 0 && <span className="pill">Tailscale</span>}
+                      </td>
                       <td className="acc-c-nodes">
                         {Object.keys(a.nodes).length === 0 ? (
                           <span className="muted">None</span>

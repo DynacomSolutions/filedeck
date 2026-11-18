@@ -95,6 +95,7 @@ export function SessionsTab({ account }: { account: Account }) {
               <tr>
                 <th>Account</th>
                 <th>Signed in</th>
+                <th>Method</th>
                 <th>Last used</th>
                 <th>Address</th>
                 <th>Notes</th>
@@ -104,7 +105,7 @@ export function SessionsTab({ account }: { account: Account }) {
             {groups.map((g) => (
               <tbody key={`${g.kind}:${g.name}`}>
                 <tr>
-                  <th scope="rowgroup" colSpan={6} className="sess-group">
+                  <th scope="rowgroup" colSpan={7} className="sess-group">
                     <span className="sess-group-in">
                       <span><bdi>{g.name}</bdi> <span className="pill">{kindLabel(g.kind)}</span></span>
                       <span className="sess-spacer" />
@@ -118,6 +119,7 @@ export function SessionsTab({ account }: { account: Account }) {
                   <tr key={s.id}>
                     <td className="acc-c-name"><bdi>{s.name}</bdi></td>
                     <td>{fmtDate(s.created)}</td>
+                    <td className="sess-method"><Method s={s} /></td>
                     <td>{fmtDate(s.lastUsed)}</td>
                     <td className="sess-addr">{s.address ? <bdi>{s.address}</bdi> : <span className="muted">Unknown</span>}</td>
                     <td>
@@ -135,7 +137,7 @@ export function SessionsTab({ account }: { account: Account }) {
             ))}
             {list && list.length === 0 && (
               <tbody>
-                <tr><td colSpan={6} className="muted vault-empty">Nobody is signed in.</td></tr>
+                <tr><td colSpan={7} className="muted vault-empty">Nobody is signed in.</td></tr>
               </tbody>
             )}
           </table>
@@ -169,6 +171,22 @@ export function SessionsTab({ account }: { account: Account }) {
       )}
     </div>
   );
+}
+
+/** How a session signed in: "Password", "Key" or "Tailscale (<source>)", with the login or tag that matched and the device when the hub says. */
+function Method({ s }: { s: SessionInfo }) {
+  if (s.method === "tailscale") {
+    return (
+      <>
+        Tailscale{s.tailnetSource ? ` (${s.tailnetSource})` : ""}
+        {s.tailnet && <span className="muted sess-sub"><bdi>{s.tailnet}</bdi></span>}
+        {s.tailnetDevice && <span className="muted sess-sub">on <bdi>{s.tailnetDevice}</bdi></span>}
+      </>
+    );
+  }
+  if (s.method === "password") return <>Password</>;
+  if (s.method === "key") return <>Key</>;
+  return <span className="muted">Unknown</span>;
 }
 
 /** A confirm in the Modal pattern: Cancel has focus, the action is disabled while it runs, and Escape waits for it. */
