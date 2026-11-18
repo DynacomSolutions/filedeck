@@ -288,3 +288,10 @@ ETA: 2026-11-18 18:45 ICT
 | 167 | Phone: jobs button at the top right opens a full-width jobs drawer from the right, under the header | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
 | 168 | Phone: navigation drawer is full width, under the header, and the menu button toggles it | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
 | 169 | Phone: Filedeck logo in the middle of the header | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
+
+## 23. Size store heals itself
+A size store damaged beyond its index repair is replaced by the agent itself: a new generation file, no operator step. Reverses 11.98 and 18.149. Design: docs/superpowers/specs/2026-11-18-size-store-self-heal-design.md
+ETA: 2026-11-18 21:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 170 | Damaged size store heals itself with generation files; explain and fix the 16.5 GB size | in_progress | claude-20261118-size-store-self-heal | size-store-self-heal | | 2026-11-18 21:00 ICT | One agent logs "database disk image is malformed" at every start; its store is 16.5 GB<br>Owner decision 18 Nov: Filedeck fixes it itself<br>Race review: 1 high, 1 medium, 2 low, all fixed with tests<br>16.5 GB: auto_vacuum was off, the file never shrank; new files use incremental vacuum<br>PR https://github.com/DynacomSolutions/filedeck/pull/241, waiting for CI |
