@@ -14,6 +14,11 @@ export const MIN_PASSWORD = 12;
 export const MAX_PASSWORD = 1024;
 export const MAX_GRANTS = 64;
 export const MAX_KEYS = 32;
+/**
+ * The most one machine's grants may take as JSON. They travel in the signed user header to the agent, whose server takes headers up to
+ * 16 KiB in all; past that every request to the machine would fail with 431.
+ */
+export const MAX_GRANTS_JSON = 8192;
 /** The longest public key line accepted, in bytes. */
 const MAX_KEY_LINE = 8 * 1024;
 /** The longest key comment kept, in characters. */
@@ -40,7 +45,8 @@ export function systemName(v: unknown, field = "user name"): string {
 
 export function newPassword(v: unknown): string {
   if (typeof v !== "string") throw new InputError("password must be text");
-  if (v.length < MIN_PASSWORD || v.length > MAX_PASSWORD) {
+  const length = [...v].length; // in characters (code points), not UTF-16 units
+  if (length < MIN_PASSWORD || length > MAX_PASSWORD) {
     throw new InputError(`password must be ${MIN_PASSWORD} to ${MAX_PASSWORD} characters`);
   }
   return v;
@@ -92,6 +98,9 @@ export function nodeAccess(v: unknown, knownNodes: ReadonlySet<string>): Record<
     const runAs = systemName(a.runAs, `run-as user on ${node}`);
     const list = grants(a.grants);
     if (list.length === 0) throw new InputError(`give at least one folder on ${node}`);
+    if (JSON.stringify(list).length > MAX_GRANTS_JSON) {
+      throw new InputError(`the folders on ${node} are too long together: their paths may take about ${MAX_GRANTS_JSON / 1024} KiB in all`);
+    }
     out[node] = { runAs, grants: list };
   }
   return out;

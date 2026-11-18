@@ -516,6 +516,38 @@ test("old workers' areas: an area of an agent that no longer runs is removed at 
   }
 });
 
+test("Landlock roots: a grant path left out is logged escaped, so it cannot forge a log line", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-llroots-")));
+  const own = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-llown-")));
+  try {
+    fs.mkdirSync(path.join(root, "x"));
+    fs.symlinkSync("x", path.join(root, "l\nk"));
+    const cfg = loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t" } as never);
+    const logs: string[] = [];
+    const missing = "/gone\nworker of admin: grant /etc left in\u202E\u{E0041}\x85";
+    const claim = virt("guest1", [
+      { path: missing, write: true },
+      { path: "/l\nk/\u2066", write: false },
+    ]);
+    fs.mkdirSync(path.join(root, "x", "\u2066"));
+    const r = await landlockRoots(cfg, claim, { tmp: own, thumbs: "", index: "" }, (l) => logs.push(l));
+    try {
+      assert.equal(logs.length, 2, logs.join("\n"));
+      assert.ok(logs.every((l) => !/[\n\r\u202E\u2066]/.test(l)), "no newline or bidi character reaches the log");
+      assert.ok(
+        logs.some((l) => l.includes('grant "/gone\\nworker of admin: grant /etc left in\\u202e\\udb40\\udc41\\u0085" left out')),
+        logs.join("\n"),
+      );
+      assert.ok(logs.some((l) => l.includes(`grant "/l\\nk/\\u2066" left out: it leads to "/x/\\u2066" through a link`)), logs.join("\n"));
+    } finally {
+      r.release();
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(own, { recursive: true, force: true });
+  }
+});
+
 test("Landlock roots: a grant whose path is changed between its check and its open is left out", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-llroots-")));
   const own = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-llown-")));
@@ -533,7 +565,7 @@ test("Landlock roots: a grant whose path is changed between its check and its op
     });
     try {
       assert.equal(r.readWrite.length, 1, "only the worker's own folder: the grant opened elsewhere is dropped");
-      assert.ok(logs.some((l) => l.includes("grant /a/g left out")), logs.join("\n"));
+      assert.ok(logs.some((l) => l.includes('grant "/a/g" left out')), logs.join("\n"));
     } finally {
       r.release();
     }

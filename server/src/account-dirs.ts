@@ -810,6 +810,16 @@ export function runtimeRoots(): Promise<{ readOnly: string[]; readExec: string[]
 }
 
 /**
+ * A path as it goes into a log line: a JSON string, with also every other control or format character (DEL, C1, bidi marks, zero-width
+ * characters, line and paragraph separators) as `\uXXXX`. A folder may have such a name, but it must not forge a line or turn text around.
+ */
+const logPath = (p: string): string =>
+  JSON.stringify(p).replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, (c) =>
+    // (an astral one, such as a tag character, as its two UTF-16 halves, as JSON writes them)
+    Array.from({ length: c.length }, (_, i) => "\\u" + c.charCodeAt(i).toString(16).padStart(4, "0")).join(""),
+  );
+
+/**
  * The Landlock roots of a virtual account's worker:
  * - each grant, resolved inside the served root (`resolveRead`) and opened as a folder without following a link at the last step, checked to
  *   be inside the root; read and write when the grant allows writing, else read only. A grant that is a link or runs through one (its
@@ -840,19 +850,19 @@ export async function landlockRoots(
       try {
         const r = resolveRead(cfg.root, g.path);
         // a grant that is a link or runs through one would follow it to wherever it leads at this moment: left out instead
-        if (r.virtual !== grantPath(g.path)) throw new Error(`it leads to ${r.virtual} through a link`);
+        if (r.virtual !== grantPath(g.path)) throw new Error(`it leads to ${logPath(r.virtual)} through a link`);
         await o.afterResolve?.(r.real);
         const fh = await openChecked(cfg.root, r.real, fsc.constants.O_RDONLY | fsc.constants.O_DIRECTORY);
         // a part of the path changed into a link between the check and the open: the folder opened is another one
         const at = await fs.readlink(inHeld(fh)).catch(() => "");
         if (at !== r.real) {
           await fh.close().catch(() => {});
-          throw new Error(`it was opened at ${at || "an unknown place"}, not ${r.real} (its path changed meanwhile)`);
+          throw new Error(`it was opened at ${at ? logPath(at) : "an unknown place"}, not ${logPath(r.real)} (its path changed meanwhile)`);
         }
         held.push(fh);
         (g.write ? readWrite : readOnly).push(fh.fd);
       } catch (e) {
-        log(`worker of ${claim.name}: grant ${g.path} left out: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+        log(`worker of ${claim.name}: grant ${logPath(g.path)} left out: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
       }
     }
     for (const d of [dirs.tmp, dirs.thumbs, dirs.index]) {

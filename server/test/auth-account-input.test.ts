@@ -104,6 +104,20 @@ test("node access", () => {
     b: { runAs: "web.user@corp", grants: [{ path: "/x/y", write: true }] },
   });
   assert.deepEqual(nodeAccess({}, known), {});
+  // the grants travel in a signed header, which the agent takes up to 16 KiB: one machine's grants are bounded
+  const long = (c: string) => ({ path: "/" + c.repeat(4095), write: false });
+  assert.equal(grants([long("x"), long("y"), long("z")]).length, 3, "each path is allowed on its own");
+  assert.match(inputError(() => nodeAccess({ a: { runAs: "guest", grants: [long("x"), long("y"), long("z")] } }, known)), /folders on a/);
+  const many = Array.from({ length: 64 }, (_, i) => ({ path: `/${String(i).padStart(2, "0")}` + "p".repeat(150), write: true }));
+  inputError(() => nodeAccess({ a: { runAs: "guest", grants: many } }, known));
+  const fits = [
+    { path: "/" + "f".repeat(4069), write: false },
+    { path: "/" + "g".repeat(4068), write: false },
+  ];
+  assert.equal(JSON.stringify(fits).length, 8192);
+  assert.equal(nodeAccess({ a: { runAs: "guest", grants: fits } }, known).a!.grants.length, 2, "up to the limit passes");
+  fits[1]!.path += "g";
+  inputError(() => nodeAccess({ a: { runAs: "guest", grants: fits } }, known));
 });
 
 test("source access", () => {
@@ -138,6 +152,12 @@ test("passwords", () => {
   assert.equal(newPassword("y".repeat(1024)), "y".repeat(1024));
   const long = "z".repeat(1025);
   assert.ok(!inputError(() => newPassword(long)).includes("zzzzzzzzzzzz"));
+  const keys6 = "\u{1F511}".repeat(6);
+  assert.equal(keys6.length, 12, "twelve UTF-16 units");
+  inputError(() => newPassword(keys6));
+  assert.equal(newPassword("\u{1F511}".repeat(12)), "\u{1F511}".repeat(12), "length counts characters");
+  inputError(() => newPassword("\u{1F511}".repeat(1025)));
+  assert.equal(newPassword("\u{1F511}".repeat(1024)).length, 2048);
   inputError(() => newPassword(undefined));
   inputError(() => newPassword(123456789012));
 });
@@ -151,19 +171,23 @@ test("keys", () => {
   assert.equal(publicKey(edLine(pub, "\t  two  words ")), edLine(pub, " two  words"));
   assert.equal(publicKey(edLine(pub, " " + "c".repeat(300))), edLine(pub, " " + "c".repeat(128)), "the comment is cut to 128 characters");
   assert.equal(
-    publicKey(edLine(pub, " a\x01b\x7fc\x85d‮e​f﻿g⁦h­i\x9Bj")),
+    publicKey(edLine(pub, " a\x01b\x7fc\x85d\u202Ee\u200Bf\uFEFFg\u2066h\u00ADi\x9Bj")),
     edLine(pub, " abcdefghij"),
     "C0, DEL, C1 and format (bidi, zero-width, BOM, soft hyphen) characters are dropped",
   );
-  assert.equal(publicKey(edLine(pub, " x\t‮y")), edLine(pub, " xy"), "a tab inside the comment is dropped too");
+  assert.equal(publicKey(edLine(pub, " x\t\u202Ey")), edLine(pub, " xy"), "a tab inside the comment is dropped too");
   assert.equal(
-    publicKey(edLine(pub, " " + "‮".repeat(20) + "d".repeat(140))),
+    publicKey(edLine(pub, " " + "\u202E".repeat(20) + "d".repeat(140))),
     edLine(pub, " " + "d".repeat(128)),
     "dropped characters do not count towards the 128",
   );
-  assert.equal(publicKey(edLine(pub, " x ​")), edLine(pub, " x"), "trimmed after dropping");
-  assert.equal(publicKey(edLine(pub, " ‮⁦\x01")), edLine(pub), "a comment of nothing but such characters goes");
-  assert.equal(publicKey(edLine(pub, " café \u{1F511} א")), edLine(pub, " café \u{1F511} א"), "other text is kept");
+  assert.equal(publicKey(edLine(pub, " x \u200B")), edLine(pub, " x"), "trimmed after dropping");
+  assert.equal(publicKey(edLine(pub, " \u200B x")), edLine(pub, " x"), "no leading space is left after dropping");
+  const astral = publicKey(edLine(pub, " " + "e".repeat(127) + "\u{1F511}\u{1F511}"));
+  assert.equal(astral, edLine(pub, " " + "e".repeat(127) + "\u{1F511}"), "a cut at 128 keeps whole characters");
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(astral), "no lone surrogate");
+  assert.equal(publicKey(edLine(pub, " \u202E\u2066\x01")), edLine(pub), "a comment of nothing but such characters goes");
+  assert.equal(publicKey(edLine(pub, " caf\u00E9 \u{1F511} \u05D0")), edLine(pub, " caf\u00E9 \u{1F511} \u05D0"), "other text is kept");
   const withOptions = `command="x" ${line}`;
   const msg = inputError(() => publicKey(withOptions));
   assert.ok(!msg.includes(b64), "the message does not hold the key");
