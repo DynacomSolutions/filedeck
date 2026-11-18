@@ -888,3 +888,62 @@ test("hub: each switch of an account gets its own end, also within the same mill
   assert.deepEqual([u2, u3], [u1 + 1, u1 + 2]);
   assert.equal((await me(h, b)).asRootUntil, u2);
 });
+
+test("hub: the answer to turning the switch on again tells the switch as it is after the wait, also when Stop came meanwhile", async () => {
+  const { st, url } = await switchAgent();
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `F=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-answer.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-answer") } as never),
+    undefined,
+    () => {},
+    { system: fakeSystem([]) },
+  );
+  closers.push(h);
+  const a = sysCookie(h, "alice");
+  assert.equal((await postJson(h, "/api/auth/as-root", a, { password: RIGHT })).status, 200);
+  st.holdNext = true;
+  const held = postJson(h, "/api/nodes/F/api/jobs/compress", a, { id: "held-job", dir: "/", names: ["x"], format: "zip" });
+  while (st.seen === 0) await new Promise((r) => setTimeout(r, 5));
+  // on again: it waits (up to 2 s) for the old switch's call in flight; Stop comes during that wait
+  const again = postJson(h, "/api/auth/as-root", a, { password: RIGHT });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await call(h, "/api/auth/as-root", a, { method: "DELETE" })).status, 200);
+  st.releases.shift()!();
+  const r = await again;
+  assert.equal(r.status, 200);
+  const body = (await r.json()) as { ok?: boolean; asRootUntil?: number };
+  const now = await me(h, a);
+  assert.equal(now.asRootUntil, undefined);
+  assert.equal(body.asRootUntil, undefined, "the answer does not describe a switch that was stopped");
+  assert.deepEqual(body, { ok: true });
+  await held;
+});
+
+test("hub: after a restart with the clock stepped back, a new switch still gets an end above the one a stored session holds", async () => {
+  const file = path.join(tmp, "auth-restart-clock.db");
+  const mk = (t: number, n: number) => {
+    const h = createHub(
+      loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `A=${A.url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: file, FILEDECK_DIFF_DIR: path.join(tmp, `diff-restart-${n}`) } as never),
+      undefined,
+      () => {},
+      { now: () => t, system: fakeSystem([]) },
+    );
+    closers.push(h);
+    return h;
+  };
+  const t0 = Date.now();
+  const h1 = mk(t0, 1);
+  const a = sysCookie(h1, "alice");
+  const r1 = await postJson(h1, "/api/auth/as-root", a, { password: RIGHT });
+  const u1 = ((await r1.json()) as { asRootUntil: number }).asRootUntil;
+  assert.equal(u1, t0 + FIFTEEN_MIN);
+  await h1.close();
+  closers.splice(closers.indexOf(h1), 1);
+  // the same auth file, the clock 1 ms behind: the new end would fall below the stored one; it goes above it
+  const h2 = mk(t0 - 1, 2);
+  const b = sysCookie(h2, "alice");
+  const r2 = await postJson(h2, "/api/auth/as-root", b, { password: RIGHT });
+  assert.equal(r2.status, 200);
+  const u2 = ((await r2.json()) as { asRootUntil: number }).asRootUntil;
+  assert.equal(u2, u1 + 1);
+  assert.equal((await me(h2, a)).asRootUntil, u1, "the stored session keeps its own end");
+});

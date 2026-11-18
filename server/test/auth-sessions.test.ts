@@ -232,3 +232,19 @@ test("create keeps a valid session of a deleted account or an old epoch: lookup 
   s.create("sys", "alice");
   assert.equal((db.db.prepare("SELECT count(*) AS n FROM sessions").get() as { n: number }).n, 3);
 });
+
+test("lastAsRootUntil: the largest switch end stored for a system name, ended sessions too; read only", () => {
+  const { s } = setup();
+  assert.equal(s.lastAsRootUntil("alice"), undefined);
+  const a = s.create("sys", "alice");
+  const b = s.create("sys", "alice");
+  const c = s.create("sys", "bob");
+  s.setAsRoot(a, 5_000_000);
+  s.setAsRoot(b, 7_000_000);
+  s.setAsRoot(c, 9_000_000);
+  assert.equal(s.lastAsRootUntil("alice"), 7_000_000);
+  s.setAsRoot(b, null);
+  assert.equal(s.lastAsRootUntil("alice"), 5_000_000);
+  assert.equal(s.lastAsRootUntil("bob"), 9_000_000);
+  assert.equal(s.lastAsRootUntil("guest"), undefined);
+});

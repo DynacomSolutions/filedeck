@@ -738,6 +738,14 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
  * (`<kind>:<name>`, added by the job queue). A job stored before the rename has the file owner in `owner`: it is taken from there only
  * when it cannot be an account (a user name or id never holds a `:`).
  */
+/** A stored perms job whose file owner was overwritten by its account (see `permsParams`) while its title says it changes the owner. */
+export function lostFileOwner(p: unknown, title: string): boolean {
+  const { fileOwner, owner } = (p && typeof p === "object" ? p : {}) as { fileOwner?: unknown; owner?: unknown };
+  if (fileOwner !== undefined || typeof owner !== "string" || !/^(sys|virt):/.test(owner)) return false;
+  const what = /^Set (.*) on /.exec(title)?.[1] ?? "";
+  return what.split(" and ").includes("owner");
+}
+
 export function permsParams(p: unknown): PermsRequest {
   const { fileOwner, owner, ...rest } = (p && typeof p === "object" ? p : {}) as PermsRequest & { fileOwner?: string | number };
   const file = fileOwner ?? (typeof owner === "string" && /^(sys|virt):/.test(owner) ? undefined : owner);
@@ -767,7 +775,10 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
     return applyPerms(cfg, plan, ctl);
   };
   // Planned again, so confinement and read-only checks apply to the moment of the restart; a refusal fails the job with its message.
-  jobs.register("perms", async (p) => {
+  jobs.register("perms", async (p, row) => {
+    // stored before `fileOwner`, under act as root: the job's account took the file owner's key, so an owner change (its title says
+    // so) has lost its target. A throw here fails the job as interrupted: it is started again by hand, never run without its owner.
+    if (lostFileOwner(p, row.title)) throw new Error("the file owner to set was lost when the job was stored");
     try {
       const req = permsParams(p);
       // a recursive change reaches everything below: an ancestor of a read-only prefix is refused too (also for a job stored before the prefix was configured)

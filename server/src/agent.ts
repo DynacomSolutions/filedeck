@@ -109,6 +109,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   app.get("/api/info", async (c) => c.json({ node: cfg.node, root: cfg.root, watches: files.watches.size, readOnly: cfg.readOnly, sandbox: await sandboxSummary() }));
   // The jobs of this process (kept in the shared job file when there is one), the file routes, the folder sizes and the job list, all over the same jobs
   const jobs = makeAgentJobs(cfg);
+  Object.assign(app, { jobs }); // (tests read a job's owner through it)
   const files = registerFileRoutes(app, cfg, jobs);
   // sign-in on: sizes and jobs follow the account (agent-jobs.ts); off: as before
   const followers = pool && workers ? new Followers(jobs) : undefined;

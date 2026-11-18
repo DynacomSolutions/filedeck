@@ -216,6 +216,16 @@ export class Sessions {
   }
 
   /**
+   * The largest act-as-root end stored for the system account `name` in any of its sessions, live or not; undefined for none. Read only.
+   * The hub starts its next switch end for the name above it, so a switch never gets an end a stored one has (also after a restart
+   * with the clock stepped back).
+   */
+  lastAsRootUntil(name: string): number | undefined {
+    const r = this.db.prepare("SELECT MAX(as_root_until) AS m FROM sessions WHERE kind = 'sys' AND name = ?").get(name) as { m: number | null } | undefined;
+    return typeof r?.m === "number" ? r.m : undefined;
+  }
+
+  /**
    * Sets (or, with null, clears) the end of the act-as-root switch of a session. An unknown session is left as it is. Either way what
    * was opened under the old switch ends (`onEnd` with `asRoot`): a new end is a new switch.
    */

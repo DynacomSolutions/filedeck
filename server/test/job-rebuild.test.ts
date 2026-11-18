@@ -7,6 +7,7 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { haveSevenZip } from "../src/sevenzip.ts";
 import { JobStore, type JobRow } from "../src/job-store.ts";
+import type { Jobs } from "../src/jobs.ts";
 
 let tmp: string;
 let n = 0;
@@ -40,10 +41,10 @@ async function done(a: { app: { request: Function } }, id: string): Promise<Job>
   throw new Error("job did not finish");
 }
 /** A row left by an owner that handed over (beat 0): the agent under test adopts it on its next tick. */
-function orphan(file: string, kind: string, params: unknown, id = `adopt-${n}`, origin?: string): JobRow {
+function orphan(file: string, kind: string, params: unknown, id = `adopt-${n}`, origin?: string, title = "t"): JobRow {
   const createdAt = 1_000_000 + n;
-  const view = { id, kind, title: "t", state: "running", ...(origin ? { origin } : {}), progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" }, createdAt };
-  const row = { id, scope: "t", kind, title: "t", params: params === null ? null : JSON.stringify(params), view: JSON.stringify(view), state: "running", owner: "dead", beat: 0, created_at: createdAt, finished_at: null };
+  const view = { id, kind, title, state: "running", ...(origin ? { origin } : {}), progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" }, createdAt };
+  const row = { id, scope: "t", kind, title, params: params === null ? null : JSON.stringify(params), view: JSON.stringify(view), state: "running", owner: "dead", beat: 0, created_at: createdAt, finished_at: null };
   assert.ok(new JobStore(file).put(row));
   return { ...row, cancel: 0 };
 }
@@ -212,13 +213,22 @@ test("an adopted perms job: the file owner to set is `fileOwner`; `owner` is the
   const now = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o750, fileOwner: me, recursive: true, owner: "sys:alice" }, "p-new").id);
   assert.equal(now.state, "done", now.error);
   assert.equal(fs.statSync(path.join(a.root, "tree/sub")).mode & 0o777, 0o750);
-  // stored before the rename with an account owner: no chown to "sys:alice", the mode is still set
-  const acct = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o755, recursive: true, owner: "sys:alice" }, "p-acct").id);
+  // stored before the rename with an account owner and no owner change (its title): no chown to "sys:alice", the mode is still set
+  const acct = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o755, recursive: true, owner: "sys:alice" }, "p-acct", undefined, "Set mode 755 on tree recursively").id);
   assert.equal(acct.state, "done", acct.error);
   assert.equal(fs.statSync(path.join(a.root, "tree/sub")).mode & 0o777, 0o755);
-  // stored before the rename with sign-in off: `owner` was the file owner, and still is
+  // the same, but its title says it also changed the owner: the file owner was lost when it was stored, so it is not run
+  fs.chmodSync(path.join(a.root, "tree/sub"), 0o700);
+  for (const [id, title] of [["p-acct-own", "Set mode 755 and owner on tree recursively"], ["p-acct-own2", "Set owner on tree recursively"]] as const) {
+    const lost = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", mode: 0o755, recursive: true, owner: "sys:alice" }, id, undefined, title).id);
+    assert.equal(lost.state, "failed", id);
+    assert.equal(lost.error, "Interrupted by an agent restart. Start it again.");
+  }
+  assert.equal(fs.statSync(path.join(a.root, "tree/sub")).mode & 0o777, 0o700, "nothing was changed");
+  // stored before the rename with sign-in off: `owner` was the file owner, and still is; it is not the job's account
   const old = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", owner: me, recursive: true }, "p-old").id);
   assert.equal(old.state, "done", old.error);
+  assert.equal((a.app as unknown as { jobs: Jobs }).jobs.ownerOf("p-old"), undefined);
   // and one that names an owner that does not exist fails on that name, not on an account
   const bad = await done(a, orphan(a.jobsFile, "perms", { path: "/tree", fileOwner: "no-such-user-xyz", recursive: true, owner: "sys:alice" }, "p-bad").id);
   assert.equal(bad.state, "failed");

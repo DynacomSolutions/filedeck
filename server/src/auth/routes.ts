@@ -302,7 +302,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
    * Act as root (system administrators only, never a virtual account): a fresh proof for the session's own name, `{password}` or
    * `{publicKey, challenge, signature}` (a challenge from /api/auth/challenge for that name; the hub builds the message itself). The
    * body never names an account. Under the sign-in limiter (by name and address) and the 500 ms floor; a failure is 401 `sign-in failed`.
-   * Success: the switch lasts `AS_ROOT_MS`, answered as `{asRootUntil, asRootLeftMs}` (the time left by the hub's clock). The audit line keeps no part of the proof (audit.ts).
+   * Success: the switch lasts `AS_ROOT_MS`, answered as `{asRootUntil, asRootLeftMs}` (the time left by the hub's clock), read after
+   * the old switch, if one was on, has been ended; `{ok: true}`, as Stop answers, when the switch was turned off meanwhile. The audit line keeps no part of the proof (audit.ts).
    */
   const notAdmin = (c: Context) => c.json({ error: "only system administrators can act as root" }, 403);
   /** The last switch end given out per account (`asRootUntil`), so that the next is always above it. Only administrators get one. */
@@ -343,14 +344,20 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     attempt.succeed();
     // each switch of an account has an end of its own (it names the switch, also on the agents' jobs): never one already given out
     let until = now() + AS_ROOT_MS;
-    const last = lastUntil.get(name);
+    // (seeded from the sessions: after a restart the map is empty, and the clock may have stepped back)
+    const stored = sessions.lastAsRootUntil(name);
+    const known = lastUntil.get(name);
+    const last = known === undefined ? stored : stored === undefined ? known : Math.max(known, stored);
     if (last !== undefined && until <= last) until = last + 1;
     lastUntil.set(name, until);
     // on again while it is on: the old switch ends here exactly as Stop would end it, with its jobs on the agents
     const was = asRootOf(raw);
     sessions.setAsRoot(raw, until);
     if (was !== undefined && was.until !== until) await rootEnded(was);
-    return c.json({ asRootUntil: until, asRootLeftMs: until - now() });
+    // (read again: that wait can take seconds, and the switch may have been stopped or replaced meanwhile; off, it answers as Stop does)
+    const cur = asRootOf(raw);
+    if (cur === undefined) return c.json({ ok: true });
+    return c.json({ asRootUntil: cur.until, asRootLeftMs: cur.until - now() });
   });
 
   /** The system account whose act-as-root switch the session of `raw` holds now, and that switch's end; or undefined. */

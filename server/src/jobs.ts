@@ -57,7 +57,7 @@ export interface JobCtl {
 }
 
 /** What an adopted job needs to run again; built from the stored allowlisted params. */
-export type Rebuild = (params: unknown) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void> }>;
+export type Rebuild = (params: unknown, row: { title: string }) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void> }>;
 
 /** Shared store: `scope` names this process's jobs, `rebuild` restarts adopted kinds (others fail), the lease is how long a silent owner keeps its jobs. */
 export interface JobsStore {
@@ -449,7 +449,7 @@ export class Jobs {
     this.adopting.add(r.id);
     try {
       const params = JSON.parse(r.params!);
-      const b = await sh.rebuild![r.kind]!(params);
+      const b = await sh.rebuild![r.kind]!(params, { title: r.title });
       const v = rowView(r);
       this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: v.origin });
       // a client of the old owner may still be polling: it gets the grace period from now on, not from a seen time that was never recorded
