@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { closeSync, constants as fsc, linkSync, mkdirSync, openSync, rmSync, type Dir, type Stats } from "node:fs";
+import { closeSync, constants as fsc, fsyncSync, linkSync, mkdirSync, openSync, rmSync, type Dir, type Stats } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
@@ -550,13 +550,18 @@ export class SizeStore {
     if (file === ":memory:") this.epoch = 1;
     else {
       // the highest generation in use; none at all (a new install): generation 0, made here as before
-      let cur = listGensSync(file).gens[0];
+      let l = listGensSync(file);
+      // A listing of a big folder takes more than one read of it: one made while another process puts a new generation in place and deletes the old one
+      // can miss both. Side files (-wal, -shm, a heal's temporary file) without any main file are a sign of that: list again before making generation 0.
+      for (let i = 0; i < 5 && !l.gens.length && l.all.length; i++) l = listGensSync(file);
+      let cur = l.gens[0];
       if (!cur) {
         try {
           mkdirSync(path.dirname(file), { recursive: true });
-          closeSync(openSync(file, fsc.O_RDWR | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600));
+          // O_EXCL: never take over a file another process made a moment ago (it is then simply used)
+          closeSync(openSync(file, fsc.O_RDWR | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600));
         } catch {
-          /* the open below says what is wrong */
+          /* made by another process, or the open below says what is wrong */
         }
         cur = listGensSync(file).gens[0] ?? { gen: 0, file };
       }
@@ -956,6 +961,8 @@ export class SizeStore {
           return;
         }
         this.healAt = Date.now() + (this.o.healEveryMs ?? HEAL_EVERY_MS);
+        // named now: once the new file is in place, this process's own follow timer may switch to it before the line below is logged
+        const old = this.file;
         const g = Math.max(this.gen, top?.gen ?? 0) + 1;
         const next = genFile(this.base, g);
         const tmp = `${next}.tmp-${randomUUID()}`;
@@ -973,6 +980,13 @@ export class SizeStore {
           } finally {
             db.close();
           }
+          // on disk before it gets its name: an OS crash must not leave a torn new generation (journal_mode=OFF above wrote it without syncs)
+          const fd = openSync(tmp, fsc.O_RDONLY | fsc.O_NOFOLLOW);
+          try {
+            fsyncSync(fd);
+          } finally {
+            closeSync(fd);
+          }
           linkSync(tmp, next);
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code === "EEXIST") {
@@ -986,7 +1000,6 @@ export class SizeStore {
           await fs.rm(tmp, { force: true }).catch(() => undefined);
           for (const x of ["-journal", "-wal", "-shm"]) await fs.rm(tmp + x, { force: true }).catch(() => undefined);
         }
-        const old = this.file;
         console.error(
           compact
             ? `size store: ${old} is ${why}; it is compacted: a new store ${next} is used and the old file is deleted. Folder sizes are measured again.`
@@ -1024,6 +1037,8 @@ export class SizeStore {
       try {
         if (to.gen <= this.gen || this.closed) return;
         const gate = new Promise<void>((r) => (ready = r));
+        // Everything up to the first await is synchronous: from here no call (a read, a mark, a walk, a reopen) can still see the old file, its lease or its
+        // handles, and a worker started from now on (post starts them on demand) opens the new file. The old workers are stopped without waiting for them.
         this.switches++;
         if (this.leaseTimer) clearInterval(this.leaseTimer);
         this.leaseTimer = undefined;
@@ -1034,7 +1049,7 @@ export class SizeStore {
             p.rej(new Error("fenced: the size store moved to a new file"));
             this.pending.delete(id);
           }
-        await Promise.all(ws.map((w) => this.stopWorker(w)));
+        for (const w of ws) void this.stopWorker(w);
         try {
           this.db?.close();
         } catch {
@@ -1076,7 +1091,8 @@ export class SizeStore {
     let t: NodeJS.Timeout | undefined;
     await Promise.race([gone, new Promise((r) => (t = setTimeout(r, 2000)))]);
     clearTimeout(t);
-    await w.terminate().catch(() => undefined);
+    // not awaited: a worker inside a long native step (an integrity check of a big file) ends only when the step ends; nobody waits for that
+    void w.terminate().catch(() => undefined);
   }
 
   /**
@@ -1086,8 +1102,9 @@ export class SizeStore {
   private async lookAtSpace(): Promise<void> {
     if (this.spaceSeen || this.file === ":memory:" || !this.isWriter) return;
     this.spaceSeen = true;
-    const one = async (pragma: string) => Number(Object.values((await this.read("space", `PRAGMA ${pragma}`, [], null))?.[0] ?? {})[0] ?? NaN);
-    const [pages, free, size, av] = [await one("page_count"), await one("freelist_count"), await one("page_size"), await one("auto_vacuum")];
+    // one read for all four (a read is a round trip to the reader worker)
+    const r = ((await this.read("space", "SELECT (SELECT page_count FROM pragma_page_count()) p, (SELECT freelist_count FROM pragma_freelist_count()) f, (SELECT page_size FROM pragma_page_size()) s, (SELECT auto_vacuum FROM pragma_auto_vacuum()) a", [], null))?.[0] ?? {}) as Record<string, unknown>;
+    const [pages, free, size, av] = [r.p, r.f, r.s, r.a].map((x) => Number(x ?? NaN)) as [number, number, number, number];
     if (![pages, free, size, av].every(Number.isFinite) || !pages) return;
     if (free * 4 > pages && free * size > 64 << 20) console.error(`size store: ${this.file} is ${gb(pages * size)}, of which ${gb(free * size)} is free pages`);
     if (av !== 2 && free * 2 > pages && free * size > (this.o.compactMinFreeBytes ?? COMPACT_MIN_FREE)) await this.heal(`${gb(pages * size)} with ${gb(free * size)} of free pages that a file without auto-vacuum never gives back`, true);
@@ -1171,7 +1188,12 @@ export class SizeStore {
     for (const w of this.waiters.splice(0)) w.rej(new FsError(503, "this process is stopping")); // (a job waiting for the lease is handed to the next process)
     if (this.genTimer) clearInterval(this.genTimer);
     this.genTimer = undefined;
-    await this.switching?.catch(() => undefined);
+    // a switch is short (its old workers are not waited for), but a shutdown never hangs on it: the lease lapses by itself
+    if (this.switching) {
+      let t: NodeJS.Timeout | undefined;
+      await Promise.race([this.switching.catch(() => undefined), new Promise((r) => (t = setTimeout(r, 2000)))]);
+      clearTimeout(t);
+    }
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.leaseTimer = undefined;
     if ((this.epoch || this.repairLease) && this.file !== ":memory:") await Promise.race([this.post({ op: "release" }, false).catch(() => undefined), new Promise((r) => setTimeout(r, 2000))]);
@@ -1359,8 +1381,10 @@ export class SizeStore {
    * otherwise keep totals from before).
    */
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** when the scan (job) began: rows written since are its own and are kept when it runs again after a restart, whatever their age (a rescan keeps only those) */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
+    /** the generation it reads and writes, taken before anything it decides: after a move to another one it writes nothing more (its rows were checked against the old file) */
+    const sw = this.switches;
     await this.reopen();
-    if (!(await this.mayScan())) throw new FsError(503, "another process holds the size store writer lease");
+    if (!(await this.mayScan()) || sw !== this.switches) throw new FsError(503, "another process holds the size store writer lease");
     // A job resumed long after it began (the agent was down for days) does not keep its own rows on that ground: changes made while nothing
     // watched could be in them. Then only the usual age and watcher checks apply.
     const since = mode.since !== undefined && Date.now() - mode.since < RESUME_MAX_MS ? mode.since : undefined;
@@ -1370,10 +1394,9 @@ export class SizeStore {
     // in here: only the writer writes them, and `acquired` loaded those of the writer before.)
     const whole = !mode.trust && !mode.force;
     if (whole) await this.barrier();
+    if (sw !== this.switches) throw new FsError(503, "the size store moved to a new file; the scan is started again");
     /** the lease this walk writes under: rows get it as `ver`, even if a missed heartbeat clears `epoch` meanwhile */
     const epoch = this.epoch;
-    /** the generation it reads and writes: after a move to another one it writes nothing more (its rows were checked against the old file) */
-    const sw = this.switches;
     // after every mark (few): rows this walk writes must count as fresh, even when a mark was made in this millisecond
     const now = this.nextAt();
     const ready0 = this.ready();

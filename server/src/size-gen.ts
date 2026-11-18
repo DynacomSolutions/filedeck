@@ -5,7 +5,7 @@ import path from "node:path";
 /**
  * Generations of a size store file (see docs/superpowers/specs/2026-11-18-size-store-self-heal-design.md).
  *
- * `<base>` is generation 0 (the name every version before generations used); generation N > 0 is `<base>.<N>`. The store in use is the highest generation
+ * `<base>` is generation 0 (the name every version before generations used); generation N > 0 is `<base>.gen<N>` (a name nobody picks by hand: a copy an operator once renamed to `<base>.1` is never taken for a store). The store in use is the highest generation
  * whose main file exists. A path is never used again for another database: SQLite finds `-wal` and `-shm` by name, so a process still holding an old file
  * would otherwise share them with the new one. Numbers only grow, a lower generation is deleted only once a higher one exists, and no open creates a file
  * (see `rwUri`) except generation 0 when there is none.
@@ -15,7 +15,7 @@ export interface Gen {
   file: string;
 }
 
-export const genFile = (base: string, gen: number): string => (gen === 0 ? base : `${base}.${gen}`);
+export const genFile = (base: string, gen: number): string => (gen === 0 ? base : `${base}.gen${gen}`);
 
 /** The SQLite URI that opens an existing file read-write and never creates it (a missing file fails with SQLITE_CANTOPEN). */
 export const rwUri = (file: string): string => "file:" + path.resolve(file).replace(/%/g, "%25").replace(/\?/g, "%3f").replace(/#/g, "%23") + "?mode=rw";
@@ -39,7 +39,7 @@ function parse(base: string, names: string[]): Listing {
     if (!name.startsWith(b)) continue;
     const rest = name.slice(b.length);
     // `<base>` or `<base>.<N>`, then nothing, a SQLite side file, or a heal's temporary name
-    const m = /^(?:\.(\d+))?(-wal|-shm|-journal|\.tmp-[0-9A-Za-z-]+)?$/.exec(rest);
+    const m = /^(?:\.gen(\d+))?(-wal|-shm|-journal|\.tmp-[0-9A-Za-z-]+)?$/.exec(rest);
     if (!m) continue;
     const gen = m[1] === undefined ? 0 : Number(m[1]);
     if (m[1] !== undefined && (gen < 1 || String(gen) !== m[1])) continue;

@@ -126,11 +126,11 @@ test("real table damage is healed: a new generation replaces the file (no operat
     const s = mk(file);
     await s.mayScan();
     await s.clearPending().catch(() => undefined);
-    for (let i = 0; i < 600 && (s.storeFile !== file + ".1" || !s.health().available); i++) await sleep(50);
+    for (let i = 0; i < 600 && (s.storeFile !== file + ".gen1" || !s.health().available); i++) await sleep(50);
   });
   const s = stores.at(-1) as Any;
   assert.ok(!lines.some((l) => /rebuilt/.test(l)), lines.join("\n"));
-  assert.equal(lines.filter((l) => /was damaged/.test(l) && l.includes(file) && l.includes(file + ".1")).length, 1, lines.join("|"));
+  assert.equal(lines.filter((l) => /was damaged/.test(l) && l.includes(file) && l.includes(file + ".gen1")).length, 1, lines.join("|"));
   assert.ok(!lines.some((l) => /Stop the agent|move the file/.test(l)), lines.join("|"));
   assert.ok(!fs.existsSync(file), "the damaged file's name is gone");
   assert.deepEqual(s.health(), { available: true, damaged: false });
@@ -138,7 +138,7 @@ test("real table damage is healed: a new generation replaces the file (no operat
   fs.readSync(held, kept, 0, bytes.length, 0);
   fs.closeSync(held);
   assert.equal(kept.subarray((root - 1) * size, root * size).compare(bytes.subarray((root - 1) * size, root * size)), 0, "the damaged table page is untouched");
-  assert.deepEqual(check(file + ".1"), ["ok"]);
+  assert.deepEqual(check(file + ".gen1"), ["ok"]);
   await s.clearPending();
 });
 
@@ -209,8 +209,8 @@ test("a table that lost rows (its indexes hold more entries) is not 'repaired' w
   assert.ok(!lines.some((l) => /rebuilt/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /more entries than its table/.test(l)), lines.join("\n"));
   const s = stores.at(-1)!;
-  for (let i = 0; i < 600 && s.storeFile !== file + ".1"; i++) await sleep(50);
-  assert.equal(s.storeFile, file + ".1");
+  for (let i = 0; i < 600 && s.storeFile !== file + ".gen1"; i++) await sleep(50);
+  assert.equal(s.storeFile, file + ".gen1");
   assert.ok(!fs.existsSync(file));
 });
 
@@ -248,7 +248,7 @@ test("a corrupt file at open heals: not SQLite, or table damage the open itself 
   const { lines } = await capture(async () => {
     const s = mk(garbage);
     assert.equal(s.persistent, false);
-    for (let i = 0; i < 600 && (s.storeFile !== garbage + ".1" || !s.persistent); i++) await sleep(50);
+    for (let i = 0; i < 600 && (s.storeFile !== garbage + ".gen1" || !s.persistent); i++) await sleep(50);
   });
   assert.ok(lines.some((l) => /size store unavailable/.test(l)), lines.join("\n"));
   assert.ok(lines.some((l) => /was damaged/.test(l) && l.includes(garbage)), lines.join("\n"));
@@ -269,10 +269,10 @@ test("a corrupt file at open heals: not SQLite, or table damage the open itself 
   const { lines: l2 } = await capture(async () => {
     const s = mk(file);
     assert.equal(s.persistent, false);
-    for (let i = 0; i < 600 && (s.storeFile !== file + ".1" || !s.persistent); i++) await sleep(50);
+    for (let i = 0; i < 600 && (s.storeFile !== file + ".gen1" || !s.persistent); i++) await sleep(50);
   });
   assert.ok(l2.some((l) => /was damaged/.test(l)), l2.join("\n"));
-  assert.equal(stores.at(-1)!.storeFile, file + ".1");
+  assert.equal(stores.at(-1)!.storeFile, file + ".gen1");
 });
 
 
@@ -401,5 +401,6 @@ test("the heal line is one line even when the check reports many problems", asyn
   const hit = lines.filter((l) => /was damaged/.test(l));
   assert.equal(hit.length, 1, lines.join("|"));
   assert.ok(!hit[0]!.includes("\n"), hit[0]);
-  assert.match(hit[0]!, /cell 48: Extends off end of page; and 2 more\); it is deleted and a new store .*oneline\.db\.1 is used\. Folder sizes are measured again\./);
+  assert.ok(hit[0]!.includes("oneline.db was damaged"), hit[0]);
+  assert.match(hit[0]!, /cell 48: Extends off end of page; and 2 more\); it is deleted and a new store .*oneline\.db\.gen1 is used\. Folder sizes are measured again\./);
 });

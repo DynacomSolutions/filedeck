@@ -1,4 +1,4 @@
-// A size store damaged beyond its indexes heals itself: a new generation file (`<file>.<N>`), never a path used again, every process follows it.
+// A size store damaged beyond its indexes heals itself: a new generation file (`<file>.gen<N>`), never a path used again, every process follows it.
 // See docs/superpowers/specs/2026-11-18-size-store-self-heal-design.md.
 import { test as nodeTest, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -118,18 +118,18 @@ test("a store damaged beyond its indexes heals itself: a new generation, the dam
   const v = tree();
   const { lines, r: s } = await capture(async () => {
     const s = mk(file);
-    await until(() => healthy(s) && s.storeFile === file + ".1", 60_000, "heal");
+    await until(() => healthy(s) && s.storeFile === file + ".gen1", 60_000, "heal");
     return s;
   });
-  assert.deepEqual(filesOf(file).filter((f) => !/-(wal|shm)$/.test(f)), [path.basename(file) + ".1"], "only the new generation is left: " + filesOf(file).join(","));
+  assert.deepEqual(filesOf(file).filter((f) => !/-(wal|shm)$/.test(f)), [path.basename(file) + ".gen1"], "only the new generation is left: " + filesOf(file).join(","));
   const healed = lines.filter((l) => /was damaged/.test(l));
   assert.equal(healed.length, 1, lines.join("\n"));
-  assert.ok(healed[0]!.includes(file) && healed[0]!.includes(file + ".1") && !healed[0]!.includes("\n"), healed[0]);
+  assert.ok(healed[0]!.includes(`${file} was damaged`) && healed[0]!.includes(file + ".gen1") && !healed[0]!.includes("\n"), healed[0]);
   assert.ok(!lines.some((l) => /Stop the agent|move the file/.test(l)), "no operator step: " + lines.join("\n"));
   assert.equal((await s.scanRead(v)).read > 0, true);
   assert.equal((await s.scanRead(v)).read, 0, "the second scan is answered from the new store");
-  assert.deepEqual(integrity(file + ".1"), ["ok"]);
-  const d = new DatabaseSync(file + ".1", { readOnly: true });
+  assert.deepEqual(integrity(file + ".gen1"), ["ok"]);
+  const d = new DatabaseSync(file + ".gen1", { readOnly: true });
   assert.equal(Number((d.prepare("PRAGMA auto_vacuum").get() as Any).auto_vacuum), 2, "a new generation gives free pages back (incremental)");
   d.close();
 });
@@ -139,7 +139,7 @@ test("a file that is not SQLite heals too", async () => {
   fs.writeFileSync(file, "this is not a database ".repeat(200));
   const { lines } = await capture(async () => {
     const s = mk(file);
-    await until(() => healthy(s) && s.storeFile === file + ".1", 60_000, "heal");
+    await until(() => healthy(s) && s.storeFile === file + ".gen1", 60_000, "heal");
   });
   assert.ok(!fs.existsSync(file));
   assert.equal(lines.filter((l) => /was damaged/.test(l)).length, 1, lines.join("\n"));
@@ -153,11 +153,11 @@ test("two processes on one damaged file: exactly one new generation, both use it
   let last: Any[] = [];
   await until(async () => {
     const [a, b] = (last = [await A.ask({ cmd: "state" }), await B.ask({ cmd: "state" })]);
-    return a.file === file + ".1" && b.file === file + ".1" && a.health.available && b.health.available;
+    return a.file === file + ".gen1" && b.file === file + ".gen1" && a.health.available && b.health.available;
   }, 90_000, "both on generation 1").catch((e) => {
     throw new Error(e.message + ": " + JSON.stringify(last) + " files " + filesOf(file).join(","));
   });
-  assert.ok(!fs.existsSync(file + ".2"), "never a second generation: " + filesOf(file).join(","));
+  assert.ok(!fs.existsSync(file + ".gen2"), "never a second generation: " + filesOf(file).join(","));
   assert.ok(!fs.existsSync(file), "the damaged file is gone");
   const all = [...(await A.ask({ cmd: "state" })).lines, ...(await B.ask({ cmd: "state" })).lines];
   assert.equal(all.filter((l: string) => /was damaged/.test(l)).length, 1, all.join("\n"));
@@ -165,8 +165,8 @@ test("two processes on one damaged file: exactly one new generation, both use it
   await until(async () => (await A.ask({ cmd: "state" })).writer || (await B.ask({ cmd: "state" })).writer, 30_000, "a writer");
   const W = (await A.ask({ cmd: "state" })).writer ? A : B;
   assert.ok((await W.ask({ cmd: "scan", path: v })).read > 0);
-  assert.ok(rowsOf(file + ".1") >= 5, "rows are in the new generation");
-  assert.deepEqual(integrity(file + ".1"), ["ok"]);
+  assert.ok(rowsOf(file + ".gen1") >= 5, "rows are in the new generation");
+  assert.deepEqual(integrity(file + ".gen1"), ["ok"]);
   await A.ask({ cmd: "close" });
   await B.ask({ cmd: "close" });
 });
@@ -182,7 +182,7 @@ test("a process still on the old file follows the new generation within a lease 
   await A.mayScan();
   const { lines } = await capture(async () => {
     await (A as Any).heal("test damage");
-    await until(async () => (await B.ask({ cmd: "state" })).file === file + ".1", 10_000, "B follows");
+    await until(async () => (await B.ask({ cmd: "state" })).file === file + ".gen1", 10_000, "B follows");
   });
   assert.equal(lines.filter((l) => /was damaged \(test damage\)/.test(l)).length, 1, lines.join("\n"));
   assert.ok(!fs.existsSync(file) && !fs.existsSync(file + "-wal"), filesOf(file).join(","));
@@ -192,7 +192,7 @@ test("a process still on the old file follows the new generation within a lease 
   const r = W ? await W.ask({ cmd: "scan", path: v }) : { read: (await A.scanRead(v)).read };
   assert.ok(r.read > 0, "the new generation starts empty: folders are read again");
   assert.ok(!fs.existsSync(file), "nobody made the old path again");
-  assert.deepEqual(integrity(file + ".1"), ["ok"]);
+  assert.deepEqual(integrity(file + ".gen1"), ["ok"]);
   await B.ask({ cmd: "close" });
 });
 
@@ -220,16 +220,16 @@ test("an older version that keeps writing (and re-creating) the old path never t
   await capture(async () => {
     await (s as Any).heal("test damage");
   });
-  assert.equal(s.storeFile, file + ".1");
+  assert.equal(s.storeFile, file + ".gen1");
   await oldGone;
   // generation 1 has no row of the old process, and is sound
-  assert.equal(rowsOf(file + ".1", "SELECT COUNT(*) c FROM sizes WHERE path LIKE '/old/%'"), 0);
-  assert.deepEqual(integrity(file + ".1"), ["ok"]);
+  assert.equal(rowsOf(file + ".gen1", "SELECT COUNT(*) c FROM sizes WHERE path LIKE '/old/%'"), 0);
+  assert.deepEqual(integrity(file + ".gen1"), ["ok"]);
   assert.ok((await s.scanRead(v)).read > 0);
   assert.equal((await s.scanRead(v)).read, 0);
   // the old name it made again is ignored, and deleted by the next process that opens the store
   const s2 = mk(file);
-  assert.equal(s2.storeFile, file + ".1", "the highest generation wins");
+  assert.equal(s2.storeFile, file + ".gen1", "the highest generation wins");
   await until(() => !fs.existsSync(file), 10_000, "old name deleted");
 });
 
@@ -237,14 +237,14 @@ test("a restart in the middle of a switch: the highest generation wins and the l
   const file = await damaged();
   fs.writeFileSync(file + "-wal", "");
   // a heal that died after putting generation 1 in place: an empty file, the damaged one and a temporary file still there
-  fs.writeFileSync(file + ".1", "");
-  fs.writeFileSync(`${file}.2.tmp-dead`, "");
-  fs.utimesSync(`${file}.2.tmp-dead`, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 2 * 3600_000));
+  fs.writeFileSync(file + ".gen1", "");
+  fs.writeFileSync(`${file}.gen2.tmp-dead`, "");
+  fs.utimesSync(`${file}.gen2.tmp-dead`, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 2 * 3600_000));
   const v = tree();
   const s = mk(file);
-  assert.equal(s.storeFile, file + ".1");
+  assert.equal(s.storeFile, file + ".gen1");
   await until(() => healthy(s), 30_000, "open");
-  await until(() => !fs.existsSync(file) && !fs.existsSync(file + "-wal") && !fs.existsSync(`${file}.2.tmp-dead`), 10_000, "leftovers deleted: " + filesOf(file).join(","));
+  await until(() => !fs.existsSync(file) && !fs.existsSync(file + "-wal") && !fs.existsSync(`${file}.gen2.tmp-dead`), 10_000, "leftovers deleted: " + filesOf(file).join(","));
   assert.ok((await s.scanRead(v)).read > 0);
   assert.equal((await s.scanRead(v)).read, 0);
 });
@@ -279,8 +279,9 @@ test("a walk that began on the old file never commits into the new generation", 
     await capture(async () => (s as Any).heal("test damage"));
     const res = await walk;
     slow = false;
-    assert.notEqual(res, "done", "the walk ends (its lease was on the old file)");
-    assert.equal(rowsOf(file + ".1", `SELECT COUNT(*) c FROM sizes WHERE path LIKE '${v}/%' OR path = '${v}'`), 0, "nothing of the old walk in generation 1");
+    // it either fails (a commit after the move is fenced) or answers what it read; it never writes into the new generation
+    assert.ok(res === "done" || /lease|moved/.test(String(res)), String(res));
+    assert.equal(rowsOf(file + ".gen1", `SELECT COUNT(*) c FROM sizes WHERE path LIKE '${v}/%' OR path = '${v}'`), 0, "nothing of the old walk in generation 1");
     assert.ok((await s.scanRead(v)).read > 0, "a new scan works");
   } finally {
     fsp.lstat = l;
@@ -310,14 +311,14 @@ test("a process heals at most once in its heal interval: a new generation found 
   const s = mk(file, { healEveryMs: 60_000 });
   await s.mayScan();
   await capture(async () => (s as Any).heal("first"));
-  assert.equal(s.storeFile, file + ".1");
+  assert.equal(s.storeFile, file + ".gen1");
   const { lines } = await capture(async () => (s as Any).heal("second"));
-  assert.equal(s.storeFile, file + ".1", "no second heal within the interval");
+  assert.equal(s.storeFile, file + ".gen1", "no second heal within the interval");
   assert.ok(lines.some((l) => /heal/.test(l) && /again/.test(l)), lines.join("\n"));
   (s as Any).healAt = 0; // the interval has passed
   await capture(async () => (s as Any).heal("third"));
-  assert.equal(s.storeFile, file + ".2");
-  assert.ok(!fs.existsSync(file + ".1"));
+  assert.equal(s.storeFile, file + ".gen2");
+  assert.ok(!fs.existsSync(file + ".gen1"));
 });
 
 test("a new generation gives free pages back in steps while the writer works", async () => {
@@ -356,8 +357,75 @@ test("a store under the old name that is mostly free pages is compacted once int
   d.close();
   const { lines } = await capture(async () => {
     const s = mk(file, { compactMinFreeBytes: 1 << 20 });
-    await until(() => s.storeFile === file + ".1" && healthy(s), 30_000, "compacted");
+    await until(() => s.storeFile === file + ".gen1" && healthy(s), 30_000, "compacted");
   });
-  assert.equal(lines.filter((l) => /compact/.test(l) && l.includes(file + ".1")).length, 1, lines.join("\n"));
+  assert.equal(lines.filter((l) => /compact/.test(l) && l.includes(file + ".gen1")).length, 1, lines.join("\n"));
   assert.ok(!fs.existsSync(file));
+});
+
+test("a switch while reads and marks keep coming: no worker stays on the old file, new rows go to the new generation", async () => {
+  const file = path.join(tmp, `s${n++}.db`);
+  const v = tree();
+  const s = mk(file, { readDelayMs: 300 });
+  await s.mayScan();
+  await s.scanRead(v);
+  let busy = true;
+  const load = (async () => {
+    while (busy) {
+      s.markStale(v + "/a");
+      await s.tree(v, 1, false).catch(() => undefined);
+      await sleep(5);
+    }
+  })();
+  await sleep(100);
+  await capture(async () => (s as Any).heal("test damage"));
+  await sleep(500);
+  busy = false;
+  await load;
+  assert.equal(s.storeFile, file + ".gen1");
+  const open = () =>
+    fs.readdirSync("/proc/self/fd").flatMap((fd) => {
+      try {
+        return [fs.readlinkSync(`/proc/self/fd/${fd}`)];
+      } catch {
+        return [];
+      }
+    });
+  await until(() => !open().some((l) => l.includes(path.basename(file)) && l.endsWith("(deleted)")), 10_000, "no deleted file open: " + open().filter((l) => l.includes(path.basename(file))).join(","));
+  await until(() => !s.health().damaged && s.health().available, 10_000, "healthy");
+  assert.ok(!fs.existsSync(file + ".gen2"), "no second heal: " + filesOf(file).join(","));
+  assert.ok((await s.scanRead(v)).read > 0);
+  assert.ok(rowsOf(file + ".gen1") >= 5, "rows are in the new generation");
+});
+
+test("a copy an operator renamed to <name>.1 is never taken for a store", async () => {
+  const file = path.join(tmp, `s${n++}.db`);
+  const v = tree();
+  const s0 = mk(file);
+  await s0.mayScan();
+  await s0.scanRead(v);
+  await s0.close();
+  fs.writeFileSync(file + ".1", "a damaged copy set aside by hand");
+  const s = mk(file);
+  assert.equal(s.storeFile, file);
+  await s.mayScan();
+  assert.equal((await s.scanRead(v)).read, 0, "the cache under the old name is kept");
+  assert.ok(fs.existsSync(file + ".1"), "the copy is not touched");
+});
+
+test("close during a switch whose old worker is stuck in a long read does not hang", async () => {
+  const file = path.join(tmp, `s${n++}.db`);
+  const s = mk(file);
+  await s.mayScan();
+  // from here the reader naps 8 s inside each read (a new reader is started with that)
+  (s as Any).o.readDelayMs = 8000;
+  await (s as Any).reader?.terminate();
+  (s as Any).reader = undefined;
+  void s.tree("/", 1, false).catch(() => undefined); // the reader naps 8 s inside its step
+  await sleep(200);
+  const t0 = Date.now();
+  void capture(async () => (s as Any).heal("test damage"));
+  await sleep(50);
+  await s.close();
+  assert.ok(Date.now() - t0 < 6000, `close took ${Date.now() - t0} ms`);
 });

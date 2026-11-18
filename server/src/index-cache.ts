@@ -129,7 +129,7 @@ export function openDb(file: string, cacheKiB = 8192, scratch = false, /** the f
     fs.mkdirSync(path.dirname(file), { recursive: true });
     privateDbFile(file, !existing);
   }
-  const db = new s.DatabaseSync(existing ? rwUri(file) : file);
+  const db = new s.DatabaseSync(existing && file !== ":memory:" ? rwUri(file) : file);
   // A scratch file (compare spill) is thrown away on restart: no journal, no syncs. A cache keeps WAL (a process crash cannot
   // corrupt it) without syncs (an OS crash might; IndexCache then starts a fresh file).
   db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`);

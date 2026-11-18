@@ -19,7 +19,7 @@ A rename does not help: the `-wal` and `-shm` names do not follow it.
 
 ## Design: generations, a path is never used again
 
-1. **File names.** `sizes-<node>.db` is generation 0 (the name all versions used). Generation N > 0 is `sizes-<node>.db.<N>`. The current store is the highest generation whose main file exists. Each generation has its own `-wal` and `-shm` names.
+1. **File names.** `sizes-<node>.db` is generation 0 (the name all versions used). Generation N > 0 is `sizes-<node>.db.gen<N>`. The current store is the highest generation whose main file exists. Each generation has its own `-wal` and `-shm` names.
 2. **No open creates a file.** Every SQLite open of a store file (main thread, writer and reader workers) uses `file:<path>?mode=rw`. A file that is gone fails to open and the process looks for the current generation again. Only two places create a store file:
    - generation 0, when no generation exists (a new install), as before;
    - generation N+1, made by a heal: built under a temporary name, then put in place with `link()`, which fails if the name exists. Only one process can make generation N+1.
@@ -30,8 +30,8 @@ A rename does not help: the `-wal` and `-shm` names do not follow it.
    - logs one line: `size store: <old> was damaged (<first problems>); it is deleted and a new store <new> is used. Folder sizes are measured again.`
    - A process heals at most once in 10 minutes, so a failing disk cannot make it loop. A failed heal (for example, a full disk) is logged and tried again.
    - No lease is needed: the lease lives in the damaged file, which may not be readable. The exclusive `link()` is the lock.
-4. **Follow.** Every process lists the index folder on each lease tick (a third of the lease time, also while the store is unavailable). A higher generation makes it switch:
-   - it closes the connections of its writer and reader workers to the old file, then stops them;
+4. **Follow.** Every process lists the index folder on each lease tick (a third of the lease time, also while the store is unavailable). A higher generation makes it switch. The switch changes all its state before its first wait, so no read, mark, walk or reopen can start a worker on the old file during the switch:
+   - it closes the connections of its writer and reader workers to the old file, then stops them, without waiting for them (a worker inside a long check ends when the check ends; a shutdown waits at most 2 s for a switch);
    - requests still waiting on them fail as "fenced" (the lease is lost), never as damage;
    - it forgets everything it read from the old file: lease epoch, first epoch, stale marks, the validation floor (now), and it marks `/` stale, the same as when a store comes back after an outage;
    - the change watcher starts a new session in the new file;
@@ -41,6 +41,9 @@ A rename does not help: the `-wal` and `-shm` names do not follow it.
    - A process still on the old file (until its next tick, or an older version until it exits) writes only into that file or into `-wal` and `-shm` names that no current process uses. Its writes are lost, never mixed in. Fencing in the old file still works as before.
    - A crash during a switch leaves a higher generation and lower leftovers. The highest wins and any process deletes the leftovers when it opens.
    - Two processes that find the damage at the same time: one `link()` wins, the other gets EEXIST and follows.
+   - The `.gen<N>` suffix is a name nobody picks by hand. A copy that an operator once renamed to `sizes-<node>.db.1` is never taken for a store.
+   - A process that starts while another heals can list the folder between the link of the new file and the delete of the old one. When it finds side files but no main file, it lists again, and it makes generation 0 only with `O_EXCL`.
+   - The new file is synced to disk before it gets its name.
 6. **Migration.** Nothing to do. An existing `sizes-<node>.db` is generation 0 and stays in use until it is damaged or compacted (below). Older versions keep using it. They never see generation 1 or later.
 7. **Disk use.** A new generation starts empty. The deleted file uses space only while a process still has it open: a current-version process lets go at its next tick, an older version when it stops.
 
