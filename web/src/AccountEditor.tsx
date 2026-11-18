@@ -15,6 +15,7 @@ const SOURCE_CHOICES: { value: SourceChoice; label: string }[] = [
   { value: "write", label: "Read and write" },
 ];
 
+const PENDING_LINK = "Add or clear the link you typed before saving.";
 const SELF_WARNING = "Saving signs this account out everywhere, also here.";
 
 /** The empty form for a new account, with one section per machine. */
@@ -77,6 +78,9 @@ export function AccountEditor({
   const [newKey, setNewKey] = useState("");
   const [err, setErr] = useState<string[]>([]);
   const [keyErr, setKeyErr] = useState("");
+  /** the text typed in the link field and not added */
+  const [pendingLink, setPendingLink] = useState("");
+  const linkField = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<"" | "save" | "key">("");
   /** the change that waits for "Saving signs this account out everywhere" to be confirmed */
   const [asking, setAsking] = useState<null | (() => Promise<void>)>(null);
@@ -114,7 +118,7 @@ export function AccountEditor({
     setForm((f) => ({ ...f, machines: f.machines.map((m) => (m.node === node ? change(m) : m)) }));
 
   /** Back to the list; with unsaved changes (the form differs, a password typed, "Remove password" set) it asks first. */
-  const changed = () => removePassword || formChanged(start, form);
+  const changed = () => removePassword || pendingLink.trim() !== "" || formChanged(start, form);
   const requestClose = (then?: () => void) => {
     if (sending.current) return;
     const go = then ?? onClose;
@@ -153,6 +157,11 @@ export function AccountEditor({
   };
 
   const save = () => {
+    if (pendingLink.trim() !== "") {
+      setErr([PENDING_LINK]);
+      linkField.current?.focus();
+      return;
+    }
     const problems = formProblems(removePassword ? { ...form, password: "" } : form);
     if (problems.length) return setErr(problems);
     setErr([]);
@@ -284,7 +293,7 @@ export function AccountEditor({
           )}
         </section>
 
-        <TailnetLinks links={form.tailnet} mode={overview.tailscale} disabled={busy !== ""} start={start.tailnet} onChange={(tailnet) => set({ tailnet })} />
+        <TailnetLinks links={form.tailnet} mode={overview.tailscale} disabled={busy !== ""} start={start.tailnet} pending={pendingLink} onPending={setPendingLink} inputRef={linkField} onChange={(tailnet) => set({ tailnet })} />
 
         <section className="set-sec" aria-labelledby={ids.name + "-m"}>
           <h3 id={ids.name + "-m"}>Machines</h3>

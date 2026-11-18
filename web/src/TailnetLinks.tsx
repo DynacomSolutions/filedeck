@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type RefObject } from "react";
 import * as Ic from "lucide-react";
 import type { Overview } from "./admin";
 import { cleanLink, cleanLinks, linkKind, MAX_LINKS } from "./accountForm";
@@ -17,11 +17,24 @@ export const REMOVE_NOTE = "Removing a link ends the sessions that signed in thr
  * added. `start` is the list as saved: while it holds a link `links` no longer has, the section says that saving ends the sessions that
  * came through it. Subjects come from the hub and from the keyboard: React text, in <bdi>.
  */
-export function TailnetLinks({ links, onChange, mode, disabled, start }: { links: string[]; onChange: (l: string[]) => void; mode: Overview["tailscale"]; disabled?: boolean; start?: string[] }) {
+export function TailnetLinks({ links, onChange, mode, disabled, start, pending, onPending, inputRef }: {
+  links: string[];
+  onChange: (l: string[]) => void;
+  mode: Overview["tailscale"];
+  disabled?: boolean;
+  start?: string[];
+  /** the text in the field, not yet added: the editor counts it as an unsaved change and refuses to save while it is there */
+  pending: string;
+  onPending: (v: string) => void;
+  /** the field, so the editor can put focus in it */
+  inputRef?: RefObject<HTMLInputElement | null>;
+}) {
   const uid = useId();
-  const [value, setValue] = useState("");
+  const value = pending;
+  const setValue = onPending;
   const [err, setErr] = useState("");
-  const field = useRef<HTMLInputElement>(null);
+  const own = useRef<HTMLInputElement>(null);
+  const field = inputRef ?? own;
   const typing = linkKind(value) === "tag";
   const hasTag = links.some((l) => linkKind(l) === "tag");
   const removed = (start ?? []).some((s) => !links.includes(s));
@@ -84,7 +97,7 @@ export function TailnetLinks({ links, onChange, mode, disabled, start }: { links
             spellCheck={false}
             autoCapitalize="none"
             aria-invalid={err ? true : undefined}
-            aria-describedby={`${uid}-help ${uid}-err`}
+            aria-describedby={`${uid}-help ${typing ? `${uid}-risk ` : ""}${uid}-err`}
             onChange={(e) => (setValue(e.target.value), setErr(""))}
             onKeyDown={(e) => {
               if (e.key !== "Enter") return;
@@ -95,7 +108,7 @@ export function TailnetLinks({ links, onChange, mode, disabled, start }: { links
           <button type="button" disabled={disabled} onClick={add}><Ic.Plus aria-hidden="true" /> Add</button>
         </div>
         <span id={`${uid}-help`} className="muted acc-help">For example alice@github or tag:server.</span>
-        {typing && <span className="muted acc-help">{TAG_RISK}</span>}
+        {typing && <span id={`${uid}-risk`} className="muted acc-help">{TAG_RISK}</span>}
         <div className="ad-err" role="alert" id={`${uid}-err`}>{err}</div>
       </div>
     </section>

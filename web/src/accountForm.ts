@@ -20,8 +20,14 @@ export const MAX_LINKS = 16;
 const LOGIN = /^[a-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*$/;
 const TAG = /^tag:[a-z0-9-]{1,63}$/;
 
-/** One link as the hub keeps it: ASCII white space trimmed, lowercased. Not checked. */
-export const cleanLink = (v: string): string => v.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").toLowerCase();
+/**
+ * One link as the hub keeps it: ASCII white space trimmed, then (only when what is left is printable ASCII) lowercased. A value with other
+ * characters stays as typed, so no case folding (the Kelvin sign lowercases to `k`) can turn it into a near match. Not checked.
+ */
+export const cleanLink = (v: string): string => {
+  const s = v.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+  return /^[\x21-\x7e]*$/.test(s) ? s.toLowerCase() : s;
+};
 
 /** What a value is as a tailnet link: a login, a tag, or null when it is neither (the client twin of the hub's `tailnetLink`). */
 export function linkKind(v: string): "login" | "tag" | null {
@@ -30,6 +36,9 @@ export function linkKind(v: string): "login" | "tag" | null {
   if (s.startsWith("tag:")) return TAG.test(s) ? "tag" : null;
   return s.length <= 254 && LOGIN.test(s) ? "login" : null;
 }
+
+/** The links of a list in one fixed order, as a string: two lists with the same links are the same, whatever the order they were added in. */
+export const linksKey = (list: readonly string[]): string => JSON.stringify(cleanLinks(list).sort());
 
 /** The links of a list, cleaned, empty ones dropped and duplicates merged at the first place. */
 export const cleanLinks = (list: readonly string[]): string[] => [...new Set(list.map(cleanLink).filter((x) => x !== ""))];
@@ -83,7 +92,7 @@ export function fromView(v: AccountView): AccountForm {
 export function formChanged(start: AccountForm, now: AccountForm): boolean {
   if (now.password !== "") return true;
   const norm = (f: AccountForm) =>
-    JSON.stringify([f.name.trim(), f.admin, f.machines.map((m) => [m.node, m.runAs.trim(), m.grants]), Object.entries(f.sources).filter(([, c]) => c !== "none").sort(([a], [b]) => (a < b ? -1 : 1)), cleanLinks(f.tailnet)]);
+    JSON.stringify([f.name.trim(), f.admin, f.machines.map((m) => [m.node, m.runAs.trim(), m.grants]), Object.entries(f.sources).filter(([, c]) => c !== "none").sort(([a], [b]) => (a < b ? -1 : 1)), linksKey(f.tailnet)]);
   return norm(start) !== norm(now);
 }
 

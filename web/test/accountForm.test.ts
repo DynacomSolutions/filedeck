@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { anyLinkCounts, linkCounts, formChanged, formProblems, fromView, linkKind, notConfigured, toInput, type AccountForm } from "../src/accountForm.ts";
+import { cleanLink, linksKey, anyLinkCounts, linkCounts, formChanged, formProblems, fromView, linkKind, notConfigured, toInput, type AccountForm } from "../src/accountForm.ts";
 import type { AccountView } from "../src/admin.ts";
 
 const good = (): AccountForm => ({
@@ -195,4 +195,21 @@ test("linkCounts follows the hub's lock-out rule: socket any link, headers only 
   assert.equal(anyLinkCounts(["tag:ci"], "headers"), false);
   assert.equal(anyLinkCounts(["tag:ci", "alice@github"], "headers"), true);
   assert.equal(anyLinkCounts([], "socket"), false);
+});
+
+test("the order of the links is not a change: removing one and adding it back leaves the form unchanged", () => {
+  const start = { ...good(), tailnet: ["a@x.y", "b@x.y"] };
+  assert.equal(formChanged(start, { ...good(), tailnet: ["b@x.y", "a@x.y"] }), false);
+  assert.equal(formChanged(start, { ...good(), tailnet: ["a@x.y"] }), true);
+  assert.equal(linksKey(["B@x.y", "a@x.y"]), linksKey(["a@x.y", "b@x.y", " "]));
+});
+
+test("a value that is not printable ASCII is never case folded into a link (the Kelvin sign is not a K)", () => {
+  assert.equal(linkKind("\u212Aate@github"), null);
+  assert.equal(linkKind("tag:\u212A"), null);
+  assert.equal(cleanLink("\u212Aate@github"), "\u212Aate@github", "left as typed, so the hub refuses it too");
+  assert.equal(linkKind("Kate@github"), "login", "plain ASCII is lowercased, as the hub does");
+  const f = good();
+  f.tailnet = ["\u212Aate@github"];
+  assert.equal(formProblems(f).length, 1);
 });
