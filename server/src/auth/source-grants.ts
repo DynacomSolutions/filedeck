@@ -1,4 +1,5 @@
 import type { AuthDb } from "./store.ts";
+import { inTransaction } from "./tx.ts";
 
 /**
  * Source grants (hub). A grant gives one account a whole network source, read-only or read-write. A system user and a virtual account
@@ -41,18 +42,13 @@ export class SourceGrants {
     return out;
   }
 
-  /** Replaces every grant of one account with `grants`, in one transaction: on any error nothing changes. `{}` removes them all. */
+  /** Replaces every grant of one account with `grants`, in one transaction (or a savepoint of the caller's): on any error nothing of it changes. `{}` removes them all. */
   setForAccount(kind: Kind, name: string, grants: Record<string, SourceAccess>): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    inTransaction(this.db, () => {
       this.db.prepare("DELETE FROM source_grants WHERE kind = ? AND name = ?").run(kind, name);
       const ins = this.db.prepare("INSERT INTO source_grants (source, kind, name, write) VALUES (?, ?, ?, ?)");
       for (const [source, a] of Object.entries(grants)) ins.run(source, kind, name, a.write ? 1 : 0);
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    });
   }
 
   /** The names of one kind that hold at least one grant, in name order. */

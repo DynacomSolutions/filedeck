@@ -52,3 +52,26 @@ test("two stores on one database see the same grants", () => {
   new SourceGrants(db).setForAccount("virt", "a", { s1: { write: true } });
   assert.deepEqual(new SourceGrants(db).get("s1", "virt", "a"), { write: true });
 });
+
+test("setForAccount inside an open transaction rolls back with it", () => {
+  const db = new AuthDb(":memory:");
+  const g = new SourceGrants(db);
+  g.setForAccount("virt", "a", { s1: { write: true } });
+  db.db.exec("BEGIN IMMEDIATE");
+  g.setForAccount("virt", "a", { s2: { write: false } });
+  assert.equal(db.db.isTransaction, true);
+  db.db.exec("ROLLBACK");
+  assert.deepEqual(g.forAccount("virt", "a"), { s1: { write: true } });
+});
+
+test("a failed setForAccount inside an open transaction undoes only its own part", () => {
+  const db = new AuthDb(":memory:");
+  const g = new SourceGrants(db);
+  db.db.exec("BEGIN IMMEDIATE");
+  g.setForAccount("virt", "b", { s1: { write: true } });
+  assert.throws(() => g.setForAccount("virt", "a", { s2: { write: true }, s3: null as unknown as { write: boolean } }));
+  assert.equal(db.db.isTransaction, true);
+  db.db.exec("COMMIT");
+  assert.deepEqual(g.forAccount("virt", "b"), { s1: { write: true } });
+  assert.deepEqual(g.forAccount("virt", "a"), {});
+});

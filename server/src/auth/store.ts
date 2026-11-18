@@ -4,13 +4,15 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Identity, NodeAccess } from "./identity.ts";
 import { keyFingerprint } from "./sshkey.ts";
+import { inTransaction } from "./tx.ts";
 
 /**
  * Account store (hub). Virtual accounts, their public keys and the epochs that
  * let the hub cancel every session of one account. System accounts have no row
  * of their own: only their epoch is kept, in `sys_users`. A deleted virtual
- * account leaves its epoch in `retired_accounts`, so a new account of the same
- * name starts above it and no agent takes it for the old one.
+ * account leaves its epoch, raised by one, in `retired_accounts`: agents that
+ * see it stop the old account's workers, and a new account of the same name
+ * starts above it, so no agent takes it for the old one.
  */
 
 export class AccountError extends Error {}
@@ -144,17 +146,9 @@ export class Accounts {
     return this.store.db;
   }
 
-  /** Runs `fn` in one transaction (rolled back when it throws). */
+  /** Runs `fn` in one transaction, or in a savepoint of the caller's (`inTransaction`). */
   private tx<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const out = fn();
-      this.db.exec("COMMIT");
-      return out;
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    return inTransaction(this.db, fn);
   }
 
   create(a: { name: string; password?: string; passwordHash?: string; admin: boolean; nodes: Record<string, NodeAccess> }): void {
@@ -234,8 +228,9 @@ export class Accounts {
   }
 
   /**
-   * Deletes the account and its keys, and keeps its epoch in `retired_accounts` (the larger of the one kept there and the current one).
-   * Its sessions end by themselves (a session of a virtual account that no longer exists is invalid). Unknown name: `AccountError`.
+   * Deletes the account and its keys, and keeps its epoch raised by one in `retired_accounts` (or the one kept there, when larger), so
+   * `epochOf` is higher after the delete. Its sessions end by themselves (a session of a virtual account that no longer exists is
+   * invalid). Unknown name: `AccountError`.
    */
   remove(name: string): void {
     this.tx(() => {
@@ -243,7 +238,7 @@ export class Accounts {
       if (!r) throw new AccountError("no such account");
       this.db
         .prepare("INSERT INTO retired_accounts (name, epoch) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET epoch = max(epoch, excluded.epoch)")
-        .run(name, r.epoch);
+        .run(name, r.epoch + 1);
       this.db.prepare("DELETE FROM account_keys WHERE name = ?").run(name);
       this.db.prepare("DELETE FROM accounts WHERE name = ?").run(name);
     });
@@ -266,7 +261,10 @@ export class Accounts {
       return (this.db.prepare("SELECT epoch FROM sys_users WHERE name = ?").get(name) as { epoch: number }).epoch;
     }
     const r = this.db.prepare("SELECT epoch FROM accounts WHERE name = ?").get(name) as { epoch: number } | undefined;
-    return r?.epoch ?? 0;
+    if (r) return r.epoch;
+    // a deleted name keeps the epoch it was retired at
+    const old = this.db.prepare("SELECT epoch FROM retired_accounts WHERE name = ?").get(name) as { epoch: number } | undefined;
+    return old?.epoch ?? 0;
   }
 
   identity(kind: "virt", name: string): Identity | undefined {

@@ -131,10 +131,24 @@ export class Sessions {
   create(kind: "sys" | "virt", name: string, address?: string): string {
     const raw = randomBytes(32).toString("base64url");
     const t = this.now();
+    this.prune(t);
     this.db
       .prepare("INSERT INTO sessions (id, kind, name, created, last_used, epoch, address) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(sha(raw), kind, name, t, t, this.acc.epochOf(kind, name), address ?? null);
     return raw;
+  }
+
+  /**
+   * Deletes every session past the idle or absolute limit, by time alone (no account lookup), so ended sessions and their addresses
+   * are not kept, and `endById` has few rows to look through. A valid session of a deleted account or an old epoch stays: `lookup`
+   * deletes it and `list` leaves it out. Each one deleted is told to `onEnd`.
+   */
+  private prune(t: number): void {
+    const gone = this.db.prepare("SELECT id FROM sessions WHERE ? - last_used > ? OR ? - created >= ?").all(t, this.o.idleMs, t, this.o.maxMs) as { id: string }[];
+    if (gone.length === 0) return;
+    const del = this.db.prepare("DELETE FROM sessions WHERE id = ?");
+    for (const g of gone) del.run(g.id);
+    for (const g of gone) this.ended({ key: g.id });
   }
 
   /** Every session that `peek` finds valid, newest `lastUsed` first. Read only, like `peek`. */

@@ -135,19 +135,25 @@ test("list leaves out expired sessions and those of a raised epoch, and writes n
   const { s, acc, db, at, now } = setup();
   const t0 = now();
   s.create("sys", "alice", "192.0.2.1");
-  at(t0 + 8 * H);
+  at(t0 + 8 * H - 5 * 60_000);
   const fresh = s.create("sys", "bob", "192.0.2.2");
   s.create("virt", "guest", "192.0.2.3");
   acc.bumpEpoch("virt", "guest");
+  // alice is past the idle limit; bob is valid and last used minutes ago, long enough that a lookup would write last_used
   at(t0 + 8 * H + 1);
+  const rows = () => db.db.prepare("SELECT * FROM sessions ORDER BY id").all();
+  const before = rows();
+  assert.equal(before.length, 3);
   assert.deepEqual(
     s.list().map((x) => x.name),
     ["bob"],
   );
   assert.equal(s.count("sys", "alice"), 0);
   assert.equal(s.count("virt", "guest"), 0);
-  assert.equal((db.db.prepare("SELECT count(*) AS n FROM sessions").get() as { n: number }).n, 3, "list is read only");
+  assert.equal(s.count("sys", "bob"), 1);
+  assert.deepEqual(rows(), before, "list and count are read only: no row deleted, no last_used written");
   assert.ok(s.lookup(fresh));
+  assert.notDeepEqual(rows(), before, "a lookup does write, so the check above would see it");
 });
 
 test("list shows the act-as-root end only while it is in the future", () => {
@@ -183,4 +189,46 @@ test("the address column is added to an older table", () => {
   const s = new Sessions(db, acc, { idleMs: H, maxMs: 2 * H });
   s.create("sys", "alice", "198.51.100.1");
   assert.equal(s.list()[0]?.address, "198.51.100.1");
+});
+
+test("create deletes sessions past the idle or absolute limit, and onEnd hears them", () => {
+  const { s, db, at, now } = setup(8 * H, 7 * 24 * H);
+  const heard: unknown[] = [];
+  s.onEnd((e) => heard.push(e));
+  const t0 = now();
+  const old = s.create("virt", "guest", "192.0.2.7");
+  // kept alive by lookups, so only the absolute limit ends it
+  for (let h = 4; h < 7 * 24; h += 4) {
+    at(t0 + h * H);
+    assert.ok(s.lookup(old));
+  }
+  const idle = s.create("sys", "alice", "192.0.2.8");
+  at(t0 + 7 * 24 * H);
+  s.create("sys", "bob");
+  const n = () => (db.db.prepare("SELECT count(*) AS n FROM sessions").get() as { n: number }).n;
+  assert.equal(n(), 2, "the session past the absolute limit is gone");
+  assert.deepEqual(heard, [{ key: s.keyOf(old) }]);
+  at(t0 + 7 * 24 * H + 8 * H + 1);
+  s.create("sys", "carol");
+  assert.equal(n(), 1, "the idle one and bob are gone too");
+  assert.equal(s.lookup(idle), undefined);
+  assert.equal((db.db.prepare("SELECT name FROM sessions").get() as { name: string }).name, "carol");
+});
+
+test("create removes an expired session by time alone, with no account lookup", () => {
+  const { s, db, at, now } = setup(H, 2 * H);
+  const t0 = now();
+  s.create("virt", "guest");
+  at(t0 + 2 * H);
+  s.create("sys", "alice");
+  assert.equal((db.db.prepare("SELECT count(*) AS n FROM sessions").get() as { n: number }).n, 1);
+});
+
+test("create keeps a valid session of a deleted account or an old epoch: lookup and list deal with those", () => {
+  const { s, acc, db } = setup();
+  s.create("virt", "guest");
+  acc.bumpEpoch("virt", "guest");
+  s.create("virt", "ghost");
+  s.create("sys", "alice");
+  assert.equal((db.db.prepare("SELECT count(*) AS n FROM sessions").get() as { n: number }).n, 3);
 });

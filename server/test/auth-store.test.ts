@@ -194,16 +194,21 @@ test("retired epoch", () => {
   assert.equal(acc.get("guest"), undefined);
   assert.deepEqual(acc.keys("guest"), []);
   assert.deepEqual(acc.list(), []);
-  acc.create({ name: "guest", admin: false, nodes: {} });
+  // a delete raises the epoch once more, so agents see a higher one and stop the old account's workers
   assert.equal(acc.epochOf("virt", "guest"), 3);
+  acc.create({ name: "guest", admin: false, nodes: {} });
+  // the new account starts above every epoch the old one had, also the one after the delete
+  assert.equal(acc.epochOf("virt", "guest"), 4);
   assert.deepEqual(acc.keys("guest"), []);
   assert.equal(acc.get("guest")?.passwordHash, null);
   assert.equal(acc.get("guest")?.admin, false);
-  // removed again at once: the retired epoch is the current one, and the next name starts above it
+  // removed again at once: the next name starts above the epoch kept after that delete
   acc.remove("guest");
+  assert.equal(acc.epochOf("virt", "guest"), 5);
   acc.create({ name: "guest", admin: false, nodes: {} });
-  assert.equal(acc.epochOf("virt", "guest"), 4);
+  assert.equal(acc.epochOf("virt", "guest"), 6);
   assert.throws(() => acc.remove("ghost"), (e: unknown) => e instanceof AccountError && e.message === "no such account");
+  assert.equal(acc.epochOf("virt", "ghost"), 0, "a name never made has epoch 0");
 });
 
 test("retired epoch survives a restart", () => {
@@ -217,8 +222,41 @@ test("retired epoch survives a restart", () => {
   db1.close();
   const db2 = new AuthDb(file);
   const a2 = new Accounts(db2);
-  a2.create({ name: "guest", admin: false, nodes: {} });
   assert.equal(a2.epochOf("virt", "guest"), 2);
+  a2.create({ name: "guest", admin: false, nodes: {} });
+  assert.equal(a2.epochOf("virt", "guest"), 3);
   db2.close();
   fs.rmSync(d, { recursive: true, force: true });
+});
+
+test("remove and create inside an open transaction roll back with it", () => {
+  const db = new AuthDb(":memory:");
+  const acc = new Accounts(db);
+  acc.create({ name: "guest", password: "p", admin: false, nodes: {} });
+  acc.addKey("guest", edKey().line);
+  db.db.exec("BEGIN IMMEDIATE");
+  acc.remove("guest");
+  acc.create({ name: "other", admin: false, nodes: {} });
+  assert.equal(db.db.isTransaction, true, "the caller's transaction is still open");
+  db.db.exec("ROLLBACK");
+  assert.ok(acc.get("guest"), "the account is still there");
+  assert.equal(acc.keys("guest").length, 1);
+  assert.equal(acc.get("other"), undefined);
+  assert.equal(acc.epochOf("virt", "guest"), 0);
+  // and committed, the change stands
+  db.db.exec("BEGIN IMMEDIATE");
+  acc.remove("guest");
+  db.db.exec("COMMIT");
+  assert.equal(acc.get("guest"), undefined);
+});
+
+test("a failed remove inside an open transaction leaves the caller's earlier writes", () => {
+  const db = new AuthDb(":memory:");
+  const acc = new Accounts(db);
+  db.db.exec("BEGIN IMMEDIATE");
+  acc.create({ name: "first", admin: false, nodes: {} });
+  assert.throws(() => acc.remove("ghost"), AccountError);
+  assert.equal(db.db.isTransaction, true);
+  db.db.exec("COMMIT");
+  assert.ok(acc.get("first"));
 });
