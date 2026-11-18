@@ -235,7 +235,11 @@ export class Sessions {
   }
 
   /** `asRootUntil` is the stored end of the act-as-root switch, as it is (the caller decides whether it still holds). */
-  lookup(raw: string): SessionRecord | undefined {
+  /**
+   * `touch: false` leaves `last_used` as it is: the gate then calls `touch` only once it admits the request, so a request it refuses
+   * (a Tailscale session used from outside the tailnet) does not keep the session alive.
+   */
+  lookup(raw: string, o: { touch?: boolean } = {}): SessionRecord | undefined {
     const id = sha(raw);
     const r = this.db
       .prepare("SELECT kind, name, created, last_used, epoch, as_root_until, method, tailnet_subject, tailnet_login, tailnet_node FROM sessions WHERE id = ?")
@@ -250,8 +254,14 @@ export class Sessions {
     if (t - r.last_used > this.o.idleMs || t - r.created >= this.o.maxMs) return gone();
     if (r.kind === "virt" && !this.acc.get(r.name)) return gone();
     if (this.acc.epochOf(r.kind, r.name) > r.epoch) return gone();
-    if (t - r.last_used >= TOUCH_MS) this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ?").run(t, id);
+    if (o.touch !== false && t - r.last_used >= TOUCH_MS) this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ?").run(t, id);
     return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}), ...howOf(r) };
+  }
+
+  /** Writes the session's last use now (at most once a minute, as `lookup` does). An unknown session is left as it is. */
+  touch(raw: string): void {
+    const t = this.now();
+    this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ? AND ? - last_used >= ?").run(t, sha(raw), t, TOUCH_MS);
   }
 
   /**

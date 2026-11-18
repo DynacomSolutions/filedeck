@@ -32,7 +32,7 @@ import { TailnetLinks } from "./auth/tailnet-links.ts";
 import { currentUser, userContext } from "./auth/context.ts";
 import { USER_HEADER } from "./auth/identity.ts";
 import { LiveStreams } from "./auth/streams.ts";
-import { markArrival, registerAuth, registerAuthOff, sessionKeyOf, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
+import { markArrival, registerAuth, registerAuthOff, sessionKeyOf, sessionMethodOf, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
 import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
@@ -99,6 +99,8 @@ const END_ROOT_JOBS_MS = 3_000;
 const ROOT_CALLS_WAIT_MS = 2_000;
 /** How long, after the answer, it still waits for such calls before it lists the jobs once more; the agents' own end covers the rest. */
 const ROOT_CALLS_LATE_MS = 5 * 60_000;
+/** The longest an event stream of a Tailscale session stays open before the browser has to reconnect through the gate (its binding check). */
+const TAILNET_STREAM_MS = 60_000;
 
 /**
  * The agent calls made under act as root that have not settled yet (no answer head, no error), per switch: the account and the
@@ -735,7 +737,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
         // gave the identity the switch, so the agent call may have carried it: the stream counts as one, and track ends it at once if the
         // switch is already gone.
         const asRoot = id.kind === "sys" && id.asRootUntil !== undefined ? { until: id.asRootUntil, ok: () => asRootOk(id) } : undefined;
-        return app.streams.track(session, id.kind, id.name, out, { abort: () => upstream.abort(), asRoot, endsAt: auth?.sessions.endsAt(session) });
+        // a Tailscale session's binding is checked only by the gate: its stream ends within a minute, and the browser's reconnect goes
+        // through the gate again (a tag taken off the device, say, then ends the session)
+        const absolute = auth?.sessions.endsAt(session);
+        const endsAt = sessionMethodOf(c) === "tailscale" ? Math.min(absolute ?? Infinity, (opts?.now ?? Date.now)() + TAILNET_STREAM_MS) : absolute;
+        return app.streams.track(session, id.kind, id.name, out, { abort: () => upstream.abort(), asRoot, endsAt });
       }
       return out;
     } catch (e) {

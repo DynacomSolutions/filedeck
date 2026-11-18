@@ -19,7 +19,12 @@ export type TailnetIdentity = {
   address?: string;
   source: "socket" | "headers";
 };
-export type TailnetAnswer = TailnetIdentity | { none: true } | { unavailable: true };
+/**
+ * `none` with `node`: whois knows the device (its stable id) but it has no valid login and no valid tag, for example a tagged device whose
+ * last tag was taken off. A session bound to that device ends then; a plain `none` (not a tailnet request, or a 404) keeps it.
+ */
+export type TailnetNone = { none: true; node?: { stableId: string } };
+export type TailnetAnswer = TailnetIdentity | TailnetNone | { unavailable: true };
 
 const NONE = Object.freeze({ none: true as const });
 const UNAVAILABLE = Object.freeze({ unavailable: true as const });
@@ -138,7 +143,19 @@ function occurrences(c: Context, name: string): number {
   return v === null ? 0 : v.includes(",") ? 2 : 1;
 }
 
-type Whois = TailnetIdentity | typeof NONE;
+type Whois = TailnetIdentity | TailnetNone;
+
+/**
+ * What the sources read from a request, taken in one go (`TailnetSource.inputOf`): the TCP peer, the X-Forwarded-For chain and the
+ * login and name headers with how often each came. `readTailnet` takes it before any later middleware runs, so none of them can change
+ * the identity, and the whois call can still wait until something asks.
+ */
+export type TailnetInput = {
+  peer: string | undefined;
+  forwardedFor: string | null;
+  login: { count: number; value: string | null };
+  name: { count: number; value: string | null };
+};
 
 /** The source the hub uses, its listed proxies, and a 10-second cache of whois answers per address. */
 export class TailnetSource {
@@ -176,30 +193,52 @@ export class TailnetSource {
     this.log = o.log ?? ((s) => console.warn(s));
   }
 
+  /** What the sources need from the request, read now (see `TailnetInput`). */
+  inputOf(c: Context): TailnetInput {
+    const h = c.req.raw.headers;
+    return {
+      peer: peerOf(c),
+      forwardedFor: h.get("x-forwarded-for"),
+      login: { count: occurrences(c, "tailscale-user-login"), value: h.get("tailscale-user-login") },
+      name: { count: occurrences(c, "tailscale-user-name"), value: h.get("tailscale-user-name") },
+    };
+  }
+
   /** The identity of this request. Never throws. */
   async identify(c: Context): Promise<TailnetAnswer> {
+    let input: TailnetInput;
+    try {
+      input = this.inputOf(c);
+    } catch {
+      return this.mode === "socket" ? UNAVAILABLE : NONE;
+    }
+    return this.identifyInput(input);
+  }
+
+  /** The identity of a request from what `inputOf` read. Never throws. */
+  async identifyInput(input: TailnetInput): Promise<TailnetAnswer> {
     try {
       if (this.mode === null) return NONE;
-      const peer = peerOf(c);
+      const peer = input.peer;
       if (!peer || !this.proxies.has(peer)) return NONE; // only the TCP peer decides, never a header
-      return this.mode === "headers" ? this.fromHeaders(c) : await this.fromSocket(c);
+      return this.mode === "headers" ? this.fromHeaders(input) : await this.fromSocket(input);
     } catch {
       return this.mode === "socket" ? UNAVAILABLE : NONE;
     }
   }
 
-  private fromHeaders(c: Context): TailnetAnswer {
-    if (occurrences(c, "tailscale-user-login") !== 1) return NONE;
-    const login = cleanLogin(c.req.raw.headers.get("tailscale-user-login") ?? "");
+  private fromHeaders(input: TailnetInput): TailnetAnswer {
+    if (input.login.count !== 1) return NONE;
+    const login = cleanLogin(input.login.value ?? "");
     if (!login) return NONE;
-    const rawName = occurrences(c, "tailscale-user-name") === 1 ? c.req.raw.headers.get("tailscale-user-name") : null;
+    const rawName = input.name.count === 1 ? input.name.value : null;
     const displayName = rawName ? cleanName(decodeWords(rawName)) : undefined;
     return { login, ...(displayName ? { displayName } : {}), tags: [], source: "headers" };
   }
 
-  private async fromSocket(c: Context): Promise<TailnetAnswer> {
+  private async fromSocket(input: TailnetInput): Promise<TailnetAnswer> {
     // the address the listed proxy wrote: the last entry, whatever FILEDECK_TRUSTED_PROXIES says
-    const chain = c.req.raw.headers.get("x-forwarded-for");
+    const chain = input.forwardedFor;
     const last = chain ? hopAddress(chain.split(",").at(-1)) : undefined;
     const addr = last ? bareAddress(last) : undefined;
     if (!addr || !TAILNET.check(addr, family(addr))) return NONE;
@@ -264,7 +303,7 @@ export class TailnetSource {
       }
       return UNAVAILABLE;
     }
-    const answer: Whois = r.status === 404 ? NONE : (parseWhois(r.body, addr) ?? NONE);
+    const answer: Whois = r.status === 404 ? NONE : parseWhois(r.body, addr);
     this.cache.delete(addr);
     this.cache.set(addr, { at: this.now(), answer });
     while (this.cache.size > this.maxCache) this.cache.delete(this.cache.keys().next().value!);
@@ -328,24 +367,25 @@ export class TailnetSource {
 const obj = (v: unknown): Record<string, unknown> | undefined => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
-/** The identity in a whois answer, or undefined when it has neither a valid login nor a valid tag. */
-function parseWhois(body: Record<string, unknown>, address: string): TailnetIdentity | undefined {
+/** The identity in a whois answer; `none` (with the device's stable id when it has a clean one) when it has neither a valid login nor a valid tag. */
+function parseWhois(body: Record<string, unknown>, address: string): Whois {
   const user = obj(body.UserProfile);
   const node = obj(body.Node);
   const loginName = str(user?.LoginName);
   const login = loginName !== undefined ? cleanLogin(loginName) : null;
   const tagList = Array.isArray(node?.Tags) ? (node.Tags as unknown[]) : [];
   const tags = [...new Set(tagList.map((t) => (typeof t === "string" ? cleanTag(t) : null)).filter((t): t is string => t !== null))].sort();
-  if (!login && tags.length === 0) return undefined;
+  const stableId = str(node?.StableID);
+  const cleanId = stableId !== undefined && stableId !== "" && cleanName(stableId) === stableId ? stableId : undefined;
+  if (!login && tags.length === 0) return cleanId ? { none: true, node: { stableId: cleanId } } : NONE;
   const displayName = login ? cleanName(str(user?.DisplayName) ?? "") : undefined;
   const name = str(node?.Name);
-  const stableId = str(node?.StableID);
   const nodeName = name !== undefined ? cleanName(name) : undefined;
   return {
     ...(login ? { login } : {}),
     ...(displayName ? { displayName } : {}),
     tags,
-    ...(nodeName && stableId && cleanName(stableId) === stableId ? { node: { name: nodeName, stableId } } : {}),
+    ...(nodeName && cleanId ? { node: { name: nodeName, stableId: cleanId } } : {}),
     address,
     source: "socket",
   };
@@ -367,7 +407,7 @@ const isServeHeader = (name: string): boolean => {
  * node server build its full Request, which copies the headers as they are then, and the copy would keep them.
  */
 export function stripTailnetHeaders(): MiddlewareHandler {
-  return async (c, next) => {
+  return named("stripTailnetHeaders", async (c, next) => {
     const h = c.req.raw.headers;
     const names: string[] = [];
     h.forEach((_v, k) => {
@@ -379,7 +419,13 @@ export function stripTailnetHeaders(): MiddlewareHandler {
       for (const k of Object.keys(incoming.headers)) if (isServeHeader(k)) delete incoming.headers[k];
     }
     await next();
-  };
+  });
+}
+
+/** `fn` with a stable name, so a test can check the order in which the hub mounts its middleware. */
+function named<T extends (...a: never[]) => unknown>(name: string, fn: T): T {
+  Object.defineProperty(fn, "name", { value: name });
+  return fn;
 }
 
 /** The context key of a request's tailnet identity (`readTailnet`). */
@@ -392,14 +438,22 @@ const KEY = "tailnet";
  * tailscaled. With no source nothing is read.
  */
 export function readTailnet(src: TailnetSource | undefined): MiddlewareHandler {
-  return async (c, next) => {
+  return named("readTailnet", async (c, next) => {
     if (src && src.mode !== null) {
-      let p: Promise<TailnetAnswer> | undefined = src.mode === "headers" ? Promise.resolve(await src.identify(c)) : undefined;
-      const get = () => (p ??= src.identify(c));
+      // the peer, X-Forwarded-For and the headers are read now, so no later middleware can change the identity
+      let input: TailnetInput | undefined;
+      try {
+        input = src.inputOf(c);
+      } catch {
+        input = undefined;
+      }
+      const ask = (): Promise<TailnetAnswer> => (input ? src.identifyInput(input) : Promise.resolve(src.mode === "socket" ? UNAVAILABLE : NONE));
+      let p: Promise<TailnetAnswer> | undefined = src.mode === "headers" ? Promise.resolve(await ask()) : undefined;
+      const get = () => (p ??= ask());
       c.set(KEY as never, get as never);
     }
     await next();
-  };
+  });
 }
 
 /** The identity `readTailnet` read for this request (asked once, shared); undefined when no source is configured. */

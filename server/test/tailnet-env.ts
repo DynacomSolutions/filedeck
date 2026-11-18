@@ -84,7 +84,7 @@ export function fakeSystem(answer: (name: string) => "yes" | "no" | "refused" = 
 
 export type Mode = "headers" | "socket";
 
-export async function rig(mode: Mode | null, o: { env?: Record<string, string>; system?: SystemAuth; auth?: boolean } = {}) {
+export async function rig(mode: Mode | null, o: { env?: Record<string, string>; system?: SystemAuth; auth?: boolean; streamCheckMs?: number } = {}) {
   const clock = { t: Date.now() };
   const lines: string[] = [];
   const api = mode === "socket" ? await fakeLocalApi() : undefined;
@@ -103,7 +103,7 @@ export async function rig(mode: Mode | null, o: { env?: Record<string, string>; 
     ...o.env,
   };
   const sys = o.system ?? fakeSystem().system;
-  const h = createHub(loadConfig(env as never), undefined, (l) => lines.push(l), { now: () => clock.t, system: sys });
+  const h = createHub(loadConfig(env as never), undefined, (l) => lines.push(l), { now: () => clock.t, system: sys, ...(o.streamCheckMs ? { streamCheckMs: o.streamCheckMs } : {}) });
   closers.push(() => h.close());
   /** The headers source's devices (the socket source's live in the fake LocalAPI). */
   const headerDevices = new Map<string, Dev>();

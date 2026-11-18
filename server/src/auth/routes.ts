@@ -90,6 +90,9 @@ export interface AuthDeps {
  */
 export const sessionKeyOf = (c: Context): string | undefined => c.get("authSession" as never) as string | undefined;
 
+/** How the session the current request was admitted with was started (`password`, `key`, `tailscale`), when known. */
+export const sessionMethodOf = (c: Context): string | undefined => (c.get("authHow" as never) as { method?: string } | undefined)?.method;
+
 /** Notes when the request arrived, so the floor on failed sign-ins counts the time spent before the route. Put it first. */
 export const markArrival = (): MiddlewareHandler => async (c, next) => {
   c.set("authArrival" as never, performance.now() as never);
@@ -158,13 +161,15 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   /**
    * The binding of a Tailscale session (spec decision 2), checked on every request it makes: the request's identity (through the
    * 10-second whois cache) must resolve again to the session's account and subject, with the same login and, when the session has one,
-   * the same device. `unavailable` (the source cannot answer) and `none` (the request did not come over the tailnet) keep the session;
-   * anything else ends it, with the reason for the audit line (`changed`, or a refusal of `resolve`).
+   * the same device. `unavailable` (the source cannot answer) and `none` (the request did not come over the tailnet, or whois does not
+   * know the address) keep the session; anything else ends it, with the reason for the audit line (`changed`, or a refusal of
+   * `resolve`; `unlinked` also when whois knows the session's device but it has no valid login or tag).
    */
   const binding = async (c: Context, s: SessionRecord): Promise<"ok" | "unavailable" | "none" | { reason: string }> => {
     const a = (await tailnetOf(c)) ?? NO_IDENTITY;
     if ("unavailable" in a) return "unavailable";
-    if ("none" in a) return "none";
+    // whois knows the session's own device, but it has no valid login or tag any more (its last tag was taken off): the session ends
+    if ("none" in a) return a.node !== undefined && s.tailnetNode !== undefined && a.node.stableId === s.tailnetNode ? { reason: "unlinked" } : "none";
     const r = deps.links ? resolve(a, deps.links) : ({ ok: false, reason: "unlinked" } as const);
     if (!r.ok) return { reason: r.reason };
     const same =
@@ -183,7 +188,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const sessionIdentity = async (c: Context): Promise<Identity | "unavailable" | undefined> => {
     const raw = getCookie(c, COOKIE);
     if (!raw) return undefined;
-    const s = sessions.lookup(raw);
+    // (last_used is written only once the request is admitted below)
+    const s = sessions.lookup(raw, { touch: false });
     if (!s) return undefined;
     if (s.method === "tailscale") {
       const b = await binding(c, s);
@@ -201,6 +207,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     }
     const id0 = s.kind === "virt" ? accounts.identity("virt", s.name) : undefined;
     if (s.kind === "virt" && !id0) return undefined;
+    sessions.touch(raw);
     c.set("authSession" as never, sessions.keyOf(raw) as never);
     c.set("authHow" as never, { method: s.method, tailnet: s.method === "tailscale" ? s.tailnetSubject : undefined } as never);
     if (id0) return id0;
@@ -379,7 +386,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
 
   /**
    * Sign in with Tailscale (spec decisions 1, 3, 5 and 9): HTTPS, the request's identity (503 when the source cannot answer; not counted),
-   * the sign-in limiter (name key `tailnet:<login, else the sorted tags>`), `resolve`, and for a system user the machines (root never,
+   * the sign-in limiter (the login, else the sorted tags, in the limiter's `tailnet` family), `resolve`, and for a system user the machines (root never,
    * not even asked). Every refusal is the same 401 `sign-in failed` after the floor; the audit line says why.
    */
   app.post("/api/auth/login-tailscale", async (c) => {
@@ -400,11 +407,12 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
         }
       : sourcePart();
     setAuditTailnet(c, seen);
-    const key = `tailnet:${id ? (id.login ?? id.tags.join(",")) : ""}`;
+    // (the login, else the sorted tags, in the limiter's tailnet family: a name typed at the password sign-in cannot reach these keys)
+    const key = id ? (id.login ?? id.tags.join(",")) : "";
     const ip = clientOf(c).ip ?? "";
-    const lim = limiter.check(key, ip);
+    const lim = limiter.check(key, ip, "tailnet");
     if (!lim.ok) return tooMany(c, lim.retryAfterMs);
-    const attempt = limiter.reserve(key, ip);
+    const attempt = limiter.reserve(key, ip, "tailnet");
     const refuse = (reason: string, accounts?: string[]) => {
       setAuditTailnet(c, { ...seen, reason, ...(accounts ? { accounts } : {}) });
       return failed(c);

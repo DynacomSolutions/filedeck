@@ -167,8 +167,9 @@ test("unlinked: the same failure after the floor, the reason in the audit line, 
     );
     const sixth = await r.req("/api/auth/login-tailscale", { method: "POST", addr: "100.64.1.5" });
     assert.equal(sixth.status, 429, mode);
-    assert.equal(r.h.auth!.limiter.check("tailnet:bob@github", "203.0.113.7").ok, false, "the name key is tailnet:<login>");
+    assert.equal(r.h.auth!.limiter.check("bob@github", "203.0.113.7", "tailnet").ok, false, "the key is the login, in the tailnet family");
     assert.equal(r.h.auth!.limiter.check("bob@github", "203.0.113.7").ok, true, "a password sign-in name is another key");
+    assert.equal(r.h.auth!.limiter.check("tailnet:bob@github", "203.0.113.7").ok, true, "and so is a name that spells the tailnet key");
   }
 });
 
@@ -237,7 +238,7 @@ test("socket down at sign-in: 503, not counted as a failure", async () => {
     assert.equal(res.status, 503);
     assert.deepEqual(await res.json(), { error: "tailnet identity unavailable" });
   }
-  assert.equal(r.h.auth!.limiter.check("tailnet:", ADDR).ok, true);
+  assert.equal(r.h.auth!.limiter.check("", ADDR, "tailnet").ok, true);
 });
 
 test("binding: the same login is admitted; another login ends the session; no identity keeps it; unavailable keeps it", async () => {
@@ -300,14 +301,29 @@ test("tag set changes: a tag taken off ends the session within 10 s; a conflicti
   r.pastCache();
   assert.equal((await r.req("/api/nodes", { cookie: c })).status, 401);
   assert.equal(r.h.auth!.sessions.list().length, 0);
-  // the device's last tag taken off: whois then gives no identity at all, which is "none" (as for a device that left the tailnet), so
-  // every request is 401 while it lasts
+  // the device's last tag taken off: whois knows the device but gives no identity; it is the session's device, so the session ends,
+  // and the tag put back does not bring the old cookie back
   r.devices.set(ADDR, { tags: ["tag:ci"] });
   r.pastCache();
   c = await r.signIn();
   r.devices.set(ADDR, { tags: [] });
   r.pastCache();
+  const last = await r.req("/api/auth/as-root", { method: "DELETE", cookie: c });
+  assert.equal(last.status, 401);
+  assert.equal(r.h.auth!.sessions.list().length, 0, "the session is gone");
+  assert.deepEqual(r.audits("/api/auth/as-root").at(-1)?.tailnet, { subject: "tag:ci", source: "socket", reason: "unlinked" });
+  r.devices.set(ADDR, { tags: ["tag:ci"] });
+  r.pastCache();
+  assert.equal((await r.req("/api/nodes", { cookie: c })).status, 401, "the old cookie stays out");
+  // the device gone from the tailnet (404): 401, but the session is kept, as for a request that came another way
+  c = await r.signIn();
+  r.devices.delete(ADDR);
+  r.pastCache();
   assert.equal((await r.req("/api/nodes", { cookie: c })).status, 401);
+  assert.equal(r.h.auth!.sessions.list().length, 1);
+  r.devices.set(ADDR, { tags: ["tag:ci"] });
+  r.pastCache();
+  assert.equal((await r.req("/api/nodes", { cookie: c })).status, 200);
   r.h.auth!.sessions.endAll("virt", "ci");
   // a linked tag of another account added to the device
   r.devices.set(ADDR, { tags: ["tag:ci"] });
@@ -534,4 +550,103 @@ test("auth off: no tailnet routes, me says auth false, and the header reaches a 
   } finally {
     await h.close();
   }
+});
+
+test("limiter families: password attempts with the name tailnet:<login> do not block that login's Tailscale sign-in", async () => {
+  const r = await rig("headers");
+  guest(r.h);
+  link(r.h, "virt", "guest", "alice@github");
+  r.devices.set(ADDR, { login: "alice@github" });
+  const tries = await Promise.all(
+    [1, 2, 3, 4, 5, 6].map((i) => r.req("/api/auth/login", { method: "POST", addr: `100.64.9.${i}`, body: { name: "tailnet:alice@github", password: "x" } })),
+  );
+  assert.ok(tries.some((t) => t.status === 429) || tries.every((t) => t.status === 401));
+  assert.equal(r.h.auth!.limiter.check("tailnet:alice@github", "203.0.113.7").ok, false, "that password name is blocked now");
+  const res = await r.req("/api/auth/login-tailscale", { method: "POST" });
+  assert.equal(res.status, 200, "alice's Tailscale sign-in is not");
+});
+
+test("event streams of a Tailscale session go back through the gate at least once a minute; a password session's stay", async () => {
+  // a fake agent with a change feed that stays open
+  const open = new Set<http.ServerResponse>();
+  const agent = http.createServer((req, res) => {
+    if ((req.url ?? "").startsWith("/api/events")) {
+      open.add(res);
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+      res.write(": open\n\n");
+      res.on("close", () => open.delete(res));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((res) => agent.listen(0, "127.0.0.1", res));
+  try {
+    const port = (agent.address() as AddressInfo).port;
+    const r = await rig("socket", { env: { NODES: `t=http://127.0.0.1:${port}` }, streamCheckMs: 50 });
+    r.h.auth!.accounts.create({ name: "ci", admin: false, nodes: { t: { runAs: "nobody", grants: [{ path: "/", write: false }] } } });
+    r.h.auth!.accounts.create({ name: "guest", password: "pw-guest", admin: false, nodes: { t: { runAs: "nobody", grants: [{ path: "/", write: false }] } } });
+    link(r.h, "virt", "ci", "tag:ci");
+    r.devices.set(ADDR, { tags: ["tag:ci"] });
+    const c = await r.signIn();
+    const pw = await r.req("/api/auth/login", { method: "POST", addr: "100.64.5.5", body: { name: "guest", password: "pw-guest" } });
+    const pc = (pw.headers.get("set-cookie") ?? "").split(";")[0];
+    const ts = await r.req("/api/nodes/t/api/events?path=/", { cookie: c, headers: { accept: "text/event-stream" } });
+    const ps = await r.req("/api/nodes/t/api/events?path=/", { cookie: pc, addr: "100.64.5.5", headers: { accept: "text/event-stream" } });
+    assert.equal(ts.status, 200);
+    assert.equal(ps.status, 200);
+    assert.equal(r.h.streams!.size(), 2);
+    // the tag is taken off: no request comes, but the stream ends once its minute is up
+    r.devices.set(ADDR, { tags: ["tag:web"] });
+    r.clock.t += 30_000;
+    await new Promise((res) => setTimeout(res, 200));
+    assert.equal(r.h.streams!.size(), 2, "within the minute it stays");
+    r.clock.t += 31_000;
+    const end = Date.now() + 5_000;
+    while (r.h.streams!.size() !== 1 && Date.now() < end) await new Promise((res) => setTimeout(res, 20));
+    assert.equal(r.h.streams!.size(), 1, "the Tailscale stream ended; the password one stays");
+    // reconnecting goes through the gate, which ends the session
+    const again = await r.req("/api/nodes/t/api/events?path=/", { cookie: c, headers: { accept: "text/event-stream" } });
+    assert.equal(again.status, 401);
+    await ts.body?.cancel().catch(() => undefined);
+    await ps.body?.cancel().catch(() => undefined);
+  } finally {
+    for (const o of open) o.destroy();
+    agent.closeAllConnections();
+    agent.close();
+  }
+});
+
+test("a cookie used only from outside the tailnet does not stay alive: it ends at the idle limit", async () => {
+  const r = await rig("headers", { env: { FILEDECK_SESSION_IDLE_SECONDS: "600" } });
+  guest(r.h);
+  link(r.h, "virt", "guest", "alice@github");
+  r.devices.set(ADDR, { login: "alice@github" });
+  const c = await r.signIn();
+  for (let i = 0; i < 4; i++) {
+    r.clock.t += 200_000;
+    assert.equal((await r.req("/api/nodes", { cookie: c, peer: "192.0.2.9" })).status, 401);
+  }
+  // 800 s since the last admitted request: past the 600 s idle limit
+  assert.equal((await r.req("/api/nodes", { cookie: c })).status, 401);
+  assert.equal(r.h.auth!.sessions.list().length, 0);
+  // an admitted request does keep it alive
+  const c2 = await r.signIn();
+  for (let i = 0; i < 4; i++) {
+    r.clock.t += 200_000;
+    assert.equal((await r.req("/api/nodes", { cookie: c2 })).status, 200);
+  }
+});
+
+test("mount order: readTailnet right after trustProxies, stripTailnetHeaders right after it, both before webHeaders, requestGuard and audit", async () => {
+  const r = await rig("headers");
+  const names = r.h.routes.filter((x) => x.path === "/*" && x.method === "ALL").map((x) => x.handler.name);
+  const at = (n: string) => {
+    const i = names.indexOf(n);
+    assert.ok(i >= 0, `${n} is mounted (${names.join(", ")})`);
+    return i;
+  };
+  assert.equal(at("readTailnet"), at("trustProxies") + 1);
+  assert.equal(at("stripTailnetHeaders"), at("readTailnet") + 1);
+  for (const later of ["webHeaders", "requestGuard", "audit"]) assert.ok(at(later) > at("stripTailnetHeaders"), later);
 });

@@ -111,9 +111,13 @@ export function adminBody(v: unknown): Record<string, unknown> | undefined {
  * is believed only to that depth; with none, a client that talks to the process directly cannot choose the address that is
  * recorded (or used as a key) by sending a header of its own. The count reaches `clientOf` through the context (`trustProxies`).
  */
-export const trustProxies = (hops: number): MiddlewareHandler => async (c, next) => {
-  c.set("trustedProxies" as never, hops as never);
-  await next();
+export const trustProxies = (hops: number): MiddlewareHandler => {
+  const mw: MiddlewareHandler = async (c, next) => {
+    c.set("trustedProxies" as never, hops as never);
+    await next();
+  };
+  Object.defineProperty(mw, "name", { value: "trustProxies" }); // (a stable name: a test checks the hub's mount order)
+  return mw;
 };
 
 /** One hop of a forwarded chain as an IP address: a port and the brackets of an IPv6 address are removed; anything that is not an address gives undefined. */
@@ -215,7 +219,7 @@ function tailnetPart(c: import("hono").Context): { tailnet?: AuditTailnet } {
 }
 
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {
-  return async (c, next) => {
+  const mw: MiddlewareHandler = async (c, next) => {
     const m = c.req.method;
     const p = c.req.path;
     // every admin call is written, whatever its method: reading the accounts and sessions is recorded too
@@ -260,4 +264,6 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
       }),
     );
   };
+  Object.defineProperty(mw, "name", { value: "audit" }); // (a stable name: a test checks the hub's mount order)
+  return mw;
 }

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { trustProxies } from "../src/audit.ts";
-import { cleanLogin, cleanTag, ProxyList, stripTailnetHeaders, TailnetSource, type TailnetAnswer } from "../src/auth/tailnet.ts";
+import { cleanLogin, cleanTag, ProxyList, readTailnet, stripTailnetHeaders, tailnetOf, TailnetSource, type TailnetAnswer } from "../src/auth/tailnet.ts";
 
 const LISTED = "127.0.0.1";
 
@@ -249,7 +249,8 @@ test("socket refusals: outside the tailnet ranges, 404, nothing valid, a peer no
     assert.deepEqual(await ask(app, LISTED, { "X-Forwarded-For": "100.64.0.1" }), { none: true }, "404");
     assert.equal(api.calls.length, 1);
     reply = whois("not a login", ["tag:Bad_Name", "server"]);
-    assert.deepEqual(await ask(app, LISTED, { "X-Forwarded-For": "100.127.255.254" }), { none: true }, "no valid login and no valid tag");
+    // a node whois knows, with no valid login and no valid tag: none, with the node's stable id (a session bound to it then ends)
+    assert.deepEqual(await ask(app, LISTED, { "X-Forwarded-For": "100.127.255.254" }), { none: true, node: { stableId: "nStable7CNTRL" } }, "no valid login and no valid tag");
     assert.equal(api.calls.length, 2);
     reply = whois("alice@github");
     assert.deepEqual(await ask(app, "192.0.2.9", { "X-Forwarded-For": "100.101.102.103" }), { none: true }, "peer not listed");
@@ -539,6 +540,31 @@ test("a none answer (404) is cached for 10 seconds too", async () => {
     t += 1_001;
     assert.deepEqual(await ask(app, LISTED, xff), { none: true });
     assert.equal(api.calls.length, 2);
+  } finally {
+    await api.close();
+  }
+});
+
+test("readTailnet: the peer and X-Forwarded-For are read when it runs; a later middleware cannot change the identity; whois stays lazy", async () => {
+  const api = await fakeLocalApi((addr) => (addr === "100.101.102.103" ? whois("alice@github") : whois("mallory@github")));
+  try {
+    const src = new TailnetSource({ socket: api.socket, headers: false, proxies: proxies() });
+    const app = new Hono();
+    app.use("*", readTailnet(src));
+    app.use("*", async (c, next) => {
+      c.req.raw.headers.set("x-forwarded-for", "100.64.0.66"); // a later middleware rewrites the chain
+      await next();
+    });
+    app.get("/lazy", (c) => c.json({ calls: api.calls.length }));
+    app.get("/who", async (c) => c.json(await tailnetOf(c)));
+    const lazy = await app.request("http://localhost/lazy", { headers: { "X-Forwarded-For": "100.101.102.103" } }, peer(LISTED) as never);
+    assert.deepEqual(await lazy.json(), { calls: 0 }, "no whois call for a request that never asks");
+    const r = await app.request("http://localhost/who", { headers: { "X-Forwarded-For": "100.101.102.103" } }, peer(LISTED) as never);
+    assert.equal(((await r.json()) as { login?: string }).login, "alice@github");
+    assert.deepEqual(
+      api.calls.map((x) => x.addr),
+      ["100.101.102.103"],
+    );
   } finally {
     await api.close();
   }

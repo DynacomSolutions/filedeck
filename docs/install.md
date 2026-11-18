@@ -70,6 +70,10 @@ Before you turn it on, let the running hub jobs (copies, moves, syncs in the Job
 
 Every change to an account signs it out and cancels its running jobs. The hub waits for the machines before it answers, up to about 11 seconds when a machine is down (8 seconds for the machines, then up to 3 seconds to cancel jobs started with "act as root"). Any ingress, proxy or client timeout in front of the hub must therefore be above 15 seconds. The chart's Mapping has no request timeout; with another ingress, check its own timeout. See [Administrators](security.md#administrators) for what each change ends.
 
+### Going back to v0.4.x
+
+A hub of v0.4.x does not know sessions started with Tailscale: it would keep such a session as a plain session, without the check of the device on each request. So before you go back to v0.4.x, end every session: in "Accounts…", tab "Signed in", end each one, or, with the hub stopped, delete the rows of the `sessions` table in the auth database (`FILEDECK_AUTH_FILE`). Everyone then signs in again.
+
 ## Vault storage
 
 > **Warning:** the vault volume holds a SQLite file shared briefly by two hub pods during a rollout. It must be block or local storage (ReadWriteOnce); never back it with NFS or SMB.
