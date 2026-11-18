@@ -1566,6 +1566,57 @@ async function verifyCompareToolbar(browser) {
   assert.deepEqual(failures, [], 'no Compare toolbar action is clipped by its panel');
 }
 
+// A phone header with a selection: the count, the actions that fit and Clear never overflow, clip or overlap, the menu button stays at the
+// left and Jobs at the right, every button is at least 44 px wide, and every action that is not shown is in the More menu.
+async function verifyPhoneSelectionHeader(browser) {
+  const failures = [];
+  for (const scheme of ['light', 'dark']) {
+    for (const [width, height] of [[320, 568], [360, 640], [390, 844], [430, 932], [844, 390]]) {
+      const { context, page } = await openPage(browser, { viewport: { width, height }, colorScheme: scheme, state: directState() });
+      const tag = `${width}x${height} ${scheme}`;
+      try {
+        const rows = page.locator('.fp.active .fp-scroll [data-path]');
+        await rows.first().waitFor({ state: 'visible' });
+        await rows.nth(0).click({ modifiers: ['Control'] });
+        await rows.nth(1).click({ modifiers: ['Control'] });
+        await page.locator('.selbar-actions').waitFor({ state: 'visible' });
+        await page.waitForTimeout(200);
+        const m = await page.evaluate(() => {
+          const box = (e) => { const r = e.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, w: r.width, h: r.height }; };
+          const hdr = document.querySelector('.site-header__inner');
+          const btns = [...hdr.querySelectorAll('button')].filter((b) => b.offsetParent !== null).map((b) => ({ label: b.getAttribute('aria-label') || b.textContent.trim(), ...box(b) }));
+          const bar = document.querySelector('.selbar');
+          return { hdr: box(hdr), hdrScroll: hdr.scrollWidth, hdrClient: hdr.clientWidth, barScroll: bar.scrollWidth, barClient: bar.clientWidth, bar: box(bar), btns, doc: document.documentElement.scrollWidth, win: window.innerWidth };
+        });
+        if (m.hdrScroll > m.hdrClient + 1) failures.push(`${tag}: header scrollWidth ${m.hdrScroll} > clientWidth ${m.hdrClient}`);
+        if (m.barScroll > m.barClient + 1) failures.push(`${tag}: selection bar scrollWidth ${m.barScroll} > clientWidth ${m.barClient}`);
+        if (m.doc > m.win + 1) failures.push(`${tag}: the page scrolls sideways`);
+        for (const b of m.btns) {
+          if (b.l < -0.5 || b.r > m.win + 0.5) failures.push(`${tag}: "${b.label}" leaves the window`);
+          if (b.w < 43.5) failures.push(`${tag}: "${b.label}" is ${b.w}px wide`);
+          if (b.t < m.hdr.t - 0.5 || b.b > m.hdr.b + 0.5) failures.push(`${tag}: "${b.label}" leaves the header`);
+        }
+        const sorted = [...m.btns].sort((a, b) => a.l - b.l);
+        for (let i = 1; i < sorted.length; i++) if (sorted[i].l < sorted[i - 1].r - 0.5) failures.push(`${tag}: "${sorted[i - 1].label}" overlaps "${sorted[i].label}"`);
+        if (sorted[0]?.label !== 'Open navigation') failures.push(`${tag}: the menu button is not at the far left (${sorted[0]?.label})`);
+        if (sorted.at(-1)?.label !== 'Jobs') failures.push(`${tag}: the Jobs button is not at the far right (${sorted.at(-1)?.label})`);
+        const shownActions = m.btns.map((b) => b.label).filter((l) => ['Copy', 'Cut', 'Download', 'Trash'].includes(l));
+        if (!m.btns.some((b) => b.label === 'Clear')) failures.push(`${tag}: Clear is not visible`);
+        await page.getByRole('button', { name: 'More selection actions' }).click();
+        const items = await page.getByRole('menu').first().getByRole('menuitem').allInnerTexts();
+        for (const a of ['Copy', 'Cut', 'Download', 'Trash']) if (!shownActions.includes(a) && !items.some((t) => t.trim().startsWith(a))) failures.push(`${tag}: "${a}" is neither shown nor in More (${items.join(' | ')})`);
+        await page.keyboard.press('Escape');
+        await page.addScriptTag({ path: axePath });
+        const ax = await page.evaluate(async (tags) => window.axe.run(document.querySelector('.site-header'), { runOnly: { type: 'tag', values: tags } }), AXE_TAGS);
+        for (const v of ax.violations) failures.push(`${tag}: axe ${v.id} on ${v.nodes.slice(0, 4).map((n) => n.target.join(' ')).join(', ')}`);
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  assert.deepEqual(failures, [], 'the phone header with a selection fits at every width');
+}
+
 // No horizontal scrolling of the document at any supported window size; the phone layout in a short window still lists files.
 async function verifyNoHorizontalOverflow(browser) {
   const sizes = [[1440, 900], [1024, 768], [768, 1024], [390, 844], [320, 568], [844, 390], [320, 256]];
@@ -2710,6 +2761,7 @@ const checks = [
   ['Compare toolbar is compact on a phone', verifyCompareToolbarCompact],
   ['a compare with skipped paths is marked incomplete', verifyCompareSkippedPaths],
   ['no horizontal overflow', verifyNoHorizontalOverflow],
+  ['phone header with a selection', verifyPhoneSelectionHeader],
   ['rows visible in a short window', verifyShortWindowRows],
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],
   ['axe-core A and AA in every view', verifyAxeViews],

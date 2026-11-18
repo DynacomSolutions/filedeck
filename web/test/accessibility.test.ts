@@ -61,3 +61,19 @@ test("narrow panel header wraps pane actions while keeping navigation and addres
   assert.match(styles, /\.fp-up, \.fp-actions button,[\s\S]*?min-width: 44px !important/);
   assert.match(styles, /\.addr-recent,[\s\S]*?min-width: 44px !important/);
 });
+
+test("active-state controls (buttons, tabs, toggles, options) set no border, underline, inset bar, ring or outline outside forced-colours", () => {
+  const active = /(\.on\b|\.marked\b|\.tab-on\b|aria-(pressed|selected|checked|current)=["']?true|aria-current=true|\.set-opt\.on)/;
+  const forbidden = /(?:^|;)\s*(?:border(?:-(?:top|right|bottom|left))?(?:-color)?\s*:\s*(?!0\b|none|transparent)[^;]+|outline\s*:\s*(?!0\b|none)[^;]+|text-decoration[^:]*:\s*[^;]*underline[^;]*)/;
+  const insetMark = /inset\s+(?:0\s+-?\d+px\s+0|-?\d+px\s+0\s+0|0\s+0\s+0\s+\d)/;
+  const offenders: string[] = [];
+  for (const [name, source] of [["accessibility.css", accessibility], ["styles.css", styles]] as const) {
+    const css = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@media\s*\(forced-colors:\s*active\)\s*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, "");
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const selectors = m[1]!.split(",").map((x) => x.trim()).filter((x) => active.test(x) && !/::|\.dot\b|\.addr-pop|\.fp\.active/.test(x));
+      if (!selectors.length) continue;
+      if (forbidden.test(m[2]!) || insetMark.test(m[2]!)) offenders.push(`${name}: ${selectors.join(", ")} { ${m[2]!.trim()} }`);
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
