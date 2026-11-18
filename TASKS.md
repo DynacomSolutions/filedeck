@@ -302,3 +302,11 @@ ETA: 2026-11-18 21:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 170 | Damaged size store heals itself with generation files; explain and fix the 16.5 GB size | done | claude-20261118-size-store-self-heal | size-store-self-heal | | 2026-11-18 21:00 ICT | One agent logs "database disk image is malformed" at every start; its store is 16.5 GB<br>Owner decision 18 Nov: Filedeck fixes it itself<br>Race review: 1 high, 1 medium, 2 low, all fixed with tests<br>16.5 GB: auto_vacuum was off, the file never shrank; new files use incremental vacuum<br>PR https://github.com/DynacomSolutions/filedeck/pull/241, merged; release v0.4.4 PR pending Released in v0.4.4. Deployed: the hq0 agent found the 16.5 GB file damaged (freelist), deleted it and moved to a new store (22 MB) with no manual step. |
+
+## 24. Size scans never wait behind unrelated walks
+A long size walk made every later du scan wait, even of unrelated folders, because the change watcher queued a broad lock behind it.
+ETA: 2026-11-19 05:00 ICT
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 178 | Watcher never queues behind a walk; metrics for queued jobs and lock waits | in_progress | claude-20261119-du-queue-stuck | du-queue-stuck | | 2026-11-19 04:00 ICT | A watcher lock on / waited behind a 2 h walk; every later du stayed queued.<br>Busy folders are marked dirty instead. |
+| 179 | Release and deploy 24.178 and add the stalled-queue alert | todo | claude-20261119-du-queue-stuck | | 24.178 | 2026-11-19 05:00 ICT | |
