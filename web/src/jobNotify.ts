@@ -55,3 +55,11 @@ export function notificationsFor(ended: HistoryEntry[], ctx: NotifyContext): Job
   const failed = list.filter((e) => e.outcome === "failed").length;
   return [{ title: failed ? `${list.length} jobs ended, ${failed} failed` : `${list.length} jobs finished`, body: list.map(line).join("\n"), tag: "filedeck-jobs" }];
 }
+
+/**
+ * The ends the page notifies itself. With Web Push on, the hub sends the ends of server jobs (also with the app closed), so the page
+ * keeps only browser uploads (`u:` keys), which run in the page and which the hub never sees.
+ */
+export function localEnds(ended: HistoryEntry[], pushOn: boolean): HistoryEntry[] {
+  return pushOn ? ended.filter((e) => e.key.startsWith("u:")) : ended;
+}

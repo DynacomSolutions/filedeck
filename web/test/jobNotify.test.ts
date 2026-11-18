@@ -54,3 +54,10 @@ test("the notification switch is off unless set, and only a boolean is kept", ()
   assert.equal(normalizeSettings({ notifyJobs: true }).notifyJobs, true);
   assert.equal(normalizeSettings({ notifyJobs: "yes" }).notifyJobs, false);
 });
+
+test("with push on, the hub notifies server jobs; the page itself only browser uploads (which the hub never sees)", async () => {
+  const { localEnds } = await import("../src/jobNotify.ts");
+  const ended = [job("o:1", "done"), job("u:2", "failed"), job("m:n1:3", "done")];
+  assert.deepEqual(localEnds(ended, false).map((e) => e.key), ["o:1", "u:2", "m:n1:3"]);
+  assert.deepEqual(localEnds(ended, true).map((e) => e.key), ["u:2"]);
+});
