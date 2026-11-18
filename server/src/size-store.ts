@@ -1273,12 +1273,17 @@ export class SizeStore {
   }
 
   /**
-   * The lock of `virtual` if no overlapping lock is held or waited for, else null. It never waits and leaves no trace when it fails,
+   * The lock of `virtual` if no overlapping lock is held or waited for, else null. It never waits and holds nothing when it fails (the try is still counted in `recentLocks`),
    * so a caller that must not queue (the watcher) never blocks the answers that come after it.
    */
   tryLock(virtual: string): (() => void) | null {
     const overlaps = (h: { path: string }) => h.path === virtual || h.path === "/" || virtual === "/" || h.path.startsWith(virtual + "/") || virtual.startsWith(h.path + "/");
-    if (this.held.some(overlaps)) return null;
+    if (this.held.some(overlaps)) {
+      // not held, but asked for: `lockedSince` tells an answer read without the lock that a change came meanwhile
+      this.recentLocks.push({ seq: ++this.lockSeq, path: virtual });
+      if (this.recentLocks.length > 256) this.recentLocks.shift();
+      return null;
+    }
     let release!: () => void;
     const h = { path: virtual, probe: false, done: new Promise<void>((r) => (release = r)), since: Date.now(), granted: true };
     this.held.push(h);
@@ -1939,7 +1944,15 @@ export class SizeStore {
         // The start folder is gone: its rows (and its share of the parent) are trimmed after this lock is released,
         // never while holding it, because that takes another lock and a job slot must not wait on one.
         release();
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") void this.applyChanged(r.virtual).catch(() => undefined);
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+          // never queue for the parent's lock (it can be "/"): a waiting lock blocks every walk asked after it. A busy parent gets a stale mark instead.
+          void this.applyChanged(r.virtual, undefined, { wait: false }).then(
+            (done) => {
+              if (!done) this.markStale(parentOf(r.virtual) || r.virtual);
+            },
+            () => undefined,
+          );
+        }
         throw e;
       }
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0, untrusted: false };

@@ -338,25 +338,52 @@ test("fanwatch: without a usable store, past maxPending the burst acts like an o
   s.done();
 });
 
-test("fanwatch: a folder whose lock is busy is recorded as dirty, never waited for, and the others are still applied", async () => {
+test("fanwatch: a folder whose lock is busy is tried again later, never waited for or marked, and the others are still applied", async () => {
   const s = setup({ plain: true });
   const calls: [string, unknown][] = [];
   const dirty: string[][] = [];
   const stale: string[] = [];
+  let free = false;
   const store = {
-    applyChanged: async (v: string, _c?: undefined, o?: { wait?: boolean }) => (calls.push([v, o]), v.endsWith("/a") ? false : true),
+    applyChanged: async (v: string, _c?: undefined, o?: { wait?: boolean }) => (calls.push([v, o]), v.endsWith("/a") && !free ? false : true),
     markStale: (v: string) => void stale.push(v),
     markDirty: async (ps: string[]) => (dirty.push(ps), true),
   };
   const w = new FanWatch(store, { helper: "fake", root: s.root, procMounts: path.join(s.root, "none"), settleMs: 5, modifyMs: 300, spawn: () => new Fake() });
   w.line(`x ${s.root}/data/a`);
   w.line(`x ${s.root}/data/b`);
-  await until(() => calls.length >= 2 && dirty.length >= 1, 30_000);
+  await until(() => calls.some(([v]) => v.endsWith("/b")) && calls.some(([v]) => v.endsWith("/a")), 30_000);
   assert.ok(calls.every(([, o]) => (o as { wait?: boolean }).wait === false), "the watcher never queues for a lock");
-  assert.deepEqual(dirty.flat(), ["/data/a"]);
+  free = true; // the walk ended: the retry applies it
+  await until(() => calls.filter(([v]) => v.endsWith("/a")).length >= 2, 30_000);
+  assert.deepEqual(dirty, [], "no dirty mark");
   assert.deepEqual(stale, []);
   w.stop();
   s.done();
+});
+
+test("fanwatch: a busy folder is noted as pending again with a due time in the future, then applied once the lock is free", async () => {
+  const f = fileStore();
+  const noted: { path: string; dueAt: number; modify: boolean }[] = [];
+  let free = false;
+  const sink = {
+    ...f.sink,
+    applyChanged: async (v: string) => (f.calls.push(v), free ? true : false),
+    notePending: async (items: { path: string; dueAt: number; modify: boolean }[], ms: number) => (noted.push(...items.map((i) => ({ ...i }))), f.st.notePending(items, ms)),
+    markDirty: async () => assert.fail("a busy folder is never marked dirty"),
+  };
+  const w = new FanWatch(sink, { ...opts, helper: "fake", spawn: () => new Fake() });
+  const t0 = Date.now();
+  w.line("x /data/a");
+  await until(() => f.calls.length >= 1, 30_000);
+  await until(() => noted.length >= 2, 30_000); // the event, then the retry
+  assert.equal(noted.at(-1)!.path, "/data/a");
+  assert.equal(noted.at(-1)!.modify, false);
+  assert.ok(noted.at(-1)!.dueAt >= t0 + 500, "due later, not at once");
+  free = true;
+  await until(() => f.calls.length >= 2, 30_000);
+  w.stop();
+  f.done();
 });
 
 function fileStore() {

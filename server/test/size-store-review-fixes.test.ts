@@ -204,8 +204,7 @@ test("scan of a folder that was removed trims its rows and its parent", async ()
   await assert.rejects(() => s.scan("/gone/p/q"));
   // the trim runs after the scan ended, climbing one locked level at a time; wait for it
   for (let i = 0; i < 100 && (await s.tree("/gone", 0, false)).entries[0]!.dirs !== 1; i++) {
-    (await s.lock("/"))();
-    await sleep(10);
+    await sleep(10); // (no lock of "/" here: the trim never queues, a lock held meanwhile would make it give up with a stale mark)
   }
   assert.equal((await s.tree("/gone/p/q", 0, false)).entries.length, 0);
   assert.equal((await s.tree("/gone", 0, false)).entries[0]!.bytes, 0);
