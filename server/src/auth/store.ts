@@ -146,8 +146,11 @@ export class Accounts {
     return this.store.db;
   }
 
-  /** Runs `fn` in one transaction, or in a savepoint of the caller's (`inTransaction`). */
-  private tx<T>(fn: () => T): T {
+  /**
+   * Runs `fn` in one transaction, or in a savepoint of the caller's (`inTransaction`). The admin routes use it to hold a check and every
+   * write of one change (accounts, keys, source grants: one database) together, with no `await` inside `fn`.
+   */
+  tx<T>(fn: () => T): T {
     return inTransaction(this.db, fn);
   }
 
