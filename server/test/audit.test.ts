@@ -161,8 +161,18 @@ test("tailnet: the login-tailscale line names the login, tags, subject and sourc
   so.devices.set(ADDR, { tags: ["tag:web", "tag:ci"] });
   const c = await so.signIn();
   assert.deepEqual(so.audits("/api/auth/login-tailscale")[0]?.tailnet, { tags: ["tag:ci", "tag:web"], subject: "tag:ci", source: "socket", node: NODE_NAME, address: ADDR });
+  // the account that the link gave is named in the sign-in line itself (a tag names a device, not a person)
+  assert.equal(hd.audits("/api/auth/login-tailscale")[0]?.user, "virt:guest");
+  assert.equal(so.audits("/api/auth/login-tailscale")[0]?.user, "virt:ci");
   assert.equal((await so.req("/api/auth/logout", { method: "POST", cookie: c })).status, 200);
   assert.deepEqual(so.audits("/api/auth/logout")[0]?.tailnet, { subject: "tag:ci", source: "socket" });
+  // a refusal names no account
+  so.devices.set(ADDR, { tags: ["tag:other"] });
+  so.pastCache();
+  assert.equal((await so.req("/api/auth/login-tailscale", { method: "POST", body: {} })).status, 401);
+  const refused = so.audits("/api/auth/login-tailscale").at(-1);
+  assert.equal(refused?.tailnet?.reason, "unlinked");
+  assert.equal(refused?.user, undefined);
   assert.ok(!so.lines.join("\n").includes(so.api!.socket));
 });
 

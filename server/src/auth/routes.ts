@@ -436,6 +436,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     } else if (!accounts.get(r.name)) return refuse("no-account");
     attempt.succeed();
     setAuditTailnet(c, { ...seen, subject: r.subject });
+    // the sign-in line names the account the link gave (the request has no account body, and a tag names a device, not a person)
+    c.set("user" as never, { kind: r.kind, name: r.name } as never);
     return signIn(c, r.kind, r.name, {
       method: "tailscale",
       tailnetSubject: r.subject,

@@ -127,7 +127,7 @@ One module, `server/src/auth/tailnet.ts`, gives `identify(c): Promise<TailnetAns
 
 ### Audit
 
-- The sign-in line of `POST /api/auth/login-tailscale` has `tailnet: {login?, tags?, subject?, source, node?, address?, reason?}` (subject: what matched; node: the device name; address: its tailnet address, socket source only; reason: decision 9, on refusals only, with `accounts` for `tag-conflict`), the status and the client address as today.
+- The sign-in line of `POST /api/auth/login-tailscale` has `tailnet: {login?, tags?, subject?, source, node?, address?, reason?}` (subject: what matched; node: the device name; address: its tailnet address, socket source only; reason: decision 9, on refusals only, with `accounts` for `tag-conflict`), the status and the client address as today. A sign-in that succeeds also has `user` (`virt:<name>` or `sys:<name>`, the account the link gave), as the lines of the session's later requests have.
 - Every audit line of a request admitted with a Tailscale session has `tailnet: {subject, source}`.
 - A 401 or 503 that the binding check gives is written with the session's subject and, for a 401 that ends the session, the reason (`changed`, or a reason of decision 9).
 - Nothing about the socket path or the raw whois answer is logged. The hub logs one line, at most once a minute, when the socket is unavailable.
@@ -166,7 +166,7 @@ With the sidecar on, the chart: runs tailscaled in userspace mode (no `NET_ADMIN
 ### Threats
 
 - **Header spoofing.** Only a request whose TCP peer is a listed proxy can have an identity. Headers from any other peer are ignored and stripped. A repeated header is refused. The listed proxy must overwrite these headers (Tailscale Serve does) and must not carry public traffic; this is the one thing the operator must get right, and the docs say it in the install section and in `docs/security.md`.
-- **Forged `X-Forwarded-For`.** The socket source takes the address only from a listed proxy's last entry, never by hop count, so a client that reaches the hub directly cannot pick an address. A listed proxy that appends the real peer (Tailscale Serve does) gives the true address.
+- **Forged `X-Forwarded-For`.** The socket source takes the address only from a listed proxy's last entry, never by hop count, so a client that reaches the hub directly cannot pick an address. A listed proxy that writes the real peer as the last entry gives the true address. Tailscale Serve (checked on a real tailnet with version 1.104) replaces the whole header with the caller's tailnet address, so an entry that the client sent never reaches the hub.
 - **Socket unavailable.** The routes answer 503 (with the `tailnet-unavailable` header) and the sign-in page says Tailscale sign-in is unavailable. Password and key sign-in work as before. There is no fallback to the headers. Tailscale sessions get 503 per request until it comes back.
 - **A tailnet address reused.** whois is asked again at most 10 seconds after the last answer; a session stores the device's stable id and ends when another device answers for the address.
 - **Tag links.** Anyone who may apply a linked tag in the tailnet's ACLs, or holds an auth key that carries it, can make a device that signs in as the linked account. The admin screen and the docs say so; a tag removed from a device ends its session within 10 seconds; tags linked to different accounts on one device refuse the sign-in instead of picking one.
