@@ -12,7 +12,7 @@ import { AccessibilityChrome } from "./AccessibilityChrome";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { installViewportTracking } from "./viewport";
 import { installSignedOutWatch, me, type Me } from "./auth";
-import { installPwa } from "./pwa";
+import { installPwa, resyncPush } from "./pwa";
 import { hubUnreachable } from "./pwaState";
 import { HubUnreachable, UpdateBanner } from "./PwaScreens";
 
@@ -63,6 +63,8 @@ function Root() {
   }, []);
   useEffect(() => {
     if (typeof view === "object" && view.auth) shownAs.current = `${view.kind}:${view.name}`;
+    // the app is shown (sign-in off, or signed in): the hub gets this browser's push subscription for this session
+    if (typeof view === "object") void resyncPush();
   }, [view]);
   if (view === "loading") return null;
   if (view === "offline") return <><HubUnreachable retry={ask} /><UpdateBanner /></>;

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import * as Ic from "lucide-react";
 import { brand } from "./brand";
-import { notifySupport, promptInstall, requestNotify, useCanInstall, type NotifySupport } from "./pwa";
+import { disablePush, enablePush, notifySupport, promptInstall, requestNotify, useCanInstall, type NotifySupport } from "./pwa";
 import { setSettings, useSettings } from "./settings";
 
 const NOTE: Record<NotifySupport, string> = {
@@ -35,11 +35,18 @@ export function AppSettings() {
     };
   }, []);
   const on = s.notifyJobs && perm === "granted";
+  /** "on": the hub notifies, also while the app is closed; "local": only while a tab is open (no push here); "" not asked yet */
+  const [push, setPush] = useState<"" | "on" | "local">("");
   const toggle = async (want: boolean) => {
-    if (!want) return setSettings({ notifyJobs: false });
+    if (!want) {
+      setSettings({ notifyJobs: false });
+      setPush("");
+      return void disablePush();
+    }
     const p = perm === "granted" ? perm : await requestNotify();
     setPerm(p);
     setSettings({ notifyJobs: p === "granted" });
+    if (p === "granted") setPush((await enablePush()) === "on" ? "on" : "local");
   };
   const Bell = on ? Ic.Bell : Ic.BellOff;
   return (
@@ -52,12 +59,15 @@ export function AppSettings() {
           <span>
             <b>Notify me when a job ends</b>
             <span className="muted" id="set-notify-help">
-              Copy, move, compress, extract, sync, compare and uploads that finish or fail while {brand.name} is in the background. Kept in this browser.
+              Copy, move, compress, extract, sync and compare jobs that finish or fail, also while {brand.name} is closed; uploads while it is open. Kept in this browser.
             </span>
           </span>
         </label>
       </div>
       {NOTE[perm] && <p className="muted" role="status">{NOTE[perm]}</p>}
+      {on && push === "local" && (
+        <p className="muted" role="status">This browser or hub cannot send notifications while {brand.name} is closed; you get them while a {brand.name} tab is open.</p>
+      )}
       {canInstall && (
         <div className="set-app-row">
           <button type="button" onClick={() => void promptInstall()}><Ic.Download aria-hidden="true" /> Install app</button>
