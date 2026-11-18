@@ -121,3 +121,7 @@ test("bar buttons draw the highlight inset and keep a thin keyboard-only focus r
   assert.match(bars, /outline:1px solid var\(--focus-ring,var\(--accent\)\)!important/);
   assert.match(bars, /\.fp-tools-side button\.tab-on::before\{inset:var\(--gap-hl\) 0 0 0;border-radius:6px 6px 0 0;background:var\(--band\)/);
 });
+
+test("buttons in the band bars draw the same inset highlight", () => {
+  assert.match(bars, /:is\(\.pv-head,\.ed-head,\.cmp-head,\.jobs-title\) :is\(button,a\.btn-a\)::before\{content:"";position:absolute;inset:var\(--gap-hl\)/);
+});

@@ -61,3 +61,17 @@
   .fp-row{height:94px;padding-top:6px}
   .fp-tools .fp-menubtn .fp-caret,.fp-tools .fp-menubtn-l{display:none}
 }
+
+/* Buttons in the other band bars (pane header, editor and Settings header, compare header, Jobs header): the same inset
+   highlight, neutral pressed fill and thin focus ring as the toolbar. The button box (hit area) is unchanged. */
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a){position:relative;isolation:isolate;background:transparent!important;box-shadow:none!important;border:0}
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a)::before{content:"";position:absolute;inset:var(--gap-hl);z-index:-1;border-radius:4px;background:transparent;pointer-events:none;transition:background var(--fast) var(--ease)}
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a):hover:not(:disabled)::before{background:var(--hl)}
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a):active:not(:disabled)::before,
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a)[aria-pressed=true]::before,
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a)[aria-expanded=true]::before,
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a).on::before{background:var(--hl-on)}
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a):focus-visible{outline:1px solid var(--focus-ring,var(--accent))!important;outline-offset:calc(-1 * var(--gap-hl))!important;border-radius:4px}
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a):active,
+:is(.pv-head,.ed-head,.cmp-head,.jobs-title) :is(button,a.btn-a):focus:not(:focus-visible){outline:0!important}
+.pv-head .pv-acts,.pv-head .pv-extra,.pv-head .pv-extra .pv-dock,.ed-head .pv-extra{gap:0}
