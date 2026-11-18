@@ -8,7 +8,7 @@ import type { Identity } from "./identity.ts";
 import { checkPassword, type Accounts, type AuthDb } from "./store.ts";
 import { sessionKey, type Sessions } from "./sessions.ts";
 import { loginMessage, parsePublicKey, verifyLogin, type Challenges } from "./sshkey.ts";
-import { RateWindow, addressKey, type LoginLimiter } from "./limiter.ts";
+import { RateWindow, addressKey, plainAddress, type LoginLimiter } from "./limiter.ts";
 import { currentUser, runAs } from "./context.ts";
 
 /**
@@ -100,12 +100,18 @@ function sysIdentity(cfg: Config, accounts: Accounts, name: string): Identity {
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
-/** The client's address for PAM (PAM_RHOST): `clientOf`'s, without a zone id; undefined over no socket. */
-const pamAddress = (c: Context): string | undefined => clientOf(c).ip?.replace(/%.*$/, "") || undefined;
+/**
+ * The client's address for PAM (PAM_RHOST): `clientOf`'s, without a zone id, and an IPv4-mapped one (an IPv4 client on a dual-stack
+ * socket) as plain IPv4, so pam_access rules for IPv4 networks match it; undefined over no socket.
+ */
+const pamAddress = (c: Context): string | undefined => {
+  const ip = clientOf(c).ip?.replace(/%.*$/, "");
+  return ip ? plainAddress(ip) : undefined;
+};
 
 function isLoopback(addr: string | undefined): boolean {
   if (!addr) return false;
-  const a = addr.toLowerCase().replace(/^::ffff:/, "");
+  const a = plainAddress(addr.replace(/%.*$/, "")).toLowerCase();
   return a === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
 }
 

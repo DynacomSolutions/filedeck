@@ -259,7 +259,7 @@ test("uid 0 on one machine asked ends the search: refused stops like fail", asyn
   }
 });
 
-test("lookup: a root route behind the agent token, strict body, a failing lookup is false", async () => {
+test("lookup: a root route behind the agent token, strict body, a failing lookup is 503", async () => {
   const lines: string[] = [];
   const logs: string[] = [];
   const accounts = withSignIn({
@@ -280,7 +280,11 @@ test("lookup: a root route behind the agent token, strict body, a failing lookup
       app.request("/api/auth/lookup", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) });
     assert.deepEqual(await (await look({ name: "carol" })).json(), { exists: true });
     for (const n of ["uid0", "gid0", "grp0"]) assert.deepEqual(await (await look({ name: n })).json(), { exists: false, refused: true }, n);
-    for (const n of ["nobody-here", "broken"]) assert.deepEqual(await (await look({ name: n })).json(), { exists: false }, n);
+    assert.deepEqual(await (await look({ name: "nobody-here" })).json(), { exists: false });
+    // a lookup that fails is no answer: 503, so the hub's presence asks again soon rather than hiding the machine
+    const broken = await look({ name: "broken" });
+    assert.equal(broken.status, 503);
+    assert.equal(((await broken.json()) as { exists?: unknown }).exists, undefined);
     assert.equal(logs.filter((l) => l.includes("broken")).length, 1, logs.join("\n"));
     assert.ok(logs.some((l) => l.includes("nss: no answer")));
     assert.equal((await look({ name: "carol" }, {})).status, 401);
@@ -432,6 +436,17 @@ test("the hub sends the client's address behind a trusted proxy, and a real agen
   const r = await fetch(`${A.url}/api/auth/password`, { method: "POST", headers: { authorization: `Bearer ${T}`, "content-type": "application/json" }, body: JSON.stringify({ name: "alice", password: PW }) });
   assert.equal(r.status, 400);
   assert.equal(A.pamCalls.length, before);
+});
+
+test("the hub sends an IPv4-mapped client address in its plain IPv4 form", async () => {
+  const h = makeHub(`a=${A.url}`);
+  seen.length = 0;
+  const mapped = { incoming: { socket: { remoteAddress: "::ffff:198.51.100.2", encrypted: true } } };
+  const r = await h.request("http://localhost/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "alice", password: PW }) }, mapped as never);
+  assert.equal(r.status, 200);
+  const pw = authRecs().filter((x) => x.path === "/api/auth/password");
+  assert.equal(pw.length, 1);
+  assert.equal(JSON.parse(pw[0]!.body).address, "198.51.100.2");
 });
 
 test("AgentSystemAuth: limits are 15 s per call and 20 s in all", () => {

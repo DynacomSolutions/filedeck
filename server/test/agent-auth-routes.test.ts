@@ -96,10 +96,14 @@ test("password route: the client's address goes to PAM as an argument; without a
     const r = await post(app, { name: "alice", password: SECRET, address });
     assert.deepEqual([r.status, await r.json()], [200, { result: "ok" }], address);
   }
+  // an IPv4-mapped address reaches PAM in its plain IPv4 form (any spelling), so pam_access rules for IPv4 networks match it
   assert.deepEqual(
     calls.map((c) => c.address),
-    ["203.0.113.7", "2001:db8::5", "::ffff:198.51.100.2"],
+    ["203.0.113.7", "2001:db8::5", "198.51.100.2"],
   );
+  calls.length = 0;
+  for (const address of ["::FFFF:198.51.100.2", "::ffff:c633:6402", "0:0:0:0:0:ffff:198.51.100.2"]) await post(app, { name: "alice", password: SECRET, address });
+  assert.deepEqual(calls.map((c) => c.address), ["198.51.100.2", "198.51.100.2", "198.51.100.2"]);
   calls.length = 0;
   for (const address of [undefined, "", "localhost", "203.0.113", "fe80::1%eth0", "1.2.3.4 -x", "-1.2.3.4", 7, ["1.2.3.4"], "a".repeat(46)]) {
     const r = await post(app, { name: "alice", password: SECRET, address });
@@ -169,6 +173,11 @@ test("sign-in lookups on the agent: the password and lookup routes share the cap
   const over = await post(app, { name: "alice", password: SECRET, address: FROM });
   assert.deepEqual([over.status, await over.json()], [200, { result: "unavailable" }]);
   assert.ok(Date.now() - t0 >= 500, "it waited in the queue first");
+  assert.equal(st.calls, 4);
+  // a lookup the cap refuses is no answer (503), never "not there", which the hub's presence would keep for minutes
+  const lookOver = await lookup();
+  assert.equal(lookOver.status, 503);
+  assert.notDeepEqual(await lookOver.json(), { exists: false });
   assert.equal(st.calls, 4);
   release();
   const answers = await Promise.all(held.map(async (x) => (await x).json()));

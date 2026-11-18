@@ -38,15 +38,26 @@ function groups6(ip: string): number[] {
   return g.map((x) => parseInt(x, 16) || 0);
 }
 
-/** The limiter key of a client address: an IPv6 address by its first 64 bits, an IPv4-mapped one (any form) as dotted IPv4. */
-export function addressKey(ip: string): string {
+/**
+ * A client address in its plain form: an IPv4-mapped IPv6 address (any spelling: `::ffff:a.b.c.d`, `::ffff:c633:6402`, the long form),
+ * as a dual-stack socket gives an IPv4 client, becomes dotted IPv4; any other string is returned as it is. The hub's limiter and
+ * loopback check, the address it sends for PAM and the agent's PAM check all use it, so a rule for an IPv4 network matches.
+ */
+export function plainAddress(ip: string): string {
   if (isIP(ip) !== 6) return ip;
   const g = groups6(ip);
   if (g.length === 8 && g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) {
     const [hi, lo] = [g[6] as number, g[7] as number];
     return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
   }
-  return g.slice(0, 4).map((x) => x.toString(16)).join(":") + "::/64";
+  return ip;
+}
+
+/** The limiter key of a client address: an IPv6 address by its first 64 bits, an IPv4-mapped one (any form) as dotted IPv4. */
+export function addressKey(ip: string): string {
+  const plain = plainAddress(ip);
+  if (isIP(plain) !== 6) return plain;
+  return groups6(plain).slice(0, 4).map((x) => x.toString(16)).join(":") + "::/64";
 }
 
 const nameKey = (name: string) => "n:" + name.slice(0, MAX_NAME);

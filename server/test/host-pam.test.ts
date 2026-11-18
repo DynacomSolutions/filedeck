@@ -230,8 +230,9 @@ const SERVICES: Record<string, string> = {
   "filedeck-test-deny": "auth required pam_deny.so\naccount required pam_deny.so\n",
 };
 /** pam_access with only local logins allowed: the file is written in the test folder (`accessFile`). */
-const ACCESS_SERVICE = (accessFile: string): Record<string, string> => ({
+const ACCESS_SERVICE = (accessFile: string, netFile: string): Record<string, string> => ({
   "filedeck-test-access": `auth required pam_permit.so\naccount required pam_access.so accessfile=${accessFile}\n`,
+  "filedeck-test-access-net": `auth required pam_permit.so\naccount required pam_access.so accessfile=${netFile}\n`,
 });
 const MOD_SERVICES = (mod: string): Record<string, string> => ({
   "filedeck-test-twice": `auth required ${mod} twice\naccount required pam_permit.so\n`,
@@ -311,7 +312,9 @@ function liveSetup() {
     assert.equal(c.status, 0, c.stderr);
     const access = path.join(tmp, "access.conf");
     fs.writeFileSync(access, "+:ALL:LOCAL\n-:ALL:ALL\n", { mode: 0o644 });
-    for (const [name, body] of Object.entries({ ...SERVICES, ...MOD_SERVICES(mod), ...ACCESS_SERVICE(access) })) {
+    const net = path.join(tmp, "access-net.conf");
+    fs.writeFileSync(net, "-:ALL:203.0.113.0/24\n+:ALL:ALL\n", { mode: 0o644 });
+    for (const [name, body] of Object.entries({ ...SERVICES, ...MOD_SERVICES(mod), ...ACCESS_SERVICE(access, net) })) {
       const f = path.join("/etc/pam.d", name);
       fs.writeFileSync(f, body, { mode: 0o644 });
       written.push(f);
@@ -360,6 +363,10 @@ live("PAM sees the client's address as PAM_RHOST: pam_access with only local log
   // no address: the old behaviour (the TTY "filedeck" is not a remote host, so LOCAL matches)
   assert.equal((await raw(built, ["filedeck-test-access", "nobody"])).code, 0);
   assert.equal(await pamFor(built, "filedeck-test-access").check("nobody", SECRET), "ok");
+  // a rule for an IPv4 network: the address as Node gives it on a dual-stack socket (IPv4-mapped) must still match it
+  assert.equal(await pamFor(built, "filedeck-test-access-net").check("nobody", SECRET, "::ffff:203.0.113.7"), "fail");
+  assert.equal(await pamFor(built, "filedeck-test-access-net").check("nobody", SECRET, "203.0.113.7"), "fail");
+  assert.equal(await pamFor(built, "filedeck-test-access-net").check("nobody", SECRET, "::ffff:198.51.100.2"), "ok");
   // an address the helper does not take is a usage error, before PAM
   for (const bad of ["host.example", "1.2.3.4;x", "", "1".repeat(46)]) assert.equal((await raw(built, ["filedeck-test-ok", "nobody", bad])).code, 64, bad);
 });

@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import type { Config } from "./config.ts";
 import { runHostHelper } from "./host-helpers.ts";
 import { validSystemName } from "./local-accounts.ts";
+import { plainAddress } from "./auth/limiter.ts";
 
 /**
  * A system user's password, checked by the machine's own PAM (sign-in on). `filedeck-pam` (server/native/host) runs once per attempt
@@ -56,10 +57,12 @@ export class HostPam {
     this.timeoutMs = o.timeoutMs ?? TIMEOUT_MS;
   }
 
-  /** `address`: the client's address, for PAM_RHOST; one that is not valid fails at once, and nothing runs. */
+  /** `address`: the client's address, for PAM_RHOST (an IPv4-mapped one as plain IPv4); one that is not valid fails at once, and nothing runs. */
   async check(name: string, password: string, address?: string): Promise<PamResult> {
     if (!validSystemName(name)) return "unknown";
     if (address !== undefined && !validClientAddress(address)) return "fail";
+    // (an IPv4 client on a dual-stack socket: PAM gets plain IPv4, so pam_access rules for IPv4 networks match; the hub does it too)
+    if (address !== undefined) address = plainAddress(address);
     let timer: NodeJS.Timeout | undefined;
     let r: { code: number | null; stderr?: string };
     // aborted when the attempt gives up: a helper that runs is killed, one that waits never starts

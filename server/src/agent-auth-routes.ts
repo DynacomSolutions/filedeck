@@ -14,12 +14,12 @@ import { signInAccount, validSystemName, type AccountResolver } from "./local-ac
  * - `POST /api/auth/key {name, publicKey, message, signature}` (`message` and `signature` base64): `{result}` from `KeyCheck` (the key
  *   listed in the user's own authorized_keys, read as the user; `refused` for uid 0, gid 0 or group 0); `unavailable` when there is no key
  *   check here or the account lookup fails.
- * - `POST /api/auth/lookup {name}`: `{exists}`; `{exists: false, refused: true}` for uid 0, gid 0 or group 0, and false for a lookup that
- *   fails (one log line). The hub
+ * - `POST /api/auth/lookup {name}`: `{exists}`; `{exists: false, refused: true}` for uid 0, gid 0 or group 0; 503 for a lookup that
+ *   fails or that the lookup cap refuses (one log line), which the hub takes as no answer and asks again soon. The hub
  *   asks it for the machines a system user may see; it never passes a client's request on to it, so its rate is the hub's.
  *
  * The agent hands these routes its `SignInLookups` as `accounts`: their lookups run before anyone is signed in, so at most 4 run at
- * once, and one that finds no place within a second fails as a failed lookup does.
+ * once, and one that finds no place within a second fails as a failed lookup does (`unavailable`, or 503 on the lookup route).
  *
  * The password, the key and the signature are never logged, never put in an audit line (an `/api/auth/` body keeps only its `name`) and
  * never echoed in an error.
@@ -63,8 +63,9 @@ export function registerAgentAuthRoutes(
       const a = await signInAccount(await o.accounts(), name);
       return c.json(a === "root" ? { exists: false, refused: true } : { exists: a !== null });
     } catch (e) {
+      // no answer, not "not there": the hub's presence keeps a false for minutes, and would hide the machine
       log(`lookup: ${name} could not be resolved (${logLine((e as Error)?.message ?? String(e))})`);
-      return c.json({ exists: false });
+      return c.json({ error: "account lookup failed; try again" }, 503);
     }
   });
 
