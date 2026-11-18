@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useUploads, pauseUpload, resumeUpload, cancelUpload, retryFailed, dismissUpload, type UpBatch } from "./uploads";
 import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type JobView, type NodeInfo, type OpJob } from "./api";
 import { Check, Circle, Loader, Minus, X } from "lucide-react";
@@ -8,9 +8,8 @@ import { splitByOrigin } from "./jobOrigin";
 import { gaveUp } from "./jobPoll";
 import { etaText, jobLines, statusPill } from "./jobRow";
 import { notifyJobsEnded } from "./pwa";
-import { HISTORY_KEY, IDLE_COLLAPSE_MS, addToHistory, announceEnded, endTime, nextExpiry, parseHistory, shouldAutoCollapse, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
+import { HISTORY_KEY, addToHistory, announceEnded, endTime, nextExpiry, parseHistory, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
 
-const COLLAPSE_KEY = "filedeck-jobs-collapsed";
 const live = (j: JobView) => j.state === "queued" || j.state === "running";
 
 function pct(j: JobView): number | null {
@@ -231,8 +230,18 @@ interface Finished {
   entry: HistoryEntry;
 }
 
-/** Background jobs from every node, polled while anything is active. */
-export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
+/** What the header button shows: running jobs, and whether an operation waits for an answer. */
+export interface JobsInfo {
+  running: number;
+  total: number;
+  asking: boolean;
+}
+
+/**
+ * Jobs from every node, polled while anything is active. It renders the jobs panel (a right-hand column on a desktop, a drawer on a
+ * phone) and stays mounted while that is closed, so polling, notifications and the announcer keep working.
+ */
+export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: NodeInfo[]; shown: boolean; modal: boolean; rootRef: RefObject<HTMLElement | null>; onInfo: (info: JobsInfo) => void }) {
   const [jobs, setJobs] = useState<Record<string, JobView[]>>({});
   const [ops, setOps] = useState<OpJob[]>([]);
   // Nodes (and the hub) whose last poll failed: their previous list stays, marked stale, until the outage is five minutes old.
@@ -366,27 +375,6 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     };
   }, [poll, nodes.length]);
 
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(COLLAPSE_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  // Folded by the idle timer rather than by the user: not persisted, and any new activity undoes it.
-  const [autoCollapsed, setAutoCollapsed] = useState(false);
-  const setCollapsedPersist = useCallback((v: boolean) => {
-    setCollapsed(v);
-    if (!v) setAutoCollapsed(false);
-    try {
-      localStorage.setItem(COLLAPSE_KEY, v ? "1" : "0");
-    } catch {
-      /* storage unavailable */
-    }
-  }, []);
-  // A newly started job expands the tray so progress is visible.
-  useEffect(() => onJobStarted(() => setCollapsedPersist(false)), [setCollapsedPersist]);
-
   useEffect(() => {
     try {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
@@ -415,9 +403,8 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   const bgRows = split.flatMap(({ node, back }) => back.filter(live).map((job) => ({ node, job })));
   const running = rows.filter((r) => live(r.job)).length + opRows.filter(opLive).length + upRows.filter((u) => u.state === "running" || u.state === "paused").length;
   const total = rows.length + opRows.length + upRows.length;
-  // Questions need attention, so the tray opens by itself.
+  // Questions need attention: the header button shows it, and a desktop opens the panel.
   const asking = opRows.some((o) => o.state === "waiting");
-  const idle = total === 0;
 
   // Re-render when the next finished job is due to leave the live list.
   const dueIn = nextExpiry([...finished.current.values()], now);
@@ -426,23 +413,9 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
     const t = setTimeout(() => tick((n) => n + 1), dueIn + 20);
     return () => clearTimeout(t);
   });
-  // Nothing live or lingering for a while: fold the tray away. Activity opens it again.
-  useEffect(() => {
-    if (!idle) {
-      setAutoCollapsed(false);
-      return;
-    }
-    const since = Date.now();
-    const t = setTimeout(() => {
-      if (shouldAutoCollapse(since, Date.now())) setAutoCollapsed(true);
-    }, IDLE_COLLAPSE_MS);
-    return () => clearTimeout(t);
-  }, [idle]);
-
   // The announcement region stays mounted so a result that arrives as the tray appears is still read out.
   const announcer = <span className="sr-only" role="status">{announce}</span>;
-  if (!total && !history.length && !bgRows.length) return announcer;
-  const folded = (collapsed || autoCollapsed) && !asking;
+  useEffect(() => onInfo({ running, total, asking }), [running, total, asking, onInfo]);
   const clearHistory = () => {
     setHistory([]);
     setShowHistory(false);
@@ -452,55 +425,52 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
   return (
     <>
     {announcer}
-    <section className={"jobs" + (folded ? " collapsed" : "")} aria-label="Background jobs">
-      <span className="sr-only" role="status">{asking ? `${total} background jobs. An operation needs an answer.` : `${running} of ${total} background jobs running.`}</span>
-      <button type="button" className="jobs-toggle" aria-expanded={!folded} onClick={() => setCollapsedPersist(!folded)}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+    <aside ref={rootRef} id="jobs-panel" className={"jobs-panel" + (shown ? " open" : "")} {...(modal ? { role: "dialog", "aria-label": "Jobs" } : { "aria-label": "Jobs" })}>
+    <section className="jobs" aria-labelledby="jobs-title">
+      <h2 id="jobs-title" className="jobs-title">
         Jobs
         <span className="n">{asking ? "needs an answer" : running > 0 ? `${running} running` : total > 0 ? total : history.length > 0 ? `${history.length} past` : "idle"}</span>
-      </button>
-      {!folded && (
-        <div className="jobs-body">
-          {total > 0 ? (
-            <ul>
-              {upRows.map((b) => (
-                <UploadRow key={b.id} b={b} expanded={open === b.id} onToggle={() => setOpen(open === b.id ? null : b.id)} />
-              ))}
-              {opRows.map((job) => (
-                <OpRow key={job.id} job={job} stale={stale.has("hub")} detail={open === job.id ? detail : undefined} expanded={open === job.id} onToggle={() => setOpen(open === job.id ? null : job.id)} onChange={() => void poll()} />
-              ))}
-              {rows.map(({ node, job }) => (
-                <JobRow key={node + job.id} node={node} job={job} stale={stale.has(node)} onChange={() => void poll()} />
-              ))}
-            </ul>
-          ) : (
-            <p className="muted jobs-idle">No jobs running.</p>
-          )}
-          {history.length > 0 && (
-            <div className="jobs-hist">
-              <div className="jobs-hist-head">
-                <button type="button" aria-expanded={showHistory} aria-controls="jobs-history" onClick={() => setShowHistory(!showHistory)}>
-                  <Ic.History /> History ({history.length})
-                </button>
-                {showHistory && <button type="button" className="jobs-clear" onClick={clearHistory}><Ic.Eraser /> Clear history</button>}
-              </div>
-              {showHistory && (
-                <ul id="jobs-history" className="jobs-hist-list" aria-label="Past jobs">
-                  {history.map((h) => (
-                    <li key={h.key}>
-                      <div className="h-line">
-                        <span className="h-title">{h.title}</span>
-                        <span className={"h-out " + h.outcome}>{h.outcome}</span>
-                      </div>
-                      <div className="muted h-detail">{[fmtAt(h.at), h.where, h.detail].filter(Boolean).join(" · ")}</div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+      </h2>
+      <div className="jobs-body">
+        {total > 0 ? (
+          <ul>
+            {upRows.map((b) => (
+              <UploadRow key={b.id} b={b} expanded={open === b.id} onToggle={() => setOpen(open === b.id ? null : b.id)} />
+            ))}
+            {opRows.map((job) => (
+              <OpRow key={job.id} job={job} stale={stale.has("hub")} detail={open === job.id ? detail : undefined} expanded={open === job.id} onToggle={() => setOpen(open === job.id ? null : job.id)} onChange={() => void poll()} />
+            ))}
+            {rows.map(({ node, job }) => (
+              <JobRow key={node + job.id} node={node} job={job} stale={stale.has(node)} onChange={() => void poll()} />
+            ))}
+          </ul>
+        ) : (
+          <p className="muted jobs-idle">No jobs running.</p>
+        )}
+        {history.length > 0 && (
+          <div className="jobs-hist">
+            <div className="jobs-hist-head">
+              <button type="button" aria-expanded={showHistory} aria-controls="jobs-history" onClick={() => setShowHistory(!showHistory)}>
+                <Ic.History /> History ({history.length})
+              </button>
+              {showHistory && <button type="button" className="jobs-clear" onClick={clearHistory}><Ic.Eraser /> Clear history</button>}
             </div>
-          )}
-        </div>
-      )}
+            {showHistory && (
+              <ul id="jobs-history" className="jobs-hist-list" aria-label="Past jobs">
+                {history.map((h) => (
+                  <li key={h.key}>
+                    <div className="h-line">
+                      <span className="h-title">{h.title}</span>
+                      <span className={"h-out " + h.outcome}>{h.outcome}</span>
+                    </div>
+                    <div className="muted h-detail">{[fmtAt(h.at), h.where, h.detail].filter(Boolean).join(" · ")}</div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
       {bgRows.length > 0 && (
         <div className="jobs-bg">
           <button type="button" className="jobs-bg-toggle" aria-expanded={showBg} aria-controls="jobs-background" onClick={() => setShowBg(!showBg)}>
@@ -516,6 +486,7 @@ export function JobsTray({ nodes }: { nodes: NodeInfo[] }) {
         </div>
       )}
     </section>
+    </aside>
     </>
   );
 }

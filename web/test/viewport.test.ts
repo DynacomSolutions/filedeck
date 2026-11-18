@@ -101,13 +101,20 @@ test("phone layout shows one panel at a time with a switcher", () => {
   assert.match(fp, /pane && phone \? \([\s\S]*?className="fp-phonepane"/);
 });
 
-test("phone sidebar is an off-canvas drawer with focus trap, Escape and backdrop close", () => {
+test("phone drawers sit under the header, close on Escape or a tap outside, and one opens at a time", () => {
   const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
-  assert.match(app, /className="drawer-back" onClick=\{onCloseDrawer\}/);
-  assert.match(app, /function DrawerGuard[\s\S]*?useDialogFocus\(root\)[\s\S]*?e\.key === "Escape"/);
+  assert.match(app, /function DrawerGuard[\s\S]*?e\.key === "Escape"[\s\S]*?pointerdown/);
+  assert.match(app, /useState<"nav" \| "jobs" \| null>/);
+  assert.match(app, /aria-label=\{navOpen \? "Close navigation" : "Open navigation"\}/);
   assert.match(app, /onOpen=\{\(n, p, h\) => \{ closeDrawer\(\); openFromSide/);
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
-  assert.match(css, /@media\(max-width:700px\),\(max-height:500px\) and \(max-width:1000px\)\{\s*\.phone-only\{display:inline-flex\}[\s\S]*?\.side\{position:fixed;[^}]*translateX\(-102%\)/);
+  assert.match(css, /@media\(max-width:700px\),\(max-height:500px\) and \(max-width:1000px\)\{\s*\.phone-only\{display:inline-flex\}[\s\S]*?\.side,\.jobs-panel\{position:fixed;top:calc\(var\(--vv-top,0px\) \+ var\(--hdr-h,44px\)\)[\s\S]*?\.side\{left:0;transform:translateX\(-102%\)\}[\s\S]*?\.jobs-panel\{[^}]*translateX\(102%\)/);
+});
+
+test("Settings, Trash, Accounts and diff overlays cover the active panel outline", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const z = (re: RegExp) => Number(re.exec(css)?.[1]);
+  assert.ok(z(/\.ed\.over\{[^}]*z-index:(\d+)/) > z(/\.fp::after\{[^}]*z-index:(\d+)/));
 });
 
 test("the editor pane has no second close button that would drop unsaved edits", () => {
