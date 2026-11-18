@@ -5,6 +5,7 @@ import { Modal } from "./ArchiveDialog";
 import { endAccountSessions, endSession, listSessions, sessionsByAccount, type SessionInfo } from "./admin";
 import type { Account } from "./auth";
 import { fmtDate } from "./fmtDate";
+import { methodView } from "./sessionMethod";
 import "./archive.css";
 import "./accounts.css";
 import "./sessions.css";
@@ -173,20 +174,17 @@ export function SessionsTab({ account }: { account: Account }) {
   );
 }
 
-/** How a session signed in: "Password", "Key" or "Tailscale (<source>)", with the login or tag that matched and the device when the hub says. */
+/** How a session signed in (`methodView`), with the login or tag that matched and the device, each in <bdi>. */
 function Method({ s }: { s: SessionInfo }) {
-  if (s.method === "tailscale") {
-    return (
-      <>
-        Tailscale{s.tailnetSource ? ` (${s.tailnetSource})` : ""}
-        {s.tailnet && <span className="muted sess-sub"><bdi>{s.tailnet}</bdi></span>}
-        {s.tailnetDevice && <span className="muted sess-sub">on <bdi>{s.tailnetDevice}</bdi></span>}
-      </>
-    );
-  }
-  if (s.method === "password") return <>Password</>;
-  if (s.method === "key") return <>Key</>;
-  return <span className="muted">Unknown</span>;
+  const m = methodView(s);
+  if (m.label === "Unknown") return <span className="muted">Unknown</span>;
+  return (
+    <>
+      {m.label}
+      {m.subject && <span className="muted sess-sub"><bdi>{m.subject}</bdi></span>}
+      {m.device && <span className="muted sess-sub">on <bdi>{m.device}</bdi></span>}
+    </>
+  );
 }
 
 /** A confirm in the Modal pattern: Cancel has focus, the action is disabled while it runs, and Escape waits for it. */

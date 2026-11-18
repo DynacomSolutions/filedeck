@@ -3,9 +3,9 @@ import * as Ic from "lucide-react";
 import { Modal } from "./ArchiveDialog";
 import { Dropdown } from "./Dropdown";
 import { GrantPicker } from "./GrantPicker";
-import { TailnetLinks, linkCounts } from "./TailnetLinks";
+import { TailnetLinks } from "./TailnetLinks";
 import { addKey, createAccount, removeKey, updateAccount, type AccountView, type Overview } from "./admin";
-import { formChanged, formProblems, fromView, MAX_PASSWORD, MIN_PASSWORD, notConfigured, toInput, type AccountForm, type Configured, type SourceChoice } from "./accountForm";
+import { anyLinkCounts, formChanged, formProblems, fromView, MAX_PASSWORD, MIN_PASSWORD, notConfigured, toInput, type AccountForm, type Configured, type SourceChoice } from "./accountForm";
 import "./archive.css";
 import "./accounts.css";
 
@@ -193,7 +193,7 @@ export function AccountEditor({
       }
     });
 
-  const canSignIn = (hasPassword && !removePassword) || form.password !== "" || keys.length > 0 || form.tailnet.some((l) => linkCounts(l, overview.tailscale));
+  const canSignIn = (hasPassword && !removePassword) || form.password !== "" || keys.length > 0 || anyLinkCounts(form.tailnet, overview.tailscale);
   return (
     // not a <form>: the folder picker and the confirmations are forms of their own (Modal)
     <div className="acc-editor" role="group" aria-labelledby={ids.name + "-h"}>

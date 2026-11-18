@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formChanged, formProblems, fromView, linkKind, notConfigured, toInput, type AccountForm } from "../src/accountForm.ts";
+import { anyLinkCounts, linkCounts, formChanged, formProblems, fromView, linkKind, notConfigured, toInput, type AccountForm } from "../src/accountForm.ts";
 import type { AccountView } from "../src/admin.ts";
 
 const good = (): AccountForm => ({
@@ -183,4 +183,16 @@ test("formProblems names a bad link and a 17th link, and nothing for good ones",
   assert.match(formProblems(f)[0]!, /16/);
   f.tailnet = Array.from({ length: 16 }, (_, i) => `u${i}@github`);
   assert.deepEqual(formProblems(f), []);
+});
+
+test("linkCounts follows the hub's lock-out rule: socket any link, headers only logins, no source none", () => {
+  for (const l of ["alice@github", "tag:ci"]) {
+    assert.equal(linkCounts(l, "socket"), true, `socket ${l}`);
+    assert.equal(linkCounts(l, null), false, `off ${l}`);
+  }
+  assert.equal(linkCounts("alice@github", "headers"), true);
+  assert.equal(linkCounts("tag:ci", "headers"), false);
+  assert.equal(anyLinkCounts(["tag:ci"], "headers"), false);
+  assert.equal(anyLinkCounts(["tag:ci", "alice@github"], "headers"), true);
+  assert.equal(anyLinkCounts([], "socket"), false);
 });

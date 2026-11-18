@@ -6,6 +6,7 @@ import { useDialogFocus } from "./dialogFocus";
 import { AccountEditor } from "./AccountEditor";
 import { SessionsTab, ConfirmDialog } from "./SessionsTab";
 import { SystemUsersTab, type SystemCtl } from "./SystemUsersTab";
+import { anyLinkCounts } from "./accountForm";
 import { deleteAccount, forgetUnownedPasswords, listAccounts, overview, type AccountView, type Overview } from "./admin";
 import type { Account } from "./auth";
 import "./archive.css";
@@ -211,7 +212,7 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
                       <td className="acc-c-name"><bdi>{a.name}</bdi>{self(a.name) && <span className="pill">You</span>}</td>
                       <td>{a.admin ? "Yes" : "No"}</td>
                       <td>
-                        {a.hasPassword || a.keys.length > 0 || (data.overview.tailscale !== null && a.tailnet.length > 0) ? "Can sign in" : "Cannot sign in"}
+                        {a.hasPassword || a.keys.length > 0 || anyLinkCounts(a.tailnet.map((l) => l.subject), data.overview.tailscale) ? "Can sign in" : "Cannot sign in"}
                         {a.tailnet.length > 0 && <span className="pill">Tailscale</span>}
                       </td>
                       <td className="acc-c-nodes">

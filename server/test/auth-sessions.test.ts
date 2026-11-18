@@ -270,7 +270,35 @@ test("the tailnet columns are added to an older table", () => {
   const acc = new Accounts(db);
   const s = new Sessions(db, acc, { idleMs: H, maxMs: 2 * H });
   const cols = (db.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[]).map((c) => c.name);
-  for (const c of ["method", "tailnet_subject", "tailnet_login", "tailnet_node"]) assert.ok(cols.includes(c), c);
+  for (const c of ["method", "tailnet_subject", "tailnet_login", "tailnet_node", "tailnet_source", "tailnet_device"]) assert.ok(cols.includes(c), c);
   const raw = s.create("sys", "alice", undefined, { method: "tailscale", tailnetSubject: "alice@github", tailnetLogin: "alice@github", tailnetNode: "n9" });
   assert.equal(s.lookup(raw)?.tailnetNode, "n9");
+});
+
+test("list gives a Tailscale session's source and device, only for Tailscale sessions, and never the node id or login", () => {
+  const { s } = setup();
+  s.create("virt", "guest", "100.64.0.1", { method: "tailscale", tailnetSubject: "tag:ci", tailnetNode: "n1", tailnetSource: "socket", tailnetDevice: "ci-runner" });
+  s.create("virt", "guest", undefined, { method: "tailscale", tailnetSubject: "alice@github", tailnetLogin: "alice@github", tailnetSource: "headers" });
+  s.create("virt", "guest", undefined, { method: "password" });
+  const l = s.list();
+  const ci = l.find((x) => x.tailnet === "tag:ci");
+  assert.equal(ci?.tailnetSource, "socket");
+  assert.equal(ci?.tailnetDevice, "ci-runner");
+  const alice = l.find((x) => x.tailnet === "alice@github");
+  assert.equal(alice?.tailnetSource, "headers");
+  assert.equal(alice?.tailnetDevice, undefined);
+  const pw = l.find((x) => x.method === "password");
+  assert.equal(pw?.tailnetSource, undefined);
+  assert.ok(!JSON.stringify(l).includes("n1"), "no stable node id in the list");
+  assert.ok(!("tailnetNode" in (ci ?? {})) && !("tailnetLogin" in (alice ?? {})));
+});
+
+test("a session made before the source and device columns lists without them", () => {
+  const db = new AuthDb(":memory:");
+  db.db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL, last_used INTEGER NOT NULL, epoch INTEGER NOT NULL, as_root_until INTEGER, address TEXT, method TEXT, tailnet_subject TEXT, tailnet_login TEXT, tailnet_node TEXT)");
+  const acc = new Accounts(db);
+  const s = new Sessions(db, acc, { idleMs: H, maxMs: 2 * H });
+  const raw = s.create("sys", "alice", undefined, { method: "tailscale", tailnetSubject: "alice@github" });
+  assert.deepEqual(s.list().map((x) => [x.tailnet, x.tailnetSource, x.tailnetDevice]), [["alice@github", undefined, undefined]]);
+  assert.ok(s.lookup(raw));
 });

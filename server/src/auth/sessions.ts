@@ -10,12 +10,13 @@ import type { AuthDb, Accounts } from "./store.ts";
  * the client address at sign-in, or NULL, so administrators can see who is signed in from where. `method` is how the session was
  * started (`password`, `key` or `tailscale`; NULL for sessions made before it was kept). A Tailscale session also keeps the link subject
  * that matched (`tailnet_subject`: a login or a tag), the device's login (`tailnet_login`, when it had one) and, with the socket source,
- * the device's stable id (`tailnet_node`): the gate checks them again on every request (routes.ts).
+ * the device's stable id (`tailnet_node`): the gate checks them again on every request (routes.ts). `tailnet_source` (`socket` or `headers`) and
+ * `tailnet_device` (the device's cleaned name, when known) are kept only to show administrators how and from where it came in.
  */
 
 export type SignInMethod = "password" | "key" | "tailscale";
 /** How a session was started, as `create` takes it. */
-export type SignInHow = { method: SignInMethod; tailnetSubject?: string; tailnetLogin?: string; tailnetNode?: string };
+export type SignInHow = { method: SignInMethod; tailnetSubject?: string; tailnetLogin?: string; tailnetNode?: string; tailnetSource?: "socket" | "headers"; tailnetDevice?: string };
 /** A session as `lookup` gives it. */
 export type SessionRecord = { kind: "sys" | "virt"; name: string; asRootUntil?: number } & Partial<SignInHow>;
 
@@ -41,6 +42,8 @@ interface SessionRow {
   tailnet_subject: string | null;
   tailnet_login: string | null;
   tailnet_node: string | null;
+  tailnet_source: string | null;
+  tailnet_device: string | null;
 }
 
 /** The sign-in fields of a row, only those that are set. */
@@ -66,6 +69,10 @@ export type SessionInfo = {
   method?: SignInMethod;
   /** a Tailscale session's link subject (the login or the tag that matched) */
   tailnet?: string;
+  /** a Tailscale session's source: where the identity came from */
+  tailnetSource?: "socket" | "headers";
+  /** a Tailscale session's device name, when the source knew it */
+  tailnetDevice?: string;
 };
 
 /** The id administrators see for the session kept under `key`: derived from the key, and no way back to it or to the cookie. */
@@ -103,7 +110,7 @@ export class Sessions {
     const cols = this.store.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
     if (!cols.some((c) => c.name === "as_root_until")) this.store.db.exec("ALTER TABLE sessions ADD COLUMN as_root_until INTEGER");
     if (!cols.some((c) => c.name === "address")) this.store.db.exec("ALTER TABLE sessions ADD COLUMN address TEXT");
-    for (const col of ["method", "tailnet_subject", "tailnet_login", "tailnet_node"]) {
+    for (const col of ["method", "tailnet_subject", "tailnet_login", "tailnet_node", "tailnet_source", "tailnet_device"]) {
       if (!cols.some((c) => c.name === col)) this.store.db.exec(`ALTER TABLE sessions ADD COLUMN ${col} TEXT`);
     }
   }
@@ -168,7 +175,7 @@ export class Sessions {
     const t = this.now();
     this.prune(t);
     this.db
-      .prepare("INSERT INTO sessions (id, kind, name, created, last_used, epoch, address, method, tailnet_subject, tailnet_login, tailnet_node) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .prepare("INSERT INTO sessions (id, kind, name, created, last_used, epoch, address, method, tailnet_subject, tailnet_login, tailnet_node, tailnet_source, tailnet_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(
         sha(raw),
         kind,
@@ -181,6 +188,8 @@ export class Sessions {
         how?.tailnetSubject ?? null,
         how?.tailnetLogin ?? null,
         how?.tailnetNode ?? null,
+        how?.tailnetSource ?? null,
+        how?.tailnetDevice ?? null,
       );
     return raw;
   }
@@ -200,7 +209,7 @@ export class Sessions {
 
   /** Every session that `peek` finds valid, newest `lastUsed` first. Read only, like `peek`. */
   list(): SessionInfo[] {
-    const rows = this.db.prepare("SELECT id, kind, name, created, last_used, epoch, as_root_until, address, method, tailnet_subject, tailnet_login, tailnet_node FROM sessions ORDER BY last_used DESC, created DESC").all() as unknown as (SessionRow & { id: string })[];
+    const rows = this.db.prepare("SELECT id, kind, name, created, last_used, epoch, as_root_until, address, method, tailnet_subject, tailnet_login, tailnet_node, tailnet_source, tailnet_device FROM sessions ORDER BY last_used DESC, created DESC").all() as unknown as (SessionRow & { id: string })[];
     const t = this.now();
     return rows
       .filter((r) => this.holds(r, t))
@@ -214,6 +223,8 @@ export class Sessions {
         ...(typeof r.as_root_until === "number" && r.as_root_until > t ? { asRootUntil: r.as_root_until } : {}),
         ...(r.method !== null && METHODS.has(r.method) ? { method: r.method as SignInMethod } : {}),
         ...(r.method === "tailscale" && r.tailnet_subject !== null ? { tailnet: r.tailnet_subject } : {}),
+        ...(r.method === "tailscale" && (r.tailnet_source === "socket" || r.tailnet_source === "headers") ? { tailnetSource: r.tailnet_source } : {}),
+        ...(r.method === "tailscale" && r.tailnet_device !== null ? { tailnetDevice: r.tailnet_device } : {}),
       }));
   }
 

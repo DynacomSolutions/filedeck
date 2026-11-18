@@ -440,7 +440,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
       method: "tailscale",
       tailnetSubject: r.subject,
       ...(id.login !== undefined ? { tailnetLogin: id.login } : {}),
-      ...(id.node ? { tailnetNode: id.node.stableId } : {}),
+      ...(id.node ? { tailnetNode: id.node.stableId, tailnetDevice: id.node.name } : {}),
+      tailnetSource: id.source,
     });
   });
 

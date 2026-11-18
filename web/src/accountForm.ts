@@ -107,3 +107,15 @@ export function formProblems(f: AccountForm): string[] {
   if (links.length > MAX_LINKS) out.push(`At most ${MAX_LINKS} tailnet links per account.`);
   return out;
 }
+
+/**
+ * Whether a link can sign in with the hub's Tailscale source (the same rule as the hub's `lockOut`): with the socket every link counts,
+ * with headers only a login does (a tag cannot sign in), and with no source none.
+ */
+export function linkCounts(subject: string, mode: "socket" | "headers" | null): boolean {
+  if (mode === null) return false;
+  return mode === "socket" || linkKind(subject) !== "tag";
+}
+
+/** Whether any of `subjects` counts for `mode` (`linkCounts`). */
+export const anyLinkCounts = (subjects: readonly string[], mode: "socket" | "headers" | null): boolean => subjects.some((l) => linkCounts(l, mode));

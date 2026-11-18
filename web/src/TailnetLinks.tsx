@@ -2,15 +2,14 @@ import { useId, useRef, useState } from "react";
 import * as Ic from "lucide-react";
 import type { Overview } from "./admin";
 import { cleanLink, cleanLinks, linkKind, MAX_LINKS } from "./accountForm";
+
+export { linkCounts } from "./accountForm";
 import "./accounts.css";
 
 export const TAG_RISK = "Anyone who may apply this tag in your tailnet can make a device that signs in as this account.";
 export const OFF_NOTE = "Tailscale sign-in is off on this hub. Links are kept and work once it is turned on.";
 export const HEADERS_NOTE = "Tag links need the socket source; they do not work on this hub now.";
 export const REMOVE_NOTE = "Removing a link ends the sessions that signed in through it when you save.";
-
-/** Whether a link can sign in with the hub's Tailscale source `mode`: logins with either source, tags with the socket only. */
-export const linkCounts = (subject: string, mode: Overview["tailscale"]): boolean => mode !== null && (linkKind(subject) !== "tag" || mode === "socket");
 
 /**
  * The "Tailscale" section of an account's editor: the tailnet logins and tags that sign in as it. `links` are the subjects as typed or kept;

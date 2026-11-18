@@ -78,6 +78,9 @@ test("virtual account by login: the cookie, and me gives the method and the subj
     assert.equal(info.length, 1);
     assert.equal(info[0]?.method, "tailscale");
     assert.equal(info[0]?.tailnet, "alice@github");
+    assert.equal(info[0]?.tailnetSource, mode, "the list names the source");
+    assert.equal(info[0]?.tailnetDevice, mode === "socket" ? NODE_NAME : undefined, "and the device, when the source knows it");
+    assert.ok(!JSON.stringify(info).includes("stable"), "no raw device id");
   }
 });
 
