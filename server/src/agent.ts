@@ -116,7 +116,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
   if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
-  // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only these two 0/1 gauges may ever be served here): 1 when it answers from its file, and whether its file is damaged beyond repair (an operator must move it aside)
+  // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only these two 0/1 gauges may ever be served here): 1 when it answers from its file, and whether its file is damaged and not yet replaced by a new one
   app.get("/metrics", (c) => {
     const h = sizes.health();
     return c.text(
@@ -124,7 +124,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_size_store_available 1 when the folder-size store answers from its file, 0 when sizes are not cached",
         "# TYPE filedeck_size_store_available gauge",
         `filedeck_size_store_available ${h.available ? 1 : 0}`,
-        "# HELP filedeck_size_store_damaged 1 when the store file is damaged and cannot be repaired by the agent",
+        "# HELP filedeck_size_store_damaged 1 when the store file is damaged and the agent has not yet replaced it with a new one",
         "# TYPE filedeck_size_store_damaged gauge",
         `filedeck_size_store_damaged ${h.damaged ? 1 : 0}`,
         "",
@@ -138,6 +138,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   sizes.watchedSince = () => fan.watchedSince();
   sizes.quiet = (v) => fan.settled(v);
   sizes.chainMin = () => fan.chainMin();
+  sizes.onReopen = () => fan.storeReplaced();
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
   (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
   // On SIGTERM, at once (not after the connections drain): stop the jobs (their rows are handed to the next process), hand the watcher's events and watched time
