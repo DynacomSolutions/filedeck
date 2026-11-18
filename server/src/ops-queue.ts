@@ -216,6 +216,8 @@ export class OpQueue {
   private slotWaiters: { job: Job; wake: () => void }[] = [];
   private readonly me = randomUUID();
   private stopping = false;
+  /** cancel flags the shared store could not take (busy): each tick writes them again until it can, or the row has ended */
+  private pendingCancels = new Set<string>();
   constructor(private d: OpQueueDeps) {
     // one unref'd timer: heartbeat, progress snapshot, foreign requests, adoption of jobs whose owner went silent
     if (d.shared) setInterval(() => this.tick(), d.shared.tickMs ?? 1000).unref();
@@ -359,9 +361,21 @@ export class OpQueue {
     const sh = this.d.shared;
     for (const r of sh?.store.list(SCOPE) ?? []) {
       if (this.jobs.has(r.id) || !live(r.state) || !mine(ownerFrom(r.user))) continue;
-      if (sh!.store.setCancel(r.id, SCOPE)) count++;
+      count++;
+      if (sh!.store.flagCancel(r.id, SCOPE) !== "busy") continue;
+      if (this.pendingCancels.size === 0) console.error(`jobs: the job store was busy; the cancel of job ${r.id} is written at a later tick`);
+      this.pendingCancels.add(r.id);
     }
     return count;
+  }
+
+  /** Writes the cancel flags the store was too busy to take; one this hub holds by now is cancelled here, one that has ended is dropped. */
+  private retryCancels(sh: NonNullable<OpQueueDeps["shared"]>) {
+    for (const id of [...this.pendingCancels]) {
+      if (this.jobs.has(id)) this.cancel(id);
+      else if (sh.store.flagCancel(id, SCOPE) === "busy") continue;
+      this.pendingCancels.delete(id);
+    }
   }
 
   pause(id: string): OpView | undefined {
@@ -492,6 +506,7 @@ export class OpQueue {
     const sh = this.d.shared;
     if (!sh || this.stopping) return;
     try {
+      if (this.pendingCancels.size > 0) this.retryCancels(sh);
       const now = Date.now();
       const all = [...this.jobs.values()];
       for (const j of all) if (j.dirty) this.save(j);
@@ -556,8 +571,9 @@ export class OpQueue {
       if (p.paused) this.hold(j);
       this.jobs.set(j.id, j);
       this.save(j);
-      // cancelled while nobody held it (its account changed, or someone pressed cancel): it ends here and never runs again
-      if (r.cancel === 1) this.cancel(j.id);
+      // cancelled while nobody held it (its account changed, or someone pressed cancel): it ends here and never runs again. The flag is
+      // read again now that the row is ours: `r` was listed before the claim, and a flag set in between would otherwise wait a tick.
+      if ((sh.store.get(r.id, SCOPE) ?? r).cancel === 1) this.cancel(j.id);
       this.pump();
     } catch {
       const now = Date.now();

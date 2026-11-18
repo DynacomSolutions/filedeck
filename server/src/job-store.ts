@@ -139,6 +139,20 @@ export class JobStore {
     return this.run(`UPDATE jobs SET cancel=1 WHERE id=? AND scope=? AND ${LIVE}`, (s) => s.run(id, scope).changes > 0, false);
   }
 
+  /**
+   * `setCancel` that tells why nothing was flagged: "flagged", "ended" (the row is gone or no longer live, nothing left to cancel) or
+   * "busy" (the database did not answer; try again later).
+   */
+  flagCancel(id: string, scope: string): "flagged" | "ended" | "busy" {
+    if (!this.db) return "ended"; // memory only: there is no shared row to flag
+    const r = this.run(
+      `UPDATE jobs SET cancel=1 WHERE id=? AND scope=? AND ${LIVE}`,
+      (s): "flagged" | "ended" => (s.run(id, scope).changes > 0 ? "flagged" : "ended"),
+      "busy" as const,
+    );
+    return r;
+  }
+
   /** Ask the owner for pause (2) or resume (3); a pending cancel is never overwritten. */
   setFlag(id: string, scope: string, flag: 2 | 3): boolean {
     return this.run(`UPDATE jobs SET cancel=? WHERE id=? AND scope=? AND cancel<>1 AND ${LIVE}`, (s) => s.run(flag, id, scope).changes > 0, false);
