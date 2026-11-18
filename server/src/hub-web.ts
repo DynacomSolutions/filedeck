@@ -33,8 +33,12 @@ export function shellCsp(html: string, brand: Brand): string {
 
 const HASHED_ASSET = /^\/assets\/[^/]+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
 
-/** Cache-Control for a static file: build output with a content hash in its name never changes. */
+/** Files a browser must check on every load: the service worker (a new build is a new worker) and the app manifest. */
+export const REVALIDATE = new Set(["/sw.js", "/site.webmanifest"]);
+
+/** Cache-Control for a static file: build output with a content hash in its name never changes; the service worker and manifest are always checked. */
 export function staticCacheControl(urlPath: string): string | undefined {
+  if (REVALIDATE.has(urlPath)) return "no-cache";
   return HASHED_ASSET.test(urlPath) ? "public, max-age=31536000, immutable" : undefined;
 }
 

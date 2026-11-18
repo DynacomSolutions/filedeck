@@ -48,7 +48,18 @@ export function renderIndex(html: string, b: Brand): string {
   const boot = JSON.stringify(b).replace(/</g, "\\u003c");
   return html
     .replace("%%TITLE%%", esc(b.title))
+    .replace("%%NAME%%", esc(b.name))
     .replace("%%ICON%%", esc(b.icon))
     .replace("%%BRANDCSS%%", b.css ? `<link rel="stylesheet" href="${esc(b.css)}" />` : "")
     .replace("%%BOOT%%", `window.__FILEDECK__=${boot};`);
+}
+
+/**
+ * The web app manifest with the deployment's name: `name` (shown when installing) takes the page title, `short_name`
+ * (under the home-screen icon) the brand name. The neutral brand leaves the bundled file as it is.
+ */
+export function renderManifest(json: string, b: Brand): string {
+  if (b.name === DEFAULT_BRAND.name && b.title === DEFAULT_BRAND.title) return json;
+  const m = JSON.parse(json) as Record<string, unknown>;
+  return JSON.stringify({ ...m, name: b.title, short_name: b.name });
 }

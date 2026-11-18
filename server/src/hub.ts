@@ -17,7 +17,7 @@ import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, withAgentToken
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
-import { renderIndex } from "./brand.ts";
+import { renderIndex, renderManifest } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
 import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
 import { audit, auditRefusal, clientOf, isAdminPath, trustProxies, type AuditSink } from "./audit.ts";
@@ -745,6 +745,17 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   app.get("/", page);
   app.get("/index.html", page);
+  // the app manifest carries the deployment's name (brand.ts); its own type so every browser reads it as a manifest
+  const manifest = path.join(cfg.staticDir, "site.webmanifest");
+  app.get("/site.webmanifest", async (c, next) => {
+    let body: string;
+    try {
+      body = renderManifest(await readFile(manifest, "utf8"), cfg.brand);
+    } catch {
+      return next();
+    }
+    return c.body(body, 200, { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache" });
+  });
   app.use(
     "/*",
     serveStatic({

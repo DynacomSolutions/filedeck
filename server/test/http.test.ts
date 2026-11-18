@@ -112,3 +112,29 @@ test("hub fills branding into index.html and ignores logo and links", async () =
   assert.match(branded.html, /"themeKey":"acme-theme"/);
   assert.match(branded.html, /<link rel="stylesheet" href="\/assets\/brand\/theme.css" \/>/);
 });
+
+test("hub fills the brand name into the home-screen title and the app manifest", async () => {
+  fs.writeFileSync(path.join(tmp, "index.html"), "<meta name=\"apple-mobile-web-app-title\" content=\"%%NAME%%\"><script>%%BOOT%%</script>");
+  const manifest = { id: "/", name: "Filedeck", short_name: "Filedeck", start_url: "/", display: "standalone", icons: [{ src: "/icon-192.png", sizes: "192x192" }] };
+  fs.writeFileSync(path.join(tmp, "site.webmanifest"), JSON.stringify(manifest));
+  const mk = async (env: Record<string, string>) => {
+    const s = await new Promise<ReturnType<typeof serve>>((res) => {
+      const x: ReturnType<typeof serve> = serve({ fetch: createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, ...env } as never)).fetch as never, port: 0 }, () => res(x));
+    });
+    const url = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+    const html = await (await fetch(url + "/")).text();
+    const m = await fetch(url + "/site.webmanifest");
+    const out = { html, type: m.headers.get("content-type"), manifest: (await m.json()) as Record<string, unknown> };
+    s.close();
+    return out;
+  };
+  const neutral = await mk({});
+  assert.match(neutral.html, /content="Filedeck"/);
+  assert.deepEqual(neutral.manifest, manifest);
+  assert.match(String(neutral.type), /^application\/manifest\+json/);
+  const branded = await mk({ FILEDECK_BRAND: JSON.stringify({ name: "Acme \"Files\"", title: "Acme file manager" }) });
+  assert.match(branded.html, /content="Acme &#34;Files&#34;"/);
+  assert.equal(branded.manifest.name, "Acme file manager");
+  assert.equal(branded.manifest.short_name, "Acme \"Files\"");
+  assert.deepEqual(branded.manifest.icons, manifest.icons);
+});
