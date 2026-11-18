@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SHELL_KEY, cacheName, isOwnCache, precacheFrom, strategyFor, swVersion, type BundleEntry } from "../src/swPolicy.ts";
+import { SHELL_KEY, cacheName, isOwnCache, precacheFrom, settleWithin, strategyFor, swVersion, type BundleEntry } from "../src/swPolicy.ts";
 
 const O = "https://files.example.test";
 const get = (path: string, mode = "cors", origin = O) => ({ method: "GET", url: origin + path, mode });
@@ -70,4 +70,16 @@ test("the version follows the precache list and names the cache; old caches are 
   assert.equal(cacheName(a), `filedeck-shell-${a}`);
   assert.ok(isOwnCache("filedeck-shell-00000000"));
   assert.ok(!isOwnCache("other-app"));
+});
+
+test("a step a worker waits on is given up after a limit, so a promise that never settles cannot keep the worker busy", async () => {
+  // Chrome on Android never settles clients.openWindow() for an installed app's window; while a notificationclick waits on it,
+  // a new version cannot take over and "Reload" does nothing
+  const never = new Promise<string>(() => undefined);
+  const t0 = Date.now();
+  assert.equal(await settleWithin(never, 30), undefined);
+  assert.ok(Date.now() - t0 < 1000);
+  assert.equal(await settleWithin(Promise.resolve("w"), 30), "w");
+  // a rejected step is not an error for the worker
+  assert.equal(await settleWithin(Promise.reject(new Error("no window")), 30), undefined);
 });
