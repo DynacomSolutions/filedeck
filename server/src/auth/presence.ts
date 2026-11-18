@@ -13,7 +13,7 @@ interface Entry {
 
 /**
  * Which machines a system account exists on, as the agents said (hub, sign-in on). `check` asks one agent's lookup: true, false (also
- * for a name that is root there, or whose lookup failed on the agent), or undefined (no answer, a bad answer, too slow). Only true and
+ * for a name that is root there), or undefined (no answer, a failed lookup on the agent (503), a bad answer, too slow). Only true and
  * false are kept; the last one stays until a new answer replaces it. `known` is what the hub's access check (`canUseNode`) reads: false
  * hides the machine, true and undefined do not.
  *
