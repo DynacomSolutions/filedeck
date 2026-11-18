@@ -506,7 +506,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       if (kind === "sys" && name) return { kind: "sys", name, admin: false, epoch: auth.accounts.epochOf("sys", name) };
       return undefined;
     };
-    const listJobs = async (who: Identity | undefined): Promise<SourcedJob[]> => {
+    const listJobs = async (who: Identity | undefined, signal?: AbortSignal): Promise<SourcedJob[]> => {
       // an administrator sees everyone's jobs: the push is about the account's own, so it lists as a plain member (and never as root)
       const id: Identity | undefined = who ? (who.kind === "sys" ? { kind: "sys", name: who.name, admin: false, epoch: who.epoch } : { ...who, admin: false }) : undefined;
       const as = <T>(f: () => T): T => (id ? runAs(id, f) : f());
@@ -519,7 +519,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       await Promise.all(
         names.map(async (node) => {
           try {
-            const r = await as(() => callNode(node, "/api/jobs", { signal: AbortSignal.timeout(10_000) }));
+            const r = await as(() => callNode(node, "/api/jobs", { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000) }));
             if (!r.ok) return void (await r.body?.cancel().catch(() => undefined));
             const v = (await r.json()) as { jobs?: unknown };
             for (const j of Array.isArray(v?.jobs) ? v.jobs : [])
@@ -535,15 +535,17 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       store,
       subject: cfg.pushSubject,
       signIn: !!auth,
-      sessionHolds: auth ? (k) => auth!.sessions.peek(k) : undefined,
+      sessionState: auth ? (k) => auth!.sessions.state(k) : undefined,
       identityOf: toId,
       listJobs,
     });
-    // a session that ends (sign-out, a limit, ended by an administrator) and an account that changes take their subscriptions with them;
-    // the end of an act-as-root switch leaves the session, and its subscriptions, as they are
+    // a session that ends (sign-out, the absolute limit, ended by an administrator) and an account that changes take their subscriptions
+    // with them. A session that only went idle (the app is closed) keeps them until its absolute end: notifications while the app is
+    // closed are the point. The end of an act-as-root switch leaves the session, and its subscriptions, as they are.
     auth?.sessions.onEnd((e) => {
       if ("key" in e) {
-        if (!e.asRoot) store.removeSession(e.key);
+        if (e.idle && e.until) store.detach(e.key, e.until);
+        else if (!e.asRoot) store.removeSession(e.key);
       } else store.removeOwner(`${e.kind}:${e.name}`);
     });
     push = { store, watch, listJobs };

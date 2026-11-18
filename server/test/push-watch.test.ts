@@ -40,7 +40,7 @@ test("one end is its title and outcome; several fold into one, failures counted"
 
 const alice: Identity = { kind: "sys", name: "alice", admin: false, epoch: 1 };
 
-function setup(o: { holds?: (s: string) => boolean; jobs?: SourcedJob[]; status?: number; identity?: Identity | null }) {
+function setup(o: { holds?: (s: string) => boolean; state?: (s: string) => "valid" | "idle" | "gone"; until?: number; jobs?: SourcedJob[]; status?: number | (() => number); identity?: Identity | null; onList?: () => void }) {
   let t = 100 * H;
   const store = new PushStore(":memory:", () => t);
   const sent: { endpoint: string; payload: unknown }[] = [];
@@ -48,16 +48,22 @@ function setup(o: { holds?: (s: string) => boolean; jobs?: SourcedJob[]; status?
   const w = new PushWatch({
     store,
     subject: "https://example.test",
-    signIn: !!o.holds,
-    sessionHolds: o.holds,
+    signIn: !!(o.holds || o.state),
+    sessionState: o.state || o.holds ? (k) => {
+      const st = o.state ? o.state(k) : o.holds!(k) ? "valid" : "gone";
+      return st === "gone" ? { state: "gone" } : { state: st, until: o.until ?? 1e15 };
+    } : undefined,
     identityOf: () => (o.identity === undefined ? alice : o.identity ?? undefined),
     listJobs: async (id) => {
       asked.push(id);
+      o.onList?.();
       return o.jobs ?? [];
     },
     send: async (x) => {
       sent.push({ endpoint: x.endpoint, payload: x.payload });
-      return o.status ?? 201;
+      const st = typeof o.status === "function" ? o.status() : o.status;
+      if (st === -1) throw new Error("network down");
+      return st ?? 201;
     },
     now: () => t,
     log: () => undefined,
@@ -116,8 +122,100 @@ test("sign-in off: the shared subscriptions get the ends, asked with no account"
 });
 
 test("a subscription made after a job ended does not get that end", async () => {
-  const s = setup({ holds: () => true, jobs: [job("a", "done", 100 * H - 5)] });
+  const s = setup({ holds: () => true, jobs: [job("a", "done", 100 * H - 120_000)] });
   s.add(1);
   await s.w.tick();
   assert.equal(s.sent.length, 0);
+});
+
+test("an idle session keeps its subscription (the app is closed), until the session's absolute end", async () => {
+  const s = setup({ state: () => "idle", until: 200 * H, jobs: [job("a", "done", 100 * H + 5)] });
+  s.add(1);
+  s.at(100 * H + 10);
+  await s.w.tick();
+  assert.equal(s.sent.length, 1);
+  assert.deepEqual(s.store.of("sys:alice").map((x) => [x.session, x.until]), [[null, 200 * H]]);
+  s.at(200 * H);
+  await s.w.tick();
+  assert.deepEqual(s.store.owners(), []);
+});
+
+test("a send that fails is tried again at the next pass; a delivered one is not", async () => {
+  let st = -1;
+  const s = setup({ holds: () => true, status: () => st, jobs: [job("a", "done", 100 * H + 5)] });
+  s.add(1);
+  s.at(100 * H + 10);
+  await s.w.tick();
+  st = 503;
+  await s.w.tick();
+  st = 201;
+  await s.w.tick();
+  await s.w.tick();
+  assert.equal(s.sent.length, 3);
+  assert.equal(s.store.of("sys:alice").length, 1);
+});
+
+test("each subscription is claimed by itself: one failing does not stop or repeat the others", async () => {
+  let n = 0;
+  const s = setup({ holds: () => true, status: () => (n++ === 0 ? 500 : 201), jobs: [job("a", "done", 100 * H + 5)] });
+  s.add(1);
+  s.add(2, "sys:alice", "s2");
+  s.at(100 * H + 10);
+  await s.w.tick();
+  await s.w.tick();
+  assert.equal(s.sent.length, 3, "first pass: 2 sends (one failed), second pass: only the failed one again");
+});
+
+test("a session that ends while the jobs are listed gets nothing", async () => {
+  let ok = true;
+  const s = setup({ holds: () => ok, jobs: [job("a", "done", 100 * H + 5)], onList: () => (ok = false) });
+  s.add(1);
+  s.at(100 * H + 10);
+  await s.w.tick();
+  assert.equal(s.sent.length, 0);
+  assert.deepEqual(s.store.owners(), []);
+});
+
+test("rows of the other sign-in mode are removed (sign-in turned on or off)", async () => {
+  const on = setup({ holds: () => true });
+  on.add(1, "", null);
+  await on.w.tick();
+  assert.deepEqual(on.store.owners(), []);
+  const off = setup({});
+  off.add(1, "sys:alice", "s1");
+  await off.w.tick();
+  assert.deepEqual(off.store.owners(), []);
+});
+
+test("a machine clock a little behind the hub's does not lose an end", () => {
+  assert.deepEqual(endsToSend([job("a", "done", 100 * H - 30_000)], 100 * H, 100 * H + 1000).map((j) => j.id), ["a"]);
+});
+
+test("stop ends a pass that waits on a slow machine, and gives its claims back", async () => {
+  let release!: () => void;
+  const s = setup({ holds: () => true, jobs: [job("a", "done", 100 * H + 5)] });
+  s.add(1);
+  s.at(100 * H + 10);
+  const slow = new PushWatch({
+    store: s.store,
+    subject: "x",
+    signIn: true,
+    sessionState: () => ({ state: "valid", until: 1e15 }),
+    identityOf: () => alice,
+    listJobs: (_id, signal) =>
+      new Promise((res, rej) => {
+        release = () => res([job("a", "done", 100 * H + 5)]);
+        signal?.addEventListener("abort", () => rej(new Error("aborted")));
+      }),
+    send: async () => 201,
+    now: () => s.now(),
+    log: () => undefined,
+  });
+  const p = slow.tick();
+  const t0 = Date.now();
+  await slow.stop();
+  await p;
+  assert.ok(Date.now() - t0 < 1000);
+  void release;
+  assert.equal(s.store.claim(`${"https://fcm.googleapis.com/fcm/send/e1"}|ops|a`), true, "nothing was claimed");
 });

@@ -123,8 +123,9 @@ sw.addEventListener("notificationclick", (e) => {
   );
 });
 
-// A job ended (the hub's push watch, push/watch.ts on the hub). Shown unless a Filedeck window is on screen: its jobs tray already
-// shows the end there (browsers do not ask for a notification while a page of the site is visible).
+// A job ended (the hub's push watch, push/watch.ts on the hub). Always shown: a push made with userVisibleOnly must show a notification,
+// or the browser shows its own "updated in the background" one and may end the subscription. With a Filedeck window on screen (its jobs
+// tray shows the end too) it is shown without sound or vibration.
 sw.addEventListener("push", (e) => {
   e.waitUntil(
     (async () => {
@@ -135,8 +136,9 @@ sw.addEventListener("push", (e) => {
         /* not JSON: shown with the plain title */
       }
       const wins = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
-      if (wins.some((w) => w.visibilityState === "visible" && new URL(w.url).origin === ORIGIN)) return;
+      const onScreen = wins.some((w) => w.visibilityState === "visible" && new URL(w.url).origin === ORIGIN);
       await sw.registration.showNotification(typeof n.title === "string" ? n.title : "A job ended", {
+        silent: onScreen,
         body: typeof n.body === "string" ? n.body : "",
         tag: typeof n.tag === "string" ? n.tag : "filedeck-jobs",
         icon: "/icon-192.png",

@@ -81,3 +81,35 @@ test("only https endpoints on push service hosts are accepted", () => {
     assert.ok(!pushHostAllowed(u, []), u);
   assert.ok(pushHostAllowed("https://push.example.test/x", ["push.example.test"]));
 });
+
+test("subscribing again for the same account keeps its start time; another account starts again", () => {
+  let t = 1000;
+  const s = new PushStore(":memory:", () => t);
+  s.add(sub(1, "sys:alice", "s1"));
+  t = 5000;
+  s.add(sub(1, "sys:alice", "s2"));
+  assert.deepEqual(s.of("sys:alice").map((x) => [x.session, x.created]), [["s2", 1000]]);
+  s.add(sub(1, "virt:bob", "s3"));
+  assert.deepEqual(s.of("virt:bob").map((x) => x.created), [5000]);
+});
+
+test("an idle session's subscriptions are kept until the session's absolute end, without the session", () => {
+  const s = new PushStore(":memory:");
+  s.add(sub(1, "sys:alice", "s1"));
+  s.add(sub(2, "sys:alice", "s2"));
+  assert.equal(s.detach("s1", 9000), 1);
+  assert.deepEqual(s.of("sys:alice").map((x) => [x.endpoint.slice(-2), x.session, x.until]), [["e1", null, 9000], ["e2", "s2", null]]);
+});
+
+test("a claim can be given back when its send failed", () => {
+  const s = new PushStore(":memory:");
+  assert.equal(s.claim("k"), true);
+  s.unclaim("k");
+  assert.equal(s.claim("k"), true);
+});
+
+test("the Google push host is the FCM host only", () => {
+  assert.ok(!pushHostAllowed("https://storage.googleapis.com/bucket/x", []));
+  assert.ok(!pushHostAllowed("https://push.apple.com.evil.test/x", []));
+  assert.ok(pushHostAllowed("https://web.push.apple.com/x", []));
+});

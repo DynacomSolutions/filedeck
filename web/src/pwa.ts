@@ -166,11 +166,30 @@ export async function showNotification(n: { title: string; body: string; tag: st
   }
 }
 
-/** Jobs that just ended (the jobs tray): notify when the page is hidden and the Settings switch is on. */
 // ---- Web Push (the hub notifies, also while the app is closed) ----
 
-/** this browser has a push subscription the hub took (set by enablePush and resyncPush) */
-let pushOn = false;
+/**
+ * Whether this browser has a push subscription the hub took (set by enablePush, resyncPush and disablePush). Kept in local storage, so
+ * every open tab knows it: a tab that does not would also notify the same end locally.
+ */
+const PUSH_KEY = "filedeck.push-on";
+let pushOnHere = false;
+const pushOn = (): boolean => {
+  try {
+    return localStorage.getItem(PUSH_KEY) === "1";
+  } catch {
+    return pushOnHere;
+  }
+};
+const setPushOn = (on: boolean) => {
+  pushOnHere = on;
+  try {
+    if (on) localStorage.setItem(PUSH_KEY, "1");
+    else localStorage.removeItem(PUSH_KEY);
+  } catch {
+    /* storage unavailable: this tab alone knows */
+  }
+};
 
 const b64u = (s: string): Uint8Array<ArrayBuffer> => {
   const t = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4));
@@ -205,17 +224,17 @@ export async function enablePush(): Promise<"on" | "unavailable"> {
     }
     sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
     const r = await fetch("/api/push/subscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sub.toJSON()) });
-    pushOn = r.ok;
+    setPushOn(r.ok);
     return r.ok ? "on" : "unavailable";
   } catch {
-    pushOn = false;
+    setPushOn(false);
     return "unavailable";
   }
 }
 
 /** The switch is off: the hub forgets this browser and the browser drops the subscription. */
 export async function disablePush(): Promise<void> {
-  pushOn = false;
+  setPushOn(false);
   try {
     const sub = await (await workerRegistration())?.pushManager?.getSubscription();
     if (!sub) return;
@@ -234,8 +253,9 @@ export async function resyncPush(): Promise<void> {
   await enablePush();
 }
 
+/** Jobs that just ended (the jobs tray): notify when the page is hidden and the Settings switch is on. */
 export function notifyJobsEnded(all: HistoryEntry[]) {
-  const ended = localEnds(all, pushOn);
+  const ended = localEnds(all, pushOn());
   const ctx = {
     hidden: document.visibilityState === "hidden",
     otherTabVisible: otherTabVisible(readMark(), TAB_ID, Date.now()),

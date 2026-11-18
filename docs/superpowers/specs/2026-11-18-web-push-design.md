@@ -13,22 +13,23 @@ push, so the notification arrives with every Filedeck window closed.
   the same key. `FILEDECK_PUSH=off` turns the feature off; `FILEDECK_PUSH_SUBJECT` sets the VAPID contact (default the project's URL).
 - **Subscriptions belong to an account and a session.** `POST /api/push/subscribe` stores the browser's endpoint and keys with the
   account (`sys:alice`, `virt:bob`) and the session key it was made in. Sign-in off: one shared owner, no session.
-- **Subscriptions end with their session.** A session that ends (sign-out, idle or absolute limit, ended by an administrator) and an
+- **Subscriptions end with their session.** A session that only goes idle (the app is closed) keeps them, without the session, until
+  its absolute end: the owner wants notifications with the app closed, and a push gives no access (review, 18 Nov). A session that ends (sign-out, the absolute limit, ended by an administrator) and an
   account change (epoch rise, deletion, every session ended) deletes its subscriptions: through `Sessions.onEnd`, and the watcher also
   drops any subscription whose session `peek` no longer holds before it sends anything. A push service answer of 404 or 410 deletes it.
-- **Only real push services.** The endpoint must be `https:` on a known push service host (Google, Mozilla, Apple, Microsoft), so a
+- **Only real push services.** The endpoint must be `https:` on the default port of `fcm.googleapis.com`, `updates.push.services.mozilla.com`, or a host under `push.apple.com` or `notify.windows.com`, so a
   signed-in person cannot make the hub post to an address of their choice. `FILEDECK_PUSH_HOSTS` adds hosts.
 - **What is watched.** Every 15 s, for each account with a subscription, the hub lists that account's jobs as that account: its hub
   operations (copy, move, sync, trash), its compares, and each machine's jobs (compress, extract and the others), through the same calls
   and checks as the account's own requests. A job started from the app (origin `ui`) that is `done` or `failed` (never `canceled`),
-  finished after the subscription was made and in the last 24 h, is sent once: the shared store records `owner|source|id` before the
-  send (`INSERT OR IGNORE`), so two hub pods never both send it. Several ends in one pass fold into one push.
+  finished after the subscription was made and in the last 24 h, is sent once to each subscription: the shared store records `endpoint|source|id` before
+  the send (`INSERT OR IGNORE`), so two hub pods never both send it; a failed send (no answer, 429, 5xx) gives the record back. Several ends in one pass fold into one push.
 - **Payload.** Only the job title and the outcome (`Copy x finished`, `Compress y failed` with the first line of the error), encrypted
   per RFC 8291 (aes128gcm), signed per RFC 8292 (VAPID, ES256). `TTL` one day. Built on `node:crypto`, no new dependency.
 - **Browser side.** The Settings switch subscribes (`pushManager.subscribe`, the hub's public key) after permission is granted, and
   unsubscribes when turned off. At start-up with the switch on, the page sends its subscription again, so it follows a new sign-in. The
-  service worker shows each push unless a Filedeck window is visible (the in-app tray already shows the end). The page's own local
-  notifications stay as the fallback where push is not available, and are skipped when push is active.
+  service worker shows every push (a `userVisibleOnly` push must show one), silently while a Filedeck window is visible. The page's own local
+  notifications stay as the fallback where push is not available, and are skipped in every tab when push is active (a local-storage mark).
 - **Uploads** run in the browser, so a closed app has none to report; they keep the local notification only.
 
 ## Tests
