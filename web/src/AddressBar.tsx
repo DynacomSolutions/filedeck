@@ -614,7 +614,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
                 </button>
               </Tip>
             )}
-            <Tip label={i === 0 ? (first.granted ? <>Granted folder on <bdi>{currentBase.node}</bdi></> : `Root of ${currentBase.label}`) : <bdi>{sg.path}</bdi>}>
+            <Tip label={i === 0 ? (first.granted ? <>Granted folder on <bdi>{currentBase.node}</bdi></> : <>Root of <bdi>{currentBase.label}</bdi></>) : <bdi>{sg.path}</bdi>}>
               <button type="button" className={i === segs.length - 1 ? "here" : ""} onClick={() => onGo(currentBase.node, sg.path)} onContextMenu={(e) => onCrumbMenu(e, sg.path)}>
                 {i === 0 ? <Ic.HardDrive aria-hidden="true" /> : null}
                 <span className="crumb-t"><bdi>{sg.label}</bdi></span>

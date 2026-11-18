@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canGoUp, firstCrumb, homeOf, noAccessHome, openPath, rowOpens } from "../src/nodeHome.ts";
+import { canGoUp, firstCrumb, homeOf, insideRoots, noAccessHome, openPath, rowOpens } from "../src/nodeHome.ts";
 
 test("a machine's home is its first granted folder, else /", () => {
   assert.equal(homeOf({ roots: ["/srv/b", "/srv/a"] }), "/srv/b");
@@ -55,4 +55,36 @@ test("a folder the account may not list offers the home folder, for a machine wi
   assert.equal(noAccessHome(undefined, "/", denied), null);
   // at the home folder itself there is nowhere better to send the account
   assert.equal(noAccessHome(n, "/srv/b", denied), null);
+});
+
+test("up is allowed when the parent folder is inside a granted folder: nested grants and a grant of /", () => {
+  assert.equal(canGoUp({ roots: ["/srv", "/srv/a"] }, "/srv/a"), true);
+  assert.equal(canGoUp({ roots: ["/srv", "/srv/a"] }, "/srv"), false);
+  assert.equal(canGoUp({ roots: ["/"] }, "/x"), true);
+  assert.equal(canGoUp({ roots: ["/"] }, "/"), false);
+  assert.equal(canGoUp({ roots: ["/srv/b", "/"] }, "/srv/b"), true);
+  // outside every grant (typed, or an old bookmark): up would only go further out
+  assert.equal(canGoUp({ roots: ["/srv/b"] }, "/etc/x"), false);
+});
+
+test("paths with a trailing slash compare as the folder itself", () => {
+  assert.equal(canGoUp({ roots: ["/srv/share"] }, "/srv/share/"), false);
+  assert.equal(canGoUp({ roots: ["/srv/share/"] }, "/srv/share"), false);
+  assert.equal(canGoUp({ roots: ["/srv/share"] }, "/srv/share/x/"), true);
+  const denied = Object.assign(new Error("no access"), { status: 403 });
+  assert.equal(noAccessHome({ roots: ["/srv/b"] }, "/srv/b/", denied), null);
+  assert.deepEqual(firstCrumb({ roots: ["/srv/b"] }, "/srv/b/"), { label: "/srv/b", granted: true });
+  assert.equal(insideRoots({ roots: ["/srv/b"] }, "/srv/b/"), true);
+});
+
+test("insideRoots: a granted folder or below it; every path on a machine without roots", () => {
+  const n = { roots: ["/srv/b", "/srv/a"] };
+  assert.equal(insideRoots(n, "/srv/b"), true);
+  assert.equal(insideRoots(n, "/srv/a/x"), true);
+  assert.equal(insideRoots(n, "/srv"), false);
+  assert.equal(insideRoots(n, "/"), false);
+  assert.equal(insideRoots(n, "/srv/bb"), false);
+  assert.equal(insideRoots({ roots: ["/"] }, "/x"), true);
+  assert.equal(insideRoots(undefined, "/"), true);
+  assert.equal(insideRoots({}, "/srv"), true);
 });

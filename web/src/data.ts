@@ -1,7 +1,8 @@
 import { useCallback } from "react";
 import useSWR, { type Cache, type SWRConfiguration } from "swr";
 import { api, type Entry, type Mount, type NodeInfo } from "./api";
-import { isPersistKey, parsePersisted, serialisePersisted, SWR_STORAGE_KEY } from "./swrCache";
+import { cacheOwner, isPersistKey, parsePersisted, serialisePersisted, SWR_STORAGE_KEY } from "./swrCache";
+import { onAccountKnown } from "./auth";
 
 export const NODES_KEY = "nodes";
 const NODES_REFRESH_MS = 15000;
@@ -10,8 +11,13 @@ const NODES_REFRESH_MS = 15000;
 let inflight: Promise<NodeInfo[]> | null = null;
 export const fetchNodes = (): Promise<NodeInfo[]> => (inflight ??= api.nodes().then((r) => r.nodes).finally(() => (inflight = null)));
 
-/** In-memory cache seeded from localStorage; the node list is written back (debounced, size-bounded) as it changes. */
+/**
+ * In-memory cache seeded from localStorage once the signed-in account is known (`me`, before the app is shown); the node list is
+ * written back (debounced, size-bounded) as it changes, under that account. Until the account is known nothing is read or written,
+ * so the first panel of an account with nothing saved waits for the fresh node list.
+ */
 const store = new Map<string, unknown>();
+let owner: string | null = null;
 export const swrCache: Cache = {
   get: (k) => store.get(k) as never,
   set: (k, v) => {
@@ -23,10 +29,12 @@ export const swrCache: Cache = {
 };
 let timer: ReturnType<typeof setTimeout> | undefined;
 function schedulePersist() {
+  if (!owner) return;
+  const who = owner;
   clearTimeout(timer);
   timer = setTimeout(() => {
     try {
-      const s = serialisePersisted(store as Iterable<[string, unknown]>);
+      const s = serialisePersisted(store as Iterable<[string, unknown]>, who);
       if (s) localStorage.setItem(SWR_STORAGE_KEY, s);
       else localStorage.removeItem(SWR_STORAGE_KEY);
     } catch {
@@ -34,11 +42,22 @@ function schedulePersist() {
     }
   }, 300);
 }
-try {
-  for (const [k, v] of parsePersisted(localStorage.getItem(SWR_STORAGE_KEY))) store.set(k, v);
-} catch {
-  /* storage unavailable */
+/** The account is known: read what it saved; what another account (or an older build) saved is dropped. */
+export function cacheFor(who: string): void {
+  if (owner === who) return;
+  // another account in the same page: what was cached for the last one goes
+  if (owner) for (const k of [...store.keys()]) if (isPersistKey(k)) store.delete(k);
+  owner = who;
+  try {
+    const raw = localStorage.getItem(SWR_STORAGE_KEY);
+    const mine = parsePersisted(raw, who);
+    for (const [k, v] of mine) store.set(k, v);
+    if (raw !== null && !mine.length) localStorage.removeItem(SWR_STORAGE_KEY);
+  } catch {
+    /* storage unavailable */
+  }
 }
+onAccountKnown((m) => cacheFor(cacheOwner(m)));
 
 export const swrConfig: SWRConfiguration = {
   provider: () => swrCache as Map<string, never>,

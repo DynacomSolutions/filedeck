@@ -16,7 +16,8 @@ export interface AddressBase extends Where {
 
 export const fmtAddr = (node: string, path: string) => `${node}:${path}`;
 
-const within = (path: string, root: string) => root === "/" || path === root || path.startsWith(root.endsWith("/") ? root : root + "/");
+/** Whether `path` is `root` or below it (`/` holds every path). Both are expected normalised (`normPath`). */
+export const within = (path: string, root: string) => root === "/" || path === root || path.startsWith(root.endsWith("/") ? root : root + "/");
 
 /** Pick the deepest known base that contains a location, falling back to the node root. */
 export function addressBase(node: string, path: string, bases: AddressBase[]): AddressBase {

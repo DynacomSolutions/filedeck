@@ -856,6 +856,8 @@ button,button:hover,button:active,.btn--secondary,.btn--danger,.btn--ghost,.user
 
 /* ==== a-chrome: custom dropdown (Dropdown.tsx) replaces every native select ==== */
 .dd-btn{justify-content:space-between;gap:.4rem;min-width:44px;max-width:100%;padding:0 .6rem;background:var(--surface-2);box-shadow:var(--shadow-1);font-size:.8rem;font-weight:600}
+/* option labels can be paths or names with bidi characters: each is isolated from the text around it */
+.dd-text{unicode-bidi:isolate}
 .dd-btn .dd-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
 .dd-btn svg,.dd-item svg{flex:none;width:16px;height:16px}
 .dd-btn .dd-caret{width:14px;height:14px;color:var(--muted);transition:transform var(--fast) var(--ease)}

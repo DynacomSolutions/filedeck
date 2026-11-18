@@ -4,7 +4,7 @@ import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star,
 import { fmtSize, onFsChanged, type Entry, type Mount, type NodeInfo } from "./api";
 import { duFetcher, duKey, listFetcher, listKey as swrListKey, mountsFetcher, mountsKey } from "./data";
 import { listState } from "./sidebarState";
-import { rowOpens } from "./nodeHome";
+import { insideRoots, rowOpens } from "./nodeHome";
 import { SkeletonTreeRows } from "./Skeleton";
 import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks, type Bookmark } from "./bookmarks";
 import { copyText } from "./clipboard";
@@ -167,7 +167,9 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const loc = current ? current.node + "\0" + current.path : "";
   const heldNow = useMemo(() => new Set(heldIds(held, loc)), [held, loc]);
   const autoDirs = useMemo(() => new Set(current ? ancestorPaths(current.path) : []), [current]);
-  const isAuto = (node: string, path: string) => !!current && node === current.node && autoDirs.has(path);
+  // on the way to the current folder; on a machine with granted folders only rows inside them (a bookmark of / stays shut: listing it
+  // would be refused)
+  const isAuto = (node: string, path: string) => !!current && node === current.node && autoDirs.has(path) && insideRoots(nodesState.nodes?.find((n) => n.name === node), path);
   const openNow = (t: TNode) => t.kind === "elided" || shownOpen(isOpen(expanded, t.id, t.defaultOpen), !!t.auto, heldNow.has(t.id));
 
   const cluster = nodes.filter((n) => n.kind !== "source");

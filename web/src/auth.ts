@@ -19,12 +19,24 @@ const isSignedOut = (r: Response) => r.status === 401 && r.headers.get(SIGNED_OU
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
+/** Told who is signed in each time `me` learns it, before `me` returns (the saved node list is kept per account, data.ts). */
+const accountListeners = new Set<(m: Me) => void>();
+export function onAccountKnown(fn: (m: Me) => void): void {
+  accountListeners.add(fn);
+}
+
 /** Who is signed in, `{auth:false}` when the hub has no sign-in, or "signed-out". Other failures throw. */
 export async function me(): Promise<Me | "signed-out"> {
   const r = await fetch("/api/auth/me", { credentials: "same-origin" });
   if (isSignedOut(r)) return "signed-out";
   if (!r.ok) throw new Error(`/api/auth/me answered ${r.status}`);
   const b = (await r.json()) as Partial<Account>;
+  const m = whoFrom(b);
+  for (const f of accountListeners) f(m);
+  return m;
+}
+
+function whoFrom(b: Partial<Account>): Me {
   if (b.auth !== true || typeof b.name !== "string") return { auth: false };
   const kind = b.kind === "virt" ? "virt" : "sys";
   // only a system account can act as root; a virtual account never carries the switch
