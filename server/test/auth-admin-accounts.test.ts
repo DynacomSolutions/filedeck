@@ -741,3 +741,23 @@ test("hashPasswordAsync: the stored format of hashPassword, and it checks", asyn
   assert.equal(checkPassword(PW2, h), false);
   assert.notEqual(await hashPasswordAsync(PW), h, "a new salt each time");
 });
+
+test("bootstrap is used once: a deleted first administrator does not come back when the hub starts again on the same store", async () => {
+  const first = await world({ FILEDECK_ADMINS: "sadmin" });
+  assert.equal(first.h.auth!.accounts.get("vadmin")?.admin, true);
+  const admin = await signIn(first.h, "vadmin");
+  // with a system administrator named, the only virtual administrator may delete itself
+  assert.equal((await send(first.h, "DELETE", "/api/admin/accounts/vadmin", admin)).status, 200);
+  assert.equal(first.h.auth!.accounts.get("vadmin"), undefined);
+  const said: string[] = [];
+  const orig = console.log;
+  console.log = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  let second: World;
+  try {
+    second = await world({ FILEDECK_ADMINS: "sadmin" }, { a: first.a, b: first.b, file: path.join(tmp, `auth-${n}.db`) });
+  } finally {
+    console.log = orig;
+  }
+  assert.equal(second.h.auth!.accounts.get("vadmin"), undefined, "the deleted first administrator came back");
+  assert.equal(said.filter((l) => l.includes("FILEDECK_BOOTSTRAP_ADMIN_FILE is set but was already used")).length, 1);
+});

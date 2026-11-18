@@ -451,16 +451,22 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const id = cfg.auth ? currentUser() : undefined;
     if (!id) return undefined;
     const root = !jobRoute && id.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id) ? { key: RootCalls.key(id.name, id.asRootUntil), until: id.asRootUntil } : undefined;
-    return calls.start(id.kind, id.name, root);
+    return calls.start(id.kind, id.name, root, { jobStart: jobRoute });
   };
   app.accountChanged = async (before: Identity): Promise<void> => {
     if (!auth) return;
+    // a system administrator's act-as-root switches still on: read before the sessions go, their root jobs are cancelled below
+    const roots = before.kind === "sys" ? auth.sessions.liveAsRootEnds(before.name) : [];
     auth.sessions.endAll(before.kind, before.name);
-    // its proxied requests and transfers in flight, to machines and sources alike, are cut now (uploads fail, downloads stop)
+    // its proxied requests and transfers in flight, to machines and sources alike, are cut now (uploads fail, downloads stop); calls
+    // that start an agent job are left to settle, so the waits below see the job they make
     calls.endAccount(before.kind, before.name);
     const id: Identity = { ...before, epoch: auth.accounts.epochOf(before.kind, before.name) };
     const nodes = before.kind === "sys" ? cfg.nodes.map((n) => n.name) : Object.keys(before.nodes).filter((x) => nodeNames.has(x));
     await endAccountWork({ id, nodes, ops, diffs, call: callNode });
+    // a root job runs in the agent's root process, so the raised epoch does not stop it, and one still being started was not in the
+    // listing above: each switch ends as Stop ends it (its calls settle, at most 2 s; its jobs are listed and cancelled; a late relist)
+    for (const until of roots) await endRootJobs(before.name, until);
   };
   // The admin routes (auth/admin-routes.ts): only with sign-in on; off, /api/admin/* is 404. `changed` is read at each call, so tests
   // can wrap app.accountChanged.

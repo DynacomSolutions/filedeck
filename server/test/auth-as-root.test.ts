@@ -12,6 +12,7 @@ import { loadConfig } from "../src/config.ts";
 import { claimFor, signClaim, verifyClaim, USER_HEADER, type Identity, type UserClaim } from "../src/auth/identity.ts";
 import { ownerFrom } from "../src/auth/job-owner.ts";
 import type { SystemAuth } from "../src/auth/routes.ts";
+import type { SourceBackend } from "../src/sources/types.ts";
 import { loginMessage } from "../src/auth/sshkey.ts";
 import type { WorkerPool } from "../src/worker-pool.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
@@ -946,4 +947,65 @@ test("hub: after a restart with the clock stepped back, a new switch still gets 
   const u2 = ((await r2.json()) as { asRootUntil: number }).asRootUntil;
   assert.equal(u2, u1 + 1);
   assert.equal((await me(h2, a)).asRootUntil, u1, "the stored session keeps its own end");
+});
+
+test("hub: an account change cancels a root job still being started (end sessions, a source grant change): the wait and the relist apply", async () => {
+  const { Hono } = await import("hono");
+  const jobsList: { id: string; state: string; asRootUntil?: number }[] = [];
+  const cancelled: string[] = [];
+  let listsAnswered = 0;
+  let extractSeen = 0;
+  const fake = new Hono();
+  fake.get("/api/jobs", (c) => {
+    const body = { jobs: jobsList.map((j) => ({ ...j })) };
+    queueMicrotask(() => listsAnswered++);
+    return c.json(body);
+  });
+  fake.post("/api/jobs/extract", async (c) => {
+    const n = ++extractSeen;
+    // the job exists only after the hub's first listing has been answered
+    const seen = listsAnswered;
+    for (let i = 0; i < 600 && listsAnswered === seen; i++) await new Promise((r) => setTimeout(r, 10)); // (at most 6 s)
+    const claimUntil = verifyClaim(c.req.header(USER_HEADER) ?? "", T, Date.now())?.asRootUntil;
+    jobsList.push({ id: `root-extract-${n}`, state: "running", asRootUntil: claimUntil });
+    return c.json({ id: `root-extract-${n}`, state: "running", asRootUntil: claimUntil }, 202);
+  });
+  fake.post("/api/jobs/:id/cancel", (c) => {
+    cancelled.push(c.req.param("id"));
+    const j = jobsList.find((x) => x.id === c.req.param("id"));
+    if (j) j.state = "canceled";
+    return c.json({ id: c.req.param("id"), state: "canceled" });
+  });
+  fake.all("*", (c) => c.json({}));
+  const srv = await new Promise<Server>((res) => {
+    const s: Server = serve({ fetch: fake.fetch, port: 0 }, () => res(s));
+  });
+  servers.push(srv);
+  const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const source = { type: "sftp", ping: async () => {}, close: async () => {} } as unknown as SourceBackend;
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `F=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-change-root.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-change-root") } as never),
+    { s1: source },
+    () => {},
+    { system: fakeSystem([]) },
+  );
+  closers.push(h);
+  for (const how of ["end-sessions", "sources"] as const) {
+    const alice = sysCookie(h, "alice");
+    assert.equal((await postJson(h, "/api/auth/as-root", alice, { password: RIGHT })).status, 200);
+    const before = extractSeen;
+    const started = postJson(h, "/api/nodes/F/api/jobs/extract", alice, { archive: "/a.zip", dest: "/" });
+    while (extractSeen === before) await new Promise((r) => setTimeout(r, 5));
+    // another session of the same administrator makes the change (it ends that session too)
+    const admin = sysCookie(h, "alice");
+    const r =
+      how === "end-sessions"
+        ? await postJson(h, "/api/admin/end-sessions", admin, { kind: "sys", name: "alice" })
+        : await call(h, "/api/admin/system/alice/sources", admin, { method: "PUT", body: JSON.stringify({ sources: { s1: { write: how === "sources" } } }) });
+    assert.equal(r.status, 200, `${how}: ${await r.clone().text()}`);
+    await started;
+    const id = `root-extract-${extractSeen}`;
+    for (let i = 0; i < 300 && !cancelled.includes(id); i++) await new Promise((res) => setTimeout(res, 10));
+    assert.ok(cancelled.includes(id), `${how}: the root job ${id} made after the first listing was not cancelled`);
+  }
 });

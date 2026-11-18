@@ -226,6 +226,15 @@ export class Sessions {
   }
 
   /**
+   * The act-as-root switch ends still ahead in the sessions of system account `name`, each once, whatever the account's epoch now: an
+   * account change raises the epoch first, and its switches then still have root jobs to cancel (the hub's `accountChanged`).
+   */
+  liveAsRootEnds(name: string): number[] {
+    const rows = this.db.prepare("SELECT DISTINCT as_root_until AS u FROM sessions WHERE kind = 'sys' AND name = ? AND as_root_until > ?").all(name, this.now()) as { u: number }[];
+    return rows.map((r) => r.u);
+  }
+
+  /**
    * Sets (or, with null, clears) the end of the act-as-root switch of a session. An unknown session is left as it is. Either way what
    * was opened under the old switch ends (`onEnd` with `asRoot`): a new end is a new switch.
    */

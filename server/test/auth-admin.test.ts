@@ -596,3 +596,34 @@ test("audit: an admin call refused for its Host still writes a line; another pat
   assert.equal((await call(h, "/api/auth/logout", admin, { method: "POST", ...host("elsewhere.test") })).status, 421);
   assert.equal(lines.length, 0);
 });
+
+test("sign-in off: /api/admin/* answers a JSON 404 (never the web app), and a GET there is audited", async () => {
+  n++;
+  const lines: string[] = [];
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, NODES: "a=http://127.0.0.1:9", FILEDECK_DIFF_DIR: path.join(tmp, `diff-${n}`) } as never),
+    undefined,
+    (l) => lines.push(l),
+  );
+  hubs.push(h);
+  for (const [method, p] of [
+    ["GET", "/api/admin/accounts"],
+    ["GET", "/api/admin/overview"],
+    ["POST", "/api/admin/end-sessions"],
+    ["DELETE", "/api/admin/accounts/x"],
+  ] as const) {
+    lines.length = 0;
+    const r = await call(h, p, undefined, { method, ...(method === "POST" ? { body: "{}" } : {}) });
+    assert.equal(r.status, 404, `${method} ${p}`);
+    assert.match(r.headers.get("content-type") ?? "", /application\/json/);
+    assert.deepEqual(await r.json(), { error: "not found" });
+    const audited = lines.map((l) => JSON.parse(l) as { method?: string; route?: string; status?: number }).filter((x) => x.route === p);
+    assert.equal(audited.length, 1, `${method} ${p}: ${lines.join(" | ")}`);
+    assert.equal(audited[0]!.method, method);
+    assert.equal(audited[0]!.status, 404);
+  }
+  // an ordinary GET elsewhere is still not audited with sign-in off
+  lines.length = 0;
+  await call(h, "/api/nodes");
+  assert.deepEqual(lines.filter((l) => l.includes("/api/nodes")), []);
+});

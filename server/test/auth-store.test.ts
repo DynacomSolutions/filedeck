@@ -84,6 +84,43 @@ test("bootstrap", () => {
   assert.equal(acc.epochOf("virt", "admin"), 1);
 });
 
+test("bootstrap runs once: a deleted first administrator is not made again, and a removed file does not stop the start", () => {
+  const db = new AuthDb(":memory:");
+  const acc = new Accounts(db);
+  const d = tmp();
+  const f = path.join(d, "admin.json");
+  fs.writeFileSync(f, JSON.stringify({ name: "admin", passwordHash: hashPassword("pw") }));
+  const said: string[] = [];
+  const log = (s: string) => said.push(s);
+  bootstrapAdmin(acc, f, log);
+  assert.equal(acc.get("admin")?.admin, true);
+  assert.deepEqual(said, []);
+  acc.remove("admin");
+  bootstrapAdmin(acc, f, log);
+  assert.equal(acc.get("admin"), undefined, "the deleted first administrator came back");
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /FILEDECK_BOOTSTRAP_ADMIN_FILE is set but was already used/);
+  // used: the file is not read any more, so a removed (or broken) file does not stop the start
+  fs.rmSync(f);
+  bootstrapAdmin(acc, f, log);
+  assert.equal(acc.get("admin"), undefined);
+  fs.rmSync(d, { recursive: true, force: true });
+});
+
+test("bootstrap after an upgrade: the account exists but nothing says the file was used; the marker is written, nothing is made", () => {
+  const acc = new Accounts(new AuthDb(":memory:"));
+  acc.create({ name: "admin", passwordHash: hashPassword("old"), admin: true, nodes: {} });
+  const d = tmp();
+  const f = path.join(d, "admin.json");
+  fs.writeFileSync(f, JSON.stringify({ name: "admin", passwordHash: hashPassword("new") }));
+  bootstrapAdmin(acc, f, () => {});
+  assert.equal(checkPassword("old", acc.get("admin")?.passwordHash ?? null), true, "an existing account is never changed");
+  acc.remove("admin");
+  bootstrapAdmin(acc, f, () => {});
+  assert.equal(acc.get("admin"), undefined);
+  fs.rmSync(d, { recursive: true, force: true });
+});
+
 test("missing account", () => {
   const acc = new Accounts(new AuthDb(":memory:"));
   assert.throws(() => acc.addKey("ghost", "ssh-ed25519 AAAA x"), (e: unknown) => e instanceof AccountError && e.message === "no such account");

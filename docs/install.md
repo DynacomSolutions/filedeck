@@ -38,7 +38,7 @@ By default (sign-in off) agents run as root with the node's `/` mounted read-wri
 
 ### System sign-in (PAM)
 
-System accounts sign in with the password or `authorized_keys` they have on the machines. The values are `auth.admins` (system user names that are administrators), `auth.authNodes` (machines asked, in order; empty = the order of `nodes`), `auth.pamService` (default `filedeck`), `auth.bootstrapAdmin.secretName` and `.key` (a Secret that holds `{"name": "...", "passwordHash": "..."}` for the first virtual administrator; make the hash with `filedeck hash-password`), `auth.session.idleSeconds` and `.maxSeconds`, and `auth.apiTokenAccount` (the account the `filedeck du` token acts as).
+System accounts sign in with the password or `authorized_keys` they have on the machines. The values are `auth.admins` (system user names that are administrators), `auth.authNodes` (machines asked, in order; empty = the order of `nodes`), `auth.pamService` (default `filedeck`), `auth.bootstrapAdmin.secretName` and `.key` (a Secret that holds `{"name": "...", "passwordHash": "..."}` for the first virtual administrator; make the hash with `filedeck hash-password`. It is used once: the hub records that in its auth database and does not make the account again, also when it has been deleted. Remove the value and the Secret after the first sign-in), `auth.session.idleSeconds` and `.maxSeconds`, and `auth.apiTokenAccount` (the account the `filedeck du` token acts as).
 
 Each machine needs glibc for system sign-in: the PAM helper and the account lookup helper run inside the machine's own root with its libc and NSS. On a machine without glibc (Alpine, for example) the agent logs it and system sign-in is refused there.
 
@@ -59,6 +59,8 @@ account  include system-auth
 Use no `session` lines. Only one hidden password prompt is answered: a stack that asks for a second factor (a one-time code) fails the attempt. The name `root` (uid 0) never signs in.
 
 ### First steps after turning sign-in on
+
+Before you turn it on, let the running hub jobs (copies, moves, syncs in the Jobs list) finish, or cancel them. A hub job saved while sign-in was off has no owner, and once sign-in is on each of its calls fails.
 
 1. Sign in as the first administrator: the virtual account that `auth.bootstrapAdmin` creates, or a system user named in `auth.admins` (it needs the machine's PAM service, see above). Sign-in needs HTTPS.
 2. Open the account menu (your name in the header) and choose "Accounts…".

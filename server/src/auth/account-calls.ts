@@ -30,6 +30,8 @@ export interface RootSwitch {
 interface Entry {
   ac: AbortController;
   root?: string;
+  /** the call starts an agent job (the hub's `startsAgentJob`): left to settle, never cut by `endAccount` */
+  jobStart?: boolean;
   timer?: NodeJS.Timeout;
 }
 
@@ -40,11 +42,12 @@ export class AccountCalls {
 
   /**
    * A call of `kind:name` starts. One made under an act-as-root switch (`root`) is also cut when that switch ends (`endRoot`), and at
-   * its end time at the latest.
+   * its end time at the latest. A call that starts an agent job (`jobStart`) is never cut by `endAccount`: cutting it would not keep
+   * the agent from making the job, and the waits that cancel such jobs need it to settle (see the hub's `endRootJobs`).
    */
-  start(kind: "sys" | "virt", name: string, root?: RootSwitch): AccountCall {
+  start(kind: "sys" | "virt", name: string, root?: RootSwitch, o?: { jobStart?: boolean }): AccountCall {
     const key = `${kind}:${name}`;
-    const e: Entry = { ac: new AbortController(), ...(root ? { root: root.key } : {}) };
+    const e: Entry = { ac: new AbortController(), ...(root ? { root: root.key } : {}), ...(o?.jobStart ? { jobStart: true } : {}) };
     let set = this.open.get(key);
     if (!set) this.open.set(key, (set = new Set()));
     set.add(e);
@@ -61,16 +64,14 @@ export class AccountCalls {
     return { signal: e.ac.signal, done };
   }
 
-  /** Cuts every call of `kind:name` now in flight; gives how many. */
+  /** Cuts every call of `kind:name` now in flight but those that start an agent job; gives how many it cut. */
   endAccount(kind: "sys" | "virt", name: string): number {
-    const key = `${kind}:${name}`;
-    const set = this.open.get(key);
+    const set = this.open.get(`${kind}:${name}`);
     if (!set) return 0;
-    this.open.delete(key);
     // (read first: a call forgets itself as it is cut)
-    const all = [...set];
-    for (const e of all) e.ac.abort(new CallCut());
-    return all.length;
+    const hit = [...set].filter((e) => !e.jobStart);
+    for (const e of hit) e.ac.abort(new CallCut());
+    return hit.length;
   }
 
   /** Cuts the calls of `sys:name` made under the act-as-root switch `key`, and no other; gives how many. */

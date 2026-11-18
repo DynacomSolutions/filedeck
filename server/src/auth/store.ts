@@ -58,6 +58,10 @@ export class AuthDb {
         name TEXT PRIMARY KEY,
         epoch INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS hub_flags (
+        name TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
     const row = this.db.prepare("SELECT hub_id FROM meta LIMIT 1").get() as { hub_id: string } | undefined;
     if (row) this.hubId = row.hub_id;
@@ -166,6 +170,16 @@ export class Accounts {
    */
   tx<T>(fn: () => T): T {
     return inTransaction(this.db, fn);
+  }
+
+  /** Whether `FILEDECK_BOOTSTRAP_ADMIN_FILE` has been used on this store (`bootstrapAdmin`). */
+  bootstrapUsed(): boolean {
+    return this.db.prepare("SELECT 1 FROM hub_flags WHERE name = 'bootstrap_used'").get() !== undefined;
+  }
+
+  /** Records that the bootstrap file has been used, with the time. */
+  markBootstrapUsed(): void {
+    this.db.prepare("INSERT OR IGNORE INTO hub_flags (name, value) VALUES ('bootstrap_used', ?)").run(new Date().toISOString());
   }
 
   create(a: { name: string; password?: string; passwordHash?: string; admin: boolean; nodes: Record<string, NodeAccess> }): void {
@@ -296,9 +310,18 @@ export class Accounts {
   }
 }
 
-/** Creates the first admin from a JSON file, only when that name is free. Never changes an existing account. */
-export function bootstrapAdmin(acc: Accounts, file: string | undefined): void {
+/**
+ * Creates the first admin from a JSON file, only when that name is free, and only once per store: the store records that the file was
+ * used, so a first administrator deleted later is not made again at the next start. Never changes an existing account. `log` gets one
+ * line when the file is set but was used already.
+ */
+export function bootstrapAdmin(acc: Accounts, file: string | undefined, log: (s: string) => void = (s) => console.log(s)): void {
   if (!file) return;
+  // used once: after that the file is not read again (it may be gone), and a first administrator deleted since is not made again
+  if (acc.bootstrapUsed()) {
+    log("FILEDECK_BOOTSTRAP_ADMIN_FILE is set but was already used; it is ignored and can be removed");
+    return;
+  }
   let j: { name?: unknown; passwordHash?: unknown };
   try {
     j = JSON.parse(fs.readFileSync(file, "utf8")) as typeof j;
@@ -310,6 +333,13 @@ export function bootstrapAdmin(acc: Accounts, file: string | undefined): void {
   if (!j || typeof j !== "object") throw new Error("admin bootstrap file needs name and passwordHash");
   if (typeof j.name !== "string" || typeof j.passwordHash !== "string") throw new Error("admin bootstrap file needs name and passwordHash");
   if (!HASH_RE.test(j.passwordHash)) throw new Error("admin bootstrap passwordHash is not a scrypt hash");
-  if (acc.get(j.name)) return;
-  acc.create({ name: j.name, passwordHash: j.passwordHash, admin: true, nodes: {} });
+  const name = j.name;
+  const passwordHash = j.passwordHash;
+  // the account and the marker in one transaction; an account that exists already (a store from a build without the marker) is
+  // left as it is, and only the marker is written
+  acc.tx(() => {
+    if (acc.bootstrapUsed()) return;
+    if (!acc.get(name)) acc.create({ name, passwordHash, admin: true, nodes: {} });
+    acc.markBootstrapUsed();
+  });
 }
