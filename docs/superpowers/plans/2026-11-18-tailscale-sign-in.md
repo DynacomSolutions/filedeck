@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 22, TypeScript, Hono, `node:sqlite`, `node:test`, `node:http` over a unix socket; React 19, Playwright and axe-core for the browser checks; Helm.
 
-**Spec:** `docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md` (decisions 1 to 9, "Identity sources", "Routes", "Sessions", "Admin API and screens", "Audit", "Configuration and chart", "Threats", "End-to-end check"). Builds on v0.4.0 (`docs/superpowers/plans/2026-11-17-auth-*.md`, all done). Board row 20.171.
+**Spec:** `docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md` (decisions 1 to 9, "Identity sources", "Routes", "Sessions", "Admin API and screens", "Audit", "Configuration and chart", "Threats", "End-to-end check"). Builds on v0.4.0 (`docs/superpowers/plans/2026-11-17-auth-*.md`, all done). Board row 20.174.
 
 **State before this plan:** sign-in methods are password and key only (`server/src/auth/routes.ts`). `sessions` has `address` and `as_root_until` but no method. Nothing reads `Tailscale-User-*` headers, and nothing talks to tailscaled. `AgentSystemAuth` has `password`, `key` and `exists`; the agent's `/api/auth/lookup` already answers `{exists:false, refused:true}` for uid 0, gid 0 or group 0. `lockOut` in `admin-routes.ts` counts a password or a key. `AccountView` and `SystemView` have no links. The chart has no sidecar.
 
@@ -240,7 +240,7 @@
 ### Task 8: Full verification, browser acceptance and the check on a real tailnet
 
 **Files:**
-- Modify: `TASKS.md` (row 20.171 notes), nothing else unless a check fails
+- Modify: `TASKS.md` (row 20.174 notes), nothing else unless a check fails
 
 - [ ] **Step 1:** Run the whole server suite with a private `TMPDIR`, `npm test -w web`, `npm run typecheck`, `npm run check:neutral` and `helm lint k8s`. Expected: all pass.
 - [ ] **Step 2:** Run the browser acceptance in Chromium and Firefox (`web/test/browser/README.md`), including "Sign in" and "Accounts". Expected: PASS, axe clean in light and dark.
@@ -250,4 +250,4 @@
   - **The checks**, in a real browser on a device of Thomas's tailnet (ask the coordinator which device and which test login to use; link that login to a test virtual account, and a tag that Thomas names to another): the button shows over the tailnet address and not over `http://127.0.0.1`; pressing it signs in; sign-out holds after a reload; removing the link in Accounts signs the browser out at its next request; a tagged device (if Thomas has one) signs in through the tag link, and the audit line names the tag; a request with a forged `Tailscale-User-Login` sent to the hub from an address that is not listed (for example the machine's own LAN address, not loopback) gets no identity; the hub log shows the `tailnet` audit fields and no socket path and no key. Then repeat the sign-in with `FILEDECK_TAILSCALE_HEADERS=on` instead of the socket and check that the tag link is refused with reason `unlinked`.
   - **Clean-up**, also when a check fails: `tailscale logout` on the test node (an ephemeral node is then removed from the tailnet), stop tailscaled and the hub, delete the temporary folder and any key file, and confirm with the coordinator that the node no longer shows in the tailnet. Record what was checked on the board row, without the key, the device's tailnet address or any infrastructure name.
 - [ ] **Step 4:** Ask for a review of the whole branch (superpowers:requesting-code-review), with the Review Focus above as the brief. Fix what it finds and run Steps 1 and 2 again.
-- [ ] **Step 5:** Update row 20.171 in `TASKS.md` (status, what was checked and how) and commit with `git commit -m "docs(tasks): 20.171 Tailscale sign-in verified"`.
+- [ ] **Step 5:** Update row 20.174 in `TASKS.md` (status, what was checked and how) and commit with `git commit -m "docs(tasks): 20.174 Tailscale sign-in verified"`.
