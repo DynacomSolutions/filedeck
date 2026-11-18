@@ -338,6 +338,19 @@ export class FanWatch {
     if (v) this.schedule(v, kind === "m");
   }
 
+  /**
+   * The store answers from a file again (back after an outage, or a new generation after a heal): the session of this run, if any, was in the old file
+   * and its chain of epochs means nothing in the new one. A new session starts there; nothing from before now is vouched for.
+   */
+  storeReplaced() {
+    if (this.stopped || this.readyAt === Infinity || this.handingOver) return;
+    this.session = null;
+    this.chain = null;
+    this.lostAt = Date.now();
+    this.since = Math.max(this.since, this.lostAt);
+    void this.beginSession(this.readyAt);
+  }
+
   private async beginSession(readyAt: number) {
     if (!this.store.sessionStart) return;
     const hash = createHash("sha1").update([...this.marks].sort().join("\0")).digest("hex");

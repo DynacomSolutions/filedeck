@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
-import { rmSync, type Dir, type Stats } from "node:fs";
+import { closeSync, constants as fsc, fsyncSync, linkSync, mkdirSync, openSync, rmSync, type Dir, type Stats } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
-import { openDb } from "./index-cache.ts";
+import { loadSqlite, openDb } from "./index-cache.ts";
+import { genFile, listGens, listGensSync, removeBelow, rwUri, type Gen } from "./size-gen.ts";
 import { memcgRelief } from "./memcg.ts";
 import { FsError } from "./fsops.ts";
 import { isReservedName, resolveRead, virtualJoin } from "./paths.ts";
@@ -286,9 +287,10 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers, putPartial } = workerData;
+const { file, uri, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers, putPartial, vacuumMinFree } = workerData;
 const fs = require("node:fs");
-const db = new DatabaseSync(file);
+// \`uri\` opens the file only if it exists (mode=rw): a store file is never created here, so a deleted generation is never made again under its name (see size-gen.ts)
+const db = new DatabaseSync(uri);
 // NORMAL, not OFF: with WAL an OS crash or power cut then loses at most the last commits, never the file (OFF left a broken freelist after a node crash)
 db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
 // the reader worker only runs "read" ops: a second connection, so a read never waits behind a commit (WAL) and the main thread never waits for the disk
@@ -300,6 +302,20 @@ const trim = () => {
   try { if (fs.statSync(file + "-wal").size <= walLimit) return; } catch { return; }
   lastTrim = Date.now();
   try { db.exec("PRAGMA busy_timeout=500"); db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {} finally { db.exec("PRAGMA busy_timeout=10000"); }
+};
+// A file made with auto_vacuum=INCREMENTAL (every new generation) gives its free pages back: 8 MiB (at 4 KiB pages) at a time, at most every 2 s, by the lease holder only,
+// once more than a tenth of the file and \`vacuumMinFree\` pages are free. A file without it (generation 0 of older versions) is never vacuumed here: see SizeStore.lookAtSpace.
+let autoVac, lastVac = 0;
+const vacuum = () => {
+  if (!fence || Date.now() - lastVac < 2000) return;
+  lastVac = Date.now();
+  try {
+    autoVac ??= Number(db.prepare("PRAGMA auto_vacuum").get().auto_vacuum);
+    if (autoVac !== 2) return;
+    const free = Number(db.prepare("PRAGMA freelist_count").get().freelist_count);
+    const pages = Number(db.prepare("PRAGMA page_count").get().page_count);
+    if (free >= vacuumMinFree && free * 10 > pages) db.exec("PRAGMA incremental_vacuum(2048)");
+  } catch {}
 };
 // prepared on first use too: a store of an older version has no \`ver\` column until the "schema" op has added it
 let putStmt;
@@ -432,6 +448,7 @@ parentPort.on("message", (m) => {
       }
       else if (m.op === "check") { parentPort.postMessage({ id: m.id, rows: [check()] }); return; }
       else if (m.op === "repair") { parentPort.postMessage({ id: m.id, rows: [repair(m.names)] }); return; }
+      else if (m.op === "close") { db.close(); parentPort.postMessage({ id: m.id }); process.exit(0); }
       else if (m.op === "release") { if (fence) db.prepare("UPDATE writer SET released = 1 WHERE id = 1 AND epoch = ? AND owner = ?").run(fence.epoch, fence.owner); fence = null; }
       else if (m.op === "meta") { const r = db.prepare(m.sql).run(...m.params); parentPort.postMessage({ id: m.id, rows: [{ id: Number(r.lastInsertRowid), changes: Number(r.changes) }] }); return; }
       else if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
@@ -439,7 +456,7 @@ parentPort.on("message", (m) => {
       else if (m.op === "tx") inTx(() => { for (const part of m.parts) { const st = db.prepare(part.sql); for (const r of part.rows) st.run(...r); } });
       else if (m.op === "many") inTx(() => { const st = db.prepare(m.sql); for (const r of m.rows) st.run(...r); });
       else inTx(() => void db.prepare(m.sql).run(...m.params));
-      if (!reader) trim();
+      if (!reader) { vacuum(); trim(); }
       parentPort.postMessage({ id: m.id });
       return;
     } catch (e) {
@@ -456,6 +473,13 @@ const PENDING_IDLE = Number.MAX_SAFE_INTEGER;
 const PENDING_BATCH = 10_000;
 /** the writer lease: a holder whose heartbeat is older than this has lost it */
 const LEASE_MS = 10_000;
+/** a process starts a new generation at most this often (a failing disk must not make it loop) */
+const HEAL_EVERY_MS = 10 * 60_000;
+/** free pages above which a new generation's writer gives some back (see `vacuum` in the worker) */
+const VACUUM_MIN_FREE = 4096;
+/** a file without auto-vacuum that is more than half free pages, and has more than this free, is compacted into a new generation */
+const COMPACT_MIN_FREE = 1 << 30;
+const gb = (n: number) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GiB` : `${Math.round(n / (1 << 20))} MiB`);
 
 export class SizeStore {
   /** null once the store is unusable: scans then walk without caching (same results, never `cached`) */
@@ -465,6 +489,24 @@ export class SizeStore {
   lastWalkFrames = 0;
   private held: { path: string; probe?: boolean; done: Promise<void> }[] = [];
   private file = ":memory:";
+  /** the name the store was given: generation 0, and the stem of every later generation (see size-gen.ts) */
+  private base = ":memory:";
+  /** the generation of `file` */
+  private gen = 0;
+  /** how many times this process moved to another generation: work begun before a move never writes after it */
+  private switches = 0;
+  private genTimer?: NodeJS.Timeout;
+  private switching?: Promise<void>;
+  private healing?: Promise<void>;
+  /** no new generation before this time (see HEAL_EVERY_MS) */
+  private healAt = 0;
+  private healWaitNoted = 0;
+  /** what was found wrong with the file, for the heal tried again later */
+  private damageWhy = "";
+  /** the space of this generation's file was looked at (once per file) */
+  private spaceSeen = false;
+  /** Set by the agent: the store is answering from a file again (back after an outage, or a new generation): the change watcher starts a new session in it. */
+  onReopen: () => void = () => {};
   private writer?: Worker;
   private reader?: Worker;
   private io = limiter(AHEAD);
@@ -502,14 +544,37 @@ export class SizeStore {
 
   constructor(
     file: string,
-    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; /** tests: every read on the worker sleeps this long, to show the main thread is not held */ readDelayMs?: number; walLimitBytes?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number; /** the writer lease lapses after this long without a heartbeat */ leaseMs?: number; /** tests: a walk writes what it has (and its partial totals) at least this often */ flushMs?: number },
+    private o: { root: string; ttlMs: number; /** cap on rows `tree` returns and on rows remembered while uncached */ maxEntries: number; commitChunk?: number; /** tests: every read on the worker sleeps this long, to show the main thread is not held */ readDelayMs?: number; walLimitBytes?: number; /** folders whose own size is above this are streamed with opendir, smaller ones read with one readdir (tests set it) */ streamAbove?: number; /** the writer lease lapses after this long without a heartbeat */ leaseMs?: number; /** tests: a walk writes what it has (and its partial totals) at least this often */ flushMs?: number; /** a new generation at most this often (default 10 min) */ healEveryMs?: number; /** tests: see VACUUM_MIN_FREE */ vacuumMinFreePages?: number; /** tests: see COMPACT_MIN_FREE */ compactMinFreeBytes?: number },
   ) {
-    this.file = file;
+    this.base = this.file = file;
     if (file === ":memory:") this.epoch = 1;
-    // A file that cannot be opened is never deleted: a busy one is opened later through the writer thread, a corrupt one is checked for index-only damage by the
-    // lease holder (see repairIndexes) and otherwise kept as it is (see markDamaged), the store running uncached.
+    else {
+      // the highest generation in use; none at all (a new install): generation 0, made here as before
+      let l = listGensSync(file);
+      // A listing of a big folder takes more than one read of it: one made while another process puts a new generation in place and deletes the old one
+      // can miss both. Side files (-wal, -shm, a heal's temporary file) without any main file are a sign of that: list again before making generation 0.
+      for (let i = 0; i < 5 && !l.gens.length && l.all.length; i++) l = listGensSync(file);
+      let cur = l.gens[0];
+      if (!cur) {
+        try {
+          mkdirSync(path.dirname(file), { recursive: true });
+          // O_EXCL: never take over a file another process made a moment ago (it is then simply used)
+          closeSync(openSync(file, fsc.O_RDWR | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600));
+        } catch {
+          /* made by another process, or the open below says what is wrong */
+        }
+        cur = listGensSync(file).gens[0] ?? { gen: 0, file };
+      }
+      this.gen = cur.gen;
+      this.file = cur.file;
+      this.genTimer = setInterval(() => void this.follow(), Math.max(20, Math.floor(this.leaseMs() / 3)));
+      this.genTimer.unref();
+      void this.follow();
+    }
+    // A file that cannot be opened is not given up: a busy one is opened later through the writer thread, a corrupt one is checked for index-only damage
+    // (see repairIndexes) and otherwise replaced by a new generation (see heal), the store running uncached meanwhile.
     try {
-      this.open(file);
+      this.open(this.file);
     } catch (e) {
       this.db = null;
       if (this.isBusy(e)) {
@@ -528,7 +593,7 @@ export class SizeStore {
   }
 
   private open(file: string) {
-    const db = openDb(file);
+    const db = openDb(file, 8192, false, true);
     if (!db) throw new Error("SQLite is unavailable");
     try {
       // a long wait here blocks the event loop (and /healthz); a miss only means a re-read from disk
@@ -566,6 +631,10 @@ export class SizeStore {
     if (this.file !== ":memory:") this.startLease();
   }
 
+  /** The file of the generation in use (tests, logs). */
+  get storeFile(): string {
+    return this.file;
+  }
   /** Is this process the one that writes the store? (Reads are always allowed.) */
   get isWriter(): boolean {
     return !!this.db && this.epoch > 0;
@@ -590,13 +659,15 @@ export class SizeStore {
   private firstEpoch = 0;
   private async tryLease(): Promise<void> {
     if (this.closed || this.leaving || !this.db) return;
+    const sw = this.switches;
     try {
       const op = this.epoch ? { op: "beat" } : { op: "acquire", owner: this.owner, leaseMs: this.leaseMs() };
       const e = Number((await this.post(op, false))?.[0]?.epoch ?? 0);
-      if (this.closed) return;
+      if (this.closed || sw !== this.switches) return; // (an answer about a file this process has left)
       if (e && !this.epoch) await this.acquired(e);
       else if (!e && this.epoch) this.loseLease();
     } catch (err) {
+      if (sw !== this.switches) return;
       // a busy database is a missed beat, not a lost lease: the next beat (or the next commit's fence check) says which
       if (!this.isBusy(err)) {
         if (this.epoch) this.loseLease();
@@ -614,6 +685,7 @@ export class SizeStore {
    */
   private acquiring = false;
   private async acquired(e: number) {
+    const sw = this.switches;
     this.epoch = e;
     this.firstEpoch ||= e;
     this.acquiring = true; // (the first lease attempt is what is running: its own writes must not wait for it)
@@ -621,6 +693,7 @@ export class SizeStore {
       // a read that failed (busy) must not look like "nothing to recover": the next tick tries again
       const w = await this.read("walking", "SELECT path, started FROM walking WHERE epoch < ?", [e], null);
       const t = await this.read("taken", "SELECT path FROM pending WHERE taker IS NOT NULL LIMIT ?", [PENDING_BATCH], null);
+      if (sw !== this.switches) return;
       if (!w || !t || !(await this.refreshMarks())) return this.loseLease();
       const taken = t.map((r) => r.path as string);
       const at = this.nextAt();
@@ -641,8 +714,10 @@ export class SizeStore {
       for (const [p] of walking) parts.push({ sql: "DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", rows: [[p, ...below(p)]] });
       if (taken.length) parts.push({ sql: DIRTY_SQL, rows: taken.map((p) => [p, parentOf(p), at]) }, { sql: "UPDATE pending SET taker = NULL WHERE taker IS NOT NULL", rows: [[]] });
       if (parts.length && !(await this.txn(parts))) return this.loseLease(); // (`unsaved` is kept for the next try)
+      if (sw !== this.switches) return;
       this.unsaved.clear();
     } catch (err) {
+      if (sw !== this.switches) return;
       this.failed(err);
       return this.loseLease();
     } finally {
@@ -650,6 +725,7 @@ export class SizeStore {
     }
     for (const w of this.waiters.splice(0)) w.res();
     this.background();
+    void this.lookAtSpace();
   }
   /** Resolves when this process holds the lease; rejects when `signal` aborts. */
   async whenWriter(signal?: AbortSignal): Promise<void> {
@@ -742,13 +818,14 @@ export class SizeStore {
   /** After a real failure, open the store again (30 s, then doubling to 10 min between tries) so one bad moment does not last until restart. */
   private reopening?: Promise<void>;
   private reopen(): Promise<void> | undefined {
-    // a file found damaged beyond repair is never opened again by this process: writes would spread the damage (an operator moves it aside and restarts)
-    if (this.db || this.damaged || this.file === ":memory:" || !this.retryAt || Date.now() < this.retryAt) return;
+    // a file found damaged beyond repair is never opened again by this process: writes would spread the damage (a new generation replaces it, see heal)
+    if (this.db || this.damaged || this.file === ":memory:" || this.closed || !this.retryAt || Date.now() < this.retryAt) return;
     return (this.reopening ??= (async () => {
+      const sw = this.switches;
       try {
         // the schema is checked on the writer thread; the main handle is then only a liveness flag (an empty in-memory one): every read and write goes to the workers
         await this.post({ op: "schema" }, false);
-        if (this.closed) return;
+        if (this.closed || sw !== this.switches) return;
         this.db = openDb(":memory:");
         this.stamp = Math.max(this.stamp, Date.now());
         await this.refreshMarks();
@@ -760,41 +837,57 @@ export class SizeStore {
         this.retryDelay = 30_000;
         this.damaged = false;
         console.error("size store back");
-      } catch {
+        this.onReopen();
+      } catch (e) {
+        if (sw !== this.switches) return;
+        // a busy file (another process is making or opening it) is tried again in a second; a damaged one is looked at (and, beyond its indexes, replaced)
+        if (this.isBusy(e)) {
+          this.retryAt = Date.now() + 1000;
+          return;
+        }
+        if (this.isCorrupt(e)) void this.repairIndexes();
         this.retryDelay = Math.min(this.retryDelay * 2, 600_000);
         this.retryAt = Date.now() + this.retryDelay;
       } finally {
-        this.reopening = undefined;
+        if (sw === this.switches) this.reopening = undefined;
       }
     })());
   }
 
   /**
-   * A malformed database may be only its indexes (a crash left an index out of step with its table). The lease holder checks it (integrity_check): if that names
-   * nothing but indexes, and none has more entries than its table, they are rebuilt from their tables inside one fenced write transaction and the store opens again
-   * at its next use. Anything else is kept as it is (never moved or deleted; see markDamaged). Tried again after an error until this process has been the holder once and checked.
+   * A malformed database may be only its indexes (a crash left an index out of step with its table). The file is checked (integrity_check, on the reader).
+   * If that names nothing but indexes, and none has more entries than its table, the lease holder rebuilds them from their tables inside one fenced write
+   * transaction and the store opens again at its next use. Damage beyond the indexes, found by any process, is healed: the file is replaced by a new
+   * generation (see heal). Tried again after an error until this process has checked once.
    */
   private repaired = false;
   private repairing?: Promise<void>;
   /** the worker holds the lease for a repair that has not been followed by a reopen (released at shutdown) */
   private repairLease = false;
-  /** The file is damaged and cannot be repaired here (not SQLite, or damage beyond its indexes): it is kept as it is and an operator must move it aside. */
+  /** The file is damaged beyond its indexes (or not SQLite) and a new generation has not been made yet (see heal). */
   private damaged = false;
   private repairIndexes(): Promise<void> {
     if (this.repaired || this.closed || this.leaving || this.file === ":memory:") return Promise.resolve();
     return (this.repairing ??= (async () => {
+      const sw = this.switches;
+      const moved = () => sw !== this.switches || this.closed;
       let done = false;
       let beat: NodeJS.Timeout | undefined;
       try {
         // the normal acquire-then-acquired() path runs at the reopen: nothing here is main-thread lease state
         this.loseLease();
-        // only the lease holder repairs (the same single-writer rule as every write; for the current holder this returns its epoch)
-        if (!Number((await this.post({ op: "acquire", owner: this.owner, leaseMs: this.leaseMs() }, false))?.[0]?.epoch ?? 0)) return;
-        this.repairLease = true;
-        // the check reads on the reader worker for as long as it takes: the lease is kept alive from here (the store's own beat is not running while it is unusable)
-        beat = setInterval(() => void this.post({ op: "beat" }, false).catch(() => undefined), Math.max(20, Math.floor(this.leaseMs() / 3)));
+        // only the lease holder rebuilds indexes (the same single-writer rule as every write; for the current holder this returns its epoch)
+        const holder = Number((await this.post({ op: "acquire", owner: this.owner, leaseMs: this.leaseMs() }, false))?.[0]?.epoch ?? 0) > 0;
+        if (moved()) return;
+        if (holder) {
+          this.repairLease = true;
+          // the check reads on the reader worker for as long as it takes: the lease is kept alive from here (the store's own beat is not running while it is unusable)
+          beat = setInterval(() => void this.post({ op: "beat" }, false).catch(() => undefined), Math.max(20, Math.floor(this.leaseMs() / 3)));
+        }
+        // any process looks (read only): damage beyond the indexes is healed by whoever finds it, the lease lives in the damaged file
         const c = (await this.post({ op: "check" }, true))?.[0] as { names?: string[]; problem?: string } | undefined;
-        if (!c) return;
+        if (!c || moved()) return;
+        if (!c.problem && !holder) return; // index-only damage, or none: the lease holder rebuilds (tried again at the next failure)
         let r: { rebuilt?: string; problem?: string } = { rebuilt: "" };
         if (c.problem) r = { problem: c.problem };
         else if (c.names?.length) {
@@ -803,6 +896,7 @@ export class SizeStore {
           const again = (await this.post({ op: "check" }, true))?.[0] as { names?: string[]; problem?: string } | undefined;
           if (again?.problem || again?.names?.length) r = { problem: again.problem ?? "still damaged after the rebuild: " + again.names!.join(", ") };
         }
+        if (moved()) return;
         clearInterval(beat);
         beat = undefined;
         // the attempt counts only once the check and the repair have answered: a fenced one (the lease lapsed) is tried again
@@ -814,34 +908,206 @@ export class SizeStore {
         } else if (r?.problem) this.markDamaged(r.problem);
         else this.retryAt = Date.now(); // (nothing wrong with the file now: the failure was a passing one)
       } catch (err) {
+        if (moved()) return;
         // the store stays unavailable and is retried as before
-        if (this.isFenced(err)) {
-          if (!this.closed) console.error("size store: repair not done, another process took the writer lease; it is tried again");
-        } else if (!this.closed) {
-          // damage the open itself reported (not SQLite) is final; anything else (I/O, memory, a full disk) keeps the file and the attempt
-          if (this.isNotDb(err)) {
-            this.repaired = true;
-            this.markDamaged((err as Error).message);
-          } else console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
-        }
+        if (this.isFenced(err)) console.error("size store: repair not done, another process took the writer lease; it is tried again");
+        // damage SQLite itself reported while taking the lease or checking (not SQLite, a damaged page) is final; anything else (I/O, memory, a full disk) keeps the file and the attempt
+        else if (this.isCorrupt(err)) {
+          this.repaired = true;
+          this.markDamaged((err as Error).message);
+        } else console.error(`size store: not repaired, the file is kept as it is: ${(err as Error)?.message ?? err}`);
       } finally {
         if (beat) clearInterval(beat);
-        if (!done && this.repairLease) {
+        if (!done && this.repairLease && !moved()) {
           this.repairLease = false;
           await this.post({ op: "release" }, false).catch(() => undefined);
         }
-        this.repairing = undefined;
+        if (sw === this.switches) this.repairing = undefined;
       }
     })());
   }
 
-  /** The file cannot be repaired. It is never moved, changed or deleted by the agent: it stays as it is, folder sizes are not cached (retried with backoff), and one clear line says what to do. */
+  /** The file cannot be repaired in place: a new generation replaces it (see heal). Meanwhile folder sizes are not cached. */
   private markDamaged(why: string) {
     this.damaged = true;
-    // integrity_check reports one problem per line: keep the log to one line and its first few problems, so the instruction is never buried
-    const parts = why.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    const brief = parts.slice(0, 3).join("; ") + (parts.length > 3 ? `; and ${parts.length - 3} more` : "");
-    console.error(`size store: ${this.file} is damaged and cannot be repaired (${brief}). Folder sizes are not cached. Stop the agent, move the file and its -wal and -shm aside, then start it again.`);
+    this.damageWhy = why;
+    void this.heal(why);
+  }
+
+  /** One line, with at most the first three problems of a report that has one per line. */
+  private brief(why: string): string {
+    const parts = why.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    return parts.slice(0, 3).join("; ") + (parts.length > 3 ? `; and ${parts.length - 3} more` : "");
+  }
+
+  /**
+   * Replace the file by a new generation: `<base>.<N+1>`, built under a temporary name (incremental auto-vacuum, the schema) and put in place with link(),
+   * which fails when the name exists, so only one process makes it. No lease is needed: the lease lives in the old file, which may not be readable. A process
+   * that finds a higher generation already there follows it instead. Then the files of the lower generations are deleted. At most once per HEAL_EVERY_MS.
+   * `compact`: the old file is sound but mostly free pages (see lookAtSpace).
+   */
+  private heal(why: string, compact = false): Promise<void> {
+    if (this.file === ":memory:" || this.closed || this.leaving) return Promise.resolve();
+    return (this.healing ??= (async () => {
+      try {
+        const l = await listGens(this.base);
+        const top = l.gens[0];
+        if (top && top.gen > this.gen) return await this.switchTo(top); // another process healed first
+        if (Date.now() < this.healAt) {
+          if (!compact && this.healWaitNoted !== this.healAt) {
+            this.healWaitNoted = this.healAt;
+            console.error(`size store: ${this.file} is damaged (${this.brief(why)}); a new store was made less than ${Math.round((this.o.healEveryMs ?? HEAL_EVERY_MS) / 60_000)} min ago, it is healed again after ${new Date(this.healAt).toISOString()}. Folder sizes are not cached until then.`);
+          }
+          return;
+        }
+        this.healAt = Date.now() + (this.o.healEveryMs ?? HEAL_EVERY_MS);
+        // named now: once the new file is in place, this process's own follow timer may switch to it before the line below is logged
+        const old = this.file;
+        const g = Math.max(this.gen, top?.gen ?? 0) + 1;
+        const next = genFile(this.base, g);
+        const tmp = `${next}.tmp-${randomUUID()}`;
+        try {
+          closeSync(openSync(tmp, fsc.O_RDWR | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600));
+          const sq = loadSqlite();
+          if (!sq) throw new Error("SQLite is unavailable");
+          const db = new sq.DatabaseSync(rwUri(tmp));
+          try {
+            // auto_vacuum while the file is still empty (any write, even of the journal mode, fixes it). No journal and no syncs while it is built (on the main
+            // thread): a crash leaves a temporary file nobody uses, deleted later; only the finished file is put in place, and its first opener sets WAL.
+            db.exec("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;");
+            db.exec(SCHEMA);
+            db.exec(TRIGGERS);
+          } finally {
+            db.close();
+          }
+          // on disk before it gets its name: an OS crash must not leave a torn new generation (journal_mode=OFF above wrote it without syncs)
+          const fd = openSync(tmp, fsc.O_RDONLY | fsc.O_NOFOLLOW);
+          try {
+            fsyncSync(fd);
+          } finally {
+            closeSync(fd);
+          }
+          linkSync(tmp, next);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+            const now = (await listGens(this.base)).gens[0];
+            if (now && now.gen > this.gen) await this.switchTo(now);
+            return;
+          }
+          console.error(`size store: could not make a new store ${next}, tried again later: ${(e as Error)?.message ?? e}`);
+          return;
+        } finally {
+          await fs.rm(tmp, { force: true }).catch(() => undefined);
+          for (const x of ["-journal", "-wal", "-shm"]) await fs.rm(tmp + x, { force: true }).catch(() => undefined);
+        }
+        console.error(
+          compact
+            ? `size store: ${old} is ${why}; it is compacted: a new store ${next} is used and the old file is deleted. Folder sizes are measured again.`
+            : `size store: ${old} was damaged (${this.brief(why)}); it is deleted and a new store ${next} is used. Folder sizes are measured again.`,
+        );
+        await this.switchTo({ gen: g, file: next });
+      } finally {
+        this.healing = undefined;
+      }
+    })());
+  }
+
+  /** On every lease tick, also while the store is unusable: move to a higher generation made by any process, delete what is left of lower ones, try a heal again. */
+  private async follow(): Promise<void> {
+    if (this.closed || this.leaving || this.switching || this.file === ":memory:") return;
+    const l = await listGens(this.base);
+    if (this.closed || this.leaving) return;
+    const top = l.gens[0];
+    if (top && top.gen > this.gen) return this.switchTo(top);
+    if (l.all.some((f) => f.gen < this.gen || f.tmp)) await removeBelow(this.base, this.gen, l);
+    if (this.damaged && !this.healing && Date.now() >= this.healAt) void this.heal(this.damageWhy);
+    // an unusable store opens again when its retry time has come, also with no request asking (a process that followed a heal while the file was busy)
+    else if (!this.db && !this.damaged) void this.reopen();
+  }
+
+  /**
+   * Move this process to generation `to`: the worker connections to the old file are closed (requests still waiting fail as fenced, never as damage),
+   * everything read from it is forgotten (the lease, the stale marks; nothing validated before now counts), and the new file is opened like a store that
+   * comes back after an outage. Then the files of lower generations are deleted.
+   */
+  private switchTo(to: Gen): Promise<void> {
+    return (this.switching ??= (async () => {
+      // work that waits for the first lease attempt (a scan, a write) waits until the new file's first attempt has answered
+      let ready = () => {};
+      try {
+        if (to.gen <= this.gen || this.closed) return;
+        const gate = new Promise<void>((r) => (ready = r));
+        // Everything up to the first await is synchronous: from here no call (a read, a mark, a walk, a reopen) can still see the old file, its lease or its
+        // handles, and a worker started from now on (post starts them on demand) opens the new file. The old workers are stopped without waiting for them.
+        this.switches++;
+        if (this.leaseTimer) clearInterval(this.leaseTimer);
+        this.leaseTimer = undefined;
+        const ws = [this.writer, this.reader].filter((w): w is Worker => !!w);
+        this.writer = this.reader = undefined;
+        for (const [id, p] of this.pending)
+          if (ws.includes(p.w)) {
+            p.rej(new Error("fenced: the size store moved to a new file"));
+            this.pending.delete(id);
+          }
+        for (const w of ws) void this.stopWorker(w);
+        try {
+          this.db?.close();
+        } catch {
+          /* already broken */
+        }
+        this.db = null;
+        this.reopening = undefined;
+        this.repairing = undefined;
+        this.loseLease();
+        this.firstEpoch = 0;
+        this.firstLease = gate;
+        this.marks.clear();
+        this.unsaved.clear();
+        this.repaired = this.damaged = this.warned = this.repairLease = this.spaceSeen = false;
+        this.damageWhy = "";
+        this.retryDelay = 30_000;
+        this.retryAt = Date.now();
+        this.gen = to.gen;
+        this.file = to.file;
+        await removeBelow(this.base, this.gen);
+        await this.reopen();
+        if (this.firstLease !== gate) await this.firstLease;
+      } finally {
+        ready();
+        this.switching = undefined;
+      }
+    })());
+  }
+
+  /** Close a worker's connection (its last close may checkpoint), then stop it; a worker busy for long (a check of a big file) is stopped anyway. */
+  private async stopWorker(w: Worker): Promise<void> {
+    // (a timer that keeps the process alive: a worker that has exited already sends no "exit" again)
+    const gone = new Promise<void>((r) => w.once("exit", () => r()));
+    try {
+      w.postMessage({ op: "close", id: 0 });
+    } catch {
+      /* gone already */
+    }
+    let t: NodeJS.Timeout | undefined;
+    await Promise.race([gone, new Promise((r) => (t = setTimeout(r, 2000)))]);
+    clearTimeout(t);
+    // not awaited: a worker inside a long native step (an integrity check of a big file) ends only when the step ends; nobody waits for that
+    void w.terminate().catch(() => undefined);
+  }
+
+  /**
+   * Once per file, by the lease holder: how big is it and how much of it is free pages (cheap header reads). One line when more than a quarter is free.
+   * A file without auto-vacuum (generation 0 of older versions) never gives free pages back: more than half free and over COMPACT_MIN_FREE is compacted.
+   */
+  private async lookAtSpace(): Promise<void> {
+    if (this.spaceSeen || this.file === ":memory:" || !this.isWriter) return;
+    this.spaceSeen = true;
+    // one read for all four (a read is a round trip to the reader worker)
+    const r = ((await this.read("space", "SELECT (SELECT page_count FROM pragma_page_count()) p, (SELECT freelist_count FROM pragma_freelist_count()) f, (SELECT page_size FROM pragma_page_size()) s, (SELECT auto_vacuum FROM pragma_auto_vacuum()) a", [], null))?.[0] ?? {}) as Record<string, unknown>;
+    const [pages, free, size, av] = [r.p, r.f, r.s, r.a].map((x) => Number(x ?? NaN)) as [number, number, number, number];
+    if (![pages, free, size, av].every(Number.isFinite) || !pages) return;
+    if (free * 4 > pages && free * size > 64 << 20) console.error(`size store: ${this.file} is ${gb(pages * size)}, of which ${gb(free * size)} is free pages`);
+    if (av !== 2 && free * 2 > pages && free * size > (this.o.compactMinFreeBytes ?? COMPACT_MIN_FREE)) await this.heal(`${gb(pages * size)} with ${gb(free * size)} of free pages that a file without auto-vacuum never gives back`, true);
   }
 
   /** For the metrics route: is the store answering from its file, and is its file damaged beyond repair. */
@@ -873,7 +1139,7 @@ export class SizeStore {
     if (this.closed) return Promise.resolve(undefined);
     let w = read ? this.reader : this.writer;
     if (!w) {
-      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, putPartial: PUT_PARTIAL, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, uri: rwUri(this.file), vacuumMinFree: this.o.vacuumMinFreePages ?? VACUUM_MIN_FREE, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, putPartial: PUT_PARTIAL, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
       const fail = (e: Error) => {
         if (this.writer === nw) this.writer = undefined;
         if (this.reader === nw) this.reader = undefined;
@@ -920,6 +1186,14 @@ export class SizeStore {
   async releaseLease(): Promise<void> {
     this.leaving = true;
     for (const w of this.waiters.splice(0)) w.rej(new FsError(503, "this process is stopping")); // (a job waiting for the lease is handed to the next process)
+    if (this.genTimer) clearInterval(this.genTimer);
+    this.genTimer = undefined;
+    // a switch is short (its old workers are not waited for), but a shutdown never hangs on it: the lease lapses by itself
+    if (this.switching) {
+      let t: NodeJS.Timeout | undefined;
+      await Promise.race([this.switching.catch(() => undefined), new Promise((r) => (t = setTimeout(r, 2000)))]);
+      clearTimeout(t);
+    }
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.leaseTimer = undefined;
     if ((this.epoch || this.repairLease) && this.file !== ":memory:") await Promise.race([this.post({ op: "release" }, false).catch(() => undefined), new Promise((r) => setTimeout(r, 2000))]);
@@ -1107,8 +1381,10 @@ export class SizeStore {
    * otherwise keep totals from before).
    */
   private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** when the scan (job) began: rows written since are its own and are kept when it runs again after a restart, whatever their age (a rescan keeps only those) */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
+    /** the generation it reads and writes, taken before anything it decides: after a move to another one it writes nothing more (its rows were checked against the old file) */
+    const sw = this.switches;
     await this.reopen();
-    if (!(await this.mayScan())) throw new FsError(503, "another process holds the size store writer lease");
+    if (!(await this.mayScan()) || sw !== this.switches) throw new FsError(503, "another process holds the size store writer lease");
     // A job resumed long after it began (the agent was down for days) does not keep its own rows on that ground: changes made while nothing
     // watched could be in them. Then only the usual age and watcher checks apply.
     const since = mode.since !== undefined && Date.now() - mode.since < RESUME_MAX_MS ? mode.since : undefined;
@@ -1118,6 +1394,7 @@ export class SizeStore {
     // in here: only the writer writes them, and `acquired` loaded those of the writer before.)
     const whole = !mode.trust && !mode.force;
     if (whole) await this.barrier();
+    if (sw !== this.switches) throw new FsError(503, "the size store moved to a new file; the scan is started again");
     /** the lease this walk writes under: rows get it as `ver`, even if a missed heartbeat clears `epoch` meanwhile */
     const epoch = this.epoch;
     // after every mark (few): rows this walk writes must count as fresh, even when a mark was made in this millisecond
@@ -1187,7 +1464,8 @@ export class SizeStore {
           const t0 = performance.now();
           const first = !walkStarted;
           walkStarted = true;
-          inflight.push(
+          if (sw !== this.switches) fenced = true;
+          else inflight.push(
             this.send({ op: "commit", items, last: last ? { path: last.path, dev: last.dev, tot: last.tot } : null, walkStart: first ? { path: virtual, started: now } : undefined, walkEnd: last && !last.up ? virtual : undefined, spine: spine(last) }).then(
               () => {
                 if (last && !last.up) walkClosed = true;
@@ -1510,7 +1788,11 @@ export class SizeStore {
       void this.write("DELETE FROM walking WHERE path = ?", [virtual]);
       void this.write("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]); // else nothing would ever clear them
     }
-    if (dirty && this.db) this.markStale(virtual, Math.max(this.nextAt(), now));
+    // the store moved to a new generation under the walk: its result is answered, nothing of it is written there (its reuse decisions read the old file)
+    if (sw !== this.switches) fenced = true;
+    if (sw !== this.switches) {
+      /* nothing to write */
+    } else if (dirty && this.db) this.markStale(virtual, Math.max(this.nextAt(), now));
     else if (this.db) {
       // The walk ended cleanly: every row is committed. What it re-read is no longer dirty (only the mark it saw: a newer one stays); marks it
       // knew about at the start and that are older than it are spent; and if the watcher kept the whole tree current throughout, it is vouched for.
