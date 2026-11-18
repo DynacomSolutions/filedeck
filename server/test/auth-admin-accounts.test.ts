@@ -69,6 +69,13 @@ function gate(): { wait: Promise<void>; open: () => void } {
   const wait = new Promise<void>((r) => (open = r));
   return { wait, open };
 }
+/** Waits (at most 5 s) until `ok()` holds. */
+async function until(ok: () => boolean): Promise<void> {
+  for (const end = Date.now() + 5_000; !ok(); ) {
+    assert.ok(Date.now() < end, "timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 async function fakeAgent(): Promise<Fake> {
   const f: Fake = { url: "", users: {}, seen: new Map(), claims: [] };
   const srv = http.createServer((req, res) => {
@@ -271,6 +278,39 @@ test("create and list: a new account can sign in and sees only its machines; no 
   assert.equal(w.changed.length, 0, "a new account changes nobody");
 });
 
+test("two creates at once: the one that loses with exists, after the early check, forgets none of the winner's saved passwords", async () => {
+  const w = await world();
+  const { h } = w;
+  const admin = await signIn(h, "vadmin");
+  w.a.users = { visitor: false, guest: true };
+  w.b.users = { visitor: false, guest: true };
+  let asked = 0;
+  const lookups = (k: number) => until(() => asked >= k);
+  w.a.onLookup = () => asked++;
+  // the first create waits at machine a's lookup (gate 1), after the early "exists" check
+  const g1 = gate();
+  w.a.lookupGate = g1.wait;
+  const first = send(h, "POST", "/api/admin/accounts", admin, { name: "visitor", nodes: share });
+  await lookups(1);
+  // the second also passes the early check (nothing is made yet) and waits at both machines (gate 2)
+  const g2 = gate();
+  w.a.lookupGate = g2.wait;
+  w.b.lookupGate = g2.wait;
+  const second = send(h, "POST", "/api/admin/accounts", admin, { name: "visitor", nodes: share });
+  await lookups(2);
+  g1.open();
+  assert.equal((await first).status, 201);
+  // the new account saves a password; then the second create loses inside its transaction
+  h.vault.put("a", "/srv/share/keep.zip", "zip-secret", { owner: "virt:visitor" });
+  g2.open();
+  const lost = await second;
+  assert.equal(lost.status, 409, lost.text);
+  assert.deepEqual(lost.json, { error: "exists" });
+  assert.equal(h.vault.list("virt:visitor").length, 1, "the create that lost wiped the winner's saved passwords");
+  w.a.lookupGate = undefined;
+  w.b.lookupGate = undefined;
+});
+
 test("name checks: a name a machine knows as a system user is refused; no answer does not block; a missing run-as user is refused", async () => {
   const w = await world();
   const { h } = w;
@@ -430,9 +470,15 @@ test("re-created name starts clean: no keys, grants or saved passwords, and an e
   assert.equal((await send(h, "PATCH", "/api/admin/accounts/guest", admin, { admin: false })).status, 200);
   const oldEpoch = h.auth!.accounts.epochOf("virt", "guest");
   assert.ok(oldEpoch >= 1);
+  const seenBefore = w.a.seen.get("virt:guest")!;
   assert.equal((await send(h, "DELETE", "/api/admin/accounts/guest", admin)).status, 200);
+  // the retired epoch: raised in the delete's transaction, then kept one above that by `remove`
+  const retired = h.auth!.accounts.epochOf("virt", "guest");
+  assert.ok(retired > oldEpoch + 1, `retired at ${retired}, ${oldEpoch} before the delete`);
+  assert.ok(retired > seenBefore, "the retired epoch is above every epoch the machine saw before the delete");
   const made = await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share });
   assert.equal(made.status, 201);
+  assert.ok(h.auth!.accounts.epochOf("virt", "guest") > retired, "a name made again starts above the retired epoch");
   assert.deepEqual(made.json, { name: "guest", admin: false, hasPassword: true, keys: [], nodes: share, sources: {}, sessions: 0 });
   assert.deepEqual(h.auth!.accounts.keys("guest"), []);
   assert.deepEqual(w.grants.forAccount("virt", "guest"), {});

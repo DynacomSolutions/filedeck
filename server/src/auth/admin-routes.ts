@@ -387,8 +387,9 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     checked(async (c) => {
       const name = c.req.param("name") ?? "";
       // One store transaction (BEGIN IMMEDIATE, so two hubs of a rollout cannot both pass the check): the check, the source grants, the
-      // epoch (raised here too, so the old sessions end even if `changed` never runs), then the account and its keys (its epoch, raised
-      // once more, stays in retired_accounts).
+      // epoch, then the account and its keys. The old sessions end without the epoch (a session of a missing virtual account is invalid).
+      // `remove` keeps the epoch in retired_accounts one above the live one, so the retired epoch (two above the epoch before the delete,
+      // with the raise here) is above every epoch an agent or a running job saw, and a name made again starts above it.
       const before = accounts.tx(() => {
         callerHolds(c);
         const id = current(name);
