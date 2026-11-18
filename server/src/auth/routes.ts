@@ -6,9 +6,9 @@ import type { Config } from "../config.ts";
 import { clientOf } from "../audit.ts";
 import type { Identity } from "./identity.ts";
 import { checkPassword, type Accounts, type AuthDb } from "./store.ts";
-import type { Sessions } from "./sessions.ts";
+import { sessionKey, type Sessions } from "./sessions.ts";
 import { loginMessage, parsePublicKey, verifyLogin, type Challenges } from "./sshkey.ts";
-import { RateWindow, addressKey, type LoginLimiter } from "./limiter.ts";
+import { RateWindow, addressKey, plainAddress, type LoginLimiter } from "./limiter.ts";
 import { currentUser, runAs } from "./context.ts";
 
 /**
@@ -19,7 +19,8 @@ import { currentUser, runAs } from "./context.ts";
 
 /** Checks a system user's password or key. Part 2 does this on an agent. */
 export interface SystemAuth {
-  password(name: string, pw: string): Promise<boolean>;
+  /** `address`: the client's address as the hub sees it (`clientOf`), for PAM_RHOST; undefined when the request came over no socket. */
+  password(name: string, pw: string, address?: string): Promise<boolean>;
   key(name: string, pub: string, msg: Buffer, sig: Buffer): Promise<boolean>;
 }
 
@@ -40,6 +41,8 @@ const FAIL_FLOOR_MS = 500;
 const CHALLENGES_PER_MINUTE = 20;
 /** A challenge for a longer name is answered but not kept. */
 const MAX_NAME = 256;
+/** How long the act-as-root switch lasts once turned on. */
+export const AS_ROOT_MS = 15 * 60_000;
 
 const AUTH_ROUTES = new Set(["/api/auth/me", "/api/auth/login", "/api/auth/challenge", "/api/auth/login-key", "/api/auth/logout"]);
 
@@ -53,7 +56,25 @@ export interface AuthDeps {
   system: SystemAuth;
   /** clock for the challenge limit (tests) */
   now?: () => number;
+  /**
+   * Called after each sign-in, before the answer goes out. It must not wait: the hub starts the presence refresh of a system account
+   * here (auth/presence.ts). A throw is ignored; it never fails the sign-in.
+   */
+  onSignIn?: (kind: "sys" | "virt", name: string) => void;
+  /**
+   * Called when a session's act-as-root switch is turned off early (`DELETE /api/auth/as-root`, or signing out while it is on), after
+   * the switch is cleared and before the answer goes out: the hub cancels the jobs the account started on the agents under the switch,
+   * which run there as root. `until` is the ended switch's end, which names it: only that switch's jobs are cancelled. It must settle
+   * within a few seconds; a rejection is ignored.
+   */
+  onAsRootEnd?: (name: string, until: number) => Promise<void>;
 }
+
+/**
+ * The key of the session the current request was admitted with (`Sessions.keyOf`), set by the gate; undefined for an API token request
+ * and with auth off. The hub ties an event stream to it, so the stream ends with the session. Never logged and never sent anywhere.
+ */
+export const sessionKeyOf = (c: Context): string | undefined => c.get("authSession" as never) as string | undefined;
 
 /** Notes when the request arrived, so the floor on failed sign-ins counts the time spent before the route. Put it first. */
 export const markArrival = (): MiddlewareHandler => async (c, next) => {
@@ -80,9 +101,18 @@ function sysIdentity(cfg: Config, accounts: Accounts, name: string): Identity {
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
+/**
+ * The client's address for PAM (PAM_RHOST): `clientOf`'s, without a zone id, and an IPv4-mapped one (an IPv4 client on a dual-stack
+ * socket) as plain IPv4, so pam_access rules for IPv4 networks match it; undefined over no socket.
+ */
+const pamAddress = (c: Context): string | undefined => {
+  const ip = clientOf(c).ip?.replace(/%.*$/, "");
+  return ip ? plainAddress(ip) : undefined;
+};
+
 function isLoopback(addr: string | undefined): boolean {
   if (!addr) return false;
-  const a = addr.toLowerCase().replace(/^::ffff:/, "");
+  const a = plainAddress(addr.replace(/%.*$/, "")).toLowerCase();
   return a === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
 }
 
@@ -104,6 +134,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const { cfg, accounts, sessions, challenges, limiter, system } = deps;
 
   const challengeLimit = new RateWindow(CHALLENGES_PER_MINUTE, 60_000, deps.now);
+  const now = deps.now ?? Date.now;
 
   const signedOut = (c: Context) => c.json({ error: "signed out" }, 401, { "x-filedeck-auth": "signed-out" });
 
@@ -113,11 +144,21 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (!raw) return undefined;
     const s = sessions.lookup(raw);
     if (!s) return undefined;
-    return s.kind === "virt" ? accounts.identity("virt", s.name) : sysIdentity(cfg, accounts, s.name);
+    const id0 = s.kind === "virt" ? accounts.identity("virt", s.name) : undefined;
+    if (s.kind === "virt" && !id0) return undefined;
+    c.set("authSession" as never, sessions.keyOf(raw) as never);
+    if (id0) return id0;
+    const id = sysIdentity(cfg, accounts, s.name);
+    // act as root: only while the switch is still on and the name is still in FILEDECK_ADMINS (checked on every request)
+    if (id.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() && cfg.admins.includes(s.name)) {
+      return { ...id, asRootUntil: s.asRootUntil, asRootSession: sessionKey(raw) };
+    }
+    return id;
   };
 
   const admit = (c: Context, id: Identity, next: () => Promise<void>) => {
-    c.set("user" as never, { kind: id.kind, name: id.name } as never);
+    // (`asRoot` goes into the audit line of every request made under the switch)
+    c.set("user" as never, { kind: id.kind, name: id.name, ...(id.kind === "sys" && id.asRootUntil !== undefined ? { asRoot: true } : {}) } as never);
     return runAs(id, next);
   };
 
@@ -171,7 +212,12 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const signIn = (c: Context, kind: "sys" | "virt", name: string) => {
     const old = getCookie(c, COOKIE);
     if (old) sessions.destroy(old);
-    const raw = sessions.create(kind, name);
+    const raw = sessions.create(kind, name, clientOf(c).ip);
+    try {
+      deps.onSignIn?.(kind, name);
+    } catch {
+      /* the sign-in stands */
+    }
     const id = kind === "virt" ? accounts.identity("virt", name) : sysIdentity(cfg, accounts, name);
     const maxAge = Math.floor(cfg.sessionMaxMs / 1000);
     return c.json({ auth: true, kind, name, admin: id?.admin ?? false }, 200, { "set-cookie": `${COOKIE}=${raw}; Max-Age=${maxAge}; ${COOKIE_ATTRS}` });
@@ -180,7 +226,10 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   app.get("/api/auth/me", (c) => {
     const id = currentUser();
     if (!id) return signedOut(c);
-    return c.json({ auth: true, kind: id.kind, name: id.name, admin: id.admin });
+    // asRootLeftMs is the time left by the hub's own clock, so a browser whose clock is off still shows the right end
+    const t = now();
+    const asRoot = id.kind === "sys" && id.asRootUntil !== undefined && id.asRootUntil > t ? { asRootUntil: id.asRootUntil, asRootLeftMs: id.asRootUntil - t } : {};
+    return c.json({ auth: true, kind: id.kind, name: id.name, admin: id.admin, ...asRoot });
   });
 
   app.post("/api/auth/login", async (c) => {
@@ -198,7 +247,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     if (name !== undefined && pw !== undefined && name !== "root") {
       const acc = accounts.get(name);
       if (acc) kind = checkPassword(pw, acc.passwordHash) ? "virt" : undefined;
-      else kind = (await system.password(name, pw)) ? "sys" : undefined;
+      else kind = (await system.password(name, pw, pamAddress(c))) ? "sys" : undefined;
     }
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();
@@ -238,16 +287,106 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
         const given = parsePublicKey(pub);
         const listed = given !== null && accounts.keys(name).some((k) => parsePublicKey(k)?.blob.equals(given.blob));
         kind = listed && verifyLogin(given, msg, sb) ? "virt" : undefined;
-      } else kind = (await system.key(name, pub, msg, sb)) ? "sys" : undefined;
+      } else {
+        // the signature is checked here first, so a bad one costs no agent call; the agent checks it again with the key it finds listed
+        const given = parsePublicKey(pub);
+        kind = given !== null && verifyLogin(given, msg, sb) && (await system.key(name, pub, msg, sb)) ? "sys" : undefined;
+      }
     }
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();
     return signIn(c, kind, name);
   });
 
-  app.post("/api/auth/logout", (c) => {
+  /**
+   * Act as root (system administrators only, never a virtual account): a fresh proof for the session's own name, `{password}` or
+   * `{publicKey, challenge, signature}` (a challenge from /api/auth/challenge for that name; the hub builds the message itself). The
+   * body never names an account. Under the sign-in limiter (by name and address) and the 500 ms floor; a failure is 401 `sign-in failed`.
+   * Success: the switch lasts `AS_ROOT_MS`, answered as `{asRootUntil, asRootLeftMs}` (the time left by the hub's clock), read after
+   * the old switch, if one was on, has been ended; `{ok: true}`, as Stop answers, when the switch was turned off meanwhile. The audit line keeps no part of the proof (audit.ts).
+   */
+  const notAdmin = (c: Context) => c.json({ error: "only system administrators can act as root" }, 403);
+  /** The last switch end given out per account (`asRootUntil`), so that the next is always above it. Only administrators get one. */
+  const lastUntil = new Map<string, number>();
+  app.post("/api/auth/as-root", async (c) => {
+    const id = currentUser();
     const raw = getCookie(c, COOKIE);
-    if (raw) sessions.destroy(raw);
+    if (!id || !raw) return signedOut(c);
+    if (id.kind !== "sys" || !cfg.admins.includes(id.name)) return notAdmin(c);
+    if (!secure(c)) return needsHttps(c);
+    const name = id.name;
+    const ip = clientOf(c).ip ?? "";
+    const lim = limiter.check(name, ip);
+    if (!lim.ok) return tooMany(c, lim.retryAfterMs);
+    const attempt = limiter.reserve(name, ip);
+    const b = await body(c);
+    const pw = str(b?.password);
+    let ok = false;
+    if (pw !== undefined) {
+      ok = await system.password(name, pw, pamAddress(c));
+    } else {
+      const pub = str(b?.publicKey);
+      const ch = str(b?.challenge);
+      const sig = str(b?.signature);
+      // the challenge is taken (used up) before any other check, as at sign-in
+      const cb = ch === undefined ? undefined : Buffer.from(ch, "base64");
+      const taken = cb !== undefined && challenges.take(name, cb);
+      if (taken && cb && pub !== undefined && sig !== undefined) {
+        // (the same message as a key sign-in, on purpose: the challenge is used up once taken and is bound to this name, so a
+        // signature made for one use cannot serve for the other)
+        const msg = loginMessage(deps.db.hubId, name, cb);
+        const sb = Buffer.from(sig, "base64");
+        const given = parsePublicKey(pub);
+        ok = given !== null && verifyLogin(given, msg, sb) && (await system.key(name, pub, msg, sb));
+      }
+    }
+    if (!ok) return failed(c);
+    attempt.succeed();
+    // each switch of an account has an end of its own (it names the switch, also on the agents' jobs): never one already given out
+    let until = now() + AS_ROOT_MS;
+    // (seeded from the sessions: after a restart the map is empty, and the clock may have stepped back)
+    const stored = sessions.lastAsRootUntil(name);
+    const known = lastUntil.get(name);
+    const last = known === undefined ? stored : stored === undefined ? known : Math.max(known, stored);
+    if (last !== undefined && until <= last) until = last + 1;
+    lastUntil.set(name, until);
+    // on again while it is on: the old switch ends here exactly as Stop would end it, with its jobs on the agents
+    const was = asRootOf(raw);
+    sessions.setAsRoot(raw, until);
+    if (was !== undefined && was.until !== until) await rootEnded(was);
+    // (read again: that wait can take seconds, and the switch may have been stopped or replaced meanwhile; off, it answers as Stop does)
+    const cur = asRootOf(raw);
+    if (cur === undefined) return c.json({ ok: true });
+    return c.json({ asRootUntil: cur.until, asRootLeftMs: cur.until - now() });
+  });
+
+  /** The system account whose act-as-root switch the session of `raw` holds now, and that switch's end; or undefined. */
+  const asRootOf = (raw: string): { name: string; until: number } | undefined => {
+    const s = sessions.lookup(raw);
+    return s?.kind === "sys" && s.asRootUntil !== undefined && s.asRootUntil > now() ? { name: s.name, until: s.asRootUntil } : undefined;
+  };
+  /** The switch was turned off early: its root jobs on the agents are cancelled (a failure is only logged by the hub). */
+  const rootEnded = async (was: { name: string; until: number } | undefined) => {
+    if (was !== undefined && deps.onAsRootEnd) await deps.onAsRootEnd(was.name, was.until).catch(() => undefined);
+  };
+
+  app.delete("/api/auth/as-root", async (c) => {
+    const raw = getCookie(c, COOKIE);
+    if (!currentUser() || !raw) return signedOut(c);
+    const was = asRootOf(raw);
+    sessions.setAsRoot(raw, null);
+    await rootEnded(was);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/auth/logout", async (c) => {
+    const raw = getCookie(c, COOKIE);
+    let was: { name: string; until: number } | undefined;
+    if (raw) {
+      was = asRootOf(raw);
+      sessions.destroy(raw);
+    }
+    await rootEnded(was);
     return c.json({ ok: true }, 200, { "set-cookie": `${COOKIE}=; Max-Age=0; ${COOKIE_ATTRS}` });
   });
 }

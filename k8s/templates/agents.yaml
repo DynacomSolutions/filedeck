@@ -1,3 +1,6 @@
+{{- if and .Values.auth.enabled (not (include "filedeck.agentTokenSecret" .)) }}
+{{- fail "auth.enabled needs agentToken" }}
+{{- end }}
 {{- range $i, $n := .Values.nodes }}
 {{- with $n }}
 ---
@@ -67,6 +70,17 @@ spec:
                   name: {{ include "filedeck.agentTokenSecret" $ }}
                   key: {{ $.Values.agentToken.key }}
             {{- end }}
+            {{- if $.Values.auth.enabled }}
+            # Sign-in: every signed-in request runs in a worker process that holds the person's own user.
+            - name: FILEDECK_AUTH
+              value: "on"
+            - name: FILEDECK_MAX_WORKERS
+              value: {{ $.Values.auth.workers.max | quote }}
+            - name: FILEDECK_WORKER_IDLE_SECONDS
+              value: {{ $.Values.auth.workers.idleSeconds | quote }}
+            - name: FILEDECK_PAM_SERVICE
+              value: {{ $.Values.auth.pamService | quote }}
+            {{- end }}
             - name: FILEDECK_MAX_UPLOAD
               value: {{ $.Values.agent.maxUpload | quote }}
             {{- $ro := default $.Values.agent.readOnlyPaths .readOnlyPaths }}
@@ -134,19 +148,32 @@ spec:
             periodSeconds: 10
             timeoutSeconds: {{ $.Values.agent.probes.timeoutSeconds }}
             failureThreshold: {{ $.Values.agent.probes.livenessFailureThreshold }}
+          {{- $res := deepCopy $.Values.agent.resources }}
+          {{- if $.Values.auth.enabled }}
+          {{- /* Each worker is a Node process with a heap of up to 96Mi, so sign-in raises the memory limit. */}}
+          {{- $lim := default dict $res.limits }}
+          {{- $_ := set $lim "memory" $.Values.auth.agentMemoryLimit }}
+          {{- $_ := set $res "limits" $lim }}
+          {{- end }}
           resources:
-            {{- toYaml $.Values.agent.resources | nindent 12 }}
+            {{- toYaml $res | nindent 12 }}
           securityContext:
             # Same reasoning as the files/ dufs backends: with ALL dropped,
             # uid 0 still obeys DAC, so writing 775 dirs owned by other uids
             # needs DAC_OVERRIDE; CHOWN/FOWNER cover mkdir/chmod/rename.
             # SETUID/SETGID let the agent run ffmpeg (thumbnails) as uid/gid 65534
             # on a file descriptor it opened, so a hostile media file is parsed
-            # without root or any capability.
+            # without root or any capability. With sign-in on, the same two start
+            # each person's worker as their own user, and the chroot capability
+            # (added below only then) lets the host helpers run inside the
+            # machine's root, with the machine's own libc, NSS and PAM. The account
+            # lookup helper (filedeck-id) holds no capability once it starts; the
+            # password helper (filedeck-pam) keeps DAC_READ_SEARCH only, as pam_unix
+            # may need to read a mode-0000 /etc/shadow.
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"{{ if $.Values.agent.fanotify.enabled }}, "SYS_ADMIN"{{ end }}]
+              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"{{ if $.Values.agent.fanotify.enabled }}, "SYS_ADMIN"{{ end }}{{ if $.Values.auth.enabled }}, "SYS_CHROOT"{{ end }}]
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0

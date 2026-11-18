@@ -99,7 +99,7 @@ function boundTo(t: Target, owner: Identity | undefined): Target {
   return { fetch: (rest, init) => asOwner(owner, () => t.fetch(rest, init)) };
 }
 
-export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs {
+export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs & { cancelOwner(kind: "sys" | "virt", name: string): number } {
   const envGrace = Number(process.env.FILEDECK_DIFF_GRACE_MS);
   const graceMs = o.graceMs ?? (envGrace > 0 ? envGrace : 120_000);
   const bigAfterMs = o.bigAfterMs ?? 8_000;
@@ -124,7 +124,9 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
   /** the account that started each compare (none with auth off); only it and admins see the compare */
   const owners = new Map<string, Identity>();
   const mayUse = o.mayUse ?? (() => true);
-  const sees = (id: string) => seesJob(currentUser(), owners.get(id));
+  /** compares whose account changed: closed and hidden from everyone at once, dismissed as soon as each has settled */
+  const revoked = new Set<string>();
+  const sees = (id: string) => !revoked.has(id) && seesJob(currentUser(), owners.get(id));
   /** live sessions (rows spill to one SQLite file each under diffDir); closed when their job is dismissed or evicted */
   const sessions = new Map<string, CompareSession>();
   if (diffDir) {
@@ -132,6 +134,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     fs.mkdirSync(diffDir, { recursive: true });
   }
   const prune = () => {
+    for (const id of revoked) if (!jobs.get(id)) revoked.delete(id);
     for (const id of meta.keys()) if (!jobs.get(id)) meta.delete(id);
     for (const id of owners.keys()) if (!jobs.get(id)) owners.delete(id);
     for (const id of seen.keys()) if (!jobs.get(id)) seen.delete(id);
@@ -281,7 +284,34 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     }
     return ok ? c.json({ ok: true }) : c.json({ error: "not found or still active" }, 404);
   });
-  return jobs;
+  /** Dismisses the revoked compares that have settled; while one is still running down, it tries again shortly. */
+  let dropTimer: NodeJS.Timeout | undefined;
+  const dropRevoked = () => {
+    dropTimer = undefined;
+    for (const id of revoked) if (jobs.dismiss(id) || !jobs.get(id)) revoked.delete(id);
+    prune();
+    if (revoked.size > 0) (dropTimer = setTimeout(dropRevoked, 100)).unref();
+  };
+  /**
+   * Ends every compare the account `kind:name` started, whatever its state (its account changed): a live one is cancelled, its session
+   * is closed at once (which stops its live follow of the change feeds, made with the old claim), and each is hidden from everyone and
+   * dismissed as soon as it has settled. Returns how many.
+   */
+  const cancelOwner = (kind: "sys" | "virt", name: string): number => {
+    let count = 0;
+    for (const j of jobs.list()) {
+      const owner = owners.get(j.id);
+      if (!owner || owner.kind !== kind || owner.name !== name || revoked.has(j.id)) continue;
+      revoked.add(j.id);
+      jobs.cancel(j.id);
+      sessions.get(j.id)?.close();
+      sessions.delete(j.id);
+      count++;
+    }
+    if (count > 0 && !dropTimer) dropRevoked();
+    return count;
+  };
+  return Object.assign(jobs, { cancelOwner });
 }
 
 /** Stream a generator as NDJSON, a few hundred items per chunk, so big subtrees never sit in memory at once. */

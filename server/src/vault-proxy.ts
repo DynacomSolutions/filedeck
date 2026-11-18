@@ -126,6 +126,11 @@ export async function proxyWithVault(o: {
   vault: Vault;
   /** whose saved passwords are used and where a typed one is saved (undefined with sign-in off) */
   owner?: Owner;
+  /**
+   * Asked just before a typed password is saved, after the agent has answered: false when the owner is no longer the account the
+   * request began as (deleted, made again or changed meanwhile), and then nothing is saved. Must not wait.
+   */
+  ownerHolds?: () => boolean;
   node: string;
   target: Target;
   method: string;
@@ -219,7 +224,9 @@ export async function proxyWithVault(o: {
   }
   if (used && typed && save !== "no" && file && file.startsWith("/")) {
     const where = scope === "folder" ? path.posix.dirname(file) : file;
-    o.vault.put(o.node, where, typed, { remember: save === "forever", scope, fid: scope === "file" ? await fidOf() : undefined, owner: o.owner });
+    const fid = scope === "file" ? await fidOf() : undefined;
+    // checked after the last wait, with nothing between it and the save
+    if (o.ownerHolds?.() !== false) o.vault.put(o.node, where, typed, { remember: save === "forever", scope, fid, owner: o.owner });
   }
   return new Response(r.body, { status: r.status, headers: out });
 }

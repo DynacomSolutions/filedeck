@@ -7,6 +7,7 @@ import { fetchNodes, NODES_KEY, swrCache } from "./data";
 import { addressBase, baseRemainder, crumbsOverflow, fmtAddr, fuzzy, itemUri, parseAddress, resolveBasePath, splitTyped, type AddressBase, type Where } from "./address";
 import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
+import { firstCrumb, homeOf, noAccessHome } from "./nodeHome";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 
@@ -39,7 +40,12 @@ let baseLoad: { node: string; promise: Promise<AddressBase[]> } | null = null;
 const baseKey = (base: Where) => `${base.node}\0${base.path}`;
 const rootBases = (fallbackNode: string, known: NodeInfo[]): AddressBase[] => {
   const all = known.some((n) => n.name === fallbackNode) ? known : [{ name: fallbackNode, online: true, kind: "node" as const }, ...known];
-  return all.map((n) => ({ node: n.name, path: "/", label: n.kind === "source" ? `${n.name} (${n.type ?? "network"})` : n.name, kind: n.kind ?? "node" }));
+  // a machine with granted folders (a virtual account's) has one base per folder, the first (its home) named after the machine; no /
+  return all.flatMap((n) =>
+    n.roots?.length
+      ? n.roots.map((r, i) => ({ node: n.name, path: r, label: i === 0 ? n.name : `${n.name}:${r}`, kind: n.kind ?? "node" }))
+      : [{ node: n.name, path: "/", label: n.kind === "source" ? `${n.name} (${n.type ?? "network"})` : n.name, kind: n.kind ?? "node" }],
+  );
 };
 const loadBases = async (fallbackNode: string): Promise<AddressBase[]> => {
   if (baseCache && Date.now() - baseCache.at < 20000 && baseCache.mountNode === fallbackNode) return baseCache.list;
@@ -48,7 +54,9 @@ const loadBases = async (fallbackNode: string): Promise<AddressBase[]> => {
   promise = loadNodes()
     .then(async (known) => {
       const roots = rootBases(fallbackNode, known);
-      const mounted = await (known.find((n) => n.name === fallbackNode)?.kind === "source" ? Promise.resolve([]) : api.mounts(fallbackNode).then((r) => r.mounts.map((m) => ({ node: fallbackNode, path: m.mountpoint, label: `${fallbackNode}:${m.mountpoint}`, kind: "mount" as const }))).catch(() => []));
+      const here = known.find((n) => n.name === fallbackNode);
+      // a source has no mounts; a machine with granted folders is not asked for them
+      const mounted = await (here?.kind === "source" || here?.roots ? Promise.resolve([]) : api.mounts(fallbackNode).then((r) => r.mounts.map((m) => ({ node: fallbackNode, path: m.mountpoint, label: `${fallbackNode}:${m.mountpoint}`, kind: "mount" as const }))).catch(() => []));
       const seen = new Set<string>();
       const list = [...roots, ...mounted].filter((b) => !seen.has(baseKey(b)) && (seen.add(baseKey(b)), true));
       baseCache = { at: Date.now(), list, mountNode: fallbackNode };
@@ -313,7 +321,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
           .map((n) => [n, fuzzy(q, n.name)] as const)
           .filter(([, s]) => s >= 0)
           .sort((a, b) => b[1] - a[1])
-          .forEach(([n]) => add({ key: "n:" + n.name, kind: "node", uri: n.name + ":/", node: n.name, path: "/" }));
+          .forEach(([n]) => add({ key: "n:" + n.name, kind: "node", uri: n.name + ":" + homeOf(n), node: n.name, path: homeOf(n) }));
       }
       {
         if (ty) {
@@ -394,6 +402,12 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
       else onGo(p.node, parent(p.path), p.path);
       end(true);
     } catch (e) {
+      // a folder refused on a machine with granted folders opens as asked: the panel says so and offers the home folder
+      if (noAccessHome(known.find((n) => n.name === p.node), p.path, e)) {
+        onGo(p.node, p.path);
+        end(true);
+        return;
+      }
       setError(`Cannot open ${fmtAddr(p.node, p.path)}: ${(e as Error).message || "not found"}`);
       setBusy(false);
     }
@@ -497,7 +511,9 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
   );
 
   const remainderCrumbs = baseRemainder(currentBase, path).split("/").filter(Boolean);
-  const segs = [{ label: "/", path: currentBase.path }, ...remainderCrumbs.map((c, i) => ({ label: c, path: resolveBasePath(currentBase, remainderCrumbs.slice(0, i + 1).join("/")) }))];
+  // the first crumb is the root sign, or, on a machine with granted folders, the granted folder's path
+  const first = firstCrumb(nodes.find((n) => n.name === currentBase.node), currentBase.path);
+  const segs = [{ label: first.label, path: currentBase.path }, ...remainderCrumbs.map((c, i) => ({ label: c, path: resolveBasePath(currentBase, remainderCrumbs.slice(0, i + 1).join("/")) }))];
   const maxFold = Math.max(0, segs.length - 2);
   const segKey = segs.map((x) => x.path).join("\0") + "\0" + currentBase.label;
   // Collapse by measurement: start from the full path, fold one more middle segment while the crumbs still overflow (settles before paint).
@@ -598,10 +614,10 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
                 </button>
               </Tip>
             )}
-            <Tip label={i === 0 ? `Root of ${currentBase.label}` : sg.path}>
+            <Tip label={i === 0 ? (first.granted ? <>Granted folder on <bdi>{currentBase.node}</bdi></> : <>Root of <bdi>{currentBase.label}</bdi></>) : <bdi>{sg.path}</bdi>}>
               <button type="button" className={i === segs.length - 1 ? "here" : ""} onClick={() => onGo(currentBase.node, sg.path)} onContextMenu={(e) => onCrumbMenu(e, sg.path)}>
                 {i === 0 ? <Ic.HardDrive aria-hidden="true" /> : null}
-                <span className="crumb-t">{sg.label}</span>
+                <span className="crumb-t"><bdi>{sg.label}</bdi></span>
               </button>
             </Tip>
             <Tip label={`Folders in ${sg.path}`}>

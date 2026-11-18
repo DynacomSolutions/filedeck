@@ -8,6 +8,29 @@ import { auditRefusal, type AuditSink } from "./audit.ts";
 /** The two paths that need no credentials and name nobody: the liveness probe and the metrics scrape (a query string is allowed). The hub and the agents use this one test. */
 export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)/.test(pathAndQuery);
 
+/**
+ * The agent's sign-in routes (`/api/auth/password`, and later the key check and the lookup, agent-auth-routes.ts): the hub calls them
+ * behind the agent token but before anyone is signed in, so they carry no user. The root process answers them itself (`ROOT_ROUTES`).
+ */
+export const isAgentAuthRoute = (p: string) => /^\/api\/auth\/[a-z-]+$/.test(p);
+
+/**
+ * Whether a path (a query string allowed) the hub would send to an agent could reach the agent's sign-in routes, read the wide way:
+ * percent escapes decoded (the agent's router decodes them), `\` taken as `/`, repeated slashes as one, `.` and `..` resolved, and
+ * letters in any case. Only the hub's own sign-in calls may go there, so the proxy and every other agent call refuse these paths. A path
+ * that cannot be read is refused too.
+ */
+export function isAgentAuthPath(pathAndQuery: string): boolean {
+  try {
+    const decoded = (pathAndQuery.split("?")[0] ?? "").replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+    const flat = ("/" + decoded.replace(/\\/g, "/")).replace(/\/{2,}/g, "/");
+    const resolved = new URL(flat, "http://x").pathname.toLowerCase();
+    return /^\/api\/auth(\/|$)/.test(resolved);
+  } catch {
+    return true;
+  }
+}
+
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
 /**
@@ -37,7 +60,8 @@ declare module "hono" {
 }
 
 /**
- * With auth on, every request except the two open probes (the same two paths the hub sends without a user) must carry a
+ * With auth on, every request except the two open probes (the same two paths the hub sends without a user) and the sign-in routes
+ * (`isAgentAuthRoute`, behind the agent token) must carry a
  * claim signed with the agent token and still fresh. A bad, missing or stale header gives 401 `no user`; neither the
  * header nor its MAC is ever logged or echoed. The verified claim is stored for the audit and the routes. Part 2 enforces
  * its `runAs` and `grants`; here it is only verified and kept. Mount it right after `agentAuth`. Off: nothing is checked.
@@ -47,6 +71,8 @@ export function agentUser(cfg: Config, sink?: AuditSink): MiddlewareHandler {
   const token = cfg.agentToken;
   return async (c, next) => {
     if (isOpenProbe(c.req.path)) return next();
+    // (the sign-in routes name nobody yet; they are still behind `agentAuth`, so only a caller with the agent token reaches them)
+    if (token && isAgentAuthRoute(c.req.path)) return next();
     const value = c.req.header(USER_HEADER);
     const claim = token && value ? verifyClaim(value, token, Date.now()) : null;
     if (!claim) {
@@ -66,12 +92,14 @@ export class NoAccessError extends Error {
 }
 
 /**
- * Whether an account may use a node at all. A system account may use every node in this part (part 2 narrows it to the
- * machines where the account exists); a virtual account only the nodes it has access on. With auth off there is no
- * account, and every node is open as before.
+ * Whether an account may use a node at all. A system account may use every node except one where `present` (the hub's presence
+ * cache, auth/presence.ts) says the account does not exist; an unknown answer keeps the node open, and the agent itself refuses a name
+ * it does not know. A virtual account may use only the nodes it has access on. With auth off there is no account, and every node is
+ * open as before.
  */
-export function canUseNode(id: Identity | undefined, node: string): boolean {
-  if (!id || id.kind === "sys") return true;
+export function canUseNode(id: Identity | undefined, node: string, present?: (name: string, node: string) => boolean | undefined): boolean {
+  if (!id) return true;
+  if (id.kind === "sys") return present?.(id.name, node) !== false;
   return Object.hasOwn(id.nodes, node);
 }
 
@@ -79,16 +107,24 @@ export function canUseNode(id: Identity | undefined, node: string): boolean {
  * Headers for a hub request to an agent: the caller's own Authorization is replaced, never forwarded. When a person is
  * behind the call (`currentUser()`), it also carries their signed claim for `node`; any copy already in `init` is replaced.
  * `requireUser` (the hub passes `cfg.auth`) turns a call with nobody behind it into an error, so a code path that lost the
- * identity fails loudly instead of reaching the agent unnamed.
+ * identity fails loudly instead of reaching the agent unnamed. An identity acting as root keeps `asRoot` in its claim only when
+ * `asRootOk` (the hub's check of the switch as it is now) says so; otherwise, and without the check, the call goes as the plain system user.
  */
-export function withAgentToken(init: RequestInit | undefined, token: string | undefined, node: string, requireUser = false): RequestInit | undefined {
-  const id = currentUser();
+export function withAgentToken(
+  init: RequestInit | undefined,
+  token: string | undefined,
+  node: string,
+  requireUser = false,
+  asRootOk?: (id: Identity & { kind: "sys" }) => boolean,
+): RequestInit | undefined {
+  let id = currentUser();
   if (requireUser && !id) throw new Error("agent call without an identity");
   if (!token) return init;
   const headers = new Headers(init?.headers);
   headers.set("authorization", `Bearer ${token}`);
   headers.delete(USER_HEADER);
   if (id) {
+    if (id.kind === "sys" && id.asRootUntil !== undefined && !asRootOk?.(id)) id = { kind: "sys", name: id.name, admin: id.admin, epoch: id.epoch };
     const claim = claimFor(id, node, Date.now());
     if (!claim) throw new NoAccessError();
     headers.set(USER_HEADER, signClaim(claim, token));

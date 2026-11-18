@@ -6,6 +6,7 @@ import type { SelRef } from "./Selection";
 import { validTransferDestination } from "./transferPaths";
 import * as Ic from "lucide-react";
 import { Dropdown } from "./Dropdown";
+import { canGoUp, homeOf } from "./nodeHome";
 
 export type TransferKind = "copy" | "move";
 
@@ -27,7 +28,7 @@ export function TransferDestination({ kind, items, initialNode, initialPath, onC
   useEffect(() => {
     if (!found || found.some((n) => n.name === initialNode && n.online)) return;
     const first = found.find((n) => n.online);
-    if (first) setNode(first.name);
+    if (first) (setNode(first.name), setDir(homeOf(first)));
   }, [found, initialNode]);
   useEffect(() => {
     if (nodesError) setError(nodesError.message);
@@ -66,11 +67,11 @@ export function TransferDestination({ kind, items, initialNode, initialPath, onC
     <Modal title={label} onClose={onClose} wide>
       <label>
         Destination node
-        <Dropdown autoFocus label="Destination node" value={node} onChange={(v) => { navigated.current = false; setNode(v); setDir("/"); }} options={nodes.map((n) => ({ value: n.name, label: n.name + (n.online ? "" : " (offline)"), disabled: !n.online }))} />
+        <Dropdown autoFocus label="Destination node" value={node} onChange={(v) => { navigated.current = false; setNode(v); setDir(homeOf(nodes.find((n) => n.name === v))); }} options={nodes.map((n) => ({ value: n.name, label: n.name + (n.online ? "" : " (offline)"), disabled: !n.online }))} />
       </label>
       <div className="transfer-destination-path">
         <span>Destination folder: <strong>{node}:{dir}</strong></span>
-        <button type="button" aria-label="Up one destination folder" disabled={dir === "/"} onClick={() => goDir(parent(dir))}><Ic.ArrowUp /> Up</button>
+        <button type="button" aria-label="Up one destination folder" disabled={!canGoUp(nodes.find((n) => n.name === node), dir)} onClick={() => goDir(parent(dir))}><Ic.ArrowUp /> Up</button>
       </div>
       {error && <div className="fp-err" role="alert">{error}</div>}
       {loading && <p role="status">Loading folders...</p>}

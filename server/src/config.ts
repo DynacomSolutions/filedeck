@@ -72,6 +72,8 @@ export interface Config {
   apiToken: string | undefined;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
+  /** hub, sign-in on: the nodes asked for a system sign-in, in order (FILEDECK_AUTH_NODES); empty = the order of `nodes` */
+  authNodes: string[];
   /** hub: network sources (SFTP, ...) declared in the chart values; credentials live in mounted Secrets */
   sources: SourceConfig[];
   sourceSecretDir: string;
@@ -92,6 +94,16 @@ export interface Config {
   sessionMaxMs: number;
   /** hub: account the `filedeck du` API token acts as; unset = none */
   apiTokenAccount: string | undefined;
+  /** agent, sign-in on: folder that holds the host helpers (`filedeck-id`); unset = the image's folder, else the built one (host-helpers.ts) */
+  hostHelpers: string | undefined;
+  /** agent, sign-in on: the PAM service `filedeck-pam` uses for system users' passwords (FILEDECK_PAM_SERVICE: /etc/pam.d/<name> on the machine) */
+  pamService: string;
+  /** this process is a worker that serves one signed-in account (worker.ts); never set from the environment */
+  worker: boolean;
+  /** agent, sign-in on: most worker processes at once; past it the least recently used idle one is stopped */
+  maxWorkers: number;
+  /** agent, sign-in on: a worker with nothing to do for this long is stopped */
+  workerIdleMs: number;
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -127,6 +139,14 @@ function readSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
  */
 export function defaultProcMounts(root: string): string {
   return root === "/" ? "/proc/mounts" : `${root}/proc/1/mounts`;
+}
+
+/** A setting that must be a whole number of at least 1: unset or empty gives `fallback`, anything else is refused at start-up. */
+function wholeSetting(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const v = env[name]?.trim();
+  if (!v) return fallback;
+  if (!/^[0-9]+$/.test(v) || Number(v) < 1) throw new Error(`${name} must be a whole number of at least 1, not "${v.slice(0, 40)}"`);
+  return Number(v);
 }
 
 export function loadConfig(env = process.env): Config {
@@ -185,6 +205,7 @@ export function loadConfig(env = process.env): Config {
     allowedHosts: (env.FILEDECK_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
     apiToken: mode === "hub" ? readSecret(env, "FILEDECK_API_TOKEN") : undefined,
     nodes: parseNodes(env.NODES),
+    authNodes: [...new Set((env.FILEDECK_AUTH_NODES ?? "").split(",").map((n) => n.trim()).filter(Boolean))],
     sources: parseSources(env.FILEDECK_SOURCES),
     sourceSecretDir: env.FILEDECK_SOURCE_SECRETS ?? "/var/run/filedeck/sources",
     vaultFile,
@@ -199,5 +220,53 @@ export function loadConfig(env = process.env): Config {
     sessionIdleMs: Number(env.FILEDECK_SESSION_IDLE_SECONDS ?? 8 * 3600) * 1000,
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
+    hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
+    pamService: env.FILEDECK_PAM_SERVICE || "filedeck",
+    worker: false,
+    maxWorkers: wholeSetting(env, "FILEDECK_MAX_WORKERS", 6),
+    workerIdleMs: wholeSetting(env, "FILEDECK_WORKER_IDLE_SECONDS", 600) * 1000,
+  };
+}
+
+/**
+ * The most one account's thumbnail cache may hold (sign-in on): the thumbnail limit (`FILEDECK_THUMB_CACHE_MAX`) shared by twice the workers
+ * that may run at once (`FILEDECK_MAX_WORKERS`): while new workers run, stopped ones may still be exiting with their caches. At least 1 MiB
+ * (never 0). The cache of an account whose worker has stopped is emptied (agent-workers.ts), so the caches together stay within the limit.
+ */
+export function accountThumbMax(cfg: Pick<Config, "thumbCacheMax" | "maxWorkers">): number {
+  return Math.max(1024 * 1024, Math.floor(cfg.thumbCacheMax / (2 * Math.max(1, cfg.maxWorkers))));
+}
+
+/**
+ * The settings a worker gets in its start-up message: the agent's own, without any secret (a worker runs as a person's account, so whatever it holds that
+ * person could read), and without what only the root process does: the shared job file, the change watcher, trash retention and sign-in checks.
+ * `dirs` are the account's own thumbnail cache and index folders.
+ */
+export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string }): Config {
+  return {
+    ...cfg,
+    worker: true,
+    auth: false,
+    agentToken: undefined,
+    apiToken: undefined,
+    apiTokenAccount: undefined,
+    vaultKey: undefined,
+    bootstrapAdminFile: undefined,
+    // whatever a worker holds, its account can read: hub settings (network sources and the folder of their credentials, the administrators, the hub's
+    // account and vault files) are dropped, an agent never uses them
+    admins: [],
+    authFile: "",
+    vaultFile: "",
+    nodes: [],
+    authNodes: [],
+    sources: [],
+    sourceSecretDir: "",
+    jobsFile: "",
+    fanwatch: "",
+    trashSweepMs: 0,
+    // the account's own folders: a worker never shares the root process's index or thumbnail cache
+    thumbDir: dirs.thumbs,
+    thumbCacheMax: accountThumbMax(cfg),
+    indexDir: dirs.index,
   };
 }

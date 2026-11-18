@@ -4,6 +4,7 @@ import { ChevronRight, Ellipsis, FolderClosed, HardDrive, Network, Server, Star,
 import { fmtSize, onFsChanged, type Entry, type Mount, type NodeInfo } from "./api";
 import { duFetcher, duKey, listFetcher, listKey as swrListKey, mountsFetcher, mountsKey } from "./data";
 import { listState } from "./sidebarState";
+import { insideRoots, rowOpens } from "./nodeHome";
 import { SkeletonTreeRows } from "./Skeleton";
 import { addBookmark, bookmarkLabel, isBookmarked, removeBookmark, useBookmarks, type Bookmark } from "./bookmarks";
 import { copyText } from "./clipboard";
@@ -103,8 +104,8 @@ export function UsageBar({ usage }: { usage: Usage }) {
 export function Popover({ t }: { t: TNode }) {
   return (
     <span className="st-pop">
-      <b>{t.label}</b>
-      {t.tip && <span className="st-pop-tip">{t.tip}</span>}
+      <b><bdi>{t.label}</bdi></b>
+      {t.tip && <span className="st-pop-tip"><bdi>{t.tip}</bdi></span>}
       {t.usage && (
         <>
           <span>{fmtSize(t.usage.used)} of {fmtSize(t.usage.total)} used ({usagePct(t.usage)}%)</span>
@@ -166,7 +167,9 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const loc = current ? current.node + "\0" + current.path : "";
   const heldNow = useMemo(() => new Set(heldIds(held, loc)), [held, loc]);
   const autoDirs = useMemo(() => new Set(current ? ancestorPaths(current.path) : []), [current]);
-  const isAuto = (node: string, path: string) => !!current && node === current.node && autoDirs.has(path);
+  // on the way to the current folder; on a machine with granted folders only rows inside them (a bookmark of / stays shut: listing it
+  // would be refused)
+  const isAuto = (node: string, path: string) => !!current && node === current.node && autoDirs.has(path) && insideRoots(nodesState.nodes?.find((n) => n.name === node), path);
   const openNow = (t: TNode) => t.kind === "elided" || shownOpen(isOpen(expanded, t.id, t.defaultOpen), !!t.auto, heldNow.has(t.id));
 
   const cluster = nodes.filter((n) => n.kind !== "source");
@@ -204,6 +207,12 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
       if (n.online && m?.status === "ready") t.usage = serverUsage(m.mounts) ?? undefined;
       t.auto = current?.node === n.name;
       if (!n.online || !openNow(t)) return t;
+      const trashRow: TNode = { id: `${id}:trash`, kind: "trash", label: "Trash", icon: <Trash2 />, node: n.name, expandable: false, defaultOpen: false };
+      // A virtual account's machine: one row per granted folder (labelled with its path) and the Trash; no / and no mounts.
+      if (n.roots) {
+        t.children = [...n.roots.map((p) => dirNode(id + ":r", n.name, p, { name: p } as Entry)), trashRow];
+        return t;
+      }
       const asMount = (mt: TNode, x: Mount): TNode => {
         mt.kind = "mount";
         mt.icon = <HardDrive />;
@@ -222,7 +231,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
       const rootRow = dirNode(id, n.name, "/", { name: "/ (root)" } as Entry);
       const rootMount = ms.find((x) => x.mountpoint === "/");
       if (rootMount) asMount(rootRow, rootMount);
-      const kids: TNode[] = [rootRow, { id: `${id}:trash`, kind: "trash", label: "Trash", icon: <Trash2 />, node: n.name, expandable: false, defaultOpen: false }];
+      const kids: TNode[] = [rootRow, trashRow];
       for (const x of ms) if (x !== rootMount) kids.push(asMount(dirNode(id + ":m", n.name, x.mountpoint, { name: x.mountpoint } as Entry), x));
       t.children = kids;
       t.load = "mounts";
@@ -297,7 +306,8 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
       if (t.load === "dir") out.push({ k: duWant(t.node, t.path!), kind: "du", node: t.node, path: t.path! });
     }
     // Server rows show a size bar, so every online node's mounts are read, not only the expanded ones.
-    for (const n of cluster) if (n.online && !out.some((w) => w.k === "m\0" + n.name)) out.push({ k: "m\0" + n.name, kind: "mounts", node: n.name, path: "" });
+    // A machine with granted folders (a virtual account's) has no mounts to read.
+    for (const n of cluster) if (n.online && !n.roots && !out.some((w) => w.k === "m\0" + n.name)) out.push({ k: "m\0" + n.name, kind: "mounts", node: n.name, path: "" });
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, byId, nodes]);
@@ -307,10 +317,14 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
   const onDu = useCallback((k: string, e: Dus[string]) => setDus((x) => (k in x && x[k] === e ? x : { ...x, [k]: e })), []);
 
   const refresh = useCallback((t: TNode) => {
+    const roots = t.kind === "node" ? nodesState.nodes?.find((n) => n.name === t.node)?.roots : undefined;
+    const reread = (node: string, path: string) => (void mutate(swrListKey(node, path)), void mutate(duKey(node, path)));
     if (t.kind === "section") nodesState.reload();
     else if (t.load === "mounts") void mutate(mountsKey(t.node!));
-    else if (t.node && t.path) (void mutate(swrListKey(t.node, t.path)), void mutate(duKey(t.node, t.path)));
-  }, [mutate, nodesState.reload]);
+    // a machine with granted folders: each of them is read again, not /
+    else if (roots) for (const p of roots) reread(t.node!, p);
+    else if (t.node && t.path) reread(t.node, t.path);
+  }, [mutate, nodesState.reload, nodesState.nodes]);
 
   const setExp = useCallback((id: string, open: boolean) => {
     const el = byId.get(id);
@@ -345,10 +359,12 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
     if (t.kind === "trash") return onTrash(t.node!);
     if (t.offline) return;
     if (how === "here" && !direct && t.expandable && !openNow(t)) return setExp(t.id, true);
-    onOpen(t.node!, t.path ?? "/", how);
+    onOpen(t.node!, target(t), how);
   };
 
-  const bookmarkOf = (t: TNode): Bookmark | null => (t.node && t.path && t.kind !== "trash" ? { node: t.node, path: t.path } : null);
+  // The folder a row opens, bookmarks and copies: a machine's own row its home, every other row its exact path.
+  const target = (t: TNode) => rowOpens(t.kind, nodes.find((n) => n.name === t.node), t.path ?? "/");
+  const bookmarkOf = (t: TNode): Bookmark | null => (t.node && t.path && t.kind !== "trash" ? { node: t.node, path: target(t) } : null);
   const menuItems = (t: TNode): MenuItem[] => {
     if (t.kind === "trash") return [{ label: "Open trash", onSelect: () => onTrash(t.node!) }];
     const b = bookmarkOf(t);
@@ -416,7 +432,7 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
         onAuxClick={(e) => {
           if (e.button !== 1 || t.kind === "section" || t.kind === "elided") return;
           e.preventDefault();
-          if (t.kind !== "trash" && !t.offline) onOpen(t.node!, t.path ?? "/", "panel");
+          if (t.kind !== "trash" && !t.offline) onOpen(t.node!, target(t), "panel");
         }}
         onContextMenu={(e) => {
           if (!hasMenu) return;
@@ -429,7 +445,8 @@ export function SideTree({ nodesState, current, onOpen, onTrash }: { nodesState:
           {Array.from({ length: level - 1 }, (_, i) => <span key={i} className="st-guide" aria-hidden="true" />)}
           <span className={"st-chev" + (t.expandable ? "" : " none") + (isExp ? " open" : "")} aria-hidden="true">{t.expandable && <ChevronRight />}</span>
           <span className="st-icon" aria-hidden="true">{t.icon}</span>
-          <span className="st-label">{t.label}</span>
+          {/* names and granted paths may hold bidi characters: each label is isolated from the text around it */}
+          <span className="st-label"><bdi>{t.label}</bdi></span>
           {t.extra}
           {t.offline && <span className="muted st-sub">offline</span>}
           {known(t.size) && <span className="muted st-sub">{fmtSize(known(t.size)!.used)}</span>}

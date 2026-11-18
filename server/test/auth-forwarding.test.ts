@@ -130,6 +130,45 @@ test("header per node: a virtual account sees only its nodes, and the agent gets
   assert.deepEqual(c.grants, [{ path: "/", write: true }]);
 });
 
+test("/api/nodes for a virtual account has its roots", async () => {
+  const grants: Record<string, NodeAccess> = {
+    A: {
+      runAs: "guest",
+      grants: [
+        { path: "/srv/b", write: true },
+        { path: "/srv/a", write: false },
+      ],
+    },
+  };
+  const guest = signIn(hub, "rooted1", grants);
+  const seen = (await (await call(hub, "/api/nodes", guest)).json()) as { nodes: { name: string; roots?: string[] }[] };
+  assert.deepEqual(seen.nodes, [{ name: "A", online: true, roots: ["/srv/b", "/srv/a"] }]);
+
+  // a system account gets no roots: both machines say the account exists there
+  const exists = (req: Request) => (new URL(req.url).pathname === "/api/auth/lookup" ? Response.json({ exists: true }) : undefined);
+  A.reply = exists;
+  B.reply = exists;
+  try {
+    const h = makeHub();
+    const sys = `__Host-filedeck=${h.auth!.sessions.create("sys", "sysroots")}`;
+    const r = (await (await call(h, "/api/nodes", sys)).json()) as { nodes: { name: string; roots?: string[] }[] };
+    assert.deepEqual(
+      r.nodes.map((n) => n.name),
+      ["A", "B"],
+    );
+    for (const n of r.nodes) assert.equal("roots" in n, false, `sys ${n.name}`);
+  } finally {
+    A.reply = undefined;
+    B.reply = undefined;
+  }
+
+  // auth off: no roots either
+  const off = makeHub({ FILEDECK_AUTH: "off" });
+  const o = (await (await off.request("http://localhost/api/nodes", {}, peer as never)).json()) as { nodes: { name: string }[] };
+  assert.equal(o.nodes.length, 2);
+  for (const n of o.nodes) assert.equal("roots" in n, false, `auth off ${n.name}`);
+});
+
 test("no grant, no forwarding: the proxy, transfer, ops and diff refuse a node without access", async () => {
   const guest = signIn(hub, "guest1");
   fs.writeFileSync(path.join(A.root, "nogrant.txt"), "x");

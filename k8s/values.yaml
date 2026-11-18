@@ -35,6 +35,33 @@ agentToken:
   key: token
   generate: false
 
+# Sign-in (FILEDECK_AUTH on the hub and the agents). Off by default; see "Turning sign-in on" in
+# docs/install.md. It needs the agent token (`agentToken.secretName` or `agentToken.generate`): the chart
+# refuses to render without one. With it on, each agent runs every signed-in request in a worker process that holds the
+# person's own user (FILEDECK_MAX_WORKERS, FILEDECK_WORKER_IDLE_SECONDS), and the agent container gets the SYS_CHROOT
+# capability for its account lookup helper.
+auth:
+  # Sign-in (FILEDECK_AUTH). Off by default; see "Turning sign-in on" in docs/install.md.
+  enabled: false
+  workers:
+    # Workers that run at once per agent; past this the least recently used idle one is stopped.
+    max: 6
+    # A worker without requests, open streams or running jobs for this long exits.
+    idleSeconds: 600
+  # agent memory limit while sign-in is on (each worker adds up to about 96Mi of heap); replaces agent.resources.limits.memory
+  agentMemoryLimit: 1Gi
+  # System user names that are administrators (FILEDECK_ADMINS)
+  admins: []
+  # Machines asked to check system sign-ins, in order (FILEDECK_AUTH_NODES); empty = the order of `nodes`
+  authNodes: []
+  # PAM service on the machines (FILEDECK_PAM_SERVICE); install /etc/pam.d/<service> yourself
+  pamService: filedeck
+  # First virtual administrator: a Secret holding {"name": ..., "passwordHash": ...} under `key` (FILEDECK_BOOTSTRAP_ADMIN_FILE)
+  bootstrapAdmin: {secretName: "", key: admin.json}
+  session: {idleSeconds: 28800, maxSeconds: 604800}
+  # Account the `filedeck du` token acts as (FILEDECK_API_TOKEN_ACCOUNT)
+  apiTokenAccount: ""
+
 # Optional read-only token for the `filedeck du` CLI (hub). Name an existing Secret (created out of band, never in Git)
 # that holds a long random value under `key`; the hub then lets a request with the header `X-Filedeck-Token: <token>` call only GET /api/du and
 # the du jobs it starts (`Authorization` is never read, so an ingress login in front of the hub keeps working). Empty (the default) switches the feature off.
@@ -118,7 +145,8 @@ agent:
   # list. Empty means everything is writable. Kernel pseudo-filesystems are read-only by default.
   readOnlyPaths: ["/proc", "/sys"]
   # Thumbnail cache (emptyDir, lost on restart): the agent deletes the least recently used entries beyond
-  # thumbCacheBytes; the volume limit is a backstop.
+  # thumbCacheBytes; the volume limit is a backstop. With sign-in on, each account's cache gets
+  # thumbCacheBytes / (2 x auth.workers.max) (at least 1 MiB), and a cache is emptied once its account's worker stops.
   thumbCacheBytes: "268435456"
   thumbCacheVolume: 512Mi
   # Compare index: inotify watches per agent on recently listed folders (LRU). A watched folder's listing is served

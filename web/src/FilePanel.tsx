@@ -39,6 +39,7 @@ import { entryKind, focusPanelList, listAnnouncement, revealRow, rowId } from ".
 import { CHUNK_ROWS, CHUNK_TILE_ROWS, OVERSCAN_ROWS, OVERSCAN_TILE_ROWS, scrollTopFor, spacerHeight, windowFor, type Geometry, type Win } from "./listWindow";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { typeAheadMatch, type TypeAheadState } from "./letterNavigation";
+import { canGoUp, noAccessHome } from "./nodeHome";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -69,6 +70,8 @@ interface Props {
   onNavigate: (node: string, path: string) => void;
   /** open node:path in a new panel beside this one, optionally with a file selected */
   onOpenPanel: (node: string, path: string, select?: string) => void;
+  /** the machine's granted folders (a virtual account's): "up" stops at them */
+  roots?: string[];
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
   /** HTML5 drag props for the panel's drag handle (the drag image is the whole panel) */
@@ -118,12 +121,14 @@ const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, onClickSelect, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, roots, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, onClickSelect, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const presentation = usePresentation();
   const estimatedFileRowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 17));
   const [entries, setEntries] = useState<Entry[]>([]);
   const [err, setErr] = useState("");
+  /** why the last listing failed (null after a good one): a refusal on a machine with granted folders offers the home folder */
+  const [listFail, setListFail] = useState<unknown>(null);
   /** the listing for node:path is still on its way (a refresh of a shown folder keeps its rows and is not "loading") */
   const [loading, setLoading] = useState(true);
   const listKey = useRef("");
@@ -340,6 +345,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         setLoading(false);
         setStreaming(false);
         setErr(r.truncated ? "Listing truncated" : "");
+        setListFail(null);
         const known = new Set(got.map((e) => e.path));
         const act = cursorRef.current;
         let nextActive = act;
@@ -363,7 +369,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         }
         setSel((s) => (nextSel.size === s.size && [...nextSel].every((p) => s.has(p)) ? s : nextSel));
       })
-      .catch((e: Error) => live && (window.clearTimeout(flush), setErr(e.message), setEntries([]), setLoading(false), setStreaming(false)));
+      .catch((e: Error) => live && (window.clearTimeout(flush), setErr(e.message), setListFail(e), setEntries([]), setLoading(false), setStreaming(false)));
     return () => {
       live = false;
       window.clearTimeout(flush);
@@ -936,7 +942,11 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     />
   ) : null;
   // ---- parent-folder row (setting: "..", "Up" or hidden); not part of the entries, so never selected or counted ----
-  const parentPath = path === "/" ? null : parent(path);
+  // none at / and none at a granted folder: above it the account has no access
+  const upOk = canGoUp({ roots }, path);
+  // a folder above or outside the granted ones (typed, an old bookmark, a recent location): offer the home folder, no silent redirect
+  const noAccess = listFail ? noAccessHome({ roots }, path, listFail) : null;
+  const parentPath = upOk ? parent(path) : null;
   const showUp = parentPath !== null && upRow !== "hidden";
   const upLabel = upRow === "up" ? "Up" : "..";
   const upDrop = {
@@ -1315,7 +1325,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         return !!en && (open(en), true);
       }
       if (e.altKey && !mod && (key === "ArrowLeft" || key === "ArrowRight")) return histGo(key === "ArrowLeft" ? -1 : 1), true;
-      if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return path !== "/" && (navigate(node, parent(path)), true);
+      if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return upOk && (navigate(node, parent(path)), true);
       if (key === "F2") return selEntries.length === 1 && (setRenaming(selEntries[0]!.path), true);
       if (key === "F4") return selEntries.length === 1 && canEdit(selEntries[0]!) && (setEditing({ node, path: selEntries[0]!.path }), true);
       if (key === "F5") return toOther("copy"), true;
@@ -1504,7 +1514,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         </Tip>
         <Tip label="Back" shortcut="Alt+Left"><button type="button" className="fp-up" aria-label="Back" disabled={!canBack} onClick={() => histGo(-1)}><ArrowLeft /></button></Tip>
         <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
-        <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
+        <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={!upOk} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar label={`Breadcrumb for ${panelName}`} node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         <Tip label="Refresh" shortcut="Alt+R"><button type="button" className="fp-up fp-refresh" aria-label="Refresh" onClick={refresh}><RefreshCw /></button></Tip>
         {git?.repo && !leaf.sr && <span className="git-chip"><GitPill s={git.repo.summary} /></span>}
@@ -1583,7 +1593,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         </div>
       )}
       <div className="visually-hidden" role="status" aria-live="polite">{!cside && !leaf.sr ? listSays : ""}</div>
-      {err && <div id={createErrorId} className="fp-err" role="alert">{err}</div>}
+      {err && !noAccess && <div id={createErrorId} className="fp-err" role="alert">{err}</div>}
+      {noAccess && (
+        // outside the list (a grid or listbox holds rows only); the message is the alert, the button is next to it
+        <div className="fp-err fp-noaccess">
+          <span role="alert">You have no access to this folder.</span>
+          <button type="button" className="primary" onClick={() => navigate(node, noAccess)}>Open <bdi>{noAccess}</bdi></button>
+        </div>
+      )}
       {pane && phone ? (
         // Phone: one view at a time. The side pane takes the whole panel; its close button returns to the list.
         <div className="fp-phonepane">{pane}</div>

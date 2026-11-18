@@ -10,6 +10,7 @@ import { panelGhost } from "./panelGhost";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
+const AccountsView = lazy(() => import("./AccountsView").then((m) => ({ default: m.AccountsView })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
 import { useNodes } from "./data";
@@ -28,7 +29,9 @@ import { useDialogFocus } from "./dialogFocus";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
 import { AccountMenu } from "./AccountMenu";
+import { AsRootBanner, useAsRoot } from "./AsRootBanner";
 import type { Account } from "./auth";
+import { openPath } from "./nodeHome";
 
 /** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = swap places). */
 function DockSlot({ id, dragging, onDock, children }: { id: string; dragging: string | null; onDock: (src: string, target: string, zone: DropZone) => void; children: React.ReactNode }) {
@@ -244,6 +247,7 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
 
 export function App({ account }: { account?: Account } = {}) {
   const nodesState = useNodes();
+  const asRoot = useAsRoot(account);
   const phone = usePhone();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
@@ -254,6 +258,18 @@ export function App({ account }: { account?: Account } = {}) {
   const [trash, setTrash] = useState<TrashState | null>(initial?.trash ?? null);
   const [settingsOpen, setSettingsOpen] = useState(initial?.settings ?? false);
   const [help, setHelp] = useState(initial?.help ?? false);
+  // the Accounts view (administrators): not in the URL, so a shared link never opens it
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  const closeAccounts = useCallback(() => setAccountsOpen(false), []);
+  // one view at a time: Settings or the Trash, opened from anywhere (also by going back in history), closes Accounts
+  useEffect(() => {
+    if (settingsOpen || trash) setAccountsOpen(false);
+  }, [settingsOpen, trash]);
+  const openAccounts = useCallback(() => {
+    setSettingsOpen(false);
+    setTrash(null);
+    setAccountsOpen(true);
+  }, []);
   const [syncRoute, setSyncRoute] = useState<SyncState | null>(initial?.sync ?? null);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -323,7 +339,8 @@ export function App({ account }: { account?: Account } = {}) {
   useEffect(() => {
     if (tree || !nodes.length) return;
     const cluster = nodes.filter((n) => n.kind !== "source");
-    const l = leaf(((cluster.length ? cluster : nodes).find((n) => n.online) ?? nodes[0])!.name);
+    const first = ((cluster.length ? cluster : nodes).find((n) => n.online) ?? nodes[0])!;
+    const l = leaf(first.name, openPath(first, "/"));
     setTree(l);
     setActiveId(l.id);
   }, [nodes, tree]);
@@ -463,6 +480,7 @@ export function App({ account }: { account?: Account } = {}) {
     update((l) => (l.id === beside ? { kind: "split", id: id(), dir: "horizontal", children: [l, fresh] } : l));
     setActiveId(fresh.id);
   };
+  // the sidebar gives the folder to open: a machine's own row already opens the machine's home (rowOpens in nodeHome.ts)
   const openFromSide = (node: string, path: string, how: How) => (how === "panel" ? openPanel(node, path) : openInActive(node, path));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
@@ -532,6 +550,7 @@ export function App({ account }: { account?: Account } = {}) {
           onFocus={() => setActiveId(t.id)}
           onNavigate={navigate(t.id)}
           onOpenPanel={(n, p, sel) => openPanel(n, p, sel, t.id)}
+          roots={nodes.find((n) => n.name === t.node)?.roots}
           onSplit={split(t.id)}
           onPatch={(p) => patchLeaf(t.id, p)}
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}
@@ -606,6 +625,7 @@ export function App({ account }: { account?: Account } = {}) {
             onDiff={(a, b) => setDiff({ left: { node: a.node, path: a.path }, right: { node: b.node, path: b.path } })}
             onStatus={setStatus}
           />
+          {asRoot.view.endsAt !== undefined && <AsRootBanner endsAt={asRoot.view.endsAt} stopping={asRoot.view.stopping} stopFailed={asRoot.view.stopFailed} onStop={() => void asRoot.stop()} />}
           <div className="site-header__actions">
             {diffMark && (
               <Tip label="Clear diff mark">
@@ -620,7 +640,7 @@ export function App({ account }: { account?: Account } = {}) {
               </Tip>
             )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
-            {account && <AccountMenu name={account.name} />}
+            {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? openAccounts : undefined} />}
           </div>
         </div>
       </header>
@@ -650,6 +670,13 @@ export function App({ account }: { account?: Account } = {}) {
             </ErrorBoundary>
           )}
           {settingsOpen && <ErrorBoundary what="Settings" onClose={() => closeView(() => setSettingsOpen(false))}><SettingsView onClose={() => closeView(() => setSettingsOpen(false))} /></ErrorBoundary>}
+          {accountsOpen && account?.admin && (
+            <ErrorBoundary what="The Accounts view" onClose={closeAccounts}>
+              <Suspense fallback={null}>
+                <AccountsView account={account} onClose={closeAccounts} />
+              </Suspense>
+            </ErrorBoundary>
+          )}
           {diff && (
             <ErrorBoundary what="The diff viewer" resetKeys={[diff.left, diff.right]} onClose={() => closeView(() => setDiff(null))}>
               <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>

@@ -82,6 +82,11 @@ async function installFixture(page, opts = {}) {
     const url = new URL(req.url());
     const pathname = url.pathname;
     const json = (body, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
+    // opts.requests: every API request the page makes, as path and query
+    opts.requests?.push(pathname + url.search);
+    // opts.nodesBody / opts.lists: a check's own node list and folder listings (by path), answered before the shared fixtures
+    if (opts.nodesBody && pathname === '/api/nodes') return json(opts.nodesBody);
+    if (opts.lists?.[url.searchParams.get('path')] && pathname.includes('/api/fs/list')) return json({ path: url.searchParams.get('path'), entries: opts.lists[url.searchParams.get('path')], truncated: false });
     // Sign-in is off unless a check asks for a signed-out or signed-in hub. opts.session ({ out }) lets a check end the
     // session while the app is open: every API call is then the gate's 401 until a password sign-in starts a new one.
     if (opts.session) {
@@ -91,12 +96,70 @@ async function installFixture(page, opts = {}) {
       }
       if (opts.session.out) return json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' });
     }
+    // opts.kind / opts.admin: the signed-in account's kind and admin flag (default a virtual non-admin). opts.asRoot ({ until }):
+    // the act-as-root switch; a POST with the password 'fixture-root-password' turns it on for 15 minutes, DELETE turns it off.
+    if (opts.asRoot && pathname === '/api/auth/as-root') {
+      if (req.method() === 'DELETE') {
+        opts.asRoot.stopped = (opts.asRoot.stopped ?? 0) + 1;
+        if (opts.asRoot.failStop) return json({ error: 'internal error' }, 500);
+        opts.asRoot.until = undefined;
+        return json({ ok: true });
+      }
+      const b = JSON.parse(req.postData() || '{}');
+      opts.asRoot.bodies = [...(opts.asRoot.bodies ?? []), Object.keys(b).sort().join(',')];
+      if (b.password !== 'fixture-root-password') return json({ error: 'sign-in failed' }, 401);
+      const lasts = opts.asRoot.lasts ?? 15 * 60_000;
+      opts.asRoot.until = Date.now() + lasts;
+      return json({ asRootUntil: opts.asRoot.until, asRootLeftMs: lasts });
+    }
     if (pathname === '/api/auth/me') {
-      if (opts.account) return json({ auth: true, kind: 'virt', name: opts.account, admin: false });
+      if (opts.account) {
+        const kind = opts.kind ?? 'virt';
+        const until = opts.asRoot?.until;
+        opts.meCalls = (opts.meCalls ?? 0) + 1;
+        return json({ auth: true, kind, name: opts.account, admin: opts.admin === true, ...(until !== undefined && until > Date.now() ? { asRootUntil: until, asRootLeftMs: until - Date.now() } : {}) });
+      }
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
     if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
-    if (pathname === '/api/nodes') return json({ nodes: [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }] });
+    // opts.adminApi ({ posts, conflict }): the hub's admin routes. Two virtual accounts exist: fixture-guest, with a machine and a
+    // source that are no longer configured, and the signed-in fixture-admin. A POST of a new account is kept in `posts` and answers
+    // 409 "exists" while `conflict` is set, else 201 with the new account.
+    if (opts.adminApi && pathname.startsWith('/api/admin/')) {
+      const a = opts.adminApi;
+      const guest = { name: 'fixture-guest', admin: false, hasPassword: true, keys: [{ fingerprint: 'SHA256:fixture', type: 'ssh-ed25519', comment: 'fixture laptop' }], nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: true }, { path: '/', write: false }] }, 'fixture-retired': { runAs: 'fixture-run', grants: [{ path: '/old', write: false }] } }, sources: { 'fixture-s3': { write: false }, 'fixture-gone': { write: true } }, sessions: 1 };
+      const self = { name: 'fixture-admin', admin: true, hasPassword: true, keys: [], nodes: {}, sources: {}, sessions: 1 };
+      // sessions: the caller's own and fixture-guest's; ended / endedAll / puts / forgot keep what the page sent
+      a.sessions ??= [
+        { id: 'aa11aa11', kind: 'virt', name: 'fixture-admin', created: Date.now() - 7_200_000, lastUsed: Date.now() - 60_000, address: '203.0.113.7', current: true },
+        { id: 'bb22bb22', kind: 'virt', name: 'fixture-guest', created: Date.now() - 86_400_000, lastUsed: Date.now() - 3_600_000, address: '198.51.100.9' },
+        { id: 'cc33cc33', kind: 'virt', name: 'fixture-guest', created: Date.now() - 90_000_000, lastUsed: Date.now() - 7_200_000, address: '192.0.2.5' },
+      ];
+      a.unowned ??= 2;
+      a.ended ??= []; a.endedAll ??= []; a.puts ??= []; a.forgot ??= 0; a.sessionCalls ??= 0;
+      if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: a.unowned });
+      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : [])], system: [{ name: 'fixture-root', admin: true, sources: {}, sessions: 0 }, ...(a.puts.length ? [{ name: 'alice', admin: false, sources: a.puts.at(-1).sources, sessions: 0 }] : [])] });
+      if (pathname === '/api/admin/sessions' && req.method() === 'GET') { a.sessionCalls++; return json({ sessions: a.sessions }); }
+      if (pathname.startsWith('/api/admin/sessions/') && req.method() === 'DELETE') {
+        const id = pathname.split('/').pop();
+        a.ended.push(id);
+        a.sessions = a.sessions.filter((x) => x.id !== id);
+        return json({ ok: true });
+      }
+      if (pathname === '/api/admin/end-sessions' && req.method() === 'POST') { const b = req.postDataJSON(); a.endedAll.push(b); a.sessions = a.sessions.filter((x) => !(x.kind === b.kind && x.name === b.name)); return json({ ok: true }); }
+      if (pathname === '/api/admin/vault/unowned' && req.method() === 'DELETE') { a.forgot++; const removed = a.unowned; a.unowned = 0; return json({ removed }); }
+      if (pathname === '/api/admin/system/alice/sources' && req.method() === 'PUT') { const b = req.postDataJSON(); a.puts.push(b); return json({ name: 'alice', admin: false, sources: b.sources, sessions: 0 }); }
+      if (pathname === '/api/admin/accounts' && req.method() === 'POST') {
+        const b = req.postDataJSON();
+        a.posts.push(b);
+        if (a.conflict) return json({ error: 'exists' }, 409);
+        a.created = { name: b.name, admin: b.admin, hasPassword: typeof b.password === 'string', keys: [], nodes: b.nodes, sources: b.sources, sessions: 0 };
+        return json(a.created, 201);
+      }
+      return json({ error: 'not found' }, 404);
+    }
+    // opts.roots: the virtual account's granted folders on the one machine it may use
+    if (pathname === '/api/nodes') return json(opts.roots ? { nodes: [{ name: nodeName, online: true, roots: opts.roots }] } : { nodes: [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }] });
     if (pathname === `/api/nodes/${encodeURIComponent(nodeName)}/api/mounts`) return json({ mounts: [] });
     if (pathname === '/api/vault') {
       if (!opts.vault) return json({ entries: [], persistent: false, ttlSeconds: 3600, maxHours: 24 });
@@ -109,6 +172,8 @@ async function installFixture(page, opts = {}) {
     }
     if (pathname.includes('/api/fs/list')) {
       const path = url.searchParams.get('path') || '/';
+      // a virtual account may list only its granted folders and what is below them
+      if (opts.roots && !opts.roots.some((r) => path === r || path.startsWith(`${r}/`))) return json({ error: 'no access to this path' }, 403);
       if (pathname.includes('/fixture-dest/')) {
         const rows = path === '/' ? [{ name: 'destination', path: '/destination', type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 }] : [];
         return json({ path, entries: rows, truncated: false });
@@ -135,6 +200,9 @@ async function installFixture(page, opts = {}) {
     }
     if (pathname.endsWith('/api/fs/stat')) {
       const path = url.searchParams.get('path') || tracked;
+      // a virtual account: its granted folders are folders, and nothing outside them can be read
+      if (opts.roots?.includes(path)) return json({ name: path.split('/').at(-1), path, type: 'dir', size: 0, mtime: 1791264000000, mode: 0o755 });
+      if (opts.roots && !opts.roots.some((r) => path.startsWith(`${r}/`))) return json({ error: 'no access to this path' }, 403);
       return json(entry(path, path === tracked ? fakeMode : originalMode));
     }
     if (pathname.endsWith('/api/git/info')) return json(gitInfo(url.searchParams.get('path') || '/', opts.worktrees));
@@ -205,7 +273,8 @@ async function expectText(page, text) {
 let currentCheck = 'check';
 let pendingShots = [];
 
-async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {} } = {}) {
+// clockOffsetMs: the page's Date runs that far ahead of the fake hub's clock (timers are untouched).
+async function openPage(browser, { viewport = { width: 1365, height: 900 }, colorScheme = 'light', state = appState(), fixture = {}, clockOffsetMs = 0, fakeClock = false } = {}) {
   // bypassCSP only lets the harness inject axe-core into the page; the app's own scripts are unaffected.
   const context = await browser.newContext({ viewport, colorScheme, bypassCSP: true });
   const page = await context.newPage();
@@ -225,6 +294,18 @@ async function openPage(browser, { viewport = { width: 1365, height: 900 }, colo
     if (new URL(response.url()).pathname.includes('/api/git/')) diagnostics.push({ type: 'git-response', status: response.status(), url: response.url() });
   });
   await page.addInitScript((mode) => localStorage.setItem('filedeck-theme', mode), colorScheme);
+  if (clockOffsetMs) {
+    await page.addInitScript((off) => {
+      const Real = Date;
+      const now = () => Real.now() + off;
+      globalThis.Date = class extends Real {
+        constructor(...a) { if (a.length) super(...a); else super(now()); }
+        static now() { return now(); }
+      };
+    }, clockOffsetMs);
+  }
+  // fakeClock: timers run in real time until a check moves them on with page.clock.fastForward
+  if (fakeClock) await context.clock.install();
   await installFixture(page, fixture);
   await page.goto(new URL(state, baseURL).toString(), { waitUntil: 'domcontentloaded' });
   await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
@@ -1542,6 +1623,672 @@ async function verifySignIn(browser) {
   assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
 }
 
+// A virtual account opens each machine at its first granted folder: with no panel in the URL the first panel shows it, the sidebar
+// lists it under the machine with the Trash, and nothing lists / or asks for the machine's mounts. axe passes in light and dark.
+async function verifyVirtualAccount(browser) {
+  const failures = [];
+  const share = '/srv/share';
+  for (const scheme of ['light', 'dark']) {
+    const fixture = { account: 'fixture-guest', kind: 'virt', roots: [share], requests: [] };
+    const { context, page } = await openPage(browser, { colorScheme: scheme, state: '/', fixture });
+    try {
+      await page.waitForFunction((p) => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p === p, share, { timeout: 10000 });
+      // the address bar's last folder menu is the one of the granted folder
+      await page.locator('.fp').first().getByRole('button', { name: `Folders in ${share}`, exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+      // above the granted folder the account has no access: up is disabled, as at /
+      assert.equal(await page.locator('.fp').first().getByRole('button', { name: 'Up one folder', exact: true }).isDisabled(), true, 'up is disabled at the granted folder');
+      const tree = page.getByRole('tree', { name: 'Navigation' });
+      await tree.getByRole('treeitem', { name: share }).waitFor({ state: 'visible', timeout: 8000 });
+      await tree.getByRole('treeitem', { name: 'Trash' }).waitFor({ state: 'visible' });
+      assert.equal(await tree.getByRole('treeitem', { name: '/ (root)' }).count(), 0, 'no "/ (root)" row');
+      // open the granted folder's row too: it lists that folder, never /
+      await tree.getByRole('treeitem', { name: share }).click();
+      await page.waitForTimeout(400);
+      await runAxe(page, `virtual account (${scheme})`, failures);
+      const node = encodeURIComponent(nodeName);
+      const bad = fixture.requests.filter((r) => r === `/api/nodes/${node}/api/mounts` || (r.startsWith(`/api/nodes/${node}/api/fs/list?`) && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === '/'));
+      assert.deepEqual(bad, [], `no list of / and no mounts request (${scheme})`);
+      assert.ok(fixture.requests.some((r) => r.startsWith(`/api/nodes/${node}/api/fs/list?`) && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === share), `the granted folder is listed (${scheme})`);
+      // the address bar's first crumb is the granted folder, not the root sign
+      const panel = page.locator('.fp').first();
+      assert.equal((await panel.locator('.crumbs .crumb').first().locator('.crumb-t').textContent())?.trim(), share, 'the first crumb shows the granted folder');
+      // "/" typed against the granted folder's base stays in it; the machine's / typed in full is refused (the fixture answers 403):
+      // the panel offers the home folder instead of the bare error, and does not move by itself
+      const go = async (text) => {
+        await panel.getByRole('button', { name: 'Edit address' }).click();
+        const box = panel.getByRole('combobox', { name: 'Address' });
+        await box.fill(text);
+        await box.press('Enter');
+        await box.waitFor({ state: 'detached' });
+      };
+      await go('/');
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p), share, `"/" stays in the granted folder (${scheme})`);
+      await go(`${nodeName}:/`);
+      const offer = panel.getByRole('button', { name: `Open ${share}`, exact: true });
+      await offer.waitFor({ state: 'visible', timeout: 8000 });
+      await panel.getByRole('alert').filter({ hasText: 'You have no access to this folder.' }).waitFor({ state: 'visible' });
+      assert.equal(await page.evaluate(() => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p), '/', 'no silent redirect');
+      await runAxe(page, `virtual account, no access (${scheme})`, failures);
+      await offer.click();
+      await page.waitForFunction((p) => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p === p, share, { timeout: 8000 });
+      await offer.waitFor({ state: 'detached', timeout: 8000 }); // the offer goes once the home folder is listed
+    } finally {
+      await context.close();
+    }
+  }
+  // Saved state from elsewhere: a node list saved with sign-in off (no roots), one saved by another account and one in the format
+  // from before accounts, plus a bookmark of / on the machine. None of them may make the page list / or ask for mounts. Then
+  // "Copy to folder..." on a second machine opens at that machine's granted folder.
+  {
+    const dest = '/srv/dest';
+    const plainList = [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }];
+    const fixture = {
+      account: 'fixture-guest', kind: 'virt', roots: [share, dest], requests: [],
+      nodesBody: { nodes: [{ name: nodeName, online: true, roots: [share] }, { name: 'fixture-dest', online: true, roots: [dest] }] },
+      lists: { [share]: [entry(`${share}/report.txt`)] },
+    };
+    const { context, page } = await openPage(browser, { state: '/', fixture });
+    try {
+      // each load starts from the saved list chosen below (kept in sessionStorage, which outlives the navigation) and the bookmark
+      await page.addInitScript((node) => {
+        const seed = sessionStorage.getItem('fixture-seed-swr');
+        if (seed) localStorage.setItem('filedeck.swr.v1', seed);
+        localStorage.setItem('filedeck.bookmarks', JSON.stringify([{ node, path: '/' }]));
+      }, nodeName);
+      const seeds = [
+        JSON.stringify({ owner: 'anon', entries: [['nodes', { data: plainList }]] }),
+        JSON.stringify({ owner: 'virt:someone-else', entries: [['nodes', { data: [{ name: nodeName, online: true, roots: ['/srv/other'] }] }]] }),
+        JSON.stringify([['nodes', { data: plainList }]]),
+      ];
+      for (const [round, seed] of seeds.entries()) {
+        await page.evaluate((v) => sessionStorage.setItem('fixture-seed-swr', v), seed);
+        fixture.requests.length = 0;
+        await page.goto(new URL('/', baseURL).toString(), { waitUntil: 'domcontentloaded' });
+        await page.waitForFunction((p) => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p === p, share, { timeout: 10000 });
+        await page.getByRole('tree', { name: 'Navigation' }).getByRole('treeitem', { name: share }).waitFor({ state: 'visible' });
+        await page.waitForTimeout(500);
+        const bad = fixture.requests.filter((r) => r.includes('/api/mounts') || (r.includes('/api/fs/list?') && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === '/'));
+        assert.deepEqual(bad, [], `saved state ${round} from elsewhere: no list of / and no mounts request`);
+        const kept = await page.evaluate(() => localStorage.getItem('filedeck.swr.v1') ?? '');
+        assert.ok(!kept.includes('/srv/other') && !kept.includes('"anon"') && !kept.startsWith('['), `saved state ${round}: the list saved elsewhere is dropped`);
+      }
+      fixture.requests.length = 0;
+      await page.locator('[data-path="/srv/share/report.txt"]').click();
+      await page.keyboard.press('Shift+F10');
+      await page.getByRole('menu').last().getByRole('menuitem', { name: 'Copy to folder...', exact: true }).press('Enter');
+      const dialog = page.getByRole('dialog', { name: 'Copy to folder' });
+      await dialog.waitFor({ state: 'visible' });
+      await chooseDestinationNode(page, dialog, 'fixture-dest');
+      await dialog.getByText(`fixture-dest:${dest}`).waitFor({ state: 'visible' });
+      assert.equal(await dialog.getByRole('button', { name: 'Up one destination folder' }).isDisabled(), true, 'up is disabled at the granted folder in the dialog');
+      const listed = fixture.requests.filter((r) => r.includes('/api/fs/list?')).map((r) => r.slice(0, r.indexOf('/api/fs/list')) + ' ' + new URLSearchParams(r.slice(r.indexOf('?'))).get('path'));
+      assert.deepEqual(listed.filter((l) => l.endsWith(' /')), [], 'switching the machine in "Copy to folder" lists no /');
+      assert.ok(listed.includes(`/api/nodes/fixture-dest ${dest}`), 'the second machine opens at its granted folder');
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'the virtual account view passes axe in light and dark');
+}
+
+// Accounts (administrators): "Accounts…" in the account menu opens the view; "New account" with a name, a password, a run-as user
+// and a folder picked in the folder picker sends one POST /api/admin/accounts with exactly that body; the hub's 409 shows its text
+// in the alert next to the button, and a second try creates the account and opens its editor. axe passes on the list, the editor
+// and the picker in light and dark, none of them overflows sideways at 1365x900, 390x844 and 320x568, and the password never
+// reaches a URL or storage. At 1365x900 also: the overlay (and Settings) fits the window without scrolling the page; axe passes on
+// an existing account's editor (with a machine and a source no longer configured), "Discard changes?", the delete confirm, one's
+// own account's editor and its confirm; Settings closes Accounts. A system administrator gets the menu item too; an account that
+// is not an administrator does not.
+// A dialog fades in: axe measures colours as they are on screen, so it waits for running animations and transitions to end.
+const settled = (page) => page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity), null, { timeout: 8000 });
+// Focus reaches `loc` within 4 s and is still there 300 ms later (nothing moves it on afterwards).
+async function focusStaysOn(page, loc, why) {
+  const on = () => loc.evaluate((el) => el === document.activeElement);
+  for (let i = 0; i < 40 && !(await on()); i++) await page.waitForTimeout(100);
+  await page.waitForTimeout(300);
+  const at = await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120));
+  assert.ok(await on(), `${why} (focus is on ${at})`);
+}
+// Polls `read` for a value above `than` (a few seconds at most).
+async function expectMore(read, than, why) {
+  for (let i = 0; i < 80 && !(read() > than); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.ok(read() > than, why);
+}
+async function verifyAccounts(browser) {
+  const failures = [];
+  const password = 'fixture account password';
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      const adminApi = { posts: [], conflict: true };
+      const fixture = { account: 'fixture-admin', kind: 'virt', admin: true, adminApi, requests: [] };
+      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture, fakeClock: true });
+      try {
+        const overflow = async (what) => {
+          const o = await page.evaluate(() => ({
+            scroll: document.documentElement.scrollWidth,
+            client: document.documentElement.clientWidth,
+            body: document.body.scrollWidth,
+            dialog: Math.max(0, ...[...document.querySelectorAll('[role=dialog]')].map((e) => e.getBoundingClientRect().right)),
+            // content that sticks out of the overlay's own box (the overlay scrolls up and down, never sideways)
+            inner: (() => { const b = document.querySelector('.acc-body'); return b ? b.scrollWidth - b.clientWidth : 0; })(),
+          }));
+          if (o.scroll > o.client + 1 || o.body > o.client + 1 || o.dialog > o.client + 1 || o.inner > 1) failures.push({ view: `${what} ${label}`, rule: 'horizontal overflow', ...o });
+        };
+        // on a phone the account menu sits in the header too
+        await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+        await page.getByRole('menuitem', { name: 'Accounts…' }).click();
+        const view = page.getByRole('dialog', { name: 'Accounts' });
+        await view.waitFor({ state: 'visible', timeout: 8000 });
+        await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        await overflow('list');
+        // old saved passwords: the notice counts them; its axe run is the list's
+        const notice = view.getByRole('region', { name: 'Old saved passwords' });
+        await notice.getByText('2 saved passwords from before sign-in was on are kept but not used.').waitFor({ state: 'visible', timeout: 8000 });
+        await runAxe(page, `accounts list ${label}`, failures);
+
+        // forget the old passwords after a confirm; the notice goes away and focus goes to the list's heading
+        await notice.getByRole('button', { name: 'Forget them' }).click();
+        const forget = page.getByRole('dialog', { name: 'Forget saved passwords' });
+        await forget.waitFor({ state: 'visible', timeout: 8000 });
+        await settled(page);
+        await runAxe(page, `forget confirm ${label}`, failures);
+        assert.equal(adminApi.forgot, 0, `nothing is sent before the confirm (${label})`);
+        await forget.getByRole('button', { name: 'Forget them' }).click();
+        await notice.waitFor({ state: 'detached', timeout: 8000 });
+        assert.equal(adminApi.forgot, 1, `one DELETE of the old passwords (${label})`);
+        await page.waitForFunction(() => document.activeElement?.textContent === 'Virtual accounts', null, { timeout: 8000 });
+
+        // closing the view with an unsaved editor asks first, from another tab too (Escape) and from the header's Close
+        await view.getByRole('button', { name: 'Edit fixture-guest' }).click();
+        const guestRunAs = view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' });
+        await guestRunAs.fill('fixture-other');
+        await view.getByRole('tab', { name: 'Signed in' }).click();
+        await page.keyboard.press('Escape');
+        const keep = page.getByRole('dialog', { name: 'Discard changes?' });
+        await keep.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+        await keep.getByRole('button', { name: 'Keep editing' }).click();
+        await keep.waitFor({ state: 'detached', timeout: 8000 });
+        assert.equal(await view.isVisible(), true, `Keep editing leaves the view open (${label})`);
+        await view.getByRole('tab', { name: 'Signed in' }).click();
+        await view.getByRole('button', { name: 'Close', exact: true }).click();
+        await keep.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+        await keep.getByRole('button', { name: 'Keep editing' }).click();
+        await keep.waitFor({ state: 'detached', timeout: 8000 });
+        assert.equal(await guestRunAs.inputValue(), 'fixture-other', `the typed text is still there (${label})`);
+        await view.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await keep.getByRole('button', { name: 'Discard' }).click();
+        await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+
+        // the tabs are a tablist: aria-selected, arrow keys, and a tabpanel named by the tab
+        const tabs = view.getByRole('tablist', { name: 'Accounts sections' });
+        assert.deepEqual(await tabs.getByRole('tab').evaluateAll((els) => els.map((e) => [e.textContent.trim(), e.getAttribute('aria-selected')])), [['Accounts', 'true'], ['Signed in', 'false'], ['System users', 'false']], `tabs (${label})`);
+        await tabs.getByRole('tab', { name: 'Accounts' }).focus();
+        await page.keyboard.press('ArrowRight');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Signed in' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
+        // Home and End move to the first and last tab
+        await page.keyboard.press('End');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'System users' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
+        await page.keyboard.press('Home');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Accounts' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
+        await page.keyboard.press('ArrowRight');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Signed in' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
+        const panel = view.getByRole('tabpanel', { name: 'Signed in' });
+        const rowOf = (address) => panel.getByRole('row').filter({ hasText: address });
+        await panel.getByRole('heading', { name: 'Signed in' }).waitFor({ state: 'visible', timeout: 8000 });
+        const mine = panel.getByRole('row').filter({ hasText: 'This session' });
+        await mine.getByText('203.0.113.7').waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(await panel.getByText('This session').count(), 1, `the caller's session is marked once (${label})`);
+        assert.equal(await panel.locator('bdi', { hasText: '198.51.100.9' }).count(), 1, `an address is isolated in bdi (${label})`);
+        await overflow('sessions');
+        await runAxe(page, `signed in tab ${label}`, failures);
+        // End all sessions asks first, says jobs are cancelled, and sending nothing until confirmed
+        await panel.getByRole('button', { name: 'End all sessions of fixture-guest' }).click();
+        const endAll = page.getByRole('dialog', { name: 'End all sessions' });
+        await endAll.waitFor({ state: 'visible', timeout: 8000 });
+        await endAll.getByText(/jobs are cancelled/).waitFor({ state: 'visible' });
+        assert.equal(await endAll.getByText(/signed out too/).count(), 0, `no own-account warning for another account (${label})`);
+        assert.deepEqual(adminApi.endedAll, [], `nothing is sent before the confirm (${label})`);
+        await settled(page);
+        await runAxe(page, `end all sessions confirm ${label}`, failures);
+        await endAll.getByRole('button', { name: 'Cancel' }).click();
+        await endAll.waitFor({ state: 'detached', timeout: 8000 });
+        await focusStaysOn(page, panel.getByRole('button', { name: 'End all sessions of fixture-guest' }), `focus returns to the button that opened the confirm (${label})`);
+        // your own account: the confirm warns that you are signed out too
+        await panel.getByRole('button', { name: 'End all sessions of fixture-admin' }).click();
+        await endAll.waitFor({ state: 'visible', timeout: 8000 });
+        await endAll.getByText(/signed out too/).waitFor({ state: 'visible' });
+        await endAll.getByRole('button', { name: 'Cancel' }).click();
+        await endAll.waitFor({ state: 'detached', timeout: 8000 });
+        // End on the other session sends its DELETE and the row goes away
+        await rowOf('198.51.100.9').getByRole('button', { name: 'End', exact: true }).click();
+        await page.waitForFunction(() => ![...document.querySelectorAll('tr')].some((r) => r.textContent.includes('198.51.100.9')), null, { timeout: 8000 });
+        assert.deepEqual(adminApi.ended, ['bb22bb22'], `End sends one DELETE for that session (${label})`);
+        // confirming "End all sessions" sends the POST, and the account's remaining row goes away when the list refreshes
+        await panel.getByRole('button', { name: 'End all sessions of fixture-guest' }).click();
+        await endAll.waitFor({ state: 'visible', timeout: 8000 });
+        await endAll.getByRole('button', { name: 'End all sessions', exact: true }).click();
+        await endAll.waitFor({ state: 'detached', timeout: 8000 });
+        await page.waitForFunction(() => ![...document.querySelectorAll('tr')].some((r) => r.textContent.includes('192.0.2.5')), null, { timeout: 8000 });
+        assert.deepEqual(adminApi.endedAll, [{ kind: 'virt', name: 'fixture-guest' }], `confirming sends one POST (${label})`);
+        assert.equal(await panel.getByRole('button', { name: 'End all sessions of fixture-guest' }).count(), 0, `the account's group is gone (${label})`);
+        // the caller's own End asks first (and reloads the page after it: not run here, the fixture page would lose its state)
+        await mine.getByRole('button', { name: 'End', exact: true }).click();
+        const endOwn = page.getByRole('dialog', { name: 'End your own session' });
+        await endOwn.waitFor({ state: 'visible', timeout: 8000 });
+        await endOwn.getByRole('button', { name: 'Cancel' }).click();
+        await endOwn.waitFor({ state: 'detached', timeout: 8000 });
+        assert.deepEqual(adminApi.ended, ['bb22bb22'], `Cancel on one's own session sends nothing (${label})`);
+        // the list refreshes every 30 s only while its tab is shown
+        const polled = adminApi.sessionCalls;
+        await page.clock.fastForward(31_000);
+        await expectMore(() => adminApi.sessionCalls, polled, `the list refreshes while the tab is shown (${label})`);
+
+        await tabs.getByRole('tab', { name: 'Signed in' }).focus();
+        await page.keyboard.press('ArrowRight');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'System users', null, { timeout: 8000 });
+        const sys = view.getByRole('tabpanel', { name: 'System users' });
+        await sys.getByRole('heading', { name: 'System users' }).waitFor({ state: 'visible', timeout: 8000 });
+        await sys.getByRole('cell', { name: 'fixture-root', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        const afterAway = adminApi.sessionCalls;
+        await page.clock.fastForward(95_000);
+        await page.waitForTimeout(300);
+        assert.equal(adminApi.sessionCalls, afterAway, `the list does not refresh while another tab is shown (${label})`);
+        await overflow('system users');
+        await runAxe(page, `system users tab ${label}`, failures);
+        await sys.getByRole('button', { name: 'Add system user' }).click();
+        const nameField = sys.getByRole('textbox', { name: 'System user name' });
+        await nameField.fill('root');
+        await sys.getByRole('button', { name: 'Continue' }).click();
+        await sys.getByRole('alert').filter({ hasText: 'root' }).waitFor({ state: 'visible', timeout: 8000 });
+        await nameField.fill('alice');
+        await sys.getByRole('button', { name: 'Continue' }).click();
+        await sys.getByRole('heading', { name: 'Sources of alice' }).waitFor({ state: 'visible', timeout: 8000 });
+        await sys.getByRole('button', { name: /^Access to fixture-s3/ }).click();
+        await page.getByRole('menuitemradio', { name: 'Read only' }).click();
+        await overflow('system user sources');
+        // unsaved sources ask before Escape or Close drops them
+        await page.keyboard.press('Escape');
+        const keepSys = page.getByRole('dialog', { name: 'Discard changes?' });
+        await keepSys.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+        await keepSys.getByRole('button', { name: 'Keep editing' }).click();
+        await keepSys.waitFor({ state: 'detached', timeout: 8000 });
+        await view.getByRole('button', { name: 'Close', exact: true }).click();
+        await keepSys.waitFor({ state: 'visible', timeout: 8000 });
+        await keepSys.getByRole('button', { name: 'Keep editing' }).click();
+        await keepSys.waitFor({ state: 'detached', timeout: 8000 });
+        await sys.getByRole('heading', { name: 'Sources of alice' }).waitFor({ state: 'visible' });
+        await runAxe(page, `system user sources ${label}`, failures);
+        await sys.getByRole('button', { name: 'Save', exact: true }).click();
+        await sys.getByRole('cell', { name: 'alice', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.deepEqual(adminApi.puts, [{ sources: { 'fixture-s3': { write: false } } }], `one PUT with the source (${label})`);
+        await tabs.getByRole('tab', { name: 'Accounts' }).click();
+        await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+
+
+        await view.getByRole('button', { name: 'New account' }).click();
+        await view.getByRole('textbox', { name: 'Name' }).fill('fixture-new');
+        await view.getByLabel('Password', { exact: true }).fill(password);
+        const machine = view.locator('.acc-machine').filter({ hasText: nodeName });
+        await machine.getByRole('textbox', { name: 'Run as (system user)' }).fill('fixture-run');
+        await overflow('editor');
+        await runAxe(page, `account editor ${label}`, failures);
+
+        await machine.getByRole('button', { name: 'Add folder…' }).click();
+        const picker = page.getByRole('dialog', { name: 'Add folder' });
+        await picker.waitFor({ state: 'visible', timeout: 8000 });
+        await picker.getByRole('button', { name: 'work', exact: true }).click();
+        await page.waitForFunction(() => document.querySelector('.acc-pick-path input')?.value === '/work', null, { timeout: 8000 });
+        await picker.getByRole('region', { name: 'Folders' }).and(page.locator('[aria-busy=false]')).waitFor({ timeout: 8000 });
+        await overflow('picker');
+        await settled(page);
+        await runAxe(page, `folder picker ${label}`, failures);
+        await picker.getByRole('button', { name: 'Add folder', exact: true }).click();
+        await picker.waitFor({ state: 'detached', timeout: 8000 });
+        await machine.getByText('/work', { exact: true }).waitFor({ state: 'visible' });
+        // Escape in the picker closes the picker only: the view and the editor with its typed text stay
+        await machine.getByRole('button', { name: 'Add folder…' }).click();
+        await picker.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.closest('[role=dialog]')?.getAttribute('aria-label') === 'Add folder', null, { timeout: 8000 });
+        await page.keyboard.press('Escape');
+        await picker.waitFor({ state: 'detached', timeout: 8000 });
+        await focusStaysOn(page, machine.getByRole('button', { name: 'Add folder…' }), `Escape in the picker returns focus to "Add folder…" (${label})`);
+        assert.equal(await view.getByRole('textbox', { name: 'Name' }).inputValue(), 'fixture-new', `the editor stays open (${label})`);
+
+        await view.getByRole('button', { name: 'Create account' }).click();
+        await view.getByRole('alert').filter({ hasText: 'exists' }).waitFor({ state: 'visible', timeout: 8000 });
+        const expected = { name: 'fixture-new', password, admin: false, nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: false }] } }, sources: {} };
+        assert.deepEqual(adminApi.posts, [expected], `one POST with the form's body (${label})`);
+        await runAxe(page, `account editor, refused ${label}`, failures);
+
+        // created: the new account's editor opens (for its keys), focus on its heading; Escape with no changes goes back to the list
+        adminApi.conflict = false;
+        await view.getByRole('button', { name: 'Create account' }).click();
+        await view.getByRole('heading', { name: 'Edit fixture-new' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(adminApi.posts.length, 2, `the second try sends the second POST (${label})`);
+        await view.getByRole('status').filter({ hasText: 'Account fixture-new created.' }).waitFor({ state: 'visible' });
+        await page.waitForFunction(() => document.activeElement?.textContent === 'Edit fixture-new', null, { timeout: 8000 });
+        await page.keyboard.press('Escape');
+        await view.getByRole('cell', { name: 'fixture-new', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent === 'Virtual accounts', null, { timeout: 8000 });
+
+        if (fixture.requests.some((r) => r.includes(encodeURIComponent(password)) || r.includes(password))) failures.push({ view: label, rule: 'password in a URL' });
+        const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+        if (stored.includes(password)) failures.push({ view: label, rule: 'password kept in storage' });
+
+        if (viewport.width === 1365) {
+          // the overlay fits the window and opening it scrolled nothing (Accounts here, Settings below)
+          const fits = (sel) => page.evaluate((s) => ({ top: document.scrollingElement.scrollTop, bottom: document.querySelector(s)?.getBoundingClientRect().bottom ?? 0, height: innerHeight }), sel);
+          const fit = await fits('.acc-view');
+          if (fit.top !== 0 || fit.bottom > fit.height + 1) failures.push({ view: `Accounts ${label}`, rule: 'overlay scrolls the page or ends below the window', ...fit });
+
+          // an existing account with a machine and a source that are no longer configured; unsaved changes ask before they go
+          await view.getByRole('button', { name: 'Edit fixture-guest' }).click();
+          await view.getByRole('heading', { name: 'Edit fixture-guest' }).waitFor({ state: 'visible', timeout: 8000 });
+          await view.locator('.acc-machine').filter({ hasText: 'fixture-retired' }).getByText('(not configured now)').waitFor({ state: 'visible' });
+          await view.locator('.acc-sources li').filter({ hasText: 'fixture-gone' }).getByText('(not configured now)').waitFor({ state: 'visible' });
+          await runAxe(page, `existing account editor ${label}`, failures);
+          const runAs = view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' });
+          await runAs.fill('fixture-other');
+          await page.keyboard.press('Escape');
+          const discard = page.getByRole('dialog', { name: 'Discard changes?' });
+          await discard.waitFor({ state: 'visible', timeout: 8000 });
+          await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+          await settled(page);
+          await runAxe(page, `discard changes ${label}`, failures);
+          // "Keep editing" gives focus back to what opened the prompt: the field Escape was pressed in, then the Cancel button
+          await discard.getByRole('button', { name: 'Keep editing' }).click();
+          await discard.waitFor({ state: 'detached', timeout: 8000 });
+          await focusStaysOn(page, runAs, `"Keep editing" returns focus to the field Escape was pressed in (${label})`);
+          const cancel = view.getByRole('button', { name: 'Cancel', exact: true });
+          await cancel.click();
+          await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+          await page.keyboard.press('Enter');
+          await discard.waitFor({ state: 'detached', timeout: 8000 });
+          await focusStaysOn(page, cancel, `"Keep editing" returns focus to Cancel (${label})`);
+          await cancel.click();
+          await discard.getByRole('button', { name: 'Discard' }).click();
+          await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+
+          await view.getByRole('button', { name: 'Delete fixture-guest' }).click();
+          const del = page.getByRole('dialog', { name: 'Delete account' });
+          await del.waitFor({ state: 'visible', timeout: 8000 });
+          await settled(page);
+          await runAxe(page, `delete confirm ${label}`, failures);
+          await del.getByRole('button', { name: 'Cancel' }).click();
+          await del.waitFor({ state: 'detached', timeout: 8000 });
+
+          // one's own account: the banner, and Save asks first
+          await view.getByRole('button', { name: 'Edit fixture-admin' }).click();
+          await view.getByText('This is your own account.').waitFor({ state: 'visible', timeout: 8000 });
+          await runAxe(page, `own account editor ${label}`, failures);
+          await view.getByRole('button', { name: 'Save', exact: true }).click();
+          const own = page.getByRole('dialog', { name: 'Change your own account' });
+          await own.waitFor({ state: 'visible', timeout: 8000 });
+          await settled(page);
+          await runAxe(page, `own account confirm ${label}`, failures);
+          await own.getByRole('button', { name: 'Cancel' }).click();
+          await own.waitFor({ state: 'detached', timeout: 8000 });
+
+          // one view at a time: Settings closes Accounts, and it too fits the window without scrolling the page
+          await page.getByRole('button', { name: 'Settings', exact: true }).click();
+          await page.getByRole('dialog', { name: 'Settings' }).waitFor({ state: 'visible', timeout: 8000 });
+          await view.waitFor({ state: 'detached', timeout: 8000 });
+          const sfit = await fits('.settings.over');
+          if (sfit.top !== 0 || sfit.bottom > sfit.height + 1) failures.push({ view: `Settings ${label}`, rule: 'overlay scrolls the page or ends below the window', ...sfit });
+        } else {
+          await page.keyboard.press('Escape');
+          await view.waitFor({ state: 'detached', timeout: 8000 });
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  // closing the view clears the refresh: with the Signed in tab shown, close, move the clock on, and no list is asked for
+  {
+    const adminApi = { posts: [] };
+    const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-admin', kind: 'virt', admin: true, adminApi }, fakeClock: true });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+      await page.getByRole('menuitem', { name: 'Accounts…' }).click();
+      const view = page.getByRole('dialog', { name: 'Accounts' });
+      await view.getByRole('tab', { name: 'Signed in' }).click();
+      await view.getByRole('tabpanel', { name: 'Signed in' }).getByText('This session').waitFor({ state: 'visible', timeout: 8000 });
+      await page.keyboard.press('Escape');
+      await view.waitFor({ state: 'detached', timeout: 8000 });
+      const n = adminApi.sessionCalls;
+      await page.clock.fastForward(95_000);
+      await page.waitForTimeout(300);
+      assert.equal(adminApi.sessionCalls, n, 'closing the view stops the refresh');
+    } finally {
+      await context.close();
+    }
+  }
+  // "Acting as root" shows for a session the hub lists with asRootUntil, whatever the page's clock says (here 20 minutes ahead); ending
+  // one's own session asks, then the page reloads: a marker set on the page is gone afterwards and the hub got the DELETE
+  {
+    const mine = { id: 'dd44dd44', kind: 'sys', name: 'fixture-root', created: Date.now() - 600_000, lastUsed: Date.now() - 1000, address: '203.0.113.7', asRootUntil: Date.now() + 10 * 60_000, current: true };
+    const adminApi = { posts: [], sessions: [mine] };
+    const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-root', kind: 'sys', admin: true, adminApi }, clockOffsetMs: 20 * 60_000 });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-root' }).click();
+      await page.getByRole('menuitem', { name: 'Accounts…' }).click();
+      const view = page.getByRole('dialog', { name: 'Accounts' });
+      await view.getByRole('tab', { name: 'Signed in' }).click();
+      const panel = view.getByRole('tabpanel', { name: 'Signed in' });
+      await panel.getByText('Acting as root', { exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+      await runAxe(page, 'signed in tab with the root pill', failures);
+      await page.evaluate(() => { window.__beforeReload = true; });
+      await panel.getByRole('row').filter({ hasText: 'This session' }).getByRole('button', { name: 'End', exact: true }).click();
+      const own = page.getByRole('dialog', { name: 'End your own session' });
+      await own.waitFor({ state: 'visible', timeout: 8000 });
+      await own.getByRole('button', { name: 'End session' }).click();
+      await page.waitForFunction(() => window.__beforeReload === undefined && document.readyState !== 'loading', null, { timeout: 15000 });
+      assert.deepEqual(adminApi.ended, ['dd44dd44'], 'the own session was ended at the hub');
+      await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
+    } finally {
+      await context.close();
+    }
+  }
+  for (const [who, fixture, has] of [
+    ['a system administrator', { account: 'fixture-root', kind: 'sys', admin: true }, true],
+    ['a virtual account that is not an administrator', { account: 'fixture-user', kind: 'virt', admin: false }, false],
+    ['a system account that is not an administrator', { account: 'fixture-user', kind: 'sys', admin: false }, false],
+  ]) {
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    try {
+      await page.getByRole('button', { name: `Account: ${fixture.account}` }).click();
+      await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
+      assert.equal(await page.getByRole('menuitem', { name: 'Accounts…' }).count(), has ? 1 : 0, `${who}: ${has ? 'the' : 'no'} "Accounts…" item`);
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'the Accounts view passes axe, fits the window and keeps the password out of URLs and storage');
+}
+
+// Act as root (a system administrator only): the "Act as root…" item opens a dialog with the sign-in fields; while the hub
+// reports the switch the header shows "Acting as root until HH:MM" (local end from the hub's time left) with Stop. Banner and open dialog pass axe in light and dark and fit at 390x844
+// and 320x568; the password is cleared after a failed attempt and is never stored. Stop and the end time hide the banner and
+// ask the hub again. Non-admins and virtual accounts never see the item or the banner.
+async function verifyActAsRoot(browser) {
+  const failures = [];
+  const hhmm = (t) => page0.evaluate((u) => { const d = new Date(u); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }, t);
+  let page0;
+  const overflow = async (page, what) => {
+    const o = await page.evaluate(() => {
+      const right = (sel) => Math.max(0, ...[...document.querySelectorAll(sel)].map((e) => e.getBoundingClientRect().right));
+      return { scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, body: document.body.scrollWidth, banner: right('.asroot-banner'), dialog: right('[role=dialog]') };
+    });
+    if (o.scroll > o.client + 1 || o.body > o.client + 1 || o.banner > o.client + 1 || o.dialog > o.client + 1) failures.push({ view: what, rule: 'horizontal overflow', ...o });
+  };
+  const openDialog = async (page) => {
+    await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+    await page.getByRole('menuitem', { name: 'Act as root…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Act as root' });
+    await dialog.waitFor({ state: 'visible' });
+    return dialog;
+  };
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
+      const asRoot = { until: Date.now() + 10 * 60_000 };
+      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture: { account: 'fixture-admin', kind: 'sys', admin: true, asRoot } });
+      page0 = page;
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      try {
+        const banner = page.locator('.asroot-banner');
+        await banner.waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal((await banner.getByRole('status').innerText()).trim(), `Acting as root until ${await hhmm(asRoot.until)}`, `the banner names the end time (${label})`);
+        await page.waitForTimeout(150);
+        await overflow(page, `banner ${label}`);
+        await runAxe(page, `act as root banner ${label}`, failures);
+        const dialog = await openDialog(page);
+        await page.waitForTimeout(150);
+        await overflow(page, `dialog ${label}`);
+        await runAxe(page, `act as root dialog ${label}`, failures);
+        await dialog.getByLabel('Password', { exact: true }).fill('not-the-password');
+        await dialog.getByRole('button', { name: 'Act as root' }).click();
+        await dialog.getByRole('alert').filter({ hasText: 'Sign-in failed' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(await dialog.getByLabel('Password', { exact: true }).inputValue(), '', 'the password is cleared after a failed attempt');
+        await runAxe(page, `act as root dialog error ${label}`, failures);
+        await dialog.getByRole('radio', { name: 'Key file' }).click();
+        await dialog.getByLabel('Key file').waitFor({ state: 'visible' });
+        await overflow(page, `dialog key file ${label}`);
+        await runAxe(page, `act as root dialog key file ${label}`, failures);
+        const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+        if (stored.includes('not-the-password')) failures.push({ view: label, rule: 'password kept in storage' });
+        await page.keyboard.press('Escape');
+        await dialog.waitFor({ state: 'hidden' });
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  // Stop, then turn it on again with the password; the end time hides the banner and the app asks the hub again.
+  {
+    const asRoot = { until: Date.now() + 10 * 60_000 };
+    const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    page0 = page;
+    try {
+      const banner = page.locator('.asroot-banner');
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      const before = fixture.meCalls;
+      await banner.getByRole('button', { name: 'Stop' }).click();
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      assert.equal(asRoot.stopped, 1, 'Stop turns the switch off on the hub');
+      await expectPoll(() => fixture.meCalls > before, 'Stop asks the hub who is signed in again');
+      const dialog = await openDialog(page);
+      await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
+      await dialog.getByRole('button', { name: 'Act as root' }).click();
+      await dialog.waitFor({ state: 'hidden', timeout: 8000 });
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      assert.deepEqual(asRoot.bodies, ['password'], 'the dialog sends the password and nothing else');
+      // the hub ends the switch 4 seconds from now; the banner goes at that time and the app asks the hub again
+      asRoot.until = Date.now() + 4000;
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+      await banner.filter({ hasText: `until ${await hhmm(asRoot.until)}` }).waitFor({ state: 'visible', timeout: 8000 });
+      const ended = fixture.meCalls;
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      await expectPoll(() => fixture.meCalls > ended, 'the end time asks the hub who is signed in again');
+    } finally {
+      await context.close();
+    }
+  }
+  // the end time the hub gave when the switch was turned on hides the banner on its own (one timer, nothing asked first)
+  {
+    const asRoot = { lasts: 3000 };
+    const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    try {
+      const banner = page.locator('.asroot-banner');
+      const dialog = await openDialog(page);
+      await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
+      await dialog.getByRole('button', { name: 'Act as root' }).click();
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      const before = fixture.meCalls;
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      await expectPoll(() => fixture.meCalls > before, 'the end time asks the hub who is signed in again');
+    } finally {
+      await context.close();
+    }
+  }
+  // A browser clock 20 minutes ahead of the hub: the hub's time left decides. The banner shows, names the local end, and
+  // a switch with 3 seconds left by the hub's clock hides about 3 seconds later by the browser's timers.
+  {
+    const skew = 20 * 60_000;
+    const asRoot = { until: Date.now() + 10 * 60_000, lasts: 3000 };
+    const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
+    const { context, page } = await openPage(browser, { state: directState(), fixture, clockOffsetMs: skew });
+    page0 = page;
+    try {
+      const banner = page.locator('.asroot-banner');
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      assert.equal((await banner.getByRole('status').innerText()).trim(), `Acting as root until ${await hhmm(asRoot.until + skew)}`, 'a skewed browser names the end by its own clock');
+      await banner.getByRole('button', { name: 'Stop' }).click();
+      await banner.waitFor({ state: 'hidden', timeout: 8000 });
+      const dialog = await openDialog(page);
+      await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
+      await dialog.getByRole('button', { name: 'Act as root' }).click();
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      const shown = Date.now();
+      await banner.waitFor({ state: 'hidden', timeout: 10000 });
+      const after = Date.now() - shown;
+      assert.ok(after > 1500 && after < 6000, `the banner hides at the local end, about 3 s after it showed (${after} ms)`);
+    } finally {
+      await context.close();
+    }
+  }
+  // A Stop the hub does not confirm keeps the banner and says so in an alert; it passes axe and fits the window.
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
+      const asRoot = { until: Date.now() + 10 * 60_000, failStop: true };
+      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture: { account: 'fixture-admin', kind: 'sys', admin: true, asRoot } });
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      try {
+        const banner = page.locator('.asroot-banner');
+        await banner.waitFor({ state: 'visible', timeout: 8000 });
+        await banner.getByRole('button', { name: 'Stop' }).click();
+        await banner.getByRole('alert').filter({ hasText: 'Could not stop acting as root. Try again.' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.ok(await banner.getByRole('status').isVisible(), `the banner stays after a failed Stop (${label})`);
+        assert.equal(asRoot.stopped, 1);
+        await page.waitForTimeout(150);
+        await overflow(page, `failed stop ${label}`);
+        await runAxe(page, `act as root failed stop ${label}`, failures);
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  // a system account that is not an administrator, and a virtual account, never see the item or the banner
+  for (const fixture of [{ account: 'fixture-admin', kind: 'sys', admin: false, asRoot: { until: Date.now() + 600_000 } }, { account: 'fixture-admin', kind: 'virt', admin: false, asRoot: { until: Date.now() + 600_000 } }]) {
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+      await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
+      assert.equal(await page.getByRole('menuitem', { name: 'Act as root…' }).count(), 0, `no "Act as root…" for a ${fixture.kind} account that is not an administrator`);
+      assert.equal(await page.locator('.asroot-banner').count(), 0, `no banner for a ${fixture.kind} account that is not an administrator`);
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'the act-as-root banner and dialog pass axe and fit the window');
+}
+
+async function expectPoll(fn, message) {
+  for (let i = 0; i < 80; i++) {
+    if (fn()) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.fail(message);
+}
+
 // The session ends while a file is being edited. Signing in again as the same account brings the app back without a
 // page load, and the unsaved text is still in the editor.
 async function verifyResumeAfterSessionEnds(browser) {
@@ -1705,6 +2452,9 @@ const checks = [
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],
   ['axe-core A and AA in every view', verifyAxeViews],
   ['sign-in screen and account menu', verifySignIn],
+  ['act as root from the account menu', verifyActAsRoot],
+  ['Virtual account opens its first granted folder', verifyVirtualAccount],
+  ['Accounts', verifyAccounts],
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
 

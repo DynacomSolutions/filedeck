@@ -1,12 +1,27 @@
-import { useState } from "react";
-import { CircleUser, LogOut } from "lucide-react";
-import { ContextMenu } from "./ContextMenu";
+import { lazy, Suspense, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { CircleUser, LogOut, ShieldAlert, Users } from "lucide-react";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
-import { logout } from "./auth";
+import { logout, type Account } from "./auth";
 
-/** The signed-in account in the header: its name, and a menu with "Sign out". Only shown when sign-in is on. */
-export function AccountMenu({ name }: { name: string }) {
+const AsRootDialog = lazy(() => import("./AsRootDialog").then((m) => ({ default: m.AsRootDialog })));
+
+/**
+ * The signed-in account in the header: its name, and a menu with "Sign out". Only shown when sign-in is on. A system
+ * administrator also gets "Act as root…", which asks for the password or key again; `onAsRoot` gets the local end time. Every
+ * administrator (system or virtual) gets "Accounts…", which opens the Accounts view through `onAccounts`.
+ */
+export function AccountMenu({ account, onAsRoot, onAccounts }: { account: Account; onAsRoot: (endsAt: number) => void; onAccounts?: () => void }) {
+  const { name } = account;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [asking, setAsking] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
+  const items: MenuItem[] = [{ label: name, disabled: true, icon: CircleUser }, "sep"];
+  if (account.admin && onAccounts) items.push({ label: "Accounts…", icon: Users, onSelect: onAccounts });
+  // never for a virtual account or a system account that is not an administrator
+  if (account.kind === "sys" && account.admin) items.push({ label: "Act as root…", icon: ShieldAlert, onSelect: () => setAsking(true) });
+  items.push({ label: "Sign out", icon: LogOut, onSelect: () => void signOut() });
   const signOut = async () => {
     try {
       await logout();
@@ -19,6 +34,7 @@ export function AccountMenu({ name }: { name: string }) {
       <Tip label={`Signed in as ${name}`}>
         <button
           type="button"
+          ref={button}
           className="account-btn"
           aria-label={`Account: ${name}`}
           aria-haspopup="menu"
@@ -36,9 +52,23 @@ export function AccountMenu({ name }: { name: string }) {
         <ContextMenu
           x={menu.x}
           y={menu.y}
-          items={[{ label: name, disabled: true, icon: CircleUser }, "sep", { label: "Sign out", icon: LogOut, onSelect: () => void signOut() }]}
+          items={items}
           onClose={() => setMenu(null)}
         />
+      )}
+      {/* on the page body: the header is a stacking context of its own, which would keep the dialog under the panels */}
+      {asking && createPortal(
+        <Suspense fallback={null}>
+          <AsRootDialog
+            name={name}
+            onStarted={onAsRoot}
+            onClose={() => {
+              setAsking(false);
+              button.current?.focus({ preventScroll: true });
+            }}
+          />
+        </Suspense>,
+        document.body,
       )}
     </>
   );

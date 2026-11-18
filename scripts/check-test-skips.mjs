@@ -21,8 +21,21 @@ const allowed = [
   /^smb live: skipped \(FILEDECK_TEST_SMB not set\)$/,
   // server/test/fanwatch.test.ts: the fanotify helper needs two capabilities; the root pass sets FILEDECK_REQUIRE_FANWATCH=1 and fails instead of skipping.
   /^helper cannot run here: .+$/,
-  // server/test/{sandbox,git-sandbox,archive-sandbox}.test.ts: the tests that need root skip in the unprivileged pass; the root pass runs them.
+  // server/test/{sandbox,git-sandbox,archive-sandbox,agent-keys}.test.ts: the tests that need root skip in the unprivileged pass; the root pass runs them.
   /^(?:git )?sandbox live: skipped \(not running as root\)$/,
+  // the worker tests (sign-in part 2) that need root to start a worker as another user skip in the unprivileged pass; the root pass runs them.
+  /^worker live: skipped \(not running as root\)$/,
+  // server/test/agent-workers.test.ts: two virtual accounts with one runAs need Landlock (their workers are confined); a kernel without it skips.
+  /^sandbox live: skipped \(no Landlock on this kernel\)$/,
+  // server/test/worker-confine.test.ts: a helper program a worker starts (git, bsdtar, ffmpeg, 7zz, qpdf) that is not installed on a development machine.
+  /^worker helpers: skipped \((?:git|bsdtar|ffmpeg|7zz|qpdf) not installed here\)$/,
+  // server/test/trash-owners.test.ts: the bind-mount restore test needs CAP_SYS_ADMIN, which root in the image build lacks; the CI root pass sets FILEDECK_REQUIRE_MOUNT=1.
+  /^trash live: skipped \(bind mounts not permitted here\)$/,
+  // server/test/{host-helpers,host-pam}.test.ts: the host helper tests (filedeck-id, filedeck-pam) need root (the chroot, and the test PAM
+  // service files in /etc/pam.d) and a glibc machine (dynamic glibc helpers); the root pass sets FILEDECK_REQUIRE_HOST_HELPERS=1, which
+  // turns the glibc skip into a failure.
+  /^host helpers live: skipped \(not running as root\)$/,
+  /^host helpers live: skipped \(no glibc here\)$/,
   // server/test/sandbox.test.ts: the x32 system call tests exist only on x86-64, and only where the kernel has x32 calls enabled.
   /^sandbox live: skipped \(x32 calls exist on x86-64 only\)$/,
   /^sandbox live: skipped \(this kernel has x32 calls disabled(?:: .*)?\)$/,

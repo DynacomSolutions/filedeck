@@ -216,6 +216,8 @@ export class OpQueue {
   private slotWaiters: { job: Job; wake: () => void }[] = [];
   private readonly me = randomUUID();
   private stopping = false;
+  /** cancel flags the shared store could not take (busy): each tick writes them again until it can, or the row has ended */
+  private pendingCancels = new Set<string>();
   constructor(private d: OpQueueDeps) {
     // one unref'd timer: heartbeat, progress snapshot, foreign requests, adoption of jobs whose owner went silent
     if (d.shared) setInterval(() => this.tick(), d.shared.tickMs ?? 1000).unref();
@@ -341,6 +343,39 @@ export class OpQueue {
       j.gate?.open();
     }
     return this.view(j, false);
+  }
+
+  /**
+   * Cancels every live job of the account `kind:name` (queued, running, paused or waiting for an answer): the account changed, so its
+   * jobs must not carry on as it was. A live row another hub holds in the shared store gets the cancel flag (its holder cancels it at its
+   * next tick; a hub that adopts it instead finds the flag first). Returns how many jobs were cancelled or flagged.
+   */
+  cancelOwner(kind: "sys" | "virt", name: string): number {
+    const mine = (u: Identity | undefined) => !!u && u.kind === kind && u.name === name;
+    let count = 0;
+    for (const j of [...this.jobs.values()]) {
+      if (!live(j.state) || j.lost || !mine(j.user)) continue;
+      this.cancel(j.id);
+      count++;
+    }
+    const sh = this.d.shared;
+    for (const r of sh?.store.list(SCOPE) ?? []) {
+      if (this.jobs.has(r.id) || !live(r.state) || !mine(ownerFrom(r.user))) continue;
+      count++;
+      if (sh!.store.flagCancel(r.id, SCOPE) !== "busy") continue;
+      if (this.pendingCancels.size === 0) console.error(`jobs: the job store was busy; the cancel of job ${r.id} is written at a later tick`);
+      this.pendingCancels.add(r.id);
+    }
+    return count;
+  }
+
+  /** Writes the cancel flags the store was too busy to take; one this hub holds by now is cancelled here, one that has ended is dropped. */
+  private retryCancels(sh: NonNullable<OpQueueDeps["shared"]>) {
+    for (const id of [...this.pendingCancels]) {
+      if (this.jobs.has(id)) this.cancel(id);
+      else if (sh.store.flagCancel(id, SCOPE) === "busy") continue;
+      this.pendingCancels.delete(id);
+    }
   }
 
   pause(id: string): OpView | undefined {
@@ -471,6 +506,7 @@ export class OpQueue {
     const sh = this.d.shared;
     if (!sh || this.stopping) return;
     try {
+      if (this.pendingCancels.size > 0) this.retryCancels(sh);
       const now = Date.now();
       const all = [...this.jobs.values()];
       for (const j of all) if (j.dirty) this.save(j);
@@ -535,6 +571,9 @@ export class OpQueue {
       if (p.paused) this.hold(j);
       this.jobs.set(j.id, j);
       this.save(j);
+      // cancelled while nobody held it (its account changed, or someone pressed cancel): it ends here and never runs again. The flag is
+      // read again now that the row is ours: `r` was listed before the claim, and a flag set in between would otherwise wait a tick.
+      if ((sh.store.get(r.id, SCOPE) ?? r).cancel === 1) this.cancel(j.id);
       this.pump();
     } catch {
       const now = Date.now();
@@ -1183,6 +1222,8 @@ export class OpQueue {
         }
       } catch (e) {
         j.progress.bytes -= sent; // the file will be retried or reported; do not count it twice
+        // a destination that failed without reading the body (unreachable, no access): the source's read stream is closed here
+        await reader?.cancel().catch(() => undefined);
         throw e;
       }
     };

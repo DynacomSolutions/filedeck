@@ -5,14 +5,15 @@ import type { Context, Hono } from "hono";
 import * as ops from "./fsops.ts";
 import { direntsOf } from "./dirnames.ts";
 import { parseMounts, networkKind, readMountTable } from "./mounts.ts";
-import { PathError, assertNotReserved, isReservedName, openChecked, resolveRead, resolveWrite } from "./paths.ts";
+import { PathError, assertNotReserved, cleanVirtual, isReservedName, openChecked, resolveRead, resolveWrite } from "./paths.ts";
 import { MAX_DEPTH, assertMayChange, dirAt, openDir, pinParentW, tooDeep, walkGuard, withReadOnly } from "./pinwalk.ts";
 import { hitsReadOnly, jobMayWrite, reachesReadOnly } from "./readonly.ts";
-import type { JobCtl, JobOrigin, Jobs } from "./jobs.ts";
+import type { JobCtl, JobOrigin, JobView, Jobs } from "./jobs.ts";
 import type { Config } from "./config.ts";
 import { stream } from "hono/streaming";
-import { SizeStore } from "./size-store.ts";
+import { SizeStore, type DuEntry } from "./size-store.ts";
 import { spillPath } from "./index-cache.ts";
+import { requestJobMeta } from "./job-meta.ts";
 
 const bad = (m: string) => new ops.FsError(400, m);
 
@@ -368,18 +369,65 @@ async function applyPermsIn(cfg: Config, plan: PermsPlan, ctl?: JobCtl): Promise
 
 const flag = (v: string | undefined) => v === "1";
 
-/** The size store lives next to the compare index; its `du` is a bounded, cancellable walk that reuses unchanged folders. */
-export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeStore {
+async function json<T>(c: Context): Promise<T> {
+  try {
+    return (await c.req.json()) as T;
+  } catch {
+    throw bad("invalid JSON body");
+  }
+}
+
+/**
+ * Sign-in on: how the size routes follow the person behind a request (agent-jobs.ts). The store and its scans are the machine's; what a
+ * person gets of them is filtered here.
+ */
+export interface SizeAccess {
+  /**
+   * which of these folders (virtual paths) the person can open, resolved as the person resolves them; a false one is left out of an answer
+   * (with everything below it), and refused when asked for. It is asked first, before this process looks at the path (no `lstat` as root
+   * of a name the person cannot see: whether it is a link must not change the answer).
+   */
+  canList?: (c: Context, paths: string[]) => Promise<boolean[]>;
+  /**
+   * throws to refuse a path as the request names it (a virtual account outside its grants). `exact` false: by the path as written only
+   * (the person cannot open it, so its links are not theirs to see); true: also with its links resolved.
+   */
+  inside?: (c: Context, path: string, exact: boolean) => void | Promise<void>;
+  /** the owner a new size or du job gets */
+  owner?: (c: Context) => string | undefined;
+  /** the request is answered with a job to follow (one it joined may be another person's: they may follow it too) */
+  follows?: (c: Context, id: string) => void;
+  /** the job as the request's answer shows it (also calls `follows`) */
+  view?: (c: Context, v: JobView) => JobView;
+  /** where the real text of a failed scan goes (the job says only `size scan failed`) */
+  log?: (s: string) => void;
+}
+
+/**
+ * The folders that decide whether a du entry below `virtual` is shown: each one from below `virtual` down to the entry itself (a folder or
+ * mount point) or its folder (a file, link or other). `[]` for `virtual` itself and a file directly in it; null for an entry that is not
+ * below `virtual` (left out).
+ */
+export function entryChain(virtual: string, e: Pick<DuEntry, "path" | "type">): string[] | null {
+  const f = e.type === "dir" || e.type === "mount" ? e.path : path.posix.dirname(e.path);
+  if (f === virtual) return [];
+  if (!f.startsWith(virtual === "/" ? "/" : virtual + "/")) return null;
+  const out: string[] = [];
+  let at = virtual === "/" ? "" : virtual;
+  for (const part of f.slice(at.length + 1).split("/")) out.push((at = `${at}/${part}`));
+  return out;
+}
+
+/** entries of a du answer checked with one `canList` call */
+const FILTER_BATCH = 256;
+
+/**
+ * Folder sizes (`POST /api/jobs/size`, `GET /api/du`) and their jobs. The size store lives next to the compare index; its `du` is a bounded, cancellable walk
+ * that reuses unchanged folders. It stays in the agent's root process (one store and one change watcher per machine). With `o` (sign-in on), see `SizeAccess`.
+ */
+export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAccess = {}): SizeStore {
   jobs.abandonMs = cfg.duAbandonMs;
   const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : spillPath("sizes"), { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
-  const json = async <T,>(c: Context): Promise<T> => {
-    try {
-      return (await c.req.json()) as T;
-    } catch {
-      throw bad("invalid JSON body");
-    }
-  };
-  app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
 
   // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
   // `since`: when the job began. Rows written since are the job's own: when the job runs again after a restart (adopted), the walk keeps them instead of starting over.
@@ -387,7 +435,15 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     let release: (() => void) | undefined;
     return {
       run: async (ctl: JobCtl) => {
-        const x = await sizes.scanRead(virtual, ctl, fresh, release, after, since);
+        let x: Awaited<ReturnType<typeof sizes.scanRead<T>>>;
+        try {
+          x = await sizes.scanRead(virtual, ctl, fresh, release, after, since);
+        } catch (e) {
+          // (sign-in on: the text may name what the walk met, which is the machine's, not the person's)
+          if (!o.canList || ctl.signal.aborted) throw e;
+          (o.log ?? ((t) => console.error(t)))(JSON.stringify({ sizeScan: virtual, failed: e instanceof Error ? e.message : String(e) }));
+          throw new ops.FsError(500, "size scan failed");
+        }
         done?.(x);
         // (`untrusted` also in a size job's result: a du that joins it answers from it)
         return kind === "size" ? { ...x.res, untrusted: x.untrusted } : { res: x.res, read: x.read, untrusted: x.untrusted };
@@ -412,12 +468,12 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       },
     };
   };
-  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; untrusted: boolean; extra?: T }) => void, origin: JobOrigin = "ui") => {
+  const startScan = <T,>(kind: "size" | "du", virtual: string, fresh: boolean, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; untrusted: boolean; extra?: T }) => void, origin: JobOrigin = "ui", owner?: string) => {
     // a scan remembers when it began: a restart keeps the folders it already read (a rescan keeps only those)
     const since = Date.now();
     const freshSince = fresh ? since : undefined;
     const p = scanParts(kind, virtual, freshSince ?? false, since, after, done);
-    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh, freshSince, since }, origin });
+    return jobs.create(kind, `Size of ${path.posix.basename(virtual) || "/"}`, p.run, p.onDrop, p.gate, { params: { path: virtual, fresh, freshSince, since }, origin, owner });
   };
   // An adopted scan runs again under its id, confined again and without `after` (a du client repeats its request once the job is done).
   for (const kind of ["size", "du"] as const) {
@@ -441,12 +497,34 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
   app.post("/api/jobs/size", async (c) => {
     const b = await json<{ path?: string; fresh?: boolean }>(c);
     if (typeof b.path !== "string") throw bad("path must be a string");
+    let self = true;
+    const asked = "/" + cleanVirtual(b.path).join("/");
+    if (o.canList) {
+      // a folder the person can open, or a file in one (whether a name there is a folder they cannot open is theirs to see)
+      const [own, up] = await o.canList(c, asked === "/" ? ["/"] : [asked, path.posix.dirname(asked)]);
+      self = own === true;
+      if (!self && !up) {
+        await o.inside?.(c, b.path, false);
+        throw new ops.FsError(403, "permission denied");
+      }
+    }
+    await o.inside?.(c, b.path, true);
     const r = resolveRead(cfg.root, b.path);
+    if (o.canList) {
+      // What this process resolved (as root, following a link at the end) is checked as the person too: their own link in a folder they can
+      // open may lead to a file in one they cannot. A file's size needs the folder it really is in; a folder reached through a link, itself.
+      if (!self && (await fs.stat(r.real)).isDirectory()) throw new ops.FsError(403, "permission denied");
+      const check = !self ? [path.posix.dirname(r.virtual)] : r.virtual !== asked ? [r.virtual] : [];
+      if (check.length && !(await o.canList(c, check))[0]) throw new ops.FsError(403, "permission denied");
+    }
     await fs.stat(r.real);
     if (stopping()) throw leaving();
     // one live size job per path (while another process holds the store's writer lease the job waits for it: see the gate): a second request attaches to it
     const same = liveScan(r.virtual, b.fresh === true);
-    return c.json(same ?? startScan("size", r.virtual, b.fresh === true), 202);
+    const v = same ?? startScan("size", r.virtual, b.fresh === true, undefined, undefined, "ui", o.owner?.(c));
+    if (o.view) return c.json(o.view(c, v), 202);
+    o.follows?.(c, v.id);
+    return c.json(v, 202);
   });
 
   // GET /api/du?path=&depth=&all=&fresh=&cachedOnly=: unchanged folders are validated (one lstat each), changed ones re-read, then the
@@ -461,32 +539,62 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
    * The answer, streamed from the store as it is read (SizeStore.treeEach): an agent never holds a whole answer, whatever its size. The JSON is
    * {path, cached, watched, entries: [...], truncated, partial?, stale?, error?}; what is known only at the end comes after the entries. `recheck` runs after the
    * last entry (stale when it says no); `done` always runs once (a lock held for the read is released there). An error after the first byte cannot change the status: it ends the answer with `error`.
+   * With `canList` (sign-in on), the entries go out in batches of `FILTER_BATCH`, without each entry below a folder the person cannot open (any folder
+   * between `virtual` and the entry, the entry itself when it is a folder): a folder they may pass through but not list hides what is below it.
+   * Each folder is asked once for the whole answer.
    */
-  const answerTree = (c: Context, virtual: string, depth: number, all: boolean, head: { cached: boolean; watched: boolean; stale?: boolean }, o: { recheck?: () => Promise<boolean>; done?: () => void } = {}) => {
+  const answerTree = (c: Context, virtual: string, depth: number, all: boolean, head: { cached: boolean; watched: boolean; stale?: boolean }, t: { recheck?: () => Promise<boolean>; done?: () => void } = {}) => {
     c.header("Content-Type", "application/json; charset=UTF-8");
     let ended = false;
     const end = () => {
-      if (!ended) (ended = true), o.done?.();
+      if (!ended) (ended = true), t.done?.();
     };
+    const canList = o.canList;
     return stream(c, async (s) => {
       s.onAbort(end);
       let buf = `{"path":${JSON.stringify(virtual)},"cached":${head.cached},"watched":${head.watched},"entries":[`;
       let first = true;
+      let found = false;
       let tail: Record<string, unknown> = {};
+      const put = async (e: DuEntry) => {
+        buf += (first ? "" : ",") + JSON.stringify(e);
+        first = false;
+        if (buf.length >= 64 * 1024) {
+          const b = buf;
+          buf = "";
+          await s.write(b);
+          if (s.aborted) throw new ops.FsError(400, "canceled");
+        }
+      };
+      let batch: DuEntry[] = [];
+      /** per folder, whether the person can open it (asked once each for the whole answer; `virtual` was checked before: see the du route) */
+      const listable = new Map<string, boolean>([[virtual, true]]);
+      const flush = async () => {
+        if (!canList || !batch.length) return;
+        // (an entry that is not below the asked folder has no chain: it is left out)
+        const out = batch.flatMap((e) => {
+          const chain = entryChain(virtual, e);
+          return chain ? [{ e, chain }] : [];
+        });
+        batch = [];
+        const asked = [...new Set(out.flatMap((x) => x.chain))].filter((f) => !listable.has(f));
+        if (asked.length) {
+          const ok = await canList(c, asked);
+          asked.forEach((f, i) => listable.set(f, ok[i] === true));
+        }
+        for (const x of out) if (x.chain.every((f) => listable.get(f) === true)) await put(x.e);
+      };
       try {
         const r = await sizes.treeEach(virtual, depth, all, async (e) => {
-          buf += (first ? "" : ",") + JSON.stringify(e);
-          first = false;
-          if (buf.length >= 64 * 1024) {
-            const b = buf;
-            buf = "";
-            await s.write(b);
-            if (s.aborted) throw new ops.FsError(400, "canceled");
-          }
+          found = true;
+          if (!canList) return put(e);
+          batch.push(e);
+          if (batch.length >= FILTER_BATCH) await flush();
         });
+        await flush();
         // the folder's rows went between the check before the answer and its read (a change removed them): never an empty answer that looks complete
-        if (first) throw new ops.FsError(404, "the sizes of this folder were removed while the answer was read; ask again");
-        const stale = head.stale || (o.recheck ? !(await o.recheck()) : false);
+        if (!found) throw new ops.FsError(404, "the sizes of this folder were removed while the answer was read; ask again");
+        const stale = head.stale || (t.recheck ? !(await t.recheck()) : false);
         tail = { truncated: r.truncated, ...(r.partial ? { partial: true } : {}), ...(stale ? { stale: true } : {}) };
       } catch (e) {
         tail = { truncated: true, error: e instanceof Error ? e.message : String(e) };
@@ -504,7 +612,16 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     const depth = q("depth") === undefined ? 1 : Number(q("depth"));
     if (!Number.isInteger(depth) || depth < 0 || depth > 64) throw bad("depth must be an integer between 0 and 64");
     for (const k of ["all", "fresh", "cachedOnly"]) if (q(k) !== undefined && q(k) !== "0" && q(k) !== "1") throw bad(`${k} must be 0 or 1`);
+    // (sign-in on: before this process looks at the path, and before anything about the folder is told)
+    if (o.canList && !(await o.canList(c, ["/" + cleanVirtual(q("path") ?? "/").join("/")]))[0]) {
+      await o.inside?.(c, q("path") ?? "/", false);
+      throw new ops.FsError(403, "permission denied");
+    }
+    await o.inside?.(c, q("path") ?? "/", true);
     const r = resolveRead(cfg.root, q("path") ?? "/");
+    // (the answer is for the folder this process resolved: when that is not the path the worker was asked about, it is asked about it too, so
+    // the answer's own folder, which `answerTree` takes as checked, always is)
+    if (o.canList && r.virtual !== "/" + cleanVirtual(q("path") ?? "/").join("/") && !(await o.canList(c, [r.virtual]))[0]) throw new ops.FsError(403, "permission denied");
     if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
@@ -542,7 +659,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       run = mine;
       // joined: the reply tree is read once that job is done. While stopping, only a new job is refused: the answer of a finished or running one is still good
       // (refusing it would send the repeat to the next process, which walks the whole tree again).
-      v = liveScan(r.virtual, fresh) ?? (stopping() ? (() => { throw leaving(); })() : startScan("du", r.virtual, fresh, undefined, (x) => (mine.out = { read: x.read, untrusted: x.untrusted }), "cli"));
+      v = liveScan(r.virtual, fresh) ?? (stopping() ? (() => { throw leaving(); })() : startScan("du", r.virtual, fresh, undefined, (x) => (mine.out = { read: x.read, untrusted: x.untrusted }), "cli", o.owner?.(c)));
       mine.id = v.id;
       duRuns.set(key, mine);
     }
@@ -562,6 +679,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
       if (v!.state === "queued" || v!.state === "running") {
         // keep the entry for the repeat request; the job goes on whether or not this client is still there
         run.detached = true;
+        o.follows?.(c, id);
         return c.json({ jobId: id, state: v!.state }, 202);
       }
       // (a job the shutdown interrupted is not cancelled: the client retries against the next process)
@@ -588,6 +706,7 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
         if (!ac.signal.aborted) throw e;
         run.detached = true; // the repeat request is answered from this finished scan
         keep = true;
+        o.follows?.(c, id);
         return c.json({ jobId: id, state: "done" }, 202);
       } finally {
         clearTimeout(timer);
@@ -611,6 +730,32 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     }
   });
 
+  return sizes;
+}
+
+/**
+ * The change a stored perms job asks for. The file owner to set is `fileOwner`; `owner` is the account the job belongs to
+ * (`<kind>:<name>`, added by the job queue). A job stored before the rename has the file owner in `owner`: it is taken from there only
+ * when it cannot be an account (a user name or id never holds a `:`).
+ */
+/** A stored perms job whose file owner was overwritten by its account (see `permsParams`) while its title says it changes the owner. */
+export function lostFileOwner(p: unknown, title: string): boolean {
+  const { fileOwner, owner } = (p && typeof p === "object" ? p : {}) as { fileOwner?: unknown; owner?: unknown };
+  if (fileOwner !== undefined || typeof owner !== "string" || !/^(sys|virt):/.test(owner)) return false;
+  const what = /^Set (.*) on /.exec(title)?.[1] ?? "";
+  return what.split(" and ").includes("owner");
+}
+
+export function permsParams(p: unknown): PermsRequest {
+  const { fileOwner, owner, ...rest } = (p && typeof p === "object" ? p : {}) as PermsRequest & { fileOwner?: string | number };
+  const file = fileOwner ?? (typeof owner === "string" && /^(sys|virt):/.test(owner) ? undefined : owner);
+  return { ...rest, ...(file !== undefined ? { owner: file } : {}) } as PermsRequest;
+}
+
+/** Properties (`GET /api/fs/props`) and permission changes (`POST /api/fs/perms`); a recursive change runs as a job of `jobs`. */
+export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): void {
+  app.get("/api/fs/props", async (c) => c.json(await props(cfg, c.req.query("path") ?? "/")));
+
   // Immediate for one entry; recursive changes run as a job (202 + job view).
   app.post("/api/fs/perms", async (c) => {
     const req = await json<PermsRequest>(c);
@@ -618,7 +763,8 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     if (plan.recursive) {
       const what = [plan.mode !== undefined ? `mode ${plan.mode.toString(8)}` : "", plan.uid !== undefined || plan.gid !== undefined ? "owner" : ""].filter(Boolean).join(" and ");
       const { path: p, mode, owner, group, recursive, scope } = req; // allowlist, never the raw body
-      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, owner, group, recursive, scope } });
+      // (the file owner to set is `fileOwner`: `owner` in a job's params is the account the job belongs to)
+      const job = jobs.create("perms", `Set ${what} on ${path.posix.basename(plan.virtual)} recursively`, (ctl) => runPerms(plan, ctl), undefined, undefined, { params: { path: p, mode, fileOwner: owner, group, recursive, scope }, ...requestJobMeta(c) });
       return c.json(job, 202);
     }
     return c.json(await applyPerms(cfg, plan));
@@ -629,16 +775,18 @@ export function registerPropsRoutes(app: Hono, cfg: Config, jobs: Jobs): SizeSto
     return applyPerms(cfg, plan, ctl);
   };
   // Planned again, so confinement and read-only checks apply to the moment of the restart; a refusal fails the job with its message.
-  jobs.register("perms", async (p) => {
+  jobs.register("perms", async (p, row) => {
+    // stored before `fileOwner`, under act as root: the job's account took the file owner's key, so an owner change (its title says
+    // so) has lost its target. A throw here fails the job as interrupted: it is started again by hand, never run without its owner.
+    if (lostFileOwner(p, row.title)) throw new Error("the file owner to set was lost when the job was stored");
     try {
-      const req = p as PermsRequest;
+      const req = permsParams(p);
       // a recursive change reaches everything below: an ancestor of a read-only prefix is refused too (also for a job stored before the prefix was configured)
       if (hitsReadOnly(cfg.root, cfg.readOnly, req.path) || (req.recursive === true && reachesReadOnly(cfg.root, cfg.readOnly, req.path, true))) throw new ops.FsError(403, "read-only volume");
-      const plan = await planPerms(cfg, p as PermsRequest);
+      const plan = await planPerms(cfg, req);
       return { run: (ctl) => runPerms(plan, ctl) };
     } catch (e) {
       return { run: async () => Promise.reject(e) };
     }
   });
-  return sizes;
 }

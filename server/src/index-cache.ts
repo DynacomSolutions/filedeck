@@ -124,13 +124,34 @@ export function dropSpill(f: string) {
 export function openDb(file: string, cacheKiB = 8192, scratch = false): DatabaseSync | null {
   const s = loadSqlite();
   if (!s) return null;
-  if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ":memory:") {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    privateDbFile(file);
+  }
   const db = new s.DatabaseSync(file);
   // A scratch file (compare spill) is thrown away on restart: no journal, no syncs. A cache keeps WAL (a process crash cannot
   // corrupt it) without syncs (an OS crash might; IndexCache then starts a fresh file).
   db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`);
   db.exec(`PRAGMA temp_store=FILE; PRAGMA cache_size=-${cacheKiB};`);
+  if (file !== ":memory:") for (const f of [`${file}-wal`, `${file}-shm`, `${file}-journal`]) privateDbFile(f, false);
   return db;
+}
+
+/**
+ * Makes a database file 0600 (it may lie in the served tree, and what it holds is the listings of folders some readers may not enter). Made
+ * here when missing (with `create`), so SQLite, which gives its `-wal`, `-shm` and journal files the mode of the database file, makes those
+ * 0600 too; files left by an older version are changed through a descriptor opened without following a link. Best effort.
+ */
+function privateDbFile(f: string, create = true): void {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(f, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | (create ? fs.constants.O_CREAT : 0), 0o600);
+    if ((fs.fstatSync(fd).mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600);
+  } catch {
+    /* missing (wal, shm), or not ours to change */
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 export interface ChangeEvent {

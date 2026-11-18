@@ -1,4 +1,4 @@
-import { createPublicKey, randomBytes, timingSafeEqual, verify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, timingSafeEqual, verify, type KeyObject } from "node:crypto";
 
 /**
  * SSH public-key sign-in check. A stored key is an `authorized_keys`-style line with no options. Only ssh-ed25519 and
@@ -48,6 +48,13 @@ export function parsePublicKey(line: string): PublicKey | null {
   }
 }
 
+/** The key's fingerprint as OpenSSH prints it: `SHA256:` and the unpadded base64 of the SHA-256 of the key blob. Null when the line is no key `parsePublicKey` accepts. */
+export function keyFingerprint(line: string): string | null {
+  const pub = parsePublicKey(line);
+  if (!pub) return null;
+  return "SHA256:" + createHash("sha256").update(pub.blob).digest("base64").replace(/=+$/, "");
+}
+
 const field = (b: Buffer | string): Buffer => {
   const d = Buffer.isBuffer(b) ? b : Buffer.from(b, "utf8");
   const len = Buffer.alloc(4);
@@ -58,6 +65,29 @@ const field = (b: Buffer | string): Buffer => {
 /** The bytes the client signs: four SSH-wire strings. */
 export function loginMessage(hubId: string, name: string, challenge: Buffer): Buffer {
   return Buffer.concat([field("filedeck-login-v1"), field(hubId), field(name), field(challenge)]);
+}
+
+const LOGIN_TAG = "filedeck-login-v1";
+const MAX_HUB_ID = 64;
+const CHALLENGE_BYTES = 32;
+
+/**
+ * Reads a `loginMessage`: exactly four SSH-wire strings and nothing after them, the tag `filedeck-login-v1`, a hub id (1 to 64 bytes),
+ * a name and a 32-byte challenge. Null for anything else. The name is given as UTF-8 text only when its bytes are valid UTF-8.
+ */
+export function parseLoginMessage(msg: Buffer): { hubId: string; name: string; challenge: Buffer } | null {
+  const f = readFields(msg);
+  if (!f || f.length !== 4) return null;
+  const [tag, hub, name, challenge] = f as [Buffer, Buffer, Buffer, Buffer];
+  if (!tag.equals(Buffer.from(LOGIN_TAG, "latin1"))) return null;
+  if (hub.length === 0 || hub.length > MAX_HUB_ID || challenge.length !== CHALLENGE_BYTES) return null;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(name);
+  } catch {
+    return null;
+  }
+  return { hubId: hub.toString("utf8"), name: text, challenge: Buffer.from(challenge) };
 }
 
 /** True only for a valid signature. Never throws. ECDSA signatures are raw r||s (64 bytes), as WebCrypto makes them. */

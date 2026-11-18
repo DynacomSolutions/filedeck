@@ -30,8 +30,14 @@ export interface JobView {
   finishedAt?: number;
   /** CLI du jobs: when a client last waited on or polled the job (see Jobs.abandonMs) */
   seenAt?: number;
-  /** queued jobs only: what is ahead of this one */
-  queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
+  /**
+   * A job started under act as root (agent, sign-in on): the switch's end as the hub gave it (by the hub's clock). It names the switch:
+   * when that switch is turned off early, the hub cancels the jobs that carry this very value, and no other. The job is also canceled
+   * at the switch's end by this process's own clock (`Jobs.create`'s `until`).
+   */
+  asRootUntil?: number;
+  /** queued jobs only: what is ahead of this one (with sign-in on, another account's job is only its state: agent-jobs.ts) */
+  queue?: { position: number; ahead: { id?: string; title?: string; state: JobState }[] };
 }
 
 /**
@@ -51,7 +57,7 @@ export interface JobCtl {
 }
 
 /** What an adopted job needs to run again; built from the stored allowlisted params. */
-export type Rebuild = (params: unknown) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void> }>;
+export type Rebuild = (params: unknown, row: { title: string }) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void> }>;
 
 /** Shared store: `scope` names this process's jobs, `rebuild` restarts adopted kinds (others fail), the lease is how long a silent owner keeps its jobs. */
 export interface JobsStore {
@@ -63,6 +69,8 @@ export interface JobsStore {
 }
 
 interface Job extends JobView {
+  /** with sign-in on, the account that started it (`<kind>:<name>`); kept in the stored params too, so an adopted job keeps it */
+  owner?: string;
   /** JSON of the allowlisted params, null = not rebuildable */
   params?: string | null;
   /** the last write to the store was skipped */
@@ -76,6 +84,26 @@ interface Job extends JobView {
 }
 
 const live = (s: string) => s === "queued" || s === "running";
+/** The owner kept in a job's stored params (see `Jobs.create`). */
+const ownerIn = (params: unknown): string | undefined => {
+  const o = params && typeof params === "object" ? (params as { owner?: unknown }).owner : undefined;
+  // (only an account, `<kind>:<name>`: a perms job stored before its file owner became `fileOwner` kept a user name here)
+  return typeof o === "string" && /^(sys|virt):/.test(o) ? o : undefined;
+};
+const rowOwner = (r: JobRow): string | undefined => {
+  try {
+    return r.params ? ownerIn(JSON.parse(r.params)) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+/** The act-as-root ends kept in a job's stored params (see `Jobs.create`). */
+const numberIn = (params: unknown, key: "asRootEndsAt" | "asRootUntil"): number | undefined => {
+  const u = params && typeof params === "object" ? (params as Record<string, unknown>)[key] : undefined;
+  return typeof u === "number" && Number.isFinite(u) ? u : undefined;
+};
+/** setTimeout's longest delay */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 /** Stored views from before origins existed: a du job came from the CLI, anything else from the UI. */
 const rowView = (r: JobRow): JobView => {
   const v = JSON.parse(r.view) as JobView;
@@ -166,11 +194,23 @@ export class Jobs {
   /**
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
+   * `owner` (sign-in on: `<kind>:<name>` of the account) is kept in the stored params as `owner`, so the shared store and a process that
+   * adopts the job keep it; an adopted job takes it from there. A job without params keeps it in this process only.
+   * `until` (a job started under act as root): the job is canceled at that time (this process's clock), queued or running; `rootSwitch`
+   * is the switch's end as the hub gave it, which names the switch (the view's `asRootUntil`; `until` when not given). Both are kept in
+   * the stored params (`asRootEndsAt`, `asRootUntil`) in the same way as `owner`, so an adopted job is canceled at the same time.
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin }): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string; until?: number; rootSwitch?: number }): JobView {
+    const owner = meta?.owner ?? ownerIn(meta?.params);
+    const until = meta?.until ?? numberIn(meta?.params, "asRootEndsAt") ?? numberIn(meta?.params, "asRootUntil");
+    const rootSwitch = until === undefined ? undefined : (meta?.rootSwitch ?? numberIn(meta?.params, "asRootUntil") ?? until);
+    const extra = { ...(owner !== undefined ? { owner } : {}), ...(until !== undefined ? { asRootEndsAt: until, asRootUntil: rootSwitch } : {}) };
+    const params = meta?.params !== undefined && Object.keys(extra).length > 0 && typeof meta.params === "object" && meta.params !== null ? { ...meta.params, ...extra } : meta?.params;
     const job: Job = {
       id: meta?.id ?? randomUUID(),
-      params: meta?.params === undefined ? null : JSON.stringify(meta.params),
+      ...(owner !== undefined ? { owner } : {}),
+      ...(rootSwitch !== undefined ? { asRootUntil: rootSwitch } : {}),
+      params: params === undefined ? null : JSON.stringify(params),
       kind,
       title,
       state: "queued",
@@ -182,6 +222,16 @@ export class Jobs {
       abort: new AbortController(),
     };
     this.jobs.set(job.id, job);
+    // an end that has already passed (a job adopted after it): canceled as it is made, and never run
+    if (until !== undefined && until <= Date.now()) {
+      job.state = "canceled";
+      job.finishedAt = Date.now();
+      job.abort.abort();
+      this.save(job);
+      onDrop?.();
+      this.prune();
+      return this.view(job);
+    }
     if (!this.reaper && this.abandonable(kind, job.origin)) {
       this.reaper = setInterval(() => this.reap(), Math.max(50, Math.min(5000, this.abandonMs / 4)));
       this.reaper.unref();
@@ -203,13 +253,24 @@ export class Jobs {
         )
         .finally(() => this.pump());
     }
+    if (until !== undefined) this.endAt(job, until);
     this.prune();
     this.pump();
     return this.view(job);
   }
 
+  /** Cancels `job` at `until` (act as root has ended) if it is still queued or running in this process then. */
+  private endAt(job: Job, until: number): void {
+    const fire = () => {
+      const left = until - Date.now();
+      if (left > 0) return void setTimeout(fire, Math.min(left, MAX_TIMER_MS)).unref();
+      if (this.jobs.get(job.id) === job && live(job.state)) this.cancel(job.id);
+    };
+    setTimeout(fire, Math.min(Math.max(0, until - Date.now()), MAX_TIMER_MS)).unref();
+  }
+
   private view(j: Job): JobView {
-    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, dirty: _y, ...v } = j;
+    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, dirty: _y, owner: _o, ...v } = j;
     const out: JobView = { ...v, progress: { ...j.progress } };
     if (j.state === "queued") {
       const all = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -220,10 +281,13 @@ export class Jobs {
     return out;
   }
 
-  /** Other processes' jobs are read from the store (during a rollout the old pod still runs what the new one is polled for). */
-  list(): JobView[] {
-    const own = [...this.jobs.values()].map((j) => this.view(j));
-    const other = (this.shared?.store.list(this.shared.scope) ?? []).filter((r) => !this.jobs.has(r.id)).map(rowView);
+  /**
+   * Other processes' jobs are read from the store (during a rollout the old pod still runs what the new one is polled for).
+   * With `owner`, only the jobs of that owner (a job without one is nobody's).
+   */
+  list(owner?: string): JobView[] {
+    const own = [...this.jobs.values()].filter((j) => owner === undefined || j.owner === owner).map((j) => this.view(j));
+    const other = (this.shared?.store.list(this.shared.scope) ?? []).filter((r) => !this.jobs.has(r.id) && (owner === undefined || rowOwner(r) === owner)).map(rowView);
     return [...own, ...other].sort((a, b) => b.createdAt - a.createdAt);
   }
 
@@ -258,6 +322,14 @@ export class Jobs {
       }
       return r.state === "running" || r.created_at < self.createdAt || (r.created_at === self.createdAt && r.id < self.id);
     });
+  }
+
+  /** The account that started a job (`create`'s `owner`), of this process or only in the shared store; undefined for none or an unknown id. */
+  ownerOf(id: string): string | undefined {
+    const j = this.jobs.get(id);
+    if (j) return j.owner;
+    const r = this.shared?.store.get(id, this.shared.scope);
+    return r ? rowOwner(r) : undefined;
   }
 
   get(id: string): JobView | undefined {
@@ -377,7 +449,7 @@ export class Jobs {
     this.adopting.add(r.id);
     try {
       const params = JSON.parse(r.params!);
-      const b = await sh.rebuild![r.kind]!(params);
+      const b = await sh.rebuild![r.kind]!(params, { title: r.title });
       const v = rowView(r);
       this.create(r.kind, r.title, b.run, b.onDrop, b.gate, { params, id: r.id, createdAt: r.created_at, origin: v.origin });
       // a client of the old owner may still be polling: it gets the grace period from now on, not from a seen time that was never recorded

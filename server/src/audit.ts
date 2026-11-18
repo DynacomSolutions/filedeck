@@ -2,10 +2,11 @@ import type { MiddlewareHandler } from "hono";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { isIP } from "node:net";
 import { isRawRoute } from "./request-guard.ts";
+import { keyFingerprint } from "./auth/sshkey.ts";
 
 /**
- * Write audit log: one JSON line on stdout per state-changing request
- * (`"audit":true`), written after the response so the status is known.
+ * Write audit log: one JSON line on stdout (`"audit":true`) per state-changing request, and per admin call (`/api/admin/*`) of any
+ * method, GET too, written after the response so the status is known.
  * It records who asked (`ip`: the last X-Forwarded-For entry, else the socket peer; `forwardedFor` keeps the whole chain, which the caller can write; `peer` the socket address), what
  * (method, route, the paths named in the query or a small JSON body) and the
  * outcome. File contents, upload bodies and credentials are never read.
@@ -28,6 +29,79 @@ export function pick(v: unknown, depth = 0): unknown {
   if (Array.isArray(v)) return v.slice(0, MAX_VALUES).map((x) => pick(x, depth + 1)).concat(v.length > MAX_VALUES ? [`(+${v.length - MAX_VALUES} more)`] : []);
   const out: Record<string, unknown> = {};
   for (const k of BODY_KEYS) if (k in (v as object)) out[k] = pick((v as Record<string, unknown>)[k], depth + 1);
+  return out;
+}
+
+/**
+ * A sign-in body (hub and agent `/api/auth/*`) holds a password or a key signature: only its `name` is kept, and a body of any other
+ * shape (an array, say, whose strings `pick` would keep) gives nothing.
+ */
+function signInBody(v: unknown): { name: string } | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const name = (v as { name?: unknown }).name;
+  return typeof name === "string" ? { name: clip(name) } : undefined;
+}
+
+/** Whether `p` is an admin path (`/api/admin` or below it): every call there is written, whatever its method or its outcome. */
+export const isAdminPath = (p: string): boolean => p === "/api/admin" || p.startsWith("/api/admin/");
+
+/** The most nodes, grants per node and sources an admin audit line keeps (the admin routes take at most 64 grants per node). */
+const MAX_ADMIN_ITEMS = 64;
+/** The most keys of a `keys` list an admin audit line looks at (an account holds at most 32). */
+const MAX_ADMIN_KEYS = 32;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * An admin body (`/api/admin/*`) as its audit line keeps it: `name`, `kind`, `admin`, `nodes` as `{ <node>: { runAs, grants: [{path,
+ * write}] } }`, `sources` as `{ <source>: { write } }`, for a `publicKey` its `fingerprint` (as OpenSSH prints it), `keys` as the
+ * fingerprints of every key in a `keys` list and `publicKey`, and `password` as "set" (a string) or "removed" (null). Nothing else, of
+ * the expected types only: never a password, a password hash or the key text. Strings are clipped and lists bounded. A body that is not
+ * an object gives nothing.
+ */
+export function adminBody(v: unknown): Record<string, unknown> | undefined {
+  if (!isPlainObject(v)) return undefined;
+  const out: Record<string, unknown> = {};
+  if (typeof v.name === "string") out.name = clip(v.name);
+  if (typeof v.kind === "string") out.kind = clip(v.kind);
+  if (typeof v.admin === "boolean") out.admin = v.admin;
+  if (isPlainObject(v.nodes)) {
+    // (built with fromEntries, so a key such as __proto__ stays a plain field)
+    out.nodes = Object.fromEntries(
+      Object.entries(v.nodes)
+        .slice(0, MAX_ADMIN_ITEMS)
+        .filter((e): e is [string, Record<string, unknown>] => isPlainObject(e[1]))
+        .map(([node, a]) => {
+          const grants = Array.isArray(a.grants)
+            ? a.grants
+                .slice(0, MAX_ADMIN_ITEMS)
+                .filter(isPlainObject)
+                .map((g) => ({ ...(typeof g.path === "string" ? { path: clip(g.path) } : {}), ...(typeof g.write === "boolean" ? { write: g.write } : {}) }))
+            : undefined;
+          return [clip(node), { ...(typeof a.runAs === "string" ? { runAs: clip(a.runAs) } : {}), ...(grants ? { grants } : {}) }];
+        }),
+    );
+  }
+  if (isPlainObject(v.sources)) {
+    out.sources = Object.fromEntries(
+      Object.entries(v.sources)
+        .slice(0, MAX_ADMIN_ITEMS)
+        .map(([source, a]) => [clip(source), isPlainObject(a) && typeof a.write === "boolean" ? { write: a.write } : {}]),
+    );
+  }
+  // whether a password was set or removed, never the value
+  if (typeof v.password === "string") out.password = "set";
+  else if (v.password === null) out.password = "removed";
+  if (typeof v.publicKey === "string") {
+    const fp = keyFingerprint(v.publicKey);
+    if (fp) out.fingerprint = fp;
+  }
+  // every key the body holds (a `keys` list, then `publicKey`), as its fingerprint only; a line that is not a key is left out
+  if (Array.isArray(v.keys) || typeof v.publicKey === "string") {
+    const lines = [...(Array.isArray(v.keys) ? v.keys.slice(0, MAX_ADMIN_KEYS) : []), v.publicKey];
+    const fps = lines.map((k) => (typeof k === "string" ? keyFingerprint(k) : null)).filter((fp): fp is string => fp !== null);
+    if (fps.length > 0) out.keys = [...new Set(fps)];
+  }
   return out;
 }
 
@@ -104,17 +178,23 @@ export function auditRefusal(who: string, c: import("hono").Context, status: num
   );
 }
 
-/** `sys:<name>` or `virt:<name>` of the account behind a request (set by the hub's gate or the agent's check), else nothing. */
-function userOf(c: import("hono").Context): { user?: string } {
+/**
+ * `sys:<name>` or `virt:<name>` of the account behind a request (set by the hub's gate or the agent's check), else nothing; and
+ * `asRoot: true` for a request made under a system administrator's act-as-root switch (no such field otherwise).
+ */
+function userOf(c: import("hono").Context): { user?: string; asRoot?: true } {
   const u = c.get("user");
-  return u?.kind && u.name ? { user: `${u.kind}:${u.name}` } : {};
+  if (!u?.kind || !u.name) return {};
+  return { user: `${u.kind}:${u.name}`, ...(u.kind === "sys" && u.asRoot === true ? { asRoot: true as const } : {}) };
 }
 
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {
   return async (c, next) => {
     const m = c.req.method;
     const p = c.req.path;
-    if (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/")) return next();
+    // every admin call is written, whatever its method: reading the accounts and sessions is recorded too
+    const admin = isAdminPath(p);
+    if (!admin && (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/"))) return next();
     const t0 = Date.now();
     let body: unknown;
     // The body was parsed once by the request guard and is shared through the body cache; without it (a bare audit
@@ -124,7 +204,8 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
       const shared = c.req.bodyCache.json as Promise<unknown> | undefined;
       if (shared || (len > 0 && len <= MAX_BODY && !c.req.raw.headers.has("transfer-encoding"))) {
         try {
-          body = pick(await (shared ?? c.req.json()));
+          const parsed = await (shared ?? c.req.json());
+          body = p.startsWith("/api/auth/") ? signInBody(parsed) : admin ? adminBody(parsed) : pick(parsed);
         } catch {
           body = undefined;
         }
