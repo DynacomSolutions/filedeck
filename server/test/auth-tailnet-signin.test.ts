@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
-import { createHub } from "../src/hub.ts";
+import { createHub, tailnetListener } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
 import { ADDR, closeRigs, fakeSystem, NODE_NAME, rig, type Mode } from "./tailnet-env.ts";
 
@@ -490,6 +490,82 @@ test("spoof over a real server: forged tailnet headers reach neither a later han
     (server as unknown as { closeAllConnections?(): void }).closeAllConnections?.();
     agent.closeAllConnections();
     agent.close();
+  }
+});
+
+test("identity listener: a listed peer on the ordinary listener with a forged X-Forwarded-For has no identity; the identity listener has", async () => {
+  for (const mode of MODES) {
+    const r = await rig(mode, { listener: true });
+    guest(r.h);
+    link(r.h, "virt", "guest", "alice@github");
+    r.devices.set(ADDR, { login: "alice@github" });
+    // what a tailnet device reaching the hub's own port through tailscaled's userspace forwarder sends: peer 127.0.0.1, any header it likes
+    const forged = { onListener: false, headers: { "sec-fetch-site": "same-origin" } };
+    assert.deepEqual(await (await r.req("/api/auth/tailnet", forged)).json(), {}, `${mode}: no button data`);
+    const [res, ms] = await timed(() => r.req("/api/auth/login-tailscale", { method: "POST", ...forged }));
+    assert.equal(res.status, 401, mode);
+    assert.equal(res.headers.get("set-cookie"), null);
+    assert.ok(ms >= 490, `${mode}: ${ms} ms`);
+    assert.deepEqual(r.audits("/api/auth/login-tailscale")[0]?.tailnet, { source: mode, reason: "unlinked" });
+    if (r.api) assert.deepEqual(r.api.calls, [], "whois is never asked for the forged address");
+    // the identity listener: the same request signs in
+    const body = (await (await r.req("/api/auth/tailnet")).json()) as Record<string, unknown>;
+    assert.equal(body.login, "alice@github", mode);
+    const c = await r.signIn();
+    assert.equal((await r.req("/api/auth/me", { cookie: c })).status, 200);
+    // the session's cookie over the ordinary listener: no identity, so signed out there, and the session is kept
+    const out = await r.req("/api/nodes", { cookie: c, onListener: false });
+    assert.equal(out.status, 401);
+    assert.equal(r.h.auth!.sessions.list().length, 1);
+    assert.equal((await r.req("/api/nodes", { cookie: c })).status, 200, `${mode}: back over the identity listener`);
+  }
+});
+
+test("identity listener over real sockets: a direct connection with a forged X-Forwarded-For gets no identity; one through the listener does", async () => {
+  const r = await rig("socket", { listener: true });
+  guest(r.h);
+  link(r.h, "virt", "guest", "alice@github");
+  r.devices.set(ADDR, { login: "alice@github" });
+  const ordinary = await new Promise<ReturnType<typeof serve>>((res) => {
+    const s = serve({ fetch: r.h.fetch, port: 0, hostname: "127.0.0.1" }, () => res(s));
+  });
+  const identity = tailnetListener(r.h, { host: "127.0.0.2", port: 0 })!;
+  await new Promise<void>((res) => (identity.listening ? res() : identity.once("listening", () => res())));
+  const send = (host: string, port: number, p: string, method: string) =>
+    new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        {
+          host,
+          port,
+          path: p,
+          method,
+          agent: false,
+          headers: { "x-forwarded-for": ADDR, "x-forwarded-proto": "https", "sec-fetch-site": "same-origin", ...(method === "POST" ? { "content-type": "application/json", "content-length": "2" } : {}) },
+        },
+        (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (d: string) => (body += d));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+        },
+      );
+      req.on("error", reject);
+      req.end(method === "POST" ? "{}" : undefined);
+    });
+  try {
+    const op = (ordinary.address() as AddressInfo).port;
+    const ip = (identity.address() as AddressInfo).port;
+    assert.equal((identity.address() as AddressInfo).address, "127.0.0.2");
+    assert.deepEqual(JSON.parse((await send("127.0.0.1", op, "/api/auth/tailnet", "GET")).body), {});
+    assert.equal((await send("127.0.0.1", op, "/api/auth/login-tailscale", "POST")).status, 401);
+    assert.deepEqual(r.api!.calls, [], "whois is never asked for the forged address");
+    assert.equal(JSON.parse((await send("127.0.0.2", ip, "/api/auth/tailnet", "GET")).body).login, "alice@github");
+    assert.equal((await send("127.0.0.2", ip, "/api/auth/login-tailscale", "POST")).status, 200);
+  } finally {
+    for (const s of [ordinary, identity] as { close(): void; closeAllConnections?(): void }[]) {
+      s.close();
+      s.closeAllConnections?.();
+    }
   }
 });
 

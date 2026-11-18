@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -84,7 +85,11 @@ export function fakeSystem(answer: (name: string) => "yes" | "no" | "refused" = 
 
 export type Mode = "headers" | "socket";
 
-export async function rig(mode: Mode | null, o: { env?: Record<string, string>; system?: SystemAuth; auth?: boolean; streamCheckMs?: number } = {}) {
+/**
+ * `listener`: FILEDECK_TAILSCALE_LISTEN is set, so an identity is read only for a request whose connection the identity listener accepted;
+ * `req` sends one over that listener with `onListener` (default true then), and over the ordinary one with `onListener: false`.
+ */
+export async function rig(mode: Mode | null, o: { env?: Record<string, string>; system?: SystemAuth; auth?: boolean; streamCheckMs?: number; listener?: boolean } = {}) {
   const clock = { t: Date.now() };
   const lines: string[] = [];
   const api = mode === "socket" ? await fakeLocalApi() : undefined;
@@ -100,11 +105,15 @@ export async function rig(mode: Mode | null, o: { env?: Record<string, string>; 
     ...(mode ? { FILEDECK_TAILSCALE_PROXIES: "127.0.0.1/32" } : {}),
     ...(mode === "headers" ? { FILEDECK_TAILSCALE_HEADERS: "on" } : {}),
     ...(api ? { FILEDECK_TAILSCALE_SOCKET: api.socket } : {}),
+    ...(o.listener ? { FILEDECK_TAILSCALE_LISTEN: "127.0.0.2:8081" } : {}),
     ...o.env,
   };
   const sys = o.system ?? fakeSystem().system;
   const h = createHub(loadConfig(env as never), undefined, (l) => lines.push(l), { now: () => clock.t, system: sys, ...(o.streamCheckMs ? { streamCheckMs: o.streamCheckMs } : {}) });
   closers.push(() => h.close());
+  // the identity listener as the hub sees it: a server whose accepted connections it marks (`TailnetSource.acceptOn`)
+  const identityServer = new EventEmitter();
+  h.auth?.tailnet.acceptOn(identityServer);
   /** The headers source's devices (the socket source's live in the fake LocalAPI). */
   const headerDevices = new Map<string, Dev>();
   const devices = api ? api.devices : headerDevices;
@@ -112,7 +121,7 @@ export async function rig(mode: Mode | null, o: { env?: Record<string, string>; 
   /** One request "from a device": peer 127.0.0.1, X-Forwarded-For ending with `addr`, HTTPS; in headers mode the device's login header. */
   const req = (
     p: string,
-    r: { method?: string; cookie?: string; addr?: string; peer?: string; https?: boolean; headers?: Record<string, string>; body?: unknown } = {},
+    r: { method?: string; cookie?: string; addr?: string; peer?: string; https?: boolean; headers?: Record<string, string>; body?: unknown; onListener?: boolean } = {},
   ): Promise<Response> => {
     const addr = r.addr ?? ADDR;
     const method = r.method ?? "GET";
@@ -126,7 +135,9 @@ export async function rig(mode: Mode | null, o: { env?: Record<string, string>; 
       ...r.headers,
     };
     const init = { method, headers, ...(method !== "GET" && method !== "HEAD" ? { body: JSON.stringify(r.body ?? {}) } : {}) };
-    const env = { incoming: { socket: { remoteAddress: r.peer ?? LISTED, encrypted: false } } };
+    const socket = { remoteAddress: r.peer ?? LISTED, encrypted: false };
+    if (r.onListener ?? o.listener === true) identityServer.emit("connection", socket);
+    const env = { incoming: { socket } };
     return Promise.resolve(h.request("http://localhost" + p, init, env as never));
   };
 

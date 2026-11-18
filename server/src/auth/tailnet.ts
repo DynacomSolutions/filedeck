@@ -9,7 +9,9 @@ import { plainAddress } from "./limiter.ts";
  * The tailnet identity of a request (docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md, "Identity sources"). This module is the
  * only reader of the two sources: tailscaled's LocalAPI socket (`whois`: login and tags) and the Tailscale Serve identity headers (login only).
  * A request has an identity only when its TCP peer is a listed Tailscale proxy (`FILEDECK_TAILSCALE_PROXIES`); `FILEDECK_TRUSTED_PROXIES` never
- * decides it. An identity has a login, or at least one tag, or both.
+ * decides it. With an identity listener (`FILEDECK_TAILSCALE_LISTEN`) the connection must also have been accepted by that listener: a
+ * listed loopback peer is not only the proxy (tailscaled in userspace mode forwards tailnet connections to 127.0.0.1, and any local process
+ * can connect). An identity has a login, or at least one tag, or both.
  */
 export type TailnetIdentity = {
   login?: string;
@@ -159,6 +161,8 @@ const BACKGROUND_FAIL_MS = 5_000;
  */
 export type TailnetInput = {
   peer: string | undefined;
+  /** the connection was accepted by the identity listener (`TailnetSource.acceptOn`); never read from the request itself */
+  listener: boolean;
   forwardedFor: string | null;
   login: { count: number; value: string | null };
   name: { count: number; value: string | null };
@@ -181,11 +185,16 @@ export class TailnetSource {
   private loggedAt = -Infinity;
   /** when a background check last found the source unavailable, per address (insertion order = oldest first) */
   private backgroundFailed = new Map<string, number>();
+  /** an identity only on connections the identity listener accepted (FILEDECK_TAILSCALE_LISTEN is set) */
+  readonly listenerOnly: boolean;
+  /** the connections the identity listener accepted (`acceptOn`) */
+  private accepted = new WeakSet<object>();
 
   constructor(o: {
     socket?: string;
     headers: boolean;
     proxies: ProxyList;
+    listenerOnly?: boolean;
     timeoutMs?: number;
     cacheMs?: number;
     maxCache?: number;
@@ -195,6 +204,7 @@ export class TailnetSource {
     this.socket = o.socket || undefined;
     this.mode = this.socket ? "socket" : o.headers ? "headers" : null; // the socket wins; there is never a fallback to the headers
     this.proxies = o.proxies;
+    this.listenerOnly = o.listenerOnly === true;
     this.timeoutMs = o.timeoutMs ?? 2000;
     this.cacheMs = o.cacheMs ?? 10_000;
     this.maxCache = Math.max(1, o.maxCache ?? 1024);
@@ -202,11 +212,21 @@ export class TailnetSource {
     this.log = o.log ?? ((s) => console.warn(s));
   }
 
+  /**
+   * Marks each connection `server` accepts as one of the identity listener (FILEDECK_TAILSCALE_LISTEN). Call it before the server listens.
+   * The mark is on the socket object, at accept time: nothing in a request can set it.
+   */
+  acceptOn(server: { on(event: "connection", fn: (socket: object) => void): unknown }): void {
+    server.on("connection", (socket) => this.accepted.add(socket));
+  }
+
   /** What the sources need from the request, read now (see `TailnetInput`). */
   inputOf(c: Context): TailnetInput {
     const h = c.req.raw.headers;
+    const socket = (c.env as { incoming?: { socket?: unknown } } | undefined)?.incoming?.socket;
     return {
       peer: peerOf(c),
+      listener: typeof socket === "object" && socket !== null && this.accepted.has(socket),
       forwardedFor: h.get("x-forwarded-for"),
       login: { count: occurrences(c, "tailscale-user-login"), value: h.get("tailscale-user-login") },
       name: { count: occurrences(c, "tailscale-user-name"), value: h.get("tailscale-user-name") },
@@ -235,6 +255,7 @@ export class TailnetSource {
       if (this.mode === null) return NONE;
       const peer = input.peer;
       if (!peer || !this.proxies.has(peer)) return NONE; // only the TCP peer decides, never a header
+      if (this.listenerOnly && !input.listener) return NONE; // and, with an identity listener, the listener that accepted the connection
       return this.mode === "headers" ? this.fromHeaders(input) : await this.fromSocket(input, o.background === true);
     } catch {
       return this.mode === "socket" ? UNAVAILABLE : NONE;

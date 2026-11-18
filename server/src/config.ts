@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { BlockList, isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { ProxyList } from "./auth/tailnet.ts";
@@ -119,6 +120,11 @@ export interface Config {
   tailscaleHeaders: boolean;
   /** hub, sign-in on: IP addresses and CIDR ranges of the proxies that carry only tailnet traffic (FILEDECK_TAILSCALE_PROXIES) */
   tailscaleProxies: string[];
+  /**
+   * hub, sign-in on: FILEDECK_TAILSCALE_LISTEN, the address and port of the identity listener. When set, a tailnet identity is read only
+   * on connections this listener accepted (still from a listed proxy); the ordinary listener never gives one.
+   */
+  tailscaleListen?: { host: string; port: number };
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -164,12 +170,41 @@ function wholeSetting(env: NodeJS.ProcessEnv, name: string, fallback: number): n
   return Number(v);
 }
 
-/** The Tailscale settings: read only by a hub with sign-in on; a bad proxy entry stops the start. */
-function tailscaleSettings(env: NodeJS.ProcessEnv, read: boolean): Pick<Config, "tailscaleSocket" | "tailscaleHeaders" | "tailscaleProxies"> {
+/** The Tailscale settings: read only by a hub with sign-in on; a bad proxy entry or listen address stops the start. */
+function tailscaleSettings(env: NodeJS.ProcessEnv, read: boolean, port: number): Pick<Config, "tailscaleSocket" | "tailscaleHeaders" | "tailscaleProxies" | "tailscaleListen"> {
   if (!read) return { tailscaleSocket: undefined, tailscaleHeaders: false, tailscaleProxies: [] };
   const tailscaleProxies = (env.FILEDECK_TAILSCALE_PROXIES ?? "").split(",").map((p) => p.trim()).filter(Boolean);
   new ProxyList(tailscaleProxies); // throws `FILEDECK_TAILSCALE_PROXIES: "<entry>" is not an IP address or range`
-  return { tailscaleSocket: env.FILEDECK_TAILSCALE_SOCKET || undefined, tailscaleHeaders: env.FILEDECK_TAILSCALE_HEADERS === "on", tailscaleProxies };
+  const tailscaleListen = listenSetting(env.FILEDECK_TAILSCALE_LISTEN, port);
+  return { tailscaleSocket: env.FILEDECK_TAILSCALE_SOCKET || undefined, tailscaleHeaders: env.FILEDECK_TAILSCALE_HEADERS === "on", tailscaleProxies, ...(tailscaleListen ? { tailscaleListen } : {}) };
+}
+
+/**
+ * FILEDECK_TAILSCALE_LISTEN: `<IPv4>:<port>` or `[<IPv6>]:<port>`. Never an address tailscaled in userspace mode forwards a tailnet
+ * connection to (127.0.0.1, ::1; it dials them for any port Serve does not take) or an unspecified one (which listens on those too), and
+ * never the hub's own port.
+ */
+function listenSetting(raw: string | undefined, port: number): { host: string; port: number } | undefined {
+  const v = (raw ?? "").trim();
+  if (!v) return undefined;
+  const bad = () => new Error(`FILEDECK_TAILSCALE_LISTEN: "${v.slice(0, 80)}" is not an IP address and a port (for example 127.0.0.2:8081)`);
+  const m = /^(?:\[([0-9a-fA-F:.]+)\]|([0-9.]+)):([0-9]{1,5})$/.exec(v);
+  if (!m) throw bad();
+  const host = (m[1] ?? m[2])!.toLowerCase();
+  const family = isIP(host);
+  const p = Number(m[3]);
+  if (family === 0 || (m[1] !== undefined) !== (family === 6) || p < 1 || p > 65535) throw bad();
+  const forwarded = new BlockList();
+  forwarded.addAddress("127.0.0.1", "ipv4");
+  forwarded.addAddress("0.0.0.0", "ipv4");
+  forwarded.addAddress("::1", "ipv6");
+  forwarded.addAddress("::", "ipv6");
+  forwarded.addAddress("::ffff:127.0.0.1", "ipv6");
+  forwarded.addAddress("::ffff:0.0.0.0", "ipv6");
+  if (forwarded.check(host, family === 6 ? "ipv6" : "ipv4"))
+    throw new Error(`FILEDECK_TAILSCALE_LISTEN: "${v.slice(0, 80)}" is an address tailscaled forwards tailnet connections to; use another one, for example 127.0.0.2`);
+  if (p === port) throw new Error(`FILEDECK_TAILSCALE_LISTEN: the port must not be PORT (${port})`);
+  return { host, port: p };
 }
 
 /**
@@ -179,16 +214,29 @@ function tailscaleSettings(env: NodeJS.ProcessEnv, read: boolean): Pick<Config, 
 export function tailscaleStartup(cfg: Config, env: NodeJS.ProcessEnv = process.env): { lines: string[]; stop?: string } {
   if (cfg.mode !== "hub") return { lines: [] };
   if (!cfg.auth) {
-    const set = ["FILEDECK_TAILSCALE_SOCKET", "FILEDECK_TAILSCALE_HEADERS", "FILEDECK_TAILSCALE_PROXIES"].some((k) => !!env[k]);
+    const set = ["FILEDECK_TAILSCALE_SOCKET", "FILEDECK_TAILSCALE_HEADERS", "FILEDECK_TAILSCALE_PROXIES", "FILEDECK_TAILSCALE_LISTEN"].some((k) => !!env[k]);
     return { lines: set ? ["tailscale: sign-in is off, so FILEDECK_TAILSCALE_* is ignored"] : [] };
   }
   const source = cfg.tailscaleSocket ? "socket" : cfg.tailscaleHeaders ? "headers" : null;
-  if (!source) return { lines: [] };
+  if (!source) return { lines: cfg.tailscaleListen ? ["tailscale: no source is set, so FILEDECK_TAILSCALE_LISTEN is ignored"] : [] };
   if (cfg.tailscaleProxies.length === 0) return { lines: [], stop: "FILEDECK_TAILSCALE_PROXIES is needed when FILEDECK_TAILSCALE_SOCKET or FILEDECK_TAILSCALE_HEADERS is set" };
+  // A listed loopback proxy is reached by more than the proxy: tailscaled in userspace mode forwards a tailnet connection to a port Serve
+  // does not take to 127.0.0.1, and any local process can connect too. Each of them could write the X-Forwarded-For the socket source
+  // trusts, so the identity is then read only on the identity listener, which neither ever reaches.
+  const proxies = new ProxyList(cfg.tailscaleProxies);
+  if (!cfg.tailscaleListen && (proxies.has("127.0.0.1") || proxies.has("::1")))
+    return {
+      lines: [],
+      stop: 'FILEDECK_TAILSCALE_PROXIES lists a loopback address, so FILEDECK_TAILSCALE_LISTEN is needed: tailscaled in userspace mode, and any process on this host, reaches the hub from loopback (docs/security.md, "Tailscale sign-in")',
+    };
   const lines = [`tailscale: sign-in with Tailscale through the ${source} source, from ${cfg.tailscaleProxies.join(",")}`];
+  if (cfg.tailscaleListen) lines.push(`tailscale: identities are read only on connections to ${listenLabel(cfg.tailscaleListen)}`);
   if (cfg.tailscaleSocket && cfg.tailscaleHeaders) lines.push("tailscale: FILEDECK_TAILSCALE_SOCKET is set, so FILEDECK_TAILSCALE_HEADERS is ignored");
   return { lines };
 }
+
+/** `host:port`, an IPv6 host in brackets. */
+export const listenLabel = (l: { host: string; port: number }): string => (l.host.includes(":") ? `[${l.host}]:${l.port}` : `${l.host}:${l.port}`);
 
 export function loadConfig(env = process.env): Config {
   const vaultFile = env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite";
@@ -270,7 +318,7 @@ export function loadConfig(env = process.env): Config {
     worker: false,
     maxWorkers: wholeSetting(env, "FILEDECK_MAX_WORKERS", 6),
     workerIdleMs: wholeSetting(env, "FILEDECK_WORKER_IDLE_SECONDS", 600) * 1000,
-    ...tailscaleSettings(env, mode === "hub" && env.FILEDECK_AUTH === "on"),
+    ...tailscaleSettings(env, mode === "hub" && env.FILEDECK_AUTH === "on", Number(env.PORT ?? 8080)),
   };
 }
 
@@ -311,6 +359,7 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     tailscaleSocket: undefined,
     tailscaleHeaders: false,
     tailscaleProxies: [],
+    tailscaleListen: undefined,
     sources: [],
     sourceSecretDir: "",
     jobsFile: "",

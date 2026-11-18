@@ -1,6 +1,8 @@
 import type { FsError } from "./fsops.ts";
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
+import { createAdaptorServer } from "@hono/node-server";
+import type { Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
@@ -151,6 +153,20 @@ class RootCalls {
   }
 }
 
+/**
+ * The identity listener (FILEDECK_TAILSCALE_LISTEN): a second HTTP server for the same hub on `listen`, whose accepted connections are the
+ * only ones a tailnet identity is read for (`TailnetSource.acceptOn`, marked before it listens). Undefined when the hub has no Tailscale
+ * source. The caller sets its timeouts and closes it.
+ */
+export function tailnetListener(app: { fetch: (req: Request, env?: unknown) => Response | Promise<Response>; auth?: HubAuth }, listen: { host: string; port: number }): Server | undefined {
+  const src = app.auth?.tailnet;
+  if (!src || src.mode === null || !src.listenerOnly) return undefined;
+  const server = createAdaptorServer({ fetch: app.fetch }) as Server;
+  src.acceptOn(server);
+  server.listen(listen.port, listen.host);
+  return server;
+}
+
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target>; accountChanged(before: Identity): Promise<void>; accountCalls: AccountCalls };
   // Sign-in state, only with auth on (off, nothing is opened or created).
@@ -168,7 +184,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       sessions: new Sessions(db, accounts, { idleMs: cfg.sessionIdleMs, maxMs: cfg.sessionMaxMs, now: opts?.now }),
       challenges: new Challenges(opts?.now),
       limiter: new LoginLimiter(opts?.now),
-      tailnet: new TailnetSource({ socket: cfg.tailscaleSocket, headers: cfg.tailscaleHeaders, proxies: new ProxyList(cfg.tailscaleProxies), now: opts?.now }),
+      tailnet: new TailnetSource({ socket: cfg.tailscaleSocket, headers: cfg.tailscaleHeaders, proxies: new ProxyList(cfg.tailscaleProxies), listenerOnly: cfg.tailscaleListen !== undefined, now: opts?.now }),
       links: new TailnetLinks(db, opts?.now),
     };
     app.auth = auth;

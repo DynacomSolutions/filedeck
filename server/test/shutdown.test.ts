@@ -59,6 +59,23 @@ test("an in-flight request finishes before exit, and cleanup waits for it", asyn
   assert.equal(cleaned, true);
 });
 
+test("two servers (the hub and its identity listener): both stop accepting, and cleanup waits for a request on either", async () => {
+  let cleaned = false;
+  const slow = (_q: http.IncomingMessage, r: http.ServerResponse) => setTimeout(() => r.end(cleaned ? "cleaned" : "open"), 800);
+  const a = http.createServer(slow);
+  const b = http.createServer(slow);
+  await listen(a);
+  const pb = await listen(b);
+  const body = get(pb);
+  await new Promise((r) => setTimeout(r, 100));
+  const done = new Promise<number>((resolve) => installShutdown([a, b], () => void (cleaned = true), { drainMs: 5_000, hardMs: 10_000, exit: resolve })());
+  assert.equal(await body, "open", "the request on the second server finished before cleanup");
+  assert.equal(await done, 0);
+  assert.equal(cleaned, true);
+  assert.equal(a.listening, false);
+  assert.equal(b.listening, false);
+});
+
 test("a busy index file is not deleted", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-busy-"));
   const file = path.join(dir, "index.db");

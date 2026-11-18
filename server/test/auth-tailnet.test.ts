@@ -574,7 +574,7 @@ test("background checks never take the last free slots: with tailscaled hung for
   const api = await fakeLocalApi((addr) => (addr === "100.101.102.103" ? whois("alice@github") : "hang"));
   try {
     const src = new TailnetSource({ socket: api.socket, headers: false, proxies: proxies(), log: () => {} });
-    const input = (addr: string) => ({ peer: LISTED, forwardedFor: addr, login: { count: 0, value: null }, name: { count: 0, value: null } });
+    const input = (addr: string) => ({ peer: LISTED, listener: false, forwardedFor: addr, login: { count: 0, value: null }, name: { count: 0, value: null } });
     // ten streams' checks at once, each for its own address
     const bg = Array.from({ length: 10 }, (_, i) => src.identifyInput(input(`100.64.2.${i + 1}`), { background: true }));
     await new Promise((r) => setTimeout(r, 100));
