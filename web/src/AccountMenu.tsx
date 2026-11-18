@@ -18,8 +18,8 @@ export function AccountMenu({ account, onAsRoot, onAccounts }: { account: Accoun
   const [asking, setAsking] = useState(false);
   const button = useRef<HTMLButtonElement>(null);
   const items: MenuItem[] = [{ label: name, disabled: true, icon: CircleUser }, "sep"];
-  // never for a virtual account or a system account that is not an administrator
   if (account.admin && onAccounts) items.push({ label: "Accounts…", icon: Users, onSelect: onAccounts });
+  // never for a virtual account or a system account that is not an administrator
   if (account.kind === "sys" && account.admin) items.push({ label: "Act as root…", icon: ShieldAlert, onSelect: () => setAsking(true) });
   items.push({ label: "Sign out", icon: LogOut, onSelect: () => void signOut() });
   const signOut = async () => {

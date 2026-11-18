@@ -411,7 +411,7 @@ svg.lucide{width:16px;height:16px;stroke-width:1.75;flex:none;vertical-align:-3p
 .fp.picked .fp-bar{background:var(--accent-tint)}
 
 /* ---- in-place compare ---- */
-.ed.over{position:absolute;inset:.6rem;z-index:20;border:1px solid var(--border-strong);border-radius:var(--radius);overflow:hidden;flex:none}
+.ed.over{position:absolute;inset:.6rem;height:auto;z-index:20;border:1px solid var(--border-strong);border-radius:var(--radius);overflow:hidden;flex:none}
 .cmp-barwrap{position:relative;flex:none;display:flex;align-items:center;min-height:var(--cmp-bar-h,36px);box-sizing:border-box;border-bottom:1px solid var(--border);background:var(--surface-2)}
 /* the toolbar wraps onto more rows instead of scrolling sideways, so no action is ever cut off; both panels share the taller height (--cmp-bar-h) to keep their rows aligned */
 .cmp-bar{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:.2rem .5rem;align-items:center;box-sizing:border-box;min-height:36px;padding:.2rem .65rem;font-size:.78rem}

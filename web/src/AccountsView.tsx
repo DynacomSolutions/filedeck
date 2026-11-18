@@ -23,7 +23,8 @@ const TABS: { id: Tab; label: string; Icon: Ic.LucideIcon }[] = [
 export function AccountsView({ account, onClose }: { account: Account; onClose: () => void }) {
   const root = useRef<HTMLDivElement>(null);
   useDialogFocus(root);
-  useEffect(() => root.current?.focus(), []);
+  // preventScroll: focusing the overlay must not scroll the page under it
+  useEffect(() => root.current?.focus({ preventScroll: true }), []);
   const uid = useId();
   const [tab, setTab] = useState<Tab>("accounts");
   const [data, setData] = useState<{ accounts: AccountView[]; overview: Overview } | null>(null);
@@ -32,7 +33,13 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
   /** the editor: a new account, or the account being edited */
   const [editing, setEditing] = useState<{ v?: AccountView } | null>(null);
   const [deleting, setDeleting] = useState<AccountView | null>(null);
-  const editorBusy = useRef(false);
+  /** a change is with the hub: the editor is disabled, and Close and Escape wait */
+  const [busy, setBusy] = useState(false);
+  /** the editor's own close, which asks first when there are unsaved changes */
+  const editorClose = useRef<(() => void) | null>(null);
+  const listHeading = useRef<HTMLHeadingElement>(null);
+  /** whether the editor was open at the last render: on its close focus goes to the list heading */
+  const wasEditing = useRef(false);
 
   const load = useCallback(() => {
     setErr("");
@@ -42,6 +49,15 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
     );
   }, []);
   useEffect(load, [load]);
+  useEffect(() => {
+    if (wasEditing.current && !editing) listHeading.current?.focus({ preventScroll: true });
+    wasEditing.current = editing !== null;
+  }, [editing]);
+  /** Back to the list from the editor; the list is read again, since keys may have changed meanwhile. */
+  const closeEditor = () => {
+    setEditing(null);
+    load();
+  };
 
   const self = (name: string) => account.kind === "virt" && account.name === name;
   const tabKeys = (e: React.KeyboardEvent) => {
@@ -67,15 +83,15 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
         if (e.key !== "Escape") return;
         // a dialog on top of this one (the folder picker, a confirmation) handles its own Escape
         if ((e.target as Element | null)?.closest('[role="dialog"]') !== root.current) return;
-        if (editing) {
-          if (!editorBusy.current) setEditing(null);
-        } else onClose();
+        if (busy) return;
+        if (editing) editorClose.current?.();
+        else onClose();
       }}
     >
       <div className="ed-head" role="group" aria-label="Toolbar">
         <b>Accounts</b>
         <span className="ed-spacer" />
-        <Tip label="Close" shortcut="Esc"><button type="button" onClick={onClose}><Ic.X aria-hidden="true" /> Close</button></Tip>
+        <Tip label="Close" shortcut="Esc"><button type="button" disabled={busy} onClick={onClose}><Ic.X aria-hidden="true" /> Close</button></Tip>
       </div>
       <div className="tr-tabs" role="tablist" aria-label="Accounts sections" onKeyDown={tabKeys}>
         {TABS.map((t) => (
@@ -95,6 +111,8 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
         ))}
       </div>
       <div className="ed-body set-body acc-body" id={`${uid}-panel`} role="tabpanel" aria-labelledby={`${uid}-tab-${tab}`}>
+        {/* above the list and the editor alike: "created" shows while the new account's editor is open */}
+        <div className="acc-status" role="status">{tab === "accounts" ? status : ""}</div>
         {tab !== "accounts" ? (
           <p className="muted">This list is not available yet.</p>
         ) : editing && data ? (
@@ -103,24 +121,30 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
             existing={editing.v}
             overview={data.overview}
             self={editing.v ? self(editing.v.name) : false}
-            busyRef={editorBusy}
-            onCancel={() => setEditing(null)}
+            onBusy={setBusy}
+            closeRef={editorClose}
+            onClose={closeEditor}
             onSaved={(v, created) => {
-              setEditing(null);
-              setStatus(created ? `Account ${v.name} created.` : `Account ${v.name} saved. Its sessions have ended.`);
+              if (created) {
+                // open the new account's editor, where keys can be added
+                setStatus(`Account ${v.name} created. Add keys here if it signs in with one.`);
+                setEditing({ v });
+              } else {
+                setStatus(`Account ${v.name} saved. Its sessions have ended.`);
+                setEditing(null);
+              }
               load();
             }}
           />
         ) : (
           <section className="set-sec acc-list" aria-labelledby={`${uid}-list`}>
-            <h2 id={`${uid}-list`}>Virtual accounts</h2>
+            <h2 id={`${uid}-list`} ref={listHeading} tabIndex={-1}>Virtual accounts</h2>
             <p className="muted">Accounts that exist only in Filedeck. Each one acts as a system user on the machines it may use, and sees only the folders given to it.</p>
             <div className="vault-bar">
               <button type="button" className="primary" disabled={!data} onClick={() => (setStatus(""), setEditing({}))}><Ic.UserPlus aria-hidden="true" /> New account</button>
               <Tip label="Reload the list"><button type="button" onClick={load}><Ic.RefreshCw aria-hidden="true" /> Refresh</button></Tip>
               <span className="muted vault-count">{data ? `${data.accounts.length} ${data.accounts.length === 1 ? "account" : "accounts"}` : err ? "" : "Loading..."}</span>
             </div>
-            <div className="acc-status" role="status">{status}</div>
             {err && <div className="ad-err" role="alert">{err}</div>}
             <div className="vault-wrap" role="region" aria-label="Virtual accounts table" tabIndex={0}>
               <table className="ft acc-table">

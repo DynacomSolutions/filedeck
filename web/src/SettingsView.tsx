@@ -14,7 +14,8 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
   const s = useSettings();
   const root = useRef<HTMLDivElement>(null);
   useDialogFocus(root);
-  useEffect(() => root.current?.focus(), []);
+  // preventScroll: focusing the overlay must not scroll the page under it
+  useEffect(() => root.current?.focus({ preventScroll: true }), []);
   return (
     <div
       ref={root}

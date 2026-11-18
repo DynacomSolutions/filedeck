@@ -261,6 +261,15 @@ export function App({ account }: { account?: Account } = {}) {
   // the Accounts view (administrators): not in the URL, so a shared link never opens it
   const [accountsOpen, setAccountsOpen] = useState(false);
   const closeAccounts = useCallback(() => setAccountsOpen(false), []);
+  // one view at a time: Settings or the Trash, opened from anywhere (also by going back in history), closes Accounts
+  useEffect(() => {
+    if (settingsOpen || trash) setAccountsOpen(false);
+  }, [settingsOpen, trash]);
+  const openAccounts = useCallback(() => {
+    setSettingsOpen(false);
+    setTrash(null);
+    setAccountsOpen(true);
+  }, []);
   const [syncRoute, setSyncRoute] = useState<SyncState | null>(initial?.sync ?? null);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -631,7 +640,7 @@ export function App({ account }: { account?: Account } = {}) {
               </Tip>
             )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
-            {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? () => setAccountsOpen(true) : undefined} />}
+            {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? openAccounts : undefined} />}
           </div>
         </div>
       </header>

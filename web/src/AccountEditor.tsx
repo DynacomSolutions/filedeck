@@ -1,10 +1,10 @@
-import { useId, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useId, useRef, useState, type MutableRefObject } from "react";
 import * as Ic from "lucide-react";
 import { Modal } from "./ArchiveDialog";
 import { Dropdown } from "./Dropdown";
 import { GrantPicker } from "./GrantPicker";
 import { addKey, createAccount, removeKey, updateAccount, type AccountView, type Overview } from "./admin";
-import { formProblems, fromView, MAX_PASSWORD, MIN_PASSWORD, toInput, type AccountForm, type SourceChoice } from "./accountForm";
+import { formChanged, formProblems, fromView, MAX_PASSWORD, MIN_PASSWORD, notConfigured, toInput, type AccountForm, type Configured, type SourceChoice } from "./accountForm";
 import "./archive.css";
 import "./accounts.css";
 
@@ -30,13 +30,42 @@ function loaded(v: AccountView, ov: Overview): AccountForm {
   return { ...f, machines };
 }
 
+/** A themed checkbox (the `label.ck` pattern of the jobs tray): the native input stays underneath for keyboard and screen readers. */
+function Check({ checked, onChange, children }: { checked: boolean; onChange: (v: boolean) => void; children: React.ReactNode }) {
+  return (
+    <label className="ck acc-ck">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span className="ck-box" aria-hidden="true"><Ic.Check /></span>
+      <span>{children}</span>
+    </label>
+  );
+}
+
 /**
  * Creates a virtual account (`existing` undefined) or edits one. Every change to an account ends its sessions and jobs on the hub, so
  * changing one's own account (`self`) first asks, and reloads the page once it is done. A save can take some seconds when a machine is
- * slow to answer: the button shows it and the form cannot be sent twice. The hub's refusal shows in the alert next to Save.
+ * slow to answer: the button shows it, the form is disabled and cannot be sent twice (`onBusy` tells the view). The hub's refusal shows
+ * in the alert next to Save. `closeRef` is how the view asks to close (Escape): with unsaved changes it asks "Discard changes?" first.
  */
-export function AccountEditor({ existing, overview, self, onSaved, onCancel, busyRef }: { existing?: AccountView; overview: Overview; self: boolean; onSaved: (v: AccountView, created: boolean) => void; onCancel: () => void; busyRef?: MutableRefObject<boolean> }) {
-  const [form, setForm] = useState<AccountForm>(() => (existing ? loaded(existing, overview) : blank(overview)));
+export function AccountEditor({
+  existing,
+  overview,
+  self,
+  onSaved,
+  onClose,
+  onBusy,
+  closeRef,
+}: {
+  existing?: AccountView;
+  overview: Overview;
+  self: boolean;
+  onSaved: (v: AccountView, created: boolean) => void;
+  onClose: () => void;
+  onBusy?: (busy: boolean) => void;
+  closeRef?: MutableRefObject<(() => void) | null>;
+}) {
+  const [start] = useState<AccountForm>(() => (existing ? loaded(existing, overview) : blank(overview)));
+  const [form, setForm] = useState<AccountForm>(start);
   const [keys, setKeys] = useState(existing?.keys ?? []);
   const [hasPassword, setHasPassword] = useState(existing?.hasPassword ?? false);
   const [removePassword, setRemovePassword] = useState(false);
@@ -46,27 +75,41 @@ export function AccountEditor({ existing, overview, self, onSaved, onCancel, bus
   const [busy, setBusy] = useState<"" | "save" | "key">("");
   /** the change that waits for "Saving signs this account out everywhere" to be confirmed */
   const [asking, setAsking] = useState<null | (() => Promise<void>)>(null);
+  const [discarding, setDiscarding] = useState(false);
   const [picking, setPicking] = useState<string | null>(null);
-  const own = useRef(false);
-  /** true while a call is in flight; the view reads it so Escape does not drop a save under way */
-  const sending = busyRef ?? own;
-  const ids = { name: useId(), password: useId(), pwHelp: useId(), key: useId(), err: useId(), self: useId() };
+  const sending = useRef(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const ids = { name: useId(), password: useId(), pwHelp: useId(), key: useId(), keyHelp: useId(), err: useId(), self: useId() };
+  const known: Configured = { nodes: overview.nodes, sources: overview.sources.map((s) => s.name) };
+  const gone = notConfigured(form, known);
+
+  useEffect(() => heading.current?.focus({ preventScroll: true }), []);
 
   const set = (patch: Partial<AccountForm>) => setForm((f) => ({ ...f, ...patch }));
   const setMachine = (node: string, change: (m: AccountForm["machines"][number]) => AccountForm["machines"][number]) =>
     setForm((f) => ({ ...f, machines: f.machines.map((m) => (m.node === node ? change(m) : m)) }));
+
+  /** Back to the list; with unsaved changes (the form differs, a password typed, "Remove password" set) it asks first. */
+  const requestClose = () => {
+    if (sending.current) return;
+    if (removePassword || formChanged(start, form)) setDiscarding(true);
+    else onClose();
+  };
+  if (closeRef) closeRef.current = requestClose;
 
   /** Runs one call to the hub at a time; `self` changes ask first and reload the page after. */
   const run = async (what: "save" | "key", call: () => Promise<boolean>) => {
     if (sending.current) return;
     sending.current = true;
     setBusy(what);
+    onBusy?.(true);
     try {
       // the change has signed this page out: a fresh load shows the sign-in screen
       if ((await call()) && self) location.reload();
     } finally {
       sending.current = false;
       setBusy("");
+      onBusy?.(false);
     }
   };
   const guarded = (what: "save" | "key", call: () => Promise<boolean>) => {
@@ -79,7 +122,7 @@ export function AccountEditor({ existing, overview, self, onSaved, onCancel, bus
     const problems = formProblems(removePassword ? { ...form, password: "" } : form);
     if (problems.length) return setErr(problems);
     setErr([]);
-    const input = toInput(form);
+    const input = toInput(form, known);
     guarded("save", async () => {
       try {
         let v: AccountView;
@@ -118,170 +161,188 @@ export function AccountEditor({ existing, overview, self, onSaved, onCancel, bus
 
   const canSignIn = (hasPassword && !removePassword) || form.password !== "" || keys.length > 0;
   return (
-    // not a <form>: the folder picker and the confirmation are forms of their own (Modal)
+    // not a <form>: the folder picker and the confirmations are forms of their own (Modal)
     <div className="acc-editor" role="group" aria-labelledby={ids.name + "-h"}>
-      <h2 id={ids.name + "-h"} className="acc-title">
+      <h2 id={ids.name + "-h"} className="acc-title" ref={heading} tabIndex={-1}>
         {existing ? <>Edit <bdi>{existing.name}</bdi></> : "New account"}
       </h2>
       {self && <p className="acc-warn" id={ids.self}><Ic.TriangleAlert aria-hidden="true" /> This is your own account. {SELF_WARNING}</p>}
 
-      <section className="set-sec" aria-labelledby={ids.name + "-s"}>
-        <h3 id={ids.name + "-s"}>Sign-in</h3>
-        {!existing && (
-          <div className="acc-field">
-            <label htmlFor={ids.name}>Name</label>
-            <input id={ids.name} value={form.name} autoComplete="off" spellCheck={false} autoCapitalize="none" required onChange={(e) => set({ name: e.target.value })} />
-          </div>
-        )}
-        <div className="acc-field">
-          <label htmlFor={ids.password}>{existing ? "New password" : "Password"}</label>
-          <input
-            id={ids.password}
-            type="password"
-            autoComplete="new-password"
-            value={form.password}
-            disabled={removePassword}
-            aria-describedby={ids.pwHelp}
-            onChange={(e) => set({ password: e.target.value })}
-          />
-          <span id={ids.pwHelp} className="muted acc-help">
-            {removePassword
-              ? "The password is removed when you save."
-              : `${MIN_PASSWORD} to ${MAX_PASSWORD} characters. ${existing ? (hasPassword ? "Leave empty to keep the current password." : "This account has no password now.") : "Leave empty for an account that signs in with a key only."}`}
-          </span>
-          {existing && hasPassword && (
-            <div className="acc-row">
-              {removePassword ? (
-                <button type="button" onClick={() => setRemovePassword(false)}><Ic.Undo2 aria-hidden="true" /> Keep password</button>
-              ) : (
-                <button type="button" onClick={() => (setRemovePassword(true), set({ password: "" }))}><Ic.KeyRound aria-hidden="true" /> Remove password</button>
-              )}
+      {/* disabled as a whole while a change is with the hub, Dropdowns and buttons included */}
+      <fieldset className="acc-fs" disabled={busy !== ""} aria-busy={busy !== "" || undefined}>
+        <section className="set-sec" aria-labelledby={ids.name + "-s"}>
+          <h3 id={ids.name + "-s"}>Sign-in</h3>
+          {!existing && (
+            <div className="acc-field">
+              <label htmlFor={ids.name}>Name</label>
+              <input id={ids.name} value={form.name} autoComplete="off" spellCheck={false} autoCapitalize="none" required onChange={(e) => set({ name: e.target.value })} />
             </div>
           )}
-        </div>
-        <label className="chk acc-chk">
-          <input type="checkbox" checked={form.admin} onChange={(e) => set({ admin: e.target.checked })} />
-          <span>Administrator <span className="muted">Can manage accounts and use every network source.</span></span>
-        </label>
-        {!canSignIn && <p className="muted acc-help">Without a password or a key this account cannot sign in.</p>}
-      </section>
-
-      <section className="set-sec" aria-labelledby={ids.key + "-s"}>
-        <h3 id={ids.key + "-s"}>Keys</h3>
-        {!existing ? (
-          <p className="muted">Add SSH keys once the account is saved.</p>
-        ) : (
-          <>
-            {keys.length === 0 ? (
-              <p className="muted">No keys.</p>
-            ) : (
-              <ul className="acc-keys">
-                {keys.map((k) => (
-                  <li key={k.fingerprint}>
-                    <span className="acc-key-text">
-                      <b><bdi>{k.comment ?? k.type}</bdi></b>
-                      <span className="muted acc-fp"><bdi>{k.fingerprint}</bdi></span>
-                    </span>
-                    <button type="button" disabled={busy !== ""} aria-label={`Remove key ${k.comment ?? k.fingerprint}`} onClick={() => changeKey(() => removeKey(existing.name, k.fingerprint))}>
-                      <Ic.Trash2 aria-hidden="true" /> Remove
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="acc-field">
-              <label htmlFor={ids.key}>Public key</label>
-              <textarea id={ids.key} rows={2} spellCheck={false} placeholder="ssh-ed25519 AAAA... comment" value={newKey} onChange={(e) => setNewKey(e.target.value)} />
-              <span className="muted acc-help">One line from a .pub file: ssh-ed25519 or ecdsa-sha2-nistp256.</span>
-            </div>
-            <div className="acc-row">
-              <button type="button" disabled={busy !== "" || newKey.trim() === ""} aria-busy={busy === "key" || undefined} onClick={() => changeKey(() => addKey(existing.name, newKey.trim()))}>
-                <Ic.KeyRound aria-hidden="true" /> {busy === "key" ? "Saving…" : "Add key"}
-              </button>
-              <div className="ad-err" role="alert">{keyErr}</div>
-            </div>
-          </>
-        )}
-      </section>
-
-      <section className="set-sec" aria-labelledby={ids.name + "-m"}>
-        <h3 id={ids.name + "-m"}>Machines</h3>
-        <p className="muted">On each machine the account acts as a system user and sees only the folders given here. The first folder is the one Filedeck opens.</p>
-        {form.machines.length === 0 && <p className="muted">No machines are configured.</p>}
-        {form.machines.map((m) => {
-          const known = overview.nodes.includes(m.node);
-          return (
-            <fieldset key={m.node} className="acc-machine">
-              <legend><Ic.Server aria-hidden="true" /> <bdi>{m.node}</bdi>{!known && <span className="muted"> (not configured now)</span>}</legend>
-              <div className="acc-field">
-                <label htmlFor={`${ids.name}-run-${m.node}`}>Run as (system user)</label>
-                <input id={`${ids.name}-run-${m.node}`} value={m.runAs} autoComplete="off" spellCheck={false} autoCapitalize="none" onChange={(e) => setMachine(m.node, (x) => ({ ...x, runAs: e.target.value }))} />
+          <div className="acc-field">
+            <label htmlFor={ids.password}>{existing ? "New password" : "Password"}</label>
+            <input
+              id={ids.password}
+              type="password"
+              autoComplete="new-password"
+              value={form.password}
+              disabled={removePassword}
+              aria-describedby={ids.pwHelp}
+              onChange={(e) => set({ password: e.target.value })}
+            />
+            <span id={ids.pwHelp} className="muted acc-help">
+              {removePassword
+                ? "The password is removed when you save."
+                : `${MIN_PASSWORD} to ${MAX_PASSWORD} characters. ${existing ? (hasPassword ? "Leave empty to keep the current password." : "This account has no password now.") : "Leave empty for an account that signs in with a key only."}`}
+            </span>
+            {existing && hasPassword && (
+              <div className="acc-row">
+                {removePassword ? (
+                  <button type="button" onClick={() => setRemovePassword(false)}><Ic.Undo2 aria-hidden="true" /> Keep password</button>
+                ) : (
+                  <button type="button" onClick={() => (setRemovePassword(true), set({ password: "" }))}><Ic.KeyRound aria-hidden="true" /> Remove password</button>
+                )}
               </div>
-              {m.grants.length > 0 && (
-                <ul className="acc-grants" aria-label={`Folders on ${m.node}`}>
-                  {m.grants.map((g, i) => (
-                    <li key={g.path}>
-                      <span className="acc-grant-path">
-                        <Ic.Folder aria-hidden="true" /> <bdi>{g.path}</bdi>
-                        {i === 0 && <span className="pill">Opens first</span>}
+            )}
+          </div>
+          <Check checked={form.admin} onChange={(admin) => set({ admin })}>
+            Administrator <span className="muted">Can manage accounts and use every network source.</span>
+          </Check>
+          {!canSignIn && <p className="muted acc-help">Without a password or a key this account cannot sign in.</p>}
+        </section>
+
+        <section className="set-sec" aria-labelledby={ids.key + "-s"}>
+          <h3 id={ids.key + "-s"}>Keys</h3>
+          {!existing ? (
+            <p className="muted">Add SSH keys once the account is created: its editor opens again then.</p>
+          ) : (
+            <>
+              {keys.length === 0 ? (
+                <p className="muted">No keys.</p>
+              ) : (
+                <ul className="acc-keys">
+                  {keys.map((k) => (
+                    <li key={k.fingerprint}>
+                      <span className="acc-key-text">
+                        <b><bdi>{k.comment ?? k.type}</bdi></b>
+                        <span className="muted acc-fp"><bdi>{k.fingerprint}</bdi></span>
                       </span>
-                      <label className="chk acc-chk">
-                        <input type="checkbox" checked={g.write} onChange={(e) => setMachine(m.node, (x) => ({ ...x, grants: x.grants.map((y) => (y.path === g.path ? { ...y, write: e.target.checked } : y)) }))} />
-                        Can change
-                      </label>
-                      <button type="button" aria-label={`Remove folder ${g.path} on ${m.node}`} onClick={() => setMachine(m.node, (x) => ({ ...x, grants: x.grants.filter((y) => y.path !== g.path) }))}>
-                        <Ic.X aria-hidden="true" /> Remove
+                      <button type="button" aria-label={`Remove key ${k.comment ?? k.fingerprint}`} onClick={() => changeKey(() => removeKey(existing.name, k.fingerprint))}>
+                        <Ic.Trash2 aria-hidden="true" /> Remove
                       </button>
-                      {g.path === "/" && (
-                        <span className="muted acc-help acc-whole">
-                          This gives the whole machine. Only the permissions of {m.runAs.trim() ? <bdi>{m.runAs.trim()}</bdi> : "the run-as user"} limit it.
-                        </span>
-                      )}
                     </li>
                   ))}
                 </ul>
               )}
-              <div className="acc-row">
-                <button type="button" onClick={() => setPicking(m.node)}><Ic.FolderPlus aria-hidden="true" /> Add folder…</button>
+              <div className="acc-field">
+                <label htmlFor={ids.key}>Public key</label>
+                <textarea id={ids.key} rows={2} spellCheck={false} placeholder="ssh-ed25519 AAAA... comment" aria-describedby={ids.keyHelp} value={newKey} onChange={(e) => setNewKey(e.target.value)} />
+                <span id={ids.keyHelp} className="muted acc-help">
+                  One line from a .pub file: ssh-ed25519 or ecdsa-sha2-nistp256. Key changes apply at once and end this account&apos;s sessions.
+                </span>
               </div>
-            </fieldset>
-          );
-        })}
-      </section>
+              <div className="acc-row">
+                <button type="button" disabled={newKey.trim() === ""} aria-busy={busy === "key" || undefined} onClick={() => changeKey(() => addKey(existing.name, newKey.trim()))}>
+                  <Ic.KeyRound aria-hidden="true" /> {busy === "key" ? "Saving…" : "Add key"}
+                </button>
+                <div className="ad-err" role="alert">{keyErr}</div>
+              </div>
+            </>
+          )}
+        </section>
 
-      <section className="set-sec" aria-labelledby={ids.name + "-n"}>
-        <h3 id={ids.name + "-n"}>Network sources</h3>
-        {overview.sources.length === 0 ? (
-          <p className="muted">No network sources are configured.</p>
-        ) : (
-          <>
-            {form.admin && <p className="muted">An administrator can use every network source, whatever is chosen here.</p>}
-            <ul className="acc-sources">
-              {overview.sources.map((s) => (
-                <li key={s.name}>
-                  <span className="acc-src-name"><bdi>{s.name}</bdi> <span className="muted">{s.type}</span></span>
-                  <Dropdown
-                    label={`Access to ${s.name}`}
-                    value={form.sources[s.name] ?? "none"}
-                    options={SOURCE_CHOICES}
-                    onChange={(v) => setForm((f) => ({ ...f, sources: { ...f.sources, [s.name]: v as SourceChoice } }))}
-                  />
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </section>
+        <section className="set-sec" aria-labelledby={ids.name + "-m"}>
+          <h3 id={ids.name + "-m"}>Machines</h3>
+          <p className="muted">On each machine the account acts as a system user and sees only the folders given here. The first folder is the one Filedeck opens.</p>
+          {form.machines.length === 0 && <p className="muted">No machines are configured.</p>}
+          {form.machines.map((m) => {
+            const isGone = gone.machines.includes(m.node);
+            return (
+              <fieldset key={m.node} className="acc-machine">
+                <legend><Ic.Server aria-hidden="true" /> <bdi>{m.node}</bdi>{!known.nodes.includes(m.node) && <span className="muted"> (not configured now)</span>}</legend>
+                {isGone && <p className="muted acc-help">This machine is not configured now. Saving leaves it out, which ends this access.</p>}
+                <div className="acc-field">
+                  <label htmlFor={`${ids.name}-run-${m.node}`}>Run as (system user)</label>
+                  <input id={`${ids.name}-run-${m.node}`} value={m.runAs} autoComplete="off" spellCheck={false} autoCapitalize="none" onChange={(e) => setMachine(m.node, (x) => ({ ...x, runAs: e.target.value }))} />
+                </div>
+                {m.grants.length > 0 && (
+                  <ul className="acc-grants" aria-label={`Folders on ${m.node}`}>
+                    {m.grants.map((g, i) => (
+                      <li key={g.path}>
+                        <span className="acc-grant-path">
+                          <Ic.Folder aria-hidden="true" /> <bdi>{g.path}</bdi>
+                          {i === 0 && <span className="pill">Opens first</span>}
+                        </span>
+                        <Check checked={g.write} onChange={(write) => setMachine(m.node, (x) => ({ ...x, grants: x.grants.map((y) => (y.path === g.path ? { ...y, write } : y)) }))}>
+                          Can change
+                        </Check>
+                        <button type="button" aria-label={`Remove folder ${g.path} on ${m.node}`} onClick={() => setMachine(m.node, (x) => ({ ...x, grants: x.grants.filter((y) => y.path !== g.path) }))}>
+                          <Ic.X aria-hidden="true" /> Remove
+                        </button>
+                        {g.path === "/" && (
+                          <span className="muted acc-help acc-whole">
+                            This gives the whole machine. Only the permissions of {m.runAs.trim() ? <bdi>{m.runAs.trim()}</bdi> : "the run-as user"} limit it.
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {!isGone && (
+                  <div className="acc-row">
+                    <button type="button" onClick={() => setPicking(m.node)}><Ic.FolderPlus aria-hidden="true" /> Add folder…</button>
+                  </div>
+                )}
+              </fieldset>
+            );
+          })}
+        </section>
 
-      <div className="acc-actions">
-        <div className="ad-err acc-err" role="alert" id={ids.err}>
-          {err.length === 1 ? err[0] : err.length > 1 ? <ul>{err.map((x) => <li key={x}>{x}</li>)}</ul> : null}
+        <section className="set-sec" aria-labelledby={ids.name + "-n"}>
+          <h3 id={ids.name + "-n"}>Network sources</h3>
+          {overview.sources.length === 0 && gone.sources.length === 0 ? (
+            <p className="muted">No network sources are configured.</p>
+          ) : (
+            <>
+              {form.admin && <p className="muted">An administrator can use every network source, whatever is chosen here.</p>}
+              <ul className="acc-sources">
+                {overview.sources.map((s) => (
+                  <li key={s.name}>
+                    <span className="acc-src-name"><bdi>{s.name}</bdi> <span className="muted">{s.type}</span></span>
+                    <Dropdown
+                      label={`Access to ${s.name}`}
+                      value={form.sources[s.name] ?? "none"}
+                      options={SOURCE_CHOICES}
+                      disabled={busy !== ""}
+                      onChange={(v) => setForm((f) => ({ ...f, sources: { ...f.sources, [s.name]: v as SourceChoice } }))}
+                    />
+                  </li>
+                ))}
+                {gone.sources.map((name) => (
+                  <li key={name}>
+                    <span className="acc-src-name">
+                      <bdi>{name}</bdi> <span className="muted">(not configured now)</span>
+                      <span className="muted acc-help acc-gone">{form.sources[name] === "write" ? "Read and write" : "Read only"}. Saving leaves this grant out, which ends it.</span>
+                    </span>
+                    <button type="button" aria-label={`Remove the grant to ${name}`} onClick={() => setForm((f) => ({ ...f, sources: { ...f.sources, [name]: "none" } }))}>
+                      <Ic.X aria-hidden="true" /> Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </section>
+
+        <div className="acc-actions">
+          <div className="ad-err acc-err" role="alert" id={ids.err}>
+            {err.length === 1 ? err[0] : err.length > 1 ? <ul>{err.map((x) => <li key={x}>{x}</li>)}</ul> : null}
+          </div>
+          <button type="button" onClick={requestClose}><Ic.X aria-hidden="true" /> Cancel</button>
+          <button type="button" className="primary" onClick={save} aria-busy={busy === "save" || undefined} aria-describedby={err.length ? ids.err : undefined}>
+            <Ic.Check aria-hidden="true" /> {busy === "save" ? "Saving…" : existing ? "Save" : "Create account"}
+          </button>
         </div>
-        <button type="button" onClick={onCancel} disabled={busy === "save"}><Ic.X aria-hidden="true" /> Cancel</button>
-        <button type="button" className="primary" onClick={save} disabled={busy !== ""} aria-busy={busy === "save" || undefined} aria-describedby={err.length ? ids.err : undefined}>
-          <Ic.Check aria-hidden="true" /> {busy === "save" ? "Saving…" : existing ? "Save" : "Create account"}
-        </button>
-      </div>
+      </fieldset>
 
       {picking !== null && (
         <GrantPicker
@@ -308,6 +369,15 @@ export function AccountEditor({ existing, overview, self, onSaved, onCancel, bus
             >
               <Ic.Check aria-hidden="true" /> Save and sign out
             </button>
+          </div>
+        </Modal>
+      )}
+      {discarding && (
+        <Modal title="Discard changes?" onClose={() => setDiscarding(false)} describedBy={ids.err + "-d"}>
+          <p id={ids.err + "-d"} className="pad0">The changes to this account have not been saved.</p>
+          <div className="modal-actions">
+            <button type="button" autoFocus onClick={() => setDiscarding(false)}><Ic.Undo2 aria-hidden="true" /> Keep editing</button>
+            <button type="submit" className="danger" onClick={() => (setDiscarding(false), onClose())}><Ic.Trash2 aria-hidden="true" /> Discard</button>
           </div>
         </Modal>
       )}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formProblems, fromView, toInput, type AccountForm } from "../src/accountForm.ts";
+import { formChanged, formProblems, fromView, notConfigured, toInput, type AccountForm } from "../src/accountForm.ts";
 import type { AccountView } from "../src/admin.ts";
 
 const good = (): AccountForm => ({
@@ -89,6 +89,38 @@ test("formProblems names a bad name, a short password, a machine with folders an
   relative.machines[0]!.grants[0]!.path = "srv/x";
   assert.equal(formProblems(relative).length, 1);
   assert.match(formProblems(relative)[0]!, /srv\/x/);
+});
+
+test("a source or machine that is no longer configured is named, and toInput leaves it out so the account can still be saved", () => {
+  const v: AccountView = {
+    name: "guest",
+    admin: false,
+    hasPassword: true,
+    keys: [],
+    nodes: { alpha: { runAs: "share", grants: [{ path: "/srv", write: false }] }, gone: { runAs: "share", grants: [{ path: "/old", write: true }] } },
+    sources: { s3: { write: false }, retired: { write: true } },
+    sessions: 0,
+  };
+  const known = { nodes: ["alpha", "beta"], sources: ["s3"] };
+  const f = fromView(v);
+  assert.deepEqual(notConfigured(f, known), { machines: ["gone"], sources: ["retired"] });
+  const input = toInput(f, known);
+  assert.deepEqual(Object.keys(input.nodes), ["alpha"]);
+  assert.deepEqual(input.sources, { s3: { write: false } });
+  // without the configured lists nothing is left out
+  assert.deepEqual(Object.keys(toInput(f).nodes).sort(), ["alpha", "gone"]);
+  assert.deepEqual(notConfigured(good(), { nodes: ["alpha", "beta"], sources: ["s3", "web", "box"] }), { machines: [], sources: [] });
+});
+
+test("formChanged: a typed password or any field that differs from the start counts; the same form does not", () => {
+  const start = good();
+  assert.equal(formChanged(start, good()), false);
+  assert.equal(formChanged(start, { ...good(), password: "x" }), true);
+  assert.equal(formChanged(start, { ...good(), admin: true }), true);
+  const g = good();
+  g.machines[0]!.grants[1]!.write = true;
+  assert.equal(formChanged(start, g), true);
+  assert.equal(formChanged(start, { ...good(), sources: { ...good().sources, web: "read" } }), true);
 });
 
 test("formProblems gives nothing for a good form", () => {

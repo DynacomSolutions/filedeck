@@ -17,15 +17,30 @@ export const MAX_PASSWORD = 1024;
 /** A machine counts once it has a run-as user or a folder; an untouched section is left out. */
 const used = (m: MachineForm) => m.runAs.trim() !== "" || m.grants.some((g) => g.path.trim() !== "");
 
-/** What the hub takes: trimmed, without untouched machines, sources set to none or an empty password. */
-export function toInput(f: AccountForm): AccountInput {
+/** The machines and network sources the hub has configured now (`overview()`). */
+export type Configured = { nodes: readonly string[]; sources: readonly string[] };
+
+/** The machines and sources the form names that are not configured now: the hub refuses them, so `toInput` leaves them out. */
+export function notConfigured(f: AccountForm, known: Configured): { machines: string[]; sources: string[] } {
+  return {
+    machines: f.machines.filter((m) => used(m) && !known.nodes.includes(m.node)).map((m) => m.node),
+    sources: Object.entries(f.sources).filter(([name, c]) => c !== "none" && !known.sources.includes(name)).map(([name]) => name),
+  };
+}
+
+/**
+ * What the hub takes: trimmed, without untouched machines, sources set to none or an empty password. With `known`, machines and sources
+ * that are not configured now are left out too: the hub would refuse the whole change for them, and machines and sources are replaced
+ * as a whole, so saving drops those grants.
+ */
+export function toInput(f: AccountForm, known?: Configured): AccountInput {
   const nodes: Record<string, NodeAccess> = {};
   for (const m of f.machines) {
-    if (!used(m)) continue;
+    if (!used(m) || (known && !known.nodes.includes(m.node))) continue;
     nodes[m.node] = { runAs: m.runAs.trim(), grants: m.grants.filter((g) => g.path.trim() !== "").map((g) => ({ path: g.path.trim(), write: g.write })) };
   }
   const sources: Record<string, SourceAccess> = {};
-  for (const [name, choice] of Object.entries(f.sources)) if (choice !== "none") sources[name] = { write: choice === "write" };
+  for (const [name, choice] of Object.entries(f.sources)) if (choice !== "none" && (!known || known.sources.includes(name))) sources[name] = { write: choice === "write" };
   // a password is sent as typed: spaces at its ends are part of it
   return { name: f.name.trim(), ...(f.password !== "" ? { password: f.password } : {}), admin: f.admin, nodes, sources };
 }
@@ -41,6 +56,14 @@ export function fromView(v: AccountView): AccountForm {
     machines: Object.entries(v.nodes).map(([node, a]) => ({ node, runAs: a.runAs, grants: a.grants.map((g) => ({ path: g.path, write: g.write })) })),
     sources,
   };
+}
+
+/** Whether `now` holds changes against `start`: a typed password, or any field that differs. Sources set to none count as absent. */
+export function formChanged(start: AccountForm, now: AccountForm): boolean {
+  if (now.password !== "") return true;
+  const norm = (f: AccountForm) =>
+    JSON.stringify([f.name.trim(), f.admin, f.machines.map((m) => [m.node, m.runAs.trim(), m.grants]), Object.entries(f.sources).filter(([, c]) => c !== "none").sort(([a], [b]) => (a < b ? -1 : 1))]);
+  return norm(start) !== norm(now);
 }
 
 /** The problems that can be seen before asking the hub, as sentences to show. Empty when there are none. */
