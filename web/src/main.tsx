@@ -7,6 +7,7 @@ import "./styles.css";
 import "./accessibility.css";
 import "./sidebar.css";
 import "./phone.css";
+import "./bars.css";
 import "./pwa.css";
 import { AccessibilityChrome } from "./AccessibilityChrome";
 import { ErrorBoundary } from "./ErrorBoundary";
