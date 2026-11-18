@@ -273,9 +273,6 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
   );
 }
 
-/** Accessible name of the header Jobs button: starts with its visible text ("Jobs"), then the count or a waiting question the badge shows. The open state is in aria-expanded. */
-const jobsLabel = ({ running, asking }: JobsInfo) => `Jobs${asking ? ", needs an answer" : running > 0 ? `, ${running} running` : ""}`;
-
 const JOBS_OPEN_KEY = "filedeck-jobs-collapsed";
 /** The desktop jobs panel reuses the saved fold state of the old tray ("1" folded); with nothing saved it starts closed. */
 const loadJobsOpen = (): boolean => {
@@ -724,9 +721,9 @@ export function App({ account }: { account?: Account } = {}) {
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
             {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? openAccounts : undefined} />}
             <Tip label="Jobs">
-              <button type="button" className={"jobs-btn" + (jobsInfo.asking ? " attn" : "")} data-drawer-toggle aria-label={jobsLabel(jobsInfo)} aria-controls="jobs-panel" aria-expanded={jobsShown} onClick={toggleJobs}>
+              <button type="button" className={"jobs-btn" + (jobsInfo.asking ? " attn" : "")} data-drawer-toggle aria-controls="jobs-panel" aria-expanded={jobsShown} onClick={toggleJobs}>
                 <Ic.Activity /> <span className="bl">Jobs</span>
-                {(jobsInfo.asking || jobsInfo.running > 0) && <span className="jobs-badge" aria-hidden="true">{jobsInfo.asking ? "!" : jobsInfo.running}</span>}
+                {(jobsInfo.asking || jobsInfo.running > 0) && <><span className="jobs-badge">{jobsInfo.asking ? "!" : jobsInfo.running}</span><span className="visually-hidden">{jobsInfo.asking ? " needs an answer" : " running"}</span></>}
               </button>
             </Tip>
           </div>
