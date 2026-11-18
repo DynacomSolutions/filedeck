@@ -34,7 +34,8 @@ test("hashed build files are cached on use, other static files come from the pre
   assert.equal(strategyFor(get("/assets/theme.css"), O), "static");
   assert.equal(strategyFor(get("/assets/fonts/Montserrat-Bold.woff2"), O), "static");
   assert.equal(strategyFor(get("/icon-192.png"), O), "static");
-  assert.equal(strategyFor(get("/site.webmanifest"), O), "static");
+  // the manifest carries the deployment's brand, which can change without a new build: always from the hub
+  assert.equal(strategyFor(get("/site.webmanifest"), O), "none");
   // a hashed name with a query is still the same file
   assert.equal(strategyFor(get("/assets/index-CuXm30AH.js?v=1"), O), "asset");
 });
@@ -55,7 +56,7 @@ test("the precache holds the entry, its static imports and their CSS, plus liste
     { type: "asset", fileName: "index.html" },
     { type: "asset", fileName: "sw.js" },
   ];
-  const list = precacheFrom(bundle, ["icon-192.png", "assets/theme.css", "assets/fonts/OFL.txt", "sw.js"]);
+  const list = precacheFrom(bundle, ["icon-192.png", "assets/theme.css", "assets/fonts/OFL.txt", "sw.js", "site.webmanifest"]);
   assert.deepEqual(list, ["/assets/auth-CCCCCCCC.js", "/assets/fonts/OFL.txt", "/assets/index-AAAAAAAA.js", "/assets/index-DDDDDDDD.css", "/assets/react-BBBBBBBB.js", "/assets/theme.css", "/icon-192.png"]);
   assert.ok(!list.includes("/assets/editor.api-EEEEEEEE.js"));
   assert.ok(!list.some((p) => p.startsWith("/api")));

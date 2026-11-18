@@ -275,5 +275,5 @@ Install on Android and desktop with the Filedeck icon, open offline to a clear "
 ETA: 2026-11-19 12:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 163 | PWA: manifest, icons (maskable, monochrome), service worker (shell only, never `/api/`), hub-unreachable screen, update prompt, job notifications from a Settings switch, Install app | in progress | claude-20261118-pwa | filedeck-pwa | | 2026-11-19 12:00 ICT | Local notifications only. Share target and file handling not built (need a destination picker) |
+| 163 | PWA: manifest, icons (maskable, monochrome), service worker (shell only, never `/api/`), hub-unreachable screen, update prompt, job notifications from a Settings switch, Install app | in progress | claude-20261118-pwa | filedeck-pwa | | 2026-11-18 14:42 ICT | Local notifications only. Share target and file handling not built (need a destination picker) |
 | 164 | Web Push while the app is closed: VAPID keys from config, per-account and per-session subscriptions at the hub, ended with the session or account change | todo | | | 21.163 | | Proposed in the design doc; needs Thomas's confirmation before it is built |

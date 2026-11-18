@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { notificationsFor } from "../src/jobNotify.ts";
+import { VISIBLE_FRESH_MS, notificationsFor, otherTabVisible, parseVisibleMark } from "../src/jobNotify.ts";
 import type { HistoryEntry } from "../src/jobHistory.ts";
 import { DEFAULT_SETTINGS, normalizeSettings } from "../src/settings.ts";
 
 const job = (key: string, outcome: HistoryEntry["outcome"], extra: Partial<HistoryEntry> = {}): HistoryEntry => ({ key, title: `Copy ${key}`, outcome, at: 1, ...extra });
-const on = { hidden: true, enabled: true, permission: "granted" };
+const on = { hidden: true, enabled: true, permission: "granted", otherTabVisible: false };
 
 test("no notification while the page is shown, the switch is off, or permission is not granted", () => {
   const ended = [job("a", "done")];
@@ -14,6 +14,18 @@ test("no notification while the page is shown, the switch is off, or permission 
   assert.deepEqual(notificationsFor(ended, { ...on, permission: "default" }), []);
   assert.deepEqual(notificationsFor(ended, { ...on, permission: "denied" }), []);
   assert.deepEqual(notificationsFor([], on), []);
+  // another Filedeck tab is on screen: its tray shows the result, so this hidden tab stays quiet
+  assert.deepEqual(notificationsFor(ended, { ...on, otherTabVisible: true }), []);
+});
+
+test("a tab counts as on screen while its mark is fresh, and never for itself", () => {
+  assert.equal(otherTabVisible({ id: "b", at: 10_000 }, "a", 12_000), true);
+  assert.equal(otherTabVisible({ id: "b", at: 10_000 }, "a", 10_000 + VISIBLE_FRESH_MS + 1), false);
+  assert.equal(otherTabVisible({ id: "a", at: 10_000 }, "a", 10_500), false);
+  assert.equal(otherTabVisible(null, "a", 10_500), false);
+  assert.equal(otherTabVisible(parseVisibleMark("not json"), "a", 1), false);
+  assert.deepEqual(parseVisibleMark(JSON.stringify({ id: "b", at: 5 })), { id: "b", at: 5 });
+  assert.equal(parseVisibleMark(JSON.stringify({ id: 3, at: "x" })), null);
 });
 
 test("one finished or failed job gives one notification, tagged with the job", () => {

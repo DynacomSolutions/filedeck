@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { brand } from "./brand";
-import { applyUpdate, useUpdateState } from "./pwa";
+import { applyUpdate, checkForUpdate, useUpdateState } from "./pwa";
 
 /** How often the "hub not reachable" screen tries again by itself. */
 export const RETRY_MS = 15_000;
@@ -25,7 +25,9 @@ export function HubUnreachable({ retry }: { retry: () => Promise<void> }) {
   again.current = retry;
   const run = () => {
     setBusy(true);
+    // the app may have opened from a stored older version: ask for the current one as soon as the hub answers
     void again.current().finally(() => {
+      checkForUpdate();
       setBusy(false);
       setTries((n) => n + 1);
     });

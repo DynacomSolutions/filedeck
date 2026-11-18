@@ -8,7 +8,7 @@
  * - `none`: not handled at all; the browser fetches as if there were no service worker
  * - `shell`: a page load; network first, the stored shell when the hub cannot be reached
  * - `asset`: a build file with a content hash in its name; it never changes, so cache first and stored on first use
- * - `static`: another file of the app (icons, fonts, theme.css, manifest); from the precache, else the network
+ * - `static`: another file of the app (icons, fonts, theme.css); from the precache, else the network
  */
 export type Strategy = "none" | "shell" | "asset" | "static";
 
@@ -43,7 +43,8 @@ export function strategyFor(req: RequestLike, origin: string): Strategy {
   if (u.origin !== origin) return "none";
   const p = decodedPath(u);
   if (p === null || /^\/api(?:\/|$)/i.test(p) || p.includes("/../")) return "none";
-  if (p === "/sw.js") return "none";
+  // the worker script; and the manifest, which carries the deployment's brand and may change without a new build
+  if (p === "/sw.js" || p === "/site.webmanifest") return "none";
   if (req.mode === "navigate") return "shell";
   if (HASHED_ASSET.test(p)) return "asset";
   return "static";

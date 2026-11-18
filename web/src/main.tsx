@@ -66,7 +66,8 @@ function Root() {
   }, [view]);
   if (view === "loading") return null;
   if (view === "offline") return <><HubUnreachable retry={ask} /><UpdateBanner /></>;
-  if (view === "sign-in") return <><Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense><UpdateBanner /></>;
+  // the sign-in chunk loads on demand; a page of an older build may no longer find it, so a failure shows the error screen (with reload), never a blank page
+  if (view === "sign-in") return <><ErrorBoundary what="Sign-in" scope="root"><Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense></ErrorBoundary><UpdateBanner /></>;
   return (
     <>
       <UpdateBanner />

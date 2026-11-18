@@ -2,7 +2,7 @@
 // bar colour, and job notifications. The decisions are in pwaState.ts and jobNotify.ts.
 import { useSyncExternalStore } from "react";
 import { THEME_COLOR, nextUpdate, type UpdateState } from "./pwaState";
-import { notificationsFor } from "./jobNotify";
+import { VISIBLE_TICK_MS, notificationsFor, otherTabVisible, parseVisibleMark } from "./jobNotify";
 import type { HistoryEntry } from "./jobHistory";
 import { currentSettings } from "./settings";
 
@@ -64,13 +64,19 @@ function registerWorker() {
     .then((reg) => {
       registration = reg;
       watch(reg);
-      const check = () => void reg.update().catch(() => undefined);
       document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible") check();
+        if (document.visibilityState === "visible") checkForUpdate();
       });
-      window.setInterval(check, UPDATE_CHECK_MS);
+      // a start without a network could not check: ask as soon as the network is back
+      window.addEventListener("online", checkForUpdate);
+      window.setInterval(checkForUpdate, UPDATE_CHECK_MS);
     })
     .catch(() => undefined); // no worker (private mode, blocked): the app works as before, without offline start
+}
+
+/** Asks the hub whether a new version exists (the banner appears when one is installed). */
+export function checkForUpdate() {
+  void registration?.update().catch(() => undefined);
 }
 
 /** "Reload" pressed: let the waiting version take over (this tab reloads when it has), or reload a tab another tab updated. */
@@ -162,13 +168,49 @@ export async function showNotification(n: { title: string; body: string; tag: st
 
 /** Jobs that just ended (the jobs tray): notify when the page is hidden and the Settings switch is on. */
 export function notifyJobsEnded(ended: HistoryEntry[]) {
-  const ctx = { hidden: document.visibilityState === "hidden", enabled: currentSettings().notifyJobs, permission: notifySupport() };
+  const ctx = {
+    hidden: document.visibilityState === "hidden",
+    otherTabVisible: otherTabVisible(readMark(), TAB_ID, Date.now()),
+    enabled: currentSettings().notifyJobs,
+    permission: notifySupport(),
+  };
   for (const n of notificationsFor(ended, ctx)) void showNotification(n);
+}
+
+// ---- which tab is on screen ----
+
+const VISIBLE_KEY = "filedeck.visible-tab";
+const TAB_ID = Math.random().toString(36).slice(2);
+const readMark = () => {
+  try {
+    return parseVisibleMark(localStorage.getItem(VISIBLE_KEY));
+  } catch {
+    return null;
+  }
+};
+
+/** While this tab is on screen it renews its mark; hidden, it drops the mark if it is its own. */
+function markVisibleTab() {
+  const tick = () => {
+    try {
+      if (document.visibilityState === "visible") localStorage.setItem(VISIBLE_KEY, JSON.stringify({ id: TAB_ID, at: Date.now() }));
+      else if (readMark()?.id === TAB_ID) localStorage.removeItem(VISIBLE_KEY);
+    } catch {
+      /* storage unavailable: every hidden tab may notify */
+    }
+  };
+  tick();
+  document.addEventListener("visibilitychange", tick);
+  window.addEventListener("pagehide", () => {
+    if (readMark()?.id === TAB_ID) localStorage.removeItem(VISIBLE_KEY);
+  });
+  window.setInterval(tick, VISIBLE_TICK_MS);
 }
 
 /** Called once at start-up. The worker is registered only in a production build (the dev server has no /sw.js). */
 export function installPwa() {
   catchInstallPrompt();
   followTheme();
+  markVisibleTab();
   if (import.meta.env.PROD) registerWorker();
 }
