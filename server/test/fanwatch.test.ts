@@ -338,6 +338,27 @@ test("fanwatch: without a usable store, past maxPending the burst acts like an o
   s.done();
 });
 
+test("fanwatch: a folder whose lock is busy is recorded as dirty, never waited for, and the others are still applied", async () => {
+  const s = setup({ plain: true });
+  const calls: [string, unknown][] = [];
+  const dirty: string[][] = [];
+  const stale: string[] = [];
+  const store = {
+    applyChanged: async (v: string, _c?: undefined, o?: { wait?: boolean }) => (calls.push([v, o]), v.endsWith("/a") ? false : true),
+    markStale: (v: string) => void stale.push(v),
+    markDirty: async (ps: string[]) => (dirty.push(ps), true),
+  };
+  const w = new FanWatch(store, { helper: "fake", root: s.root, procMounts: path.join(s.root, "none"), settleMs: 5, modifyMs: 300, spawn: () => new Fake() });
+  w.line(`x ${s.root}/data/a`);
+  w.line(`x ${s.root}/data/b`);
+  await until(() => calls.length >= 2 && dirty.length >= 1, 30_000);
+  assert.ok(calls.every(([, o]) => (o as { wait?: boolean }).wait === false), "the watcher never queues for a lock");
+  assert.deepEqual(dirty.flat(), ["/data/a"]);
+  assert.deepEqual(stale, []);
+  w.stop();
+  s.done();
+});
+
 function fileStore() {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-store-")));
   const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 1000 });

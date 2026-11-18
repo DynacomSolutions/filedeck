@@ -43,7 +43,8 @@ export interface FanWatchOptions {
 }
 
 export interface ChangeSink {
-  applyChanged(virtual: string): Promise<void>;
+  /** false when `wait` is false and an overlapping walk holds or waits for the lock: nothing was applied, the caller records the folder as dirty */
+  applyChanged(virtual: string, ctl?: undefined, opts?: { wait?: boolean }): Promise<boolean | void>;
   markStale(virtual: string): void;
   /** keep changed folders on disk: false when that is not possible (the watcher then keeps them in memory) */
   notePending?(items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number): Promise<boolean>;
@@ -491,15 +492,18 @@ export class FanWatch {
         if (!batch.length) break;
         for (const v of batch) this.taken.set(v, false);
         const ends: [string, number][] = [];
+        // folders whose lock was busy: never queue behind a long walk (that would block every walk asked after it), record them as dirty instead
+        const busy: string[] = [];
         for (const v of batch) {
           if (this.stopped || this.handingOver) break;
           try {
-            await this.store.applyChanged(v);
+            if ((await this.store.applyChanged(v, undefined, { wait: false })) === false) busy.push(v);
           } catch {
             /* a folder that vanished or cannot be read: the next scan deals with it */
           }
           ends.push([v, Date.now()]);
         }
+        if (busy.length && !(await this.store.markDirty?.(busy))) for (const v of busy) this.store.markStale(v);
         // taken and not applied (the process is stopping): dirty, so the next process re-reads them
         const rest = batch.filter((v) => !ends.some(([e]) => e === v));
         if (rest.length) {
