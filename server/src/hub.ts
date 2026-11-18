@@ -202,11 +202,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
    * line). Calls still in flight then do not hold the answer: once they settle, the jobs are listed and cancelled once more.
    */
   const rootCalls = new RootCalls();
+  /** Each account's proxied requests and transfers in flight (sign-in on), cut when the account changes (auth/account-calls.ts). */
+  const calls = new AccountCalls(opts?.now);
+  app.accountCalls = calls; // (tests count them)
   const endRootJobs = async (name: string, until: number): Promise<void> => {
     if (!auth) return;
     const t0 = Date.now();
     // a call made under the switch may still be starting a job (the switch is off now, so no new one starts): wait for it first
     const key = RootCalls.key(name, until);
+    // the proxied requests and transfers made under the switch are cut now (the account's other calls go on)
+    calls.endRoot(name, key);
     const settled = await rootCalls.settled(key, ROOT_CALLS_WAIT_MS);
     await cancelRootJobs(name, until, Math.max(500, END_ROOT_JOBS_MS - (Date.now() - t0)));
     // still in flight: the answer does not wait any longer, but the jobs are listed again once those calls have settled (not when they
@@ -422,13 +427,17 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
    * (so the agent also stops its workers), to cancel its jobs there. `before` is the identity from before the change, so a machine the
    * change took away is still asked. A system account is asked on every machine.
    */
-  /** Each account's proxied requests and transfers in flight (sign-in on), cut when the account changes (auth/account-calls.ts). */
-  const calls = new AccountCalls();
-  app.accountCalls = calls; // (tests count them)
-  /** A call of the current account starts: undefined with sign-in off or nobody behind the request. */
-  const startCall = (): AccountCall | undefined => {
+  /**
+   * A call of the current account starts: undefined with sign-in off or nobody behind the request. One made under a live act-as-root
+   * switch is tagged with it, so the switch's end cuts it (and only it) as well; but not a call to the agent's job routes
+   * (`jobRoute`): cutting a job start would not keep the agent from starting the job, and it would end the wait in `endRootJobs` early,
+   * so its listing could miss that job. Those calls are short, and that wait and the late relist cover them.
+   */
+  const startCall = (jobRoute = false): AccountCall | undefined => {
     const id = cfg.auth ? currentUser() : undefined;
-    return id ? calls.start(id.kind, id.name) : undefined;
+    if (!id) return undefined;
+    const root = !jobRoute && id.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id) ? { key: RootCalls.key(id.name, id.asRootUntil), until: id.asRootUntil } : undefined;
+    return calls.start(id.kind, id.name, root);
   };
   app.accountChanged = async (before: Identity): Promise<void> => {
     if (!auth) return;
@@ -665,7 +674,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     }
     // With sign-in on, every proxied request is the account's until its answer body is over, whatever its method: when the account
     // changes it is cut (a body on its way up fails, so the agent or source drops a partial upload; the answer stops).
-    const call = startCall();
+    const call = startCall(rest === "/api/jobs" || rest.startsWith("/api/jobs/"));
     const target = call ? cuttableTarget(base, call.signal) : base;
     const cut = (res: Response) => (call ? cuttableResponse(res, call.signal, call.done) : res);
     try {

@@ -21,24 +21,44 @@ export interface AccountCall {
   done(): void;
 }
 
-export class AccountCalls {
-  private readonly open = new Map<string, Set<AbortController>>();
+/** A call made under an act-as-root switch: the switch's key (the hub's `RootCalls.key`) and its end, ms since the epoch. */
+export interface RootSwitch {
+  key: string;
+  until: number;
+}
 
-  /** A call of `kind:name` starts. */
-  start(kind: "sys" | "virt", name: string): AccountCall {
+interface Entry {
+  ac: AbortController;
+  root?: string;
+  timer?: NodeJS.Timeout;
+}
+
+export class AccountCalls {
+  private readonly open = new Map<string, Set<Entry>>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /**
+   * A call of `kind:name` starts. One made under an act-as-root switch (`root`) is also cut when that switch ends (`endRoot`), and at
+   * its end time at the latest.
+   */
+  start(kind: "sys" | "virt", name: string, root?: RootSwitch): AccountCall {
     const key = `${kind}:${name}`;
-    const ac = new AbortController();
+    const e: Entry = { ac: new AbortController(), ...(root ? { root: root.key } : {}) };
     let set = this.open.get(key);
     if (!set) this.open.set(key, (set = new Set()));
-    set.add(ac);
+    set.add(e);
     const calls = set;
-    return {
-      signal: ac.signal,
-      done: () => {
-        calls.delete(ac);
-        if (calls.size === 0 && this.open.get(key) === calls) this.open.delete(key);
-      },
+    const done = () => {
+      clearTimeout(e.timer);
+      calls.delete(e);
+      if (calls.size === 0 && this.open.get(key) === calls) this.open.delete(key);
     };
+    if (root) {
+      e.timer = setTimeout(() => e.ac.abort(new CallCut()), Math.max(0, Math.min(root.until - this.now(), 2 ** 31 - 1)));
+      e.timer.unref();
+    }
+    return { signal: e.ac.signal, done };
   }
 
   /** Cuts every call of `kind:name` now in flight; gives how many. */
@@ -47,8 +67,19 @@ export class AccountCalls {
     const set = this.open.get(key);
     if (!set) return 0;
     this.open.delete(key);
-    for (const ac of set) ac.abort(new CallCut());
-    return set.size;
+    // (read first: a call forgets itself as it is cut)
+    const all = [...set];
+    for (const e of all) e.ac.abort(new CallCut());
+    return all.length;
+  }
+
+  /** Cuts the calls of `sys:name` made under the act-as-root switch `key`, and no other; gives how many. */
+  endRoot(name: string, key: string): number {
+    const set = this.open.get(`sys:${name}`);
+    if (!set) return 0;
+    const hit = [...set].filter((e) => e.root === key);
+    for (const e of hit) e.ac.abort(new CallCut());
+    return hit.length;
   }
 
   /** How many calls are in flight (tests). */
@@ -59,14 +90,28 @@ export class AccountCalls {
   }
 }
 
+/** A cuttable body, and `close`, which ends it and closes the inner body whether it was read or not. */
+interface CuttableBody {
+  stream: ReadableStream<Uint8Array>;
+  /** ends it (its reader sees it fail) and closes the inner body; nothing when it is over already */
+  close(): void;
+}
+
 /**
  * `body` passed through until `signal` aborts; then the stream fails (never a clean end) and `body` is cancelled. `onEnd` runs once
- * however it ends: read to the end, failed, cancelled by its reader, or cut.
+ * however it ends: read to the end, failed, cancelled by its reader, cut, or closed. `body` is locked only at the first read, so until
+ * then its owner can still cancel it itself; and cancelling the stream, a cut and `close` all close `body`, read or not (a source's read
+ * stream left open holds the backend: an SMB download keeps its smbclient child).
  */
-export function cuttableBody(body: ReadableStream<Uint8Array>, signal: AbortSignal, onEnd?: () => void): ReadableStream<Uint8Array> {
-  const reader = body.getReader();
+function cuttable(body: ReadableStream<Uint8Array>, signal: AbortSignal, onEnd?: () => void): CuttableBody {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let over = false;
   let ctl!: ReadableStreamDefaultController<Uint8Array>;
+  /** cancels `body`, through the reader once there is one */
+  const closeInner = (reason: unknown): Promise<void> => {
+    const p = reader ? reader.cancel(reason) : body.locked ? Promise.resolve() : body.cancel(reason);
+    return p.catch(() => undefined);
+  };
   const end = () => {
     if (over) return false;
     over = true;
@@ -74,22 +119,25 @@ export function cuttableBody(body: ReadableStream<Uint8Array>, signal: AbortSign
     onEnd?.();
     return true;
   };
-  const cut = () => {
+  const fail = (e: Error) => {
     if (!end()) return;
     try {
-      ctl.error(new CallCut());
+      ctl.error(e);
     } catch {
       /* already closed */
     }
-    reader.cancel(new CallCut()).catch(() => undefined);
+    void closeInner(e);
   };
-  return new ReadableStream<Uint8Array>({
+  const cut = () => fail(new CallCut());
+  const stream = new ReadableStream<Uint8Array>({
     start: (c) => {
       ctl = c;
       if (signal.aborted) cut();
       else signal.addEventListener("abort", cut, { once: true });
     },
     pull: async (c) => {
+      if (over) return;
+      reader ??= body.getReader();
       let r: ReadableStreamReadResult<Uint8Array>;
       try {
         r = await reader.read();
@@ -105,20 +153,45 @@ export function cuttableBody(body: ReadableStream<Uint8Array>, signal: AbortSign
     },
     cancel: (reason) => {
       end();
-      return reader.cancel(reason);
+      return closeInner(reason);
     },
   });
+  return { stream, close: () => fail(new Error("the body was not read")) };
 }
 
-/** A target whose calls are cut with `signal`: a call after the cut fails at once; a body sent in a call fails when cut. */
+/** `body` passed through until `signal` aborts (see `cuttable`). */
+export function cuttableBody(body: ReadableStream<Uint8Array>, signal: AbortSignal, onEnd?: () => void): ReadableStream<Uint8Array> {
+  return cuttable(body, signal, onEnd).stream;
+}
+
+/**
+ * A target whose calls are cut with `signal`: a call after the cut fails at once; a body sent in a call fails when cut. A body the
+ * other end did not take (the call failed, or the answer is not a success: a refusal comes before the body is read) is closed as soon
+ * as the answer is in, so the stream it came from (a source's download) is never left open.
+ */
 export function cuttableTarget<T extends { fetch(rest: string, init?: RequestInit): Promise<Response> }>(t: T, signal: AbortSignal): T {
   return {
     ...t,
     fetch: (rest: string, init?: RequestInit) => {
       if (signal.aborted) return Promise.reject(new CallCut());
-      const body = init?.body instanceof ReadableStream ? cuttableBody(init.body as ReadableStream<Uint8Array>, signal) : init?.body;
+      const body = init?.body instanceof ReadableStream ? cuttable(init.body as ReadableStream<Uint8Array>, signal) : undefined;
       const sig = init?.signal ? AbortSignal.any([init.signal, signal]) : signal;
-      return t.fetch(rest, { ...init, ...(body !== undefined ? { body } : {}), signal: sig });
+      let p: Promise<Response>;
+      try {
+        p = t.fetch(rest, { ...init, ...(body ? { body: body.stream } : {}), signal: sig });
+      } catch (e) {
+        p = Promise.reject(e); // (a target that throws at once: the body is closed all the same)
+      }
+      return p.then(
+        (r) => {
+          if (!r.ok) body?.close();
+          return r;
+        },
+        (e: unknown) => {
+          body?.close();
+          throw e;
+        },
+      );
     },
   };
 }

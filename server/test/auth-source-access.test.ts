@@ -11,6 +11,7 @@ import { loadConfig } from "../src/config.ts";
 import { hashPassword } from "../src/auth/store.ts";
 import { SourceGrants } from "../src/auth/source-grants.ts";
 import { FsError } from "../src/fsops.ts";
+import { AccountCalls } from "../src/auth/account-calls.ts";
 import type { SystemAuth } from "../src/auth/routes.ts";
 import type { Identity } from "../src/auth/identity.ts";
 import type { SourceBackend, SourceEntry, SourceStat } from "../src/sources/types.ts";
@@ -46,6 +47,9 @@ class MemSource implements SourceBackend {
   writeMs = 0;
   /** slows every file read down (a long download) */
   readMs = 0;
+  /** read streams handed out, and those closed since (a stream left open holds the backend, as an smbclient child) */
+  readsOpened = 0;
+  readsClosed = 0;
   /** how many file writes have begun */
   started = 0;
   /** how many file writes have finished */
@@ -89,17 +93,21 @@ class MemSource implements SourceBackend {
     const e = this.entries.get(p);
     if (!e || e.type !== "file") throw new FsError(404, "not found");
     const data = range ? e.data.subarray(range.start, range.end + 1) : e.data;
-    if (!this.readMs) return Readable.from([data]);
     // a slow download: 16 KiB at a time, `readMs` apart
     const ms = this.readMs;
-    return Readable.from(
-      (async function* () {
-        for (let at = 0; at < data.length; at += 16_384) {
-          yield data.subarray(at, at + 16_384);
-          await sleep(ms);
-        }
-      })(),
-    );
+    const out = !ms
+      ? Readable.from([data])
+      : Readable.from(
+          (async function* () {
+            for (let at = 0; at < data.length; at += 16_384) {
+              yield data.subarray(at, at + 16_384);
+              await sleep(ms);
+            }
+          })(),
+        );
+    this.readsOpened++;
+    out.on("close", () => this.readsClosed++);
+    return out;
   }
   async write(p: string, body: Readable, o: { overwrite: boolean; mtime?: number }): Promise<number> {
     this.started++;
@@ -728,4 +736,82 @@ test("calls that end on their own are forgotten: none stays tracked", async () =
   await sleep(20);
   assert.equal(h.accountCalls.size(), 0);
   assert.equal(s2.entries.get("/ok.txt")?.data.toString(), "fine");
+});
+
+test("a transfer the destination refuses without reading closes the source's read stream (read-only, missing folder)", async () => {
+  const { h, s1, grants } = world();
+  s1.put("/big.bin", "z".repeat(1024 * 1024));
+  s1.readMs = 5;
+  const guest = await signIn(h, "guest");
+  for (const [access, dir, status] of [
+    [{ s1: { write: false }, s2: { write: false } }, "/", 403],
+    [{ s1: { write: false }, s2: { write: true } }, "/nope", 404],
+  ] as const) {
+    grants.setForAccount("virt", "guest", access);
+    const opened = s1.readsOpened;
+    const closed = s1.readsClosed;
+    const r = await send(h, "POST", "/api/transfer", guest, { src: { node: "s1", path: "/big.bin" }, dst: { node: "s2", dir } });
+    assert.equal(r.status, status, r.text);
+    assert.equal(s1.readsOpened, opened + 1);
+    await until(`the read stream of the transfer into ${dir} to close`, () => s1.readsClosed === closed + 1, 2_000);
+  }
+});
+
+test("act as root: switching off cuts the calls made under the switch, and only those", async () => {
+  const agent = await fakeAgent();
+  try {
+    const { h } = world(`a=${agent.url}`);
+    const root = await signIn(h, "sadmin");
+    const plain = await signIn(h, "sadmin");
+    const on = await send(h, "POST", "/api/auth/as-root", root, { password: PW });
+    assert.equal(on.status, 200, on.text);
+    const b1 = heldBody(new Uint8Array(1000).fill(1), new Uint8Array(1000).fill(2));
+    const asRoot = streamed(h, "PUT", "/api/nodes/a/api/fs/upload?dir=/&name=root.bin", root, b1.body);
+    await until("the root upload to reach the machine", () => agent.uploads.started === 1);
+    const b2 = heldBody(new Uint8Array(1000).fill(3), new Uint8Array(1000).fill(4));
+    const mine = streamed(h, "PUT", "/api/nodes/a/api/fs/upload?dir=/&name=plain.bin", plain, b2.body);
+    await until("the plain upload to reach the machine", () => agent.uploads.started === 2);
+    assert.equal((await send(h, "DELETE", "/api/auth/as-root", root)).status, 200);
+    await until("the root upload to be cut", () => agent.uploads.cut === 1, 2_000);
+    b1.release();
+    const r1 = await asRoot;
+    await r1.body?.cancel().catch(() => undefined);
+    assert.notEqual(r1.status, 201);
+    // the same administrator's call without the switch goes on
+    b2.release();
+    const r2 = await mine;
+    assert.equal(r2.status, 201, await r2.text());
+    assert.equal(agent.uploads.finished, 1);
+    assert.equal(agent.uploads.cut, 1);
+  } finally {
+    agent.close();
+  }
+});
+
+test("AccountCalls.endAccount gives how many calls it cut, also when each call forgets itself as it is cut", () => {
+  const calls = new AccountCalls();
+  for (let i = 0; i < 3; i++) {
+    const c = calls.start("virt", "guest");
+    c.signal.addEventListener("abort", c.done, { once: true });
+  }
+  const other = calls.start("virt", "other");
+  assert.equal(calls.endAccount("virt", "guest"), 3);
+  assert.equal(calls.endAccount("virt", "guest"), 0);
+  assert.equal(other.signal.aborted, false);
+  assert.equal(calls.size(), 1);
+});
+
+test("AccountCalls: a call under an act-as-root switch is cut by endRoot with its key, and at the switch's end at the latest", async () => {
+  const calls = new AccountCalls();
+  const ends = Date.now() + 80;
+  const a = calls.start("sys", "sadmin", { key: "sadmin\n1", until: ends + 60_000 });
+  const b = calls.start("sys", "sadmin", { key: "sadmin\n2", until: ends });
+  const plain = calls.start("sys", "sadmin");
+  assert.equal(calls.endRoot("sadmin", "sadmin\n1"), 1);
+  assert.ok(a.signal.aborted);
+  assert.ok(!b.signal.aborted && !plain.signal.aborted);
+  await until("the switch's end", () => b.signal.aborted, 1_000);
+  assert.ok(!plain.signal.aborted);
+  for (const c of [a, b, plain]) c.done();
+  assert.equal(calls.size(), 0);
 });
