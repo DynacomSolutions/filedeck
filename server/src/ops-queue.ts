@@ -343,6 +343,27 @@ export class OpQueue {
     return this.view(j, false);
   }
 
+  /**
+   * Cancels every live job of the account `kind:name` (queued, running, paused or waiting for an answer): the account changed, so its
+   * jobs must not carry on as it was. A live row another hub holds in the shared store gets the cancel flag (its holder cancels it at its
+   * next tick; a hub that adopts it instead finds the flag first). Returns how many jobs were cancelled or flagged.
+   */
+  cancelOwner(kind: "sys" | "virt", name: string): number {
+    const mine = (u: Identity | undefined) => !!u && u.kind === kind && u.name === name;
+    let count = 0;
+    for (const j of [...this.jobs.values()]) {
+      if (!live(j.state) || j.lost || !mine(j.user)) continue;
+      this.cancel(j.id);
+      count++;
+    }
+    const sh = this.d.shared;
+    for (const r of sh?.store.list(SCOPE) ?? []) {
+      if (this.jobs.has(r.id) || !live(r.state) || !mine(ownerFrom(r.user))) continue;
+      if (sh!.store.setCancel(r.id, SCOPE)) count++;
+    }
+    return count;
+  }
+
   pause(id: string): OpView | undefined {
     const j = this.jobs.get(id);
     if (!j) return this.foreign(id, 2);
@@ -535,6 +556,8 @@ export class OpQueue {
       if (p.paused) this.hold(j);
       this.jobs.set(j.id, j);
       this.save(j);
+      // cancelled while nobody held it (its account changed, or someone pressed cancel): it ends here and never runs again
+      if (r.cancel === 1) this.cancel(j.id);
       this.pump();
     } catch {
       const now = Date.now();

@@ -33,6 +33,7 @@ import { LiveStreams } from "./auth/streams.ts";
 import { markArrival, registerAuth, registerAuthOff, sessionKeyOf, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
+import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
 import { SysPresence } from "./auth/presence.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
@@ -119,7 +120,7 @@ class RootCalls {
 }
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
-  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target> };
+  const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target>; accountChanged(before: Identity): Promise<void> };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
   // the signed user header is keyed on the agent token, so there is no auth without one (main.ts says so first)
@@ -215,33 +216,20 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const cancelRootJobs = async (name: string, until: number, ms: number): Promise<void> => {
     if (!auth) return;
     const id: Identity = { kind: "sys", name, admin: cfg.admins.includes(name), epoch: auth.accounts.epochOf("sys", name) };
-    const signal = AbortSignal.timeout(ms);
-    await Promise.all(
-      cfg.nodes.map((n) =>
-        userContext.run(id, async () => {
-          try {
-            const r = await agentCall(n, "/api/jobs", { signal });
-            if (!r.ok) {
-              await r.body?.cancel().catch(() => undefined);
-              return;
-            }
-            const v = (await r.json()) as { jobs?: unknown };
-            const live = (Array.isArray(v?.jobs) ? v.jobs : []).filter(
-              (j): j is { id: string } =>
-                !!j && typeof j === "object" && typeof j.id === "string" && j.asRootUntil === until && (j.state === "queued" || j.state === "running"),
-            );
-            await Promise.all(
-              live.map(async (j) => {
-                const c = await agentCall(n, `/api/jobs/${encodeURIComponent(j.id)}/cancel`, { method: "POST", signal });
-                await c.body?.cancel().catch(() => undefined);
-              }),
-            );
-          } catch (e) {
-            console.error(`act as root: the root jobs of ${name} on ${n.name} were not cancelled (${String((e as Error)?.message ?? e).split("\n")[0]}); they stop at the switch's end`);
-          }
-        }),
-      ),
+    await userContext.run(id, () =>
+      cancelAgentJobs({
+        call: callNode,
+        nodes: cfg.nodes.map((n) => n.name),
+        pick: (j) => j.asRootUntil === until,
+        signal: AbortSignal.timeout(ms),
+        log: (node, reason) => console.error(`act as root: the root jobs of ${name} on ${node} were not cancelled (${reason}); they stop at the switch's end`),
+      }),
     );
+  };
+  /** An agent call by node name, as whoever the caller runs as (the agent-work helpers in auth/account-work.ts). */
+  const callNode = (node: string, rest: string, init?: RequestInit): Promise<Response> => {
+    const n = cfg.nodes.find((x) => x.name === node);
+    return n ? agentCall(n, rest, init) : Promise.reject(new Error(`unknown node ${node}`));
   };
   if (auth) registerAuth(app, { cfg, ...auth, system: opts?.system ?? app.systemAuth ?? unavailableSystemAuth, now: opts?.now, onSignIn, onAsRootEnd: endRootJobs });
   else registerAuthOff(app);
@@ -371,9 +359,23 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   });
 
   // Folder diff jobs run here: the hub reads both agents' listings and asks each agent to hash its own files.
-  registerHubDiff(app, agents, cfg.mode === "hub" ? cfg.diffDir : "", { mayUse });
+  const diffs = registerHubDiff(app, agents, cfg.mode === "hub" ? cfg.diffDir : "", { mayUse });
   // Bulk copy/move/trash/delete/sync run as hub jobs (survive the browser closing, pausable, conflict policy).
   opq = registerOps(app, agents, (n) => sources.has(n), cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), leaseMs: 30_000 } : undefined, mayUse);
+  const ops = opq;
+  /**
+   * An account changed (password, keys, admin flag, machines, grants, sources, deletion, "end all sessions"): its epoch rises, which ends
+   * its sessions and their streams; its hub jobs and compares are cancelled; and each machine is asked, as the account at its new epoch
+   * (so the agent also stops its workers), to cancel its jobs there. `before` is the identity from before the change, so a machine the
+   * change took away is still asked. A system account is asked on every machine.
+   */
+  app.accountChanged = async (before: Identity): Promise<void> => {
+    if (!auth) return;
+    auth.sessions.endAll(before.kind, before.name);
+    const id: Identity = { ...before, epoch: auth.accounts.epochOf(before.kind, before.name) };
+    const nodes = before.kind === "sys" ? cfg.nodes.map((n) => n.name) : Object.keys(before.nodes).filter((x) => nodeNames.has(x));
+    await endAccountWork({ id, nodes, ops, diffs, call: callNode });
+  };
   for (const f of cfg.jobsFile ? [cfg.jobsFile, cfg.jobsFile + "-wal", cfg.jobsFile + "-shm"] : []) {
     try {
       fs.chmodSync(f, 0o600);

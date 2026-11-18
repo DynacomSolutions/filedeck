@@ -99,7 +99,7 @@ function boundTo(t: Target, owner: Identity | undefined): Target {
   return { fetch: (rest, init) => asOwner(owner, () => t.fetch(rest, init)) };
 }
 
-export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs {
+export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs & { cancelOwner(kind: "sys" | "virt", name: string): number } {
   const envGrace = Number(process.env.FILEDECK_DIFF_GRACE_MS);
   const graceMs = o.graceMs ?? (envGrace > 0 ? envGrace : 120_000);
   const bigAfterMs = o.bigAfterMs ?? 8_000;
@@ -281,7 +281,18 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     }
     return ok ? c.json({ ok: true }) : c.json({ error: "not found or still active" }, 404);
   });
-  return jobs;
+  /** Cancels every queued or running compare the account `kind:name` started (its account changed). Returns how many. */
+  const cancelOwner = (kind: "sys" | "virt", name: string): number => {
+    let count = 0;
+    for (const j of jobs.list()) {
+      const owner = owners.get(j.id);
+      if (!owner || owner.kind !== kind || owner.name !== name || (j.state !== "queued" && j.state !== "running")) continue;
+      jobs.cancel(j.id);
+      count++;
+    }
+    return count;
+  };
+  return Object.assign(jobs, { cancelOwner });
 }
 
 /** Stream a generator as NDJSON, a few hundred items per chunk, so big subtrees never sit in memory at once. */
