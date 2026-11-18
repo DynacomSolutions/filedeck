@@ -5,6 +5,7 @@ import { Modal } from "./ArchiveDialog";
 import { endAccountSessions, endSession, listSessions, sessionsByAccount, type SessionInfo } from "./admin";
 import type { Account } from "./auth";
 import { fmtDate } from "./fmtDate";
+import { methodView } from "./sessionMethod";
 import "./archive.css";
 import "./accounts.css";
 import "./sessions.css";
@@ -95,6 +96,7 @@ export function SessionsTab({ account }: { account: Account }) {
               <tr>
                 <th>Account</th>
                 <th>Signed in</th>
+                <th>Method</th>
                 <th>Last used</th>
                 <th>Address</th>
                 <th>Notes</th>
@@ -104,7 +106,7 @@ export function SessionsTab({ account }: { account: Account }) {
             {groups.map((g) => (
               <tbody key={`${g.kind}:${g.name}`}>
                 <tr>
-                  <th scope="rowgroup" colSpan={6} className="sess-group">
+                  <th scope="rowgroup" colSpan={7} className="sess-group">
                     <span className="sess-group-in">
                       <span><bdi>{g.name}</bdi> <span className="pill">{kindLabel(g.kind)}</span></span>
                       <span className="sess-spacer" />
@@ -118,6 +120,7 @@ export function SessionsTab({ account }: { account: Account }) {
                   <tr key={s.id}>
                     <td className="acc-c-name"><bdi>{s.name}</bdi></td>
                     <td>{fmtDate(s.created)}</td>
+                    <td className="sess-method"><Method s={s} /></td>
                     <td>{fmtDate(s.lastUsed)}</td>
                     <td className="sess-addr">{s.address ? <bdi>{s.address}</bdi> : <span className="muted">Unknown</span>}</td>
                     <td>
@@ -135,7 +138,7 @@ export function SessionsTab({ account }: { account: Account }) {
             ))}
             {list && list.length === 0 && (
               <tbody>
-                <tr><td colSpan={6} className="muted vault-empty">Nobody is signed in.</td></tr>
+                <tr><td colSpan={7} className="muted vault-empty">Nobody is signed in.</td></tr>
               </tbody>
             )}
           </table>
@@ -168,6 +171,19 @@ export function SessionsTab({ account }: { account: Account }) {
         </ConfirmDialog>
       )}
     </div>
+  );
+}
+
+/** How a session signed in (`methodView`), with the login or tag that matched and the device, each in <bdi>. */
+function Method({ s }: { s: SessionInfo }) {
+  const m = methodView(s);
+  if (m.label === "Unknown") return <span className="muted">Unknown</span>;
+  return (
+    <>
+      {m.label}
+      {m.subject && <span className="muted sess-sub"><bdi>{m.subject}</bdi></span>}
+      {m.device && <span className="muted sess-sub">on <bdi>{m.device}</bdi></span>}
+    </>
   );
 }
 

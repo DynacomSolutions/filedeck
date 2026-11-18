@@ -239,7 +239,7 @@ test("create and list: a new account can sign in and sees only its machines; no 
   const admin = await signIn(h, "vadmin");
   const r = await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share, sources: { s1: { write: false } } });
   assert.equal(r.status, 201, r.text);
-  const view = { name: "guest", admin: false, hasPassword: true, keys: [], nodes: share, sources: { s1: { write: false } }, sessions: 0 };
+  const view = { name: "guest", admin: false, hasPassword: true, keys: [], nodes: share, sources: { s1: { write: false } }, sessions: 0, tailnet: [] };
   assert.deepEqual(r.json, view);
   const list = await send(h, "GET", "/api/admin/accounts", admin);
   assert.equal(list.status, 200);
@@ -274,7 +274,7 @@ test("create and list: a new account can sign in and sees only its machines; no 
   // the system list: a system user with a source grant shows there
   w.grants.setForAccount("sys", "bob", { s1: { write: true } });
   const sys = await send(h, "GET", "/api/admin/accounts", admin);
-  assert.deepEqual(sys.json.system, [{ name: "bob", admin: false, sources: { s1: { write: true } }, sessions: 0 }]);
+  assert.deepEqual(sys.json.system, [{ name: "bob", admin: false, sources: { s1: { write: true } }, sessions: 0, tailnet: [] }]);
   assert.equal(w.changed.length, 0, "a new account changes nobody");
 });
 
@@ -479,7 +479,7 @@ test("re-created name starts clean: no keys, grants or saved passwords, and an e
   const made = await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share });
   assert.equal(made.status, 201);
   assert.ok(h.auth!.accounts.epochOf("virt", "guest") > retired, "a name made again starts above the retired epoch");
-  assert.deepEqual(made.json, { name: "guest", admin: false, hasPassword: true, keys: [], nodes: share, sources: {}, sessions: 0 });
+  assert.deepEqual(made.json, { name: "guest", admin: false, hasPassword: true, keys: [], nodes: share, sources: {}, sessions: 0, tailnet: [] });
   assert.deepEqual(h.auth!.accounts.keys("guest"), []);
   assert.deepEqual(w.grants.forAccount("virt", "guest"), {});
   assert.equal(h.vault.list("virt:guest").length, 0);
@@ -569,7 +569,7 @@ test("system admins exist: with FILEDECK_ADMINS set, the only virtual administra
   // a virtual account may not take a system administrator's name
   assert.equal((await send(h, "POST", "/api/admin/accounts", admin, { name: "alice", password: PW2 })).status, 400);
   const sys = await send(h, "GET", "/api/admin/accounts", admin);
-  assert.deepEqual(sys.json.system, [{ name: "alice", admin: true, sources: {}, sessions: 0 }]);
+  assert.deepEqual(sys.json.system, [{ name: "alice", admin: true, sources: {}, sessions: 0, tailnet: [] }]);
   assert.equal((await send(h, "PATCH", "/api/admin/accounts/vadmin", admin, { password: null })).status, 200);
   const r = await send(h, "DELETE", "/api/admin/accounts/vadmin", keeper(h));
   assert.equal(r.status, 200, r.text);
@@ -581,16 +581,17 @@ test("lockOut on its own", async () => {
   const { h } = w;
   const cfg = loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, NODES: "a=http://127.0.0.1:9", FILEDECK_ADMINS: "" } as never);
   const acc = h.auth!.accounts;
-  assert.equal(lockOut(cfg, acc, { name: "vadmin", admin: false }), true);
-  assert.equal(lockOut(cfg, acc, { name: "vadmin", password: null }), true);
-  assert.equal(lockOut(cfg, acc, { name: "vadmin", deleted: true }), true);
-  assert.equal(lockOut(cfg, acc, { name: "vadmin", admin: true }), false);
-  assert.equal(lockOut(cfg, acc, { name: "vadmin", keysLeft: 0 }), false, "it still has its password");
+  const links = h.auth!.links;
+  assert.equal(lockOut(cfg, acc, links, null, { name: "vadmin", admin: false }), true);
+  assert.equal(lockOut(cfg, acc, links, null, { name: "vadmin", password: null }), true);
+  assert.equal(lockOut(cfg, acc, links, null, { name: "vadmin", deleted: true }), true);
+  assert.equal(lockOut(cfg, acc, links, null, { name: "vadmin", admin: true }), false);
+  assert.equal(lockOut(cfg, acc, links, null, { name: "vadmin", keysLeft: 0 }), false, "it still has its password");
   acc.addKey("vadmin", sshKey().line);
-  assert.equal(lockOut(cfg, acc, { name: "vadmin", password: null }), false, "it still has a key");
-  assert.equal(lockOut(cfg, acc, { name: "vadmin", password: null, keysLeft: 0 }), true);
+  assert.equal(lockOut(cfg, acc, links, null, { name: "vadmin", password: null }), false, "it still has a key");
+  assert.equal(lockOut(cfg, acc, links, null, { name: "vadmin", password: null, keysLeft: 0 }), true);
   const withSys = loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, NODES: "a=http://127.0.0.1:9", FILEDECK_ADMINS: "alice" } as never);
-  assert.equal(lockOut(withSys, acc, { name: "vadmin", deleted: true }), false);
+  assert.equal(lockOut(withSys, acc, links, null, { name: "vadmin", deleted: true }), false);
 });
 
 /** An archive listing through the hub with a typed password the hub is asked to save. */

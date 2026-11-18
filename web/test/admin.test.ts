@@ -20,7 +20,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 const sent = (c: { init?: RequestInit }) => (c.init?.body === undefined ? undefined : JSON.parse(String(c.init.body)));
 const method = (c: { init?: RequestInit }) => c.init?.method ?? "GET";
 
-const view: admin.AccountView = { name: "guest", admin: false, hasPassword: true, keys: [], nodes: {}, sources: {}, sessions: 0 };
+const view: admin.AccountView = { name: "guest", admin: false, hasPassword: true, keys: [], nodes: {}, sources: {}, sessions: 0, tailnet: [] };
 
 test("each function sends its method, URL and body", async (t) => {
   const calls = fakeFetch(t, (url, init) => {
@@ -28,7 +28,7 @@ test("each function sends its method, URL and body", async (t) => {
     if (url === "/api/admin/accounts" && !init?.method) return json({ accounts: [view], system: [] });
     if (url === "/api/admin/sessions") return json({ sessions: [] });
     if (url === "/api/admin/vault/unowned") return json({ removed: 3 });
-    if (url.startsWith("/api/admin/system/")) return json({ name: "alice", admin: false, sources: {}, sessions: 0 });
+    if (url.startsWith("/api/admin/system/")) return json({ name: "alice", admin: false, sources: {}, sessions: 0, tailnet: [] });
     return json(view);
   });
   const input: admin.AccountInput = { name: "guest", password: "a long password", admin: false, nodes: { a: { runAs: "share", grants: [{ path: "/srv", write: true }] } }, sources: { s3: { write: false } } };
@@ -40,6 +40,7 @@ test("each function sends its method, URL and body", async (t) => {
   await admin.addKey("guest", "ssh-ed25519 AAAA comment");
   await admin.removeKey("guest", "SHA256:abc");
   await admin.setSystemSources("alice", { s3: { write: true } });
+  await admin.setSystemTailnet("alice", ["alice@github", "tag:ops"]);
   assert.deepEqual(await admin.listSessions(), []);
   await admin.endSession("0123abcd");
   await admin.endAccountSessions("virt", "guest");
@@ -55,6 +56,7 @@ test("each function sends its method, URL and body", async (t) => {
       ["POST", "/api/admin/accounts/guest/keys", { publicKey: "ssh-ed25519 AAAA comment" }],
       ["DELETE", "/api/admin/accounts/guest/keys/SHA256%3Aabc", undefined],
       ["PUT", "/api/admin/system/alice/sources", { sources: { s3: { write: true } } }],
+      ["PUT", "/api/admin/system/alice/tailnet", { links: ["alice@github", "tag:ops"] }],
       ["GET", "/api/admin/sessions", undefined],
       ["DELETE", "/api/admin/sessions/0123abcd", undefined],
       ["POST", "/api/admin/end-sessions", { kind: "virt", name: "guest" }],
@@ -89,6 +91,12 @@ test("the password goes in the body only", async (t) => {
 test("a 409 with an error text throws AdminError with that text", async (t) => {
   fakeFetch(t, () => json({ error: "exists" }, 409));
   await assert.rejects(admin.createAccount({ name: "guest", admin: false, nodes: {}, sources: {} }), (e: unknown) => e instanceof AdminError && e.message === "exists" && e.status === 409);
+});
+
+test("setSystemTailnet encodes the name, and a 409 gives the hub's text", async (t) => {
+  const calls = fakeFetch(t, () => json({ error: "this tag is linked to virt:guest" }, 409));
+  await assert.rejects(admin.setSystemTailnet("a/b", ["tag:ops"]), (e: unknown) => e instanceof AdminError && e.message === "this tag is linked to virt:guest" && e.status === 409);
+  assert.equal(calls[0]!.url, "/api/admin/system/a%2Fb/tailnet");
 });
 
 test("an answer without JSON throws `The server answered <status>`", async (t) => {

@@ -1,0 +1,59 @@
+{{- include "filedeck.tailscaleChecks" . }}
+{{- $sc := .Values.auth.tailscale.sidecar }}
+{{- if and .Values.auth.enabled $sc.enabled }}
+{{- if $sc.serve }}
+---
+# The serve configuration of the tailscaled sidecar (auth.tailscale.sidecar.serve).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "filedeck.name" . }}-hub-tailscale
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+data:
+  serve.json: |
+    {{- include "filedeck.tailscaleServe" . | nindent 4 }}
+{{- end }}
+{{- if $sc.stateSecret }}
+---
+# tailscaled keeps its state in one Secret (auth.tailscale.sidecar.stateSecret); this account may use that Secret and no other.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "filedeck.name" . }}-hub-tailscale
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "filedeck.name" . }}-hub-tailscale
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $sc.stateSecret | quote }}]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "filedeck.name" . }}-hub-tailscale
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "filedeck.name" . }}-hub-tailscale
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "filedeck.name" . }}-hub-tailscale
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

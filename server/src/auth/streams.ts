@@ -6,6 +6,10 @@
  * expiry, an epoch rise or a deleted account, also when made by another process), or, for a stream opened under the switch, the switch
  * gone. Ending a stream closes the client's body and cuts the hub's request to the agent, so the agent releases its watcher.
  * An entry is removed however the stream ends (told to, the client closes, the agent ends it), and the timer runs only while one is open.
+ *
+ * A stream of a Tailscale session also carries `bound`, the hub's check of the session's binding to the tailnet identity (the gate's
+ * check, run from what the stream's own request carried). It runs every `bindCheckMs` while such a stream is open, never counts as use
+ * of the session, and ends the stream when it says `end`.
  */
 
 /** A stream opened under the act-as-root switch: its end, and the hub's own check that the switch still holds for it. */
@@ -19,6 +23,10 @@ interface Entry {
   kind: "sys" | "virt";
   name: string;
   asRoot?: AsRootStream;
+  /** the binding check of a Tailscale session's stream: `end` ends the stream (it may end the session first) */
+  bound?: () => Promise<"ok" | "end">;
+  /** a binding check is running for this entry */
+  binding?: boolean;
   /** the session's absolute end (created + the absolute limit), ms since the epoch */
   endsAt?: number;
   end: () => void;
@@ -30,11 +38,14 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 export class LiveStreams {
   private live = new Set<Entry>();
   private timer: NodeJS.Timeout | undefined;
+  private bindTimer: NodeJS.Timeout | undefined;
   private checkMs: number;
+  private bindCheckMs: number;
   private now: () => number;
 
-  constructor(private o: { peek: (key: string) => boolean; checkMs?: number; now?: () => number }) {
+  constructor(private o: { peek: (key: string) => boolean; checkMs?: number; bindCheckMs?: number; now?: () => number }) {
     this.checkMs = o.checkMs ?? 60_000;
+    this.bindCheckMs = o.bindCheckMs ?? 2_000;
     this.now = o.now ?? Date.now;
   }
 
@@ -43,7 +54,13 @@ export class LiveStreams {
    * the upstream request; the upstream body is cancelled as well. `endsAt` is the session's absolute end, known already, so the stream
    * ends at that time and not up to one check later (as at the end of the act-as-root switch).
    */
-  track(key: string, kind: "sys" | "virt", name: string, res: Response, o?: { abort?: () => void; asRoot?: AsRootStream; endsAt?: number }): Response {
+  track(
+    key: string,
+    kind: "sys" | "virt",
+    name: string,
+    res: Response,
+    o?: { abort?: () => void; asRoot?: AsRootStream; endsAt?: number; bound?: () => Promise<"ok" | "end"> },
+  ): Response {
     if (!res.body) return res;
     const reader = res.body.getReader();
     let done = false;
@@ -67,6 +84,7 @@ export class LiveStreams {
       kind,
       name,
       asRoot: o?.asRoot,
+      bound: o?.bound,
       endsAt: o?.endsAt,
       end: () => {
         if (!finish()) return;
@@ -165,14 +183,37 @@ export class LiveStreams {
     this.endWhere((e) => !this.valid(e));
   }
 
+  /** Runs the binding check of every stream that has one (one at a time per stream); a check that fails keeps the stream. */
+  private checkBound(): void {
+    for (const e of this.live) {
+      if (!e.bound || e.binding) continue;
+      e.binding = true;
+      e.bound()
+        .then((r) => {
+          if (r === "end") e.end();
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          e.binding = false;
+        });
+    }
+  }
+
   private startTimer(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => this.check(), this.checkMs);
-    this.timer.unref();
+    if (!this.timer) {
+      this.timer = setInterval(() => this.check(), this.checkMs);
+      this.timer.unref();
+    }
+    if (!this.bindTimer && [...this.live].some((e) => e.bound)) {
+      this.bindTimer = setInterval(() => this.checkBound(), this.bindCheckMs);
+      this.bindTimer.unref();
+    }
   }
 
   private stopTimer(): void {
     clearInterval(this.timer);
     this.timer = undefined;
+    clearInterval(this.bindTimer);
+    this.bindTimer = undefined;
   }
 }

@@ -7,8 +7,20 @@ import type { AuthDb, Accounts } from "./store.ts";
  * A session ends when it is idle too long, when it is older than the absolute
  * limit, or when its account epoch is raised. `as_root_until` holds the end of a system administrator's "act as root"
  * switch (ms since the epoch), or NULL; it goes with the session (sign-out, `endAll` and an epoch rise end it too). `address` is
- * the client address at sign-in, or NULL, so administrators can see who is signed in from where.
+ * the client address at sign-in, or NULL, so administrators can see who is signed in from where. `method` is how the session was
+ * started (`password`, `key` or `tailscale`; NULL for sessions made before it was kept). A Tailscale session also keeps the link subject
+ * that matched (`tailnet_subject`: a login or a tag), the device's login (`tailnet_login`, when it had one) and, with the socket source,
+ * the device's stable id (`tailnet_node`): the gate checks them again on every request (routes.ts). `tailnet_source` (`socket` or `headers`) and
+ * `tailnet_device` (the device's cleaned name, when known) are kept only to show administrators how and from where it came in.
  */
+
+export type SignInMethod = "password" | "key" | "tailscale";
+/** How a session was started, as `create` takes it. */
+export type SignInHow = { method: SignInMethod; tailnetSubject?: string; tailnetLogin?: string; tailnetNode?: string; tailnetSource?: "socket" | "headers"; tailnetDevice?: string };
+/** A session as `lookup` gives it. */
+export type SessionRecord = { kind: "sys" | "virt"; name: string; asRootUntil?: number } & Partial<SignInHow>;
+
+const METHODS = new Set<string>(["password", "key", "tailscale"]);
 
 /** A lookup writes `last_used` at most this often. */
 const TOUCH_MS = 60_000;
@@ -26,6 +38,22 @@ interface SessionRow {
   epoch: number;
   as_root_until: number | null;
   address: string | null;
+  method: string | null;
+  tailnet_subject: string | null;
+  tailnet_login: string | null;
+  tailnet_node: string | null;
+  tailnet_source: string | null;
+  tailnet_device: string | null;
+}
+
+/** The sign-in fields of a row, only those that are set. */
+function howOf(r: Pick<SessionRow, "method" | "tailnet_subject" | "tailnet_login" | "tailnet_node">): Partial<SignInHow> {
+  return {
+    ...(r.method !== null && METHODS.has(r.method) ? { method: r.method as SignInMethod } : {}),
+    ...(r.tailnet_subject !== null ? { tailnetSubject: r.tailnet_subject } : {}),
+    ...(r.tailnet_login !== null ? { tailnetLogin: r.tailnet_login } : {}),
+    ...(r.tailnet_node !== null ? { tailnetNode: r.tailnet_node } : {}),
+  };
 }
 
 /** A session as administrators see it. `id` is `publicId` of its key, never the key. `asRootUntil` only while it is in the future. */
@@ -37,6 +65,14 @@ export type SessionInfo = {
   lastUsed: number;
   address?: string;
   asRootUntil?: number;
+  /** how it was started, when known */
+  method?: SignInMethod;
+  /** a Tailscale session's link subject (the login or the tag that matched) */
+  tailnet?: string;
+  /** a Tailscale session's source: where the identity came from */
+  tailnetSource?: "socket" | "headers";
+  /** a Tailscale session's device name, when the source knew it */
+  tailnetDevice?: string;
 };
 
 /** The id administrators see for the session kept under `key`: derived from the key, and no way back to it or to the cookie. */
@@ -75,6 +111,9 @@ export class Sessions {
     const cols = this.store.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
     if (!cols.some((c) => c.name === "as_root_until")) this.store.db.exec("ALTER TABLE sessions ADD COLUMN as_root_until INTEGER");
     if (!cols.some((c) => c.name === "address")) this.store.db.exec("ALTER TABLE sessions ADD COLUMN address TEXT");
+    for (const col of ["method", "tailnet_subject", "tailnet_login", "tailnet_node", "tailnet_source", "tailnet_device"]) {
+      if (!cols.some((c) => c.name === col)) this.store.db.exec(`ALTER TABLE sessions ADD COLUMN ${col} TEXT`);
+    }
   }
 
   private get db() {
@@ -141,14 +180,31 @@ export class Sessions {
     return this.acc.epochOf(r.kind, r.name) <= r.epoch;
   }
 
-  /** `address`: the client address at sign-in, kept to show administrators where a session came from. */
-  create(kind: "sys" | "virt", name: string, address?: string): string {
+  /**
+   * `address`: the client address at sign-in, kept to show administrators where a session came from. `how`: the sign-in method and, for
+   * a Tailscale session, the identity it is bound to.
+   */
+  create(kind: "sys" | "virt", name: string, address?: string, how?: SignInHow): string {
     const raw = randomBytes(32).toString("base64url");
     const t = this.now();
     this.prune(t);
     this.db
-      .prepare("INSERT INTO sessions (id, kind, name, created, last_used, epoch, address) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(sha(raw), kind, name, t, t, this.acc.epochOf(kind, name), address ?? null);
+      .prepare("INSERT INTO sessions (id, kind, name, created, last_used, epoch, address, method, tailnet_subject, tailnet_login, tailnet_node, tailnet_source, tailnet_device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(
+        sha(raw),
+        kind,
+        name,
+        t,
+        t,
+        this.acc.epochOf(kind, name),
+        address ?? null,
+        how?.method ?? null,
+        how?.tailnetSubject ?? null,
+        how?.tailnetLogin ?? null,
+        how?.tailnetNode ?? null,
+        how?.tailnetSource ?? null,
+        how?.tailnetDevice ?? null,
+      );
     return raw;
   }
 
@@ -170,7 +226,7 @@ export class Sessions {
 
   /** Every session that `peek` finds valid, newest `lastUsed` first. Read only, like `peek`. */
   list(): SessionInfo[] {
-    const rows = this.db.prepare("SELECT id, kind, name, created, last_used, epoch, as_root_until, address FROM sessions ORDER BY last_used DESC, created DESC").all() as unknown as (SessionRow & { id: string })[];
+    const rows = this.db.prepare("SELECT id, kind, name, created, last_used, epoch, as_root_until, address, method, tailnet_subject, tailnet_login, tailnet_node, tailnet_source, tailnet_device FROM sessions ORDER BY last_used DESC, created DESC").all() as unknown as (SessionRow & { id: string })[];
     const t = this.now();
     return rows
       .filter((r) => this.holds(r, t))
@@ -182,6 +238,10 @@ export class Sessions {
         lastUsed: r.last_used,
         ...(r.address !== null ? { address: r.address } : {}),
         ...(typeof r.as_root_until === "number" && r.as_root_until > t ? { asRootUntil: r.as_root_until } : {}),
+        ...(r.method !== null && METHODS.has(r.method) ? { method: r.method as SignInMethod } : {}),
+        ...(r.method === "tailscale" && r.tailnet_subject !== null ? { tailnet: r.tailnet_subject } : {}),
+        ...(r.method === "tailscale" && (r.tailnet_source === "socket" || r.tailnet_source === "headers") ? { tailnetSource: r.tailnet_source } : {}),
+        ...(r.method === "tailscale" && r.tailnet_device !== null ? { tailnetDevice: r.tailnet_device } : {}),
       }));
   }
 
@@ -203,9 +263,15 @@ export class Sessions {
   }
 
   /** `asRootUntil` is the stored end of the act-as-root switch, as it is (the caller decides whether it still holds). */
-  lookup(raw: string): { kind: "sys" | "virt"; name: string; asRootUntil?: number } | undefined {
+  /**
+   * `touch: false` leaves `last_used` as it is: the gate then calls `touch` only once it admits the request, so a request it refuses
+   * (a Tailscale session used from outside the tailnet) does not keep the session alive.
+   */
+  lookup(raw: string, o: { touch?: boolean } = {}): SessionRecord | undefined {
     const id = sha(raw);
-    const r = this.db.prepare("SELECT kind, name, created, last_used, epoch, as_root_until FROM sessions WHERE id = ?").get(id) as Omit<SessionRow, "address"> | undefined;
+    const r = this.db
+      .prepare("SELECT kind, name, created, last_used, epoch, as_root_until, method, tailnet_subject, tailnet_login, tailnet_node FROM sessions WHERE id = ?")
+      .get(id) as Omit<SessionRow, "address"> | undefined;
     if (!r) return undefined;
     const t = this.now();
     const gone = (idle?: true) => {
@@ -217,8 +283,45 @@ export class Sessions {
     if (r.kind === "virt" && !this.acc.get(r.name)) return gone();
     if (this.acc.epochOf(r.kind, r.name) > r.epoch) return gone();
     if (t - r.last_used > this.o.idleMs) return gone(true);
-    if (t - r.last_used >= TOUCH_MS) this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ?").run(t, id);
-    return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}) };
+    if (o.touch !== false && t - r.last_used >= TOUCH_MS) this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ?").run(t, id);
+    return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}), ...howOf(r) };
+  }
+
+  /**
+   * The session kept under `key` as `lookup` gives it, while `peek` finds it valid; undefined otherwise. Read only: it never writes
+   * `last_used` and never deletes (the hub asks it for each open event stream of a Tailscale session).
+   */
+  recordOf(key: string): SessionRecord | undefined {
+    const r = this.db
+      .prepare("SELECT kind, name, created, last_used, epoch, as_root_until, method, tailnet_subject, tailnet_login, tailnet_node FROM sessions WHERE id = ?")
+      .get(key) as Omit<SessionRow, "address"> | undefined;
+    if (!r || !this.holds(r, this.now())) return undefined;
+    return { kind: r.kind, name: r.name, ...(typeof r.as_root_until === "number" ? { asRootUntil: r.as_root_until } : {}), ...howOf(r) };
+  }
+
+  /**
+   * What the binding check of a Tailscale session needs, for a session that is valid or only idle (push subscriptions outlive the idle
+   * limit): its record and the address it signed in from. Read only; undefined for another method or a session that is gone.
+   */
+  tailnetOf(key: string): { record: SessionRecord; address?: string } | undefined {
+    if (this.state(key).state === "gone") return undefined;
+    const r = this.db
+      .prepare("SELECT kind, name, created, last_used, epoch, as_root_until, address, method, tailnet_subject, tailnet_login, tailnet_node FROM sessions WHERE id = ?")
+      .get(key) as SessionRow | undefined;
+    if (!r || r.method !== "tailscale") return undefined;
+    return { record: { kind: r.kind, name: r.name, ...howOf(r) }, ...(r.address !== null ? { address: r.address } : {}) };
+  }
+
+  /** Ends the session kept under `key` (its streams end through `onEnd`), as `destroy` does for a cookie value. */
+  endKey(key: string): void {
+    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(key);
+    this.ended({ key });
+  }
+
+  /** Writes the session's last use now (at most once a minute, as `lookup` does). An unknown session is left as it is. */
+  touch(raw: string): void {
+    const t = this.now();
+    this.db.prepare("UPDATE sessions SET last_used = ? WHERE id = ? AND ? - last_used >= ?").run(t, sha(raw), t, TOUCH_MS);
   }
 
   /**

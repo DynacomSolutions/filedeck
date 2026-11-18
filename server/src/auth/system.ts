@@ -70,6 +70,32 @@ export class AgentSystemAuth implements SystemAuth {
     return undefined;
   }
 
+  /**
+   * Whether the machines vouch for system user `name` at a Tailscale sign-in (docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md,
+   * decision 5): the agents' lookup in the sign-in order, under `TOTAL_MS` in all. The first `exists:true` is `yes`; `refused:true` (uid
+   * 0, gid 0 or group 0 on that machine) ends the search with `refused`, whatever later machines would say; `exists:false`, an answer
+   * that is not 200, a body that does not parse or no answer goes on to the next machine. None said yes: `no`. `root` is `refused`
+   * without a call; a name no agent could know is `no`.
+   */
+  async vouch(name: string): Promise<"yes" | "no" | "refused"> {
+    if (name === "root") return "refused";
+    if (!validSystemName(name)) return "no";
+    const end = performance.now() + this.totalMs;
+    for (const node of this.nodes) {
+      const left = end - performance.now();
+      if (left < MIN_CALL_MS) {
+        this.log(`tailscale sign-in: no answer within ${this.totalMs / 1000} s in all; the nodes after ${node} were not asked`);
+        return "no";
+      }
+      const v = await this.answer(node, "/api/auth/lookup", { name }, Math.min(this.callTimeoutMs, left));
+      const b = v.ok ? (v.body as { exists?: unknown; refused?: unknown } | null) : null;
+      if (b?.refused === true) return "refused";
+      if (b?.exists === true) return "yes";
+      if (!v.ok) this.log(`tailscale sign-in: node ${node} passed over (${v.why})`);
+    }
+    return "no";
+  }
+
   private async ask(name: string, path: string, body: unknown): Promise<boolean> {
     if (!validSystemName(name)) return false; // (no agent could know it: the agents take only valid names)
     const end = performance.now() + this.totalMs;

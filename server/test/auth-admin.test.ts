@@ -15,6 +15,7 @@ import { isAdmin, registerAdmin } from "../src/auth/admin-routes.ts";
 import { Accounts, AuthDb } from "../src/auth/store.ts";
 import { Sessions } from "../src/auth/sessions.ts";
 import { SourceGrants } from "../src/auth/source-grants.ts";
+import { TailnetLinks } from "../src/auth/tailnet-links.ts";
 import { keyFingerprint } from "../src/auth/sshkey.ts";
 import { runAs } from "../src/auth/context.ts";
 import type { Identity } from "../src/auth/identity.ts";
@@ -127,7 +128,7 @@ test("administrators only: a non-admin, a caller without a session and the du to
   for (const name of ["alice", "vadmin"]) {
     const r = await call(h, "/api/admin/overview", await signIn(h, name));
     assert.equal(r.status, 200, name);
-    assert.deepEqual(await r.json(), { nodes: ["a"], sources: [], systemAdmins: ["alice"], unownedPasswords: 0 });
+    assert.deepEqual(await r.json(), { nodes: ["a"], sources: [], systemAdmins: ["alice"], unownedPasswords: 0, tailscale: null });
   }
   // an admin path that does not exist: 403 for a non-admin (the gate comes first), 404 JSON for an admin, never the web app
   assert.equal((await call(h, "/api/admin/nope", user)).status, 403);
@@ -153,6 +154,8 @@ test("administrators only: the gate itself refuses an identity without a session
     vault: new Vault(),
     nodes: ["a"],
     sources: [],
+    links: new TailnetLinks(db),
+    tailscale: null,
     changed: async () => void changed++,
   });
   for (const [m, p] of [
@@ -434,6 +437,13 @@ test("adminBody keeps only the named fields, of the right types, and never a key
   assert.ok(out.nodes.a.grants.length <= 65, "a long list is bounded");
   const long = adminBody({ name: "n".repeat(5000) }) as { name: string };
   assert.ok(long.name.length < 600, "a long string is clipped");
+  // tailnet logins and tags are not secrets: kept as clipped strings, at most 16, other types left out
+  assert.deepEqual(adminBody({ tailnet: ["alice@github", "tag:ci", 5, null], links: ["bob@github"] }), { tailnet: ["alice@github", "tag:ci"], links: ["bob@github"] });
+  assert.deepEqual(adminBody({ tailnet: "alice@github", links: {} }), {});
+  const lots = adminBody({ tailnet: Array.from({ length: 40 }, (_, i) => `u${i}@github`), links: ["x".repeat(5000)] }) as { tailnet: string[]; links: string[] };
+  assert.equal(lots.tailnet.length, 16);
+  assert.ok(lots.links[0]!.length < 600);
+  assert.deepEqual(adminBody({ tailnet: ["alice@github"], password: "x".repeat(20) }), { tailnet: ["alice@github"], password: "set" });
 });
 
 test("audit: keys are written as their fingerprints only, and a password only as set or removed", async () => {

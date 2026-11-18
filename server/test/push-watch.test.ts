@@ -40,7 +40,7 @@ test("one end is its title and outcome; several fold into one, failures counted"
 
 const alice: Identity = { kind: "sys", name: "alice", admin: false, epoch: 1 };
 
-function setup(o: { holds?: (s: string) => boolean; state?: (s: string) => "valid" | "idle" | "gone"; until?: number; jobs?: SourcedJob[]; status?: number | (() => number); identity?: Identity | null; onList?: () => void }) {
+function setup(o: { bound?: (s: string) => "ok" | "wait" | "drop"; holds?: (s: string) => boolean; state?: (s: string) => "valid" | "idle" | "gone"; until?: number; jobs?: SourcedJob[]; status?: number | (() => number); identity?: Identity | null; onList?: () => void }) {
   let t = 100 * H;
   const store = new PushStore(":memory:", () => t);
   const sent: { endpoint: string; payload: unknown }[] = [];
@@ -53,6 +53,7 @@ function setup(o: { holds?: (s: string) => boolean; state?: (s: string) => "vali
       const st = o.state ? o.state(k) : o.holds!(k) ? "valid" : "gone";
       return st === "gone" ? { state: "gone" } : { state: st, until: o.until ?? 1e15 };
     } : undefined,
+    bound: o.bound ? async (k) => o.bound!(k) : undefined,
     identityOf: () => (o.identity === undefined ? alice : o.identity ?? undefined),
     listJobs: async (id) => {
       asked.push(id);
@@ -218,4 +219,15 @@ test("stop ends a pass that waits on a slow machine, and gives its claims back",
   assert.ok(Date.now() - t0 < 1000);
   void release;
   assert.equal(s.store.claim(`${"https://fcm.googleapis.com/fcm/send/e1"}|ops|a`), true, "nothing was claimed");
+});
+
+test("a bound check before a push: drop removes the subscription, wait keeps it without a push, ok sends", async () => {
+  const s = setup({ holds: () => true, jobs: [job("a", "done", 100 * H + 5)], bound: (k) => (k === "s1" ? "drop" : k === "s2" ? "wait" : "ok") });
+  s.add(1, "sys:alice", "s1");
+  s.add(2, "sys:alice", "s2");
+  s.add(3, "sys:alice", "s3");
+  s.at(100 * H + 10);
+  await s.w.tick();
+  assert.deepEqual(s.sent.map((x) => x.endpoint), ["https://fcm.googleapis.com/fcm/send/e3"]);
+  assert.deepEqual(s.store.of("sys:alice").map((x) => x.session).sort(), ["s2", "s3"]);
 });

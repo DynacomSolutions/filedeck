@@ -1,7 +1,8 @@
 /* Accounts view (administrators): the Settings overlay's look, its sections and fields, and the shared table, button and dialog styles. */
 .acc-view .tr-tabs{padding-bottom:.5rem}
 .acc-view .tr-tabs button svg{width:16px;height:16px}
-.acc-body{overflow:auto}
+/* the sticky action bar (.acc-actions, about 3.8rem) covers the foot of the scrolling body: scroll-padding keeps a focused or scrolled-to control clear of it */
+.acc-body{overflow:auto;scroll-padding-bottom:5rem}
 .acc-list{max-width:64rem}
 .acc-status{min-height:1.3em;font-size:.82rem}
 .acc-status:empty{min-height:0}
@@ -67,3 +68,11 @@
 .acc-pick-at{font-size:.76rem;padding:.2rem .5rem;overflow-wrap:anywhere}
 .acc-pick-empty{font-size:.82rem;padding:.4rem .5rem}
 .acc-pick-list .ad-err{padding:.2rem .5rem}
+
+/* the Tailscale links section (account editor and System users editor) */
+.acc-tl{display:flex;flex-direction:column;gap:.6rem}
+.acc-tl h3{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:0}
+.acc-tl input{width:100%;max-width:22rem;min-width:0;color:var(--fg);border:0;border-radius:var(--radius-btn);background:var(--surface-2);box-shadow:var(--shadow-1);padding:.4rem .6rem;font:inherit;font-size:.88rem}
+.acc-tl input:disabled{opacity:.5;cursor:not-allowed}
+.acc-tl-row{flex-wrap:nowrap}
+.acc-tl-row input{flex:1 1 auto}

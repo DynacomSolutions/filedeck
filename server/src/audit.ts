@@ -49,13 +49,16 @@ export const isAdminPath = (p: string): boolean => p === "/api/admin" || p.start
 const MAX_ADMIN_ITEMS = 64;
 /** The most keys of a `keys` list an admin audit line looks at (an account holds at most 32). */
 const MAX_ADMIN_KEYS = 32;
+/** The most tailnet links of one admin body that the line keeps (the admin routes take at most 16 per account). */
+const MAX_ADMIN_LINKS = 16;
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /**
  * An admin body (`/api/admin/*`) as its audit line keeps it: `name`, `kind`, `admin`, `nodes` as `{ <node>: { runAs, grants: [{path,
  * write}] } }`, `sources` as `{ <source>: { write } }`, for a `publicKey` its `fingerprint` (as OpenSSH prints it), `keys` as the
- * fingerprints of every key in a `keys` list and `publicKey`, and `password` as "set" (a string) or "removed" (null). Nothing else, of
+ * fingerprints of every key in a `keys` list and `publicKey`, `tailnet` and `links` as lists of tailnet logins and tags (not secrets), and
+ * `password` as "set" (a string) or "removed" (null). Nothing else, of
  * the expected types only: never a password, a password hash or the key text. Strings are clipped and lists bounded. A body that is not
  * an object gives nothing.
  */
@@ -89,6 +92,11 @@ export function adminBody(v: unknown): Record<string, unknown> | undefined {
         .map(([source, a]) => [clip(source), isPlainObject(a) && typeof a.write === "boolean" ? { write: a.write } : {}]),
     );
   }
+  // tailnet logins and tags (a PATCH or POST `tailnet`, a system user's PUT `links`): not secrets, so kept, clipped, at most 16
+  for (const k of ["tailnet", "links"] as const) {
+    const list = v[k];
+    if (Array.isArray(list)) out[k] = list.filter((x): x is string => typeof x === "string").slice(0, MAX_ADMIN_LINKS).map(clip);
+  }
   // whether a password was set or removed, never the value
   if (typeof v.password === "string") out.password = "set";
   else if (v.password === null) out.password = "removed";
@@ -111,9 +119,13 @@ export function adminBody(v: unknown): Record<string, unknown> | undefined {
  * is believed only to that depth; with none, a client that talks to the process directly cannot choose the address that is
  * recorded (or used as a key) by sending a header of its own. The count reaches `clientOf` through the context (`trustProxies`).
  */
-export const trustProxies = (hops: number): MiddlewareHandler => async (c, next) => {
-  c.set("trustedProxies" as never, hops as never);
-  await next();
+export const trustProxies = (hops: number): MiddlewareHandler => {
+  const mw: MiddlewareHandler = async (c, next) => {
+    c.set("trustedProxies" as never, hops as never);
+    await next();
+  };
+  Object.defineProperty(mw, "name", { value: "trustProxies" }); // (a stable name: a test checks the hub's mount order)
+  return mw;
 };
 
 /** One hop of a forwarded chain as an IP address: a port and the brackets of an IPv6 address are removed; anything that is not an address gives undefined. */
@@ -188,13 +200,51 @@ function userOf(c: import("hono").Context): { user?: string; asRoot?: true } {
   return { user: `${u.kind}:${u.name}`, ...(u.kind === "sys" && u.asRoot === true ? { asRoot: true as const } : {}) };
 }
 
+/**
+ * The tailnet part of an audit line (docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md, "Audit"): for
+ * `POST /api/auth/login-tailscale` the device's login and tags, the subject that matched, the source, the device name and its tailnet
+ * address (socket source), and on a refusal the reason (with the accounts of a tag conflict); for a request made with a Tailscale
+ * session its subject and source, plus the reason when the binding ended the session. Logins, tags and device names are not secrets;
+ * the socket path and the raw whois answer never come here.
+ */
+export type AuditTailnet = {
+  login?: string;
+  tags?: string[];
+  subject?: string;
+  source?: "socket" | "headers";
+  node?: string;
+  address?: string;
+  reason?: string;
+  accounts?: string[];
+};
+
+/** Marks that this request ended a Tailscale session, so a read is written to the audit log too. */
+export const markSessionEnded = (c: import("hono").Context): void => c.set("auditSessionEnded" as never, true as never);
+
+/** Sets the tailnet part of this request's audit line (the hub's sign-in routes and gate). */
+export const setAuditTailnet = (c: import("hono").Context, t: AuditTailnet): void => c.set("auditTailnet" as never, t as never);
+
+function tailnetPart(c: import("hono").Context): { tailnet?: AuditTailnet } {
+  const t = c.get("auditTailnet" as never) as AuditTailnet | undefined;
+  return t ? { tailnet: t } : {};
+}
+
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {
-  return async (c, next) => {
+  const mw: MiddlewareHandler = async (c, next) => {
     const m = c.req.method;
     const p = c.req.path;
     // every admin call is written, whatever its method: reading the accounts and sessions is recorded too
     const admin = isAdminPath(p);
-    if (!admin && (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/"))) return next();
+    const unlogged = !admin && (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/"));
+    if (unlogged) {
+      // A read is not written, except one that ended a Tailscale session (its binding no longer holds): that is an event, whatever the method.
+      const t = Date.now();
+      await next();
+      const ended = (c.get("auditTailnet" as never) as AuditTailnet | undefined)?.reason;
+      if (ended === undefined || !c.get("auditSessionEnded" as never)) return;
+      sink(JSON.stringify({ audit: true, ts: new Date(t).toISOString(), who, event: "session-ended", ...userOf(c), ...clientOf(c), method: m, route: clip(p), ...tailnetPart(c), status: c.res.status, ms: Date.now() - t }));
+      return;
+    }
     const t0 = Date.now();
     let body: unknown;
     // The body was parsed once by the request guard and is shared through the body cache; without it (a bare audit
@@ -228,9 +278,12 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
         route: clip(p),
         query: Object.keys(q).length ? q : undefined,
         body,
+        ...tailnetPart(c),
         status: c.res.status,
         ms: Date.now() - t0,
       }),
     );
   };
+  Object.defineProperty(mw, "name", { value: "audit" }); // (a stable name: a test checks the hub's mount order)
+  return mw;
 }

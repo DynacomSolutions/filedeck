@@ -1,4 +1,4 @@
-import { ApiError, nodeBase, type TextFile } from "./api";
+import { ApiError, BACKGROUND_HEADER, nodeBase, type TextFile } from "./api";
 
 /** Read-only Git state from the agent (server/src/git-routes.ts). */
 export interface GitSummary {
@@ -70,7 +70,9 @@ async function j<T>(r: Response): Promise<T> {
 }
 
 export const gitApi = {
-  status: (node: string, path: string, fresh: boolean, signal?: AbortSignal) => fetch(`${nodeBase(node)}/api/git/status?path=${enc(path)}${fresh ? "&fresh=1" : ""}`, { signal }).then((r) => j<GitListing>(r)),
+  /** `background`: asked by the app itself (after a change feed event or a poll), see `BACKGROUND_HEADER` */
+  status: (node: string, path: string, fresh: boolean, signal?: AbortSignal, o: { background?: boolean } = {}) =>
+    fetch(`${nodeBase(node)}/api/git/status?path=${enc(path)}${fresh ? "&fresh=1" : ""}`, { signal, ...(o.background ? { headers: BACKGROUND_HEADER } : {}) }).then((r) => j<GitListing>(r)),
   info: (node: string, path: string, fresh = false) => fetch(`${nodeBase(node)}/api/git/info?path=${enc(path)}${fresh ? "&fresh=1" : ""}`).then((r) => j<GitInfo>(r)),
   /** A file as of a revision, shaped like a text file so the diff viewer can show it as one side. */
   show: (node: string, path: string, rev: string) => fetch(`${nodeBase(node)}/api/git/show?path=${enc(path)}&rev=${enc(rev)}`).then((r) => j<TextFile & { absent?: boolean }>(r)),

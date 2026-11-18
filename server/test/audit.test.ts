@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,6 +7,9 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
 import { chownForTest, fakeResolver, privateTmpdir } from "./worker-env.ts";
+import { ADDR, closeRigs, NODE_NAME, rig } from "./tailnet-env.ts";
+
+after(closeRigs);
 
 await useSandboxOrOff(); // with sign-in on, the agent's file routes run in a worker started through the sandbox launcher
 
@@ -143,4 +146,48 @@ test("a sign-in body keeps only its name: a string or an array body gives no bod
     await hub.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("tailnet: the login-tailscale line names the login, tags, subject and source; never the socket path", async () => {
+  const hd = await rig("headers");
+  hd.h.auth!.accounts.create({ name: "guest", admin: false, nodes: {} });
+  hd.h.auth!.links.setForAccount("virt", "guest", [{ subject: "alice@github", kind: "login" }]);
+  hd.devices.set(ADDR, { login: "alice@github" });
+  await hd.signIn();
+  assert.deepEqual(hd.audits("/api/auth/login-tailscale")[0]?.tailnet, { login: "alice@github", subject: "alice@github", source: "headers" });
+  const so = await rig("socket");
+  so.h.auth!.accounts.create({ name: "ci", admin: false, nodes: {} });
+  so.h.auth!.links.setForAccount("virt", "ci", [{ subject: "tag:ci", kind: "tag" }]);
+  so.devices.set(ADDR, { tags: ["tag:web", "tag:ci"] });
+  const c = await so.signIn();
+  assert.deepEqual(so.audits("/api/auth/login-tailscale")[0]?.tailnet, { tags: ["tag:ci", "tag:web"], subject: "tag:ci", source: "socket", node: NODE_NAME, address: ADDR });
+  // the account that the link gave is named in the sign-in line itself (a tag names a device, not a person)
+  assert.equal(hd.audits("/api/auth/login-tailscale")[0]?.user, "virt:guest");
+  assert.equal(so.audits("/api/auth/login-tailscale")[0]?.user, "virt:ci");
+  assert.equal((await so.req("/api/auth/logout", { method: "POST", cookie: c })).status, 200);
+  assert.deepEqual(so.audits("/api/auth/logout")[0]?.tailnet, { subject: "tag:ci", source: "socket" });
+  // a refusal names no account
+  so.devices.set(ADDR, { tags: ["tag:other"] });
+  so.pastCache();
+  assert.equal((await so.req("/api/auth/login-tailscale", { method: "POST", body: {} })).status, 401);
+  const refused = so.audits("/api/auth/login-tailscale").at(-1);
+  assert.equal(refused?.tailnet?.reason, "unlinked");
+  assert.equal(refused?.user, undefined);
+  assert.ok(!so.lines.join("\n").includes(so.api!.socket));
+});
+
+test("tailnet: an admin line keeps the tailnet list of a PATCH and the links of a system user's PUT, never a password", async () => {
+  const so = await rig("socket", { env: { FILEDECK_ADMINS: "" } });
+  so.h.auth!.accounts.create({ name: "boss", password: "a-long-password-1", admin: true, nodes: {} });
+  so.h.auth!.accounts.create({ name: "guest", admin: false, nodes: {} });
+  const r = await so.req("/api/auth/login", { method: "POST", body: { name: "boss", password: "a-long-password-1" } });
+  assert.equal(r.status, 200);
+  const cookie = (r.headers.get("set-cookie") ?? "").split(";")[0]!;
+  const p = await so.req("/api/admin/accounts/guest", { method: "PATCH", cookie, body: { tailnet: ["alice@github", "tag:ci"], password: "another-password-2" } });
+  assert.equal(p.status, 200, await p.text());
+  assert.deepEqual(so.audits("/api/admin/accounts/guest")[0]?.body, { tailnet: ["alice@github", "tag:ci"], password: "set" });
+  const s = await so.req("/api/admin/system/alice/tailnet", { method: "PUT", cookie, body: { links: ["alice@work"] } });
+  assert.equal(s.status, 200, await s.text());
+  assert.deepEqual(so.audits("/api/admin/system/alice/tailnet")[0]?.body, { links: ["alice@work"] });
+  assert.ok(!so.lines.join("\n").includes("another-password-2"));
 });

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Tip } from "./Tooltip";
 import { isOpenerPress, lastPress, liveReturnTarget, pressedFocusable, resolveOpener, resolveReturnFocus, swallowNextClick, trackPresses } from "./menuOpener";
@@ -8,6 +8,8 @@ export type MenuItem =
   | "sep"
   | {
       label: string;
+      /** shown instead of `label` (which still names the row for type-ahead and the icon), for text that needs markup such as <bdi> */
+      content?: ReactNode;
       onSelect?: () => void;
       disabled?: boolean;
       /** checkable item: true or false renders as a menuitemcheckbox with a tick */
@@ -127,7 +129,7 @@ function Menu({ items, x, y, onClose, depth = 0, onLeft, onRestore, anchor, labe
               }}
               onClick={() => run(it)}
             >
-              <span className="ctx-l">{(() => { if (it.checked !== undefined) return <Check aria-hidden="true" style={{ visibility: it.checked ? "visible" : "hidden" }} />; const I = it.icon ?? iconFor(it.label); return <I aria-hidden="true" />; })()}{it.label}</span>
+              <span className="ctx-l">{(() => { if (it.checked !== undefined) return <Check aria-hidden="true" style={{ visibility: it.checked ? "visible" : "hidden" }} />; const I = it.icon ?? iconFor(it.label); return <I aria-hidden="true" />; })()}{it.content ?? it.label}</span>
               {it.sub ? <span className="hint"><ChevronRight /></span> : it.hint ? <span className="hint">{it.hint}</span> : null}
             </button>
             </Tip>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createPublicKey, verify } from "node:crypto";
-import { installSignedOutWatch, keyReader, login, me, noteXhr, signInMessage, SignInError, startAsRoot, stopAsRoot } from "../src/auth.ts";
+import { installSignedOutWatch, keyReader, login, loginTailscale, logout, me, noteXhr, retryDelayMs, signInMessage, SignInError, startAsRoot, stopAsRoot, tailnet, TailnetUnavailableError } from "../src/auth.ts";
 import * as keys from "./fixtures/keys.ts";
 
 type Handler = (url: string, init?: RequestInit) => Response;
@@ -17,6 +17,8 @@ function fakeFetch(t: { after: (fn: () => void) => void }, h: Handler) {
   t.after(() => (globalThis.fetch = real));
   return calls;
 }
+/** the header the hub's gate sets on its tailnet 503 */
+const DOWN = { "x-filedeck-auth": "tailnet-unavailable" };
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
@@ -174,4 +176,125 @@ test("stopAsRoot sends DELETE", async (t) => {
 test("stopAsRoot throws when the hub does not confirm", async (t) => {
   fakeFetch(t, () => json({ error: "boom" }, 500));
   await assert.rejects(stopAsRoot());
+});
+
+test("tailnet: asks GET /api/auth/tailnet and gives back the login, display name and device name", async (t) => {
+  const calls = fakeFetch(t, () => json({ login: "alice@github", displayName: "Alice Example", node: { name: "alice-laptop" } }));
+  assert.deepEqual(await tailnet(), { login: "alice@github", displayName: "Alice Example", node: "alice-laptop" });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "/api/auth/tailnet");
+  assert.equal(calls[0]!.init?.method ?? "GET", "GET");
+});
+
+test("tailnet: tags come back as tags; 503 is unavailable; {} and every other failure give null", async (t) => {
+  let answer: () => Response = () => json({ tags: ["tag:ci", "tag:web"] });
+  fakeFetch(t, () => answer());
+  assert.deepEqual(await tailnet(), { tags: ["tag:ci", "tag:web"] });
+  answer = () => json({ error: "tailnet identity unavailable" }, 503);
+  assert.deepEqual(await tailnet(), { unavailable: true });
+  answer = () => json({});
+  assert.equal(await tailnet(), null);
+  // a device name alone is no identity to sign in with
+  answer = () => json({ node: { name: "laptop" } });
+  assert.equal(await tailnet(), null);
+  answer = () => json({ error: "not found" }, 404);
+  assert.equal(await tailnet(), null);
+  answer = () => new Response("not json", { status: 200 });
+  assert.equal(await tailnet(), null);
+  // values that are not strings are dropped
+  answer = () => json({ login: 7, tags: ["tag:ci", 3], displayName: {}, node: "x" });
+  assert.deepEqual(await tailnet(), { tags: ["tag:ci"] });
+  answer = () => {
+    throw new TypeError("Failed to fetch");
+  };
+  assert.equal(await tailnet(), null);
+});
+
+test("loginTailscale posts {} as JSON to /api/auth/login-tailscale and gives back the account", async (t) => {
+  const calls = fakeFetch(t, () => json({ auth: true, kind: "virt", name: "alice", admin: false }));
+  assert.deepEqual(await loginTailscale(), { auth: true, kind: "virt", name: "alice", admin: false });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "/api/auth/login-tailscale");
+  assert.equal(calls[0]!.init?.method, "POST");
+  assert.equal(String(calls[0]!.init?.body), "{}");
+  assert.equal(new Headers(calls[0]!.init?.headers).get("content-type"), "application/json");
+});
+
+test("loginTailscale: a refusal says the same as a password failure; 429 and 503 have their own text", async (t) => {
+  let answer: () => Response = () => json({ error: "sign-in failed" }, 401);
+  fakeFetch(t, () => answer());
+  await assert.rejects(loginTailscale(), (e: unknown) => e instanceof SignInError && e.message === "Sign-in failed");
+  answer = () => json({ error: "too many attempts" }, 429, { "retry-after": "5" });
+  await assert.rejects(loginTailscale(), (e: unknown) => e instanceof SignInError && e.message === "Too many attempts. Try again in 5 seconds");
+  answer = () => json({ error: "tailnet identity unavailable" }, 503, DOWN);
+  await assert.rejects(loginTailscale(), (e: unknown) => e instanceof SignInError && e.message === "Tailscale is not answering. Try again soon.");
+  // another 503 (a proxy in front of the hub, say) is not Tailscale
+  answer = () => new Response("<html>Service Unavailable</html>", { status: 503, headers: { "content-type": "text/html" } });
+  await assert.rejects(loginTailscale(), (e: unknown) => e instanceof SignInError && e.message === "The server is not answering. Try again soon.");
+  answer = () => {
+    throw new TypeError("Failed to fetch");
+  };
+  await assert.rejects(loginTailscale(), (e: unknown) => e instanceof SignInError && e.message === "Cannot reach the server");
+});
+
+test("me keeps the sign-in method and the tailnet subject when they are strings", async (t) => {
+  let answer: Response = json({ auth: true, kind: "virt", name: "alice", admin: false, method: "tailscale", tailnet: "alice@github" });
+  fakeFetch(t, () => answer);
+  assert.deepEqual(await me(), { auth: true, kind: "virt", name: "alice", admin: false, method: "tailscale", tailnet: "alice@github" });
+  answer = json({ auth: true, kind: "sys", name: "bob", admin: true, method: "password" });
+  assert.deepEqual(await me(), { auth: true, kind: "sys", name: "bob", admin: true, method: "password" });
+  answer = json({ auth: true, kind: "sys", name: "bob", admin: true, method: 3, tailnet: ["x"] });
+  assert.deepEqual(await me(), { auth: true, kind: "sys", name: "bob", admin: true });
+});
+
+test("me: the hub's tailnet 503 (a Tailscale session while tailscaled does not answer) is not a sign-out", async (t) => {
+  fakeFetch(t, () => json({ error: "tailnet identity unavailable" }, 503, DOWN));
+  await assert.rejects(me(), (e: unknown) => e instanceof TailnetUnavailableError);
+});
+
+test("me: a 503 without the hub's header (an HTML page from a proxy) is not Tailscale", async (t) => {
+  let answer: Response = new Response("<html>Service Unavailable</html>", { status: 503, headers: { "content-type": "text/html" } });
+  fakeFetch(t, () => answer);
+  await assert.rejects(me(), (e: unknown) => !(e instanceof TailnetUnavailableError));
+  answer = json({ error: "tailnet identity unavailable" }, 503);
+  await assert.rejects(me(), (e: unknown) => !(e instanceof TailnetUnavailableError));
+});
+
+test("tailnet: only the hub's tailnet 503 is unavailable", async (t) => {
+  let answer: Response = json({ error: "tailnet identity unavailable" }, 503, DOWN);
+  fakeFetch(t, () => answer);
+  assert.deepEqual(await tailnet(), { unavailable: true });
+  answer = new Response("<html>Service Unavailable</html>", { status: 503, headers: { "content-type": "text/html" } });
+  assert.equal(await tailnet(), null);
+  answer = json({ error: "busy" }, 503);
+  assert.equal(await tailnet(), null);
+});
+
+test("signed-out watch: the hub's tailnet 503 calls the second handler; other 503s and the sign-out do not", async (t) => {
+  let answer: Response = json({ error: "tailnet identity unavailable" }, 503, DOWN);
+  fakeFetch(t, () => answer);
+  let out = 0;
+  let down = 0;
+  t.after(installSignedOutWatch(() => out++, () => down++));
+  const r = await fetch("/api/nodes");
+  assert.equal(r.status, 503, "the answer is passed on as it is");
+  assert.deepEqual([out, down], [0, 1]);
+  answer = new Response("<html>Service Unavailable</html>", { status: 503 });
+  await fetch("/api/nodes");
+  answer = json({ error: "signed out" }, 401, { "x-filedeck-auth": "signed-out" });
+  await fetch("/api/nodes");
+  assert.deepEqual([out, down], [1, 1]);
+  // an upload (XMLHttpRequest) reports through the same handler
+  noteXhr({ status: 503, getResponseHeader: (h: string) => (h.toLowerCase() === "x-filedeck-auth" ? "tailnet-unavailable" : null) });
+  assert.deepEqual([out, down], [1, 2]);
+});
+
+test("logout posts to /api/auth/logout", async (t) => {
+  const calls = fakeFetch(t, () => json({ ok: true }));
+  await logout();
+  assert.deepEqual(calls.map((c) => [c.url, c.init?.method]), [["/api/auth/logout", "POST"]]);
+});
+
+test("retryDelayMs doubles from 1 s up to 30 s", () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 20].map(retryDelayMs), [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
 });

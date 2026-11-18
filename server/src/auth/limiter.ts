@@ -60,7 +60,12 @@ export function addressKey(ip: string): string {
   return groups6(plain).slice(0, 4).map((x) => x.toString(16)).join(":") + "::/64";
 }
 
-const nameKey = (name: string) => "n:" + name.slice(0, MAX_NAME);
+/**
+ * The families of name keys. A name typed in a sign-in body is always a `name` key; a Tailscale sign-in counts under its login or tags
+ * in the `tailnet` family, which no typed name can reach, so failed password guesses never block someone's Tailscale sign-in.
+ */
+export type NameFamily = "name" | "tailnet";
+const nameKey = (name: string, family: NameFamily = "name") => (family === "tailnet" ? "t:" : "n:") + name.slice(0, MAX_NAME);
 const ipKey = (ip: string) => "i:" + addressKey(ip);
 
 /** An attempt counted in advance. `succeed` gives it back: the name is cleared and the address loses this one failure. */
@@ -76,10 +81,10 @@ export class LoginLimiter {
     private maxKeys = MAX_KEYS,
   ) {}
 
-  check(name: string, ip: string): { ok: true } | { ok: false; retryAfterMs: number } {
+  check(name: string, ip: string, family: NameFamily = "name"): { ok: true } | { ok: false; retryAfterMs: number } {
     const t = this.now();
     let wait = 0;
-    for (const k of [nameKey(name), ipKey(ip)]) {
+    for (const k of [nameKey(name, family), ipKey(ip)]) {
       const e = this.live(k, t);
       if (e && e.streak > 0) wait = Math.max(wait, e.until - t);
     }
@@ -87,16 +92,16 @@ export class LoginLimiter {
   }
 
   /** Counts a failure now; call `succeed` on the result when the credentials turn out good. */
-  reserve(name: string, ip: string): Reservation {
+  reserve(name: string, ip: string, family: NameFamily = "name"): Reservation {
     const t = this.now();
     const ik = ipKey(ip);
-    this.record(nameKey(name), t);
+    this.record(nameKey(name, family), t);
     const own = this.record(ik, t);
     if (this.keys.size > this.maxKeys) this.prune(t);
     return {
       // Undoes only what this attempt did to the address; failures that came in meanwhile stay.
       succeed: () => {
-        this.succeed(name);
+        this.succeed(name, family);
         const e = this.keys.get(ik);
         if (!e) return;
         const i = e.times.lastIndexOf(t);
@@ -114,8 +119,8 @@ export class LoginLimiter {
   }
 
   /** A good sign-in clears its name. The address keeps its count, so one known account cannot reset it. */
-  succeed(name: string): void {
-    this.keys.delete(nameKey(name));
+  succeed(name: string, family: NameFamily = "name"): void {
+    this.keys.delete(nameKey(name, family));
   }
 
   private gen = 0;

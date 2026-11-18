@@ -3,8 +3,9 @@ import * as Ic from "lucide-react";
 import { Modal } from "./ArchiveDialog";
 import { Dropdown } from "./Dropdown";
 import { GrantPicker } from "./GrantPicker";
+import { TailnetLinks } from "./TailnetLinks";
 import { addKey, createAccount, removeKey, updateAccount, type AccountView, type Overview } from "./admin";
-import { formChanged, formProblems, fromView, MAX_PASSWORD, MIN_PASSWORD, notConfigured, toInput, type AccountForm, type Configured, type SourceChoice } from "./accountForm";
+import { anyLinkCounts, formChanged, formProblems, fromView, MAX_PASSWORD, MIN_PASSWORD, notConfigured, toInput, type AccountForm, type Configured, type SourceChoice } from "./accountForm";
 import "./archive.css";
 import "./accounts.css";
 
@@ -14,11 +15,12 @@ const SOURCE_CHOICES: { value: SourceChoice; label: string }[] = [
   { value: "write", label: "Read and write" },
 ];
 
+const PENDING_LINK = "Add or clear the link you typed before saving.";
 const SELF_WARNING = "Saving signs this account out everywhere, also here.";
 
 /** The empty form for a new account, with one section per machine. */
 function blank(ov: Overview): AccountForm {
-  return { name: "", password: "", admin: false, machines: ov.nodes.map((node) => ({ node, runAs: "", grants: [] })), sources: {} };
+  return { name: "", password: "", admin: false, machines: ov.nodes.map((node) => ({ node, runAs: "", grants: [] })), sources: {}, tailnet: [] };
 }
 
 /** The form of an existing account, with a section for every machine: the configured ones first, then any the account still names. */
@@ -76,6 +78,9 @@ export function AccountEditor({
   const [newKey, setNewKey] = useState("");
   const [err, setErr] = useState<string[]>([]);
   const [keyErr, setKeyErr] = useState("");
+  /** the text typed in the link field and not added */
+  const [pendingLink, setPendingLink] = useState("");
+  const linkField = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<"" | "save" | "key">("");
   /** the change that waits for "Saving signs this account out everywhere" to be confirmed */
   const [asking, setAsking] = useState<null | (() => Promise<void>)>(null);
@@ -113,7 +118,7 @@ export function AccountEditor({
     setForm((f) => ({ ...f, machines: f.machines.map((m) => (m.node === node ? change(m) : m)) }));
 
   /** Back to the list; with unsaved changes (the form differs, a password typed, "Remove password" set) it asks first. */
-  const changed = () => removePassword || formChanged(start, form);
+  const changed = () => removePassword || pendingLink.trim() !== "" || formChanged(start, form);
   const requestClose = (then?: () => void) => {
     if (sending.current) return;
     const go = then ?? onClose;
@@ -152,6 +157,11 @@ export function AccountEditor({
   };
 
   const save = () => {
+    if (pendingLink.trim() !== "") {
+      setErr([PENDING_LINK]);
+      linkField.current?.focus();
+      return;
+    }
     const problems = formProblems(removePassword ? { ...form, password: "" } : form);
     if (problems.length) return setErr(problems);
     setErr([]);
@@ -192,7 +202,7 @@ export function AccountEditor({
       }
     });
 
-  const canSignIn = (hasPassword && !removePassword) || form.password !== "" || keys.length > 0;
+  const canSignIn = (hasPassword && !removePassword) || form.password !== "" || keys.length > 0 || anyLinkCounts(form.tailnet, overview.tailscale);
   return (
     // not a <form>: the folder picker and the confirmations are forms of their own (Modal)
     <div className="acc-editor" role="group" aria-labelledby={ids.name + "-h"}>
@@ -240,7 +250,7 @@ export function AccountEditor({
           <Check checked={form.admin} onChange={(admin) => set({ admin })}>
             Administrator <span className="muted">Can manage accounts and use every network source.</span>
           </Check>
-          {!canSignIn && <p className="muted acc-help">Without a password or a key this account cannot sign in.</p>}
+          {!canSignIn && <p className="muted acc-help">Without a password, a key or a tailnet link that works now, this account cannot sign in.</p>}
         </section>
 
         <section className="set-sec" aria-labelledby={ids.key + "-s"}>
@@ -282,6 +292,8 @@ export function AccountEditor({
             </>
           )}
         </section>
+
+        <TailnetLinks links={form.tailnet} mode={overview.tailscale} disabled={busy !== ""} start={start.tailnet} pending={pendingLink} onPending={setPendingLink} inputRef={linkField} onChange={(tailnet) => set({ tailnet })} />
 
         <section className="set-sec" aria-labelledby={ids.name + "-m"}>
           <h3 id={ids.name + "-m"}>Machines</h3>

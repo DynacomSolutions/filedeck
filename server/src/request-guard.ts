@@ -199,7 +199,7 @@ export function requestGuard(o: GuardOptions = {}): MiddlewareHandler {
     if (o.audit) auditRefusal(o.audit.who, c, status, o.audit.sink);
     return c.json({ error }, status);
   };
-  return async (c, next) => {
+  const mw: MiddlewareHandler = async (c, next) => {
     const m = c.req.method;
     if (SAFE.has(m)) return next();
     if (crossSite(c, allowed)) return refuse(c, 403, "cross-site request refused");
@@ -239,4 +239,6 @@ export function requestGuard(o: GuardOptions = {}): MiddlewareHandler {
     c.req.raw = new Request(c.req.raw, { body: buf as unknown as BodyInit });
     return next();
   };
+  Object.defineProperty(mw, "name", { value: "requestGuard" }); // (a stable name: a test checks the hub's mount order)
+  return mw;
 }

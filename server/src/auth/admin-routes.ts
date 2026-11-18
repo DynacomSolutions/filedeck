@@ -8,7 +8,8 @@ import type { SourceAccess, SourceGrants } from "./source-grants.ts";
 import { currentUser } from "./context.ts";
 import { sessionKeyOf } from "./routes.ts";
 import { keyFingerprint } from "./sshkey.ts";
-import { InputError, MAX_KEYS, accountName, newPassword, nodeAccess, publicKey, sourceAccess, systemName } from "./account-input.ts";
+import { InputError, MAX_KEYS, accountName, newPassword, nodeAccess, publicKey, sourceAccess, systemName, tailnetLinks } from "./account-input.ts";
+import { LinkTaken, type Link, type TailnetLinks } from "./tailnet-links.ts";
 
 /**
  * The admin routes (`/api/admin/*`, hub, sign-in on only). A gate in front of them lets through only a caller with a session (never the
@@ -27,6 +28,10 @@ export interface AdminDeps {
   nodes: string[];
   /** the network sources */
   sources: { name: string; type: string }[];
+  /** The tailnet links (logins and tags) of every account. */
+  links: TailnetLinks;
+  /** The configured Tailscale source, or null when none is: decides whether a link counts for the last administrator (`lockOut`). */
+  tailscale: "socket" | "headers" | null;
   /** Whether a system user exists on a machine: true, false, or undefined when the machine did not answer. */
   systemExists?: (node: string, name: string) => Promise<boolean | undefined>;
   /**
@@ -56,28 +61,45 @@ export type AccountView = {
   nodes: Record<string, NodeAccess>;
   sources: Record<string, SourceAccess>;
   sessions: number;
+  /** its tailnet links, by subject */
+  tailnet: Link[];
 };
 
-/** A system user the hub knows of: named in FILEDECK_ADMINS, given a source grant, or signed in now. */
-export type SystemView = { name: string; admin: boolean; sources: Record<string, SourceAccess>; sessions: number };
+/** A system user the hub knows of: named in FILEDECK_ADMINS, given a source grant or a tailnet link, or signed in now. */
+export type SystemView = { name: string; admin: boolean; sources: Record<string, SourceAccess>; sessions: number; tailnet: Link[] };
+
+type TailnetMode = AdminDeps["tailscale"];
+
+/** Whether a list of links holds one that can sign in with `mode`: as `TailnetLinks.counts`, on a list not yet written. */
+const listCounts = (list: readonly Link[], mode: TailnetMode): boolean =>
+  mode === "socket" ? list.length > 0 : mode === "headers" ? list.some((l) => l.kind === "login") : false;
 
 const NO_ADMIN_LEFT = "this would leave no administrator who can sign in";
 
 /**
  * Whether `change` to the virtual account `change.name` would leave no administrator who can sign in (a virtual account with the admin
- * flag and a password or a key). Only when FILEDECK_ADMINS is empty: system administrators come from there, and no screen can take them
- * away. `password: null` removes the password, `keysLeft` is how many keys it keeps, `deleted` removes the account. Read from the store
- * as it is now, so the caller runs it in the same store transaction as the write, with no `await` between them.
+ * flag and a password, a key, or a tailnet link that counts for `mode`: docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md,
+ * decision 7; no link counts with no source, and only a login link with the headers source). Only when FILEDECK_ADMINS is empty: system
+ * administrators come from there, and no screen can take them away. `password: null` removes the password, `keysLeft` is how many keys it
+ * keeps, `links` the tailnet links it keeps, `deleted` removes the account. Read from the store as it is now, so the caller runs it in the
+ * same store transaction as the write, with no `await` between them.
  */
-export function lockOut(cfg: Config, accounts: Accounts, change: { name: string; admin?: boolean; password?: null; keysLeft?: number; deleted?: true }): boolean {
+export function lockOut(
+  cfg: Config,
+  accounts: Accounts,
+  links: Pick<TailnetLinks, "counts">,
+  mode: TailnetMode,
+  change: { name: string; admin?: boolean; password?: null; keysLeft?: number; links?: readonly Link[]; deleted?: true },
+): boolean {
   if (cfg.admins.length > 0) return false;
   return !accounts.list().some((a) => {
-    if (a.name !== change.name) return a.admin && (a.passwordHash !== null || accounts.keys(a.name).length > 0);
+    if (a.name !== change.name) return a.admin && (a.passwordHash !== null || accounts.keys(a.name).length > 0 || links.counts("virt", a.name, mode));
     if (change.deleted) return false;
     const admin = change.admin ?? a.admin;
     const password = change.password === null ? false : a.passwordHash !== null;
     const keys = change.keysLeft ?? accounts.keys(a.name).length;
-    return admin && (password || keys > 0);
+    const linked = change.links ? listCounts(change.links, mode) : links.counts("virt", a.name, mode);
+    return admin && (password || keys > 0 || linked);
   });
 }
 
@@ -129,6 +151,8 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     } catch (e) {
       if (e instanceof InputError) return c.json({ error: e.message }, 400);
       if (e instanceof Refused) return c.json({ error: e.message }, e.status);
+      // a login or tag linked to another account (the primary key decided it, inside the transaction, which rolled back)
+      if (e instanceof LinkTaken) return c.json({ error: e.message }, 409);
       if (e instanceof AccountError && e.message === "exists") return c.json({ error: "exists" }, 409);
       if (e instanceof AccountError && e.message === "no such account") return notFound(c);
       throw e;
@@ -136,7 +160,7 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
   };
 
   app.get("/api/admin/overview", (c) =>
-    c.json({ nodes: [...deps.nodes], sources: deps.sources.map((s) => ({ name: s.name, type: s.type })), systemAdmins: [...cfg.admins], unownedPasswords: vault.countUnowned() }),
+    c.json({ nodes: [...deps.nodes], sources: deps.sources.map((s) => ({ name: s.name, type: s.type })), systemAdmins: [...cfg.admins], unownedPasswords: vault.countUnowned(), tailscale: deps.tailscale }),
   );
 
   app.get("/api/admin/sessions", (c) => {
@@ -201,6 +225,7 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       nodes: a.nodes,
       sources: deps.sourceGrants.forAccount("virt", a.name),
       sessions: counts.get(`virt:${a.name}`) ?? 0,
+      tailnet: deps.links.forAccount("virt", a.name),
     };
   };
   /** A system user as administrators see it. */
@@ -209,6 +234,7 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     admin: cfg.admins.includes(name),
     sources: deps.sourceGrants.forAccount("sys", name),
     sessions: counts.get(`sys:${name}`) ?? 0,
+    tailnet: deps.links.forAccount("sys", name),
   });
   /** The view after a change, or 404 when the account went meanwhile (another administrator deleted it). */
   const answer = (c: Context, name: string, status: 200 | 201 = 200) => {
@@ -266,7 +292,7 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
   app.get("/api/admin/accounts", (c) => {
     const counts = sessionCounts();
     const list = accounts.list().flatMap((a) => view(a.name, counts) ?? []);
-    const names = new Set<string>([...cfg.admins, ...deps.sourceGrants.accounts("sys")]);
+    const names = new Set<string>([...cfg.admins, ...deps.sourceGrants.accounts("sys"), ...deps.links.accounts("sys")]);
     for (const s of sessions.list()) if (s.kind === "sys") names.add(s.name);
     const system: SystemView[] = [...names].sort().map((name) => systemView(name, counts));
     return c.json({ accounts: list, system });
@@ -283,6 +309,7 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       const nodes = b.nodes === undefined ? {} : nodeAccess(b.nodes, knownNodes());
       const sources = b.sources === undefined ? {} : sourceAccess(b.sources, knownSources());
       const keys = keyList(b.keys);
+      const tailnet = b.tailnet === undefined ? [] : tailnetLinks(b.tailnet);
       if (accounts.get(name)) throw new Refused(409, "exists");
       await askMachines(name, nodes);
       // hashed before the transaction, so the write lock is not held for it
@@ -293,6 +320,8 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
         accounts.create({ name, passwordHash, admin, nodes });
         for (const k of keys) accounts.addKey(name, k);
         deps.sourceGrants.setForAccount("virt", name, sources);
+        // always, `[]` too: links left under the name (as source grants) are never the new account's
+        deps.links.setForAccount("virt", name, tailnet);
         // Saved passwords left under the name (one a late request saved for the deleted account of that name) are not this account's.
         // Only after `create` has passed: a create that loses with "exists" leaves the live account's entries alone.
         vault.forgetAll("virt:" + name);
@@ -316,7 +345,10 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       }
       if (b.nodes !== undefined) patch.nodes = nodeAccess(b.nodes, knownNodes());
       const sources = b.sources === undefined ? undefined : sourceAccess(b.sources, knownSources());
-      if (Object.keys(patch).length === 0 && password === undefined && sources === undefined) throw new InputError("nothing to change: give password, admin, nodes or sources");
+      const tailnet = b.tailnet === undefined ? undefined : tailnetLinks(b.tailnet);
+      if (Object.keys(patch).length === 0 && password === undefined && sources === undefined && tailnet === undefined) {
+        throw new InputError("nothing to change: give password, admin, nodes, sources or tailnet");
+      }
       if (patch.nodes) await askMachines(undefined, patch.nodes);
       // hashed before the transaction, so the write lock is not held for it
       if (typeof password === "string") patch.passwordHash = await hashPasswordAsync(password);
@@ -324,11 +356,20 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       const before = accounts.tx(() => {
         callerHolds(c);
         const id = current(name);
-        if ((patch.admin === false || patch.password === null) && lockOut(cfg, accounts, { name, ...(patch.admin === false ? { admin: false } : {}), ...(patch.password === null ? { password: null } : {}) })) {
+        if (
+          (patch.admin === false || patch.password === null || tailnet !== undefined) &&
+          lockOut(cfg, accounts, deps.links, deps.tailscale, {
+            name,
+            ...(patch.admin === false ? { admin: false } : {}),
+            ...(patch.password === null ? { password: null } : {}),
+            ...(tailnet !== undefined ? { links: tailnet } : {}),
+          })
+        ) {
           throw new Refused(409, NO_ADMIN_LEFT);
         }
         accounts.update(name, patch);
         if (sources) deps.sourceGrants.setForAccount("virt", name, sources);
+        if (tailnet) deps.links.setForAccount("virt", name, tailnet);
         accounts.bumpEpoch("virt", name);
         return id;
       });
@@ -372,7 +413,7 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
         const have = accounts.keys(name);
         const left = have.filter((l) => keyFingerprint(l) !== fp).length;
         if (left === have.length) throw new Refused(404, "no such key");
-        if (lockOut(cfg, accounts, { name, keysLeft: left })) throw new Refused(409, NO_ADMIN_LEFT);
+        if (lockOut(cfg, accounts, deps.links, deps.tailscale, { name, keysLeft: left })) throw new Refused(409, NO_ADMIN_LEFT);
         accounts.removeKey(name, fp);
         accounts.bumpEpoch("virt", name);
         return id;
@@ -386,15 +427,16 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     "/api/admin/accounts/:name",
     checked(async (c) => {
       const name = c.req.param("name") ?? "";
-      // One store transaction (BEGIN IMMEDIATE, so two hubs of a rollout cannot both pass the check): the check, the source grants, the
+      // One store transaction (BEGIN IMMEDIATE, so two hubs of a rollout cannot both pass the check): the check, the source grants and tailnet links, the
       // epoch, then the account and its keys. The old sessions end without the epoch (a session of a missing virtual account is invalid).
       // `remove` keeps the epoch in retired_accounts one above the live one, so the retired epoch (two above the epoch before the delete,
       // with the raise here) is above every epoch an agent or a running job saw, and a name made again starts above it.
       const before = accounts.tx(() => {
         callerHolds(c);
         const id = current(name);
-        if (lockOut(cfg, accounts, { name, deleted: true })) throw new Refused(409, NO_ADMIN_LEFT);
+        if (lockOut(cfg, accounts, deps.links, deps.tailscale, { name, deleted: true })) throw new Refused(409, NO_ADMIN_LEFT);
         deps.sourceGrants.removeAccount("virt", name);
+        deps.links.removeAccount("virt", name);
         accounts.bumpEpoch("virt", name);
         accounts.remove(name);
         return id;
@@ -427,6 +469,33 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
         callerHolds(c);
         const id: Identity = { kind: "sys", name, admin: cfg.admins.includes(name), epoch: accounts.epochOf("sys", name) };
         deps.sourceGrants.setForAccount("sys", name, sources);
+        accounts.bumpEpoch("sys", name);
+        return id;
+      });
+      await deps.changed(before);
+      return c.json(systemView(name));
+    }),
+  );
+
+  // A system user's tailnet links, replaced as a whole (`[]` removes them all). Never root (`systemName`). A list that is not empty is
+  // first checked against the machines, outside the transaction: when at least one machine answers and none says the user exists (a root
+  // account answers no), it is refused; a machine that does not answer blocks nothing, and every Tailscale sign-in asks again. Then the
+  // check, the links and the epoch in one transaction; `changed` after the commit, so sessions signed in through a removed link end.
+  app.put(
+    "/api/admin/system/:name/tailnet",
+    checked(async (c) => {
+      const name = systemName(c.req.param("name") ?? "");
+      const b = await objectBody(c);
+      const list = tailnetLinks(b.links);
+      const ask = deps.systemExists;
+      if (list.length > 0 && ask) {
+        const answers = await Promise.all(deps.nodes.map((node) => ask(node, name).catch(() => undefined)));
+        if (answers.some((v) => v !== undefined) && !answers.includes(true)) throw new InputError(`no machine has a system user ${name}`);
+      }
+      const before = accounts.tx((): Identity => {
+        callerHolds(c);
+        const id: Identity = { kind: "sys", name, admin: cfg.admins.includes(name), epoch: accounts.epochOf("sys", name) };
+        deps.links.setForAccount("sys", name, list);
         accounts.bumpEpoch("sys", name);
         return id;
       });

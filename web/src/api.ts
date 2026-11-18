@@ -721,14 +721,28 @@ export interface SearchDone {
   errors: number;
 }
 
+/**
+ * The header of a request the app makes by itself, not because of something the person did: a refresh after a change feed event, a
+ * reconnect or a poll, and the sign-in check after a dropped feed. The hub does not count such a request as use of the session, so an
+ * open tab alone does not keep an idle session alive.
+ */
+export const BACKGROUND_HEADER: Readonly<Record<string, string>> = Object.freeze({ "x-filedeck-background": "1" });
+
 /** Streams a search (NDJSON from the agent) and reports each batch; abort the signal to cancel the walk on the node. */
 /**
  * The folder listing, streamed when the node supports it (the agent sends NDJSON batches in the default order, so a folder with tens of
  * thousands of entries paints its first rows at once); sources that answer with plain JSON are handled the same way as one batch.
  * `onBatch` gets every batch as it arrives; the resolved value says whether the listing was cut off.
  */
-export async function listStream(node: string, path: string, hidden: boolean, signal: AbortSignal, onBatch: (entries: Entry[]) => void): Promise<{ truncated: boolean }> {
-  const r = await fetch(`${nodeBase(node)}/api/fs/list?path=${enc(path)}&stream=1${hidden ? "&hidden=1" : ""}`, { signal });
+export async function listStream(
+  node: string,
+  path: string,
+  hidden: boolean,
+  signal: AbortSignal,
+  onBatch: (entries: Entry[]) => void,
+  o: { background?: boolean } = {},
+): Promise<{ truncated: boolean }> {
+  const r = await fetch(`${nodeBase(node)}/api/fs/list?path=${enc(path)}&stream=1${hidden ? "&hidden=1" : ""}`, { signal, ...(o.background ? { headers: BACKGROUND_HEADER } : {}) });
   if (!r.ok) await j<unknown>(r);
   if (!(r.headers.get("content-type") ?? "").includes("ndjson") || !r.body) {
     const v = (await r.json()) as { entries: Entry[]; truncated: boolean };

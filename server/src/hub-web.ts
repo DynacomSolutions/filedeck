@@ -49,7 +49,7 @@ export function staticCacheControl(urlPath: string): string | undefined {
  * read's own sandboxing CSP, a thumbnail's cache lifetime) is left alone.
  */
 export function webHeaders(): MiddlewareHandler {
-  return async (c, next) => {
+  const mw: MiddlewareHandler = async (c, next) => {
     await next();
     const res = c.res;
     const h = new Headers(res.headers);
@@ -64,6 +64,8 @@ export function webHeaders(): MiddlewareHandler {
     }
     c.res = new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
   };
+  Object.defineProperty(mw, "name", { value: "webHeaders" }); // (a stable name: a test checks the hub's mount order)
+  return mw;
 }
 
 const NOT_FOR_GZIP = /ndjson|event-stream/i;

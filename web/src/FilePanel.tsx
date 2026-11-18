@@ -261,6 +261,19 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, root
   const clip = useClip();
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((t) => t + 1), []);
+  /**
+   * The tick of the last refresh the change hub caused (a feed event, a reconnect, a poll): the app's own, so its listing and git status
+   * go as background requests (`BACKGROUND_HEADER`) and do not count as use of the session. -1 once the person opens another folder.
+   */
+  const bgTick = useRef(-1);
+  const refreshInBackground = useCallback(
+    () =>
+      setTick((t) => {
+        bgTick.current = t + 1;
+        return t + 1;
+      }),
+    [],
+  );
 
   // Per-panel preview: shown only while exactly one file is selected here (or being edited).
   const editing = leaf.edit ?? null;
@@ -315,6 +328,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, root
     if (fresh) {
       // A different folder: drop the old rows so skeleton rows (not the previous folder) hold the space until the list arrives.
       listKey.current = key;
+      bgTick.current = -1;
       setEntries([]);
       setGit(null);
       setLoading(true);
@@ -332,12 +346,20 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, root
       setLoading(false);
     };
     const ctl = new AbortController();
-    listStream(node, path, hidden, ctl.signal, (batch) => {
-      got.push(...batch);
-      if (!progressive || !live) return;
-      setStreaming(true);
-      if (!flush) flush = window.setTimeout(show, got.length === batch.length ? 0 : 120);
-    })
+    const background = !fresh && bgTick.current === tick;
+    listStream(
+      node,
+      path,
+      hidden,
+      ctl.signal,
+      (batch) => {
+        got.push(...batch);
+        if (!progressive || !live) return;
+        setStreaming(true);
+        if (!flush) flush = window.setTimeout(show, got.length === batch.length ? 0 : 120);
+      },
+      { background },
+    )
       .then((r) => {
         if (!live) return;
         window.clearTimeout(flush);
@@ -382,12 +404,13 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, root
     // One shared stream per folder (see eventStream.ts), not one connection per panel.
     // A busy folder (a temp dir, a build output) fires many change events: relist at most once per 700 ms, after the last one.
     let t = 0;
+    // (every notification is the app's own doing, so the refresh it causes is a background one)
     const off = changeHub().subscribe(node, path, () => {
       window.clearTimeout(t);
-      t = window.setTimeout(refresh, 700);
+      t = window.setTimeout(refreshInBackground, 700);
     });
     return () => (window.clearTimeout(t), off());
-  }, [node, path, refresh]);
+  }, [node, path, refreshInBackground]);
 
   // Git status for the folder, asked for once its listing is on screen. A change event (tick) asks for a fresh read; a repository too big to
   // read within the agent's time budget answers "pending" and is asked again shortly, while the listing stays as it is.
@@ -397,8 +420,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, root
     let timer = 0;
     let tries = 0;
     const ctl = new AbortController();
+    const background = tick > 0 && bgTick.current === tick;
     const ask = (fresh: boolean) =>
-      gitApi.status(node, path, fresh, ctl.signal).then(
+      gitApi.status(node, path, fresh, ctl.signal, { background }).then(
         (g) => {
           if (!live) return;
           setGit(g);
