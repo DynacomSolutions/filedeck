@@ -465,8 +465,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const nodes = before.kind === "sys" ? cfg.nodes.map((n) => n.name) : Object.keys(before.nodes).filter((x) => nodeNames.has(x));
     await endAccountWork({ id, nodes, ops, diffs, call: callNode });
     // a root job runs in the agent's root process, so the raised epoch does not stop it, and one still being started was not in the
-    // listing above: each switch ends as Stop ends it (its calls settle, at most 2 s; its jobs are listed and cancelled; a late relist)
-    for (const until of roots) await endRootJobs(before.name, until);
+    // listing above: each switch ends as Stop ends it (its calls settle, at most 2 s; its jobs are listed and cancelled; a late relist).
+    // The switches end together, so they add at most 3 s to the change however many there are.
+    await Promise.all(roots.map((until) => endRootJobs(before.name, until)));
   };
   // The admin routes (auth/admin-routes.ts): only with sign-in on; off, /api/admin/* is 404. `changed` is read at each call, so tests
   // can wrap app.accountChanged.

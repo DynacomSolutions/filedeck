@@ -1109,3 +1109,15 @@ test("cuttableTarget: a call after the cut rejects without calling the target, a
   assert.equal(cancelled, 1);
   reader.releaseLock();
 });
+
+test("AccountCalls.endAccount leaves a call that starts an agent job to settle, and cuts the others", () => {
+  const calls = new AccountCalls();
+  const job = calls.start("sys", "alice", undefined, { jobStart: true });
+  const plain = calls.start("sys", "alice");
+  assert.equal(calls.endAccount("sys", "alice"), 1);
+  assert.equal(job.signal.aborted, false);
+  assert.equal(plain.signal.aborted, true);
+  job.done();
+  plain.done();
+  assert.equal(calls.size(), 0);
+});

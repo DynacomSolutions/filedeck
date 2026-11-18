@@ -1009,3 +1009,35 @@ test("hub: an account change cancels a root job still being started (end session
     assert.ok(cancelled.includes(id), `${how}: the root job ${id} made after the first listing was not cancelled`);
   }
 });
+
+test("hub: an account change with a machine that never answers answers in under 12 s, with one live switch and with two", { timeout: 60_000 }, async () => {
+  const http = await import("node:http");
+  // takes every request and never answers it
+  const silent = http.createServer(() => {});
+  await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${(silent.address() as AddressInfo).port}`;
+    const h = createHub(
+      loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `S=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-silent.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-silent") } as never),
+      undefined,
+      () => {},
+      { system: fakeSystem([]) },
+    );
+    closers.push(h);
+    for (const switches of [1, 2]) {
+      for (let i = 0; i < switches; i++) {
+        const s = sysCookie(h, "alice");
+        assert.equal((await postJson(h, "/api/auth/as-root", s, { password: RIGHT })).status, 200);
+      }
+      const admin = sysCookie(h, "alice");
+      const t0 = Date.now();
+      const r = await postJson(h, "/api/admin/end-sessions", admin, { kind: "sys", name: "alice" });
+      const took = Date.now() - t0;
+      assert.equal(r.status, 200);
+      assert.ok(took < 12_000, `${switches} switch(es): the change took ${took} ms`);
+    }
+  } finally {
+    silent.close();
+    silent.closeAllConnections();
+  }
+});

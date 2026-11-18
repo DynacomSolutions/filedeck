@@ -68,7 +68,7 @@ Before you turn it on, let the running hub jobs (copies, moves, syncs in the Job
 4. Give network sources. A network source is open only to administrators until you give an account a grant for it (read only, or read and write). Give a system user a grant in the "System users" tab.
 5. Passwords saved while sign-in was off serve nobody now. The Accounts view shows how many there are, and you may forget them.
 
-Every change to an account signs it out and cancels its running jobs. The hub waits for the machines before it answers, up to about 10 seconds when a machine is down. Any ingress, proxy or client timeout in front of the hub must therefore be above 10 seconds. The chart's Mapping has no request timeout; with another ingress, check its own timeout. See [Administrators](security.md#administrators) for what each change ends.
+Every change to an account signs it out and cancels its running jobs. The hub waits for the machines before it answers, up to about 11 seconds when a machine is down (8 seconds for the machines, then up to 3 seconds to cancel jobs started with "act as root"). Any ingress, proxy or client timeout in front of the hub must therefore be above 15 seconds. The chart's Mapping has no request timeout; with another ingress, check its own timeout. See [Administrators](security.md#administrators) for what each change ends.
 
 ## Vault storage
 
