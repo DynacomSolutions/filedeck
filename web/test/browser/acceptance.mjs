@@ -2499,7 +2499,15 @@ async function verifyInstallableApp(browser) {
   const { context, page } = await openPage(browser, { serviceWorkers: 'allow', fixture, initScripts: [pwaSpies], origin: door.origin });
   try {
     // The worker takes control of the first page load (clients.claim), so the next start works without a network.
-    await page.waitForFunction(() => !!navigator.serviceWorker?.controller, null, { timeout: 15000 });
+    // Installing stores the shell and its files first; late in a full run that can take a while, so the wait is generous.
+    const state = await page.evaluate(() => Promise.race([
+      navigator.serviceWorker.ready.then(() => 'ready'),
+      new Promise((r) => setTimeout(() => r('not ready'), 45000)),
+    ]));
+    assert.equal(state, 'ready', 'the service worker installs and activates');
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 15000 }).catch(() => {
+      throw new Error('the active service worker does not control the page (clients.claim)');
+    });
 
     // Manifest, icons and headers
     const m = await page.evaluate(async () => {
