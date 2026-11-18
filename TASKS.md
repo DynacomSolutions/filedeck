@@ -308,5 +308,5 @@ A long size walk made every later du scan wait, even of unrelated folders, becau
 ETA: 2026-11-19 05:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 178 | Watcher never queues behind a walk; metrics for queued jobs and lock waits | in_progress | claude-20261119-du-queue-stuck | du-queue-stuck | | 2026-11-19 04:00 ICT | A watcher lock on / waited behind a 2 h walk; every later du stayed queued.<br>Busy folders are marked dirty instead. |
-| 179 | Release and deploy 24.178 and add the stalled-queue alert | todo | claude-20261119-du-queue-stuck | | 24.178 | 2026-11-19 05:00 ICT | |
+| 178 | Watcher never queues behind a walk; metrics for queued jobs and lock waits | done | claude-20261119-du-queue-stuck | du-queue-stuck | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/253 (223b4b0); CI green.<br>Watcher retries busy folders instead of waiting; new queue and lock-wait gauges. |
+| 179 | Release and deploy 24.178 and add the stalled-queue alert | in_progress | claude-20261119-du-queue-stuck | release-v0.5.1 | 24.178 | 2026-11-19 05:00 ICT | Releasing v0.5.1.<br>Alert PR https://github.com/DynacomSolutions/.cluster/pull/2602 |
