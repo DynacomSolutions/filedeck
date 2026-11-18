@@ -146,12 +146,12 @@ export function publicKey(v: unknown): string {
 const TAILNET_LINK_MESSAGE = "a tailnet link must be a login such as alice@github or a tag such as tag:server (letters, digits and dashes)";
 
 /**
- * One tailnet link: trimmed and lowercased, then a tag when it starts with `tag:` (`cleanTag`), else a login (`cleanLogin`, never
+ * One tailnet link: trimmed (ASCII white space only) and lowercased, then a tag when it starts with `tag:` (`cleanTag`), else a login (`cleanLogin`, never
  * `tagged-devices`). Gives the cleaned subject with its kind.
  */
 export function tailnetLink(v: unknown): Link {
   if (typeof v !== "string") throw new InputError(TAILNET_LINK_MESSAGE);
-  const isTag = v.trim().toLowerCase().startsWith("tag:");
+  const isTag = /^[ \t\r\n]*tag:/i.test(v);
   const subject = isTag ? cleanTag(v) : cleanLogin(v);
   if (subject === null) throw new InputError(TAILNET_LINK_MESSAGE);
   return { subject, kind: isTag ? "tag" : "login" };

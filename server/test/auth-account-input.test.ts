@@ -209,7 +209,7 @@ test("tailnetLink: a login or a tag, trimmed and lowercased, with its kind", () 
   assert.deepEqual(tailnetLink("bob@passkey"), { subject: "bob@passkey", kind: "login" });
   const longest = "a@" + "b".repeat(249) + ".io";
   assert.deepEqual(tailnetLink(longest), { subject: longest, kind: "login" }, "254 characters pass");
-  for (const bad of ["tagged-devices", "tag:", "tag:a_b", "tag:a.b", "alice", "@github", "alice@", "a\n@github", "", "a@" + "b".repeat(250) + ".io", 5, null, undefined, ["a@x"]]) {
+  for (const bad of ["\u212aelly@github", "kelly@github\u00a0", "\ufefftag:server", "tag:\u212a8s", "tagged-devices", "tag:", "tag:a_b", "tag:a.b", "alice", "@github", "alice@", "a\n@github", "", "a@" + "b".repeat(250) + ".io", 5, null, undefined, ["a@x"]]) {
     const msg = inputError(() => tailnetLink(bad));
     assert.match(msg, /tailnet link/, `${JSON.stringify(bad)} is refused with the link message`);
   }

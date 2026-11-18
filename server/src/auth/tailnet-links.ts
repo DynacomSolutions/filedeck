@@ -6,7 +6,8 @@ import { inTransaction } from "./tx.ts";
  * Tailnet links (hub; docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md, decisions 3, 4 and 7). An administrator links a tailnet
  * login (`alice@github`) or a tag (`tag:server`) to one account. The subject is the primary key, so a login or a tag belongs to at most one
  * account, whatever two writers do at the same moment. A system user and a virtual account of the same name are different accounts. The
- * values are already cleaned (`account-input.ts` `tailnetLink`); this store does not check them again.
+ * values are already cleaned (`account-input.ts` `tailnetLink`); this store does not check them again, but it works out each link's kind
+ * from its subject, never from the caller.
  */
 
 export type LinkKind = "login" | "tag";
@@ -24,6 +25,9 @@ export class LinkTaken extends Error {
     super(`${kind === "tag" ? "this tag" : "this tailnet login"} is linked to ${accountKind}:${name}`);
   }
 }
+
+/** The kind of a cleaned subject: tags start with `tag:`, logins hold an `@`, so the two never share a subject. */
+const linkKind = (subject: string): LinkKind => (subject.startsWith("tag:") ? "tag" : "login");
 
 export class TailnetLinks {
   private now: () => number;
@@ -81,11 +85,11 @@ export class TailnetLinks {
         if (seen.has(l.subject)) continue;
         seen.add(l.subject);
         try {
-          ins.run(l.subject, l.kind, kind, name, kept.get(l.subject) ?? t);
+          ins.run(l.subject, linkKind(l.subject), kind, name, kept.get(l.subject) ?? t);
         } catch (e) {
           if (!/UNIQUE|PRIMARY KEY/i.test((e as Error).message)) throw e;
           const o = this.owner(l.subject);
-          throw o ? new LinkTaken(l.subject, l.kind, o.kind, o.name) : e;
+          throw o ? new LinkTaken(l.subject, linkKind(l.subject), o.kind, o.name) : e;
         }
       }
     });

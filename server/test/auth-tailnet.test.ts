@@ -9,6 +9,15 @@ import { trustProxies } from "../src/audit.ts";
 import { cleanLogin, cleanTag, ProxyList, stripTailnetHeaders, TailnetSource, type TailnetAnswer } from "../src/auth/tailnet.ts";
 
 const LISTED = "127.0.0.1";
+
+/** Waits until `cond` holds; fails (instead of hanging) after `ms`. */
+async function until(cond: () => boolean, what: string, ms = 5_000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 const proxies = () => new ProxyList(["127.0.0.1/32", "::1/128"]);
 const peer = (remoteAddress: string) => ({ incoming: { socket: { remoteAddress, encrypted: false } } });
 
@@ -74,6 +83,23 @@ test("clean: logins and tags are trimmed, lowercased and checked", () => {
   assert.equal(cleanTag("tag:" + "a".repeat(63)), "tag:" + "a".repeat(63));
 });
 
+test("clean: only ASCII passes; only ASCII space, tab, CR and LF are trimmed (no near match by Unicode case folding or trimming)", () => {
+  const K = "\u212a"; // KELVIN SIGN, lower-cases to "k"
+  assert.equal(cleanLogin(`${K}ate@example.com`), null);
+  assert.equal(cleanLogin(`kate@example.${K}om`), null);
+  for (const ws of ["\u00a0", "\u2028", "\ufeff", "\u3000"]) {
+    assert.equal(cleanLogin(`alice@github${ws}`), null, JSON.stringify(ws));
+    assert.equal(cleanLogin(`${ws}alice@github`), null, JSON.stringify(ws));
+    assert.equal(cleanTag(`tag:server${ws}`), null, JSON.stringify(ws));
+    assert.equal(cleanTag(`${ws}tag:server`), null, JSON.stringify(ws));
+  }
+  assert.equal(cleanTag(`tag:${K}8s`), null);
+  assert.equal(cleanTag(`${K.toUpperCase()}TAG:a`), null);
+  assert.equal(cleanLogin("\t Alice@GitHub\r\n"), "alice@github", "ASCII white space is trimmed");
+  assert.equal(cleanTag(" \tTAG:Server\n"), "tag:server");
+  assert.equal(cleanLogin("İ@github"), null, "a letter that lower-cases to ASCII plus a mark");
+});
+
 test("proxy list: addresses and ranges, IPv4-mapped IPv6 and zone ids", () => {
   const l = new ProxyList(["127.0.0.1/32", "::1/128"]);
   assert.ok(l.has("127.0.0.1"));
@@ -88,7 +114,7 @@ test("proxy list: addresses and ranges, IPv4-mapped IPv6 and zone ids", () => {
   assert.ok(r.has("fd00::5%eth0"));
   assert.ok(r.has("192.0.2.7"));
   assert.ok(!new ProxyList([]).has("127.0.0.1"));
-  for (const bad of ["localhost", "10.0.0.0/33", "::1/129", "10.0.0.0/", "/8", "10.0.0.0/8/8", "10.0.0.0/x"]) {
+  for (const bad of ["localhost", "10.0.0.0/33", "::1/129", "10.0.0.0/", "/8", "10.0.0.0/8/8", "10.0.0.0/x", "::ffff:10.0.0.0/104", "::ffff:10.0.0.0/8", "::ffff:127.0.0.1/128", "fe80::1%eth0", "fe80::/64%eth0"]) {
     assert.throws(() => new ProxyList([bad]), { message: `FILEDECK_TAILSCALE_PROXIES: "${bad}" is not an IP address or range` }, bad);
   }
 });
@@ -309,10 +335,12 @@ test("at most 8 whois calls at once; the cache keeps at most maxCache addresses,
     const src = new TailnetSource({ socket, headers: false, proxies: proxies(), maxCache: 3 });
     const app = appFor(src);
     const all = Array.from({ length: 12 }, (_, i) => ask(app, LISTED, { "X-Forwarded-For": `100.64.0.${i + 1}` }));
-    while (calls < 8) await new Promise((r) => setTimeout(r, 5));
+    await until(() => calls >= 8, "8 calls");
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(open, 8);
+    const end = Date.now() + 5_000;
     while (pending.length || calls < 12) {
+      if (Date.now() > end) throw new Error("timed out answering 12 calls");
       pending.shift()?.();
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -324,7 +352,7 @@ test("at most 8 whois calls at once; the cache keeps at most maxCache addresses,
     assert.equal(((await again) as { login: string }).login, "alice@github");
     assert.equal(calls, before);
     const first = ask(app, LISTED, { "X-Forwarded-For": "100.64.0.1" });
-    while (calls === before) await new Promise((r) => setTimeout(r, 5));
+    await until(() => calls > before, "the evicted address to be asked again", 2_000);
     pending.shift()?.();
     await first;
     assert.equal(calls, before + 1);
@@ -399,8 +427,109 @@ test("over a real node server: a repeated login header gives none, and the strip
     assert.deepEqual(one, { identity: { login: "alice@github", tags: [], source: "headers" }, seen: null, node: null });
     const two = await get(["Tailscale-User-Login", "alice@github", "tailscale-user-login", "alice@github"]);
     assert.deepEqual(two, { identity: { none: true }, seen: null, node: null });
+    const comma = await get(["Tailscale-User-Login", "doe@github", "Tailscale-User-Name", "Doe, John"]);
+    assert.deepEqual(comma.identity, { login: "doe@github", displayName: "Doe, John", tags: [], source: "headers" });
   } finally {
     server.close();
     (server as unknown as { closeAllConnections?(): void }).closeAllConnections?.();
+  }
+});
+
+test("queue time counts: with tailscaled hung, 24 addresses at once all answer unavailable within 2.5 s", async () => {
+  const api = await fakeLocalApi(() => "hang");
+  try {
+    const src = new TailnetSource({ socket: api.socket, headers: false, proxies: proxies(), log: () => {} });
+    const app = appFor(src);
+    const t0 = Date.now();
+    const answers = await Promise.all(
+      Array.from({ length: 24 }, async (_, i) => {
+        const a = await ask(app, LISTED, { "X-Forwarded-For": `100.64.1.${i + 1}` });
+        return { a, ms: Date.now() - t0 };
+      }),
+    );
+    for (const { a, ms } of answers) {
+      assert.deepEqual(a, { unavailable: true });
+      assert.ok(ms < 2_500, `${ms} ms`);
+    }
+  } finally {
+    await api.close();
+  }
+});
+
+test("a slot given up in the queue is not lost: after a hung round, 8 fresh calls run at once", async () => {
+  let hang = true;
+  const api = await fakeLocalApi(() => (hang ? "hang" : whois("alice@github")));
+  try {
+    const src = new TailnetSource({ socket: api.socket, headers: false, proxies: proxies(), log: () => {}, timeoutMs: 300 });
+    const app = appFor(src);
+    await Promise.all(Array.from({ length: 20 }, (_, i) => ask(app, LISTED, { "X-Forwarded-For": `100.64.2.${i + 1}` })));
+    hang = false;
+    const t0 = Date.now();
+    const got = await Promise.all(Array.from({ length: 8 }, (_, i) => ask(app, LISTED, { "X-Forwarded-For": `100.64.3.${i + 1}` })));
+    for (const a of got) assert.equal((a as { login?: string }).login, "alice@github");
+    assert.ok(Date.now() - t0 < 1_000);
+  } finally {
+    await api.close();
+  }
+});
+
+test("an answer larger than 1 MiB is unavailable", async () => {
+  const big = whois("alice@github");
+  (big.body as Record<string, unknown>).Padding = "x".repeat(1024 * 1024 + 10);
+  const api = await fakeLocalApi(() => big);
+  try {
+    const src = new TailnetSource({ socket: api.socket, headers: false, proxies: proxies(), log: () => {} });
+    assert.deepEqual(await ask(appFor(src), LISTED, { "X-Forwarded-For": "100.101.102.103" }), { unavailable: true });
+  } finally {
+    await api.close();
+  }
+});
+
+test("requests for one address at the same moment share one whois call", async () => {
+  const pending: (() => void)[] = [];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fd-ts-"));
+  const socket = path.join(dir, "ts.sock");
+  let calls = 0;
+  const server = http.createServer((_req, res) => {
+    calls++;
+    pending.push(() => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(whois("alice@github").body));
+    });
+  });
+  await new Promise<void>((res) => server.listen(socket, res));
+  try {
+    const src = new TailnetSource({ socket, headers: false, proxies: proxies() });
+    const app = appFor(src);
+    const all = Array.from({ length: 5 }, () => ask(app, LISTED, { "X-Forwarded-For": "100.101.102.103" }));
+    await until(() => calls >= 1, "the first call");
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(calls, 1);
+    pending.shift()!();
+    for (const a of await Promise.all(all)) assert.equal((a as { login: string }).login, "alice@github");
+    assert.equal(calls, 1);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((res) => server.close(() => res()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a none answer (404) is cached for 10 seconds too", async () => {
+  const api = await fakeLocalApi(() => ({ status: 404, body: "no match" }));
+  let t = 1_000;
+  try {
+    const src = new TailnetSource({ socket: api.socket, headers: false, proxies: proxies(), now: () => t });
+    const app = appFor(src);
+    const xff = { "X-Forwarded-For": "100.101.102.103" };
+    assert.deepEqual(await ask(app, LISTED, xff), { none: true });
+    t += 9_000;
+    assert.deepEqual(await ask(app, LISTED, xff), { none: true });
+    assert.equal(api.calls.length, 1);
+    t += 1_001;
+    assert.deepEqual(await ask(app, LISTED, xff), { none: true });
+    assert.equal(api.calls.length, 2);
+  } finally {
+    await api.close();
   }
 });

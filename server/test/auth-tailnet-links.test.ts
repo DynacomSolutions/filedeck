@@ -134,6 +134,31 @@ test("counts: a login link for socket and headers, a tag link only for socket, n
   assert.equal(links.counts("sys", "l", "socket"), false);
 });
 
+test("setForAccount takes the kind from the subject, never from the caller", () => {
+  const { links } = fresh();
+  links.setForAccount("virt", "x", [
+    { subject: "tag:server", kind: "login" },
+    { subject: "alice@github", kind: "tag" },
+  ]);
+  assert.deepEqual(links.forAccount("virt", "x"), [
+    { subject: "alice@github", kind: "login" },
+    { subject: "tag:server", kind: "tag" },
+  ]);
+  links.setForAccount("virt", "y", [{ subject: "tag:web", kind: "login" }]);
+  assert.equal(links.counts("virt", "y", "headers"), false, "a tag never counts as a login");
+  assert.equal(links.counts("virt", "y", "socket"), true);
+});
+
+test("resolve: tag-conflict names the accounts in sorted order, and a system user and a virtual account of one name differ", () => {
+  const { links } = fresh();
+  links.setForAccount("virt", "z", [{ subject: "tag:c", kind: "tag" }]);
+  links.setForAccount("sys", "a", [{ subject: "tag:d", kind: "tag" }]);
+  assert.deepEqual(resolve({ tags: ["tag:c", "tag:d"], source: "socket" }, links), { ok: false, reason: "tag-conflict", accounts: ["sys:a", "virt:z"] });
+  links.setForAccount("sys", "x", [{ subject: "tag:a", kind: "tag" }]);
+  links.setForAccount("virt", "x", [{ subject: "tag:b", kind: "tag" }]);
+  assert.deepEqual(resolve({ tags: ["tag:b", "tag:a"], source: "socket" }, links), { ok: false, reason: "tag-conflict", accounts: ["sys:x", "virt:x"] });
+});
+
 test("resolve: a linked login wins; else one account among the linked tags; else a refusal", () => {
   const { links } = fresh();
   links.setForAccount("virt", "a", [{ subject: "alice@github", kind: "login" }]);

@@ -27,16 +27,25 @@ const UNAVAILABLE = Object.freeze({ unavailable: true as const });
 const LOGIN = /^[a-z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*$/;
 const TAG = /^tag:[a-z0-9-]{1,63}$/;
 
+/**
+ * Trims only ASCII space, tab, CR and LF, refuses anything outside printable ASCII, and only then lowercases: no Unicode trimming (U+00A0,
+ * U+2028, U+FEFF) or case folding (the Kelvin sign lowercases to `k`) can turn a value into a near match of a link.
+ */
+function asciiClean(v: string): string | null {
+  const s = v.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+  return /^[\x21-\x7e]*$/.test(s) ? s.toLowerCase() : null;
+}
+
 /** A tailnet login, trimmed and lowercased, or null when it does not pass the link rules (`tagged-devices`, whois's "no user", never passes). */
 export function cleanLogin(v: string): string | null {
-  const s = v.trim().toLowerCase();
-  return s.length <= 254 && LOGIN.test(s) ? s : null;
+  const s = asciiClean(v);
+  return s !== null && s.length <= 254 && LOGIN.test(s) ? s : null;
 }
 
 /** A tag (`tag:name`), trimmed and lowercased, or null when it does not pass the link rules. */
 export function cleanTag(v: string): string | null {
-  const s = v.trim().toLowerCase();
-  return TAG.test(s) ? s : null;
+  const s = asciiClean(v);
+  return s !== null && TAG.test(s) ? s : null;
 }
 
 /** An IP address without a zone id, an IPv4-mapped IPv6 address as dotted IPv4; undefined when it is not an address. */
@@ -117,13 +126,13 @@ function peerOf(c: Context): string | undefined {
   }
 }
 
-/** How often a header occurs in the request as it came in: the node request's raw list when there is one, else a comma marks a joined value. */
+/** How often a header occurs in the request as it came in: the node request's raw list when there is one, else (no node request) a comma marks a joined value. */
 function occurrences(c: Context, name: string): number {
   const raw = (c.env as { incoming?: { rawHeaders?: string[] } } | undefined)?.incoming?.rawHeaders;
   if (Array.isArray(raw)) {
     let n = 0;
     for (let i = 0; i < raw.length; i += 2) if (raw[i]?.toLowerCase() === name) n++;
-    if (n > 1) return n;
+    return n;
   }
   const v = c.req.raw.headers.get(name);
   return v === null ? 0 : v.includes(",") ? 2 : 1;
@@ -144,7 +153,7 @@ export class TailnetSource {
   private cache = new Map<string, { at: number; answer: Whois }>(); // insertion order = oldest first
   private inflight = new Map<string, Promise<Whois | typeof UNAVAILABLE>>();
   private running = 0;
-  private queue: (() => void)[] = [];
+  private queue: (() => void)[] = []; // waiters for a call slot, first come first served
   private loggedAt = -Infinity;
 
   constructor(o: {
@@ -198,26 +207,55 @@ export class TailnetSource {
     if (hit && this.now() - hit.at < this.cacheMs) return hit.answer;
     let p = this.inflight.get(addr);
     if (!p) {
-      p = this.limited(() => this.whois(addr)).finally(() => this.inflight.delete(addr));
+      p = this.whois(addr).finally(() => this.inflight.delete(addr));
       this.inflight.set(addr, p);
     }
     return p;
   }
 
-  /** At most 8 whois calls at once; the rest wait their turn. */
-  private async limited<T>(f: () => Promise<T>): Promise<T> {
-    if (this.running >= 8) await new Promise<void>((r) => this.queue.push(r));
-    this.running++;
+  /**
+   * A call slot by `deadline` (at most 8 whois calls at once; the rest wait their turn); false when the deadline passes first. A slot that is
+   * given back goes straight to the next waiter, and a waiter that gives up leaves the queue, so no slot is ever lost.
+   */
+  private slot(deadline: number): Promise<boolean> {
+    if (this.running < 8) {
+      this.running++;
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      const grant = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        const i = this.queue.indexOf(grant);
+        if (i >= 0) this.queue.splice(i, 1);
+        resolve(false);
+      }, Math.max(0, deadline - Date.now()));
+      this.queue.push(grant);
+    });
+  }
+
+  private release(): void {
+    const next = this.queue.shift();
+    if (next) next(); // the slot passes on; `running` stays
+    else this.running--;
+  }
+
+  /** One whois call within `timeoutMs` in all, the wait for a slot included. */
+  private async limitedAsk(addr: string): ReturnType<TailnetSource["ask"]> {
+    const deadline = Date.now() + this.timeoutMs;
+    if (!(await this.slot(deadline))) return { fail: "timeout" };
     try {
-      return await f();
+      const left = deadline - Date.now();
+      return left > 0 ? await this.ask(addr, left) : { fail: "timeout" };
     } finally {
-      this.running--;
-      this.queue.shift()?.();
+      this.release();
     }
   }
 
   private async whois(addr: string): Promise<Whois | typeof UNAVAILABLE> {
-    const r = await this.ask(addr);
+    const r = await this.limitedAsk(addr);
     if ("fail" in r) {
       const t = this.now();
       if (t - this.loggedAt >= 60_000) {
@@ -234,7 +272,7 @@ export class TailnetSource {
   }
 
   /** One `GET /localapi/v0/whois` over the socket: 200 with a JSON object, 404, or a failure reason without the path. */
-  private ask(addr: string): Promise<{ status: 200; body: Record<string, unknown> } | { status: 404 } | { fail: string }> {
+  private ask(addr: string, timeoutMs: number): Promise<{ status: 200; body: Record<string, unknown> } | { status: 404 } | { fail: string }> {
     return new Promise((resolve) => {
       let done = false;
       const end = (v: Parameters<typeof resolve>[0]) => {
@@ -280,7 +318,7 @@ export class TailnetSource {
       const timer = setTimeout(() => {
         end({ fail: "timeout" });
         req.destroy();
-      }, this.timeoutMs);
+      }, timeoutMs);
       req.on("error", (e: NodeJS.ErrnoException) => end({ fail: typeof e.code === "string" && /^[A-Z_]+$/.test(e.code) ? e.code : "error" }));
       req.end();
     });
