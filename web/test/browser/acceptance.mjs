@@ -112,12 +112,30 @@ async function installFixture(page, opts = {}) {
       opts.asRoot.until = Date.now() + lasts;
       return json({ asRootUntil: opts.asRoot.until, asRootLeftMs: lasts });
     }
+    // opts.tailnet ({ body, status }): the hub's answer to GET /api/auth/tailnet (default `{}`: no tailnet identity).
+    // opts.tailscale ({ posts, refuse, as }): POST /api/auth/login-tailscale is counted in `posts`; it answers 401 while `refuse`
+    // is set, else signs in as `as` ({ account, kind, admin, subject }), so the next /api/auth/me reports a Tailscale session.
+    if (pathname === '/api/auth/tailnet') return json(opts.tailnet?.body ?? {}, opts.tailnet?.status ?? 200);
+    if (pathname === '/api/auth/login-tailscale' && req.method() === 'POST') {
+      const ts = opts.tailscale ?? {};
+      ts.posts = (ts.posts ?? 0) + 1;
+      ts.bodies = [...(ts.bodies ?? []), req.postData()];
+      if (ts.refuse || !ts.as) return json({ error: 'sign-in failed' }, 401);
+      Object.assign(opts, { signedOut: false, account: ts.as.account, kind: ts.as.kind, admin: ts.as.admin, method: 'tailscale', tailnetSubject: ts.as.subject });
+      return json({ auth: true, kind: ts.as.kind, name: ts.as.account, admin: ts.as.admin });
+    }
     if (pathname === '/api/auth/me') {
+      // opts.meUnavailable: that many answers are 503 first (a Tailscale session while tailscaled does not answer)
+      if (opts.meUnavailable > 0) {
+        opts.meUnavailable--;
+        return json({ error: 'tailnet identity unavailable' }, 503);
+      }
       if (opts.account) {
         const kind = opts.kind ?? 'virt';
         const until = opts.asRoot?.until;
         opts.meCalls = (opts.meCalls ?? 0) + 1;
-        return json({ auth: true, kind, name: opts.account, admin: opts.admin === true, ...(until !== undefined && until > Date.now() ? { asRootUntil: until, asRootLeftMs: until - Date.now() } : {}) });
+        const how = opts.method ? { method: opts.method, ...(opts.tailnetSubject ? { tailnet: opts.tailnetSubject } : {}) } : {};
+        return json({ auth: true, kind, name: opts.account, admin: opts.admin === true, ...(until !== undefined && until > Date.now() ? { asRootUntil: until, asRootLeftMs: until - Date.now() } : {}), ...how });
       }
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
@@ -1620,7 +1638,153 @@ async function verifySignIn(browser) {
     await context.close();
   }
   await verifyResumeAfterSessionEnds(browser);
+  await verifyTailscaleSignIn(browser, failures);
   assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
+}
+
+// Sign in with Tailscale: the button shows only when the hub gives a tailnet identity, names the login (or the tags), and is never
+// pressed for the person (no POST before the click, focus stays on the name field). A refusal shows "Sign-in failed", as for a
+// password. 503 shows a note; `{}` shows nothing new. axe passes and nothing overflows sideways at 1365x900, 390x844 and 320x568
+// in light and dark. The click sends one POST with `{}`; the app then loads and the account menu names the method. Acting as root
+// from a Tailscale session still asks for the password. A 503 from /api/auth/me is a wait with a retry, never the sign-in screen.
+async function verifyTailscaleSignIn(browser, failures) {
+  const open = async (viewport, scheme, fixture) => {
+    const context = await browser.newContext({ viewport, colorScheme: scheme, bypassCSP: true });
+    const page = await context.newPage();
+    fixture.requests = [];
+    await page.addInitScript((mode) => localStorage.setItem('filedeck-theme', mode), scheme);
+    await installFixture(page, fixture);
+    await page.goto(new URL(directState(), baseURL).toString(), { waitUntil: 'domcontentloaded' });
+    return { context, page };
+  };
+  const overflow = async (page, what) => {
+    const o = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, body: document.body.scrollWidth, form: document.querySelector('.signin-form')?.getBoundingClientRect().right ?? 0, menu: Math.max(0, ...[...document.querySelectorAll('.ctx, .ctx button')].map((e) => e.getBoundingClientRect().right)) }));
+    if (o.scroll > o.client + 1 || o.body > o.client + 1 || o.form > o.client + 1 || o.menu > o.client + 1) failures.push({ view: what, rule: 'horizontal overflow', ...o });
+  };
+  const posts = (fixture) => fixture.requests.filter((r) => r === '/api/auth/login-tailscale').length;
+  const tsButton = (page) => page.getByRole('button', { name: 'Sign in with Tailscale', exact: true });
+  const heading = (page) => page.getByRole('heading', { name: /^Sign in to / });
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      const fixture = { signedOut: true, tailnet: { body: { login: 'alice.with.a.rather.long.name@example-github', displayName: 'Alice Example', node: { name: 'alice-laptop' } } }, tailscale: { refuse: true } };
+      const { context, page } = await open(viewport, scheme, fixture);
+      try {
+        await tsButton(page).waitFor({ state: 'visible', timeout: 15000 });
+        const as = page.locator('.signin-as');
+        assert.match(await as.innerText(), /^as Alice Example \(alice\.with\.a\.rather\.long\.name@example-github\) on alice-laptop$/, `the button names the login (${label})`);
+        assert.equal(await as.locator('bdi').count(), 3, 'the login, display name and device name are in <bdi>');
+        assert.match(await tsButton(page).getAttribute('aria-describedby'), /.+/, 'the button is described by the login line');
+        await page.waitForTimeout(400);
+        assert.equal(posts(fixture), 0, `no sign-in before the click (${label})`);
+        assert.equal(await page.getByRole('textbox', { name: 'Name' }).evaluate((el) => el === document.activeElement), true, `focus stays on the name field (${label})`);
+        await overflow(page, `tailscale button ${label}`);
+        await runAxe(page, `tailscale button ${label}`, failures);
+        await tsButton(page).click();
+        await page.getByRole('alert').filter({ hasText: 'Sign-in failed' }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(posts(fixture), 1, 'one POST per click');
+        assert.equal(await heading(page).count(), 1, 'a refusal stays on the sign-in screen');
+        await overflow(page, `tailscale refused ${label}`);
+        await runAxe(page, `tailscale refused ${label}`, failures);
+      } finally {
+        await context.close();
+      }
+    }
+    // a tagged device: the button names its tags
+    {
+      const fixture = { signedOut: true, tailnet: { body: { tags: ['tag:ci', 'tag:web'], node: { name: 'ci-runner' } } } };
+      const { context, page } = await open({ width: 390, height: 844 }, scheme, fixture);
+      try {
+        await tsButton(page).waitFor({ state: 'visible', timeout: 15000 });
+        assert.equal((await page.locator('.signin-as').innerText()).trim(), 'as this device (ci-runner): tag:ci, tag:web', 'the button names the tags');
+        await runAxe(page, `tailscale tags ${scheme}`, failures);
+      } finally {
+        await context.close();
+      }
+    }
+    // the hub's source does not answer: a note, no button
+    {
+      const fixture = { signedOut: true, tailnet: { status: 503, body: { error: 'tailnet identity unavailable' } } };
+      const { context, page } = await open({ width: 1365, height: 900 }, scheme, fixture);
+      try {
+        await page.getByText('Tailscale sign-in is not available now.', { exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+        assert.equal(await tsButton(page).count(), 0, 'no button while the source does not answer');
+        await runAxe(page, `tailscale unavailable ${scheme}`, failures);
+      } finally {
+        await context.close();
+      }
+    }
+    // /api/auth/me answers 503 for a Tailscale session: a wait that asks again, never the sign-in screen
+    {
+      const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github', meUnavailable: 2 };
+      const { context, page } = await open({ width: 320, height: 568 }, scheme, fixture);
+      try {
+        await page.getByRole('status').filter({ hasText: 'Tailscale is not answering, trying again.' }).waitFor({ state: 'visible', timeout: 15000 });
+        assert.equal(await heading(page).count(), 0, 'a 503 from me is not the sign-in screen');
+        await overflow(page, `tailscale waiting ${scheme}`);
+        await runAxe(page, `tailscale waiting ${scheme}`, failures);
+        // the second answer is a 503 too; the third (after 1 s, then 2 s) brings the app
+        await page.getByRole('button', { name: 'Account: fixture-ts' }).waitFor({ state: 'visible', timeout: 10000 });
+        assert.equal(fixture.meUnavailable, 0, 'me was asked again after each 503');
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  // no tailnet identity: the page is as before
+  {
+    const fixture = { signedOut: true, tailnet: { body: {} } };
+    const { context, page } = await open({ width: 1365, height: 900 }, 'light', fixture);
+    try {
+      await heading(page).waitFor({ state: 'visible', timeout: 15000 });
+      await page.waitForTimeout(400);
+      assert.equal(await tsButton(page).count(), 0, 'no button without a tailnet identity');
+      assert.equal(await page.locator('.signin-or').count(), 0, 'no divider without a tailnet identity');
+    } finally {
+      await context.close();
+    }
+  }
+  // the click signs in; the account menu names the method; acting as root still asks for the password
+  for (const scheme of ['light', 'dark']) {
+    const asRoot = {};
+    const fixture = { signedOut: true, asRoot, tailnet: { body: { login: 'alice@github' } }, tailscale: { as: { account: 'fixture-root', kind: 'sys', admin: true, subject: 'alice@github' } } };
+    const { context, page } = await open({ width: 390, height: 844 }, scheme, fixture);
+    try {
+      await tsButton(page).click({ timeout: 15000 });
+      const account = page.getByRole('button', { name: 'Account: fixture-root' });
+      await account.waitFor({ state: 'visible', timeout: 15000 });
+      assert.equal(fixture.tailscale.posts, 1, 'one POST signs in');
+      assert.deepEqual(fixture.tailscale.bodies, ['{}'], 'the POST body is {}');
+      await account.click();
+      const line = page.getByRole('menuitem', { name: 'Signed in with Tailscale as alice@github' });
+      await line.waitFor({ state: 'visible', timeout: 8000 });
+      assert.equal(await line.locator('bdi').innerText(), 'alice@github', 'the subject is in <bdi>');
+      await page.waitForTimeout(150);
+      await overflow(page, `tailscale account menu ${scheme}`);
+      await runAxe(page, `tailscale account menu ${scheme}`, failures);
+      await page.getByRole('menuitem', { name: 'Act as root…' }).click();
+      const dialog = page.getByRole('dialog', { name: 'Act as root' });
+      await dialog.waitFor({ state: 'visible' });
+      await dialog.getByLabel('Password', { exact: true }).fill('fixture-root-password');
+      await dialog.getByRole('button', { name: 'Act as root' }).click();
+      await dialog.waitFor({ state: 'hidden', timeout: 8000 });
+      await page.locator('.asroot-banner').waitFor({ state: 'visible', timeout: 8000 });
+      assert.deepEqual(asRoot.bodies, ['password'], 'act as root from a Tailscale session sends the password');
+    } finally {
+      await context.close();
+    }
+  }
+  // a password session's menu has no Tailscale line
+  {
+    const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-user', method: 'password' } });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-user' }).click();
+      await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
+      assert.equal(await page.getByRole('menuitem', { name: /Tailscale/ }).count(), 0, 'no Tailscale line for a password session');
+    } finally {
+      await context.close();
+    }
+  }
 }
 
 // A virtual account opens each machine at its first granted folder: with no panel in the URL the first panel shows it, the sidebar

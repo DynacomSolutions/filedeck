@@ -111,8 +111,27 @@ export function useProofFields<F extends string = never>() {
     }
   };
 
+  /**
+   * An attempt that needs no password or key (Tailscale sign-in): the same busy state and error line as `run`. The
+   * fields are left as they are. True when `act` succeeded.
+   */
+  const runWithoutProof = async (act: () => Promise<void>): Promise<boolean> => {
+    if (busy) return false;
+    setBusy(true);
+    clearErr();
+    try {
+      await act();
+      return true;
+    } catch (e) {
+      if (mounted.current) fail(attemptFailure(e).message);
+      return false;
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
   const errProps = (f: Field) => (err && errField === f ? { "aria-invalid": true as const, "aria-describedby": errId } : {});
-  return { method, password, setPassword, keyText, keyEncrypted, passphrase, setPassphrase, fileGen, err, errId, busy, fail, clearErr, forgetSecrets, pick, moveMethod, readFile, run, errProps };
+  return { method, password, setPassword, keyText, keyEncrypted, passphrase, setPassphrase, fileGen, err, errId, busy, fail, clearErr, forgetSecrets, pick, moveMethod, readFile, run, runWithoutProof, errProps };
 }
 
 /** What the fields need from useProofFields (any caller's extra fields are not theirs to mark) */

@@ -10,13 +10,15 @@ import "./phone.css";
 import { AccessibilityChrome } from "./AccessibilityChrome";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { installViewportTracking } from "./viewport";
-import { installSignedOutWatch, me, type Me } from "./auth";
+import { installSignedOutWatch, me, retryDelayMs, TailnetUnavailableError, type Me } from "./auth";
 
 installViewportTracking();
 
 const SignIn = lazy(() => import("./SignIn").then((m) => ({ default: m.SignIn })));
+const TailnetWaiting = lazy(() => import("./SignIn").then((m) => ({ default: m.TailnetWaiting })));
 
-type View = "loading" | "sign-in" | Me;
+/** "waiting": `me` answered 503 (a Tailscale session while tailscaled does not answer); asked again with a growing wait. */
+type View = "loading" | "sign-in" | "waiting" | Me;
 
 // Installed before the first request, so a session that ends while the app is open shows the sign-in screen.
 // Only the gate's signed-out header counts; an archive's password 401 still reaches its prompt.
@@ -45,18 +47,42 @@ function Root() {
   const [view, setView] = useState<View>("loading");
   /** the account the app was last shown for, as kind:name */
   const shownAs = useRef<string | undefined>(undefined);
+  /** asks `me` again at once (the waiting screen's "Try now") */
+  const askNow = useRef<() => void>(() => {});
   useEffect(() => {
     show = setView;
     if (signedOut) return setView("sign-in");
-    me()
-      .then((m) => setView((v) => (v === "sign-in" ? v : m === "signed-out" ? "sign-in" : m)))
-      // An older hub or a failed request: show the app as before; its own requests report what is wrong.
-      .catch(() => setView((v) => (v === "sign-in" ? v : { auth: false })));
+    let gone = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let tries = 0;
+    const ask = () => {
+      clearTimeout(timer);
+      me()
+        .then((m) => !gone && setView((v) => (v === "sign-in" ? v : m === "signed-out" ? "sign-in" : m)))
+        .catch((e: unknown) => {
+          if (gone) return;
+          // a Tailscale session whose tailscaled does not answer: the hub keeps the session, so wait and ask again
+          if (e instanceof TailnetUnavailableError) {
+            setView((v) => (v === "sign-in" ? v : "waiting"));
+            timer = setTimeout(ask, retryDelayMs(tries++));
+            return;
+          }
+          // An older hub or a failed request: show the app as before; its own requests report what is wrong.
+          setView((v) => (v === "sign-in" ? v : { auth: false }));
+        });
+    };
+    askNow.current = ask;
+    ask();
+    return () => {
+      gone = true;
+      clearTimeout(timer);
+    };
   }, []);
   useEffect(() => {
     if (typeof view === "object" && view.auth) shownAs.current = `${view.kind}:${view.name}`;
   }, [view]);
   if (view === "loading") return null;
+  if (view === "waiting") return <Suspense fallback={null}><TailnetWaiting onRetry={() => askNow.current()} /></Suspense>;
   if (view === "sign-in") return <Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense>;
   return (
     <>

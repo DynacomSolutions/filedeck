@@ -7,11 +7,21 @@
  * `asRootLeftMs` the time left by the hub's clock, and `asRootEndsAt` the end by this browser's clock, worked out when
  * the answer arrived (now + time left), so a browser clock that is off does not hide or keep the switch.
  */
-export type Account = { auth: true; kind: "sys" | "virt"; name: string; admin: boolean; asRootUntil?: number; asRootLeftMs?: number; asRootEndsAt?: number };
+/** `method` is how the session signed in (`password`, `key` or `tailscale`); `tailnet` is the login or tag that matched, for a Tailscale session. */
+export type Account = { auth: true; kind: "sys" | "virt"; name: string; admin: boolean; asRootUntil?: number; asRootLeftMs?: number; asRootEndsAt?: number; method?: string; tailnet?: string };
 export type Me = { auth: false } | Account;
 
 /** A sign-in that did not work; the message is ready to show. */
 export class SignInError extends Error {}
+
+/**
+ * `GET /api/auth/me` answered 503: a Tailscale session while tailscaled does not answer. The hub keeps the session, so
+ * this is not a sign-out; ask again later (`retryDelayMs`).
+ */
+export class TailnetUnavailableError extends Error {}
+
+/** The wait before the next `me` after the `n`th 503 in a row (from 0): 1 s, doubled each time, at most 30 s. */
+export const retryDelayMs = (n: number): number => Math.min(30_000, 1000 * 2 ** Math.max(0, n));
 
 /** The header the hub's gate sets on its 401. Other 401s (an archive that needs its password) do not have it. */
 const SIGNED_OUT = "x-filedeck-auth";
@@ -29,6 +39,7 @@ export function onAccountKnown(fn: (m: Me) => void): void {
 export async function me(): Promise<Me | "signed-out"> {
   const r = await fetch("/api/auth/me", { credentials: "same-origin" });
   if (isSignedOut(r)) return "signed-out";
+  if (r.status === 503) throw new TailnetUnavailableError("Tailscale is not answering");
   if (!r.ok) throw new Error(`/api/auth/me answered ${r.status}`);
   const b = (await r.json()) as Partial<Account>;
   const m = whoFrom(b);
@@ -41,7 +52,37 @@ function whoFrom(b: Partial<Account>): Me {
   const kind = b.kind === "virt" ? "virt" : "sys";
   // only a system account can act as root; a virtual account never carries the switch
   const asRoot = kind === "sys" && finite(b.asRootUntil) && finite(b.asRootLeftMs) ? { asRootUntil: b.asRootUntil, asRootLeftMs: b.asRootLeftMs, asRootEndsAt: Date.now() + Math.max(0, b.asRootLeftMs) } : {};
-  return { auth: true, kind, name: b.name, admin: b.admin === true, ...asRoot };
+  const how = typeof b.method === "string" ? { method: b.method, ...(typeof b.tailnet === "string" ? { tailnet: b.tailnet } : {}) } : {};
+  return { auth: true, kind, name: b.name, admin: b.admin === true, ...asRoot, ...how };
+}
+
+/**
+ * The tailnet identity the hub sees for this request, for the sign-in page's button: a login (with its display name),
+ * or a tagged device's tags, and the device name when known. `{unavailable:true}` when the hub's source does not
+ * answer (503). Null when there is no identity (`{}`), and for every other failure: the button is then not shown.
+ */
+export type Tailnet = { login?: string; displayName?: string; tags?: string[]; node?: string } | { unavailable: true } | null;
+
+export async function tailnet(): Promise<Tailnet> {
+  try {
+    const r = await fetch("/api/auth/tailnet", { credentials: "same-origin" });
+    if (r.status === 503) return { unavailable: true };
+    if (!r.ok) return null;
+    const b = (await r.json()) as { login?: unknown; displayName?: unknown; tags?: unknown; node?: { name?: unknown } | null } | null;
+    if (!b || typeof b !== "object") return null;
+    const tags = Array.isArray(b.tags) ? b.tags.filter((x): x is string => typeof x === "string") : [];
+    const login = typeof b.login === "string" ? b.login : undefined;
+    if (login === undefined && tags.length === 0) return null;
+    const node = b.node && typeof b.node === "object" && typeof b.node.name === "string" ? b.node.name : undefined;
+    return {
+      ...(login !== undefined ? { login } : {}),
+      ...(login !== undefined && typeof b.displayName === "string" ? { displayName: b.displayName } : {}),
+      ...(tags.length > 0 ? { tags } : {}),
+      ...(node !== undefined ? { node } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** The line to show for a failed sign-in answer. */
@@ -74,6 +115,16 @@ async function signedIn(r: Response): Promise<Account> {
 /** Signs in with a name and password. The password goes in the JSON body only. */
 export async function login(name: string, password: string): Promise<Account> {
   return signedIn(await reach(() => fetch("/api/auth/login", { method: "POST", ...jsonBody({ name, password }) })));
+}
+
+/**
+ * Signs in with the tailnet identity the hub sees for this request (an empty JSON body). A refusal says "Sign-in failed",
+ * as for a password, whatever the reason (the hub's audit line has it).
+ */
+export async function loginTailscale(): Promise<Account> {
+  const r = await reach(() => fetch("/api/auth/login-tailscale", { method: "POST", ...jsonBody({}) }));
+  if (r.status === 503) throw new SignInError("Tailscale is not answering. Try again soon.");
+  return signedIn(r);
 }
 
 /**
