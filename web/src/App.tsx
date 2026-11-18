@@ -30,6 +30,7 @@ import * as Ic from "lucide-react";
 import { AccountMenu } from "./AccountMenu";
 import { AsRootBanner, useAsRoot } from "./AsRootBanner";
 import type { Account } from "./auth";
+import { openPath } from "./nodeHome";
 
 /** Wraps a panel as a drop target: while another panel is dragged, shows where it would dock (edge = split there, centre = swap places). */
 function DockSlot({ id, dragging, onDock, children }: { id: string; dragging: string | null; onDock: (src: string, target: string, zone: DropZone) => void; children: React.ReactNode }) {
@@ -325,7 +326,8 @@ export function App({ account }: { account?: Account } = {}) {
   useEffect(() => {
     if (tree || !nodes.length) return;
     const cluster = nodes.filter((n) => n.kind !== "source");
-    const l = leaf(((cluster.length ? cluster : nodes).find((n) => n.online) ?? nodes[0])!.name);
+    const first = ((cluster.length ? cluster : nodes).find((n) => n.online) ?? nodes[0])!;
+    const l = leaf(first.name, openPath(first, "/"));
     setTree(l);
     setActiveId(l.id);
   }, [nodes, tree]);
@@ -465,6 +467,7 @@ export function App({ account }: { account?: Account } = {}) {
     update((l) => (l.id === beside ? { kind: "split", id: id(), dir: "horizontal", children: [l, fresh] } : l));
     setActiveId(fresh.id);
   };
+  // the sidebar gives the folder to open: a machine's own row already opens the machine's home (rowOpens in nodeHome.ts)
   const openFromSide = (node: string, path: string, how: How) => (how === "panel" ? openPanel(node, path) : openInActive(node, path));
   const split = (lid: string) => (dir: "horizontal" | "vertical") =>
     update((l) => (l.id === lid ? { kind: "split", id: id(), dir, children: [l, leaf(l.node, l.path)] } : l));
@@ -534,6 +537,7 @@ export function App({ account }: { account?: Account } = {}) {
           onFocus={() => setActiveId(t.id)}
           onNavigate={navigate(t.id)}
           onOpenPanel={(n, p, sel) => openPanel(n, p, sel, t.id)}
+          roots={nodes.find((n) => n.name === t.node)?.roots}
           onSplit={split(t.id)}
           onPatch={(p) => patchLeaf(t.id, p)}
           onClose={total > 1 ? () => update((l) => (l.id === t.id ? null : l)) : null}

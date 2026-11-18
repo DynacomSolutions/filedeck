@@ -40,6 +40,10 @@ export interface NodeInfo {
   host?: string;
   /** why a source is offline when the hub knows: "host-key-changed" (SFTP server key is not the pinned or remembered one) */
   offlineReason?: string;
+  /** a virtual account's granted folders on this machine, in the administrator's order; absent for everyone else */
+  roots?: string[];
+  /** a source the account may only read */
+  readOnly?: boolean;
 }
 
 const enc = encodeURIComponent;

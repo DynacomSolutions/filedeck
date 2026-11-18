@@ -82,6 +82,8 @@ async function installFixture(page, opts = {}) {
     const url = new URL(req.url());
     const pathname = url.pathname;
     const json = (body, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
+    // opts.requests: every API request the page makes, as path and query
+    opts.requests?.push(pathname + url.search);
     // Sign-in is off unless a check asks for a signed-out or signed-in hub. opts.session ({ out }) lets a check end the
     // session while the app is open: every API call is then the gate's 401 until a password sign-in starts a new one.
     if (opts.session) {
@@ -117,7 +119,8 @@ async function installFixture(page, opts = {}) {
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
     if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
-    if (pathname === '/api/nodes') return json({ nodes: [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }] });
+    // opts.roots: the virtual account's granted folders on the one machine it may use
+    if (pathname === '/api/nodes') return json(opts.roots ? { nodes: [{ name: nodeName, online: true, roots: opts.roots }] } : { nodes: [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }] });
     if (pathname === `/api/nodes/${encodeURIComponent(nodeName)}/api/mounts`) return json({ mounts: [] });
     if (pathname === '/api/vault') {
       if (!opts.vault) return json({ entries: [], persistent: false, ttlSeconds: 3600, maxHours: 24 });
@@ -1574,6 +1577,39 @@ async function verifySignIn(browser) {
   assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
 }
 
+// A virtual account opens each machine at its first granted folder: with no panel in the URL the first panel shows it, the sidebar
+// lists it under the machine with the Trash, and nothing lists / or asks for the machine's mounts. axe passes in light and dark.
+async function verifyVirtualAccount(browser) {
+  const failures = [];
+  const share = '/srv/share';
+  for (const scheme of ['light', 'dark']) {
+    const fixture = { account: 'fixture-guest', kind: 'virt', roots: [share], requests: [] };
+    const { context, page } = await openPage(browser, { colorScheme: scheme, state: '/', fixture });
+    try {
+      await page.waitForFunction((p) => JSON.parse(new URL(location.href).searchParams.get('s') || 'null')?.t?.p === p, share, { timeout: 10000 });
+      // the address bar's last folder menu is the one of the granted folder
+      await page.locator('.fp').first().getByRole('button', { name: `Folders in ${share}`, exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+      // above the granted folder the account has no access: up is disabled, as at /
+      assert.equal(await page.locator('.fp').first().getByRole('button', { name: 'Up one folder', exact: true }).isDisabled(), true, 'up is disabled at the granted folder');
+      const tree = page.getByRole('tree', { name: 'Navigation' });
+      await tree.getByRole('treeitem', { name: share }).waitFor({ state: 'visible', timeout: 8000 });
+      await tree.getByRole('treeitem', { name: 'Trash' }).waitFor({ state: 'visible' });
+      assert.equal(await tree.getByRole('treeitem', { name: '/ (root)' }).count(), 0, 'no "/ (root)" row');
+      // open the granted folder's row too: it lists that folder, never /
+      await tree.getByRole('treeitem', { name: share }).click();
+      await page.waitForTimeout(400);
+      await runAxe(page, `virtual account (${scheme})`, failures);
+      const node = encodeURIComponent(nodeName);
+      const bad = fixture.requests.filter((r) => r === `/api/nodes/${node}/api/mounts` || (r.startsWith(`/api/nodes/${node}/api/fs/list?`) && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === '/'));
+      assert.deepEqual(bad, [], `no list of / and no mounts request (${scheme})`);
+      assert.ok(fixture.requests.some((r) => r.startsWith(`/api/nodes/${node}/api/fs/list?`) && new URLSearchParams(r.slice(r.indexOf('?'))).get('path') === share), `the granted folder is listed (${scheme})`);
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'the virtual account view passes axe in light and dark');
+}
+
 // Act as root (a system administrator only): the "Act as root…" item opens a dialog with the sign-in fields; while the hub
 // reports the switch the header shows "Acting as root until HH:MM" (local end from the hub's time left) with Stop. Banner and open dialog pass axe in light and dark and fit at 390x844
 // and 320x568; the password is cleared after a failed attempt and is never stored. Stop and the end time hide the banner and
@@ -1914,6 +1950,7 @@ const checks = [
   ['axe-core A and AA in every view', verifyAxeViews],
   ['sign-in screen and account menu', verifySignIn],
   ['act as root from the account menu', verifyActAsRoot],
+  ['Virtual account opens its first granted folder', verifyVirtualAccount],
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
 

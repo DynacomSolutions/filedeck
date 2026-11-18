@@ -7,6 +7,7 @@ import { fetchNodes, NODES_KEY, swrCache } from "./data";
 import { addressBase, baseRemainder, crumbsOverflow, fmtAddr, fuzzy, itemUri, parseAddress, resolveBasePath, splitTyped, type AddressBase, type Where } from "./address";
 import { useBookmarks } from "./bookmarks";
 import { getRecents, pushRecent } from "./recents";
+import { homeOf } from "./nodeHome";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 
@@ -39,7 +40,12 @@ let baseLoad: { node: string; promise: Promise<AddressBase[]> } | null = null;
 const baseKey = (base: Where) => `${base.node}\0${base.path}`;
 const rootBases = (fallbackNode: string, known: NodeInfo[]): AddressBase[] => {
   const all = known.some((n) => n.name === fallbackNode) ? known : [{ name: fallbackNode, online: true, kind: "node" as const }, ...known];
-  return all.map((n) => ({ node: n.name, path: "/", label: n.kind === "source" ? `${n.name} (${n.type ?? "network"})` : n.name, kind: n.kind ?? "node" }));
+  // a machine with granted folders (a virtual account's) has one base per folder, the first (its home) named after the machine; no /
+  return all.flatMap((n) =>
+    n.roots?.length
+      ? n.roots.map((r, i) => ({ node: n.name, path: r, label: i === 0 ? n.name : `${n.name}:${r}`, kind: n.kind ?? "node" }))
+      : [{ node: n.name, path: "/", label: n.kind === "source" ? `${n.name} (${n.type ?? "network"})` : n.name, kind: n.kind ?? "node" }],
+  );
 };
 const loadBases = async (fallbackNode: string): Promise<AddressBase[]> => {
   if (baseCache && Date.now() - baseCache.at < 20000 && baseCache.mountNode === fallbackNode) return baseCache.list;
@@ -48,7 +54,9 @@ const loadBases = async (fallbackNode: string): Promise<AddressBase[]> => {
   promise = loadNodes()
     .then(async (known) => {
       const roots = rootBases(fallbackNode, known);
-      const mounted = await (known.find((n) => n.name === fallbackNode)?.kind === "source" ? Promise.resolve([]) : api.mounts(fallbackNode).then((r) => r.mounts.map((m) => ({ node: fallbackNode, path: m.mountpoint, label: `${fallbackNode}:${m.mountpoint}`, kind: "mount" as const }))).catch(() => []));
+      const here = known.find((n) => n.name === fallbackNode);
+      // a source has no mounts; a machine with granted folders is not asked for them
+      const mounted = await (here?.kind === "source" || here?.roots ? Promise.resolve([]) : api.mounts(fallbackNode).then((r) => r.mounts.map((m) => ({ node: fallbackNode, path: m.mountpoint, label: `${fallbackNode}:${m.mountpoint}`, kind: "mount" as const }))).catch(() => []));
       const seen = new Set<string>();
       const list = [...roots, ...mounted].filter((b) => !seen.has(baseKey(b)) && (seen.add(baseKey(b)), true));
       baseCache = { at: Date.now(), list, mountNode: fallbackNode };
@@ -313,7 +321,7 @@ export function AddressBar({ node, path, active, hidden, onGo, onCrumbMenu, labe
           .map((n) => [n, fuzzy(q, n.name)] as const)
           .filter(([, s]) => s >= 0)
           .sort((a, b) => b[1] - a[1])
-          .forEach(([n]) => add({ key: "n:" + n.name, kind: "node", uri: n.name + ":/", node: n.name, path: "/" }));
+          .forEach(([n]) => add({ key: "n:" + n.name, kind: "node", uri: n.name + ":" + homeOf(n), node: n.name, path: homeOf(n) }));
       }
       {
         if (ty) {

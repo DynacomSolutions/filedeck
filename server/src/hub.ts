@@ -381,13 +381,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     // a system account sees only the machines where it exists: wait (at most 2 s) for answers that are missing or old
     const id = currentUser();
     if (presence && id?.kind === "sys" && presence.due(id.name)) await presence.refresh(id.name, opts?.nodesWaitMs ?? 2000);
+    // a virtual account's grant paths on each machine, in stored order (the gate reads the identity from the store on every call); the
+    // web app opens the machine at the first one
+    const rootsOf = (node: string) => (cfg.auth && id?.kind === "virt" && Object.hasOwn(id.nodes, node) ? { roots: id.nodes[node]!.grants.map((g) => g.path) } : {});
     const nodes = await Promise.all(
       cfg.nodes.filter((n) => mayUse(n.name)).map(async (n) => {
         try {
           const r = await fetch(`${n.url}/healthz`, { signal: AbortSignal.timeout(2000) }); // open probe: no token needed
-          return { name: n.name, online: r.ok };
+          return { name: n.name, online: r.ok, ...rootsOf(n.name) };
         } catch {
-          return { name: n.name, online: false };
+          return { name: n.name, online: false, ...rootsOf(n.name) };
         }
       }),
     );

@@ -39,6 +39,7 @@ import { entryKind, focusPanelList, listAnnouncement, revealRow, rowId } from ".
 import { CHUNK_ROWS, CHUNK_TILE_ROWS, OVERSCAN_ROWS, OVERSCAN_TILE_ROWS, scrollTopFor, spacerHeight, windowFor, type Geometry, type Win } from "./listWindow";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { typeAheadMatch, type TypeAheadState } from "./letterNavigation";
+import { canGoUp } from "./nodeHome";
 import * as Ic from "lucide-react";
 
 // Monaco (several MB) stays in its own chunk, fetched on first edit.
@@ -69,6 +70,8 @@ interface Props {
   onNavigate: (node: string, path: string) => void;
   /** open node:path in a new panel beside this one, optionally with a file selected */
   onOpenPanel: (node: string, path: string, select?: string) => void;
+  /** the machine's granted folders (a virtual account's): "up" stops at them */
+  roots?: string[];
   onSplit: (dir: "horizontal" | "vertical") => void;
   onClose: (() => void) | null;
   /** HTML5 drag props for the panel's drag handle (the drag image is the whole panel) */
@@ -118,7 +121,7 @@ const UP_DROP = "\0up";
 const isDirEntry = (e: Entry) => e.type === "dir" || !!e.linkDir;
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1) || p;
 
-export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, onClickSelect, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
+export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, roots, onSplit, onClose, dragProps, onDock, onPatch, onDiff, onDiffHead, diffMarked, onCompare, peers, others, panelPicked, clearReq, onSelection, onClearOthers, onTogglePanel, onClickSelect, next, onSwitch, onHelp, onTrash, onStatus }: Props) {
   const { node, path } = leaf;
   const presentation = usePresentation();
   const estimatedFileRowHeight = Math.max(ROW_H, Math.ceil(presentation.fontSize * presentation.lineHeight + 17));
@@ -936,7 +939,9 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
     />
   ) : null;
   // ---- parent-folder row (setting: "..", "Up" or hidden); not part of the entries, so never selected or counted ----
-  const parentPath = path === "/" ? null : parent(path);
+  // none at / and none at a granted folder: above it the account has no access
+  const upOk = canGoUp({ roots }, path);
+  const parentPath = upOk ? parent(path) : null;
   const showUp = parentPath !== null && upRow !== "hidden";
   const upLabel = upRow === "up" ? "Up" : "..";
   const upDrop = {
@@ -1315,7 +1320,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         return !!en && (open(en), true);
       }
       if (e.altKey && !mod && (key === "ArrowLeft" || key === "ArrowRight")) return histGo(key === "ArrowLeft" ? -1 : 1), true;
-      if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return path !== "/" && (navigate(node, parent(path)), true);
+      if (key === "Backspace" || (e.altKey && key === "ArrowUp")) return upOk && (navigate(node, parent(path)), true);
       if (key === "F2") return selEntries.length === 1 && (setRenaming(selEntries[0]!.path), true);
       if (key === "F4") return selEntries.length === 1 && canEdit(selEntries[0]!) && (setEditing({ node, path: selEntries[0]!.path }), true);
       if (key === "F5") return toOther("copy"), true;
@@ -1504,7 +1509,7 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, onSp
         </Tip>
         <Tip label="Back" shortcut="Alt+Left"><button type="button" className="fp-up" aria-label="Back" disabled={!canBack} onClick={() => histGo(-1)}><ArrowLeft /></button></Tip>
         <Tip label="Forward" shortcut="Alt+Right"><button type="button" className="fp-up" aria-label="Forward" disabled={!canFwd} onClick={() => histGo(1)}><ArrowRight /></button></Tip>
-        <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={path === "/"} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
+        <Tip label="Up one folder" shortcut="Backspace"><button type="button" className="fp-up" aria-label="Up one folder" disabled={!upOk} onClick={() => navigate(node, parent(path))}><ArrowUp /></button></Tip>
         <AddressBar label={`Breadcrumb for ${panelName}`} node={node} path={path} active={active} hidden={hidden} onGo={goTo} onCrumbMenu={(e, p) => showMenu(e, folderItems(p, false))} />
         <Tip label="Refresh" shortcut="Alt+R"><button type="button" className="fp-up fp-refresh" aria-label="Refresh" onClick={refresh}><RefreshCw /></button></Tip>
         {git?.repo && !leaf.sr && <span className="git-chip"><GitPill s={git.repo.summary} /></span>}
