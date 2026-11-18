@@ -554,6 +554,14 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     if (!id) throw new Error("vault use without an identity");
     return `${id.kind}:${id.name}`;
   };
+  /**
+   * Whether the account a request began as is still the same account (it exists, at the epoch read when the request began). A password
+   * typed in a request that waited on its agent is saved only then: an account deleted, made again or changed meanwhile gets nothing.
+   */
+  const ownerHoldsFor = (id: Identity | undefined): (() => boolean) | undefined => {
+    if (!auth || !id) return undefined;
+    return () => (id.kind === "sys" || auth.accounts.get(id.name) !== undefined) && auth.accounts.epochOf(id.kind, id.name) === id.epoch;
+  };
   registerVaultRoutes(app, vault, (n) => cfg.nodes.some((x) => x.name === n), cfg.auth ? { owner: vaultOwner, mayUse } : undefined);
 
   // Reverse proxy: /api/nodes/<node>/<rest> -> <agent>/<rest>
@@ -596,7 +604,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     try {
       if (isPasswordRoute(c.req.method, rest)) {
         // encrypted archives / PDFs: the vault supplies (and saves) the password
-        const r = await proxyWithVault({ vault, owner: cfg.auth ? vaultOwner() : undefined, node: c.req.param("node"), target, method: c.req.method, rest, search: url.search, headers: init.headers as Headers, body: c.req.raw.body, signal: c.req.raw.signal });
+        const r = await proxyWithVault({ vault, owner: cfg.auth ? vaultOwner() : undefined, ownerHolds: ownerHoldsFor(currentUser()), node: c.req.param("node"), target, method: c.req.method, rest, search: url.search, headers: init.headers as Headers, body: c.req.raw.body, signal: c.req.raw.signal });
         return new Response(r.body, { status: r.status, headers: clean(r.headers, true) });
       }
       const r = await target.fetch(rest + url.search, init);

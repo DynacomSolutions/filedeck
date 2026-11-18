@@ -2,7 +2,7 @@ import type { Context, Hono } from "hono";
 import type { Config } from "../config.ts";
 import type { Vault } from "../vault.ts";
 import type { Identity, NodeAccess } from "./identity.ts";
-import { AccountError, type Accounts } from "./store.ts";
+import { AccountError, hashPasswordAsync, type Accounts } from "./store.ts";
 import type { Sessions, SessionInfo } from "./sessions.ts";
 import type { SourceAccess, SourceGrants } from "./source-grants.ts";
 import { currentUser } from "./context.ts";
@@ -84,7 +84,7 @@ export function lockOut(cfg: Config, accounts: Accounts, change: { name: string;
 /** A refusal decided inside a store transaction: thrown there (so it rolls back) and answered with this status and text. */
 class Refused extends Error {
   constructor(
-    readonly status: 404 | 409,
+    readonly status: 403 | 404 | 409,
     message: string,
   ) {
     super(message);
@@ -208,6 +208,14 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     const v = view(name);
     return v ? c.json(v, status) : notFound(c);
   };
+  /**
+   * The gate's check again, inside the store transaction: a route that waited on the machines (or for the hash) may have outlived the
+   * caller's admin flag or session. Either gone: `Refused` 403, and nothing is written.
+   */
+  const callerHolds = (c: Context): void => {
+    const key = sessionKeyOf(c);
+    if (key === undefined || !sessions.peek(key) || !isAdmin(cfg, accounts, currentUser())) throw new Refused(403, "administrators only");
+  };
   /** The current virtual account `name`, or `Refused` 404. For use inside the store transaction. */
   const current = (name: string): Identity => {
     const id = accounts.identity("virt", name);
@@ -272,11 +280,17 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       const keys = keyList(b.keys);
       if (accounts.get(name)) throw new Refused(409, "exists");
       await askMachines(name, nodes);
+      // hashed before the transaction, so the write lock is not held for it
+      const passwordHash = password === undefined ? undefined : await hashPasswordAsync(password);
       // a new account has no sessions and no work, so nothing to end: no `changed`
       accounts.tx(() => {
-        accounts.create({ name, password, admin, nodes });
+        callerHolds(c);
+        accounts.create({ name, passwordHash, admin, nodes });
         for (const k of keys) accounts.addKey(name, k);
         deps.sourceGrants.setForAccount("virt", name, sources);
+        // Saved passwords left under the name (one a late request saved for the deleted account of that name) are not this account's.
+        // Only after `create` has passed: a create that loses with "exists" leaves the live account's entries alone.
+        vault.forgetAll("virt:" + name);
       });
       return answer(c, name, 201);
     }),
@@ -288,25 +302,29 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       const name = c.req.param("name") ?? "";
       if (!accounts.get(name)) return notFound(c);
       const b = await objectBody(c);
-      const patch: { password?: string | null; admin?: boolean; nodes?: Record<string, NodeAccess> } = {};
-      if (b.password === null) patch.password = null;
-      else if (b.password !== undefined) patch.password = newPassword(b.password);
+      const patch: { password?: null; passwordHash?: string; admin?: boolean; nodes?: Record<string, NodeAccess> } = {};
+      const password = b.password === null || b.password === undefined ? b.password : newPassword(b.password);
+      if (password === null) patch.password = null;
       if (b.admin !== undefined) {
         if (typeof b.admin !== "boolean") throw new InputError("admin must be true or false");
         patch.admin = b.admin;
       }
       if (b.nodes !== undefined) patch.nodes = nodeAccess(b.nodes, knownNodes());
       const sources = b.sources === undefined ? undefined : sourceAccess(b.sources, knownSources());
-      if (Object.keys(patch).length === 0 && sources === undefined) throw new InputError("nothing to change: give password, admin, nodes or sources");
+      if (Object.keys(patch).length === 0 && password === undefined && sources === undefined) throw new InputError("nothing to change: give password, admin, nodes or sources");
       if (patch.nodes) await askMachines(undefined, patch.nodes);
+      // hashed before the transaction, so the write lock is not held for it
+      if (typeof password === "string") patch.passwordHash = await hashPasswordAsync(password);
       // the check and every write in one transaction, no await between them; `changed` after the commit
       const before = accounts.tx(() => {
+        callerHolds(c);
         const id = current(name);
         if ((patch.admin === false || patch.password === null) && lockOut(cfg, accounts, { name, ...(patch.admin === false ? { admin: false } : {}), ...(patch.password === null ? { password: null } : {}) })) {
           throw new Refused(409, NO_ADMIN_LEFT);
         }
         accounts.update(name, patch);
         if (sources) deps.sourceGrants.setForAccount("virt", name, sources);
+        accounts.bumpEpoch("virt", name);
         return id;
       });
       await deps.changed(before);
@@ -323,12 +341,14 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       const line = publicKey(b.publicKey);
       const fp = keyFingerprint(line);
       const before = accounts.tx(() => {
+        callerHolds(c);
         const id = current(name);
         const have = accounts.keys(name);
         // the store keys rows on the whole line, comment included: the same key with another comment would be a second row
         if (have.some((l) => keyFingerprint(l) === fp)) throw new Refused(409, "key already added");
         if (have.length >= MAX_KEYS) throw new Refused(409, `at most ${MAX_KEYS} keys per account`);
         accounts.addKey(name, line);
+        accounts.bumpEpoch("virt", name);
         return id;
       });
       await deps.changed(before);
@@ -342,12 +362,14 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
       const name = c.req.param("name") ?? "";
       const fp = c.req.param("fingerprint") ?? "";
       const before = accounts.tx(() => {
+        callerHolds(c);
         const id = current(name);
         const have = accounts.keys(name);
         const left = have.filter((l) => keyFingerprint(l) !== fp).length;
         if (left === have.length) throw new Refused(404, "no such key");
         if (lockOut(cfg, accounts, { name, keysLeft: left })) throw new Refused(409, NO_ADMIN_LEFT);
         accounts.removeKey(name, fp);
+        accounts.bumpEpoch("virt", name);
         return id;
       });
       await deps.changed(before);
@@ -360,16 +382,24 @@ export function registerAdmin(app: Hono, deps: AdminDeps): void {
     checked(async (c) => {
       const name = c.req.param("name") ?? "";
       // One store transaction (BEGIN IMMEDIATE, so two hubs of a rollout cannot both pass the check): the check, the source grants, the
-      // account and its keys (its epoch, raised, stays in retired_accounts), then its saved passwords. The vault is another database, so
-      // it goes last: a store write that fails leaves the passwords as they were.
+      // epoch (raised here too, so the old sessions end even if `changed` never runs), then the account and its keys (its epoch, raised
+      // once more, stays in retired_accounts).
       const before = accounts.tx(() => {
+        callerHolds(c);
         const id = current(name);
         if (lockOut(cfg, accounts, { name, deleted: true })) throw new Refused(409, NO_ADMIN_LEFT);
         deps.sourceGrants.removeAccount("virt", name);
+        accounts.bumpEpoch("virt", name);
         accounts.remove(name);
-        vault.forgetAll("virt:" + name);
         return id;
       });
+      // The saved passwords live in another database, so they go after the commit. A failure there is logged and never skips `changed`
+      // (a new account of this name forgets them when it is made).
+      try {
+        vault.forgetAll("virt:" + name);
+      } catch (e) {
+        console.error(`account change: the saved passwords of virt:${name} were not forgotten (${(e as Error).message}); a new account of that name forgets them`);
+      }
       // sessions, streams and jobs end (epochOf now reads the retired epoch)
       await deps.changed(before);
       return c.json({ ok: true });

@@ -8,7 +8,7 @@ import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
-import { hashPassword } from "../src/auth/store.ts";
+import { checkPassword, hashPassword, hashPasswordAsync } from "../src/auth/store.ts";
 import { SourceGrants } from "../src/auth/source-grants.ts";
 import { keyFingerprint, loginMessage } from "../src/auth/sshkey.ts";
 import { lockOut } from "../src/auth/admin-routes.ts";
@@ -54,17 +54,33 @@ interface Fake {
   users: Record<string, boolean>;
   seen: Map<string, number>;
   claims: { path: string; claim: UserClaim }[];
+  /** while set, the account lookup waits for it before it answers */
+  lookupGate?: Promise<void>;
+  /** while set, an archive listing waits for it, then answers that the password it got opened the file */
+  archiveGate?: Promise<void>;
+  /** called when an archive listing arrives */
+  onArchive?: () => void;
+  /** called when an account lookup arrives */
+  onLookup?: () => void;
+}
+/** A promise and the function that resolves it. */
+function gate(): { wait: Promise<void>; open: () => void } {
+  let open = () => {};
+  const wait = new Promise<void>((r) => (open = r));
+  return { wait, open };
 }
 async function fakeAgent(): Promise<Fake> {
   const f: Fake = { url: "", users: {}, seen: new Map(), claims: [] };
   const srv = http.createServer((req, res) => {
     let body = "";
     req.on("data", (d: Buffer) => (body += d.toString()));
-    req.on("end", () => {
+    req.on("end", async () => {
       const u = new URL(req.url ?? "/", "http://x");
       res.setHeader("content-type", "application/json");
       if (u.pathname === "/healthz") return void res.end("ok");
       if (u.pathname === "/api/auth/lookup") {
+        f.onLookup?.();
+        if (f.lookupGate) await f.lookupGate;
         const name = (JSON.parse(body || "{}") as { name?: string }).name ?? "";
         if (!Object.hasOwn(f.users, name)) {
           res.statusCode = 503;
@@ -85,6 +101,12 @@ async function fakeAgent(): Promise<Fake> {
         f.seen.set(k, claim.epoch);
       }
       if (u.pathname === "/api/jobs") return void res.end(JSON.stringify({ jobs: [] }));
+      if (u.pathname === "/api/archive/list") {
+        f.onArchive?.();
+        if (f.archiveGate) await f.archiveGate;
+        res.setHeader("x-filedeck-pw", req.headers["x-filedeck-password"] ? "ok" : "none");
+        return void res.end(JSON.stringify({ entries: [] }));
+      }
       res.end(JSON.stringify({ entries: [] }));
     });
   });
@@ -228,7 +250,9 @@ test("create and list: a new account can sign in and sees only its machines; no 
     nodes.json.nodes.map((x: { name: string }) => x.name),
     ["a"],
   );
-  // a second account of the same name: 409
+  assert.match(h.auth!.accounts.get("guest")!.passwordHash!, /^scrypt\$15\$8\$1\$[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=$/);
+  // a second account of the same name: 409; it leaves the live account's saved passwords alone
+  h.vault.put("a", "/srv/share/keep.zip", "zip-secret", { owner: "virt:guest" });
   const again = await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2 });
   assert.equal(again.status, 409);
   assert.deepEqual(again.json, { error: "exists" });
@@ -239,6 +263,7 @@ test("create and list: a new account can sign in and sees only its machines; no 
     assert.equal(typeof bad.json.error, "string");
   }
   assert.equal(h.auth!.accounts.list().length, 2);
+  assert.equal(h.vault.list("virt:guest").length, 1, "a create that lost with exists wiped nothing");
   // the system list: a system user with a source grant shows there
   w.grants.setForAccount("sys", "bob", { s1: { write: true } });
   const sys = await send(h, "GET", "/api/admin/accounts", admin);
@@ -296,17 +321,25 @@ test("edit ends sessions and jobs: changed gets the identity from before; the ol
   const last = w.a.claims.at(-1)!.claim;
   assert.equal(last.name, "guest");
   assert.deepEqual(last.grants, nodes.a.grants);
-  // a password change and a removal end sessions too; the change shows as hasPassword
-  const pw = await send(h, "PATCH", "/api/admin/accounts/guest", admin, { password: null });
-  assert.equal(pw.status, 200);
-  assert.equal(pw.json.hasPassword, false);
+  // a new password (hashed before the store transaction) signs in, the old one no longer; the old session ends
+  const set = await send(h, "PATCH", "/api/admin/accounts/guest", admin, { password: PW });
+  assert.equal(set.status, 200);
   assert.equal(w.changed.length, 2);
   assert.equal((await send(h, "GET", "/api/auth/me", again)).status, 401);
   await signInFails(h, "guest", PW2);
+  const third = await signIn(h, "guest", PW);
+  assert.match(h.auth!.accounts.get("guest")!.passwordHash!, /^scrypt\$15\$8\$1\$[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=$/);
+  // a removal ends sessions too; the change shows as hasPassword
+  const pw = await send(h, "PATCH", "/api/admin/accounts/guest", admin, { password: null });
+  assert.equal(pw.status, 200);
+  assert.equal(pw.json.hasPassword, false);
+  assert.equal(w.changed.length, 3);
+  assert.equal((await send(h, "GET", "/api/auth/me", third)).status, 401);
+  await signInFails(h, "guest", PW);
   // unknown name: 404; nothing to change: 400
   assert.equal((await send(h, "PATCH", "/api/admin/accounts/nobody", admin, { admin: true })).status, 404);
   assert.equal((await send(h, "PATCH", "/api/admin/accounts/guest", admin, {})).status, 400);
-  assert.equal(w.changed.length, 2);
+  assert.equal(w.changed.length, 3);
 });
 
 test("keys: an added key signs in, a removed one no longer; no answer or audit line holds the key's text", async () => {
@@ -469,6 +502,8 @@ test("last admin, at once: two deletes of the last two administrators sent toget
   assert.equal(w.changed.length, 1);
 });
 
+// Both hubs run in this one process, so this shows that no `await` comes between the check and the write, each on its own connection
+// to the shared file. It cannot tell BEGIN from BEGIN IMMEDIATE: the lock between two processes is the BEGIN IMMEDIATE in auth/tx.ts.
 test("last admin, at once: two hubs on one store (a rollout), each deleting one of the last two", async () => {
   const first = await world();
   const file = path.join(tmp, `auth-shared-${n}.db`);
@@ -510,4 +545,153 @@ test("lockOut on its own", async () => {
   assert.equal(lockOut(cfg, acc, { name: "vadmin", password: null, keysLeft: 0 }), true);
   const withSys = loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, NODES: "a=http://127.0.0.1:9", FILEDECK_ADMINS: "alice" } as never);
   assert.equal(lockOut(withSys, acc, { name: "vadmin", deleted: true }), false);
+});
+
+/** An archive listing through the hub with a typed password the hub is asked to save. */
+function listArchive(h: Hub, cookie: string, file: string) {
+  return h.request(
+    `https://localhost/api/nodes/a/api/archive/list?path=${encodeURIComponent(file)}`,
+    { headers: { cookie, "x-filedeck-password": Buffer.from("zip-secret-1").toString("base64"), "x-filedeck-save": "forever" } },
+    peer as never,
+  );
+}
+
+test("re-created name starts clean: a password typed just before a delete, or a change, is not saved when the agent answers late", async () => {
+  const w = await world();
+  const { h } = w;
+  const admin = await signIn(h, "vadmin");
+  assert.equal((await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share })).status, 201);
+  const guest = await signIn(h, "guest", PW2);
+  // without a race the typed password is saved for the account
+  assert.equal((await listArchive(h, guest, "/srv/share/plain.zip")).status, 200);
+  assert.equal(h.vault.list("virt:guest").length, 1);
+  // the agent holds its answer while the account is deleted and made again
+  const g = gate();
+  w.a.archiveGate = g.wait;
+  const arrived = new Promise<void>((r) => (w.a.onArchive = r));
+  const late = listArchive(h, guest, "/srv/share/late.zip");
+  await arrived;
+  assert.equal((await send(h, "DELETE", "/api/admin/accounts/guest", admin)).status, 200);
+  assert.equal((await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share })).status, 201);
+  g.open();
+  await (await late).text();
+  assert.deepEqual(h.vault.list("virt:guest"), [], "the old account's password went to the new one");
+  // the same when the account is only changed meanwhile: the request belongs to the old epoch
+  const fresh = await signIn(h, "guest", PW2);
+  const g2 = gate();
+  w.a.archiveGate = g2.wait;
+  const arrived2 = new Promise<void>((r) => (w.a.onArchive = r));
+  const late2 = listArchive(h, fresh, "/srv/share/late2.zip");
+  await arrived2;
+  assert.equal((await send(h, "PATCH", "/api/admin/accounts/guest", admin, { admin: false })).status, 200);
+  g2.open();
+  await (await late2).text();
+  assert.deepEqual(h.vault.list("virt:guest"), []);
+});
+
+test("re-created name starts clean: create forgets saved passwords left under the name", async () => {
+  const w = await world();
+  const { h } = w;
+  const admin = await signIn(h, "vadmin");
+  h.vault.put("a", "/srv/share/f.zip", "zip-secret", { owner: "virt:ghost" });
+  assert.equal((await send(h, "POST", "/api/admin/accounts", admin, { name: "ghost", password: PW2 })).status, 201);
+  assert.deepEqual(h.vault.list("virt:ghost"), []);
+});
+
+test("an administrator demoted or signed out while the machines are asked gets 403, and nothing is written", async () => {
+  const w = await world();
+  const { h } = w;
+  h.auth!.accounts.create({ name: "vadmin2", password: PW2, admin: true, nodes: {} });
+  h.auth!.accounts.create({ name: "carol", password: PW2, admin: false, nodes: {} });
+  for (const f of [w.a, w.b]) f.users = { guest: true, newbie: false };
+  /** Sends one change while the lookups wait, runs `meanwhile`, then lets the lookups answer. */
+  const held = async (cookie: string, method: string, p: string, body: unknown, meanwhile: () => Promise<void> | void) => {
+    const g = gate();
+    w.a.lookupGate = g.wait;
+    const asked = new Promise<void>((r) => (w.a.onLookup = r));
+    const r = send(h, method, p, cookie, body);
+    await asked;
+    await meanwhile();
+    g.open();
+    const out = await r;
+    w.a.lookupGate = undefined;
+    return out;
+  };
+  // demoted in the store while a create waits on the machines
+  let cookie = await signIn(h, "vadmin2", PW2);
+  const post = await held(cookie, "POST", "/api/admin/accounts", { name: "newbie", password: PW2, nodes: share }, () => h.auth!.accounts.update("vadmin2", { admin: false }));
+  assert.equal(post.status, 403, post.text);
+  assert.deepEqual(post.json, { error: "administrators only" });
+  assert.equal(h.auth!.accounts.get("newbie"), undefined);
+  // the same for a change of machines
+  h.auth!.accounts.update("vadmin2", { admin: true });
+  const patch = await held(cookie, "PATCH", "/api/admin/accounts/carol", { nodes: share }, () => h.auth!.accounts.update("vadmin2", { admin: false }));
+  assert.equal(patch.status, 403, patch.text);
+  assert.deepEqual(h.auth!.accounts.get("carol")!.nodes, {});
+  // signed out meanwhile: the session no longer holds
+  h.auth!.accounts.update("vadmin2", { admin: true });
+  cookie = await signIn(h, "vadmin2", PW2);
+  const out = await held(cookie, "POST", "/api/admin/accounts", { name: "newbie", password: PW2, nodes: share }, async () => {
+    assert.equal((await send(h, "POST", "/api/auth/logout", cookie)).status, 200);
+  });
+  assert.equal(out.status, 403, out.text);
+  assert.equal(h.auth!.accounts.get("newbie"), undefined);
+  assert.equal(w.changed.length, 0);
+});
+
+test("the epoch rises in the store transaction itself: old sessions end even when accountChanged never runs", async () => {
+  const w = await world();
+  const { h } = w;
+  const admin = await signIn(h, "vadmin");
+  assert.equal((await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share })).status, 201);
+  // a hub that stops right after the commit: accountChanged never runs
+  h.accountChanged = async () => {};
+  const k = sshKey();
+  for (const [method, p, body] of [
+    ["PATCH", "/api/admin/accounts/guest", { admin: false }],
+    ["POST", "/api/admin/accounts/guest/keys", { publicKey: k.line }],
+    ["DELETE", `/api/admin/accounts/guest/keys/${encodeURIComponent(keyFingerprint(k.line)!)}`, undefined],
+  ] as const) {
+    const guest = await signIn(h, "guest", PW2);
+    const e = h.auth!.accounts.epochOf("virt", "guest");
+    assert.equal((await send(h, method, p, admin, body)).status, 200, `${method} ${p}`);
+    assert.equal(h.auth!.accounts.epochOf("virt", "guest"), e + 1);
+    assert.equal((await send(h, "GET", "/api/auth/me", guest)).status, 401, `${method} ${p}: the old session`);
+  }
+  // and the new epoch is one the machine takes (above every one it has seen)
+  const guest = await signIn(h, "guest", PW2);
+  assert.equal((await send(h, "GET", "/api/nodes/a/api/fs/lsdir?path=/srv/share", guest)).status, 200);
+});
+
+test("delete: saved passwords that cannot be forgotten are logged, and the account's work still ends", async () => {
+  const w = await world();
+  const { h } = w;
+  const admin = await signIn(h, "vadmin");
+  assert.equal((await send(h, "POST", "/api/admin/accounts", admin, { name: "guest", password: PW2, nodes: share })).status, 201);
+  const forget = h.vault.forgetAll;
+  h.vault.forgetAll = () => {
+    throw new Error("disk full");
+  };
+  const logged: string[] = [];
+  const err = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+  try {
+    const r = await send(h, "DELETE", "/api/admin/accounts/guest", admin);
+    assert.equal(r.status, 200, r.text);
+  } finally {
+    console.error = err;
+    h.vault.forgetAll = forget;
+  }
+  assert.equal(h.auth!.accounts.get("guest"), undefined, "the store change stands");
+  assert.equal(w.changed.length, 1, "accountChanged still ran");
+  assert.ok(logged.some((l) => l.includes("virt:guest") && l.includes("disk full")), logged.join("\n"));
+});
+
+test("hashPasswordAsync: the stored format of hashPassword, and it checks", async () => {
+  const h = await hashPasswordAsync(PW);
+  assert.match(h, /^scrypt\$15\$8\$1\$[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=$/);
+  assert.equal(hashPassword(PW).split("$").slice(0, 4).join("$"), h.split("$").slice(0, 4).join("$"));
+  assert.equal(checkPassword(PW, h), true);
+  assert.equal(checkPassword(PW2, h), false);
+  assert.notEqual(await hashPasswordAsync(PW), h, "a new salt each time");
 });

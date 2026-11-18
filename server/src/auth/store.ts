@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, scrypt, scryptSync, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Identity, NodeAccess } from "./identity.ts";
@@ -83,10 +83,23 @@ function derive(pw: string, salt: Buffer, logN: number, r: number, p: number): B
   return scryptSync(pw, salt, 32, { N: 2 ** logN, r, p, maxmem: MAXMEM });
 }
 
+const stored = (salt: Buffer, hash: Buffer) => `scrypt$${LOG_N}$${R}$${P}$${salt.toString("base64")}$${hash.toString("base64")}`;
+
 /** `scrypt$15$8$1$<salt b64>$<hash b64>` */
 export function hashPassword(pw: string): string {
   const salt = randomBytes(16);
-  return `scrypt$${LOG_N}$${R}$${P}$${salt.toString("base64")}$${derive(pw, salt, LOG_N, R, P).toString("base64")}`;
+  return stored(salt, derive(pw, salt, LOG_N, R, P));
+}
+
+/**
+ * The same as `hashPassword` (same parameters, same stored form), off the main thread: the admin routes hash before their store
+ * transaction, so the write lock is not held while it runs.
+ */
+export function hashPasswordAsync(pw: string): Promise<string> {
+  const salt = randomBytes(16);
+  return new Promise((resolve, reject) => {
+    scrypt(pw, salt, 32, { N: 2 ** LOG_N, r: R, p: P, maxmem: MAXMEM }, (e, hash) => (e ? reject(e) : resolve(stored(salt, hash))));
+  });
 }
 
 let dummy: string | undefined;
@@ -148,7 +161,8 @@ export class Accounts {
 
   /**
    * Runs `fn` in one transaction, or in a savepoint of the caller's (`inTransaction`). The admin routes use it to hold a check and every
-   * write of one change (accounts, keys, source grants: one database) together, with no `await` inside `fn`.
+   * write of one change together, with no `await` inside `fn`. That covers the source grants (and sessions) only because `SourceGrants`
+   * and `Sessions` are built on the same `AuthDb` and so share this connection; a store on another connection would not be part of it.
    */
   tx<T>(fn: () => T): T {
     return inTransaction(this.db, fn);
@@ -185,14 +199,19 @@ export class Accounts {
   }
 
   /**
-   * Changes what the patch names. `password: null` removes the password; a string is hashed. It does not raise the epoch: the caller
-   * (`accountChanged` in the hub) does, so sessions, streams and jobs end with it.
+   * Changes what the patch names. `password: null` removes the password; a string is hashed; `passwordHash` (made by `hashPassword` or
+   * `hashPasswordAsync`) is stored as it is and wins over `password`. It does not raise the epoch: the caller does (`bumpEpoch`, and
+   * `accountChanged` in the hub), so sessions, streams and jobs end with it.
    */
-  update(name: string, patch: { password?: string | null; admin?: boolean; nodes?: Record<string, NodeAccess> }): void {
+  update(name: string, patch: { password?: string | null; passwordHash?: string; admin?: boolean; nodes?: Record<string, NodeAccess> }): void {
     if (!this.get(name)) throw new AccountError("no such account");
     const sets: string[] = [];
     const args: (string | number | null)[] = [];
-    if (patch.password !== undefined) {
+    if (patch.passwordHash !== undefined) {
+      if (!HASH_RE.test(patch.passwordHash)) throw new AccountError("not a scrypt hash");
+      sets.push("password_hash = ?");
+      args.push(patch.passwordHash);
+    } else if (patch.password !== undefined) {
       sets.push("password_hash = ?");
       args.push(patch.password === null ? null : hashPassword(patch.password));
     }
