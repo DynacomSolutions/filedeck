@@ -280,11 +280,11 @@ ETA: 2026-11-19 12:00 ICT
 
 ## 22. Jobs panel and phone header layout
 - Jobs move out of the sidebar into their own panel; the phone header gets the logo and two drawer toggles.
-ETA: 2026-11-18 17:30 ICT
+ETA: 2026-11-18 18:45 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 165 | Settings and other overlays hide the active panel outline | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238<br>`.fp::after` (z-index 40) paints over `.ed.over` (z-index 20) |
-| 166 | Desktop: jobs in a collapsible right panel, toggled by a header button with a running count | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238<br>Background jobs sit inside the panel |
-| 167 | Phone: jobs button at the top right opens a full-width jobs drawer from the right, under the header | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238<br>Removes the jobs space under the file list |
-| 168 | Phone: navigation drawer is full width, under the header, and the menu button toggles it | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238 |
-| 169 | Phone: Filedeck logo in the middle of the header | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238 |
+| 165 | Settings and other overlays hide the active panel outline | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
+| 166 | Desktop: jobs in a collapsible right panel, toggled by a header button with a running count | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
+| 167 | Phone: jobs button at the top right opens a full-width jobs drawer from the right, under the header | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
+| 168 | Phone: navigation drawer is full width, under the header, and the menu button toggles it | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
+| 169 | Phone: Filedeck logo in the middle of the header | in_progress | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 18:45 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/238 (768f1c3)<br>Release v0.4.3 and deploy check in progress |
