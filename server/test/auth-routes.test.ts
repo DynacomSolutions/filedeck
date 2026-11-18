@@ -96,7 +96,7 @@ test("password sign-in sets the cookie, and /api/auth/me knows the name", async 
   assert.match(sc, /Path=\//);
   const me = await get(h, "/api/auth/me", cookieOf(r));
   assert.equal(me.status, 200);
-  assert.deepEqual(await me.json(), { auth: true, kind: "virt", name: "guest1", admin: false });
+  assert.deepEqual(await me.json(), { auth: true, kind: "virt", name: "guest1", admin: false, method: "password" });
   assert.equal((await get(h, "/api/nodes", cookieOf(r))).status, 200);
 });
 
@@ -117,7 +117,7 @@ test("a TLS socket needs no loopback peer; an https URL on a plain socket is not
   const r = await post(h, "/api/auth/login", { name: "boss", password: "pw-boss" }, { base: "https://files.example", addr: "10.0.0.5", tls: true });
   assert.equal(r.status, 200);
   const me = await h.request("https://files.example/api/auth/me", { headers: { cookie: cookieOf(r) } }, peer("10.0.0.5", true) as never);
-  assert.deepEqual(await me.json(), { auth: true, kind: "virt", name: "boss", admin: true });
+  assert.deepEqual(await me.json(), { auth: true, kind: "virt", name: "boss", admin: true, method: "password" });
   const plain = await post(h, "/api/auth/login", { name: "boss", password: "pw-boss" }, { base: "https://files.example", addr: "10.0.0.5", tls: false });
   assert.equal(plain.status, 403);
   assert.deepEqual(await plain.json(), { error: "sign-in needs HTTPS" });
@@ -220,7 +220,7 @@ test("key sign-in: challenge, signature, cookie; a challenge works once", async 
   const r = await post(h, "/api/auth/login-key", body);
   assert.equal(r.status, 200);
   assert.match(r.headers.get("set-cookie") ?? "", /^__Host-filedeck=[A-Za-z0-9_-]{43}; .*HttpOnly.*Secure.*SameSite=Lax/);
-  assert.deepEqual(await (await get(h, "/api/auth/me", cookieOf(r))).json(), { auth: true, kind: "virt", name: "guest1", admin: false });
+  assert.deepEqual(await (await get(h, "/api/auth/me", cookieOf(r))).json(), { auth: true, kind: "virt", name: "guest1", admin: false, method: "key" });
   const [again, ms] = await timed(() => post(h, "/api/auth/login-key", body));
   assert.equal(again.status, 401);
   assert.deepEqual(await again.json(), { error: "sign-in failed" });

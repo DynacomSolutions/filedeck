@@ -369,7 +369,7 @@ test("no source configured: mode null and every request has no identity", async 
   assert.deepEqual(await ask(appFor(src), LISTED, { "Tailscale-User-Login": "alice@github" }), { none: true });
 });
 
-test("strip: no later route sees a tailscale-user-* header", async () => {
+test("strip: no later route sees a tailscale-user-* header, the app capabilities, the headers info or the Funnel marker", async () => {
   const app = new Hono();
   app.use("*", stripTailnetHeaders());
   app.get("/h", (c) =>
@@ -378,12 +378,22 @@ test("strip: no later route sees a tailscale-user-* header", async () => {
       name: c.req.header("Tailscale-User-Name") ?? null,
       pic: c.req.header("tailscale-user-profile-pic") ?? null,
       other: c.req.header("x-other") ?? null,
-      all: Object.keys(c.req.header()).filter((k) => k.startsWith("tailscale-user-")),
+      all: Object.keys(c.req.header()).filter((k) => k.startsWith("tailscale-")),
     }),
   );
   const r = await app.request(
     "http://localhost/h",
-    { headers: { "Tailscale-User-Login": "alice@github", "Tailscale-User-Name": "Alice", "Tailscale-User-Profile-Pic": "https://x", "X-Other": "kept" } },
+    {
+      headers: {
+        "Tailscale-User-Login": "alice@github",
+        "Tailscale-User-Name": "Alice",
+        "Tailscale-User-Profile-Pic": "https://x",
+        "Tailscale-App-Capabilities": "{}",
+        "Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers",
+        "Tailscale-Funnel-Request": "?1",
+        "X-Other": "kept",
+      },
+    },
     peer("192.0.2.9") as never,
   );
   assert.deepEqual(await r.json(), { login: null, name: null, pic: null, other: "kept", all: [] });

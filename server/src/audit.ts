@@ -188,6 +188,32 @@ function userOf(c: import("hono").Context): { user?: string; asRoot?: true } {
   return { user: `${u.kind}:${u.name}`, ...(u.kind === "sys" && u.asRoot === true ? { asRoot: true as const } : {}) };
 }
 
+/**
+ * The tailnet part of an audit line (docs/superpowers/specs/2026-11-18-tailscale-sign-in-design.md, "Audit"): for
+ * `POST /api/auth/login-tailscale` the device's login and tags, the subject that matched, the source, the device name and its tailnet
+ * address (socket source), and on a refusal the reason (with the accounts of a tag conflict); for a request made with a Tailscale
+ * session its subject and source, plus the reason when the binding ended the session. Logins, tags and device names are not secrets;
+ * the socket path and the raw whois answer never come here.
+ */
+export type AuditTailnet = {
+  login?: string;
+  tags?: string[];
+  subject?: string;
+  source?: "socket" | "headers";
+  node?: string;
+  address?: string;
+  reason?: string;
+  accounts?: string[];
+};
+
+/** Sets the tailnet part of this request's audit line (the hub's sign-in routes and gate). */
+export const setAuditTailnet = (c: import("hono").Context, t: AuditTailnet): void => c.set("auditTailnet" as never, t as never);
+
+function tailnetPart(c: import("hono").Context): { tailnet?: AuditTailnet } {
+  const t = c.get("auditTailnet" as never) as AuditTailnet | undefined;
+  return t ? { tailnet: t } : {};
+}
+
 export function audit(who: string, sink: AuditSink = (l) => console.log(l)): MiddlewareHandler {
   return async (c, next) => {
     const m = c.req.method;
@@ -228,6 +254,7 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
         route: clip(p),
         query: Object.keys(q).length ? q : undefined,
         body,
+        ...tailnetPart(c),
         status: c.res.status,
         ms: Date.now() - t0,
       }),

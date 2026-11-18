@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,6 +7,9 @@ import { createAgent } from "../src/agent.ts";
 import { loadConfig } from "../src/config.ts";
 import { useSandboxOrOff } from "./sandbox-env.ts";
 import { chownForTest, fakeResolver, privateTmpdir } from "./worker-env.ts";
+import { ADDR, closeRigs, NODE_NAME, rig } from "./tailnet-env.ts";
+
+after(closeRigs);
 
 await useSandboxOrOff(); // with sign-in on, the agent's file routes run in a worker started through the sandbox launcher
 
@@ -143,4 +146,22 @@ test("a sign-in body keeps only its name: a string or an array body gives no bod
     await hub.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("tailnet: the login-tailscale line names the login, tags, subject and source; never the socket path", async () => {
+  const hd = await rig("headers");
+  hd.h.auth!.accounts.create({ name: "guest", admin: false, nodes: {} });
+  hd.h.auth!.links.setForAccount("virt", "guest", [{ subject: "alice@github", kind: "login" }]);
+  hd.devices.set(ADDR, { login: "alice@github" });
+  await hd.signIn();
+  assert.deepEqual(hd.audits("/api/auth/login-tailscale")[0]?.tailnet, { login: "alice@github", subject: "alice@github", source: "headers" });
+  const so = await rig("socket");
+  so.h.auth!.accounts.create({ name: "ci", admin: false, nodes: {} });
+  so.h.auth!.links.setForAccount("virt", "ci", [{ subject: "tag:ci", kind: "tag" }]);
+  so.devices.set(ADDR, { tags: ["tag:web", "tag:ci"] });
+  const c = await so.signIn();
+  assert.deepEqual(so.audits("/api/auth/login-tailscale")[0]?.tailnet, { tags: ["tag:ci", "tag:web"], subject: "tag:ci", source: "socket", node: NODE_NAME, address: ADDR });
+  assert.equal((await so.req("/api/auth/logout", { method: "POST", cookie: c })).status, 200);
+  assert.deepEqual(so.audits("/api/auth/logout")[0]?.tailnet, { subject: "tag:ci", source: "socket" });
+  assert.ok(!so.lines.join("\n").includes(so.api!.socket));
 });

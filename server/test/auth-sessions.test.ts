@@ -248,3 +248,29 @@ test("lastAsRootUntil: the largest switch end stored for a system name, ended se
   assert.equal(s.lastAsRootUntil("bob"), 9_000_000);
   assert.equal(s.lastAsRootUntil("guest"), undefined);
 });
+
+test("a Tailscale session keeps its method, subject, login and device; lookup and list give them", () => {
+  const { s } = setup();
+  const raw = s.create("virt", "guest", "100.64.0.1", { method: "tailscale", tailnetSubject: "tag:ci", tailnetNode: "n1" });
+  assert.deepEqual(s.lookup(raw), { kind: "virt", name: "guest", method: "tailscale", tailnetSubject: "tag:ci", tailnetNode: "n1" });
+  const l = s.list()[0];
+  assert.equal(l?.method, "tailscale");
+  assert.equal(l?.tailnet, "tag:ci");
+  const both = s.create("virt", "guest", undefined, { method: "tailscale", tailnetSubject: "alice@github", tailnetLogin: "alice@github" });
+  assert.deepEqual(s.lookup(both), { kind: "virt", name: "guest", method: "tailscale", tailnetSubject: "alice@github", tailnetLogin: "alice@github" });
+  const pw = s.create("virt", "guest", undefined, { method: "password" });
+  assert.deepEqual(s.lookup(pw), { kind: "virt", name: "guest", method: "password" });
+  assert.equal(s.list().find((x) => x.method === "password")?.tailnet, undefined);
+});
+
+test("the tailnet columns are added to an older table", () => {
+  const db = new AuthDb(":memory:");
+  db.db.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL, last_used INTEGER NOT NULL, epoch INTEGER NOT NULL, as_root_until INTEGER, address TEXT)");
+  db.db.exec("INSERT INTO sessions VALUES ('x', 'sys', 'old', 0, 0, 0, NULL, NULL)");
+  const acc = new Accounts(db);
+  const s = new Sessions(db, acc, { idleMs: H, maxMs: 2 * H });
+  const cols = (db.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[]).map((c) => c.name);
+  for (const c of ["method", "tailnet_subject", "tailnet_login", "tailnet_node"]) assert.ok(cols.includes(c), c);
+  const raw = s.create("sys", "alice", undefined, { method: "tailscale", tailnetSubject: "alice@github", tailnetLogin: "alice@github", tailnetNode: "n9" });
+  assert.equal(s.lookup(raw)?.tailnetNode, "n9");
+});

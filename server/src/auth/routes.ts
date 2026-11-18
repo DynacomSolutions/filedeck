@@ -3,10 +3,12 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Config } from "../config.ts";
-import { clientOf } from "../audit.ts";
+import { clientOf, setAuditTailnet, type AuditTailnet } from "../audit.ts";
 import type { Identity } from "./identity.ts";
 import { checkPassword, type Accounts, type AuthDb } from "./store.ts";
-import { sessionKey, type Sessions } from "./sessions.ts";
+import { sessionKey, type SessionRecord, type Sessions, type SignInHow } from "./sessions.ts";
+import { tailnetOf, type TailnetAnswer, type TailnetSource } from "./tailnet.ts";
+import { resolve, type TailnetLinks } from "./tailnet-links.ts";
 import { loginMessage, parsePublicKey, verifyLogin, type Challenges } from "./sshkey.ts";
 import { RateWindow, addressKey, plainAddress, type LoginLimiter } from "./limiter.ts";
 import { currentUser, runAs } from "./context.ts";
@@ -22,6 +24,11 @@ export interface SystemAuth {
   /** `address`: the client's address as the hub sees it (`clientOf`), for PAM_RHOST; undefined when the request came over no socket. */
   password(name: string, pw: string, address?: string): Promise<boolean>;
   key(name: string, pub: string, msg: Buffer, sig: Buffer): Promise<boolean>;
+  /**
+   * Whether the machines vouch for a system user at a Tailscale sign-in (`AgentSystemAuth.vouch`): `yes`, `no`, or `refused` (root on a
+   * machine). Without it no system user signs in with Tailscale.
+   */
+  vouch?(name: string): Promise<"yes" | "no" | "refused">;
 }
 
 /** No system sign-in yet. The password is still hashed once, so a system name takes as long as a virtual one. */
@@ -31,6 +38,7 @@ export const unavailableSystemAuth: SystemAuth = {
     return false;
   },
   key: async () => false,
+  vouch: async () => "no",
 };
 
 export const COOKIE = "__Host-filedeck";
@@ -44,7 +52,9 @@ const MAX_NAME = 256;
 /** How long the act-as-root switch lasts once turned on. */
 export const AS_ROOT_MS = 15 * 60_000;
 
-const AUTH_ROUTES = new Set(["/api/auth/me", "/api/auth/login", "/api/auth/challenge", "/api/auth/login-key", "/api/auth/logout"]);
+const AUTH_ROUTES = new Set(["/api/auth/me", "/api/auth/login", "/api/auth/challenge", "/api/auth/login-key", "/api/auth/logout", "/api/auth/tailnet", "/api/auth/login-tailscale"]);
+
+const NO_IDENTITY: TailnetAnswer = { none: true };
 
 export interface AuthDeps {
   cfg: Config;
@@ -54,6 +64,10 @@ export interface AuthDeps {
   challenges: Challenges;
   limiter: LoginLimiter;
   system: SystemAuth;
+  /** The tailnet identity source (auth/tailnet.ts); the hub reads each request's identity with `readTailnet` before the gate. */
+  tailnet?: TailnetSource;
+  /** The tailnet links (auth/tailnet-links.ts). Without them nobody signs in with Tailscale. */
+  links?: TailnetLinks;
   /** clock for the challenge limit (tests) */
   now?: () => number;
   /**
@@ -137,16 +151,58 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
   const now = deps.now ?? Date.now;
 
   const signedOut = (c: Context) => c.json({ error: "signed out" }, 401, { "x-filedeck-auth": "signed-out" });
+  const unavailable = (c: Context) => c.json({ error: "tailnet identity unavailable" }, 503);
+  const tailnetMode = deps.tailnet?.mode ?? null;
+  const sourcePart = (): Pick<AuditTailnet, "source"> => (tailnetMode ? { source: tailnetMode } : {});
 
-  /** The identity of the session cookie, or undefined. */
-  const sessionIdentity = (c: Context): Identity | undefined => {
+  /**
+   * The binding of a Tailscale session (spec decision 2), checked on every request it makes: the request's identity (through the
+   * 10-second whois cache) must resolve again to the session's account and subject, with the same login and, when the session has one,
+   * the same device. `unavailable` (the source cannot answer) and `none` (the request did not come over the tailnet) keep the session;
+   * anything else ends it, with the reason for the audit line (`changed`, or a refusal of `resolve`).
+   */
+  const binding = async (c: Context, s: SessionRecord): Promise<"ok" | "unavailable" | "none" | { reason: string }> => {
+    const a = (await tailnetOf(c)) ?? NO_IDENTITY;
+    if ("unavailable" in a) return "unavailable";
+    if ("none" in a) return "none";
+    const r = deps.links ? resolve(a, deps.links) : ({ ok: false, reason: "unlinked" } as const);
+    if (!r.ok) return { reason: r.reason };
+    const same =
+      r.kind === s.kind &&
+      r.name === s.name &&
+      r.subject === s.tailnetSubject &&
+      a.login === s.tailnetLogin &&
+      (s.tailnetNode === undefined || a.node?.stableId === s.tailnetNode);
+    return same ? "ok" : { reason: "changed" };
+  };
+
+  /**
+   * The identity of the session cookie; `unavailable` for a Tailscale session whose identity source cannot answer now (the session is
+   * kept); or undefined. A Tailscale session whose binding no longer holds is ended here.
+   */
+  const sessionIdentity = async (c: Context): Promise<Identity | "unavailable" | undefined> => {
     const raw = getCookie(c, COOKIE);
     if (!raw) return undefined;
     const s = sessions.lookup(raw);
     if (!s) return undefined;
+    if (s.method === "tailscale") {
+      const b = await binding(c, s);
+      const part: AuditTailnet = { ...(s.tailnetSubject !== undefined ? { subject: s.tailnetSubject } : {}), ...sourcePart() };
+      if (b === "unavailable" || b === "none") {
+        setAuditTailnet(c, part);
+        return b === "unavailable" ? "unavailable" : undefined;
+      }
+      if (b !== "ok") {
+        sessions.destroy(raw);
+        setAuditTailnet(c, { ...part, reason: b.reason });
+        return undefined;
+      }
+      setAuditTailnet(c, part);
+    }
     const id0 = s.kind === "virt" ? accounts.identity("virt", s.name) : undefined;
     if (s.kind === "virt" && !id0) return undefined;
     c.set("authSession" as never, sessions.keyOf(raw) as never);
+    c.set("authHow" as never, { method: s.method, tailnet: s.method === "tailscale" ? s.tailnetSubject : undefined } as never);
     if (id0) return id0;
     const id = sysIdentity(cfg, accounts, s.name);
     // act as root: only while the switch is still on and the name is still in FILEDECK_ADMINS (checked on every request)
@@ -168,12 +224,15 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     const p = c.req.path;
     const m = c.req.method;
     if (AUTH_ROUTES.has(p)) {
-      const id = sessionIdentity(c);
-      return id ? admit(c, id, next) : next();
+      const id = await sessionIdentity(c);
+      // (me says so, so the page does not take a Tailscale session that is only waiting for tailscaled as signed out)
+      if (id === "unavailable" && p === "/api/auth/me") return unavailable(c);
+      return id && id !== "unavailable" ? admit(c, id, next) : next();
     }
     // The health probe, the app shell (also for a deep link) and the build's public files. Only /api/ carries data.
     if ((m === "GET" || m === "HEAD") && p !== "/api" && !p.startsWith("/api/")) return next();
-    const id = sessionIdentity(c);
+    const id = await sessionIdentity(c);
+    if (id === "unavailable") return unavailable(c);
     return id ? admit(c, id, next) : signedOut(c);
   });
 
@@ -209,10 +268,10 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
 
   const body = async (c: Context) => (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
 
-  const signIn = (c: Context, kind: "sys" | "virt", name: string) => {
+  const signIn = (c: Context, kind: "sys" | "virt", name: string, how: SignInHow) => {
     const old = getCookie(c, COOKIE);
     if (old) sessions.destroy(old);
-    const raw = sessions.create(kind, name, clientOf(c).ip);
+    const raw = sessions.create(kind, name, clientOf(c).ip, how);
     try {
       deps.onSignIn?.(kind, name);
     } catch {
@@ -229,7 +288,9 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     // asRootLeftMs is the time left by the hub's own clock, so a browser whose clock is off still shows the right end
     const t = now();
     const asRoot = id.kind === "sys" && id.asRootUntil !== undefined && id.asRootUntil > t ? { asRootUntil: id.asRootUntil, asRootLeftMs: id.asRootUntil - t } : {};
-    return c.json({ auth: true, kind: id.kind, name: id.name, admin: id.admin, ...asRoot });
+    const how = c.get("authHow" as never) as { method?: string; tailnet?: string } | undefined;
+    const method = how?.method ? { method: how.method, ...(how.tailnet !== undefined ? { tailnet: how.tailnet } : {}) } : {};
+    return c.json({ auth: true, kind: id.kind, name: id.name, admin: id.admin, ...asRoot, ...method });
   });
 
   app.post("/api/auth/login", async (c) => {
@@ -251,7 +312,7 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     }
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();
-    return signIn(c, kind, name);
+    return signIn(c, kind, name, { method: "password" });
   });
 
   app.post("/api/auth/challenge", async (c) => {
@@ -295,7 +356,77 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     }
     if (!kind || name === undefined) return failed(c);
     attempt.succeed();
-    return signIn(c, kind, name);
+    return signIn(c, kind, name, { method: "key" });
+  });
+
+  /**
+   * The tailnet identity of this request, for the sign-in page's button (spec "Routes"): `{login?, displayName?, tags?, node?: {name}}`,
+   * `{}` with none (also with no source configured: then nothing is asked), or 503 when the source cannot answer. It never says whether
+   * anything is linked.
+   */
+  app.get("/api/auth/tailnet", async (c) => {
+    const a = (await tailnetOf(c)) ?? NO_IDENTITY;
+    c.header("cache-control", "no-store");
+    if ("unavailable" in a) return unavailable(c);
+    if ("none" in a) return c.json({});
+    return c.json({
+      ...(a.login !== undefined ? { login: a.login } : {}),
+      ...(a.displayName !== undefined ? { displayName: a.displayName } : {}),
+      ...(a.tags.length > 0 ? { tags: a.tags } : {}),
+      ...(a.node ? { node: { name: a.node.name } } : {}),
+    });
+  });
+
+  /**
+   * Sign in with Tailscale (spec decisions 1, 3, 5 and 9): HTTPS, the request's identity (503 when the source cannot answer; not counted),
+   * the sign-in limiter (name key `tailnet:<login, else the sorted tags>`), `resolve`, and for a system user the machines (root never,
+   * not even asked). Every refusal is the same 401 `sign-in failed` after the floor; the audit line says why.
+   */
+  app.post("/api/auth/login-tailscale", async (c) => {
+    if (!secure(c)) return needsHttps(c);
+    const a = (await tailnetOf(c)) ?? NO_IDENTITY;
+    if ("unavailable" in a) {
+      setAuditTailnet(c, sourcePart());
+      return unavailable(c);
+    }
+    const id = "none" in a ? undefined : a;
+    const seen: AuditTailnet = id
+      ? {
+          ...(id.login !== undefined ? { login: id.login } : {}),
+          ...(id.tags.length > 0 ? { tags: id.tags } : {}),
+          source: id.source,
+          ...(id.node ? { node: id.node.name } : {}),
+          ...(id.address !== undefined ? { address: id.address } : {}),
+        }
+      : sourcePart();
+    setAuditTailnet(c, seen);
+    const key = `tailnet:${id ? (id.login ?? id.tags.join(",")) : ""}`;
+    const ip = clientOf(c).ip ?? "";
+    const lim = limiter.check(key, ip);
+    if (!lim.ok) return tooMany(c, lim.retryAfterMs);
+    const attempt = limiter.reserve(key, ip);
+    const refuse = (reason: string, accounts?: string[]) => {
+      setAuditTailnet(c, { ...seen, reason, ...(accounts ? { accounts } : {}) });
+      return failed(c);
+    };
+    if (!id) return refuse("unlinked");
+    const r = deps.links ? resolve(id, deps.links) : ({ ok: false, reason: "unlinked" } as const);
+    if (!r.ok) return refuse(r.reason, "accounts" in r ? r.accounts : undefined);
+    if (r.kind === "sys") {
+      // root never signs in, and is never even asked for
+      if (r.name === "root") return refuse("refused");
+      const v = system.vouch ? await system.vouch(r.name) : "no";
+      if (v === "refused") return refuse("refused");
+      if (v !== "yes") return refuse("not-vouched");
+    } else if (!accounts.get(r.name)) return refuse("no-account");
+    attempt.succeed();
+    setAuditTailnet(c, { ...seen, subject: r.subject });
+    return signIn(c, r.kind, r.name, {
+      method: "tailscale",
+      tailnetSubject: r.subject,
+      ...(id.login !== undefined ? { tailnetLogin: id.login } : {}),
+      ...(id.node ? { tailnetNode: id.node.stableId } : {}),
+    });
   });
 
   /**

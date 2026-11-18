@@ -27,6 +27,8 @@ import { Accounts, AuthDb, bootstrapAdmin } from "./auth/store.ts";
 import { Sessions } from "./auth/sessions.ts";
 import { Challenges } from "./auth/sshkey.ts";
 import { LoginLimiter } from "./auth/limiter.ts";
+import { ProxyList, readTailnet, stripTailnetHeaders, TailnetSource } from "./auth/tailnet.ts";
+import { TailnetLinks } from "./auth/tailnet-links.ts";
 import { currentUser, userContext } from "./auth/context.ts";
 import { USER_HEADER } from "./auth/identity.ts";
 import { LiveStreams } from "./auth/streams.ts";
@@ -46,6 +48,9 @@ export interface HubAuth {
   sessions: Sessions;
   challenges: Challenges;
   limiter: LoginLimiter;
+  /** The tailnet identity source (mode null when no Tailscale source is configured) and the tailnet links. */
+  tailnet: TailnetSource;
+  links: TailnetLinks;
 }
 
 /** Where a request for a node or a network source goes. Agents are HTTP; sources run inside the hub. */
@@ -153,6 +158,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       sessions: new Sessions(db, accounts, { idleMs: cfg.sessionIdleMs, maxMs: cfg.sessionMaxMs, now: opts?.now }),
       challenges: new Challenges(opts?.now),
       limiter: new LoginLimiter(opts?.now),
+      tailnet: new TailnetSource({ socket: cfg.tailscaleSocket, headers: cfg.tailscaleHeaders, proxies: new ProxyList(cfg.tailscaleProxies), now: opts?.now }),
+      links: new TailnetLinks(db, opts?.now),
     };
     app.auth = auth;
     // Event streams end with their session (auth/streams.ts): told to by the session store, or found out by the check every minute.
@@ -180,6 +187,13 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     });
   }
   app.use("*", trustProxies(cfg.trustedProxies));
+  // Sign-in on: the tailnet identity is read once (auth/tailnet.ts), and then the Tailscale Serve headers are removed, so no route, agent
+  // or network source ever sees one. Both come before anything that reads the body or the signal: either makes the node server build its
+  // full Request, which would keep a copy of the headers.
+  if (auth) {
+    app.use("*", readTailnet(auth.tailnet));
+    app.use("*", stripTailnetHeaders());
+  }
   app.use("*", webHeaders());
   app.use("*", textCompression());
   // editor saves are limited by the agent that takes them (its own maxEdit), not here

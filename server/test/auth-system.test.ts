@@ -540,3 +540,39 @@ test("AgentSystemAuth.exists: the agent's answer, or undefined when it does not 
   assert.ok(looked.length >= 3);
   for (const r of looked) assert.equal(r.headers[USER_HEADER], undefined);
 });
+
+test("vouch: refused stops the search; exists:false, a failure or no answer goes on; the first yes vouches", async () => {
+  const cases: [Record<string, Answer>, "yes" | "no" | "refused", string[]][] = [
+    [{ x: json({ exists: false, refused: true }), y: json({ exists: true }) }, "refused", ["x"]],
+    [{ x: json({ exists: false }), y: json({ exists: true }) }, "yes", ["x", "y"]],
+    [{ x: "throw", y: json({ exists: true }) }, "yes", ["x", "y"]],
+    [{ x: json({ exists: true }, 500), y: json({ exists: true }) }, "yes", ["x", "y"]],
+    [{ x: new Response("not json", { status: 200 }), y: json({ exists: true }) }, "yes", ["x", "y"]],
+    [{ x: json({ exists: "yes" }), y: json({ exists: true }) }, "yes", ["x", "y"]],
+    [{ x: json({ exists: true }), y: json({ exists: false, refused: true }) }, "yes", ["x"]],
+    [{ x: json({ exists: false }), y: json({ exists: false }) }, "no", ["x", "y"]],
+  ];
+  for (const [answers, want, order] of cases) {
+    const { asked, call } = fakeCall(answers);
+    const s = new AgentSystemAuth({ nodes: ["x", "y"], call, log: () => {} });
+    assert.equal(await s.vouch("alice"), want, JSON.stringify(Object.keys(answers)));
+    assert.deepEqual(asked, order);
+  }
+  // root and invalid names: no call
+  const none = fakeCall({ x: json({ exists: true }) });
+  const s = new AgentSystemAuth({ nodes: ["x"], call: none.call, log: () => {} });
+  assert.equal(await s.vouch("root"), "refused");
+  assert.equal(await s.vouch("../x"), "no");
+  assert.deepEqual(none.asked, []);
+  // a slow node is passed over; the total limit ends the search
+  const slow = fakeCall({ x: "hang", y: json({ exists: true }) });
+  const [v, ms] = await timed(() => new AgentSystemAuth({ nodes: ["x", "y"], call: slow.call, callTimeoutMs: 150, totalMs: 1000, log: () => {} }).vouch("alice"));
+  assert.equal(v, "yes");
+  assert.ok(ms >= 140 && ms < 5000, `${ms} ms`);
+});
+
+test("vouch: the hub asks the real agents' lookup in the sign-in order", async () => {
+  const h = hub as unknown as { systemAuth?: AgentSystemAuth };
+  assert.equal(await h.systemAuth!.vouch("alice"), "yes");
+  assert.equal(await h.systemAuth!.vouch("toor"), "refused");
+});

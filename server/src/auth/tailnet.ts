@@ -351,19 +351,59 @@ function parseWhois(body: Record<string, unknown>, address: string): TailnetIden
   };
 }
 
-/** Deletes every `tailscale-user-*` header from the request seen by later middleware and routes (mounted after the identity was read). */
+/**
+ * The headers Tailscale Serve sets (or a client may forge): every `tailscale-user-*`, and the app capabilities, headers info and Funnel
+ * marker. Nothing in Filedeck reads any of them after the identity has been read.
+ */
+const SERVE_HEADERS = new Set(["tailscale-app-capabilities", "tailscale-headers-info", "tailscale-funnel-request"]);
+const isServeHeader = (name: string): boolean => {
+  const k = name.toLowerCase();
+  return k.startsWith("tailscale-user-") || SERVE_HEADERS.has(k);
+};
+
+/**
+ * Deletes the Tailscale Serve headers (`isServeHeader`) from the request seen by later middleware and routes, and from the node request
+ * behind it. Mount it right after the identity was read (`readTailnet`) and before anything reads the body or the signal: those make the
+ * node server build its full Request, which copies the headers as they are then, and the copy would keep them.
+ */
 export function stripTailnetHeaders(): MiddlewareHandler {
   return async (c, next) => {
     const h = c.req.raw.headers;
     const names: string[] = [];
     h.forEach((_v, k) => {
-      if (k.toLowerCase().startsWith("tailscale-user-")) names.push(k);
+      if (isServeHeader(k)) names.push(k);
     });
     for (const k of names) h.delete(k);
     const incoming = (c.env as { incoming?: { headers?: Record<string, unknown> } } | undefined)?.incoming;
     if (incoming?.headers && typeof incoming.headers === "object") {
-      for (const k of Object.keys(incoming.headers)) if (k.toLowerCase().startsWith("tailscale-user-")) delete incoming.headers[k];
+      for (const k of Object.keys(incoming.headers)) if (isServeHeader(k)) delete incoming.headers[k];
     }
     await next();
   };
+}
+
+/** The context key of a request's tailnet identity (`readTailnet`). */
+const KEY = "tailnet";
+
+/**
+ * Reads the request's tailnet identity once, before `stripTailnetHeaders` removes the headers, and keeps it on the context for
+ * `tailnetOf`. The headers source is read here (it needs the headers); the socket source is asked only when something needs the answer
+ * (it needs only the TCP peer and X-Forwarded-For, which stay), so a request that never asks costs no whois call and never waits for
+ * tailscaled. With no source nothing is read.
+ */
+export function readTailnet(src: TailnetSource | undefined): MiddlewareHandler {
+  return async (c, next) => {
+    if (src && src.mode !== null) {
+      let p: Promise<TailnetAnswer> | undefined = src.mode === "headers" ? Promise.resolve(await src.identify(c)) : undefined;
+      const get = () => (p ??= src.identify(c));
+      c.set(KEY as never, get as never);
+    }
+    await next();
+  };
+}
+
+/** The identity `readTailnet` read for this request (asked once, shared); undefined when no source is configured. */
+export function tailnetOf(c: Context): Promise<TailnetAnswer> | undefined {
+  const get = c.get(KEY as never) as (() => Promise<TailnetAnswer>) | undefined;
+  return get?.();
 }
