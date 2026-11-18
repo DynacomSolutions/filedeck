@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ProxyList } from "./auth/tailnet.ts";
 import { parseBrand, type Brand } from "./brand.ts";
 import { parseReadOnly } from "./readonly.ts";
 import { parseSources } from "./sources/registry.ts";
@@ -104,6 +105,12 @@ export interface Config {
   maxWorkers: number;
   /** agent, sign-in on: a worker with nothing to do for this long is stopped */
   workerIdleMs: number;
+  /** hub, sign-in on: path of tailscaled's LocalAPI socket (FILEDECK_TAILSCALE_SOCKET); turns the socket source on. Never logged. */
+  tailscaleSocket: string | undefined;
+  /** hub, sign-in on: FILEDECK_TAILSCALE_HEADERS=on turns the Tailscale Serve headers source on (ignored when the socket is set) */
+  tailscaleHeaders: boolean;
+  /** hub, sign-in on: IP addresses and CIDR ranges of the proxies that carry only tailnet traffic (FILEDECK_TAILSCALE_PROXIES) */
+  tailscaleProxies: string[];
 }
 
 /** NODES="node-a=http://filedeck-agent-node-a:8080,node-b=http://..." */
@@ -147,6 +154,32 @@ function wholeSetting(env: NodeJS.ProcessEnv, name: string, fallback: number): n
   if (!v) return fallback;
   if (!/^[0-9]+$/.test(v) || Number(v) < 1) throw new Error(`${name} must be a whole number of at least 1, not "${v.slice(0, 40)}"`);
   return Number(v);
+}
+
+/** The Tailscale settings: read only by a hub with sign-in on; a bad proxy entry stops the start. */
+function tailscaleSettings(env: NodeJS.ProcessEnv, read: boolean): Pick<Config, "tailscaleSocket" | "tailscaleHeaders" | "tailscaleProxies"> {
+  if (!read) return { tailscaleSocket: undefined, tailscaleHeaders: false, tailscaleProxies: [] };
+  const tailscaleProxies = (env.FILEDECK_TAILSCALE_PROXIES ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+  new ProxyList(tailscaleProxies); // throws `FILEDECK_TAILSCALE_PROXIES: "<entry>" is not an IP address or range`
+  return { tailscaleSocket: env.FILEDECK_TAILSCALE_SOCKET || undefined, tailscaleHeaders: env.FILEDECK_TAILSCALE_HEADERS === "on", tailscaleProxies };
+}
+
+/**
+ * What a hub says about its Tailscale settings at start, and whether it must stop (`stop`: the message). With sign-in off a set value gives one
+ * line and nothing else; with a source on the proxy list is needed. No line holds the socket path.
+ */
+export function tailscaleStartup(cfg: Config, env: NodeJS.ProcessEnv = process.env): { lines: string[]; stop?: string } {
+  if (cfg.mode !== "hub") return { lines: [] };
+  if (!cfg.auth) {
+    const set = ["FILEDECK_TAILSCALE_SOCKET", "FILEDECK_TAILSCALE_HEADERS", "FILEDECK_TAILSCALE_PROXIES"].some((k) => !!env[k]);
+    return { lines: set ? ["tailscale: sign-in is off, so FILEDECK_TAILSCALE_* is ignored"] : [] };
+  }
+  const source = cfg.tailscaleSocket ? "socket" : cfg.tailscaleHeaders ? "headers" : null;
+  if (!source) return { lines: [] };
+  if (cfg.tailscaleProxies.length === 0) return { lines: [], stop: "FILEDECK_TAILSCALE_PROXIES is needed when FILEDECK_TAILSCALE_SOCKET or FILEDECK_TAILSCALE_HEADERS is set" };
+  const lines = [`tailscale: sign-in with Tailscale through the ${source} source, from ${cfg.tailscaleProxies.join(",")}`];
+  if (cfg.tailscaleSocket && cfg.tailscaleHeaders) lines.push("tailscale: FILEDECK_TAILSCALE_SOCKET is set, so FILEDECK_TAILSCALE_HEADERS is ignored");
+  return { lines };
 }
 
 export function loadConfig(env = process.env): Config {
@@ -225,6 +258,7 @@ export function loadConfig(env = process.env): Config {
     worker: false,
     maxWorkers: wholeSetting(env, "FILEDECK_MAX_WORKERS", 6),
     workerIdleMs: wholeSetting(env, "FILEDECK_WORKER_IDLE_SECONDS", 600) * 1000,
+    ...tailscaleSettings(env, mode === "hub" && env.FILEDECK_AUTH === "on"),
   };
 }
 
@@ -259,6 +293,9 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     vaultFile: "",
     nodes: [],
     authNodes: [],
+    tailscaleSocket: undefined,
+    tailscaleHeaders: false,
+    tailscaleProxies: [],
     sources: [],
     sourceSecretDir: "",
     jobsFile: "",

@@ -1,7 +1,7 @@
 import type { Server } from "node:http";
 import { serve } from "@hono/node-server";
 import { createAgent } from "./agent.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, tailscaleStartup } from "./config.ts";
 import { initSandbox } from "./sandbox.ts";
 import { noReplaceWarning } from "./noreplace.ts";
 import { selfCheckTools } from "./archive.ts";
@@ -12,6 +12,12 @@ import { installShutdown } from "./shutdown.ts";
 const cfg = loadConfig();
 if (cfg.auth && !cfg.agentToken) {
   console.error("FILEDECK_AUTH=on needs FILEDECK_AGENT_TOKEN");
+  process.exit(2);
+}
+const tailscale = tailscaleStartup(cfg);
+for (const l of tailscale.lines) console.log(l);
+if (tailscale.stop) {
+  console.error(tailscale.stop);
   process.exit(2);
 }
 if (cfg.mode === "agent") void initSandbox().then(() => selfCheckTools()); // says once at start-up when helper programs are not confined by the kernel
