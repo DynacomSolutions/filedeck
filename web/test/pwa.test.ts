@@ -32,5 +32,7 @@ test("the hub counts as not reachable on a network failure or a gateway's 502, 5
 
 test("the title bar colour follows the app's theme", () => {
   assert.equal(THEME_COLOR.dark, "#151518");
-  assert.equal(THEME_COLOR.light, "#ffffff");
+  // Chrome on Android ignores a very light theme colour (white, #f0f0f0) and keeps the manifest's dark one: the light
+  // theme uses its page background, which Chrome accepts (checked on Android 17, Chrome 145)
+  assert.equal(THEME_COLOR.light, "#e9ebef");
 });

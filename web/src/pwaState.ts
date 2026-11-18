@@ -25,4 +25,4 @@ export function hubUnreachable(e: unknown): boolean {
 }
 
 /** Title bar colour per theme: the header colour of theme.css (--surface). The manifest carries the dark one. */
-export const THEME_COLOR = { dark: "#151518", light: "#ffffff" } as const;
+export const THEME_COLOR = { dark: "#151518", light: "#e9ebef" } as const;

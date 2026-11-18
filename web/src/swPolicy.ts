@@ -88,3 +88,23 @@ export function swVersion(list: string[]): string {
 
 export const cacheName = (version: string): string => CACHE_PREFIX + version;
 export const isOwnCache = (name: string): boolean => name.startsWith(CACHE_PREFIX);
+
+/**
+ * `p`, or undefined after `ms` or when it fails. For steps the worker keeps itself alive for (`waitUntil`): while an event is still
+ * extended, a new version cannot take over, so one promise that never settles would leave "Reload" doing nothing.
+ */
+export function settleWithin<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(undefined), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(undefined);
+      },
+    );
+  });
+}

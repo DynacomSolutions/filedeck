@@ -41,7 +41,7 @@ app is in the background. Asked for by the owner: "a PWA for this app with the p
   `scope: "/"`, `display: "standalone"`, `categories: ["productivity", "utilities"]`, `theme_color` and `background_color`.
 - The hub serves it rendered with the deployment's brand (`FILEDECK_BRAND` name and title replace "Filedeck"), like `index.html`.
 - A manifest has one colour of each kind. It carries the dark theme (the default): `theme_color` `#151518` (the header),
-  `background_color` `#0c0c0e` (the page). `index.html` adds `<meta name="theme-color">` for light (`#ffffff`) and dark by
+  `background_color` `#0c0c0e` (the page). `index.html` adds `<meta name="theme-color">` for light (`#e9ebef`, the page background: Chrome on Android ignores a white theme colour) and dark by
   `prefers-color-scheme`, and the page updates it when the user picks a theme in the app, so the title bar always matches.
 - Icons are generated from `favicon.svg` by `web/scripts/icons.mjs` (uses `rsvg-convert`; the PNGs are committed, so a build needs no
   tool). Mark in light ink (`#e8eaed`) on the dark header colour, the same pair the dark favicon uses:

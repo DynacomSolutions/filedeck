@@ -2613,7 +2613,7 @@ async function verifyInstallableApp(browser) {
       assert.ok(icon, `a ${purpose} icon of ${size} px is listed`);
       assert.deepEqual([icon.w, icon.h], [size, size], `${icon.src} is ${size} px`);
     }
-    assert.equal(m.theme, '#ffffff', 'the title bar takes the light theme colour');
+    assert.equal(m.theme, '#e9ebef', 'the title bar takes the light theme colour');
     await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
     assert.equal(await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content), '#151518', 'the title bar follows a switch to the dark theme');
     await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });

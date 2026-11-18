@@ -2,7 +2,7 @@
 // front of this code. It stores the app shell so the app opens without a network, and nothing else: see swPolicy.ts for
 // what it handles (never /api). A new build waits until the page asks it to take over (the page shows "Reload").
 
-import { SHELL_KEY, cacheName, isOwnCache, strategyFor } from "./swPolicy";
+import { SHELL_KEY, cacheName, isOwnCache, settleWithin, strategyFor } from "./swPolicy";
 
 interface ExtendableEvent extends Event {
   waitUntil(p: Promise<unknown>): void;
@@ -110,16 +110,24 @@ sw.addEventListener("fetch", (e) => {
   e.respondWith(s === "shell" ? shell(e.request) : s === "asset" ? asset(e.request) : staticFile(e.request));
 });
 
-// A job notification (jobNotify.ts) was clicked: bring the open Filedeck window forward, or open one.
+/** how long a notification click keeps the worker waiting for the window */
+const WINDOW_WAIT_MS = 5000;
+
+// A job notification (jobNotify.ts) was clicked: bring the open Filedeck window forward, or open one. Chrome on Android never settles
+// openWindow() for an installed app's window; waited on without a limit, the click would keep this worker busy for good, and a new
+// version could not take over ("Reload" would do nothing). The window opens either way; the worker only stops waiting for it.
 sw.addEventListener("notificationclick", (e) => {
   e.notification.close();
   e.waitUntil(
-    (async () => {
-      const wins = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
-      const own = wins.find((w) => new URL(w.url).origin === ORIGIN);
-      if (own) await own.focus();
-      else await sw.clients.openWindow("/");
-    })(),
+    settleWithin(
+      (async () => {
+        const wins = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
+        const own = wins.find((w) => new URL(w.url).origin === ORIGIN);
+        if (own) await own.focus();
+        else await sw.clients.openWindow("/");
+      })(),
+      WINDOW_WAIT_MS,
+    ),
   );
 });
 
