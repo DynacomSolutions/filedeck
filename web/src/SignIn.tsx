@@ -58,7 +58,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
           // the button's space, kept while the request is pending
           <div className="signin-tailnet-wrap signin-tailnet-pending" aria-hidden="true">
             <div className="signin-tailnet">
-              <span className="signin-tailnet-btn" />
+              <button type="button" className="signin-tailnet-btn" tabIndex={-1} disabled><LogIn aria-hidden="true" /> Sign in with Tailscale</button>
               <p className="signin-note">&nbsp;</p>
             </div>
             <p className="signin-or">&nbsp;</p>

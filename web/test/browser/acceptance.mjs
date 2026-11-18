@@ -73,6 +73,9 @@ const trashItems = [
 ];
 const stateOf = (tree, extra = {}) => `?s=${encodeURIComponent(JSON.stringify({ t: tree, a: 'p1', ...extra }))}`;
 
+/** The header of the gate's 503 for a Tailscale session while tailscaled does not answer. */
+const TAILNET_DOWN = { 'x-filedeck-auth': 'tailnet-unavailable' };
+
 // opts.vault: serve one saved password near expiry; opts.worktrees: serve a nested repository with worktrees;
 // opts.signedOut: the hub has sign-in on and no session; opts.account: signed in as that name.
 async function installFixture(page, opts = {}) {
@@ -84,6 +87,9 @@ async function installFixture(page, opts = {}) {
     const json = (body, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(body) });
     // opts.requests: every API request the page makes, as path and query
     opts.requests?.push(pathname + url.search);
+    // opts.tailnetDown: while set, every API request is the gate's tailnet 503 (a Tailscale session while tailscaled does not
+    // answer; the session is kept), with its header
+    if (opts.tailnetDown) return json({ error: 'tailnet identity unavailable' }, 503, TAILNET_DOWN);
     // opts.nodesBody / opts.lists: a check's own node list and folder listings (by path), answered before the shared fixtures
     if (opts.nodesBody && pathname === '/api/nodes') return json(opts.nodesBody);
     if (opts.lists?.[url.searchParams.get('path')] && pathname.includes('/api/fs/list')) return json({ path: url.searchParams.get('path'), entries: opts.lists[url.searchParams.get('path')], truncated: false });
@@ -115,7 +121,18 @@ async function installFixture(page, opts = {}) {
     // opts.tailnet ({ body, status }): the hub's answer to GET /api/auth/tailnet (default `{}`: no tailnet identity).
     // opts.tailscale ({ posts, refuse, as }): POST /api/auth/login-tailscale is counted in `posts`; it answers 401 while `refuse`
     // is set, else signs in as `as` ({ account, kind, admin, subject }), so the next /api/auth/me reports a Tailscale session.
-    if (pathname === '/api/auth/tailnet') return json(opts.tailnet?.body ?? {}, opts.tailnet?.status ?? 200);
+    // (opts.tailnet.delayMs: the answer comes that late; a 503 carries the gate's header)
+    if (pathname === '/api/auth/tailnet') {
+      if (opts.tailnet?.delayMs) await new Promise((r) => setTimeout(r, opts.tailnet.delayMs));
+      const status = opts.tailnet?.status ?? 200;
+      return json(opts.tailnet?.body ?? {}, status, status === 503 ? TAILNET_DOWN : {});
+    }
+    // opts.logouts: POST /api/auth/logout is counted; it ends the session
+    if (pathname === '/api/auth/logout' && req.method() === 'POST') {
+      opts.logouts = (opts.logouts ?? 0) + 1;
+      Object.assign(opts, { account: undefined, signedOut: true, meUnavailable: 0 });
+      return json({ ok: true });
+    }
     if (pathname === '/api/auth/login-tailscale' && req.method() === 'POST') {
       const ts = opts.tailscale ?? {};
       ts.posts = (ts.posts ?? 0) + 1;
@@ -125,10 +142,11 @@ async function installFixture(page, opts = {}) {
       return json({ auth: true, kind: ts.as.kind, name: ts.as.account, admin: ts.as.admin });
     }
     if (pathname === '/api/auth/me') {
-      // opts.meUnavailable: that many answers are 503 first (a Tailscale session while tailscaled does not answer)
+      // opts.meUnavailable: that many answers are the gate's tailnet 503 first; opts.meDelayMs: each comes that late
+      if (opts.meDelayMs) await new Promise((r) => setTimeout(r, opts.meDelayMs));
       if (opts.meUnavailable > 0) {
         opts.meUnavailable--;
-        return json({ error: 'tailnet identity unavailable' }, 503);
+        return json({ error: 'tailnet identity unavailable' }, 503, TAILNET_DOWN);
       }
       if (opts.account) {
         const kind = opts.kind ?? 'virt';
@@ -140,7 +158,8 @@ async function installFixture(page, opts = {}) {
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
     if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
-    // opts.adminApi ({ posts, conflict, tailscale, patchConflict }): the hub's admin routes. Two virtual accounts exist: fixture-guest, with a machine and a
+    // opts.adminApi ({ posts, conflict, tailscale, patchConflict, extra, sessions }): the hub's admin routes. `extra`: more virtual
+    // accounts ({ name, tailnet: [subjects], ... }); `sessions`: the Signed in list instead of the default one. Two virtual accounts exist: fixture-guest, with a machine and a
     // source that are no longer configured, and the signed-in fixture-admin. A POST of a new account is kept in `posts` and answers
     // 409 "exists" while `conflict` is set, else 201 with the new account.
     if (opts.adminApi && pathname.startsWith('/api/admin/')) {
@@ -158,7 +177,7 @@ async function installFixture(page, opts = {}) {
       a.unowned ??= 2;
       a.ended ??= []; a.endedAll ??= []; a.puts ??= []; a.tputs ??= []; a.patches ??= []; a.forgot ??= 0; a.sessionCalls ??= 0;
       if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: a.unowned, tailscale: a.tailscale === undefined ? 'socket' : a.tailscale });
-      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : [])], system: [{ name: 'fixture-root', admin: true, sources: {}, sessions: 0, tailnet: [] }, ...(a.puts.length ? [{ name: 'alice', admin: false, sources: a.puts.at(-1).sources, sessions: 0, tailnet: kinds(a.tputs.at(-1)?.links ?? []) }] : [])] });
+      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [self, guest, ...(a.created ? [a.created] : []), ...(a.extra ?? []).map((x) => ({ admin: false, hasPassword: false, keys: [], nodes: {}, sources: {}, sessions: 0, ...x, tailnet: kinds(x.tailnet ?? []) }))], system: [{ name: 'fixture-root', admin: true, sources: {}, sessions: 0, tailnet: [] }, ...(a.puts.length ? [{ name: 'alice', admin: false, sources: a.puts.at(-1).sources, sessions: 0, tailnet: kinds(a.tputs.at(-1)?.links ?? []) }] : [])] });
       if (pathname === '/api/admin/sessions' && req.method() === 'GET') { a.sessionCalls++; return json({ sessions: a.sessions }); }
       if (pathname.startsWith('/api/admin/sessions/') && req.method() === 'DELETE') {
         const id = pathname.split('/').pop();
@@ -1693,6 +1712,7 @@ async function verifyTailscaleSignIn(browser, failures) {
         await tsButton(page).click();
         await page.getByRole('alert').filter({ hasText: 'Sign-in failed' }).waitFor({ state: 'visible', timeout: 8000 });
         assert.equal(posts(fixture), 1, 'one POST per click');
+        assert.equal(await tsButton(page).evaluate((el) => el === document.activeElement), true, `focus stays on the button after a refusal (${label})`);
         assert.equal(await heading(page).count(), 1, 'a refusal stays on the sign-in screen');
         await overflow(page, `tailscale refused ${label}`);
         await runAxe(page, `tailscale refused ${label}`, failures);
@@ -1739,6 +1759,123 @@ async function verifyTailscaleSignIn(browser, failures) {
       } finally {
         await context.close();
       }
+    }
+  }
+  // a button that comes late does not move the form: its space is kept while the request is pending, so a tap meant for the
+  // name field (made at the field's place from before) lands there and signs nobody in
+  for (const viewport of [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
+    const fixture = { signedOut: true, tailnet: { body: { login: 'alice@github' }, delayMs: 1500 }, tailscale: { as: { account: 'fixture-ts', kind: 'virt', admin: false, subject: 'alice@github' } } };
+    const { context, page } = await open(viewport, 'light', fixture);
+    try {
+      const name = page.getByRole('textbox', { name: 'Name' });
+      await name.waitFor({ state: 'visible', timeout: 15000 });
+      // (fonts first: their swap moves the form by itself)
+      await page.evaluate(() => document.fonts.ready);
+      await page.waitForTimeout(300);
+      assert.equal(await tsButton(page).count(), 0, 'the button is not there yet');
+      const before = await name.boundingBox();
+      await tsButton(page).waitFor({ state: 'visible', timeout: 8000 });
+      const after = await name.boundingBox();
+      assert.ok(Math.abs(after.y - before.y) <= 1, `the name field does not move when the button comes (${viewport.width}px: ${before.y} then ${after.y})`);
+      await page.mouse.click(before.x + before.width / 2, before.y + before.height / 2);
+      await page.waitForTimeout(400);
+      assert.equal(posts(fixture), 0, `a tap at the name field signs nobody in (${viewport.width}px)`);
+      assert.equal(await name.evaluate((el) => el === document.activeElement), true, 'the tap lands in the name field');
+    } finally {
+      await context.close();
+    }
+  }
+  // the waiting screen: "Try now" shows "Trying…" while in flight, then the status says "still"; Sign out ends the session and
+  // shows the sign-in screen; a 401 while waiting shows the sign-in screen too
+  {
+    const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github', meUnavailable: 1000 };
+    const { context, page } = await open({ width: 390, height: 844 }, 'light', fixture);
+    try {
+      const status = page.getByRole('status');
+      await status.filter({ hasText: 'Tailscale is not answering, trying again.' }).waitFor({ state: 'visible', timeout: 15000 });
+      fixture.meDelayMs = 1200;
+      const tryNow = page.getByRole('button', { name: 'Try now' });
+      await tryNow.click();
+      const trying = page.getByRole('button', { name: 'Trying…' });
+      await trying.waitFor({ state: 'visible', timeout: 2000 });
+      assert.equal(await trying.getAttribute('aria-disabled'), 'true', '"Trying…" is aria-disabled');
+      assert.equal(await trying.evaluate((el) => el === document.activeElement), true, 'focus stays on the button while trying');
+      await status.filter({ hasText: 'Tailscale is still not answering, trying again.' }).waitFor({ state: 'visible', timeout: 8000 });
+      await page.getByRole('button', { name: 'Try now' }).waitFor({ state: 'visible', timeout: 4000 });
+      fixture.meDelayMs = 0;
+      await runAxe(page, 'tailscale waiting, still', failures);
+      await page.getByRole('button', { name: 'Sign out' }).click();
+      await heading(page).waitFor({ state: 'visible', timeout: 8000 });
+      assert.equal(fixture.logouts, 1, 'Sign out posts /api/auth/logout once');
+    } finally {
+      await context.close();
+    }
+  }
+  {
+    const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github', meUnavailable: 1000 };
+    const { context, page } = await open({ width: 390, height: 844 }, 'light', fixture);
+    try {
+      await page.getByRole('status').filter({ hasText: 'Tailscale is not answering, trying again.' }).waitFor({ state: 'visible', timeout: 15000 });
+      // the session ends meanwhile: the next answer is the gate's 401
+      Object.assign(fixture, { meUnavailable: 0, account: undefined, signedOut: true });
+      await heading(page).waitFor({ state: 'visible', timeout: 8000 });
+      assert.equal(fixture.logouts ?? 0, 0, 'no logout was sent');
+    } finally {
+      await context.close();
+    }
+  }
+  // the hub's tailnet 503 while the app is open: a banner over the app, which stays mounted (the panel keeps its state), and goes
+  // once me answers again; axe passes and it fits at 1365x900 and 320x568 in light and dark
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github' };
+      const { context, page } = await open(viewport, scheme, fixture);
+      try {
+        const panel = page.locator('.fp').first();
+        await panel.locator('.fp-scroll [data-path]').first().waitFor({ state: 'visible', timeout: 15000 });
+        // a mark on the panel's element: it is still there afterwards only if the app was not mounted again
+        await panel.evaluate((el) => el.setAttribute('data-kept', 'yes'));
+        const url = page.url();
+        fixture.tailnetDown = true;
+        await page.evaluate(() => fetch('/api/nodes').catch(() => {}));
+        const banner = page.getByRole('region', { name: 'Tailscale' });
+        await banner.getByRole('status').filter({ hasText: /Tailscale is (still )?not answering, trying again\./ }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(await heading(page).count(), 0, `the tailnet 503 is not a sign-out (${label})`);
+        await banner.getByRole('button', { name: 'Sign out' }).waitFor({ state: 'visible' });
+        await page.waitForTimeout(150);
+        await overflow(page, `tailscale banner ${label}`);
+        const bannerRight = await banner.evaluate((el) => el.getBoundingClientRect().right);
+        const width = await page.evaluate(() => document.documentElement.clientWidth);
+        if (bannerRight > width + 1) failures.push({ view: `tailscale banner ${label}`, rule: 'horizontal overflow', banner: bannerRight, client: width });
+        await runAxe(page, `tailscale banner ${label}`, failures);
+        fixture.tailnetDown = false;
+        await banner.waitFor({ state: 'detached', timeout: 10000 });
+        assert.equal(await page.locator('.fp[data-kept="yes"]').count(), 1, `the app stays mounted, the panel keeps its state (${label})`);
+        assert.equal(page.url(), url, 'the layout in the URL is unchanged');
+        assert.equal(await heading(page).count(), 0, 'still signed in');
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  // Sign out from the banner ends the session and shows the sign-in screen
+  {
+    const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github' };
+    const { context, page } = await open({ width: 1365, height: 900 }, 'light', fixture);
+    try {
+      await page.locator('.fp .fp-scroll [data-path]').first().waitFor({ state: 'visible', timeout: 15000 });
+      fixture.tailnetDown = true;
+      await page.evaluate(() => fetch('/api/nodes').catch(() => {}));
+      const banner = page.getByRole('region', { name: 'Tailscale' });
+      await banner.waitFor({ state: 'visible', timeout: 8000 });
+      fixture.tailnetDown = false;
+      fixture.meUnavailable = 1000;
+      await banner.getByRole('button', { name: 'Sign out' }).click();
+      await heading(page).waitFor({ state: 'visible', timeout: 8000 });
+      assert.equal(fixture.logouts, 1, 'Sign out from the banner posts /api/auth/logout once');
+    } finally {
+      await context.close();
     }
   }
   // no tailnet identity: the page is as before
@@ -2379,7 +2516,63 @@ async function verifyAccounts(browser) {
       await context.close();
     }
   }
+  await verifyTailnetCanSignIn(browser);
   assert.deepEqual(failures, [], 'the Accounts view passes axe, fits the window and keeps the password out of URLs and storage');
+}
+
+// Tailnet links and "Can sign in", by the lock-out rule: with the headers source a tag link does not count and a login link does;
+// with Tailscale off no link counts. The editor of an account with only a tag link says so under headers. The Signed in tab's
+// Method column: "Tailscale (socket)" with the subject and "on" the device (each in <bdi>), "Tailscale (headers)", plain
+// "Tailscale" for an unknown source, "Password" and "Key".
+async function verifyTailnetCanSignIn(browser) {
+  const now = Date.now();
+  const sess = (id, address, more) => ({ id, kind: 'virt', name: 'fixture-tagonly', created: now - 3_600_000, lastUsed: now - 60_000, address, ...more });
+  const adminApi = {
+    posts: [],
+    tailscale: 'headers',
+    extra: [{ name: 'fixture-tagonly', tailnet: ['tag:ci'] }, { name: 'fixture-login', tailnet: ['alice@github'] }],
+    sessions: [
+      { ...sess('a1', '203.0.113.7', { method: 'password' }), name: 'fixture-admin', current: true },
+      sess('a2', '203.0.113.21', { method: 'tailscale', tailnet: 'tag:ci', tailnetSource: 'socket', tailnetDevice: 'ci-runner' }),
+      sess('a3', '203.0.113.22', { method: 'tailscale', tailnet: 'bob@github', tailnetSource: 'headers' }),
+      sess('a4', '203.0.113.23', { method: 'tailscale' }),
+      sess('a5', '203.0.113.24', { method: 'key' }),
+    ],
+  };
+  const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-admin', kind: 'virt', admin: true, adminApi } });
+  try {
+    await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+    await page.getByRole('menuitem', { name: 'Accounts…' }).click();
+    const view = page.getByRole('dialog', { name: 'Accounts' });
+    await view.waitFor({ state: 'visible', timeout: 8000 });
+    const row = (name) => view.getByRole('row').filter({ has: page.getByRole('cell', { name, exact: true }) });
+    // (the cell also has a "Tailscale" pill when links exist)
+    const signIn = async (name) => (await row(name).locator('td').nth(2).innerText()).trim().match(/^Can(not)? sign in/)?.[0];
+    await row('fixture-tagonly').waitFor({ state: 'visible', timeout: 8000 });
+    assert.equal(await signIn('fixture-tagonly'), 'Cannot sign in', 'headers source: a tag link alone does not count');
+    assert.equal(await signIn('fixture-login'), 'Can sign in', 'headers source: a login link counts');
+    await view.getByRole('button', { name: 'Edit fixture-tagonly' }).click();
+    await view.getByText('Without a password, a key or a tailnet link that works now, this account cannot sign in.', { exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+    await view.getByRole('button', { name: 'Cancel', exact: true }).click();
+    adminApi.tailscale = null;
+    await view.getByRole('button', { name: 'Refresh' }).click();
+    await row('fixture-login').filter({ hasText: 'Cannot sign in' }).waitFor({ state: 'visible', timeout: 8000 });
+    assert.equal(await signIn('fixture-tagonly'), 'Cannot sign in', 'Tailscale off: no link counts');
+    assert.equal(await signIn('fixture-login'), 'Cannot sign in', 'Tailscale off: no link counts');
+    await view.getByRole('tab', { name: 'Signed in' }).click();
+    const panel = view.getByRole('tabpanel', { name: 'Signed in' });
+    const method = (address) => panel.getByRole('row').filter({ hasText: address }).locator('.sess-method');
+    await method('203.0.113.21').waitFor({ state: 'visible', timeout: 8000 });
+    const socket = method('203.0.113.21');
+    assert.match((await socket.innerText()).replace(/\s+/g, ' ').trim(), /^Tailscale \(socket\) ?tag:ci ?on ci-runner$/, 'a socket session: source, subject and device');
+    assert.deepEqual(await socket.locator('bdi').allInnerTexts(), ['tag:ci', 'ci-runner'], 'the subject and the device are in <bdi>');
+    assert.match((await method('203.0.113.22').innerText()).replace(/\s+/g, ' ').trim(), /^Tailscale \(headers\) ?bob@github$/, 'a headers session');
+    assert.equal((await method('203.0.113.23').innerText()).trim(), 'Tailscale', 'an unknown source: plain Tailscale');
+    assert.equal((await method('203.0.113.7').innerText()).trim(), 'Password');
+    assert.equal((await method('203.0.113.24').innerText()).trim(), 'Key');
+  } finally {
+    await context.close();
+  }
 }
 
 // Act as root (a system administrator only): the "Act as root…" item opens a dialog with the sign-in fields; while the hub

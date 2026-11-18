@@ -1057,7 +1057,6 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
 .signin-err:empty{display:none}
 .signin-tailnet-wrap{display:flex;flex-direction:column;gap:.8rem}
 .signin-tailnet-pending{visibility:hidden}
-.signin-tailnet-pending .signin-tailnet-btn{display:block;box-shadow:none;background:transparent}
 .signin-tailnet{display:flex;flex-direction:column;gap:.35rem}
 .signin-tailnet-btn{width:100%;min-height:38px;justify-content:center;gap:var(--btn-gap);font-size:.85rem;font-weight:700}
 .signin-tailnet-btn[aria-disabled=true],.tailnet-banner button[aria-disabled=true],.signin button[aria-disabled=true]{opacity:.7;cursor:progress}
