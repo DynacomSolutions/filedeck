@@ -7,16 +7,21 @@ import "./styles.css";
 import "./accessibility.css";
 import "./sidebar.css";
 import "./phone.css";
+import "./pwa.css";
 import { AccessibilityChrome } from "./AccessibilityChrome";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { installViewportTracking } from "./viewport";
 import { installSignedOutWatch, me, type Me } from "./auth";
+import { installPwa } from "./pwa";
+import { hubUnreachable } from "./pwaState";
+import { HubUnreachable, UpdateBanner } from "./PwaScreens";
 
 installViewportTracking();
+installPwa();
 
 const SignIn = lazy(() => import("./SignIn").then((m) => ({ default: m.SignIn })));
 
-type View = "loading" | "sign-in" | Me;
+type View = "loading" | "sign-in" | "offline" | Me;
 
 // Installed before the first request, so a session that ends while the app is open shows the sign-in screen.
 // Only the gate's signed-out header counts; an archive's password 401 still reaches its prompt.
@@ -45,21 +50,26 @@ function Root() {
   const [view, setView] = useState<View>("loading");
   /** the account the app was last shown for, as kind:name */
   const shownAs = useRef<string | undefined>(undefined);
+  const ask = () =>
+    me()
+      .then((m) => setView((v) => (v === "sign-in" ? v : m === "signed-out" ? "sign-in" : m)))
+      // No answer from the hub (offline, or a gateway saying it is down): say so and keep trying (PwaScreens). An older
+      // hub or another failed request: show the app as before; its own requests report what is wrong.
+      .catch((e: unknown) => setView((v) => (v === "sign-in" ? v : hubUnreachable(e) ? "offline" : { auth: false })));
   useEffect(() => {
     show = setView;
     if (signedOut) return setView("sign-in");
-    me()
-      .then((m) => setView((v) => (v === "sign-in" ? v : m === "signed-out" ? "sign-in" : m)))
-      // An older hub or a failed request: show the app as before; its own requests report what is wrong.
-      .catch(() => setView((v) => (v === "sign-in" ? v : { auth: false })));
+    void ask();
   }, []);
   useEffect(() => {
     if (typeof view === "object" && view.auth) shownAs.current = `${view.kind}:${view.name}`;
   }, [view]);
   if (view === "loading") return null;
-  if (view === "sign-in") return <Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense>;
+  if (view === "offline") return <><HubUnreachable retry={ask} /><UpdateBanner /></>;
+  if (view === "sign-in") return <><Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense><UpdateBanner /></>;
   return (
     <>
+      <UpdateBanner />
       <AccessibilityChrome />
       <ErrorBoundary what="Filedeck" scope="root">
         <App account={view.auth ? view : undefined} />
