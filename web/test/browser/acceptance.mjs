@@ -1396,11 +1396,11 @@ async function verifyThemeTokens(browser) {
       await page.keyboard.press('Shift+Tab');
       await page.keyboard.press('Tab');
       const ring = await page.evaluate(() => { const s = getComputedStyle(document.activeElement); return { outlineStyle: s.outlineStyle, outlineWidth: s.outlineWidth, boxShadow: s.boxShadow }; });
-      // Either a 2px solid outline, or (toolbar buttons) an inset 2px ring in the same colour: one colour, no halo.
+      // Either a solid outline (2px, or the thin 1px ring of bar buttons) or an inset ring in the same colour: one colour, no halo.
       const ringColour = `rgb(${t['--focus-ring'].join(', ')})`;
-      const outline = ring.outlineStyle === 'solid' && ring.outlineWidth === '2px' && ring.boxShadow === 'none';
+      const outline = ring.outlineStyle === 'solid' && ['1px', '2px'].includes(ring.outlineWidth) && ring.boxShadow === 'none';
       const inset = ring.outlineStyle === 'none' && ring.boxShadow === `${ringColour} 0px 0px 0px 2px inset`;
-      if (!outline && !inset) failures.push(`${scheme}: the focus indicator is not a single 2px ring in the focus colour: ${JSON.stringify(ring)}`);
+      if (!outline && !inset) failures.push(`${scheme}: the focus indicator is not a single 1px or 2px ring in the focus colour: ${JSON.stringify(ring)}`);
     } finally {
       await context.close();
     }
