@@ -2631,7 +2631,8 @@ async function verifyInstallableApp(browser) {
       await label.click();
       await waitFor(() => pushCalls.includes('DELETE /api/push/subscribe'), 'turning off removes the subscription at the hub');
       assert.deepEqual(pushLog.filter((x) => x.method === 'DELETE').map((x) => x.body), [{ endpoint: 'https://fcm.googleapis.com/fcm/send/acceptance-stand-in' }]);
-      assert.equal(await page.evaluate(() => window.__push.current), null, 'and in the browser');
+      // the browser drops it once the hub has answered the DELETE
+      await page.waitForFunction(() => window.__push.current === null, null, { timeout: 10000 }).catch(() => assert.fail('and in the browser'));
       await page.keyboard.press('Escape');
     } finally {
       page.off('request', onPush);
