@@ -305,6 +305,8 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
    * Success: the switch lasts `AS_ROOT_MS`, answered as `{asRootUntil, asRootLeftMs}` (the time left by the hub's clock). The audit line keeps no part of the proof (audit.ts).
    */
   const notAdmin = (c: Context) => c.json({ error: "only system administrators can act as root" }, 403);
+  /** The last switch end given out per account (`asRootUntil`), so that the next is always above it. Only administrators get one. */
+  const lastUntil = new Map<string, number>();
   app.post("/api/auth/as-root", async (c) => {
     const id = currentUser();
     const raw = getCookie(c, COOKIE);
@@ -339,9 +341,16 @@ export function registerAuth(app: Hono, deps: AuthDeps): void {
     }
     if (!ok) return failed(c);
     attempt.succeed();
-    const until = now() + AS_ROOT_MS;
+    // each switch of an account has an end of its own (it names the switch, also on the agents' jobs): never one already given out
+    let until = now() + AS_ROOT_MS;
+    const last = lastUntil.get(name);
+    if (last !== undefined && until <= last) until = last + 1;
+    lastUntil.set(name, until);
+    // on again while it is on: the old switch ends here exactly as Stop would end it, with its jobs on the agents
+    const was = asRootOf(raw);
     sessions.setAsRoot(raw, until);
-    return c.json({ asRootUntil: until, asRootLeftMs: AS_ROOT_MS });
+    if (was !== undefined && was.until !== until) await rootEnded(was);
+    return c.json({ asRootUntil: until, asRootLeftMs: until - now() });
   });
 
   /** The system account whose act-as-root switch the session of `raw` holds now, and that switch's end; or undefined. */

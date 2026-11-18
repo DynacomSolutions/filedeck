@@ -549,7 +549,7 @@ test("root only: under the switch, a file mode 0600 owned by root is read in the
   await call(hub, "/api/auth/as-root", alice, { method: "DELETE" });
 });
 
-test("agent: archive (compress, extract) and permission jobs started under the switch carry its end (by the agent's clock) and their owner", async () => {
+test("agent: archive (compress, extract) and permission jobs started under the switch carry its end exactly as the hub gave it, and their owner", async () => {
   const rootA = path.join(tmp, "root-A");
   fs.mkdirSync(path.join(rootA, "permsdir", "sub"), { recursive: true });
   const iat = Date.now();
@@ -563,20 +563,20 @@ test("agent: archive (compress, extract) and permission jobs started under the s
   const c = await A.app.request("/api/jobs/compress", { method: "POST", headers: hdr(true), body: JSON.stringify({ dir: "/", names: ["hello.txt"], format: "zip", name: "erin-hello.zip" }) });
   assert.equal(c.status, 202, await c.clone().text());
   const cv = (await c.json()) as { id: string; asRootUntil?: number };
-  assert.equal(typeof cv.asRootUntil, "number");
-  assert.ok(cv.asRootUntil! >= before + 59_000 && cv.asRootUntil! <= Date.now() + 60_000, `${cv.asRootUntil! - before} ms ahead`);
+  // the view carries the switch's end exactly as the hub gave it (it names the switch), not one turned to the agent's clock
+  assert.equal(cv.asRootUntil, iat + 60_000);
+  void before;
   const p = await A.app.request("/api/fs/perms", { method: "POST", headers: hdr(true), body: JSON.stringify({ path: "/permsdir", mode: 0o755, recursive: true }) });
   assert.equal(p.status, 202, await p.clone().text());
   const pv = (await p.json()) as { id: string; asRootUntil?: number };
-  assert.equal(typeof pv.asRootUntil, "number");
+  assert.equal(pv.asRootUntil, iat + 60_000);
   // extracting: the zip made above, waited for, then extracted into a folder of its own
   for (let i = 0; i < 200 && ((await (await A.app.request(`/api/jobs/${cv.id}`, { headers: hdr(true) })).json()) as { state: string }).state !== "done"; i++) await new Promise((r) => setTimeout(r, 10));
   fs.mkdirSync(path.join(rootA, "erin-out"), { recursive: true });
   const x = await A.app.request("/api/jobs/extract", { method: "POST", headers: hdr(true), body: JSON.stringify({ path: "/erin-hello.zip", destDir: "/erin-out" }) });
   assert.equal(x.status, 202, await x.clone().text());
   const xv = (await x.json()) as { id: string; asRootUntil?: number };
-  assert.equal(typeof xv.asRootUntil, "number");
-  assert.ok(xv.asRootUntil! >= before + 59_000 && xv.asRootUntil! <= Date.now() + 60_000, `${xv.asRootUntil! - before} ms ahead`);
+  assert.equal(xv.asRootUntil, iat + 60_000);
   // erin without the switch sees them as hers (so the hub can find and cancel them when the switch is turned off)
   const mine = ((await (await A.app.request("/api/jobs", { headers: hdr(false) })).json()) as { jobs: { id: string; asRootUntil?: number }[] }).jobs;
   for (const id of [cv.id, pv.id, xv.id]) assert.ok(mine.some((j) => j.id === id && typeof j.asRootUntil === "number"), id);
@@ -838,4 +838,53 @@ test("hub: a late relist due after the hub has closed does nothing, and rejects 
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("hub: turning the switch on again while it is on ends the old switch as Stop does: its jobs are cancelled", async () => {
+  const { st, url } = await switchAgent();
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `F=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-again.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-again") } as never),
+    undefined,
+    () => {},
+    { system: fakeSystem([]) },
+  );
+  closers.push(h);
+  const a = sysCookie(h, "alice");
+  const on = async () => {
+    const r = await postJson(h, "/api/auth/as-root", a, { password: RIGHT });
+    assert.equal(r.status, 200);
+    return ((await r.json()) as { asRootUntil: number }).asRootUntil;
+  };
+  const u1 = await on();
+  assert.equal((await postJson(h, "/api/nodes/F/api/jobs/compress", a, { id: "first-job", dir: "/", names: ["x"], format: "zip" })).status, 202);
+  const u2 = await on();
+  assert.ok(u2 > u1);
+  assert.deepEqual(st.cancelled, ["first-job"], "the old switch's job is cancelled when the new one starts");
+  assert.equal((await postJson(h, "/api/nodes/F/api/jobs/compress", a, { id: "second-job", dir: "/", names: ["x"], format: "zip" })).status, 202);
+  assert.equal((await call(h, "/api/auth/as-root", a, { method: "DELETE" })).status, 200);
+  assert.deepEqual(st.cancelled, ["first-job", "second-job"]);
+});
+
+test("hub: each switch of an account gets its own end, also within the same millisecond", async () => {
+  const fixed = Date.now();
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `A=${A.url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-same-ms.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-same-ms") } as never),
+    undefined,
+    () => {},
+    { now: () => fixed, system: fakeSystem([]) },
+  );
+  closers.push(h);
+  const on = async (cookie: string) => {
+    const r = await postJson(h, "/api/auth/as-root", cookie, { password: RIGHT });
+    assert.equal(r.status, 200);
+    return ((await r.json()) as { asRootUntil: number }).asRootUntil;
+  };
+  const a = sysCookie(h, "alice");
+  const b = sysCookie(h, "alice");
+  const u1 = await on(a);
+  const u2 = await on(b);
+  const u3 = await on(a);
+  assert.equal(u1, fixed + FIFTEEN_MIN);
+  assert.deepEqual([u2, u3], [u1 + 1, u1 + 2]);
+  assert.equal((await me(h, b)).asRootUntil, u2);
 });
