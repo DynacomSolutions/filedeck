@@ -1037,12 +1037,12 @@ kbd{background:var(--surface-3);box-shadow:var(--shadow-1)}
   .site-header__inner{height:44px}
   .selbar b.selbar-none{display:none}
   .hide-phone{display:none!important}
-  /* every selection action stays reachable: compact icon buttons, and the bar scrolls rather than clipping; Clear is pinned at the right edge */
-  .selbar{overflow-x:auto;gap:0 .3rem}
-  .selbar>.tip{flex:0 1 auto;min-width:0;max-width:4.6rem;overflow:hidden}.selbar b{overflow:hidden;text-overflow:ellipsis}
-  .selbar-actions{gap:.1rem}
-  .selbar-actions button{padding:0 .2rem;min-width:32px}
-  .selbar-actions .tip:last-child{position:sticky;right:0;background:var(--surface)}
+  /* the bar is the space between the menu and Jobs buttons: the count, the actions that fit (SelectionBar measures; the rest are in More) and Clear, each action a 44px target, nothing clipped */
+  .selbar{overflow:hidden;gap:0 .3rem}
+  .selbar>.tip{flex:0 1 auto;min-width:0;max-width:5.5rem;overflow:hidden}.selbar b{overflow:hidden;text-overflow:ellipsis}
+  .selbar-actions{gap:0;margin-left:auto}
+  .selbar-actions button,.selbar-actions button.selbar-clear{padding:0;width:44px;min-width:44px;justify-content:center}
+  .selbar-actions .bl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
   .selbar>.tip:has(.selbar-none){display:none}
   /* both drawers fill the width under the header (--hdr-h is its measured height): navigation slides in from the left, jobs from the right */
   .side,.jobs-panel{position:fixed;top:calc(var(--vv-top,0px) + var(--hdr-h,44px));z-index:70;height:calc(var(--vvh,100dvh) - var(--hdr-h,44px));max-height:none;width:100%;box-sizing:border-box;visibility:hidden;transition:transform .18s ease,visibility 0s linear .18s;border:0;box-shadow:var(--shadow-3)}
