@@ -35,6 +35,8 @@ import type { Identity } from "./auth/identity.ts";
 import { AgentSystemAuth } from "./auth/system.ts";
 import { cancelAgentJobs, endAccountWork } from "./auth/account-work.ts";
 import { SysPresence } from "./auth/presence.ts";
+import { SourceGrants } from "./auth/source-grants.ts";
+import { registerAdmin, registerAdminOff } from "./auth/admin-routes.ts";
 
 /** The sign-in state of a hub with auth on (tests reach it as `app.auth`). */
 export interface HubAuth {
@@ -235,6 +237,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   else registerAuthOff(app);
   const vault = new Vault({ file: cfg.vaultFile, secret: cfg.vaultKey, ttlMs: cfg.vaultTtlMs, maxMs: cfg.vaultMaxMs });
   app.vault = vault;
+  // with sign-in on, passwords saved while it was off (no owner) serve nobody: said once at start, while there are any
+  if (auth) {
+    const unowned = vault.countUnowned();
+    if (unowned > 0) console.log(`vault: ${unowned} saved passwords from before sign-in was on are kept but not used; an administrator can forget them in Accounts`);
+  }
   let opq: OpQueue | undefined;
   let closed = false;
   app.close = async () => {
@@ -376,6 +383,20 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const nodes = before.kind === "sys" ? cfg.nodes.map((n) => n.name) : Object.keys(before.nodes).filter((x) => nodeNames.has(x));
     await endAccountWork({ id, nodes, ops, diffs, call: callNode });
   };
+  // The admin routes (auth/admin-routes.ts): only with sign-in on; off, /api/admin/* is 404. `changed` is read at each call, so tests
+  // can wrap app.accountChanged.
+  if (auth)
+    registerAdmin(app, {
+      cfg,
+      accounts: auth.accounts,
+      sessions: auth.sessions,
+      sourceGrants: new SourceGrants(auth.db),
+      vault,
+      nodes: cfg.nodes.map((n) => n.name),
+      sources: [...sources.values()].map(({ config }) => ({ name: config.name, type: config.type })),
+      changed: (before) => app.accountChanged(before),
+    });
+  else registerAdminOff(app);
   for (const f of cfg.jobsFile ? [cfg.jobsFile, cfg.jobsFile + "-wal", cfg.jobsFile + "-shm"] : []) {
     try {
       fs.chmodSync(f, 0o600);

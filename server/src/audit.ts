@@ -2,10 +2,11 @@ import type { MiddlewareHandler } from "hono";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { isIP } from "node:net";
 import { isRawRoute } from "./request-guard.ts";
+import { keyFingerprint } from "./auth/sshkey.ts";
 
 /**
- * Write audit log: one JSON line on stdout per state-changing request
- * (`"audit":true`), written after the response so the status is known.
+ * Write audit log: one JSON line on stdout (`"audit":true`) per state-changing request, and per admin call (`/api/admin/*`) of any
+ * method, GET too, written after the response so the status is known.
  * It records who asked (`ip`: the last X-Forwarded-For entry, else the socket peer; `forwardedFor` keeps the whole chain, which the caller can write; `peer` the socket address), what
  * (method, route, the paths named in the query or a small JSON body) and the
  * outcome. File contents, upload bodies and credentials are never read.
@@ -39,6 +40,54 @@ function signInBody(v: unknown): { name: string } | undefined {
   if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
   const name = (v as { name?: unknown }).name;
   return typeof name === "string" ? { name: clip(name) } : undefined;
+}
+
+/** The most nodes, grants per node and sources an admin audit line keeps (the admin routes take at most 64 grants per node). */
+const MAX_ADMIN_ITEMS = 64;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * An admin body (`/api/admin/*`) as its audit line keeps it: `name`, `kind`, `admin`, `nodes` as `{ <node>: { runAs, grants: [{path,
+ * write}] } }`, `sources` as `{ <source>: { write } }`, and for a `publicKey` its `fingerprint` (as OpenSSH prints it). Nothing else, of
+ * the expected types only: never a password, a password hash or the key text. Strings are clipped and lists bounded. A body that is not
+ * an object gives nothing.
+ */
+export function adminBody(v: unknown): Record<string, unknown> | undefined {
+  if (!isPlainObject(v)) return undefined;
+  const out: Record<string, unknown> = {};
+  if (typeof v.name === "string") out.name = clip(v.name);
+  if (typeof v.kind === "string") out.kind = clip(v.kind);
+  if (typeof v.admin === "boolean") out.admin = v.admin;
+  if (isPlainObject(v.nodes)) {
+    // (built with fromEntries, so a key such as __proto__ stays a plain field)
+    out.nodes = Object.fromEntries(
+      Object.entries(v.nodes)
+        .slice(0, MAX_ADMIN_ITEMS)
+        .filter((e): e is [string, Record<string, unknown>] => isPlainObject(e[1]))
+        .map(([node, a]) => {
+          const grants = Array.isArray(a.grants)
+            ? a.grants
+                .slice(0, MAX_ADMIN_ITEMS)
+                .filter(isPlainObject)
+                .map((g) => ({ ...(typeof g.path === "string" ? { path: clip(g.path) } : {}), ...(typeof g.write === "boolean" ? { write: g.write } : {}) }))
+            : undefined;
+          return [clip(node), { ...(typeof a.runAs === "string" ? { runAs: clip(a.runAs) } : {}), ...(grants ? { grants } : {}) }];
+        }),
+    );
+  }
+  if (isPlainObject(v.sources)) {
+    out.sources = Object.fromEntries(
+      Object.entries(v.sources)
+        .slice(0, MAX_ADMIN_ITEMS)
+        .map(([source, a]) => [clip(source), isPlainObject(a) && typeof a.write === "boolean" ? { write: a.write } : {}]),
+    );
+  }
+  if (typeof v.publicKey === "string") {
+    const fp = keyFingerprint(v.publicKey);
+    if (fp) out.fingerprint = fp;
+  }
+  return out;
 }
 
 /** The audit line of a request the guard refused (or, with `aborted`, one whose body the client abandoned before it was acted on, status 499): status, method, route, query and the origin it claimed; the body is never read. The user is named when the account is already known: on an agent always, on the hub never (its guard runs before sign-in, so those lines are "refused before sign-in"). */
@@ -128,7 +177,9 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
   return async (c, next) => {
     const m = c.req.method;
     const p = c.req.path;
-    if (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/")) return next();
+    // every admin call is written, whatever its method: reading the accounts and sessions is recorded too
+    const admin = p.startsWith("/api/admin/");
+    if (!admin && (m === "GET" || m === "HEAD" || m === "OPTIONS" || !p.startsWith("/api/"))) return next();
     const t0 = Date.now();
     let body: unknown;
     // The body was parsed once by the request guard and is shared through the body cache; without it (a bare audit
@@ -139,7 +190,7 @@ export function audit(who: string, sink: AuditSink = (l) => console.log(l)): Mid
       if (shared || (len > 0 && len <= MAX_BODY && !c.req.raw.headers.has("transfer-encoding"))) {
         try {
           const parsed = await (shared ?? c.req.json());
-          body = p.startsWith("/api/auth/") ? signInBody(parsed) : pick(parsed);
+          body = p.startsWith("/api/auth/") ? signInBody(parsed) : admin ? adminBody(parsed) : pick(parsed);
         } catch {
           body = undefined;
         }

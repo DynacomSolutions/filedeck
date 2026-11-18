@@ -343,4 +343,19 @@ export class Vault {
     const [w, a] = this.mine(owner);
     return Number(this.db.prepare(`DELETE FROM entries WHERE 1${w}`).run(...a).changes);
   }
+
+  /**
+   * How many live entries have no owner: saved with sign-in off. With sign-in on they serve nobody; the hub says how many at start and
+   * an administrator can forget them (`forgetUnowned`).
+   */
+  countUnowned(): number {
+    this.purge();
+    const r = this.db.prepare("SELECT COUNT(*) AS n FROM entries WHERE owner IS NULL").get() as { n: number };
+    return Number(r.n);
+  }
+
+  /** Deletes every entry without an owner (saved with sign-in off); returns how many. Entries of accounts stay. */
+  forgetUnowned(): number {
+    return Number(this.db.prepare("DELETE FROM entries WHERE owner IS NULL").run().changes);
+  }
 }
