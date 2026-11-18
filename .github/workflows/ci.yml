@@ -61,7 +61,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # tests take about 10 minutes; the rest is room for a slow Ubuntu mirror in "Install test tools" (up to 15)
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
