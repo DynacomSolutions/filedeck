@@ -10,7 +10,7 @@
 }
 @media(max-height:500px) and (max-width:1000px){
   .site-header__inner{height:36px}
-  .site-header .drawer-btn{min-height:32px;height:32px}
+  .site-header .drawer-btn,.site-header .jobs-btn{min-height:32px;height:32px}
   .main{padding:.15rem}
 }
 

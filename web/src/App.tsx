@@ -1,8 +1,8 @@
 import { ErrorBoundary } from "./ErrorBoundary";
 import { brand } from "./brand";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { api, type Entry, type NodeInfo } from "./api";
+import { api, onJobStarted, type Entry, type NodeInfo } from "./api";
 import { FilePanel } from "./FilePanel";
 import { DEFAULT_UI, decodeState, encodeState, isSyncPreviewReady, leaves, maxId, viewCloseTarget, viewHistoryAction, viewIdentity, type FolderState, type Leaf, type SyncState, type Tree, type TrashState } from "./urlState";
 import { comparePairs, isMultiPanel, panelsAfterClick, pruneMissing, togglePanelSelection, type ClickKind } from "./panelSelection";
@@ -12,7 +12,7 @@ import type { FileRef } from "./EditorViews";
 // Monaco (several MB) lives in its own chunks, fetched on first use.
 const AccountsView = lazy(() => import("./AccountsView").then((m) => ({ default: m.AccountsView })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
-import { JobsTray } from "./Jobs";
+import { JobsTray, type JobsInfo } from "./Jobs";
 import { useNodes } from "./data";
 import { SideTree, type How, type NodesState } from "./SidebarTree";
 import { ThemeMenu } from "./ThemeMenu";
@@ -25,7 +25,6 @@ import { GitCompareArrows, Keyboard, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
 import { usePhone } from "./viewport";
-import { useDialogFocus } from "./dialogFocus";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
 import { AccountMenu } from "./AccountMenu";
@@ -209,30 +208,59 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   }, [setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot]);
 }
 
-/** Mounted only while the phone drawer is open: traps focus, restores it on close, and closes on Escape. */
+/** The header buttons that open a drawer: a tap on one is handled by the button, not as a tap outside. */
+const DRAWER_TOGGLE = "[data-drawer-toggle]";
+
+/**
+ * Mounted only while a phone drawer is open. The drawer sits under the header and the header stays usable, so it is a dialog without
+ * a focus trap: focus moves into it, goes back to the opener on close, Escape and a tap outside (not on a drawer button) close it.
+ */
 function DrawerGuard({ root, onClose }: { root: React.RefObject<HTMLElement | null>; onClose: () => void }) {
-  useDialogFocus(root);
+  // Captured during render, before focus moves.
+  const opener = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && onClose();
-    document.addEventListener("keydown", k);
-    return () => document.removeEventListener("keydown", k);
-  }, [onClose]);
+    const frame = requestAnimationFrame(() => {
+      const el = root.current;
+      if (!el || el.contains(document.activeElement)) return;
+      // The container itself, not its first control: no ring lands on a row; Tab then enters the drawer.
+      el.focus({ preventScroll: true });
+    });
+    const key = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && onClose();
+    const outside = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (t && !root.current?.contains(t) && !t.closest(DRAWER_TOGGLE)) onClose();
+    };
+    document.addEventListener("keydown", key);
+    document.addEventListener("pointerdown", outside, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", key);
+      document.removeEventListener("pointerdown", outside, true);
+      const active = document.activeElement;
+      // Hand focus back unless the user already moved it to something else outside the drawer.
+      if (opener.current?.isConnected && (!active || active === document.body || root.current?.contains(active))) opener.current.focus({ preventScroll: true });
+    };
+  }, [root, onClose]);
   return null;
 }
+
+/** The brand mark, as the sidebar header and (on a phone) the top bar show it. */
+const BrandMark = () => (
+  <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path d="M8 3h8M5.5 6.5h13" />
+    <path d="M3 19v-8a1 1 0 0 1 1-1h4a1 1 0 0 1 .7.3L10.5 12H20a1 1 0 0 1 1 1v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+  </svg>
+);
 
 function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onCloseDrawer }: { nodesState: NodesState; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode; drawer: boolean; onCloseDrawer: () => void }) {
   const root = useRef<HTMLElement>(null);
   return (
     <>
-    {drawer && <div className="drawer-back" onClick={onCloseDrawer} aria-hidden="true" />}
     {drawer && <DrawerGuard root={root} onClose={onCloseDrawer} />}
-    <aside ref={root} id="side-drawer" className={"side" + (drawer ? " open" : "")} {...(drawer ? { role: "dialog", "aria-modal": true, "aria-label": "Navigation" } : {})}>
+    <aside ref={root} id="side-drawer" className={"side" + (drawer ? " open" : "")} {...(drawer ? { role: "dialog", "aria-label": "Navigation", tabIndex: -1 } : {})}>
       <div className="side-brand">
         <span className="brand-name">
-          <svg className="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M8 3h8M5.5 6.5h13" />
-            <path d="M3 19v-8a1 1 0 0 1 1-1h4a1 1 0 0 1 .7.3L10.5 12H20a1 1 0 0 1 1 1v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-          </svg>
+          <BrandMark />
           {brand.name}
         </span>
       </div>
@@ -245,12 +273,62 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
   );
 }
 
+const JOBS_OPEN_KEY = "filedeck-jobs-collapsed";
+/** The desktop jobs panel reuses the saved fold state of the old tray ("1" folded); with nothing saved it starts closed. */
+const loadJobsOpen = (): boolean => {
+  try {
+    return localStorage.getItem(JOBS_OPEN_KEY) === "0";
+  } catch {
+    return false;
+  }
+};
+
 export function App({ account }: { account?: Account } = {}) {
   const nodesState = useNodes();
   const asRoot = useAsRoot(account);
   const phone = usePhone();
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  // Phone: one drawer at a time, the folders from the left or the jobs from the right.
+  const [drawer, setDrawer] = useState<"nav" | "jobs" | null>(null);
+  const closeDrawer = useCallback(() => setDrawer(null), []);
+  const navOpen = phone && drawer === "nav";
+  // Desktop: the jobs panel beside the files, open or closed (kept in storage).
+  const [jobsOpen, setJobsOpen] = useState(loadJobsOpen);
+  const setJobsOpenSaved = useCallback((v: boolean) => {
+    setJobsOpen(v);
+    try {
+      localStorage.setItem(JOBS_OPEN_KEY, v ? "0" : "1");
+    } catch {
+      /* storage unavailable: the choice lasts for this page view */
+    }
+  }, []);
+  const [jobsInfo, setJobsInfo] = useState<JobsInfo>({ running: 0, total: 0, asking: false });
+  const phoneRef = useRef(phone);
+  phoneRef.current = phone;
+  // A question opens the panel on a desktop (a phone only shows the badge); so does a job started here.
+  const onJobsInfo = useCallback((info: JobsInfo) => {
+    setJobsInfo(info);
+    if (info.asking && !phoneRef.current) setJobsOpen(true);
+  }, []);
+  useEffect(() => onJobStarted(() => { if (!phoneRef.current) setJobsOpen(true); }), []);
+  const jobsShown = phone ? drawer === "jobs" : jobsOpen;
+  const toggleJobs = () => {
+    if (phone) setDrawer((d) => (d === "jobs" ? null : "jobs"));
+    else setJobsOpenSaved(!jobsOpen);
+  };
+  const jobsRoot = useRef<HTMLElement>(null);
+  // The phone drawers sit under the header, whatever height it has (a wrapped banner makes it taller).
+  const appRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const h = headerRef.current;
+    const a = appRef.current;
+    if (!h || !a) return;
+    const set = () => a.style.setProperty("--hdr-h", `${h.offsetHeight}px`);
+    set();
+    const ro = new ResizeObserver(set);
+    ro.observe(h);
+    return () => ro.disconnect();
+  }, []);
   const nodes = useMemo(() => nodesState.nodes ?? [], [nodesState.nodes]);
   const [tree, setTree] = useState<Tree | null>(initial?.tree ?? null);
   const [activeId, setActiveId] = useState(initial?.active ?? "");
@@ -597,22 +675,23 @@ export function App({ account }: { account?: Account } = {}) {
     );
   };
 
-  // Status line, compare notes and the jobs tray. On a phone they sit under the file list: the drawer is hidden until opened, and a hidden live region is never read out.
+  // Status line and compare notes. On a phone they sit under the file list: the drawer is hidden until opened, and a hidden live region is never read out.
   const notices = (
     <>
       <CompareInfo />
       <div className="side-status" role="status"><Tip label={status || "No messages"} fill><span>{status}</span></Tip></div>
-      <JobsTray nodes={nodes} />
     </>
   );
   return (
-    <div className="app">
+    <div className="app" ref={appRef}>
       <CompareCtx.Provider value={routedCompare}>
-      <Sidebar drawer={phone && drawerOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<>{!phone && notices}<div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
+      <Sidebar drawer={navOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<>{!phone && notices}<div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
+      {phone && drawer && <div className="drawer-back" onClick={closeDrawer} aria-hidden="true" />}
       <div className="app-col">
-      <header className="site-header">
+      <header className="site-header" ref={headerRef}>
         <div className="site-header__inner">
-          <Tip label="Folders and settings"><button type="button" className="phone-only drawer-btn" aria-label="Open navigation" aria-controls="side-drawer" aria-expanded={phone && drawerOpen} onClick={() => setDrawerOpen(true)}><Ic.Menu /></button></Tip>
+          <Tip label="Folders and settings"><button type="button" className="phone-only drawer-btn" data-drawer-toggle aria-label={navOpen ? "Close navigation" : "Open navigation"} aria-controls="side-drawer" aria-expanded={navOpen} onClick={() => setDrawer((d) => (d === "nav" ? null : "nav"))}><Ic.Menu /></button></Tip>
+          <span className="hdr-brand phone-only" aria-hidden="true"><BrandMark /></span>
           <SelectionBar
             refs={Object.values(sels).flat()}
             panelCount={Object.keys(sels).length}
@@ -641,6 +720,12 @@ export function App({ account }: { account?: Account } = {}) {
             )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
             {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? openAccounts : undefined} />}
+            <Tip label="Jobs">
+              <button type="button" className={"jobs-btn" + (jobsInfo.asking ? " attn" : "")} data-drawer-toggle aria-controls="jobs-panel" aria-expanded={jobsShown} onClick={toggleJobs}>
+                <Ic.Activity /> <span className="bl">Jobs</span>
+                {(jobsInfo.asking || jobsInfo.running > 0) && <><span className="jobs-badge">{jobsInfo.asking ? "!" : jobsInfo.running}</span><span className="sr-only">{jobsInfo.asking ? " needs an answer" : " running"}</span></>}
+              </button>
+            </Tip>
           </div>
         </div>
       </header>
@@ -685,6 +770,8 @@ export function App({ account }: { account?: Account } = {}) {
             </ErrorBoundary>
           )}
         </main>
+        <JobsTray nodes={nodes} shown={jobsShown} modal={phone && jobsShown} rootRef={jobsRoot} onInfo={onJobsInfo} />
+        {phone && drawer === "jobs" && <DrawerGuard root={jobsRoot} onClose={closeDrawer} />}
       </div>
       </div>
       {cmp && <SyncDialog ctl={{ ...cmp, closeExec: () => closeView(() => { suppressSyncCapture.current = true; cmp.closeExec(); setSyncRoute(null); }) }} />}
