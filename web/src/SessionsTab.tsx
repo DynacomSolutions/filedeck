@@ -122,7 +122,7 @@ export function SessionsTab({ account }: { account: Account }) {
                     <td className="sess-addr">{s.address ? <bdi>{s.address}</bdi> : <span className="muted">Unknown</span>}</td>
                     <td>
                       {s.current && <span className="pill">This session</span>}
-                      {s.asRootUntil !== undefined && s.asRootUntil > Date.now() && <span className="pill">Acting as root</span>}
+                      {s.asRootUntil !== undefined && <span className="pill">Acting as root</span>}
                     </td>
                     <td className="sess-c-act">
                       <button type="button" disabled={busy !== ""} onClick={() => (s.current ? setAsking({ one: s }) : void run(`end-${s.id}`, () => endSession(s.id), false, `Ended the session of ${s.name}.`))}>

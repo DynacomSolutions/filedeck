@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import * as Ic from "lucide-react";
 import { Tip } from "./Tooltip";
 import { Dropdown } from "./Dropdown";
+import { Modal } from "./ArchiveDialog";
 import { ConfirmDialog } from "./SessionsTab";
 import { listAccounts, overview, setSystemSources, systemUserProblem, type Overview, type SourceAccess, type SystemView } from "./admin";
 import type { Account } from "./auth";
@@ -17,11 +18,14 @@ const CHOICES: { value: Choice; label: string }[] = [
 ];
 const choiceOf = (a: SourceAccess | undefined): Choice => (a ? (a.write ? "write" : "read") : "none");
 
+/** How the view reaches the sources editor: is it open, does it hold unsaved changes, and leave it (`then`: whatever follows, e.g. closing the view). */
+export type SystemCtl = { editing: () => boolean; close: (then?: () => void) => void };
+
 /**
  * System users the hub knows of: named in FILEDECK_ADMINS, given a source, or signed in now. Administrators can add a system user (to
  * give it network sources before it signs in) and change the sources of one. The hub checks every name and answers with its own text.
  */
-export function SystemUsersTab({ account }: { account: Account }) {
+export function SystemUsersTab({ account, ctl }: { account: Account; ctl?: React.MutableRefObject<SystemCtl | null> }) {
   const uid = useId();
   const [data, setData] = useState<{ system: SystemView[]; overview: Overview } | null>(null);
   const [err, setErr] = useState("");
@@ -38,6 +42,17 @@ export function SystemUsersTab({ account }: { account: Account }) {
   const addButton = useRef<HTMLButtonElement>(null);
   const wasEditing = useRef(false);
   const alive = useRef(true);
+  /** the open editor's own close, which asks first when it holds unsaved changes */
+  const editorClose = useRef<((then?: () => void) => void) | null>(null);
+  const isEditing = useRef(false);
+  isEditing.current = editing !== null;
+  useEffect(() => {
+    if (!ctl) return;
+    ctl.current = { editing: () => isEditing.current, close: (then) => editorClose.current?.(then) };
+    return () => {
+      ctl.current = null;
+    };
+  }, [ctl]);
 
   const load = useCallback(() => {
     Promise.all([listAccounts(), overview()]).then(
@@ -98,6 +113,7 @@ export function SystemUsersTab({ account }: { account: Account }) {
         user={editing}
         overview={data.overview}
         headingRef={editHeading}
+        closeRef={editorClose}
         onCancel={() => setEditing(null)}
         onSaved={(n) => {
           setEditing(null);
@@ -189,11 +205,12 @@ export function SystemUsersTab({ account }: { account: Account }) {
 }
 
 /** The sources of one system user: one select per source, saved as a whole. Saving ends the user's sessions, so one's own asks first. */
-function SourcesEditor({ account, user, overview: ov, headingRef, onCancel, onSaved }: {
+function SourcesEditor({ account, user, overview: ov, headingRef, closeRef, onCancel, onSaved }: {
   account: Account;
   user: { name: string; admin: boolean; start: Record<string, Choice> };
   overview: Overview;
   headingRef: React.RefObject<HTMLHeadingElement | null>;
+  closeRef: React.MutableRefObject<((then?: () => void) => void) | null>;
   onCancel: () => void;
   onSaved: (name: string) => void;
 }) {
@@ -203,6 +220,28 @@ function SourcesEditor({ account, user, overview: ov, headingRef, onCancel, onSa
   const [asking, setAsking] = useState(false);
   const sending = useRef(false);
   const errId = useId();
+  const [discarding, setDiscarding] = useState(false);
+  const afterDiscard = useRef<(() => void) | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const norm = (c: Record<string, Choice>) => JSON.stringify(Object.entries(c).filter(([, v]) => v !== "none").sort(([a], [b]) => (a < b ? -1 : 1)));
+  /** Back to the list, or on to `then`; with unsaved changes it asks "Discard changes?" first. */
+  const requestClose = (then?: () => void) => {
+    if (sending.current) return;
+    const go = then ?? onCancel;
+    if (norm(choices) !== norm(user.start)) {
+      opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      afterDiscard.current = go;
+      setDiscarding(true);
+    } else go();
+  };
+  closeRef.current = requestClose;
+  // the form is inert under the prompt: focus goes back to the control that opened it once the prompt is gone
+  useEffect(() => {
+    if (discarding) return;
+    const el = opener.current;
+    opener.current = null;
+    if (el?.isConnected && document.activeElement !== el) el.focus({ preventScroll: true });
+  }, [discarding]);
   const self = account.kind === "sys" && account.name === user.name;
   const known = ov.sources.map((s) => s.name);
   const gone = Object.entries(user.start).filter(([s, c]) => c !== "none" && !known.includes(s)).map(([s]) => s);
@@ -231,7 +270,7 @@ function SourcesEditor({ account, user, overview: ov, headingRef, onCancel, onSa
   return (
     <div className="sys-editor sess-view">
       <h2 className="acc-title" ref={headingRef} tabIndex={-1}>Sources of <bdi>{user.name}</bdi></h2>
-      <fieldset className="acc-fs" disabled={busy} aria-busy={busy || undefined} inert={asking || undefined}>
+      <fieldset className="acc-fs" disabled={busy} aria-busy={busy || undefined} inert={asking || discarding || undefined}>
         {user.admin && <p className="muted">This user is an administrator and can use every network source, whatever is chosen here.</p>}
         {self && <p className="acc-warn"><Ic.AlertTriangle aria-hidden="true" /> <span>This is your own account. Saving signs it out everywhere, also here.</span></p>}
         {ov.sources.length === 0 ? (
@@ -251,12 +290,21 @@ function SourcesEditor({ account, user, overview: ov, headingRef, onCancel, onSa
         )}
         <div className="acc-actions">
           <div className="ad-err acc-err" role="alert" id={errId}>{err}</div>
-          <button type="button" onClick={onCancel}><Ic.X aria-hidden="true" /> Cancel</button>
+          <button type="button" onClick={() => requestClose()}><Ic.X aria-hidden="true" /> Cancel</button>
           <button type="button" className="primary" disabled={busy} aria-busy={busy || undefined} aria-describedby={errId} onClick={() => (self ? setAsking(true) : void save())}>
             <Ic.Check aria-hidden="true" /> {busy ? "Saving…" : "Save"}
           </button>
         </div>
       </fieldset>
+      {discarding && (
+        <Modal title="Discard changes?" onClose={() => setDiscarding(false)} describedBy={errId + "-d"}>
+          <p id={errId + "-d"} className="pad0">The changes to these sources have not been saved.</p>
+          <div className="modal-actions">
+            <button type="button" autoFocus onClick={() => setDiscarding(false)}><Ic.Undo2 aria-hidden="true" /> Keep editing</button>
+            <button type="submit" className="danger" onClick={() => (setDiscarding(false), (afterDiscard.current ?? onCancel)())}><Ic.Trash2 aria-hidden="true" /> Discard</button>
+          </div>
+        </Modal>
+      )}
       {asking && (
         <ConfirmDialog title="Change your own account" confirm="Save and sign out" busy={busy} onClose={() => setAsking(false)} onConfirm={() => void save()}>
           Saving signs this account out everywhere, also here. This page reloads.

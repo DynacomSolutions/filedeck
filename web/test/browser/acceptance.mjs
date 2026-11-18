@@ -132,7 +132,8 @@ async function installFixture(page, opts = {}) {
       // sessions: the caller's own and fixture-guest's; ended / endedAll / puts / forgot keep what the page sent
       a.sessions ??= [
         { id: 'aa11aa11', kind: 'virt', name: 'fixture-admin', created: Date.now() - 7_200_000, lastUsed: Date.now() - 60_000, address: '203.0.113.7', current: true },
-        { id: 'bb22bb22', kind: 'virt', name: 'fixture-guest', created: Date.now() - 86_400_000, lastUsed: Date.now() - 3_600_000, address: '198.51.100.9', asRootUntil: undefined },
+        { id: 'bb22bb22', kind: 'virt', name: 'fixture-guest', created: Date.now() - 86_400_000, lastUsed: Date.now() - 3_600_000, address: '198.51.100.9' },
+        { id: 'cc33cc33', kind: 'virt', name: 'fixture-guest', created: Date.now() - 90_000_000, lastUsed: Date.now() - 7_200_000, address: '192.0.2.5' },
       ];
       a.unowned ??= 2;
       a.ended ??= []; a.endedAll ??= []; a.puts ??= []; a.forgot ??= 0; a.sessionCalls ??= 0;
@@ -145,7 +146,7 @@ async function installFixture(page, opts = {}) {
         a.sessions = a.sessions.filter((x) => x.id !== id);
         return json({ ok: true });
       }
-      if (pathname === '/api/admin/end-sessions' && req.method() === 'POST') { a.endedAll.push(req.postDataJSON()); return json({ ok: true }); }
+      if (pathname === '/api/admin/end-sessions' && req.method() === 'POST') { const b = req.postDataJSON(); a.endedAll.push(b); a.sessions = a.sessions.filter((x) => !(x.kind === b.kind && x.name === b.name)); return json({ ok: true }); }
       if (pathname === '/api/admin/vault/unowned' && req.method() === 'DELETE') { a.forgot++; const removed = a.unowned; a.unowned = 0; return json({ removed }); }
       if (pathname === '/api/admin/system/alice/sources' && req.method() === 'PUT') { const b = req.postDataJSON(); a.puts.push(b); return json({ name: 'alice', admin: false, sources: b.sources, sessions: 0 }); }
       if (pathname === '/api/admin/accounts' && req.method() === 'POST') {
@@ -1800,10 +1801,40 @@ async function verifyAccounts(browser) {
         assert.equal(adminApi.forgot, 1, `one DELETE of the old passwords (${label})`);
         await page.waitForFunction(() => document.activeElement?.textContent === 'Virtual accounts', null, { timeout: 8000 });
 
+        // closing the view with an unsaved editor asks first, from another tab too (Escape) and from the header's Close
+        await view.getByRole('button', { name: 'Edit fixture-guest' }).click();
+        const guestRunAs = view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' });
+        await guestRunAs.fill('fixture-other');
+        await view.getByRole('tab', { name: 'Signed in' }).click();
+        await page.keyboard.press('Escape');
+        const keep = page.getByRole('dialog', { name: 'Discard changes?' });
+        await keep.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+        await keep.getByRole('button', { name: 'Keep editing' }).click();
+        await keep.waitFor({ state: 'detached', timeout: 8000 });
+        assert.equal(await view.isVisible(), true, `Keep editing leaves the view open (${label})`);
+        await view.getByRole('tab', { name: 'Signed in' }).click();
+        await view.getByRole('button', { name: 'Close', exact: true }).click();
+        await keep.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+        await keep.getByRole('button', { name: 'Keep editing' }).click();
+        await keep.waitFor({ state: 'detached', timeout: 8000 });
+        assert.equal(await guestRunAs.inputValue(), 'fixture-other', `the typed text is still there (${label})`);
+        await view.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await keep.getByRole('button', { name: 'Discard' }).click();
+        await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+
         // the tabs are a tablist: aria-selected, arrow keys, and a tabpanel named by the tab
         const tabs = view.getByRole('tablist', { name: 'Accounts sections' });
         assert.deepEqual(await tabs.getByRole('tab').evaluateAll((els) => els.map((e) => [e.textContent.trim(), e.getAttribute('aria-selected')])), [['Accounts', 'true'], ['Signed in', 'false'], ['System users', 'false']], `tabs (${label})`);
         await tabs.getByRole('tab', { name: 'Accounts' }).focus();
+        await page.keyboard.press('ArrowRight');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Signed in' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
+        // Home and End move to the first and last tab
+        await page.keyboard.press('End');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'System users' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
+        await page.keyboard.press('Home');
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Accounts' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
         await page.keyboard.press('ArrowRight');
         await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Signed in' && document.activeElement.getAttribute('aria-selected') === 'true', null, { timeout: 8000 });
         const panel = view.getByRole('tabpanel', { name: 'Signed in' });
@@ -1837,6 +1868,14 @@ async function verifyAccounts(browser) {
         await rowOf('198.51.100.9').getByRole('button', { name: 'End', exact: true }).click();
         await page.waitForFunction(() => ![...document.querySelectorAll('tr')].some((r) => r.textContent.includes('198.51.100.9')), null, { timeout: 8000 });
         assert.deepEqual(adminApi.ended, ['bb22bb22'], `End sends one DELETE for that session (${label})`);
+        // confirming "End all sessions" sends the POST, and the account's remaining row goes away when the list refreshes
+        await panel.getByRole('button', { name: 'End all sessions of fixture-guest' }).click();
+        await endAll.waitFor({ state: 'visible', timeout: 8000 });
+        await endAll.getByRole('button', { name: 'End all sessions', exact: true }).click();
+        await endAll.waitFor({ state: 'detached', timeout: 8000 });
+        await page.waitForFunction(() => ![...document.querySelectorAll('tr')].some((r) => r.textContent.includes('192.0.2.5')), null, { timeout: 8000 });
+        assert.deepEqual(adminApi.endedAll, [{ kind: 'virt', name: 'fixture-guest' }], `confirming sends one POST (${label})`);
+        assert.equal(await panel.getByRole('button', { name: 'End all sessions of fixture-guest' }).count(), 0, `the account's group is gone (${label})`);
         // the caller's own End asks first (and reloads the page after it: not run here, the fixture page would lose its state)
         await mine.getByRole('button', { name: 'End', exact: true }).click();
         const endOwn = page.getByRole('dialog', { name: 'End your own session' });
@@ -1872,6 +1911,18 @@ async function verifyAccounts(browser) {
         await sys.getByRole('button', { name: /^Access to fixture-s3/ }).click();
         await page.getByRole('menuitemradio', { name: 'Read only' }).click();
         await overflow('system user sources');
+        // unsaved sources ask before Escape or Close drops them
+        await page.keyboard.press('Escape');
+        const keepSys = page.getByRole('dialog', { name: 'Discard changes?' });
+        await keepSys.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
+        await keepSys.getByRole('button', { name: 'Keep editing' }).click();
+        await keepSys.waitFor({ state: 'detached', timeout: 8000 });
+        await view.getByRole('button', { name: 'Close', exact: true }).click();
+        await keepSys.waitFor({ state: 'visible', timeout: 8000 });
+        await keepSys.getByRole('button', { name: 'Keep editing' }).click();
+        await keepSys.waitFor({ state: 'detached', timeout: 8000 });
+        await sys.getByRole('heading', { name: 'Sources of alice' }).waitFor({ state: 'visible' });
         await runAxe(page, `system user sources ${label}`, failures);
         await sys.getByRole('button', { name: 'Save', exact: true }).click();
         await sys.getByRole('cell', { name: 'alice', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
@@ -2015,6 +2066,32 @@ async function verifyAccounts(browser) {
       await page.clock.fastForward(95_000);
       await page.waitForTimeout(300);
       assert.equal(adminApi.sessionCalls, n, 'closing the view stops the refresh');
+    } finally {
+      await context.close();
+    }
+  }
+  // "Acting as root" shows for a session the hub lists with asRootUntil, whatever the page's clock says (here 20 minutes ahead); ending
+  // one's own session asks, then the page reloads: a marker set on the page is gone afterwards and the hub got the DELETE
+  {
+    const mine = { id: 'dd44dd44', kind: 'sys', name: 'fixture-root', created: Date.now() - 600_000, lastUsed: Date.now() - 1000, address: '203.0.113.7', asRootUntil: Date.now() + 10 * 60_000, current: true };
+    const adminApi = { posts: [], sessions: [mine] };
+    const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-root', kind: 'sys', admin: true, adminApi }, clockOffsetMs: 20 * 60_000 });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-root' }).click();
+      await page.getByRole('menuitem', { name: 'Accounts…' }).click();
+      const view = page.getByRole('dialog', { name: 'Accounts' });
+      await view.getByRole('tab', { name: 'Signed in' }).click();
+      const panel = view.getByRole('tabpanel', { name: 'Signed in' });
+      await panel.getByText('Acting as root', { exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+      await runAxe(page, 'signed in tab with the root pill', failures);
+      await page.evaluate(() => { window.__beforeReload = true; });
+      await panel.getByRole('row').filter({ hasText: 'This session' }).getByRole('button', { name: 'End', exact: true }).click();
+      const own = page.getByRole('dialog', { name: 'End your own session' });
+      await own.waitFor({ state: 'visible', timeout: 8000 });
+      await own.getByRole('button', { name: 'End session' }).click();
+      await page.waitForFunction(() => window.__beforeReload === undefined && document.readyState !== 'loading', null, { timeout: 15000 });
+      assert.deepEqual(adminApi.ended, ['dd44dd44'], 'the own session was ended at the hub');
+      await page.locator('.fp').first().waitFor({ state: 'visible', timeout: 15000 });
     } finally {
       await context.close();
     }

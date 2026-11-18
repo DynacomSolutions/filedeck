@@ -55,6 +55,7 @@ export function AccountEditor({
   onClose,
   onBusy,
   closeRef,
+  dirtyRef,
 }: {
   existing?: AccountView;
   overview: Overview;
@@ -62,7 +63,10 @@ export function AccountEditor({
   onSaved: (v: AccountView, created: boolean) => void;
   onClose: () => void;
   onBusy?: (busy: boolean) => void;
-  closeRef?: MutableRefObject<(() => void) | null>;
+  /** the view's way to close the editor (or, given `then`, to leave the whole view): asks first when there are unsaved changes */
+  closeRef?: MutableRefObject<((then?: () => void) => void) | null>;
+  /** whether there are unsaved changes now */
+  dirtyRef?: MutableRefObject<(() => boolean) | null>;
 }) {
   const [start] = useState<AccountForm>(() => (existing ? loaded(existing, overview) : blank(overview)));
   const [form, setForm] = useState<AccountForm>(start);
@@ -76,6 +80,8 @@ export function AccountEditor({
   /** the change that waits for "Saving signs this account out everywhere" to be confirmed */
   const [asking, setAsking] = useState<null | (() => Promise<void>)>(null);
   const [discarding, setDiscarding] = useState(false);
+  /** what "Discard" does: back to the list, or (when the view is being closed) whatever the view asked for */
+  const afterDiscard = useRef<(() => void) | null>(null);
   const [picking, setPicking] = useState<string | null>(null);
   const sending = useRef(false);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -107,15 +113,19 @@ export function AccountEditor({
     setForm((f) => ({ ...f, machines: f.machines.map((m) => (m.node === node ? change(m) : m)) }));
 
   /** Back to the list; with unsaved changes (the form differs, a password typed, "Remove password" set) it asks first. */
-  const requestClose = () => {
+  const changed = () => removePassword || formChanged(start, form);
+  const requestClose = (then?: () => void) => {
     if (sending.current) return;
-    if (removePassword || formChanged(start, form)) {
+    const go = then ?? onClose;
+    if (changed()) {
       noteOpener();
+      afterDiscard.current = go;
       setDiscarding(true);
     }
-    else onClose();
+    else go();
   };
   if (closeRef) closeRef.current = requestClose;
+  if (dirtyRef) dirtyRef.current = changed;
 
   /** Runs one call to the hub at a time; `self` changes ask first and reload the page after. */
   const run = async (what: "save" | "key", call: () => Promise<boolean>) => {
@@ -360,7 +370,7 @@ export function AccountEditor({
           <div className="ad-err acc-err" role="alert" id={ids.err}>
             {err.length === 1 ? err[0] : err.length > 1 ? <ul>{err.map((x) => <li key={x}>{x}</li>)}</ul> : null}
           </div>
-          <button type="button" onClick={requestClose}><Ic.X aria-hidden="true" /> Cancel</button>
+          <button type="button" onClick={() => requestClose()}><Ic.X aria-hidden="true" /> Cancel</button>
           <button type="button" className="primary" onClick={save} aria-busy={busy === "save" || undefined} aria-describedby={err.length ? ids.err : undefined}>
             <Ic.Check aria-hidden="true" /> {busy === "save" ? "Saving…" : existing ? "Save" : "Create account"}
           </button>
@@ -400,7 +410,7 @@ export function AccountEditor({
           <p id={ids.err + "-d"} className="pad0">The changes to this account have not been saved.</p>
           <div className="modal-actions">
             <button type="button" autoFocus onClick={() => setDiscarding(false)}><Ic.Undo2 aria-hidden="true" /> Keep editing</button>
-            <button type="submit" className="danger" onClick={() => (setDiscarding(false), onClose())}><Ic.Trash2 aria-hidden="true" /> Discard</button>
+            <button type="submit" className="danger" onClick={() => (setDiscarding(false), (afterDiscard.current ?? onClose)())}><Ic.Trash2 aria-hidden="true" /> Discard</button>
           </div>
         </Modal>
       )}

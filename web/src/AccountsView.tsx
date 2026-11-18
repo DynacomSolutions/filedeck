@@ -5,7 +5,7 @@ import { Modal } from "./ArchiveDialog";
 import { useDialogFocus } from "./dialogFocus";
 import { AccountEditor } from "./AccountEditor";
 import { SessionsTab, ConfirmDialog } from "./SessionsTab";
-import { SystemUsersTab } from "./SystemUsersTab";
+import { SystemUsersTab, type SystemCtl } from "./SystemUsersTab";
 import { deleteAccount, forgetUnownedPasswords, listAccounts, overview, type AccountView, type Overview } from "./admin";
 import type { Account } from "./auth";
 import "./archive.css";
@@ -45,7 +45,10 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
   /** a change is with the hub: the editor is disabled, and Close and Escape wait */
   const [busy, setBusy] = useState(false);
   /** the editor's own close, which asks first when there are unsaved changes */
-  const editorClose = useRef<(() => void) | null>(null);
+  const editorClose = useRef<((then?: () => void) => void) | null>(null);
+  const editorDirty = useRef<(() => boolean) | null>(null);
+  /** the System users tab's editor: whether it is open, whether it has unsaved changes, and how to leave it (asking first) */
+  const sysCtl = useRef<SystemCtl | null>(null);
   const listHeading = useRef<HTMLHeadingElement>(null);
   /** whether the editor was open at the last render: on its close focus goes to the list heading */
   const wasEditing = useRef(false);
@@ -74,6 +77,21 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
     load();
   };
 
+  /**
+   * Leaves the whole view (Close, or Escape with no editor open). An editor with unsaved changes, on this tab or another, asks
+   * "Discard changes?" first; the Accounts editor's prompt is on the Accounts tab, so that tab is shown for it.
+   */
+  const closeView = () => {
+    if (busy) return;
+    if (tab === "system" && sysCtl.current?.editing()) return sysCtl.current.close(onClose);
+    if (editing && editorDirty.current?.()) {
+      setTab("accounts");
+      editorClose.current?.(onClose);
+      return;
+    }
+    onClose();
+  };
+
   const self = (name: string) => account.kind === "virt" && account.name === name;
   const tabKeys = (e: React.KeyboardEvent) => {
     const at = TABS.findIndex((t) => t.id === tab);
@@ -99,14 +117,15 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
         // a dialog on top of this one (the folder picker, a confirmation) handles its own Escape
         if ((e.target as Element | null)?.closest('[role="dialog"]') !== root.current) return;
         if (busy) return;
-        if (editing && tab === "accounts") editorClose.current?.();
-        else onClose();
+        if (tab === "system" && sysCtl.current?.editing()) sysCtl.current.close();
+        else if (editing && tab === "accounts") editorClose.current?.();
+        else closeView();
       }}
     >
       <div className="ed-head" role="group" aria-label="Toolbar">
         <b>Accounts</b>
         <span className="ed-spacer" />
-        <Tip label="Close" shortcut="Esc"><button type="button" disabled={busy} onClick={onClose}><Ic.X aria-hidden="true" /> Close</button></Tip>
+        <Tip label="Close" shortcut="Esc"><button type="button" disabled={busy} onClick={closeView}><Ic.X aria-hidden="true" /> Close</button></Tip>
       </div>
       <div className="tr-tabs" role="tablist" aria-label="Accounts sections" onKeyDown={tabKeys}>
         {TABS.map((t) => (
@@ -127,7 +146,7 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
       </div>
       <div className="ed-body set-body acc-body" id={`${uid}-panel`} ref={panel} role="tabpanel" aria-labelledby={`${uid}-tab-${tab}`}>
         {tab === "sessions" && <SessionsTab account={account} />}
-        {tab === "system" && <SystemUsersTab account={account} />}
+        {tab === "system" && <SystemUsersTab account={account} ctl={sysCtl} />}
         <div hidden={tab !== "accounts"}>
         {/* above the list and the editor alike: "created" shows while the new account's editor is open */}
         <div className="acc-status" role="status">{status}</div>
@@ -139,6 +158,7 @@ export function AccountsView({ account, onClose }: { account: Account; onClose: 
             self={editing.v ? self(editing.v.name) : false}
             onBusy={setBusy}
             closeRef={editorClose}
+            dirtyRef={editorDirty}
             onClose={closeEditor}
             onSaved={(v, created) => {
               if (created) {
