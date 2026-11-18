@@ -639,3 +639,75 @@ test("hub: switching off, or signing out, cancels the admin's live root jobs on 
     }
   }
 });
+
+test("hub: switching off waits for root calls still in flight before it lists the jobs; one that takes too long is listed again after it", async () => {
+  const { Hono } = await import("hono");
+  const jobsList: { id: string; state: string; asRootUntil?: number }[] = [];
+  const cancelled: string[] = [];
+  let listsAnswered = 0;
+  let holdUntilListed = false;
+  let compressSeen = 0;
+  const fake = new Hono();
+  const until = Date.now() + 60_000;
+  fake.get("/api/jobs", (c) => {
+    const body = { jobs: jobsList.map((j) => ({ ...j })) };
+    queueMicrotask(() => listsAnswered++);
+    return c.json(body);
+  });
+  fake.post("/api/jobs/compress", async (c) => {
+    compressSeen++;
+    if (holdUntilListed) {
+      // the race: the job exists only after the hub's first listing has been answered
+      const seen = listsAnswered;
+      for (let i = 0; i < 600 && listsAnswered === seen; i++) await new Promise((r) => setTimeout(r, 10)); // (at most 6 s)
+    } else await new Promise((r) => setTimeout(r, 200));
+    const id = holdUntilListed ? "root-late" : "root-quick";
+    jobsList.push({ id, state: "running", asRootUntil: until });
+    return c.json({ id, state: "running", asRootUntil: until }, 202);
+  });
+  fake.post("/api/jobs/:id/cancel", (c) => {
+    cancelled.push(c.req.param("id"));
+    const j = jobsList.find((x) => x.id === c.req.param("id"));
+    if (j) j.state = "canceled";
+    return c.json({ id: c.req.param("id"), state: "canceled" });
+  });
+  fake.all("*", (c) => c.json({}));
+  const srv = await new Promise<Server>((res) => {
+    const s: Server = serve({ fetch: fake.fetch, port: 0 }, () => res(s));
+  });
+  servers.push(srv);
+  const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const h = createHub(
+    loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: T, FILEDECK_STATIC: tmp, NODES: `F=${url}`, FILEDECK_ADMINS: "alice", FILEDECK_AUTH_FILE: path.join(tmp, "auth-race.db"), FILEDECK_DIFF_DIR: path.join(tmp, "diff-race") } as never),
+    undefined,
+    () => {},
+    { system: fakeSystem([]) },
+  );
+  closers.push(h);
+  const startRootJob = async (alice: string) => {
+    const before = compressSeen;
+    const p = postJson(h, "/api/nodes/F/api/jobs/compress", alice, { dir: "/", names: ["x"], format: "zip" });
+    while (compressSeen === before) await new Promise((r) => setTimeout(r, 5));
+    return { done: p }; // (wrapped: an async function that returns a promise would wait for it)
+  };
+
+  // a root call in flight when Stop comes: the hub waits for it, then lists, and the new job is cancelled before the answer
+  const alice = sysCookie(h, "alice");
+  assert.equal((await postJson(h, "/api/auth/as-root", alice, { password: RIGHT })).status, 200);
+  const quick = await startRootJob(alice);
+  assert.equal((await call(h, "/api/auth/as-root", alice, { method: "DELETE" })).status, 200);
+  assert.equal((await quick.done).status, 202);
+  assert.deepEqual(cancelled, ["root-quick"]);
+
+  // one that settles only after the hub's listing: the answer does not wait for it beyond the budget; the hub lists again once it settles
+  holdUntilListed = true;
+  const alice2 = sysCookie(h, "alice");
+  assert.equal((await postJson(h, "/api/auth/as-root", alice2, { password: RIGHT })).status, 200);
+  const late = await startRootJob(alice2);
+  const t0 = Date.now();
+  assert.equal((await call(h, "/api/auth/as-root", alice2, { method: "DELETE" })).status, 200);
+  assert.ok(Date.now() - t0 < 4_000, `the answer waited ${Date.now() - t0} ms`);
+  assert.equal((await late.done).status, 202);
+  for (let i = 0; i < 300 && !cancelled.includes("root-late"); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(cancelled.includes("root-late"), JSON.stringify(cancelled));
+});

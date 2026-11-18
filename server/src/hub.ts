@@ -72,6 +72,45 @@ function clean(h: Headers, keepLength: boolean): Headers {
 
 /** The most the hub waits for the agents when act as root is turned off early and it cancels the account's root jobs there. */
 const END_ROOT_JOBS_MS = 3_000;
+/** Of that, the most it waits for the account's agent calls made under the switch that are still in flight (a job being started). */
+const ROOT_CALLS_WAIT_MS = 2_000;
+/** How long, after the answer, it still waits for such calls before it lists the jobs once more; the agents' own end covers the rest. */
+const ROOT_CALLS_LATE_MS = 5 * 60_000;
+
+/** The agent calls made under act as root that have not settled yet (no answer head, no error), per account. */
+class RootCalls {
+  private readonly open = new Map<string, { n: number; idle: (() => void)[] }>();
+  track(name: string, p: Promise<unknown>): void {
+    let e = this.open.get(name);
+    if (!e) this.open.set(name, (e = { n: 0, idle: [] }));
+    const entry = e;
+    entry.n++;
+    const done = () => {
+      if (--entry.n > 0) return;
+      this.open.delete(name);
+      for (const f of entry.idle.splice(0)) f();
+    };
+    p.then(done, done);
+  }
+  /** Resolves true once none of `name`'s calls is in flight, or false when `ms` pass first. */
+  settled(name: string, ms: number): Promise<boolean> {
+    const e = this.open.get(name);
+    if (!e) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const go = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        const at = e.idle.indexOf(go);
+        if (at >= 0) e.idle.splice(at, 1);
+        resolve(false);
+      }, ms);
+      timer.unref();
+      e.idle.push(go);
+    });
+  }
+}
 
 export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target> };
@@ -146,12 +185,24 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
    * Act as root was turned off early (or its session signed out): every machine is asked, as the plain system user, for the account's
    * jobs, and each live one started under the switch (`asRootUntil` in its view: it runs as root in the agent's root process) is
    * cancelled through the usual cancel route. The agents also cancel such jobs on their own at the switch's end; this covers the time
-   * before it. At most `END_ROOT_JOBS_MS` in all; a machine that does not answer is left to that end (one log line).
+   * before it. The account's agent calls made under the switch that are still in flight (a job still being started) are waited for first,
+   * at most `ROOT_CALLS_WAIT_MS`. The whole takes at most `END_ROOT_JOBS_MS`; a machine that does not answer is left to that end (one log
+   * line). Calls still in flight then do not hold the answer: once they settle, the jobs are listed and cancelled once more.
    */
+  const rootCalls = new RootCalls();
   const endRootJobs = async (name: string): Promise<void> => {
     if (!auth) return;
+    const t0 = Date.now();
+    // a call made under the switch may still be starting a job (the switch is off now, so no new one starts): wait for it first
+    const settled = await rootCalls.settled(name, ROOT_CALLS_WAIT_MS);
+    await cancelRootJobs(name, Math.max(500, END_ROOT_JOBS_MS - (Date.now() - t0)));
+    // still in flight: the answer does not wait any longer, but the jobs are listed again once those calls have settled
+    if (!settled) void rootCalls.settled(name, ROOT_CALLS_LATE_MS).then(() => cancelRootJobs(name, END_ROOT_JOBS_MS));
+  };
+  const cancelRootJobs = async (name: string, ms: number): Promise<void> => {
+    if (!auth) return;
     const id: Identity = { kind: "sys", name, admin: cfg.admins.includes(name), epoch: auth.accounts.epochOf("sys", name) };
-    const signal = AbortSignal.timeout(END_ROOT_JOBS_MS);
+    const signal = AbortSignal.timeout(ms);
     await Promise.all(
       cfg.nodes.map((n) =>
         userContext.run(id, async () => {
@@ -210,9 +261,12 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) => {
     if (cfg.auth && isAgentAuthPath(rest)) return Promise.reject(new Error("the agents' sign-in routes are not forwarded"));
     if (cfg.auth) init = withoutCookie(init);
-    return isOpenProbe(rest)
-      ? userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name)))
-      : agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk));
+    if (isOpenProbe(rest)) return userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name)));
+    const p = agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk));
+    // (a call under act as root is counted until it settles, so switching off can wait for a job that is still being started)
+    const id = currentUser();
+    if (id?.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id)) rootCalls.track(id.name, p);
+    return p;
   };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));
   app.nodeTargets = agents; // (tests reach the agent calls through it)
