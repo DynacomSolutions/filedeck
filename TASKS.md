@@ -290,3 +290,4 @@ ETA: 2026-11-18 19:30 ICT
 | 169 | Phone: Filedeck logo in the middle of the header | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238 |
 | 170 | Column header row and sidebar section headers in a duller colour than the panel toolbar | in_progress | claude-20261118-toolbar-contrast | toolbar-contrast | | 2026-11-18 19:30 ICT | Toolbar (New, View) keeps its colour |
 | 171 | Toolbar and header-bar buttons: no thick border when active, highlight inset from the bar edges | in_progress | claude-20261118-toolbar-contrast | toolbar-contrast | | 2026-11-18 19:30 ICT | Smaller padding, more space round the highlight |
+| 172 | Preview and Info as subtabs; the open one matches the column header colour like an open tab | in_progress | claude-20261118-toolbar-contrast | toolbar-contrast | | 2026-11-18 19:30 ICT | |
