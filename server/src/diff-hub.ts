@@ -99,7 +99,7 @@ function boundTo(t: Target, owner: Identity | undefined): Target {
   return { fetch: (rest, init) => asOwner(owner, () => t.fetch(rest, init)) };
 }
 
-export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs & { cancelOwner(kind: "sys" | "virt", name: string): number } {
+export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir = "", o: HubDiffOptions = {}): Jobs & { cancelOwner(kind: "sys" | "virt", name: string): number; visible(): JobView[] } {
   const envGrace = Number(process.env.FILEDECK_DIFF_GRACE_MS);
   const graceMs = o.graceMs ?? (envGrace > 0 ? envGrace : 120_000);
   const bigAfterMs = o.bigAfterMs ?? 8_000;
@@ -311,7 +311,9 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     if (count > 0 && !dropTimer) dropRevoked();
     return count;
   };
-  return Object.assign(jobs, { cancelOwner });
+  // the compares the current account may see (the hub's push watch asks as each account)
+  const visible = () => jobs.list().filter((j) => sees(j.id));
+  return Object.assign(jobs, { cancelOwner, visible });
 }
 
 /** Stream a generator as NDJSON, a few hundred items per chunk, so big subtrees never sit in memory at once. */
