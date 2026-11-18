@@ -280,7 +280,7 @@ ETA: 2026-11-19 12:00 ICT
 
 ## 22. Jobs panel and phone header layout
 - Jobs move out of the sidebar into their own panel; the phone header gets the logo and two drawer toggles.
-ETA: 2026-11-18 17:30 ICT
+ETA: 2026-11-18 19:30 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 165 | Settings and other overlays hide the active panel outline | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238<br>`.fp::after` (z-index 40) paints over `.ed.over` (z-index 20) |
@@ -288,3 +288,5 @@ ETA: 2026-11-18 17:30 ICT
 | 167 | Phone: jobs button at the top right opens a full-width jobs drawer from the right, under the header | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238<br>Removes the jobs space under the file list |
 | 168 | Phone: navigation drawer is full width, under the header, and the menu button toggles it | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238 |
 | 169 | Phone: Filedeck logo in the middle of the header | in_review | claude-20261118-jobs-panel | mobile-jobs-panel | | 2026-11-18 17:30 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/238 |
+| 170 | Column header row and sidebar section headers in a duller colour than the panel toolbar | in_progress | claude-20261118-toolbar-contrast | toolbar-contrast | | 2026-11-18 19:30 ICT | Toolbar (New, View) keeps its colour |
+| 171 | Toolbar and header-bar buttons: no thick border when active, highlight inset from the bar edges | in_progress | claude-20261118-toolbar-contrast | toolbar-contrast | | 2026-11-18 19:30 ICT | Smaller padding, more space round the highlight |
