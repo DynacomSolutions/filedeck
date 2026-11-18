@@ -39,6 +39,18 @@
 /* column header: the sort buttons keep their text-tint hover; the ring is thin and inset */
 .ft th.colh button.colh-btn:active{outline:0!important}
 
+/* Preview / Properties / Git sit at the bottom edge of the toolbar like tabs: the open one takes the band colour of the
+   header row under it (rounded top corners only, no border), so it reads as joined to it. */
+.fp-tools-side{padding-left:0}
+.fp-tools-side button.tab-on{color:var(--fg)}
+.fp-tools-side button.tab-on::before{inset:var(--gap-hl) 0 0 0;border-radius:6px 6px 0 0;background:var(--band)}
+.fp-tools-side button.tab-on:hover:not(:disabled)::before{background:var(--band)}
+.fp-tools-side button.tab-on:focus-visible{outline-offset:-4px!important}
+
+@media (forced-colors:active){
+  .fp-tools-side button.tab-on{outline:1px solid Highlight}
+}
+
 /* the pane header's own toggles: highlight only, no inset bar */
 .pv-dockbtn.on{box-shadow:none}
 

@@ -1538,14 +1538,14 @@ export function FilePanel({ leaf, active, onFocus, onNavigate, onOpenPanel, root
         </div>
         <div className="fp-tools-side" role="group" aria-label="Side panel">
           <Tip label={canPreview ? "Preview the selected file" : "Preview panel (select a file to fill it)"}>
-            <button type="button" aria-label="Preview in the side panel" aria-pressed={toggles.preview} className={toggles.preview ? "marked" : ""} onClick={() => (toggles.preview ? closeSide() : showPreview())}><Eye /></button>
+            <button type="button" aria-label="Preview in the side panel" aria-pressed={toggles.preview} className={toggles.preview ? "tab-on" : ""} onClick={() => (toggles.preview ? closeSide() : showPreview())}><Eye /></button>
           </Tip>
           <Tip label="Properties in the side panel" shortcut="Alt+Enter">
-            <button type="button" aria-label="Properties in the side panel" aria-pressed={toggles.props} className={toggles.props ? "marked" : ""} onClick={() => (toggles.props ? closeSide() : openProps())}><Ic.Info /></button>
+            <button type="button" aria-label="Properties in the side panel" aria-pressed={toggles.props} className={toggles.props && leaf.pt !== "git" ? "tab-on" : ""} onClick={() => (toggles.props ? closeSide() : openProps())}><Ic.Info /></button>
           </Tip>
           {git?.repo && (
             <Tip label="Git details in the side panel: branch, changes, worktrees, pull request diff">
-              <button type="button" aria-label="Git details in the side panel" aria-pressed={toggles.props && leaf.pt === "git"} className={toggles.props && leaf.pt === "git" ? "marked" : ""} onClick={() => (toggles.props && leaf.pt === "git" ? closeSide() : showGit())}><GitBranch /></button>
+              <button type="button" aria-label="Git details in the side panel" aria-pressed={toggles.props && leaf.pt === "git"} className={toggles.props && leaf.pt === "git" ? "tab-on" : ""} onClick={() => (toggles.props && leaf.pt === "git" ? closeSide() : showGit())}><GitBranch /></button>
             </Tip>
           )}
         </div>

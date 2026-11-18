@@ -119,4 +119,5 @@ test("bar buttons draw the highlight inset and keep a thin keyboard-only focus r
   assert.match(bars, /--gap-hl:4px/);
   assert.match(bars, /::before\{content:"";position:absolute;inset:var\(--gap-hl\)/);
   assert.match(bars, /outline:1px solid var\(--focus-ring,var\(--accent\)\)!important/);
+  assert.match(bars, /\.fp-tools-side button\.tab-on::before\{inset:var\(--gap-hl\) 0 0 0;border-radius:6px 6px 0 0;background:var\(--band\)/);
 });
