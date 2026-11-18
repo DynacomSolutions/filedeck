@@ -1,7 +1,8 @@
 /* Accounts view (administrators): the Settings overlay's look, its sections and fields, and the shared table, button and dialog styles. */
 .acc-view .tr-tabs{padding-bottom:.5rem}
 .acc-view .tr-tabs button svg{width:16px;height:16px}
-.acc-body{overflow:auto}
+/* the sticky action bar (.acc-actions, about 3.8rem) covers the foot of the scrolling body: scroll-padding keeps a focused or scrolled-to control clear of it */
+.acc-body{overflow:auto;scroll-padding-bottom:5rem}
 .acc-list{max-width:64rem}
 .acc-status{min-height:1.3em;font-size:.82rem}
 .acc-status:empty{min-height:0}

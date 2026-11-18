@@ -1411,6 +1411,11 @@ async function verifyThemeTokens(browser) {
 // WCAG 2.0, 2.1 and 2.2 A and AA rules, run by axe-core over the whole document in every state listed.
 const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
 async function runAxe(page, label, failures) {
+  // axe reads the colours the page shows now: a button still fading to its theme colour (150 ms transition) reads as low contrast, so let running transitions end and the fonts load first.
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await Promise.all(document.getAnimations().filter((a) => Number.isFinite(a.effect?.getComputedTiming().endTime)).map((a) => a.finished.catch(() => undefined)));
+  });
   await page.addScriptTag({ path: axePath });
   const result = await page.evaluate(async (tags) => window.axe.run(document, { runOnly: { type: 'tag', values: tags } }), AXE_TAGS);
   for (const v of result.violations) failures.push({ view: label, rule: v.id, impact: v.impact, help: v.help, targets: v.nodes.slice(0, 4).map((n) => n.target.join(' ')) });
@@ -2187,6 +2192,8 @@ async function verifySystemEditor({ page, view, sys, adminApi, label, failures, 
   assert.match(await field.getAttribute('aria-describedby'), /-risk /, `the tag warning is part of the field's description while a tag is typed (${label})`);
   await field.fill('');
   await overflow('system users editor, headers');
+  // Tab to Add: the browser scrolls it clear of the sticky Cancel and Save bar (scroll-padding on the Accounts body), as it does for a keyboard user
+  await sys.getByRole('button', { name: 'Add', exact: true }).focus();
   await runAxe(page, `system users editor, tag and headers note ${label}`, failures);
   await sys.getByRole('button', { name: 'Cancel', exact: true }).click();
   await discard.getByRole('button', { name: 'Discard' }).click();
