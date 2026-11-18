@@ -46,7 +46,7 @@ export interface FanWatchOptions {
 const RETRY_MS = 1000;
 
 export interface ChangeSink {
-  /** false when `wait` is false and an overlapping walk holds or waits for the lock: nothing was applied, the caller records the folder as dirty */
+  /** false when `wait` is false and an overlapping walk holds or waits for the lock: nothing was applied, the caller tries the folder again later */
   applyChanged(virtual: string, ctl?: undefined, opts?: { wait?: boolean }): Promise<boolean | void>;
   markStale(virtual: string): void;
   /** keep changed folders on disk: false when that is not possible (the watcher then keeps them in memory) */
