@@ -496,6 +496,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       vault,
       nodes: cfg.nodes.map((n) => n.name),
       sources: [...sources.values()].map(({ config }) => ({ name: config.name, type: config.type })),
+      links: auth.links,
+      tailscale: auth.tailnet.mode,
       onAsRootEnd: endRootJobs,
       // the account lookup the sign-in uses (2 s; no answer is undefined): a name a machine knows, or a run-as user it does not
       systemExists: sysAuth ? (node, name) => sysAuth.exists(node, name) : undefined,

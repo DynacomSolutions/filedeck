@@ -49,13 +49,16 @@ export const isAdminPath = (p: string): boolean => p === "/api/admin" || p.start
 const MAX_ADMIN_ITEMS = 64;
 /** The most keys of a `keys` list an admin audit line looks at (an account holds at most 32). */
 const MAX_ADMIN_KEYS = 32;
+/** The most tailnet links of one admin body that the line keeps (the admin routes take at most 16 per account). */
+const MAX_ADMIN_LINKS = 16;
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /**
  * An admin body (`/api/admin/*`) as its audit line keeps it: `name`, `kind`, `admin`, `nodes` as `{ <node>: { runAs, grants: [{path,
  * write}] } }`, `sources` as `{ <source>: { write } }`, for a `publicKey` its `fingerprint` (as OpenSSH prints it), `keys` as the
- * fingerprints of every key in a `keys` list and `publicKey`, and `password` as "set" (a string) or "removed" (null). Nothing else, of
+ * fingerprints of every key in a `keys` list and `publicKey`, `tailnet` and `links` as lists of tailnet logins and tags (not secrets), and
+ * `password` as "set" (a string) or "removed" (null). Nothing else, of
  * the expected types only: never a password, a password hash or the key text. Strings are clipped and lists bounded. A body that is not
  * an object gives nothing.
  */
@@ -88,6 +91,11 @@ export function adminBody(v: unknown): Record<string, unknown> | undefined {
         .slice(0, MAX_ADMIN_ITEMS)
         .map(([source, a]) => [clip(source), isPlainObject(a) && typeof a.write === "boolean" ? { write: a.write } : {}]),
     );
+  }
+  // tailnet logins and tags (a PATCH or POST `tailnet`, a system user's PUT `links`): not secrets, so kept, clipped, at most 16
+  for (const k of ["tailnet", "links"] as const) {
+    const list = v[k];
+    if (Array.isArray(list)) out[k] = list.filter((x): x is string => typeof x === "string").slice(0, MAX_ADMIN_LINKS).map(clip);
   }
   // whether a password was set or removed, never the value
   if (typeof v.password === "string") out.password = "set";

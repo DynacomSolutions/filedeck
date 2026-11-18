@@ -165,3 +165,19 @@ test("tailnet: the login-tailscale line names the login, tags, subject and sourc
   assert.deepEqual(so.audits("/api/auth/logout")[0]?.tailnet, { subject: "tag:ci", source: "socket" });
   assert.ok(!so.lines.join("\n").includes(so.api!.socket));
 });
+
+test("tailnet: an admin line keeps the tailnet list of a PATCH and the links of a system user's PUT, never a password", async () => {
+  const so = await rig("socket", { env: { FILEDECK_ADMINS: "" } });
+  so.h.auth!.accounts.create({ name: "boss", password: "a-long-password-1", admin: true, nodes: {} });
+  so.h.auth!.accounts.create({ name: "guest", admin: false, nodes: {} });
+  const r = await so.req("/api/auth/login", { method: "POST", body: { name: "boss", password: "a-long-password-1" } });
+  assert.equal(r.status, 200);
+  const cookie = (r.headers.get("set-cookie") ?? "").split(";")[0]!;
+  const p = await so.req("/api/admin/accounts/guest", { method: "PATCH", cookie, body: { tailnet: ["alice@github", "tag:ci"], password: "another-password-2" } });
+  assert.equal(p.status, 200, await p.text());
+  assert.deepEqual(so.audits("/api/admin/accounts/guest")[0]?.body, { tailnet: ["alice@github", "tag:ci"], password: "set" });
+  const s = await so.req("/api/admin/system/alice/tailnet", { method: "PUT", cookie, body: { links: ["alice@work"] } });
+  assert.equal(s.status, 200, await s.text());
+  assert.deepEqual(so.audits("/api/admin/system/alice/tailnet")[0]?.body, { links: ["alice@work"] });
+  assert.ok(!so.lines.join("\n").includes("another-password-2"));
+});

@@ -399,7 +399,7 @@ test("system user grants: PUT /api/admin/system/:name/sources gives a system use
   assert.deepEqual(await sourcesSeen(h, old), []);
   const r = await send(h, "PUT", "/api/admin/system/alice/sources", admin, { sources: { s1: { write: true } } });
   assert.equal(r.status, 200, r.text);
-  assert.deepEqual(r.json, { name: "alice", admin: false, sources: { s1: { write: true } }, sessions: 0 });
+  assert.deepEqual(r.json, { name: "alice", admin: false, sources: { s1: { write: true } }, sessions: 0, tailnet: [] });
   // through `changed`, with the identity from before: alice's sessions ended
   assert.deepEqual(
     changed.map((x) => [x.kind, x.name, x.epoch]),
@@ -415,7 +415,7 @@ test("system user grants: PUT /api/admin/system/:name/sources gives a system use
   assert.equal(list.status, 200);
   assert.deepEqual(
     list.json.system.find((x: { name: string }) => x.name === "alice"),
-    { name: "alice", admin: false, sources: { s1: { write: true } }, sessions: 1 },
+    { name: "alice", admin: false, sources: { s1: { write: true } }, sessions: 1, tailnet: [] },
   );
   for (const [p, body] of [
     ["/api/admin/system/root/sources", { sources: { s1: { write: true } } }],
