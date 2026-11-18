@@ -10,6 +10,7 @@ const styles = read("../src/styles.css");
 const columns = read("../src/columns.css");
 const sidebar = read("../src/sidebar.css");
 const theme = read("../public/assets/theme.css");
+const bars = read("../src/bars.css");
 
 type Mode = "dark" | "light";
 const DARK = ':root:not([data-theme="light"])';
@@ -99,4 +100,23 @@ test("focus rings use the ring token, and forced colours get real outlines", () 
 
 test("text fields in dialogs keep a visible boundary", () => {
   assert.match(accessibility, /\.modal :is\(input, textarea\)[\s\S]*border: 1px solid var\(--a11y-control-boundary\)/);
+});
+
+for (const mode of ["dark", "light"] as Mode[]) {
+  test(`${mode}: text on the duller header band (--band) keeps AA contrast and the band differs from the toolbar`, () => {
+    assert.match(bars, /--band:var\(--bg\)/);
+    const band = token(theme, mode === "dark" ? ":root" : ':root[data-theme="light"]', "--bg");
+    const muted = token(accessibility, sel[mode], "--muted");
+    const fg = token(theme, mode === "dark" ? ":root" : ':root[data-theme="light"]', "--fg");
+    assert.ok(contrastRatio(muted, band) >= 4.5, `muted ${muted} on ${band}`);
+    assert.ok(contrastRatio(fg, band) >= 4.5, `fg ${fg} on ${band}`);
+    const bar = token(theme, mode === "dark" ? ":root" : ':root[data-theme="light"]', "--surface-2");
+    assert.notEqual(band.toLowerCase(), bar.toLowerCase());
+  });
+}
+
+test("bar buttons draw the highlight inset and keep a thin keyboard-only focus ring", () => {
+  assert.match(bars, /--gap-hl:4px/);
+  assert.match(bars, /::before\{content:"";position:absolute;inset:var\(--gap-hl\)/);
+  assert.match(bars, /outline:1px solid var\(--focus-ring,var\(--accent\)\)!important/);
 });

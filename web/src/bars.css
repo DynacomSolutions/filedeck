@@ -1,0 +1,51 @@
+/* ===== Bars: the toolbar keeps its colour; the column header row and the sidebar subheaders use one duller band colour. =====
+   --band is the page background token (darker than the toolbar and the list in both themes), so the toolbar, the header
+   row and the list read as three bands. Text on it stays --muted / --fg (tested in test/contrast.test.ts). */
+:root{--band:var(--bg);--hl:var(--surface-3);--hl-on:var(--sel-bg,var(--accent-tint));--gap-hl:4px}
+
+/* the duller bands */
+.ft th,.cmp-head,.jobs-title,.pv-head,.ed.inline .ed-head,.ed.in-pane .ed-head{background:var(--band)}
+.st-row:has(.st-sec),.st-row:has(.st-sec):hover,.st-row:has(.st-sec):focus-within{background:var(--band)}
+.jobs-title{border-radius:0}
+
+/* Bar buttons: the button keeps its 44px hit area; the highlight is drawn 4px inside it (a pseudo-element), so it never
+   touches the bar edge or a neighbour. Pressed, open and active states use the highlight only: no inset bar, no border. */
+.fp-up,.fp-actions button,.fp-tools button,.crumbs button,.addr-recent,.side-scroll .st-row button.st-sec{position:relative;isolation:isolate;background:transparent!important;box-shadow:none!important;border:0}
+.fp-up::before,.fp-actions button::before,.fp-tools button::before,.crumbs button::before,.addr-recent::before,.side-scroll .st-row button.st-sec::before{content:"";position:absolute;inset:var(--gap-hl);z-index:-1;border-radius:4px;background:transparent;pointer-events:none;transition:background var(--fast) var(--ease)}
+.fp-up:hover:not(:disabled)::before,.fp-actions button:hover:not(:disabled)::before,.fp-tools button:hover:not(:disabled)::before,.crumbs button:hover:not(:disabled)::before,.addr-recent:hover:not(:disabled)::before,.side-scroll .st-row button.st-sec:hover:not(:disabled)::before{background:var(--hl)}
+.fp-up:active:not(:disabled)::before,.fp-actions button:active:not(:disabled)::before,.fp-tools button:active:not(:disabled)::before,.crumbs button:active:not(:disabled)::before,.addr-recent:active:not(:disabled)::before,
+.fp-actions button.marked::before,.fp-tools button.marked::before,.fp-tools button[aria-pressed=true]::before,.fp-tools button[aria-expanded=true]::before,.fp-actions button[aria-expanded=true]::before,.addr-recent.open::before,.crumbs .crumb-sep.open::before{background:var(--hl-on)}
+.crumbs .crumb-sep{background:transparent!important}
+.crumbs button.here,.crumbs button:hover:not(:disabled){background:transparent!important}
+.fp-tools .fp-menubtn{padding:0 .75rem}
+.fp-up,.fp-actions button{flex:none}
+
+/* spacing: the highlights provide the 8px between neighbours, so the rows need no extra gap */
+.fp-tools,.fp-tools-main,.fp-tools-side,.fp-actions{gap:0}
+.fp-row{gap:2px}
+@container fp (max-width:560px){.fp-row{column-gap:0}}
+
+/* thin keyboard focus ring (1px, just outside the highlight), shown for keyboard focus only */
+.fp-up:focus-visible,.fp-actions button:focus-visible,.fp-tools button:focus-visible,.crumbs button:focus-visible,.addr-recent:focus-visible,.side-scroll .st-row button.st-main:focus-visible,.ft th.colh button.colh-btn:focus-visible{outline:1px solid var(--focus-ring,var(--accent))!important;outline-offset:calc(-1 * var(--gap-hl))!important;box-shadow:none!important;border-radius:4px}
+.fp-up:active,.fp-actions button:active,.fp-tools button:active,.crumbs button:active,.addr-recent:active,.fp-up:focus:not(:focus-visible),.fp-actions button:focus:not(:focus-visible),.fp-tools button:focus:not(:focus-visible),.crumbs button:focus:not(:focus-visible){outline:0!important;box-shadow:none!important}
+.site-header button:focus-visible,.site-header .jobs-btn:focus-visible,.site-header .drawer-btn:focus-visible{outline:1px solid var(--focus-ring,var(--accent))!important;outline-offset:-3px!important}
+.site-header button:active,.site-header button:focus:not(:focus-visible){outline:0!important}
+.jobs-btn[aria-expanded=true],.site-header button[aria-expanded=true]{box-shadow:none}
+
+/* sidebar section headers: same 44px target, highlight inset, band row */
+.side-scroll .st-row button.st-sec:hover:not(:disabled){background:transparent!important}
+.side-scroll .st-row button.st-main:focus-visible{outline-offset:calc(-1 * var(--gap-hl))!important}
+
+/* column header: the sort buttons keep their text-tint hover; the ring is thin and inset */
+.ft th.colh button.colh-btn:active{outline:0!important}
+
+/* the pane header's own toggles: highlight only, no inset bar */
+.pv-dockbtn.on{box-shadow:none}
+
+/* a very narrow panel (a 320px phone): seven toolbar buttons must fit one row, so they are 40px wide (still above the 24px minimum) */
+@container fp (max-width:340px){
+  .fp-tools button,.fp-tools .fp-menubtn,.fp-up,.fp-actions button{width:40px;min-width:40px!important;padding:0}
+  .fp-bar{height:138px}
+  .fp-row{height:94px;padding-top:6px}
+  .fp-tools .fp-menubtn .fp-caret,.fp-tools .fp-menubtn-l{display:none}
+}
