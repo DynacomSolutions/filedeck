@@ -48,7 +48,7 @@ Filedeck lets you browse, preview, edit and move files on many machines from one
 
 <p align="center"><img src="docs/images/phone.webp" alt="Filedeck on a phone, showing a photo grid" width="260"></p>
 
-Install it as an app from the browser (Settings, "Install app", or the browser's own menu) to get the Filedeck icon on the home screen and a window of its own. It opens without a network and says when the hub cannot be reached, offers "Reload" when a new version is deployed, and can notify you when a copy, move, compress, extract, sync or compare ends while it is in the background (switch it on in Settings). The service worker stores only the app itself, never file contents or anything the API answers.
+Install it as an app from the browser (Settings, "Install app", or the browser's own menu) to get the Filedeck icon on the home screen and a window of its own. It opens without a network and says when the hub cannot be reached, offers "Reload" when a new version is deployed, and can notify you when a copy, move, compress, extract, sync or compare finishes or fails, also while the app is closed (switch it on in Settings; the hub sends these by Web Push, with keys it makes itself). The service worker stores only the app itself, never file contents or anything the API answers.
 
 ## How it works
 
@@ -73,7 +73,7 @@ Filedeck is one container image that runs in two modes:
 Download the chart archive from the [latest GitHub release](https://github.com/DynacomSolutions/filedeck/releases), then install it:
 
 ```sh
-helm install filedeck ./filedeck-0.4.1.tgz -n filedeck --create-namespace
+helm install filedeck ./filedeck-0.4.2.tgz -n filedeck --create-namespace
 kubectl -n filedeck port-forward svc/filedeck 8080:80   # then open http://127.0.0.1:8080
 ```
 
