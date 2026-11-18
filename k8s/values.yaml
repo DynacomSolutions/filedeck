@@ -72,9 +72,15 @@ auth:
     # 127.0.0.1/32 and ::1/128 are added for you. Needed when `headers` or `socket` is set.
     proxies: []
     # for example (the pods of an operator ingress): proxies: ["10.42.0.0/16"]
+    # FILEDECK_TAILSCALE_LISTEN: `<IP>:<port>` of the identity listener, for a setup without the sidecar whose listed proxy is on loopback.
+    # The hub reads an identity only on connections to it. The sidecar sets it for you. Never 127.0.0.1, ::1 or an unspecified address.
+    listen: ""
     # An optional tailscaled container in the hub pod, in userspace mode (no added capability, no tun device).
     sidecar:
       enabled: false
+      # The identity listener's port, on 127.0.0.2 (tailscaled in userspace mode forwards other ports to 127.0.0.1, never to 127.0.0.2).
+      # Serve points at it. It is not in the Service. Needs hub.trustedProxies of 1 or more.
+      listenPort: 8081
       # You pick and pin the image (a `digest` wins over `tag`). It must start tailscaled as the official image does (containerboot).
       image: {repository: "", tag: "", digest: ""}
       # A Secret you make out of band (never in Git) that holds a Tailscale auth key under `key`. Prefer an ephemeral key.

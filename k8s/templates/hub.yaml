@@ -108,6 +108,11 @@ spec:
             {{- end }}
             - name: FILEDECK_TAILSCALE_PROXIES
               value: {{ include "filedeck.tailscaleProxies" . | quote }}
+            {{- with include "filedeck.tailscaleListen" . }}
+            # The identity listener: an identity is read only on connections to it. It has no containerPort and is not in the Service.
+            - name: FILEDECK_TAILSCALE_LISTEN
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.hub.trustedProxies }}
             - name: FILEDECK_TRUSTED_PROXIES
@@ -269,8 +274,9 @@ spec:
             capabilities:
               drop: ["ALL"]
             runAsNonRoot: true
-            runAsUser: 1000
-            runAsGroup: 1000
+            # Not the hub's user (1000): the hub reaches the socket (mode 0666) but cannot read tailscaled's state or signal it
+            runAsUser: 1001
+            runAsGroup: 1001
           resources:
             {{- toYaml $sc.resources | nindent 12 }}
           volumeMounts:
