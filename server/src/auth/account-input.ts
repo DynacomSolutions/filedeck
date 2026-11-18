@@ -111,7 +111,8 @@ export function sourceAccess(v: unknown, knownSources: ReadonlySet<string>): Rec
 
 /**
  * One SSH public key line, as `parsePublicKey` accepts it (Ed25519 or ECDSA P-256, no options), given back as
- * `<type> <base64>[ <comment>]` with the comment cut to 128 characters.
+ * `<type> <base64>[ <comment>]`. Control (Cc: C0, DEL, C1) and format (Cf: bidi marks, zero-width characters) characters are
+ * dropped from the comment, so it cannot fake text in the admin screens or the audit log; then it is cut to 128 characters and trimmed.
  */
 export function publicKey(v: unknown): string {
   if (typeof v !== "string") throw new InputError("public key must be text");
@@ -122,9 +123,9 @@ export function publicKey(v: unknown): string {
   const m = /^(\S+)[ \t]+(\S+)(?:[ \t]+(.*))?$/.exec(v.trim());
   if (!m) throw new InputError("public key must be one ssh-ed25519 or ecdsa-sha2-nistp256 line, without options");
   // Cut by code points, so a character outside the BMP is never split in half.
-  const comment = Array.from(m[3] ?? "")
+  const comment = Array.from((m[3] ?? "").replace(/[\p{Cc}\p{Cf}]/gu, ""))
     .slice(0, MAX_KEY_COMMENT)
     .join("")
-    .trimEnd();
+    .trim();
   return comment ? `${m[1]} ${m[2]} ${comment}` : `${m[1]} ${m[2]}`;
 }

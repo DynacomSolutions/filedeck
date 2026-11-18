@@ -150,6 +150,20 @@ test("keys", () => {
   assert.equal(publicKey("  " + edLine(pub) + "  \n"), edLine(pub), "no comment, spaces trimmed");
   assert.equal(publicKey(edLine(pub, "\t  two  words ")), edLine(pub, " two  words"));
   assert.equal(publicKey(edLine(pub, " " + "c".repeat(300))), edLine(pub, " " + "c".repeat(128)), "the comment is cut to 128 characters");
+  assert.equal(
+    publicKey(edLine(pub, " a\x01b\x7fc\x85d‮e​f﻿g⁦h­i\x9Bj")),
+    edLine(pub, " abcdefghij"),
+    "C0, DEL, C1 and format (bidi, zero-width, BOM, soft hyphen) characters are dropped",
+  );
+  assert.equal(publicKey(edLine(pub, " x\t‮y")), edLine(pub, " xy"), "a tab inside the comment is dropped too");
+  assert.equal(
+    publicKey(edLine(pub, " " + "‮".repeat(20) + "d".repeat(140))),
+    edLine(pub, " " + "d".repeat(128)),
+    "dropped characters do not count towards the 128",
+  );
+  assert.equal(publicKey(edLine(pub, " x ​")), edLine(pub, " x"), "trimmed after dropping");
+  assert.equal(publicKey(edLine(pub, " ‮⁦\x01")), edLine(pub), "a comment of nothing but such characters goes");
+  assert.equal(publicKey(edLine(pub, " café \u{1F511} א")), edLine(pub, " café \u{1F511} א"), "other text is kept");
   const withOptions = `command="x" ${line}`;
   const msg = inputError(() => publicKey(withOptions));
   assert.ok(!msg.includes(b64), "the message does not hold the key");
