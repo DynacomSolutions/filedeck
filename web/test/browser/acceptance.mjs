@@ -119,6 +119,22 @@ async function installFixture(page, opts = {}) {
       return opts.signedOut ? json({ error: 'signed out' }, 401, { 'x-filedeck-auth': 'signed-out' }) : json({ auth: false });
     }
     if (pathname === '/api/auth/login' && req.method() === 'POST') return json({ error: 'sign-in failed' }, 401);
+    // opts.adminApi ({ posts, conflict }): the hub's admin routes. One virtual account exists; a POST of a new account is kept in
+    // `posts` and answers 409 "exists" while `conflict` is set, else 201 with the new account.
+    if (opts.adminApi && pathname.startsWith('/api/admin/')) {
+      const a = opts.adminApi;
+      const guest = { name: 'fixture-guest', admin: false, hasPassword: true, keys: [{ fingerprint: 'SHA256:fixture', type: 'ssh-ed25519', comment: 'fixture laptop' }], nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: true }] } }, sources: {}, sessions: 1 };
+      if (pathname === '/api/admin/overview') return json({ nodes: [nodeName, 'fixture-dest'], sources: [{ name: 'fixture-s3', type: 's3' }], systemAdmins: [], unownedPasswords: 0 });
+      if (pathname === '/api/admin/accounts' && req.method() === 'GET') return json({ accounts: [guest, ...(a.created ? [a.created] : [])], system: [] });
+      if (pathname === '/api/admin/accounts' && req.method() === 'POST') {
+        const b = req.postDataJSON();
+        a.posts.push(b);
+        if (a.conflict) return json({ error: 'exists' }, 409);
+        a.created = { name: b.name, admin: b.admin, hasPassword: typeof b.password === 'string', keys: [], nodes: b.nodes, sources: b.sources, sessions: 0 };
+        return json(a.created, 201);
+      }
+      return json({ error: 'not found' }, 404);
+    }
     // opts.roots: the virtual account's granted folders on the one machine it may use
     if (pathname === '/api/nodes') return json(opts.roots ? { nodes: [{ name: nodeName, online: true, roots: opts.roots }] } : { nodes: [{ name: nodeName, online: true }, { name: 'fixture-dest', online: true }] });
     if (pathname === `/api/nodes/${encodeURIComponent(nodeName)}/api/mounts`) return json({ mounts: [] });
@@ -1639,6 +1655,108 @@ async function verifyVirtualAccount(browser) {
   assert.deepEqual(failures, [], 'the virtual account view passes axe in light and dark');
 }
 
+// Accounts (administrators): "Accounts…" in the account menu opens the view; "New account" with a name, a password, a run-as user
+// and a folder picked in the folder picker sends one POST /api/admin/accounts with exactly that body; the hub's 409 shows its text
+// in the alert next to the button, and a second try creates the account. axe passes on the list, the editor and the picker in light
+// and dark, none of them overflows sideways at 1365x900, 390x844 and 320x568, and the password never reaches a URL or storage.
+// A system administrator gets the menu item too; an account that is not an administrator does not.
+async function verifyAccounts(browser) {
+  const failures = [];
+  const password = 'fixture account password';
+  for (const scheme of ['light', 'dark']) {
+    for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
+      const label = `${viewport.width}x${viewport.height} ${scheme}`;
+      const adminApi = { posts: [], conflict: true };
+      const fixture = { account: 'fixture-admin', kind: 'virt', admin: true, adminApi, requests: [] };
+      const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture });
+      try {
+        const overflow = async (what) => {
+          const o = await page.evaluate(() => ({
+            scroll: document.documentElement.scrollWidth,
+            client: document.documentElement.clientWidth,
+            body: document.body.scrollWidth,
+            dialog: Math.max(0, ...[...document.querySelectorAll('[role=dialog]')].map((e) => e.getBoundingClientRect().right)),
+            // content that sticks out of the overlay's own box (the overlay scrolls up and down, never sideways)
+            inner: (() => { const b = document.querySelector('.acc-body'); return b ? b.scrollWidth - b.clientWidth : 0; })(),
+          }));
+          if (o.scroll > o.client + 1 || o.body > o.client + 1 || o.dialog > o.client + 1 || o.inner > 1) failures.push({ view: `${what} ${label}`, rule: 'horizontal overflow', ...o });
+        };
+        // on a phone the account menu sits in the header too
+        await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+        await page.getByRole('menuitem', { name: 'Accounts…' }).click();
+        const view = page.getByRole('dialog', { name: 'Accounts' });
+        await view.waitFor({ state: 'visible', timeout: 8000 });
+        await view.getByRole('cell', { name: 'fixture-guest', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        await overflow('list');
+        await runAxe(page, `accounts list ${label}`, failures);
+
+        await view.getByRole('button', { name: 'New account' }).click();
+        await view.getByRole('textbox', { name: 'Name' }).fill('fixture-new');
+        await view.getByLabel('Password', { exact: true }).fill(password);
+        const machine = view.locator('.acc-machine').filter({ hasText: nodeName });
+        await machine.getByRole('textbox', { name: 'Run as (system user)' }).fill('fixture-run');
+        await overflow('editor');
+        await runAxe(page, `account editor ${label}`, failures);
+
+        await machine.getByRole('button', { name: 'Add folder…' }).click();
+        const picker = page.getByRole('dialog', { name: 'Add folder' });
+        await picker.waitFor({ state: 'visible', timeout: 8000 });
+        await picker.getByRole('button', { name: 'work', exact: true }).click();
+        await page.waitForFunction(() => document.querySelector('.acc-pick-path input')?.value === '/work', null, { timeout: 8000 });
+        await picker.getByRole('region', { name: 'Folders' }).and(page.locator('[aria-busy=false]')).waitFor({ timeout: 8000 });
+        await overflow('picker');
+        await runAxe(page, `folder picker ${label}`, failures);
+        await picker.getByRole('button', { name: 'Add folder', exact: true }).click();
+        await picker.waitFor({ state: 'detached', timeout: 8000 });
+        await machine.getByText('/work', { exact: true }).waitFor({ state: 'visible' });
+        // Escape in the picker closes the picker only: the view and the editor with its typed text stay
+        await machine.getByRole('button', { name: 'Add folder…' }).click();
+        await picker.waitFor({ state: 'visible', timeout: 8000 });
+        await page.waitForFunction(() => document.activeElement?.closest('[role=dialog]')?.getAttribute('aria-label') === 'Add folder', null, { timeout: 8000 });
+        await page.keyboard.press('Escape');
+        await picker.waitFor({ state: 'detached', timeout: 8000 });
+        assert.equal(await view.getByRole('textbox', { name: 'Name' }).inputValue(), 'fixture-new', `the editor stays open (${label})`);
+
+        await view.getByRole('button', { name: 'Create account' }).click();
+        await view.getByRole('alert').filter({ hasText: 'exists' }).waitFor({ state: 'visible', timeout: 8000 });
+        const expected = { name: 'fixture-new', password, admin: false, nodes: { [nodeName]: { runAs: 'fixture-run', grants: [{ path: '/work', write: false }] } }, sources: {} };
+        assert.deepEqual(adminApi.posts, [expected], `one POST with the form's body (${label})`);
+        await runAxe(page, `account editor, refused ${label}`, failures);
+
+        adminApi.conflict = false;
+        await view.getByRole('button', { name: 'Create account' }).click();
+        await view.getByRole('cell', { name: 'fixture-new', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
+        assert.equal(adminApi.posts.length, 2, `the second try sends the second POST (${label})`);
+        await view.getByRole('status').filter({ hasText: 'Account fixture-new created.' }).waitFor({ state: 'visible' });
+
+        if (fixture.requests.some((r) => r.includes(encodeURIComponent(password)) || r.includes(password))) failures.push({ view: label, rule: 'password in a URL' });
+        const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
+        if (stored.includes(password)) failures.push({ view: label, rule: 'password kept in storage' });
+
+        await page.keyboard.press('Escape');
+        await view.waitFor({ state: 'detached', timeout: 8000 });
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  for (const [who, fixture, has] of [
+    ['a system administrator', { account: 'fixture-root', kind: 'sys', admin: true }, true],
+    ['a virtual account that is not an administrator', { account: 'fixture-user', kind: 'virt', admin: false }, false],
+    ['a system account that is not an administrator', { account: 'fixture-user', kind: 'sys', admin: false }, false],
+  ]) {
+    const { context, page } = await openPage(browser, { state: directState(), fixture });
+    try {
+      await page.getByRole('button', { name: `Account: ${fixture.account}` }).click();
+      await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
+      assert.equal(await page.getByRole('menuitem', { name: 'Accounts…' }).count(), has ? 1 : 0, `${who}: ${has ? 'the' : 'no'} "Accounts…" item`);
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'the Accounts view passes axe, fits the window and keeps the password out of URLs and storage');
+}
+
 // Act as root (a system administrator only): the "Act as root…" item opens a dialog with the sign-in fields; while the hub
 // reports the switch the header shows "Acting as root until HH:MM" (local end from the hub's time left) with Stop. Banner and open dialog pass axe in light and dark and fit at 390x844
 // and 320x568; the password is cleared after a failed attempt and is never stored. Stop and the end time hide the banner and
@@ -1980,6 +2098,7 @@ const checks = [
   ['sign-in screen and account menu', verifySignIn],
   ['act as root from the account menu', verifyActAsRoot],
   ['Virtual account opens its first granted folder', verifyVirtualAccount],
+  ['Accounts', verifyAccounts],
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
 

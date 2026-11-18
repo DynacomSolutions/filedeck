@@ -1,6 +1,6 @@
 import { lazy, Suspense, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { CircleUser, LogOut, ShieldAlert } from "lucide-react";
+import { CircleUser, LogOut, ShieldAlert, Users } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
 import { logout, type Account } from "./auth";
@@ -9,15 +9,17 @@ const AsRootDialog = lazy(() => import("./AsRootDialog").then((m) => ({ default:
 
 /**
  * The signed-in account in the header: its name, and a menu with "Sign out". Only shown when sign-in is on. A system
- * administrator also gets "Act as root…", which asks for the password or key again; `onAsRoot` gets the local end time.
+ * administrator also gets "Act as root…", which asks for the password or key again; `onAsRoot` gets the local end time. Every
+ * administrator (system or virtual) gets "Accounts…", which opens the Accounts view through `onAccounts`.
  */
-export function AccountMenu({ account, onAsRoot }: { account: Account; onAsRoot: (endsAt: number) => void }) {
+export function AccountMenu({ account, onAsRoot, onAccounts }: { account: Account; onAsRoot: (endsAt: number) => void; onAccounts?: () => void }) {
   const { name } = account;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [asking, setAsking] = useState(false);
   const button = useRef<HTMLButtonElement>(null);
   const items: MenuItem[] = [{ label: name, disabled: true, icon: CircleUser }, "sep"];
   // never for a virtual account or a system account that is not an administrator
+  if (account.admin && onAccounts) items.push({ label: "Accounts…", icon: Users, onSelect: onAccounts });
   if (account.kind === "sys" && account.admin) items.push({ label: "Act as root…", icon: ShieldAlert, onSelect: () => setAsking(true) });
   items.push({ label: "Sign out", icon: LogOut, onSelect: () => void signOut() });
   const signOut = async () => {

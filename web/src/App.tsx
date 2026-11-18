@@ -10,6 +10,7 @@ import { panelGhost } from "./panelGhost";
 import type { FileRef } from "./EditorViews";
 
 // Monaco (several MB) lives in its own chunks, fetched on first use.
+const AccountsView = lazy(() => import("./AccountsView").then((m) => ({ default: m.AccountsView })));
 const DiffViewer = lazy(() => import("./EditorViews").then((m) => ({ default: m.DiffViewer })));
 import { JobsTray } from "./Jobs";
 import { useNodes } from "./data";
@@ -257,6 +258,9 @@ export function App({ account }: { account?: Account } = {}) {
   const [trash, setTrash] = useState<TrashState | null>(initial?.trash ?? null);
   const [settingsOpen, setSettingsOpen] = useState(initial?.settings ?? false);
   const [help, setHelp] = useState(initial?.help ?? false);
+  // the Accounts view (administrators): not in the URL, so a shared link never opens it
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  const closeAccounts = useCallback(() => setAccountsOpen(false), []);
   const [syncRoute, setSyncRoute] = useState<SyncState | null>(initial?.sync ?? null);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -627,7 +631,7 @@ export function App({ account }: { account?: Account } = {}) {
               </Tip>
             )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
-            {account && <AccountMenu account={account} onAsRoot={asRoot.start} />}
+            {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? () => setAccountsOpen(true) : undefined} />}
           </div>
         </div>
       </header>
@@ -657,6 +661,13 @@ export function App({ account }: { account?: Account } = {}) {
             </ErrorBoundary>
           )}
           {settingsOpen && <ErrorBoundary what="Settings" onClose={() => closeView(() => setSettingsOpen(false))}><SettingsView onClose={() => closeView(() => setSettingsOpen(false))} /></ErrorBoundary>}
+          {accountsOpen && account?.admin && (
+            <ErrorBoundary what="The Accounts view" onClose={closeAccounts}>
+              <Suspense fallback={null}>
+                <AccountsView account={account} onClose={closeAccounts} />
+              </Suspense>
+            </ErrorBoundary>
+          )}
           {diff && (
             <ErrorBoundary what="The diff viewer" resetKeys={[diff.left, diff.right]} onClose={() => closeView(() => setDiff(null))}>
               <Suspense fallback={<div className="ed over"><div className="pad muted">Loading editor...</div></div>}>
