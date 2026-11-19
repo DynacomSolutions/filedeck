@@ -128,28 +128,69 @@ export function openDb(file: string, cacheKiB = 8192, scratch = false, /** the f
   if (file !== ":memory:") {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     privateDbFile(file, !existing);
+    for (const x of ["-wal", "-shm", "-journal"]) privateDbFile(file + x, false); // left by an older version; none is touched while this process has it open
   }
   const db = new s.DatabaseSync(existing && file !== ":memory:" ? rwUri(file) : file);
   // A scratch file (compare spill) is thrown away on restart: no journal, no syncs. A cache keeps WAL (a process crash cannot
   // corrupt it) without syncs (an OS crash might; IndexCache then starts a fresh file).
   db.exec(scratch ? `PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE;` : `PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`);
   db.exec(`PRAGMA temp_store=FILE; PRAGMA cache_size=-${cacheKiB};`);
-  if (file !== ":memory:") for (const f of [`${file}-wal`, `${file}-shm`, `${file}-journal`]) privateDbFile(f, false);
   return db;
+}
+
+/**
+ * True when this process (any thread) holds a descriptor of the file, false when it holds none, undefined when that cannot be told (no /proc).
+ * Compares device and inode, so a link or a second name does not hide an open file.
+ */
+function openHere(st: fs.Stats): boolean | undefined {
+  let names: string[];
+  try {
+    names = fs.readdirSync("/proc/self/fd");
+  } catch {
+    return undefined;
+  }
+  for (const n of names) {
+    try {
+      const o = fs.statSync(`/proc/self/fd/${n}`);
+      if (o.ino === st.ino && o.dev === st.dev) return true;
+    } catch {
+      /* closed meanwhile, or the descriptor of the listing itself */
+    }
+  }
+  return false;
 }
 
 /**
  * Makes a database file 0600 (it may lie in the served tree, and what it holds is the listings of folders some readers may not enter). Made
  * here when missing (with `create`), so SQLite, which gives its `-wal`, `-shm` and journal files the mode of the database file, makes those
- * 0600 too; files left by an older version are changed through a descriptor opened without following a link. Best effort.
+ * 0600 too; files left by an older version are changed through a descriptor opened without following a link.
+ *
+ * Closing any descriptor of a file drops every POSIX lock this process holds on it, also the locks of SQLite connections of other threads
+ * (the shared lock on the `-shm` tells other processes that a connection is alive). So no descriptor is opened or closed here for a file that
+ * this process may have open: the mode is read without a descriptor first, and a file with a loose mode is changed only when /proc shows that
+ * this process holds no descriptor of it. Without /proc such a file is left as it is. Best effort.
  */
 function privateDbFile(f: string, create = true): void {
+  let st: fs.Stats | undefined;
+  try {
+    st = fs.lstatSync(f);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT" || !create) return;
+  }
   let fd: number | undefined;
   try {
-    fd = fs.openSync(f, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | (create ? fs.constants.O_CREAT : 0), 0o600);
-    if ((fs.fstatSync(fd).mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600);
+    if (!st) {
+      // O_EXCL: the file did not exist a moment ago, so no connection of this process can hold it; the open then also made it
+      fd = fs.openSync(f, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
+      return;
+    }
+    if (!st.isFile() || (st.mode & 0o077) === 0) return;
+    if (openHere(st) !== false) return; // open here, or unknown: leave the mode, a descriptor must not be closed
+    fd = fs.openSync(f, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const o = fs.fstatSync(fd);
+    if (o.ino === st.ino && o.dev === st.dev && (o.mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600);
   } catch {
-    /* missing (wal, shm), or not ours to change */
+    /* made by another process meanwhile, or not ours to change */
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -202,8 +243,9 @@ export class IndexCache {
     `;
     this.file = file;
     for (let attempt = 0; attempt < 2 && !this.db; attempt++) {
+      let db: DatabaseSync | null = null;
       try {
-        const db = openDb(file);
+        db = openDb(file);
         if (!db) break;
         db.exec(schema);
         db.prepare("SELECT count(*) FROM dirs WHERE path = ''").get();
@@ -214,6 +256,11 @@ export class IndexCache {
         const code = (e as { errcode?: number }).errcode;
         const contended = code === 5 || code === 6;
         console.error(contended ? "index cache busy:" : "index cache reset:", (e as Error).message);
+        try {
+          db?.close(); // its locks and mapping go before the files do
+        } catch {
+          /* already closed */
+        }
         if (file !== ":memory:" && !contended) for (const f of [file, file + "-wal", file + "-shm"]) fs.rmSync(f, { force: true });
       }
     }
