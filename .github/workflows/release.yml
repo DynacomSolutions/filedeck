@@ -73,7 +73,6 @@ jobs:
           command -v ffmpeg
           command -v git
           command -v smbclient
-        timeout-minutes: 5
       - run: npm ci --no-audit --no-fund
         timeout-minutes: 5
       - name: Verify the tagged release
