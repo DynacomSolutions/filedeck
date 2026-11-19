@@ -76,7 +76,7 @@ jobs:
       - name: Configure apt retries
         # a stalled mirror connection times out after 30 s and apt retries it; Playwright runs apt-get itself, so flags cannot reach it
         run: |
-          printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::http::Pipeline-Depth "0";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
+          printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::http::Pipeline-Depth "0";' 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
         timeout-minutes: 1
       - name: Install test tools
         # the Ubuntu mirror is sometimes slow (single packages taking 20 s or more), which pushed this step past 5 minutes;
@@ -89,6 +89,8 @@ jobs:
               break
             fi
             if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sudo pkill -x apt-get || true
+            sudo pkill -x dpkg || true
             echo "apt attempt $attempt failed, retrying"
           done
           if ! command -v 7zz >/dev/null 2>&1; then
@@ -193,7 +195,7 @@ jobs:
       - name: Configure apt retries
         # a stalled mirror connection times out after 30 s and apt retries it; Playwright runs apt-get itself, so flags cannot reach it
         run: |
-          printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::http::Pipeline-Depth "0";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
+          printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::http::Pipeline-Depth "0";' 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
         timeout-minutes: 1
       - name: Install Chromium and Firefox for Playwright
         working-directory: web/test/browser
@@ -208,6 +210,8 @@ jobs:
               break
             fi
             if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sudo pkill -x apt-get || true
+            sudo pkill -x dpkg || true
             echo "Playwright install attempt $attempt failed, retrying"
           done
         shell: bash
