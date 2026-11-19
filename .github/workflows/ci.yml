@@ -73,13 +73,26 @@ jobs:
           node-version: 22
           cache: npm
         timeout-minutes: 5
+      - name: Configure apt retries
+        # a stalled mirror connection times out after 30 s and apt retries it; Playwright runs apt-get itself, so flags cannot reach it
+        run: |
+          printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::http::Pipeline-Depth "0";' 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
+        timeout-minutes: 1
       - name: Install test tools
         # the Ubuntu mirror is sometimes slow (single packages taking 20 s or more), which pushed this step past 5 minutes;
         # retries and a per-connection timeout get past a stalled download instead of waiting on it
-        timeout-minutes: 15
+        timeout-minutes: 20
+        shell: bash
         run: |
-          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev
+          for attempt in 1 2 3; do
+            if timeout 6m bash -c 'sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev'; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sudo pkill -x apt-get || true
+            sudo pkill -x dpkg || true
+            echo "apt attempt $attempt failed, retrying"
+          done
           if ! command -v 7zz >/dev/null 2>&1; then
             sudo ln -s "$(command -v 7z)" /usr/local/bin/7zz
           fi
@@ -179,16 +192,30 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-firefox-${{ runner.os }}-${{ hashFiles('web/test/browser/package-lock.json') }}
         timeout-minutes: 5
+      - name: Configure apt retries
+        # a stalled mirror connection times out after 30 s and apt retries it; Playwright runs apt-get itself, so flags cannot reach it
+        run: |
+          printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::http::Pipeline-Depth "0";' 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
+        timeout-minutes: 1
       - name: Install Chromium and Firefox for Playwright
         working-directory: web/test/browser
         run: |
           if [[ "${{ steps.playwright-cache.outputs.cache-hit }}" == true ]]; then
-            npx playwright install-deps chromium firefox
+            install_cmd="npx playwright install-deps chromium firefox"
           else
-            npx playwright install --with-deps chromium firefox
+            install_cmd="npx playwright install --with-deps chromium firefox"
           fi
+          for attempt in 1 2 3; do
+            if timeout 6m $install_cmd; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sudo pkill -x apt-get || true
+            sudo pkill -x dpkg || true
+            echo "Playwright install attempt $attempt failed, retrying"
+          done
         shell: bash
-        timeout-minutes: 8
+        timeout-minutes: 20
       - name: Start the hub on the static build
         id: hub
         shell: bash
