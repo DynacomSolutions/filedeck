@@ -1,0 +1,51 @@
+{{- if .Values.mapping.enabled }}
+{{- /* Envoy Gateway route for the Mapping in mapping.yaml, from the same values. The Mapping stays until the VIP cut-over (cluster board row 144.484). */}}
+{{- $name := default (printf "%s-public" (include "filedeck.name" .)) .Values.mapping.name }}
+# Same timeouts as the Mapping: no request timeout, 1 hour stream idle timeout, no backend idle timeout or connection lifetime limit.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+  annotations:
+    dynacom.dev/emissary-mapping: {{ printf "%s/%s" .Release.Namespace $name | quote }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: edge
+      namespace: envoy-gateway-system
+  hostnames:
+    - {{ required "mapping.host is required when mapping.enabled" .Values.mapping.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 0s
+      backendRefs:
+        - name: {{ include "filedeck.name" . }}
+          port: {{ .Values.service.port }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $name }}
+  mergeType: StrategicMerge
+  timeout:
+    http:
+      streamIdleTimeout: 1h
+      connectionIdleTimeout: 0s
+      maxConnectionDuration: 0s
+{{- end }}
