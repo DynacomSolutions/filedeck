@@ -365,12 +365,14 @@ test("fanwatch: a folder whose lock is busy is tried again later, never waited f
 test("fanwatch: a busy folder is noted as pending again with a due time in the future, then applied once the lock is free", async () => {
   const f = fileStore();
   const noted: { path: string; dueAt: number; modify: boolean }[] = [];
+  const dirty: unknown[][] = [];
   let free = false;
   const sink = {
     ...f.sink,
     applyChanged: async (v: string) => (f.calls.push(v), free ? true : false),
     notePending: async (items: { path: string; dueAt: number; modify: boolean }[], ms: number) => (noted.push(...items.map((i) => ({ ...i }))), f.st.notePending(items, ms)),
-    markDirty: async () => assert.fail("a busy folder is never marked dirty"),
+    // stop() may interrupt a drain batch, and the drain then marks taken but unapplied folders dirty on purpose; only calls while the watcher runs count
+    markDirty: async (...a: unknown[]) => (dirty.push(a), true),
   };
   const w = new FanWatch(sink, { ...opts, helper: "fake", spawn: () => new Fake() });
   const t0 = Date.now();
@@ -382,6 +384,7 @@ test("fanwatch: a busy folder is noted as pending again with a due time in the f
   assert.ok(noted.at(-1)!.dueAt >= t0 + 500, "due later, not at once");
   free = true;
   await until(() => f.calls.length >= 2, 30_000);
+  assert.deepEqual(dirty, [], "a busy folder is never marked dirty while the watcher runs");
   w.stop();
   f.done();
 });
