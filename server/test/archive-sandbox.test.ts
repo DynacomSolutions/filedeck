@@ -52,6 +52,12 @@ const live = (name: string, fn: () => Promise<void>, opts: { skip?: string | fal
 
 const mkCtl = (): JobCtl => ({ signal: new AbortController().signal, progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" } }) as unknown as JobCtl;
 const LIM = { maxEntries: 100_000, maxBytes: 1 << 30 };
+// The sandboxed tool may exit before it reads its input: that refusal is what these tests check, so a write EPIPE is not a failure.
+function endStdin(child: { stdin: NodeJS.WritableStream | null }, data: string): void {
+  child.stdin!.on("error", () => {});
+  child.stdin!.end(data);
+}
+
 function scene(name: string) {
   const dir = path.join(tmp, name);
   const root = path.join(dir, "root");
@@ -90,7 +96,7 @@ live("a link-following tool given the production grants cannot read through a su
       const child = confined ? await spawnSandboxed("bsdtar", args, { cwd: s.src, readOnly: grants.roots, stdio: ["pipe", "pipe", "pipe"] }) : spawn("bsdtar", args, { cwd: s.src, stdio: ["pipe", "pipe", "pipe"] });
       const out: Buffer[] = [];
       child.stdout!.on("data", (d) => out.push(d));
-      child.stdin!.end("sel\0");
+      endStdin(child, "sel\0");
       await new Promise((r) => child.on("close", r));
       return Buffer.concat(out).toString("latin1");
     };
@@ -500,14 +506,14 @@ live("bsdtar compress is told to read a sibling that was not selected, and to wr
     const grants = await selectionGrants(s.src, srcFd, ["own.txt"]);
     await sandboxedAndNot("bsdtar compress (read)", async () => {
       const child = await spawnBsdtar(["--null", "-cf", "-", "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots, scratch: { fd: scratchFd, dir: scratchDir } });
-      child.stdin!.end("own.txt\0sibling.txt\0");
+      endStdin(child, "own.txt\0sibling.txt\0");
       const r = await finish(child);
       return { denied: deniedWith(r) && !r.out.includes("SIBLING-SECRET"), detail: `${r.code} ${r.err}` };
     });
     await sandboxedAndNot("bsdtar compress (write)", async () => {
       const target = path.join(s.outside, `w-${Date.now()}-${Math.random()}.tar`);
       const child = await spawnBsdtar(["--null", "-cf", target, "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots, scratch: { fd: scratchFd, dir: scratchDir } });
-      child.stdin!.end("own.txt\0");
+      endStdin(child, "own.txt\0");
       const r = await finish(child);
       return { denied: deniedWith(r) && !fs.existsSync(target), detail: `${r.code} ${r.err}` };
     });
@@ -525,7 +531,7 @@ live("the zip tool is told to read a sibling that was not selected: refused unde
     const grants = await selectionGrants(s.src, srcFd, ["own.txt"]);
     await sandboxedAndNot("zip", async () => {
       const child = await spawnBsdtar(["--null", "--format", "zip", "-cf", "-", "-T", "-"], { cwdFd: srcFd, stdin: "pipe", readOnly: grants.roots });
-      child.stdin!.end("own.txt\0sibling.txt\0");
+      endStdin(child, "own.txt\0sibling.txt\0");
       const r = await finish(child);
       return { denied: deniedWith(r) && !r.out.includes("SIBLING-SECRET"), detail: `${r.code} ${r.err}` };
     });
