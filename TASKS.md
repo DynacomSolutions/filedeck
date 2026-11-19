@@ -320,3 +320,4 @@ ETA: 2026-11-19 14:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 181 | Add an HTTPRoute and BackendTrafficPolicy next to the Mapping | done | Claude | eg-httproutes | | | Rendered under `mapping.enabled`, from the same values<br>Attached to the `edge` Gateway only<br>The Mapping stays until the VIP cut-over (.cluster 144.484) |
+| 182 | Release v0.5.3 or later so the HTTPRoute deploys | todo | | | 25.181 | | Argo app `filedeck` deploys the `stable` tag, which is v0.5.2 and has no `httproute.yaml`.<br>Needed before the Envoy Gateway VIP cut-over (.cluster row 144.484). Until then a shadow copy covers `files.dynacom.dev`. |
