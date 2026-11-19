@@ -73,7 +73,7 @@ Filedeck is one container image that runs in two modes:
 Download the chart archive from the [latest GitHub release](https://github.com/DynacomSolutions/filedeck/releases), then install it:
 
 ```sh
-helm install filedeck ./filedeck-0.5.1.tgz -n filedeck --create-namespace
+helm install filedeck ./filedeck-0.5.2.tgz -n filedeck --create-namespace
 kubectl -n filedeck port-forward svc/filedeck 8080:80   # then open http://127.0.0.1:8080
 ```
 

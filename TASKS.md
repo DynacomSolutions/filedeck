@@ -243,7 +243,7 @@ ETA: 2026-11-14 12:00 ICT
 
 ## 19. Review follow-up checks and size job latency
 What the 12 November 2026 review report left open: checks that were not made, and limits that can be removed in code.
-ETA: 2026-11-20 12:00 ICT
+ETA: 2026-11-19 09:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 143 | Live check of main after the releases: request checks, layout at five window sizes, the new notices | done | claude-20261116-rv-postcheck | rv-postcheck | | | Checked main at a2147e4 (after v0.3.37) with a live hub and agent<br>Request checks: cross-site and read-only deletes refused, headers present, dead agent answers 502<br>Browser: acceptance script 35 of 35; no overflow and no console error at six window sizes, light and dark<br>The sandbox reports fallback in a development start: row 19.148 |
@@ -259,7 +259,7 @@ ETA: 2026-11-20 12:00 ICT
 
 ## 20. Sign-in and per-user access
 Sign-in for system users (PAM, SSH key) and virtual accounts, with file work that runs as the signed-in person. Design: docs/superpowers/specs/2026-11-17-authentication-design.md
-ETA: 2026-11-20 12:00 ICT
+ETA: 2026-11-19 09:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 156 | Design for sign-in and per-user access approved | done | claude-20261117-auth-design | auth-design | | 2026-11-17 22:00 ICT | Approach A (one worker per user on each agent) chosen<br>Decided: same name on every machine, the host's own PAM and NSS through a chroot helper, admins can switch on "act as root", no root sign-in<br>Approved 17 Nov 2026; build plan next |
@@ -305,9 +305,9 @@ ETA: 2026-11-18 21:00 ICT
 
 ## 24. Size scans never wait behind unrelated walks
 A long size walk made every later du scan wait, even of unrelated folders, because the change watcher queued a broad lock behind it.
-ETA: 2026-11-20 12:00 ICT
+ETA: 2026-11-19 09:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 178 | Watcher never queues behind a walk; metrics for queued jobs and lock waits | done | claude-20261119-du-queue-stuck | du-queue-stuck | | | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/253 (223b4b0); CI green.<br>Watcher retries busy folders instead of waiting; new queue and lock-wait gauges. |
 | 179 | Release and deploy 24.178 and add the stalled-queue alert | done | claude-20261119-du-queue-stuck | release-v0.5.1 | 24.178 | | v0.5.1 released (PR https://github.com/DynacomSolutions/filedeck/pull/254); all agents run 0.5.1.<br>Alert PR https://github.com/DynacomSolutions/.cluster/pull/2602 merged; gauges scraped.<br>Proof: du of a 2.9G folder in 5.6 s. |
-| 180 | Find why an agent exited with SIGBUS at start during a rollout | in_review | claude-20261119-du-queue-stuck | agent-sigbus | | 2026-11-19 09:00 ICT | Cause: openDb closed a descriptor of the -shm after SQLite opened it, which drops the process's fcntl locks.<br>Repro: 8 SIGBUS in 80 hand-overs. |
+| 180 | Find why an agent exited with SIGBUS at start during a rollout | done | claude-20261119-du-queue-stuck | agent-sigbus | | | Cause: openDb closed a descriptor of the -shm after SQLite opened it, dropping the fcntl locks.<br>Fixed in PR https://github.com/DynacomSolutions/filedeck/pull/255; repro 8 SIGBUS in 80 hand-overs before, 0 in 160 after.<br>Released in v0.5.2. |
