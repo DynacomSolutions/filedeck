@@ -39,8 +39,9 @@ export class JobStore {
 
   constructor(file: string) {
     for (let attempt = 0; attempt < 2 && !this.db; attempt++) {
+      let db: DatabaseSync | null = null;
       try {
-        const db = openDb(file, 1024);
+        db = openDb(file, 1024);
         if (!db) return;
         db.exec("PRAGMA busy_timeout=100");
         db.exec(`CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, scope TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
@@ -58,6 +59,11 @@ export class JobStore {
         const code = (e as { errcode?: number }).errcode;
         const contended = code === 5 || code === 6;
         console.error(contended ? "job store busy:" : "job store reset:", (e as Error).message);
+        try {
+          db?.close(); // its locks and mapping go before the files do
+        } catch {
+          /* already closed */
+        }
         if (!contended && attempt === 0) for (const f of [file, file + "-wal", file + "-shm"]) fs.rmSync(f, { force: true });
         else return; // memory-only from here on
       }
