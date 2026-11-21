@@ -211,13 +211,16 @@ agent:
   # Roll the agents one at a time under Argo CD: agent N gets sync wave N+1 (in the order of `nodes`), so Argo waits for
   # it to be Ready before it touches the next one. Plain Helm ignores the annotation. Set false to roll them together.
   stagger: true
+  # Host folder that holds the compare index (hostPath of the `index` volume; the container still sees it at
+  # /var/lib/filedeck). A node can set its own `indexHostPath`, for example to keep the index off a small root partition.
+  indexHostPath: /var/lib/filedeck
   # Extra annotations on the agent Deployments (for example an Argo CD sync option). Empty by default.
   annotations: {}
 
 # One agent per entry. `name` is what the UI shows (lowercase, [a-z0-9-], unique); `nodeName` is the Kubernetes node
 # (kubernetes.io/hostname) the agent runs on and whose filesystem it browses at "/". An empty `nodeName` lets the
 # scheduler pick any node, which is fine for a single-node cluster. Each agent gets a Service and the selector label
-# app.kubernetes.io/instance: <release>-agent-<name>. A node can add its own `readOnlyPaths`.
+# app.kubernetes.io/instance: <release>-agent-<name>. A node can add its own `readOnlyPaths` and `indexHostPath`.
 nodes:
   - name: local
     nodeName: ""

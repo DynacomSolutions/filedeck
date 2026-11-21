@@ -200,7 +200,7 @@ spec:
             sizeLimit: {{ $.Values.agent.thumbCacheVolume }}
         - name: index
           hostPath:
-            path: /var/lib/filedeck
+            path: {{ default $.Values.agent.indexHostPath .indexHostPath }}
             type: DirectoryOrCreate
 ---
 apiVersion: v1

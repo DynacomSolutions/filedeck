@@ -16,6 +16,7 @@ The defaults give one agent (`local`, any node) that browses the node's filesyst
 | `image.repository`, `image.tag`, `image.digest` | The image; a `digest` wins over `tag` |
 | `nodes[]` | One agent each: `name` (shown in the UI) and `nodeName` (Kubernetes node; empty = any) |
 | `agent.stagger` | Under Argo CD, roll agents one at a time (agent N in sync wave N+1, in `nodes` order); default on, ignored by plain Helm |
+| `agent.indexHostPath`, `nodes[].indexHostPath` | Host folder of the compare index (default `/var/lib/filedeck`); a node can set its own, for example `/home/filedeck` on a node with a small root partition. The folder is created on first start. The path inside the container does not change |
 | `agent.readOnlyPaths` | Virtual paths no agent may change (default `/proc`, `/sys`) |
 | `agentToken.secretName`, `agentToken.generate` | Shared hub-to-agent token: name an existing Secret, or set `generate: true` and a hook Job creates a random one (never rotated); empty and off = none |
 | `hub.networkPolicy.enabled`, `hub.networkPolicy.from` | Optional NetworkPolicy for the hub: only the listed peers (for example your ingress controller) may connect; off by default |

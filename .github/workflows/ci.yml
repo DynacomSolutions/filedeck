@@ -276,6 +276,8 @@ jobs:
         timeout-minutes: 5
       - run: helm lint k8s
         timeout-minutes: 5
+      - run: scripts/check-chart-render.sh
+        timeout-minutes: 2
       - run: npm run check:neutral
         timeout-minutes: 2
 
