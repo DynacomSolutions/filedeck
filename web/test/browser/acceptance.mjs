@@ -2820,6 +2820,8 @@ async function verifyTailnetCanSignIn(browser) {
 async function verifyActAsRoot(browser) {
   const failures = [];
   const hhmm = (t) => page0.evaluate((u) => { const d = new Date(u); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }, t);
+  // The page counts the end from its own clock after the request. A short delay can move the end into the next minute, so accept both minutes.
+  const endsAt = async (t) => [await hhmm(t), await hhmm(t + 15_000)];
   let page0;
   const overflow = async (page, what) => {
     const o = await page.evaluate(() => {
@@ -2844,7 +2846,8 @@ async function verifyActAsRoot(browser) {
       try {
         const banner = page.locator('.asroot-banner');
         await banner.waitFor({ state: 'visible', timeout: 8000 });
-        assert.equal((await banner.getByRole('status').innerText()).trim(), `Acting as root until ${await hhmm(asRoot.until)}`, `the banner names the end time (${label})`);
+        const text = (await banner.getByRole('status').innerText()).trim();
+        assert.ok((await endsAt(asRoot.until)).map((m) => `Acting as root until ${m}`).includes(text), `the banner names the end time (${label}), got '${text}'`);
         await page.waitForTimeout(150);
         await overflow(page, `banner ${label}`);
         await runAxe(page, `act as root banner ${label}`, failures);
@@ -2893,7 +2896,7 @@ async function verifyActAsRoot(browser) {
       // the hub ends the switch 4 seconds from now; the banner goes at that time and the app asks the hub again
       asRoot.until = Date.now() + 4000;
       await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-      await banner.filter({ hasText: `until ${await hhmm(asRoot.until)}` }).waitFor({ state: 'visible', timeout: 8000 });
+      await banner.filter({ hasText: new RegExp(`until (${(await endsAt(asRoot.until)).join('|')})`) }).waitFor({ state: 'visible', timeout: 8000 });
       const ended = fixture.meCalls;
       await banner.waitFor({ state: 'hidden', timeout: 8000 });
       await expectPoll(() => fixture.meCalls > ended, 'the end time asks the hub who is signed in again');
@@ -2930,7 +2933,8 @@ async function verifyActAsRoot(browser) {
     try {
       const banner = page.locator('.asroot-banner');
       await banner.waitFor({ state: 'visible', timeout: 8000 });
-      assert.equal((await banner.getByRole('status').innerText()).trim(), `Acting as root until ${await hhmm(asRoot.until + skew)}`, 'a skewed browser names the end by its own clock');
+      const text = (await banner.getByRole('status').innerText()).trim();
+      assert.ok((await endsAt(asRoot.until + skew)).map((m) => `Acting as root until ${m}`).includes(text), `a skewed browser names the end by its own clock, got '${text}'`);
       await banner.getByRole('button', { name: 'Stop' }).click();
       await banner.waitFor({ state: 'hidden', timeout: 8000 });
       const dialog = await openDialog(page);
