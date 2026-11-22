@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "check": "node acceptance.mjs",
+    "check:parallel": "node parallel.mjs",
     "check:firefox": "BROWSER=firefox node acceptance.mjs",
     "install-browser": "playwright install chromium firefox"
   },
