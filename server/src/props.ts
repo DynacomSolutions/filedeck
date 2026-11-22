@@ -430,6 +430,8 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
   const sizes = new SizeStore(cfg.indexDir ? path.join(cfg.indexDir, `sizes-${cfg.node}.db`) : spillPath("sizes"), { root: cfg.root, ttlMs: cfg.indexRevalidateMs, maxEntries: cfg.walkMaxEntries });
 
   // The job exists at once; it waits for the lock of its subtree (overlapping scans run one after the other) without a job slot.
+  // A scan of a folder below a walk that runs does not wait for that walk (see SizeStore.lock with `nest`): its job then starts at once, outside the job limit,
+  // because the walk may hold the free slots while it waits for this scan.
   // `since`: when the job began. Rows written since are the job's own: when the job runs again after a restart (adopted), the walk keeps them instead of starting over.
   const scanParts = <T,>(kind: "size" | "du", virtual: string, fresh: boolean | number, since: number | undefined, after?: () => Promise<T>, done?: (x: { res: SizeResult; read: number; untrusted: boolean; extra?: T }) => void) => {
     let release: (() => void) | undefined;
@@ -449,10 +451,10 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
         return kind === "size" ? { ...x.res, untrusted: x.untrusted } : { res: x.res, read: x.read, untrusted: x.untrusted };
       },
       onDrop: () => release?.(),
-      gate: async (signal: AbortSignal, self: { id: string; createdAt: number }) => {
+      gate: async (signal: AbortSignal, self: { id: string; createdAt: number }): Promise<{ urgent?: boolean }> => {
         // an adopted job waits here while another process holds the store's writer lease (a rolling deploy): only the writer walks
         await sizes.whenWriter(signal);
-        release = await sizes.lock(virtual, signal);
+        release = await sizes.lock(virtual, signal, false, { nest: true });
         // Compatibility with 0.3.31 (removable once no such process can share the store file, together with Jobs.foreignAhead): its lock is per process, and it walks without the
         // writer lease, so during a rollout wait for its overlapping walks too.
         const overlaps = (p: { path: string }) => p.path === virtual || p.path === "/" || virtual === "/" || p.path.startsWith(virtual + "/") || virtual.startsWith(p.path + "/");
@@ -465,6 +467,7 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
           release();
           throw e;
         }
+        return sizes.nested(release) ? { urgent: true } : {};
       },
     };
   };
@@ -668,6 +671,10 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     const forget = () => {
       if (duRuns.get(key) === run) duRuns.delete(key);
     };
+    // Watched from the request on (every exit below ends it): a walk of a folder above that goes on while the answer is read does not make it stale by itself, and a walk that
+    // comes to this folder again after a scan beside it ended waits (at most ANSWER_HOLD_MS) until the answer has its lock, so `du --fresh` is answered at once.
+    const watch = sizes.watchAnswer(r.virtual);
+    let handed = false; // the answer took over the watch
     let keep = false; // the entry stays for the repeat request (a replay that could not get the lock in time)
     try {
       const signal = c.req.raw.signal;
@@ -695,12 +702,14 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
       // The wait for the lock is bounded like the job wait: a later walk queued ahead can hold it.
       let rel: () => void;
       const mark = sizes.lockMark();
+      const opens0 = watch.opens();
       const t0 = Date.now(); // before the lock: a stale mark made while it waits or while the top row is read is seen too
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), Math.max(0, arrived + cfg.duWaitMs - Date.now()));
       signal.addEventListener("abort", () => ac.abort(), { once: true });
       try {
-        rel = await sizes.lock(r.virtual, ac.signal, true);
+        rel = await sizes.lock(r.virtual, ac.signal, true, { nest: true });
+        watch.passed(); // (a walk that waits to go into this folder again may go on: it reuses the rows of the scan, which an answer does not call a change)
         rel(); // no walk is half done now; one that starts while the answer is streamed makes it `stale` (a slow reader must never hold up a scan)
       } catch (e) {
         if (!ac.signal.aborted) throw e;
@@ -717,12 +726,14 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
         // `stale`: the walk reused rows on their age under a running watcher (they may have changed while no watcher saw it), or the repeat of a finished job
         // comes after a change the watcher has reported
         // (a stale mark made after the job ended: an overflow or a helper exit loses events and leaves only that)
-        const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && ((sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual))) || sizes.markedSince(r.virtual, v!.startedAt ?? v!.createdAt)));
+        const stale = (run.out?.untrusted ?? jr.untrusted ?? false) || (replay && ((sizes.covers(r.virtual) && (await sizes.changesWaiting(r.virtual, { nested: true }))) || sizes.markedSince(r.virtual, v!.startedAt ?? v!.createdAt)));
         const cached = (replay || (run.out ? run.out.read : jr.read ?? -1) === 0) && sizes.persistent;
         // stale too when, while the answer was read, a walk of an overlapping folder came or the watcher lost changes (an overflow leaves only a stale mark)
-        return answerTree(c, r.virtual, depth, all, { cached, watched: sizes.covers(r.virtual), stale }, { recheck: async () => !sizes.lockedSince(r.virtual, mark) && !sizes.markedSince(r.virtual, t0) });
+        handed = true;
+        return answerTree(c, r.virtual, depth, all, { cached, watched: sizes.covers(r.virtual), stale }, { recheck: async () => !sizes.lockedSince(r.virtual, mark, { watch, opens: opens0 }) && !sizes.markedSince(r.virtual, t0), done: watch.end });
       }
     } finally {
+      if (!handed) watch.end();
       if (!keep) {
         if (!run.detached) forget();
         else if (replay) forget();

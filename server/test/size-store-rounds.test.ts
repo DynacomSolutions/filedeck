@@ -109,8 +109,11 @@ test("scans: requests do not wait for overlapping scans, a vanished start folder
       }
     };
     const sub = await answered(post("/big/sub"), "POST");
+    // a scan of a folder below the walk goes beside it (SizeStore.lock with `nest`): it ends while the walk is still blocked, and the answer for its folder comes at once
+    assert.equal(await answered(settle(sub.id), "the scan of the subfolder"), "done");
+    assert.equal((await job(big.id)).state, "running");
     const r = await answered(Promise.resolve(app.request("/api/du?path=/big/sub&depth=0")), "GET du");
-    assert.equal(r.status, 202);
+    assert.equal(r.status, 200);
     letBigGo();
     // a waiting job can be canceled, and it does not block the one after it
     const doomed = await post("/big/sub2");
