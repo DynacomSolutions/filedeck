@@ -243,7 +243,7 @@ ETA: 2026-11-14 12:00 ICT
 
 ## 19. Review follow-up checks and size job latency
 What the 12 November 2026 review report left open: checks that were not made, and limits that can be removed in code.
-ETA: 2026-11-19 09:00 ICT
+ETA: 2026-11-23 06:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 143 | Live check of main after the releases: request checks, layout at five window sizes, the new notices | done | claude-20261116-rv-postcheck | rv-postcheck | | | Checked main at a2147e4 (after v0.3.37) with a live hub and agent<br>Request checks: cross-site and read-only deletes refused, headers present, dead agent answers 502<br>Browser: acceptance script 35 of 35; no overflow and no console error at six window sizes, light and dark<br>The sandbox reports fallback in a development start: row 19.148 |
@@ -255,7 +255,7 @@ ETA: 2026-11-19 09:00 ICT
 | 151 | The text-spacing check cannot pass by scrolling content inside a box that a user cannot scroll | done | claude-20261116-rv-postcheck | rv-spacing-check | 19.146 | | Merged https://github.com/DynacomSolutions/filedeck/pull/226, CI green in Chromium and Firefox<br>With the Name column fix taken out the check now fails in Chromium, where it passed before |
 | 152 | Release v0.3.39 with 19.146 to 19.148 | done | claude-20261116-release-v0339 | release-v0339 | 19.146, 19.147, 19.148, 19.151, 19.153 | | Released v0.3.39: https://github.com/DynacomSolutions/filedeck/pull/227 (6a6d685), release run green, stable moved<br>Local run on the branch: 240 web and 969 server tests pass, 0 failed, 0 cancelled |
 | 153 | The resumed-scan test waits for the lease without ending its own process early | done | claude-20261116-rv-postcheck | rv-scan-test-wait | | | Merged https://github.com/DynacomSolutions/filedeck/pull/228, CI green<br>Cause shown with a script: a process that only waits for the lease ends without it; the test now holds a timer of its own<br>Seen in two of four full local runs on a loaded machine; no product change |
-| 154 | Size jobs on a busy tree finish or answer partial sizes; small paths skip the long queue | todo | | | | | Seen 17 and 22 Nov 2026: a subtree du stays `queued, 0 entries` behind an overlapping ancestor walk<br>22 Nov hq0: cargo-target du waited 82 min behind a 10 h walk of /srv/projects (0.3 entries/s, data disk ~95% busy, agent at its 1-CPU limit)<br>Alert 24.179 fired<br>Fix: a subtree du never waits behind an ancestor walk |
+| 154 | Size jobs on a busy tree finish or answer partial sizes; small paths skip the long queue | in_progress | claude-20261123-du-subtree-no-wait | du-subtree-no-wait | | 2026-11-23 06:00 ICT | Seen 17 and 22 Nov 2026: a subtree du stays `queued, 0 entries` behind an overlapping ancestor walk<br>22 Nov hq0: cargo-target du waited 82 min behind a 10 h walk of /srv/projects (0.3 entries/s, data disk ~95% busy, agent at its 1-CPU limit)<br>Alert 24.179 fired<br>Fix: a subtree du never waits behind an ancestor walk |
 
 ## 20. Sign-in and per-user access
 Sign-in for system users (PAM, SSH key) and virtual accounts, with file work that runs as the signed-in person. Design: docs/superpowers/specs/2026-11-17-authentication-design.md
