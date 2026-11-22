@@ -51,6 +51,8 @@ async function validate(s: SizeStore, p = "/", ready = Date.now()) {
   arm(s, ready);
   await sleep(5);
   await s.scan(p, undefined, true);
+  // the store vouches only once the writer's background indexes exist (idxReady): on a loaded host the walk can end before that
+  for (let i = 0; i < 1500 && !(s as Any).idxReady; i++) await sleep(5);
   return ready;
 }
 const bytes = (t: { entries: { bytes: number }[] } | null) => t?.entries?.[0]?.bytes ?? null;
