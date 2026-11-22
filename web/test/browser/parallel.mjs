@@ -36,6 +36,7 @@ function run(i) {
         const fail = /^FAIL {2}(.*) \(\d+ ms\)$/.exec(text);
         if (fail) shard.failed.push(fail[1]);
       };
+      stream.setEncoding('utf8'); // a character split across two chunks stays whole
       stream.on('data', (chunk) => {
         rest += chunk;
         const parts = rest.split('\n');
