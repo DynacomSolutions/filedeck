@@ -160,7 +160,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 14
     strategy:
       fail-fast: false
       matrix:
@@ -212,7 +212,7 @@ jobs:
             install_cmd="npx playwright install --with-deps ${{ matrix.engine }}"
           fi
           for attempt in 1 2 3; do
-            if timeout 6m $install_cmd; then
+            if timeout 2m $install_cmd; then
               break
             fi
             if [[ "$attempt" == 3 ]]; then exit 1; fi
@@ -221,7 +221,7 @@ jobs:
             echo "Playwright install attempt $attempt failed, retrying"
           done
         shell: bash
-        timeout-minutes: 6
+        timeout-minutes: 7
       - name: Start the hub on the static build
         id: hub
         shell: bash
