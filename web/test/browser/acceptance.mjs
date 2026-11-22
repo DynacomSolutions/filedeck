@@ -2137,6 +2137,14 @@ async function verifyVirtualAccount(browser) {
 // is not an administrator does not.
 // A dialog fades in: axe measures colours as they are on screen, so it waits for running animations and transitions to end.
 const settled = (page) => page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity), null, { timeout: 8000 });
+// A tooltip that is open takes the next Escape (it dismisses itself first). One opens 450 ms after the pointer rests on a control with
+// one, also when the layout moved a control under a pointer that did not move. So a check that expects Escape to reach the view first
+// moves the pointer away and waits until no tooltip is open.
+async function pressEscape(page) {
+  await page.mouse.move(2, 2);
+  await page.locator('[role=tooltip]').waitFor({ state: 'detached', timeout: 8000 });
+  await page.keyboard.press('Escape');
+}
 // Focus reaches `loc` within 4 s and is still there 300 ms later (nothing moves it on afterwards).
 async function focusStaysOn(page, loc, why) {
   const on = () => loc.evaluate((el) => el === document.activeElement);
@@ -2192,7 +2200,7 @@ async function verifySystemEditor({ page, view, sys, adminApi, label, failures, 
   await bob.click();
   await heading().waitFor({ state: 'visible', timeout: 8000 });
   await links.getByRole('button', { name: 'Remove login a@x.y' }).click();
-  await page.keyboard.press('Escape');
+  await pressEscape(page);
   await discard.waitFor({ state: 'visible', timeout: 8000 });
   await discard.getByRole('button', { name: 'Keep editing' }).click();
   await discard.waitFor({ state: 'detached', timeout: 8000 });
@@ -2348,7 +2356,7 @@ async function verifyAccounts(browser, schemes = ['light', 'dark']) {
         const guestRunAs = view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' });
         await guestRunAs.fill('fixture-other');
         await view.getByRole('tab', { name: 'Signed in' }).click();
-        await page.keyboard.press('Escape');
+        await pressEscape(page);
         const keep = page.getByRole('dialog', { name: 'Discard changes?' });
         await keep.waitFor({ state: 'visible', timeout: 8000 });
         await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
@@ -2468,7 +2476,7 @@ async function verifyAccounts(browser, schemes = ['light', 'dark']) {
         await sysLinks.getByRole('list', { name: 'Tailnet links' }).getByText('Login', { exact: true }).waitFor({ state: 'visible' });
         await overflow('system user sources');
         // unsaved sources ask before Escape or Close drops them
-        await page.keyboard.press('Escape');
+        await pressEscape(page);
         const keepSys = page.getByRole('dialog', { name: 'Discard changes?' });
         await keepSys.waitFor({ state: 'visible', timeout: 8000 });
         await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
@@ -2602,7 +2610,7 @@ async function verifyAccounts(browser, schemes = ['light', 'dark']) {
         await machine.getByRole('button', { name: 'Add folder…' }).click();
         await picker.waitFor({ state: 'visible', timeout: 8000 });
         await page.waitForFunction(() => document.activeElement?.closest('[role=dialog]')?.getAttribute('aria-label') === 'Add folder', null, { timeout: 8000 });
-        await page.keyboard.press('Escape');
+        await pressEscape(page);
         await picker.waitFor({ state: 'detached', timeout: 8000 });
         await focusStaysOn(page, machine.getByRole('button', { name: 'Add folder…' }), `Escape in the picker returns focus to "Add folder…" (${label})`);
         assert.equal(await view.getByRole('textbox', { name: 'Name' }).inputValue(), 'fixture-new', `the editor stays open (${label})`);
@@ -2620,7 +2628,7 @@ async function verifyAccounts(browser, schemes = ['light', 'dark']) {
         assert.equal(adminApi.posts.length, 2, `the second try sends the second POST (${label})`);
         await view.getByRole('status').filter({ hasText: 'Account fixture-new created.' }).waitFor({ state: 'visible' });
         await page.waitForFunction(() => document.activeElement?.textContent === 'Edit fixture-new', null, { timeout: 8000 });
-        await page.keyboard.press('Escape');
+        await pressEscape(page);
         await view.getByRole('cell', { name: 'fixture-new', exact: true }).waitFor({ state: 'visible', timeout: 8000 });
         await page.waitForFunction(() => document.activeElement?.textContent === 'Virtual accounts', null, { timeout: 8000 });
 
@@ -2643,7 +2651,7 @@ async function verifyAccounts(browser, schemes = ['light', 'dark']) {
           await runAxe(page, `existing account editor ${label}`, failures);
           const runAs = view.locator('.acc-machine').filter({ hasText: nodeName }).getByRole('textbox', { name: 'Run as (system user)' });
           await runAs.fill('fixture-other');
-          await page.keyboard.press('Escape');
+          await pressEscape(page);
           const discard = page.getByRole('dialog', { name: 'Discard changes?' });
           await discard.waitFor({ state: 'visible', timeout: 8000 });
           await page.waitForFunction(() => document.activeElement?.textContent?.trim() === 'Keep editing', null, { timeout: 8000 });
@@ -2690,7 +2698,7 @@ async function verifyAccounts(browser, schemes = ['light', 'dark']) {
           const sfit = await fits('.settings.over');
           if (sfit.top !== 0 || sfit.bottom > sfit.height + 1) failures.push({ view: `Settings ${label}`, rule: 'overlay scrolls the page or ends below the window', ...sfit });
         } else {
-          await page.keyboard.press('Escape');
+          await pressEscape(page);
           await view.waitFor({ state: 'detached', timeout: 8000 });
         }
       } finally {
@@ -2712,7 +2720,7 @@ async function verifyAccounts(browser, schemes = ['light', 'dark']) {
       const view = page.getByRole('dialog', { name: 'Accounts' });
       await view.getByRole('tab', { name: 'Signed in' }).click();
       await view.getByRole('tabpanel', { name: 'Signed in' }).getByText('This session').waitFor({ state: 'visible', timeout: 8000 });
-      await page.keyboard.press('Escape');
+      await pressEscape(page);
       await view.waitFor({ state: 'detached', timeout: 8000 });
       const n = adminApi.sessionCalls;
       await page.clock.fastForward(95_000);
