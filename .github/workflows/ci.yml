@@ -60,9 +60,14 @@ jobs:
   server:
     needs: changes
     if: needs.changes.outputs.server == 'true'
+    name: server (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [user, root]
     runs-on: ubuntu-latest
-    # tests take about 10 minutes; the rest is room for a slow Ubuntu mirror in "Install test tools" (up to 15)
-    timeout-minutes: 35
+    # each leg runs one suite and takes about 5 minutes; the rest is room for a slow Ubuntu mirror in "Install test tools"
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -107,11 +112,15 @@ jobs:
           test -x /usr/sbin/apache2
       - run: npm ci --no-audit --no-fund
         timeout-minutes: 5
+      # typecheck and build give the same result in both legs, so only the user leg runs them (no server test reads server/dist)
       - run: npm run typecheck -w server
+        if: matrix.suite == 'user'
         timeout-minutes: 5
       - run: npm run build -w server
+        if: matrix.suite == 'user'
         timeout-minutes: 5
       - name: Run server tests with the TAP skip gate
+        if: matrix.suite == 'user'
         shell: bash
         run: |
           set -o pipefail
@@ -122,8 +131,10 @@ jobs:
       # Workers run as an unprivileged account from this checkout, so that account must be able to pass through to it.
       # The runner's home folder is 0750; the image build's source folder is already open.
       - name: Let worker accounts reach the checkout
+        if: matrix.suite == 'root'
         run: chmod o+x "$HOME" "$HOME/work" "$GITHUB_WORKSPACE/.."
       - name: Run the server tests as root, as the image build does
+        if: matrix.suite == 'root'
         run: sudo env "PATH=$PATH" FILEDECK_REQUIRE_FANWATCH=1 FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_HOST_HELPERS=1 FILEDECK_REQUIRE_MOUNT=1 npm test
         working-directory: server
         timeout-minutes: 10
