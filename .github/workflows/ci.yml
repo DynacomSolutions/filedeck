@@ -160,7 +160,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
@@ -221,7 +221,7 @@ jobs:
             echo "Playwright install attempt $attempt failed, retrying"
           done
         shell: bash
-        timeout-minutes: 20
+        timeout-minutes: 6
       - name: Start the hub on the static build
         id: hub
         shell: bash
