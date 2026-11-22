@@ -66,8 +66,8 @@ jobs:
       matrix:
         suite: [user, root]
     runs-on: ubuntu-latest
-    # each leg takes about 6 minutes (p99 6.4 on 23 Nov); the rest is room for a slow Ubuntu mirror in "Install test tools" (up to 4 minutes seen)
-    timeout-minutes: 15
+    # each leg takes about 6 minutes (p99 6.4 on 23 Nov); the rest is room for three tries of "Install test tools" on a slow Ubuntu mirror
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -86,11 +86,11 @@ jobs:
       - name: Install test tools
         # the Ubuntu mirror is sometimes slow (single packages taking 20 s or more), which pushed this step past 5 minutes;
         # retries and a per-connection timeout get past a stalled download instead of waiting on it
-        timeout-minutes: 8
+        timeout-minutes: 10
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            if timeout 6m bash -c 'sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev'; then
+            if timeout 3m bash -c 'sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev'; then
               break
             fi
             if [[ "$attempt" == 3 ]]; then exit 1; fi
