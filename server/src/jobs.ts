@@ -51,13 +51,16 @@ export interface JobLanes {
   checkMs?: number;
 }
 
+/** What a gate may resolve with: `urgent` starts the job at once, outside the concurrency limit (see `Jobs.create`). */
+export type GateResult = void | { urgent?: boolean };
+
 export interface JobCtl {
   signal: AbortSignal;
   progress: Progress;
 }
 
 /** What an adopted job needs to run again; built from the stored allowlisted params. */
-export type Rebuild = (params: unknown, row: { title: string }) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void> }>;
+export type Rebuild = (params: unknown, row: { title: string }) => Promise<{ run: (ctl: JobCtl) => Promise<unknown>; onDrop?: () => void; gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<GateResult> }>;
 
 /** Shared store: `scope` names this process's jobs, `rebuild` restarts adopted kinds (others fail), the lease is how long a silent owner keeps its jobs. */
 export interface JobsStore {
@@ -79,6 +82,8 @@ interface Job extends JobView {
   onDrop?: () => void;
   /** set while the job waits for its gate: it is queued but takes no slot */
   gated?: boolean;
+  /** the gate said so: the job starts as soon as it is free of the gate, even when every slot is taken (it still counts in `running`) */
+  urgent?: boolean;
   abort: AbortController;
   big?: boolean;
 }
@@ -194,13 +199,15 @@ export class Jobs {
   /**
    * `onDrop` runs when the job is canceled while still queued (its `run` then never starts).
    * `gate` runs at once with the job's abort signal; the job takes no slot until it resolves (a rejection fails the job).
+   * A gate that resolves with `{ urgent: true }` starts its job at once, outside the concurrency limit. A job that waits for a slot while a running job waits for
+   * it (a scan of a subfolder that a running scan of a folder above it holds up) would never start otherwise.
    * `owner` (sign-in on: `<kind>:<name>` of the account) is kept in the stored params as `owner`, so the shared store and a process that
    * adopts the job keep it; an adopted job takes it from there. A job without params keeps it in this process only.
    * `until` (a job started under act as root): the job is canceled at that time (this process's clock), queued or running; `rootSwitch`
    * is the switch's end as the hub gave it, which names the switch (the view's `asRootUntil`; `until` when not given). Both are kept in
    * the stored params (`asRootEndsAt`, `asRootUntil`) in the same way as `owner`, so an adopted job is canceled at the same time.
    */
-  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<void>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string; until?: number; rootSwitch?: number }): JobView {
+  create(kind: string, title: string, run: (ctl: JobCtl) => Promise<unknown>, onDrop?: () => void, gate?: (signal: AbortSignal, self: { id: string; createdAt: number }) => Promise<GateResult>, meta?: { params?: unknown; id?: string; createdAt?: number; origin?: JobOrigin; owner?: string; until?: number; rootSwitch?: number }): JobView {
     const owner = meta?.owner ?? ownerIn(meta?.params);
     const until = meta?.until ?? numberIn(meta?.params, "asRootEndsAt") ?? numberIn(meta?.params, "asRootUntil");
     const rootSwitch = until === undefined ? undefined : (meta?.rootSwitch ?? numberIn(meta?.params, "asRootUntil") ?? until);
@@ -241,7 +248,10 @@ export class Jobs {
       job.gated = true;
       gate(job.abort.signal, { id: job.id, createdAt: job.createdAt })
         .then(
-          () => void (job.gated = false),
+          (g) => {
+            job.gated = false;
+            if (g && g.urgent) job.urgent = true;
+          },
           (e) => {
             job.gated = false;
             if (job.state !== "queued") return;
@@ -270,7 +280,7 @@ export class Jobs {
   }
 
   private view(j: Job): JobView {
-    const { run: _r, onDrop: _d, gated: _g, abort: _a, big: _b, params: _p, dirty: _y, owner: _o, ...v } = j;
+    const { run: _r, onDrop: _d, gated: _g, urgent: _u, abort: _a, big: _b, params: _p, dirty: _y, owner: _o, ...v } = j;
     const out: JobView = { ...v, progress: { ...j.progress } };
     if (j.state === "queued") {
       const all = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt);
@@ -510,8 +520,9 @@ export class Jobs {
   private pump() {
     if (this.stopping) return;
     for (const j of this.jobs.values()) {
-      if (!this.canStart()) return;
       if (j.state !== "queued" || j.gated) continue;
+      // an urgent job starts whatever the limit says; the others wait for room (and a later urgent job is still looked at)
+      if (!j.urgent && !this.canStart()) continue;
       if (this.lanes && !this.timer) {
         this.timer = setInterval(() => this.recheck(), this.lanes.checkMs ?? 1000);
         this.timer.unref();

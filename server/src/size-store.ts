@@ -90,10 +90,73 @@ interface Frame {
 
 interface Walk {
   root: Row;
+  /** every row of the walk is in the store (a nested scan only hands a change to the walk above it when it is) */
+  stored: boolean;
   /** folders read from disk (not reused from the store) */
   read: number;
   /** a folder was reused on its age although the watcher is running: rows from before it, or from a version without the lease, may be out of date */
   untrusted: boolean;
+}
+
+/** `a` is a folder above `b` (not `b` itself). */
+const above = (a: string, b: string) => a !== b && (a === "/" || b.startsWith(a + "/"));
+/** `b` is `a` or a folder below it. */
+const atOrBelow = (b: string, a: string) => b === a || a === "/" || b.startsWith(a + "/");
+
+/**
+ * A scan of a folder (`path`) below a walk that runs (`holder`) does not wait for that walk (see `SizeStore.lock`). Both sides keep to this claim:
+ * the walk never enters `path` while the scan runs, and takes the change the scan made to the folder's totals when the walk had passed it already.
+ */
+interface Claim {
+  path: string;
+  holder: Held;
+  /** the deepest open folder of the walk above `path` when the claim was made (the walk may have passed `path` already); null when the walk had not started */
+  at: Node | null;
+  /** the walk opened `path` or a folder above it since (it then reads the rows of the scan itself) */
+  reached: boolean;
+  /** the walk took the change of the scan into its totals */
+  taken?: boolean;
+  settled: boolean;
+  /** the change in the totals of `path` made by the scan (null: none the walk could take) */
+  delta: Sums | null;
+  /** the change could not be measured (a failed read): the walk takes nothing and marks its folder stale */
+  unknown?: boolean;
+  /** the scan has ended and let go of its lock */
+  done: Promise<void>;
+  settle(delta: Sums | null, unknown?: boolean): void;
+}
+
+/** What a walk shows to the scans of folders below it, while it runs. */
+interface WalkHook {
+  /** the device of the walk's start folder */
+  dev: number;
+  /** is the walk in `p` or in a folder below it (open now, or being opened) */
+  inside(p: string, probe?: boolean): boolean;
+  /** the open folders, the outermost first */
+  nodes(): Node[];
+  /** writes what the walk has finished and waits until every write is committed */
+  sync(): Promise<void>;
+  /** resolves when the walk is no longer in `p` or below it */
+  leave(p: string, probe?: boolean): Promise<void>;
+}
+
+interface Held {
+  path: string;
+  probe?: boolean;
+  done: Promise<void>;
+  since: number;
+  granted: boolean;
+  /** taken by a scan: a scan of a folder below it need not wait for it (see `SizeStore.lock`) */
+  scan?: boolean;
+  /** a scan lock is "queued" until its walk starts, "walking" while it runs, "finishing" from the end of the walk until the lock is let go */
+  phase: "queued" | "walking" | "finishing";
+  walk?: WalkHook;
+  /** claims of scans below this one */
+  claims: Claim[];
+  /** claims this lock made on walks above it */
+  mine: Claim[];
+  /** the stored row of the folder when the lock was granted beside a walk (null: none, "unknown": the read failed): the scan's change is measured from it (see `scanRead`) */
+  prev?: Row | null | "unknown";
 }
 
 export interface DuEntry {
@@ -479,6 +542,8 @@ const HEAL_EVERY_MS = 10 * 60_000;
 const VACUUM_MIN_FREE = 4096;
 /** a file without auto-vacuum that is more than half free pages, and has more than this free, is compacted into a new generation */
 const COMPACT_MIN_FREE = 1 << 30;
+/** a walk waits at most this long, before it opens a folder an answer is asked for, until the answer has been read (see `SizeStore.watchAnswer`) */
+const ANSWER_HOLD_MS = 10_000;
 const gb = (n: number) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GiB` : `${Math.round(n / (1 << 20))} MiB`);
 
 export class SizeStore {
@@ -487,7 +552,9 @@ export class SizeStore {
   private q!: Record<"get" | "put" | "kidPage" | "getKids" | "touch" | "delTree" | "delDirty", StatementSync>;
   /** deepest frame stack of the latest walk (tests: memory follows depth, not width) */
   lastWalkFrames = 0;
-  private held: { path: string; probe?: boolean; done: Promise<void>; since: number; granted: boolean }[] = [];
+  private held: Held[] = [];
+  /** the lock entry behind the function `lock` returned */
+  private entries = new WeakMap<() => void, Held>();
   private file = ":memory:";
   /** the name the store was given: generation 0, and the stem of every later generation (see size-gen.ts) */
   private base = ":memory:";
@@ -1219,29 +1286,95 @@ export class SizeStore {
    * Scans and changes of overlapping subtrees run one after the other, in the order they asked; unrelated subtrees do not wait.
    * Arrival order keeps a long scan from starving while small changes keep re-taking an overlapping lock.
    * The returned function releases the lock (more than once is harmless). A wait ends with an error when `signal` aborts.
+   *
+   * `nest` (scans, and the probe of a du answer; no other caller): a scan of a folder below a walk that runs does not wait for that walk.
+   * A walk is a scan lock that is granted. The new lock waits for every other overlapping lock as before, then goes beside the deepest walks above it:
+   *  - a walk that has not started (queued) will read the rows of the new scan when it comes to that folder;
+   *  - a walk that runs waits for the new scan where it comes to the folder (and, when it has passed the folder already, takes the change in the totals
+   *    at the end of the folder above, `Claim`); first the walk writes what it has finished, so the new scan changes rows that are final;
+   *  - a walk that is in the folder now (or below it) is waited for, as before;
+   *  - a walk that has ended but not let go is waited for, as before.
+   * A probe makes no claim: it only waits until no walk is in its folder.
    */
   /** Locks asked for (counter, and the latest ones): an answer read without the lock can tell whether a walk of an overlapping folder came meanwhile (`lockedSince`). */
   private lockSeq = 0;
   private recentLocks: { seq: number; path: string; probe?: boolean }[] = [];
+  /** the du answers that are being asked for or read, by folder: see `watchAnswer` */
+  private answers = new Map<string, { path: string; count: number; /** answers whose probe has not passed */ pending: number; /** folders a walk opened at or below the path */ opens: number; waiters: (() => void)[] }>();
   lockMark(): number {
     return this.lockSeq;
   }
   /**
+   * A du answer for `virtual` is asked for. A walk above `virtual` that goes on while the answer is read does not make it stale by itself (it does when it opens `virtual`
+   * or a folder below it: `opens`). A walk waits (at most `ANSWER_HOLD_MS`) before it opens `virtual` or a folder below it until the answer has been read (`end`, or `passed` for a
+   * caller that only needs the probe lock), so a scan that went beside the walk is answered before the walk goes into its folder again. Call before `lockMark`; `end` ends the watch (more than once is harmless).
+   */
+  watchAnswer(virtual: string): { passed: () => void; end: () => void; opens: () => number } {
+    let w = this.answers.get(virtual);
+    if (!w) this.answers.set(virtual, (w = { path: virtual, count: 0, pending: 0, opens: 0, waiters: [] }));
+    const e = w;
+    e.count++;
+    e.pending++;
+    let on = true;
+    let held = true;
+    const passed = () => {
+      if (!held) return;
+      held = false;
+      if (--e.pending <= 0) for (const f of e.waiters.splice(0)) f();
+    };
+    return {
+      passed,
+      opens: () => e.opens,
+      end: () => {
+        passed();
+        if (!on) return;
+        on = false;
+        if (--e.count <= 0 && this.answers.get(virtual) === e) this.answers.delete(virtual);
+      },
+    };
+  }
+  /** A scan lock's walk that started above an answer's folder is going to go into it (`c`): waits while an answer for `c` has not passed its lock (see `watchAnswer`). */
+  private async answerHold(c: string, start: string, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw new FsError(400, "canceled"); // (a cancel before the listener below is added would otherwise wait for the limit)
+    for (const w of [...this.answers.values()]) {
+      if (c !== w.path || !above(start, w.path) || w.pending <= 0) continue; // (only to go into the answer's folder; the scan that serves the answer starts at it: never held)
+      await new Promise<void>((res) => {
+        const t = setTimeout(done, ANSWER_HOLD_MS);
+        t.unref();
+        function done() {
+          clearTimeout(t);
+          signal.removeEventListener("abort", done);
+          res();
+        }
+        signal.addEventListener("abort", done, { once: true });
+        w.waiters.push(done);
+      });
+    }
+  }
+  /** A scan lock's walk opens `c`: the answers for `c` or a folder above it see it (`opens`). */
+  private noteOpen(c: string) {
+    for (const w of this.answers.values()) if (atOrBelow(c, w.path)) w.opens++;
+  }
+  /**
    * Is a lock overlapping `virtual` held or waited for now, or was one asked for since `mark` (or are there too many since to tell)? Probe locks (an answer
    * that only waits for walks ahead of it, then lets go) change nothing and do not count: two answers of one folder never make each other stale.
+   * While an answer for `virtual` is watched (`watchAnswer`), a walk above `virtual` does not count either; `since` (the watch and its `opens()` at the mark) makes the
+   * answer count a walk that opened `virtual` or a folder below it meanwhile.
    */
-  lockedSince(virtual: string, mark: number): boolean {
+  lockedSince(virtual: string, mark: number, since?: { watch: { opens: () => number }; opens: number }): boolean {
+    if (since && since.watch.opens() !== since.opens) return true;
     const overlaps = (p: string) => p === virtual || p === "/" || virtual === "/" || p.startsWith(virtual + "/") || virtual.startsWith(p + "/");
-    if (this.held.some((h) => !h.probe && overlaps(h.path))) return true;
+    const watched = !!since || this.answers.has(virtual);
+    if (this.held.some((h) => !h.probe && overlaps(h.path) && !(watched && h.scan && above(h.path, virtual)))) return true;
     if (this.lockSeq - mark > this.recentLocks.length) return true;
     return this.recentLocks.some((l) => l.seq > mark && !l.probe && overlaps(l.path));
   }
-  async lock(virtual: string, signal?: AbortSignal, /** only waits for the walks ahead (see `lockedSince`) */ probe = false): Promise<() => void> {
+  async lock(virtual: string, signal?: AbortSignal, /** only waits for the walks ahead (see `lockedSince`) */ probe = false, opts?: { nest?: boolean }): Promise<() => void> {
     const overlaps = (h: { path: string }) => h.path === virtual || h.path === "/" || virtual === "/" || h.path.startsWith(virtual + "/") || virtual.startsWith(h.path + "/");
     const canceled = () => new FsError(400, "canceled");
     if (signal?.aborted) throw canceled();
     let release!: () => void;
-    const h = { path: virtual, probe, done: new Promise<void>((r) => (release = r)), since: Date.now(), granted: false };
+    const h: Held = { path: virtual, probe, done: new Promise<void>((r) => (release = r)), since: Date.now(), granted: false, scan: !!opts?.nest && !probe, phase: "queued", claims: [], mine: [] };
     const ahead = this.held.filter(overlaps);
     h.granted = ahead.length === 0;
     this.held.push(h);
@@ -1250,8 +1383,10 @@ export class SizeStore {
     const free = () => {
       const i = this.held.indexOf(h);
       if (i >= 0) this.held.splice(i, 1);
+      for (const c of h.mine) c.settle(null); // (no-op for a claim settled already)
       release();
     };
+    this.entries.set(free, h);
     if (ahead.length) {
       let off = () => {};
       const aborted = new Promise<never>((_, rej) => {
@@ -1259,8 +1394,18 @@ export class SizeStore {
         signal?.addEventListener("abort", f, { once: true });
         off = () => signal?.removeEventListener("abort", f);
       });
+      aborted.catch(() => undefined);
       try {
-        await Promise.race([Promise.all(ahead.map((a) => a.done)), aborted]);
+        if (opts?.nest) {
+          await this.nestWait(h, ahead, aborted);
+          // After the walks above wrote what they had (and before any scan below goes beside this one, which waits for the grant): the scan's change is measured from this row.
+          if (h.mine.length) {
+            await this.tail;
+            const k = await this.getKnown(virtual);
+            h.prev = k ? (k.row ?? null) : "unknown";
+          }
+          if (signal?.aborted) throw canceled(); // (the waits above end for a cancel only while they race it)
+        } else await Promise.race([Promise.all(ahead.map((a) => a.done)), aborted]);
       } catch (e) {
         free();
         throw e;
@@ -1270,6 +1415,72 @@ export class SizeStore {
       h.granted = true;
     }
     return free;
+  }
+
+  /** `lock` with `nest`: waits for what must be waited for, and makes the claims on the walks above (see `lock`). `ahead` = the overlapping locks when `h` was queued. */
+  private async nestWait(h: Held, ahead: Held[], aborted: Promise<never>): Promise<void> {
+    const virtual = h.path;
+    const wait = (ps: Promise<unknown>[]) => Promise.race([Promise.all(ps), aborted]);
+    // the walks above: scan locks that were granted. Every other lock (below, the same folder, an ordinary lock, a probe, a lock still waiting) is waited for.
+    const walks = new Set(ahead.filter((a) => a.scan && a.granted && above(a.path, virtual)));
+    for (;;) {
+      const live = ahead.filter((a) => this.held.includes(a));
+      const block = live.filter((a) => !walks.has(a) || a.phase === "finishing");
+      if (block.length) {
+        await wait(block.map((a) => a.done));
+        continue;
+      }
+      if (!live.length) return;
+      // only the deepest walks (a claim on a shallower one would count a change twice): nothing awaited from here to the claims below, so what they see does not change
+      const deepest = Math.max(...live.map((a) => a.path.length));
+      const hold = live.filter((a) => a.path.length === deepest);
+      const inside = hold.find((a) => a.phase === "walking" && a.walk!.inside(virtual, h.probe));
+      if (inside) {
+        await wait([inside.walk!.leave(virtual, h.probe)]);
+        continue;
+      }
+      // (a probe makes no claim, but reads rows: what the walk has finished in its region is written first, so the answer is not a mix)
+      // Known limit: a scan lock above this folder that is not granted yet (for example a second size scan of the walk's folder, queued behind it) is waited for, and
+      // this scan waits for it too, because it is not a walk yet.
+      const syncs: Promise<void>[] = [];
+      if (h.probe) {
+        for (const a of hold) if (a.phase === "walking" && a.walk!.nodes().some((n) => above(n.path, virtual))) syncs.push(a.walk!.sync());
+        if (syncs.length) await wait(syncs);
+        return;
+      }
+      for (const a of hold) {
+        const w = a.phase === "walking" ? a.walk : undefined;
+        const at = (w ? [...w.nodes()].reverse().find((n) => above(n.path, virtual)) : undefined) ?? null;
+        let settle!: () => void;
+        const c: Claim = {
+          path: virtual,
+          holder: a,
+          at,
+          reached: false,
+          settled: false,
+          delta: null,
+          done: new Promise<void>((r) => (settle = r)),
+          settle: (delta, unknown) => {
+            if (c.settled) return;
+            c.settled = true;
+            c.delta = delta;
+            c.unknown = unknown;
+            settle();
+          },
+        };
+        a.claims.push(c);
+        h.mine.push(c);
+        // (the walk has the folder's chain in its buffer: written before the scan changes those rows)
+        if (at && w) syncs.push(w.sync());
+      }
+      if (syncs.length) await wait(syncs);
+      return;
+    }
+  }
+
+  /** Did the lock behind `release` go beside a walk above it (see `lock` with `nest`)? */
+  nested(release: () => void): boolean {
+    return !!this.entries.get(release)?.mine.length;
   }
 
   /**
@@ -1285,7 +1496,7 @@ export class SizeStore {
       return null;
     }
     let release!: () => void;
-    const h = { path: virtual, probe: false, done: new Promise<void>((r) => (release = r)), since: Date.now(), granted: true };
+    const h: Held = { path: virtual, probe: false, done: new Promise<void>((r) => (release = r)), since: Date.now(), granted: true, phase: "queued", claims: [], mine: [] };
     this.held.push(h);
     this.recentLocks.push({ seq: ++this.lockSeq, path: virtual });
     if (this.recentLocks.length > 256) this.recentLocks.shift();
@@ -1351,6 +1562,11 @@ export class SizeStore {
     const r = (await this.read("get", SQL.get, [p], []))?.[0];
     return r && this.toRow(r);
   }
+  /** The stored row of `p` (`row` undefined: not stored); null when the read failed, which is not the same as "not stored". */
+  private async getKnown(p: string): Promise<{ row: Row | undefined } | null> {
+    const r = await this.read("get", SQL.get, [p], null);
+    return r ? { row: r[0] ? this.toRow(r[0]) : undefined } : null;
+  }
   /** Up to `PAGE` stored child folders on device `dev` after path `after` (keyset paging, so a folder with millions never loads at once). */
   /** null when the read failed (a busy database): not the same as "no more rows" */
   private async kidPage(p: string, dev: number, after: string): Promise<Row[] | null> {
@@ -1413,7 +1629,7 @@ export class SizeStore {
    * A walk that fails after rows were written marks the subtree stale so the next scan re-reads it (parents above would
    * otherwise keep totals from before).
    */
-  private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** when the scan (job) began: rows written since are its own and are kept when it runs again after a restart, whatever their age (a rescan keeps only those) */ since?: number; force?: boolean; trust?: boolean }): Promise<Walk> {
+  private async walk(virtual: string, real: string, st: Stats, ctl: JobCtl, mode: { fresh: boolean; /** when the scan (job) began: rows written since are its own and are kept when it runs again after a restart, whatever their age (a rescan keeps only those) */ since?: number; force?: boolean; trust?: boolean; /** the scan lock this walk runs under: scans of folders below it go beside it (see `lock`) */ held?: Held }): Promise<Walk> {
     /** the generation it reads and writes, taken before anything it decides: after a move to another one it writes nothing more (its rows were checked against the old file) */
     const sw = this.switches;
     await this.reopen();
@@ -1544,6 +1760,67 @@ export class SizeStore {
         const names = kids?.length ? kids.map((k) => path.posix.basename(k.path)) : await firstNames(r, AHEAD_NAMES);
         await Promise.all(names.map((n) => fs.lstat(path.join(r, n)).catch(() => undefined)));
       }).catch(() => undefined);
+    };
+
+    // Scans of folders below this walk (see `lock` with `nest`) make claims on it. The walk keeps to them: it never enters a claimed folder while its scan
+    // runs, and a scan that came after the walk passed its folder gives its change in the totals to the folder above.
+    const nest = mode.held?.scan ? mode.held : undefined;
+    /** the folder being opened (not in `frames` yet) */
+    let opening: string | null = null;
+    /** the walk waits to go into `opening` for an answer (see `answerHold`): it does not count as being in it */
+    let holding = false;
+    /** ends the hold: a scan lock of the folder waits for the walk to leave it (the answer for that folder, if any, may be of that scan, which would wait for the answer's end) */
+    let stopHold: (() => void) | undefined;
+    const leavers: { p: string; probe?: boolean; res: () => void }[] = [];
+    // (a walk that is held for an answer is not in the folder for the answer's own lock, only: a scan lock of that folder still waits for the walk to leave it)
+    const inside = (p: string, probe = false) => (opening !== null && !(probe && holding) && atOrBelow(opening, p)) || frames.some((f) => atOrBelow(f.node.path, p));
+    const notifyLeavers = () => {
+      for (let i = leavers.length - 1; i >= 0; i--) {
+        if (inside(leavers[i]!.p, leavers[i]!.probe)) continue;
+        leavers[i]!.res();
+        leavers.splice(i, 1);
+      }
+    };
+    /** waits for `p`, or ends with an error when the walk is canceled */
+    const until = (p: Promise<void>) =>
+      new Promise<void>((res, rej) => {
+        if (ctl.signal.aborted) return rej(new FsError(400, "canceled"));
+        const off = () => rej(new FsError(400, "canceled"));
+        ctl.signal.addEventListener("abort", off, { once: true });
+        void p.then(() => {
+          ctl.signal.removeEventListener("abort", off);
+          res();
+        });
+      });
+    /** the walk opens (or skips, too deep) `c`: a scan that claimed a folder at or below `c`, and came before this, is ahead of the walk, which reads its rows */
+    const reach = (c: string) => {
+      if (!nest) return;
+      for (const r of nest.claims) if (!r.reached && atOrBelow(r.path, c) && (r.at === null || above(r.at.path, c))) r.reached = true;
+    };
+    /** a claim of the walk's folder `n` that the walk has to take into `n` before it ends (the scan came after the walk passed its folder) */
+    const owed = (n: Node) => nest?.claims.find((r) => r.at === n && !r.reached && !r.taken);
+    /** a claim is over for the walk: it has taken the change, or has opened the claimed folder (the scan has ended) */
+    const retire = (r: Claim) => {
+      const i = nest!.claims.indexOf(r);
+      if (i >= 0) nest!.claims.splice(i, 1);
+    };
+    /** folders below DU_MAX_DEPTH that were counted and not entered: a scan below one is not in this walk's totals either (bounded: past it, the walk does not trust a correction) */
+    const cuts: string[] = [];
+    let cutsFull = false;
+    /** takes the change of one claim into `n`, once its scan has ended */
+    const take = async (r: Claim, n: Node) => {
+      r.taken = true;
+      await until(r.done);
+      retire(r);
+      // Only the folder the walk has open is marked, never the whole walk: the next scan reads that folder again and reuses the rest.
+      if (cutsFull) return void this.markStale(n.path); // too many cuts to tell whether this scan is below one
+      if (cuts.some((c) => atOrBelow(r.path, c))) return; // never part of this walk
+      // not passed, but unreached: the folder is gone (or no longer a folder here) since the walk listed its parent, so the walk never counted it: nothing to add
+      const here = await fs.lstat(resolveRead(this.o.root, r.path).real).then((x) => x.isDirectory() && Number(x.dev) === dev, () => false);
+      if (!here || r.unknown) return void this.markStale(n.path); // (or the change of the scan could not be measured)
+      if (r.delta) addTo(n.tot, r.delta);
+      // the scan rewrote the rows of its folder with its own stamp: the purge of its parent (this walk's `n`) must not drop them
+      if (parentOf(r.path) === n.path) buf.push({ path: r.path, parent: n.path, ino: 0, dev, mtime_ms: 0, scanned_at: 0, seen_at: stamp, ver: 0, own: zero(), tot: zero(), reused: true, touch: true });
     };
 
     /** `n` has all its children: its totals are final. Store it and roll it into its parent. */
@@ -1708,6 +1985,36 @@ export class SizeStore {
     const open = async (t: Child & { root: boolean; up?: Node }): Promise<Frame | null> => {
       canceled();
       ctl.progress.current = t.virtual;
+      if (nest) {
+        reach(t.virtual);
+        // Until no scan of this folder is left to wait for: a scan of the same folder that came while the walk was held for an answer waits for the walk to leave (it is
+        // not granted beside the walk), but one that was granted before the hold began may have made a claim meanwhile.
+        let again = false;
+        for (let claimed = nest.claims.filter((r) => r.path === t.virtual); claimed.length; claimed = nest.claims.filter((r) => r.path === t.virtual)) {
+          for (const r of claimed) {
+            await until(r.done);
+            retire(r);
+          }
+          // A du answer for this folder that waits for the scan is answered before the walk goes in again (the walk is not "in" the folder meanwhile, for the answer's lock).
+          if (!leavers.some((l) => !l.probe && atOrBelow(t.virtual, l.p))) {
+            holding = true;
+            notifyLeavers();
+            try {
+              await Promise.race([this.answerHold(t.virtual, virtual, ctl.signal), new Promise<void>((res) => (stopHold = res))]);
+            } finally {
+              holding = false;
+              stopHold = undefined;
+            }
+          }
+          again = true;
+          reach(t.virtual);
+        }
+        if (again) {
+          // The scan wrote new rows for this folder: what was read before the wait is old.
+          t = { ...t, stored: undefined };
+          firstPages.delete(t.virtual);
+        }
+      }
       const s = t.s;
       const ino = Number(s.ino);
       const stored = t.stored === undefined ? await this.getWithKids(t.virtual) : t.stored ?? undefined;
@@ -1755,6 +2062,8 @@ export class SizeStore {
         ctl.progress.bytes = bytes;
         return storedFrame(node, t.real, first);
       }
+      // (a folder that is read again, not one that is reused with the same rows: only that can change what an answer for it has read)
+      if (nest) this.noteOpen(t.virtual);
       const node: Node = { path: t.virtual, parent: parentOf(t.virtual), ino, dev, mtime_ms: s.mtimeMs, scanned_at: now, seen_at: stamp, ver: epoch, own: zero(), tot: zero(), reused: false, up: t.up };
       read++;
       node.purge = storedKids > 0 || !stored || stored.dev !== dev; // no stored row: children may still be stored (a scan of a child alone)
@@ -1773,15 +2082,51 @@ export class SizeStore {
       } catch {
         node.own.errors++;
         node.tot = { ...node.own };
+        // A scan went beside this walk in a folder below this one that cannot be read: its rows are not this walk's to drop (the purge of this folder would delete them while the scan
+        // writes them). The walk waits for the scan and keeps the rows, and this folder is marked stale: the next scan reads it.
+        const under = nest?.claims.filter((r) => above(t.virtual, r.path)) ?? [];
+        if (under.length) {
+          for (const r of under) await until(r.done);
+          node.purge = false;
+          this.markStale(t.virtual);
+        }
         await finish(node);
         return null;
       }
       return readFrame(node, src, t.virtual, t.real, t.root);
     };
 
+    /** `open`, and the frame is pushed before the folder counts as left (a scan below it waits while the walk is in it) */
+    const openIn = async (t: Child & { root: boolean; up?: Node }) => {
+      opening = t.virtual;
+      try {
+        const f = await open(t);
+        if (f) frames.push(f);
+        return f;
+      } finally {
+        opening = null;
+        notifyLeavers();
+      }
+    };
+    if (nest) {
+      nest.walk = {
+        dev,
+        inside,
+        nodes: () => frames.map((f) => f.node),
+        sync: async () => {
+          if (buf.length) await flush(null);
+          await drain();
+        },
+        leave: (p, probe) => {
+          if (!inside(p, probe)) return Promise.resolve();
+          if (!probe) stopHold?.();
+          return new Promise<void>((res) => leavers.push({ p, probe, res }));
+        },
+      };
+      nest.phase = "walking";
+    }
     try {
-      const first = await open({ virtual, real, root: true, s: st });
-      if (first) frames.push(first);
+      await openIn({ virtual, real, root: true, s: st });
       while (frames.length) {
         canceled();
         // the kernel's dentry and inode cache of what was stat-ed must not fill the cgroup (see memcg.ts); close to the limit the walk waits for the reclaim
@@ -1794,15 +2139,20 @@ export class SizeStore {
             if (!f.node.reused) f.node.own.errors++;
             f.node.tot.errors++;
             tooDeep = true;
+            reach(c.virtual);
+            if (cuts.length < 1000) cuts.push(c.virtual);
+            else cutsFull = true;
             continue;
           }
-          const nf = await open({ ...c, root: false, up: f.node });
-          if (nf) frames.push(nf);
+          await openIn({ ...c, root: false, up: f.node });
           this.lastWalkFrames = Math.max(this.lastWalkFrames, frames.length);
         } else {
-          frames.pop();
           await f.close();
+          // the folder stays in `frames` while it waits for the scans that came after the walk passed their folders; checked and left in one step
+          for (let r = owed(f.node); r; r = owed(f.node)) await take(r, f.node);
+          frames.pop();
           await finish(f.node);
+          notifyLeavers();
         }
       }
     } catch (e) {
@@ -1813,6 +2163,11 @@ export class SizeStore {
       if (written && !fenced) void this.write("DELETE FROM partial WHERE path = ? OR (path > ? AND path < ?)", [virtual, ...below(virtual)]); // counts of a walk that stopped
       throw e;
     } finally {
+      if (nest) {
+        // (a scan that comes now waits for the lock to be let go)
+        nest.phase = "finishing";
+        for (const l of leavers.splice(0)) l.res();
+      }
       for (const f of frames) await f.close();
     }
     await drain();
@@ -1845,7 +2200,7 @@ export class SizeStore {
       if (parts.length) await this.txn(parts);
     }
     if (!this.db) this.keep(rows);
-    return { root: root!, read, untrusted: untrusted && this.covers(virtual) };
+    return { root: root!, read, untrusted: untrusted && this.covers(virtual), stored: !!this.db && !fenced && !dirty && sw === this.switches && (this.file === ":memory:" || walkClosed) };
   }
 
   /** The writer worker's `commit` (WRITER_WORKER) for a store that has no file: one transaction. `last` = the start folder, whose change is added to the ancestors. */
@@ -1934,7 +2289,11 @@ export class SizeStore {
    * `after` runs once the scan is stored, still under the lock, so it never sees a half-written scan.
    */
   async scanRead<T = undefined>(virtual: string, ctl: JobCtl = noCtl(), fresh: boolean | number = false, release?: () => void, after?: () => Promise<T>, /** when the scan's job began (see `walk`) */ since?: number): Promise<{ res: SizeResult; read: number; untrusted: boolean; extra?: T }> {
-    release ??= await this.lock(resolveRead(this.o.root, virtual).virtual);
+    release ??= await this.lock(resolveRead(this.o.root, virtual).virtual, undefined, false, { nest: true });
+    const held = this.entries.get(release);
+    /** the change this scan makes to its folder's totals, for the walk above it (null = not known) */
+    let delta: Sums | null = null;
+    const r0 = resolveRead(this.o.root, virtual).virtual;
     try {
       const r = resolveRead(this.o.root, virtual);
       let st: Stats;
@@ -1955,6 +2314,8 @@ export class SizeStore {
         }
         throw e;
       }
+      // a walk above never enters another device: it has nothing to wait for or to take from this scan
+      for (const c of held?.mine ?? []) if (c.holder.walk && c.holder.walk.dev !== Number(st.dev)) c.settle(null);
       if (!st.isDirectory()) return { res: { path: r.virtual, files: 1, dirs: 0, symlinks: 0, other: 0, bytes: st.size, diskBytes: Number(st.blocks) * 512, truncated: false, mountsSkipped: 0, errors: 0 }, read: 0, untrusted: false };
       await this.tail;
       // The previous scan is the expected total (progress and ETA); read before the walk replaces it.
@@ -1963,9 +2324,29 @@ export class SizeStore {
         ctl.progress.totalEntries = prev.tot.files + prev.tot.dirs + prev.tot.symlinks + prev.tot.other;
         ctl.progress.totalBytes = prev.tot.bytes;
       }
-      const w = await this.walk(r.virtual, r.real, st, ctl, { fresh: !!fresh, since: typeof fresh === "number" ? fresh : since });
+      const w = await this.walk(r.virtual, r.real, st, ctl, { fresh: !!fresh, since: typeof fresh === "number" ? fresh : since, held });
       return { res: this.result(w.root), read: w.read, untrusted: w.untrusted, ...(after ? { extra: await after() } : {}) };
     } finally {
+      if (held) {
+        // Scans of folders below this one that went beside it end first (small and bounded): a walk that fails or is canceled never lets another in while one still writes.
+        await Promise.all(held.claims.map((c) => c.done));
+        // the walk above this scan goes on into its folder now, with the change this scan made
+        // The change is what the store's row of this folder went through since the lock was granted: that is what reached the ancestors' stored rows, whether this scan
+        // ended, failed or was canceled (its commits are all written when the walk returns or throws), and with it the changes of the scans below this one.
+        let unknown = false;
+        const before = held.prev;
+        if (held.mine.length && before === "unknown") unknown = true;
+        else if (held.mine.length && before && before !== "unknown") {
+          const k = await this.tail.then(() => this.getKnown(r0)).catch(() => null);
+          if (!k?.row) unknown = true; // (a row that was there and is gone, or a failed read)
+          else {
+            delta = zero();
+            addTo(delta, k.row.tot);
+            addTo(delta, before.tot, -1);
+          }
+        }
+        for (const c of held.mine) c.settle(delta, unknown);
+      }
       release();
     }
   }
@@ -2298,10 +2679,11 @@ export class SizeStore {
   /**
    * Is a change of `virtual`, of a folder above it or of anything below it waiting: in the watcher (buffered, being handed to the store, held in memory, taken),
    * pending or dirty in the store, being applied or walked here (a lock held)? A finished du is repeated within a minute from its result, which is only right if not.
+   * `nested`: a scan lock of a folder above `virtual` does not count (a scan of `virtual` does not wait for it; the watcher's own checks stay).
    */
-  async changesWaiting(virtual: string): Promise<boolean> {
+  async changesWaiting(virtual: string, opts?: { nested?: boolean }): Promise<boolean> {
     const overlaps = (p: string) => p === "/" || virtual === "/" || p === virtual || p.startsWith(virtual + "/") || virtual.startsWith(p + "/");
-    if (!this.quiet(virtual) || [...this.taken].some(overlaps) || this.held.some((h) => overlaps(h.path))) return true;
+    if (!this.quiet(virtual) || [...this.taken].some(overlaps) || this.held.some((h) => overlaps(h.path) && !(opts?.nested && h.scan && above(h.path, virtual)))) return true;
     if (!this.db) return false;
     const chain: string[] = [];
     for (let a = virtual; a; a = parentOf(a)) chain.push(a);

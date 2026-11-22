@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import { resolveRead } from "./paths.ts";
 import * as ops from "./fsops.ts";
 import * as ar from "./archive.ts";
-import { Jobs } from "./jobs.ts";
+import { Jobs, type JobLanes } from "./jobs.ts";
 import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
 import { extractBlocked, hitsReadOnly, jobMayWrite } from "./readonly.ts";
@@ -51,10 +51,15 @@ function dispo(name: string) {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
+/** A size or du job that has run this long is a long walk: it no longer takes one of the job slots (see `JobLanes`), so a small scan queued behind it still starts. */
+export const BIG_SCAN_MS = 30_000;
+
 /** The agent's background jobs: kept in the shared job file when `cfg.jobsFile` is set (handed to the next process on a restart), else in memory. */
 export function makeAgentJobs(cfg: Config): Jobs {
   const shared = cfg.jobsFile ? { store: new JobStore(cfg.jobsFile), scope: cfg.node, leaseMs: 10_000 } : undefined;
-  return new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, undefined, shared);
+  // (size and du jobs only: other kinds are never big, so their limit stays; the jobs that run at once, long walks included, are at most the limit plus two)
+  const lanes: JobLanes = { isBig: (j) => (j.kind === "size" || j.kind === "du") && j.state === "running" && j.startedAt !== undefined && Date.now() - j.startedAt > BIG_SCAN_MS, maxTotal: cfg.jobConcurrency + 2 };
+  return new Jobs(cfg.jobConcurrency, 100, (e) => ops.mapError(e).message, lanes, shared);
 }
 
 /** Listing, polling, cancelling and dismissing the jobs of `jobs`, whatever their kind. */
