@@ -91,7 +91,7 @@ test("a store whose only damage is an index is repaired by the writer: one log l
     const s = mk(file);
     await s.mayScan(); // takes the lease
     await s.clearPending(); // a DELETE on pending: malformed on the broken index, which sends the store to the repair
-    for (let i = 0; i < 1500 && check(file).length; i++) await sleep(50);
+    for (let i = 0; i < 1500 && check(file).join() !== "ok"; i++) await sleep(50);
     await sleep(100);
   });
   assert.deepEqual(check(file), ["ok"]);

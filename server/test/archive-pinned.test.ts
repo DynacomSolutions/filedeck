@@ -801,6 +801,7 @@ test("7-Zip gets the fixed reserved names as patterns and the scanned paths in a
 
 test("the mode of a produced archive follows one rule: private when read with more privilege than the destination's owner", async () => {
   const s = szCompressScene("sz-mode", "ok");
+  fs.writeFileSync(s.go, ""); // the bsdtar stand-in waits for this file (up to 30 s) before it writes the archive
   const r = await runCompress(await szPlan(s), LIM, mkCtl().ctl);
   void r;
   const mode = fs.statSync(path.join(s.dest, "x.7z")).mode & 0o777;

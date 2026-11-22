@@ -52,6 +52,9 @@ export async function validate(s: SizeStore, p = "/") {
   a.watchedSince = () => ready;
   await sleep(5);
   await s.scan(p, undefined, true);
+  // the store vouches only once the writer's background indexes exist (idxReady): on a loaded host the walk can end before that
+  await until(() => !!a.idxReady, 7_500);
+  assert.ok(a.idxReady, "the store did not build its indexes as the writer, so it cannot vouch for a walk");
 }
 export const bytes = (t: { entries: { bytes: number }[] } | null) => t?.entries?.[0]?.bytes ?? null;
 export const backlog = async (s: SizeStore, ps: string[]) => {

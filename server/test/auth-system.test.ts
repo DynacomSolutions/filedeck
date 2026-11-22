@@ -455,20 +455,22 @@ test("AgentSystemAuth: limits are 15 s per call and 20 s in all", () => {
 });
 
 test("AgentSystemAuth: only ok signs in, only fail stops; anything else goes on to the next", async () => {
-  const cases: [Answer, boolean][] = [
-    [json({ result: "unknown" }), true],
-    [json({ result: "unavailable" }), true],
-    [json({ result: "ok" }, 500), true],
-    [json({ result: "ok" }, 201), true],
-    [new Response("not json", { status: 200 }), true],
-    [json({ answer: "ok" }), true],
-    ["throw", true],
-    [json({ result: "fail" }), false],
-    [json({ result: "refused" }), false],
+  // Each case builds a fresh Response: a clone shares a tee'd body, and cancelling one branch waits for the other.
+  const cases: [() => Answer, boolean][] = [
+    [() => json({ result: "unknown" }), true],
+    [() => json({ result: "unavailable" }), true],
+    [() => json({ result: "ok" }, 500), true],
+    [() => json({ result: "ok" }, 201), true],
+    [() => new Response("not json", { status: 200 }), true],
+    [() => json({ answer: "ok" }), true],
+    [() => "throw", true],
+    [() => json({ result: "fail" }), false],
+    [() => json({ result: "refused" }), false],
   ];
-  for (const [first, next] of cases) {
+  for (const [make, next] of cases) {
     for (const m of ["password", "key"] as const) {
-      const { asked, call } = fakeCall({ x: typeof first === "string" ? first : first.clone(), y: json({ result: "ok" }) });
+      const first = make();
+      const { asked, call } = fakeCall({ x: first, y: json({ result: "ok" }) });
       const s = new AgentSystemAuth({ nodes: ["x", "y"], call, log: () => {} });
       const got = m === "password" ? await s.password("alice", PW) : await s.key("alice", KEY.line, Buffer.from("m"), Buffer.from("s"));
       assert.equal(got, next, `${m} after ${typeof first === "string" ? first : first.status}`);

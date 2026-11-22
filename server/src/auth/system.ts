@@ -129,7 +129,8 @@ export class AgentSystemAuth implements SystemAuth {
     const got = (async (): Promise<{ ok: true; body: unknown } | { ok: false; why: string }> => {
       const r = await this.call(node, path, body, ac.signal);
       if (r.status !== 200) {
-        await r.body?.cancel().catch(() => undefined);
+        // Not awaited: a cancel that waits on another reader must not turn a clear status into a timeout.
+        void r.body?.cancel().catch(() => undefined);
         return { ok: false, why: `status ${r.status}` };
       }
       try {
