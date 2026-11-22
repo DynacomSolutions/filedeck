@@ -152,13 +152,19 @@ jobs:
       - run: npm run build -w web
         timeout-minutes: 10
 
-  # Drives the built app in Chromium (web/test/browser): keyboard, focus, axe-core A and AA rules, layouts and a large listing.
+  # Drives the built app in a browser (web/test/browser): keyboard, focus, axe-core A and AA rules, layouts and a large listing.
+  # One leg per browser, each running its checks in parallel processes (npm run check:parallel).
   # The hub serves the static build; the script answers /api/** itself from a deterministic fixture, so no agent is needed.
   browser:
+    name: browser (${{ matrix.engine }})
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, firefox]
     permissions:
       contents: read
     env:
@@ -184,26 +190,26 @@ jobs:
         timeout-minutes: 5
       - run: npm run build
         timeout-minutes: 10
-      # The key names both browsers: a cache saved with Chromium only must not count as a hit.
-      - name: Cache the Playwright browsers
+      # The key names the engine: each leg caches only its own browser.
+      - name: Cache the Playwright browser
         id: playwright-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-firefox-${{ runner.os }}-${{ hashFiles('web/test/browser/package-lock.json') }}
+          key: playwright-${{ matrix.engine }}-${{ runner.os }}-${{ hashFiles('web/test/browser/package-lock.json') }}
         timeout-minutes: 5
       - name: Configure apt retries
         # a stalled mirror connection times out after 30 s and apt retries it; Playwright runs apt-get itself, so flags cannot reach it
         run: |
           printf '%s\n' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::http::Pipeline-Depth "0";' 'DPkg::Lock::Timeout "300";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
         timeout-minutes: 1
-      - name: Install Chromium and Firefox for Playwright
+      - name: Install ${{ matrix.engine }} for Playwright
         working-directory: web/test/browser
         run: |
           if [[ "${{ steps.playwright-cache.outputs.cache-hit }}" == true ]]; then
-            install_cmd="npx playwright install-deps chromium firefox"
+            install_cmd="npx playwright install-deps ${{ matrix.engine }}"
           else
-            install_cmd="npx playwright install --with-deps chromium firefox"
+            install_cmd="npx playwright install --with-deps ${{ matrix.engine }}"
           fi
           for attempt in 1 2 3; do
             if timeout 6m $install_cmd; then
@@ -231,17 +237,11 @@ jobs:
           cat "$RUNNER_TEMP/hub.log" >&2
           exit 1
         timeout-minutes: 2
-      - name: Run the browser acceptance checks in Chromium
-        run: npm run check
-        working-directory: web/test/browser
-        timeout-minutes: 10
-      # Firefox runs also when the Chromium run failed, so one job shows the result for both engines.
-      - name: Run the browser acceptance checks in Firefox
-        if: ${{ !cancelled() && steps.hub.outcome == 'success' }}
-        run: npm run check:firefox
+      - name: Run the browser acceptance checks in ${{ matrix.engine }}
+        run: npm run check:parallel
         working-directory: web/test/browser
         env:
-          FILEDECK_EVIDENCE_DIR: ${{ github.workspace }}/web/test/browser/evidence/firefox
+          BROWSER: ${{ matrix.engine }}
         timeout-minutes: 10
       - name: Stop the hub
         if: always()
@@ -254,7 +254,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: browser-acceptance-evidence
+          name: browser-acceptance-evidence-${{ matrix.engine }}
           path: web/test/browser/evidence
           if-no-files-found: ignore
           retention-days: 7
