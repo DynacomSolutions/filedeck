@@ -1701,9 +1701,10 @@ async function verifyNoHorizontalOverflow(browser) {
 
 // Sign-in on and no session: the sign-in screen replaces the app. It passes axe in both schemes, with an error shown too,
 // and does not scroll sideways on a phone. Signed in, the header names the account and offers "Sign out".
-async function verifySignIn(browser) {
+async function verifySignIn(browser, schemes = ['light', 'dark']) {
+  const once = schemes.includes('light');
   const failures = [];
-  for (const scheme of ['light', 'dark']) {
+  for (const scheme of schemes) {
     for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
       const context = await browser.newContext({ viewport, colorScheme: scheme, bypassCSP: true });
       const page = await context.newPage();
@@ -1738,15 +1739,17 @@ async function verifySignIn(browser) {
       }
     }
   }
-  const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-user' } });
-  try {
-    await page.getByRole('button', { name: 'Account: fixture-user' }).click();
-    await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
-  } finally {
-    await context.close();
+  if (once) {
+    const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-user' } });
+    try {
+      await page.getByRole('button', { name: 'Account: fixture-user' }).click();
+      await page.getByRole('menuitem', { name: 'Sign out' }).waitFor({ state: 'visible' });
+    } finally {
+      await context.close();
+    }
+    await verifyResumeAfterSessionEnds(browser);
   }
-  await verifyResumeAfterSessionEnds(browser);
-  await verifyTailscaleSignIn(browser, failures);
+  await verifyTailscaleSignIn(browser, failures, schemes);
   assert.deepEqual(failures, [], 'the sign-in screen passes axe and fits the window');
 }
 
@@ -1755,7 +1758,8 @@ async function verifySignIn(browser) {
 // password. 503 shows a note; `{}` shows nothing new. axe passes and nothing overflows sideways at 1365x900, 390x844 and 320x568
 // in light and dark. The click sends one POST with `{}`; the app then loads and the account menu names the method. Acting as root
 // from a Tailscale session still asks for the password. A 503 from /api/auth/me is a wait with a retry, never the sign-in screen.
-async function verifyTailscaleSignIn(browser, failures) {
+async function verifyTailscaleSignIn(browser, failures, schemes = ['light', 'dark']) {
+  const once = schemes.includes('light');
   const open = async (viewport, scheme, fixture) => {
     const context = await browser.newContext({ viewport, colorScheme: scheme, bypassCSP: true });
     const page = await context.newPage();
@@ -1772,7 +1776,7 @@ async function verifyTailscaleSignIn(browser, failures) {
   const posts = (fixture) => fixture.requests.filter((r) => r === '/api/auth/login-tailscale').length;
   const tsButton = (page) => page.getByRole('button', { name: 'Sign in with Tailscale', exact: true });
   const heading = (page) => page.getByRole('heading', { name: /^Sign in to / });
-  for (const scheme of ['light', 'dark']) {
+  for (const scheme of schemes) {
     for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
       const label = `${viewport.width}x${viewport.height} ${scheme}`;
       const fixture = { signedOut: true, tailnet: { body: { login: 'alice.with.a.rather.long.name@example-github', displayName: 'Alice Example', node: { name: 'alice-laptop' } } }, tailscale: { refuse: true } };
@@ -1842,7 +1846,7 @@ async function verifyTailscaleSignIn(browser, failures) {
   }
   // a button that comes late does not move the form: its space is kept while the request is pending, so a tap meant for the
   // name field (made at the field's place from before) lands there and signs nobody in
-  for (const viewport of [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
+  for (const viewport of !once ? [] : [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
     const fixture = { signedOut: true, tailnet: { body: { login: 'alice@github' }, delayMs: 1500 }, tailscale: { as: { account: 'fixture-ts', kind: 'virt', admin: false, subject: 'alice@github' } } };
     const { context, page } = await open(viewport, 'light', fixture);
     try {
@@ -1866,7 +1870,7 @@ async function verifyTailscaleSignIn(browser, failures) {
   }
   // the waiting screen: "Try now" shows "Trying…" while in flight, then the status says "still"; Sign out ends the session and
   // shows the sign-in screen; a 401 while waiting shows the sign-in screen too
-  {
+  if (once) {
     const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github', meUnavailable: 1000 };
     const { context, page } = await open({ width: 390, height: 844 }, 'light', fixture);
     try {
@@ -1890,7 +1894,7 @@ async function verifyTailscaleSignIn(browser, failures) {
       await context.close();
     }
   }
-  {
+  if (once) {
     const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github', meUnavailable: 1000 };
     const { context, page } = await open({ width: 390, height: 844 }, 'light', fixture);
     try {
@@ -1905,7 +1909,7 @@ async function verifyTailscaleSignIn(browser, failures) {
   }
   // the hub's tailnet 503 while the app is open: a banner over the app, which stays mounted (the panel keeps its state), and goes
   // once me answers again; axe passes and it fits at 1365x900 and 320x568 in light and dark
-  for (const scheme of ['light', 'dark']) {
+  for (const scheme of schemes) {
     for (const viewport of [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
       const label = `${viewport.width}x${viewport.height} ${scheme}`;
       const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github' };
@@ -1939,7 +1943,7 @@ async function verifyTailscaleSignIn(browser, failures) {
     }
   }
   // Sign out from the banner ends the session and shows the sign-in screen
-  {
+  if (once) {
     const fixture = { account: 'fixture-ts', kind: 'virt', method: 'tailscale', tailnetSubject: 'alice@github' };
     const { context, page } = await open({ width: 1365, height: 900 }, 'light', fixture);
     try {
@@ -1958,7 +1962,7 @@ async function verifyTailscaleSignIn(browser, failures) {
     }
   }
   // no tailnet identity: the page is as before
-  {
+  if (once) {
     const fixture = { signedOut: true, tailnet: { body: {} } };
     const { context, page } = await open({ width: 1365, height: 900 }, 'light', fixture);
     try {
@@ -1971,7 +1975,7 @@ async function verifyTailscaleSignIn(browser, failures) {
     }
   }
   // the click signs in; the account menu names the method; acting as root still asks for the password
-  for (const scheme of ['light', 'dark']) {
+  for (const scheme of schemes) {
     const asRoot = {};
     const fixture = { signedOut: true, asRoot, tailnet: { body: { login: 'alice@github' } }, tailscale: { as: { account: 'fixture-root', kind: 'sys', admin: true, subject: 'alice@github' } } };
     const { context, page } = await open({ width: 390, height: 844 }, scheme, fixture);
@@ -2001,7 +2005,7 @@ async function verifyTailscaleSignIn(browser, failures) {
     }
   }
   // a password session's menu has no Tailscale line
-  {
+  if (once) {
     const { context, page } = await openPage(browser, { state: directState(), fixture: { account: 'fixture-user', method: 'password' } });
     try {
       await page.getByRole('button', { name: 'Account: fixture-user' }).click();
@@ -2294,10 +2298,10 @@ async function verifySystemOwnAccount(browser, scheme, failures) {
   }
 }
 
-async function verifyAccounts(browser) {
+async function verifyAccounts(browser, schemes = ['light', 'dark']) {
   const failures = [];
   const password = 'fixture account password';
-  for (const scheme of ['light', 'dark']) {
+  for (const scheme of schemes) {
     for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
       const label = `${viewport.width}x${viewport.height} ${scheme}`;
       const adminApi = { posts: [], conflict: true, sysExtra: [{ name: 'bob', sources: { 'fixture-retired': { write: true } }, tailnet: ['a@x.y', 'b@x.y'] }] };
@@ -2694,6 +2698,10 @@ async function verifyAccounts(browser) {
       }
     }
   }
+  if (!schemes.includes('light')) {
+    assert.deepEqual(failures, [], 'the Accounts view passes axe, fits the window and keeps the password out of URLs and storage');
+    return;
+  }
   // closing the view clears the refresh: with the Signed in tab shown, close, move the clock on, and no list is asked for
   {
     const adminApi = { posts: [] };
@@ -2817,7 +2825,8 @@ async function verifyTailnetCanSignIn(browser) {
 // reports the switch the header shows "Acting as root until HH:MM" (local end from the hub's time left) with Stop. Banner and open dialog pass axe in light and dark and fit at 390x844
 // and 320x568; the password is cleared after a failed attempt and is never stored. Stop and the end time hide the banner and
 // ask the hub again. Non-admins and virtual accounts never see the item or the banner.
-async function verifyActAsRoot(browser) {
+async function verifyActAsRoot(browser, schemes = ['light', 'dark']) {
+  const once = schemes.includes('light');
   const failures = [];
   const hhmm = (t) => page0.evaluate((u) => { const d = new Date(u); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }, t);
   let page0;
@@ -2835,7 +2844,7 @@ async function verifyActAsRoot(browser) {
     await dialog.waitFor({ state: 'visible' });
     return dialog;
   };
-  for (const scheme of ['light', 'dark']) {
+  for (const scheme of schemes) {
     for (const viewport of [{ width: 1365, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 568 }]) {
       const asRoot = { until: Date.now() + 10 * 60_000 };
       const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture: { account: 'fixture-admin', kind: 'sys', admin: true, asRoot } });
@@ -2871,7 +2880,7 @@ async function verifyActAsRoot(browser) {
     }
   }
   // Stop, then turn it on again with the password; the end time hides the banner and the app asks the hub again.
-  {
+  if (once) {
     const asRoot = { until: Date.now() + 10 * 60_000 };
     const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
     const { context, page } = await openPage(browser, { state: directState(), fixture });
@@ -2902,7 +2911,7 @@ async function verifyActAsRoot(browser) {
     }
   }
   // the end time the hub gave when the switch was turned on hides the banner on its own (one timer, nothing asked first)
-  {
+  if (once) {
     const asRoot = { lasts: 3000 };
     const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
     const { context, page } = await openPage(browser, { state: directState(), fixture });
@@ -2921,7 +2930,7 @@ async function verifyActAsRoot(browser) {
   }
   // A browser clock 20 minutes ahead of the hub: the hub's time left decides. The banner shows, names the local end, and
   // a switch with 3 seconds left by the hub's clock hides about 3 seconds later by the browser's timers.
-  {
+  if (once) {
     const skew = 20 * 60_000;
     const asRoot = { until: Date.now() + 10 * 60_000, lasts: 3000 };
     const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, asRoot };
@@ -2946,7 +2955,7 @@ async function verifyActAsRoot(browser) {
     }
   }
   // A Stop the hub does not confirm keeps the banner and says so in an alert; it passes axe and fits the window.
-  for (const scheme of ['light', 'dark']) {
+  for (const scheme of schemes) {
     for (const viewport of [{ width: 1365, height: 900 }, { width: 320, height: 568 }]) {
       const asRoot = { until: Date.now() + 10 * 60_000, failStop: true };
       const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, state: directState(), fixture: { account: 'fixture-admin', kind: 'sys', admin: true, asRoot } });
@@ -2967,7 +2976,7 @@ async function verifyActAsRoot(browser) {
     }
   }
   // a system account that is not an administrator, and a virtual account, never see the item or the banner
-  for (const fixture of [{ account: 'fixture-admin', kind: 'sys', admin: false, asRoot: { until: Date.now() + 600_000 } }, { account: 'fixture-admin', kind: 'virt', admin: false, asRoot: { until: Date.now() + 600_000 } }]) {
+  for (const fixture of !once ? [] : [{ account: 'fixture-admin', kind: 'sys', admin: false, asRoot: { until: Date.now() + 600_000 } }, { account: 'fixture-admin', kind: 'virt', admin: false, asRoot: { until: Date.now() + 600_000 } }]) {
     const { context, page } = await openPage(browser, { state: directState(), fixture });
     try {
       await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
@@ -3371,7 +3380,11 @@ async function expectChecked(locator) {
 
 // ---- Runner ---------------------------------------------------------------------------------------------------------
 
-const checks = [
+function schemePair(name, verify) {
+  return ['light', 'dark'].map((scheme) => [`${name} (${scheme})`, (b) => verify(b, [scheme])]);
+}
+
+const allChecks = [
   ['list semantics', verifyListSemantics],
   ['keyboard shortcuts dialog and confirmations', verifyKeyboardAndConfirmation],
   ['keyboard isolation', verifyKeyboardIsolation],
@@ -3402,13 +3415,58 @@ const checks = [
   ['rows visible in a short window', verifyShortWindowRows],
   ['theme tokens, selection mark, focus indicator', verifyThemeTokens],
   ['axe-core A and AA in every view', verifyAxeViews],
-  ['sign-in screen and account menu', verifySignIn],
-  ['act as root from the account menu', verifyActAsRoot],
+  // The three long checks run once per colour scheme, as two checks. Parts that do not depend on the scheme run with the light one.
+  ...schemePair('sign-in screen and account menu', verifySignIn),
+  ...schemePair('act as root from the account menu', verifyActAsRoot),
   ['Virtual account opens its first granted folder', verifyVirtualAccount],
-  ['Accounts', verifyAccounts],
+  ...schemePair('Accounts', verifyAccounts),
   ['installable app: manifest, worker, offline start, notifications', verifyInstallableApp],
   ...['light', 'dark'].flatMap((scheme) => [[1365, 900], [390, 844], [320, 760]].map(([width, height]) => [`measurements ${width}px ${scheme}`, (b) => verifyAccessibility(b, { width, height }, scheme)])),
 ];
+
+// Expected seconds per check, from CI timings (the slower of the two browsers, split parts halved). Unknown names count as 3 s.
+// Only used by FILEDECK_SHARD to spread the checks over processes.
+const expectedSeconds = {
+  'Accounts (light)': 100,
+  'Accounts (dark)': 95,
+  'sign-in screen and account menu (light)': 42,
+  'sign-in screen and account menu (dark)': 31,
+  'act as root from the account menu (light)': 28,
+  'act as root from the account menu (dark)': 20,
+  'axe-core A and AA in every view': 25,
+  'phone header with a selection': 13,
+  'no horizontal overflow': 10,
+  'installable app: manifest, worker, offline start, notifications': 9,
+  'Virtual account opens its first granted folder': 9,
+  'unsaved editor text survives a resize': 8,
+};
+
+// FILEDECK_SHARD=i/n (1-based) runs shard i of n. Checks go to the shard with the least expected time so far, longest first.
+// The same list always gives the same shards. The checks keep their listed order inside a shard.
+function selectShard(list, spec) {
+  const m = /^(\d+)\/(\d+)$/.exec(spec);
+  if (!m || Number(m[1]) < 1 || Number(m[1]) > Number(m[2])) throw new Error(`FILEDECK_SHARD must look like i/n with 1 <= i <= n, not ${spec}`);
+  const index = Number(m[1]) - 1;
+  const count = Number(m[2]);
+  const load = Array(count).fill(0);
+  const owner = new Map();
+  const order = list.map((c, position) => ({ name: c[0], position, seconds: expectedSeconds[c[0]] ?? 3 }))
+    .sort((a, b) => b.seconds - a.seconds || a.position - b.position);
+  for (const c of order) {
+    let best = 0;
+    for (let k = 1; k < count; k++) if (load[k] < load[best]) best = k;
+    owner.set(c.name, best);
+    load[best] += c.seconds;
+  }
+  return list.filter((c) => owner.get(c[0]) === index);
+}
+
+const selected = allChecks.filter(([name]) => !only.length || only.some((o) => name.includes(o)));
+const shardSpec = process.env.FILEDECK_SHARD || '';
+const checks = shardSpec ? selectShard(selected, shardSpec) : selected;
+if (shardSpec || process.env.FILEDECK_LIST) console.log(`shard ${shardSpec || 'all'}: ${checks.length} checks\n${checks.map(([name]) => `  - ${name}`).join('\n')}`);
+// FILEDECK_LIST=1 prints the checks that would run and exits, without a browser. It is for checking shard splits.
+if (process.env.FILEDECK_LIST) process.exit(0);
 
 // BROWSER=firefox runs the same checks in Playwright's Firefox; the default is Chromium.
 const engineName = process.env.BROWSER || 'chromium';
@@ -3421,7 +3479,6 @@ const failed = [];
 const results = [];
 try {
   for (const [name, run] of checks) {
-    if (only.length && !only.some((o) => name.includes(o))) continue;
     currentCheck = name.replace(/\W+/g, '-');
     pendingShots = [];
     const t0 = Date.now();

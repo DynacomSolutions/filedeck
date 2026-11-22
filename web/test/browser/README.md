@@ -1,8 +1,8 @@
 # Browser acceptance checks
 
-These checks drive the built Filedeck web app in Chromium and in Firefox with Playwright against a deterministic fake API. They run in CI on every change under `web/` (the `browser` job in `.github/workflows/ci.yml`, one run in each browser) and never call a live Filedeck API: the script intercepts every `/api/**` request in the browser and answers it from fixtures in `acceptance.mjs`, so the server only has to serve the built static files.
+These checks drive the built Filedeck web app in Chromium and in Firefox with Playwright against a deterministic fake API. They run in CI on every change under `web/` (the `browser` job in `.github/workflows/ci.yml`: one leg for each browser, and each leg splits the checks over parallel processes with `npm run check:parallel`) and never call a live Filedeck API: the script intercepts every `/api/**` request in the browser and answers it from fixtures in `acceptance.mjs`, so the server only has to serve the built static files.
 
-There is one run, no scopes. It makes these checks, in order (the names are what the output prints):
+There are no scopes. A full run makes these checks (the names are what the output prints). Three long checks run as two checks each, one for each colour scheme: `sign-in screen and account menu`, `act as root from the account menu` and `Accounts`, with the suffix ` (light)` or ` (dark)`. A part that does not depend on the scheme runs with the light one. `FILEDECK_ONLY=Accounts` still selects both parts.
 
 - File list: grid semantics (selected and current row, `aria-activedescendant`, file or folder in the row name); focus returns to the list after Shift+F10 then Escape, after a rename (committed and cancelled) and after creating a folder; the row context menu scrolls and every item is reachable at 1366x768, and a submenu opens inside the window.
 - Keyboard: the shortcuts dialog (focus trap, focus back on its opener, URL history); Properties keys do not act on files; Tab from one panel reaches the next panel's toolbar with two and with three panels, and Alt+PageDown / Alt+PageUp switch panels; the Trash grid selects one item with Space and moves with the arrows; tooltips (hover, focus, Escape).
@@ -44,12 +44,24 @@ FILEDECK_URL=http://127.0.0.1:<port> npm run check
 FILEDECK_URL=http://127.0.0.1:<port> npm run check:firefox
 ```
 
-The first command uses Chromium, the second Firefox. The two runs make the same 40 checks: no check is skipped or relaxed for one browser. A check must not depend on how one engine rounds a size or scrolls a focused element; when the two browsers disagree, find out which one shows a defect a user can see and correct the product.
+The first command uses Chromium, the second Firefox. The two runs make the same 44 checks: no check is skipped or relaxed for one browser. A check must not depend on how one engine rounds a size or scrolls a focused element; when the two browsers disagree, find out which one shows a defect a user can see and correct the product.
 
 - `FILEDECK_URL` is required; the script contains no deployment or machine-specific address.
 - `BROWSER` selects the browser: `chromium` (the default) or `firefox`. `npm run check:firefox` sets it.
 - `CHROMIUM_PATH` selects a system Chromium instead of the Playwright download. Firefox always uses the Playwright download: Playwright cannot drive a system Firefox.
 - `FILEDECK_EVIDENCE_DIR` is where screenshots and reports go (default `./evidence`, ignored by git). Each measurement run writes a screenshot and a JSON report there, and a failed check writes the last screenshot of each of its pages as `fail-<check>-<n>.png`. CI uploads the folder as the `browser-acceptance-evidence` artifact when the job fails.
+- `FILEDECK_SHARD=<i>/<n>` (i from 1) runs only shard i of n. After the `FILEDECK_ONLY` filter, the checks go to the shard with the least expected time so far, longest first, using the table `expectedSeconds` in `acceptance.mjs` (unknown names count as 3 s). The same list always gives the same shards, and the shards together make every check once. The script prints the shard and its check names at the start. Without it, all checks run in one process. Each process keeps its own fixture state, so checks never run side by side inside one process.
+- `FILEDECK_LIST=1` prints the checks that would run (with `FILEDECK_SHARD` and `FILEDECK_ONLY` applied) and exits without a browser. It is for checking a shard split.
+- `FILEDECK_WORKERS` is the number of processes that `npm run check:parallel` starts (default: the smaller of 4 and the CPU count).
 - `FILEDECK_ONLY` runs only the checks whose name contains one of the comma-separated words, for example `FILEDECK_ONLY="focus returns,Trash"`. It is a debugging aid; CI runs everything.
 
-A run takes two to three minutes in each browser.
+## Running the shards in parallel
+
+```sh
+FILEDECK_URL=http://127.0.0.1:<port> npm run check:parallel
+BROWSER=firefox FILEDECK_URL=http://127.0.0.1:<port> npm run check:parallel
+```
+
+`npm run check:parallel` (`parallel.mjs`) starts `FILEDECK_WORKERS` copies of `acceptance.mjs`, one for each shard, with the same environment. It prefixes each output line with `[i/n] `, lets a failing shard finish while the others carry on, and prints one summary: the checks passed in each shard, the total, the failed check names and the wall time. It exits with a non-zero code if any shard fails or ends abnormally, and it passes SIGINT and SIGTERM to the shards. All shards use the one hub and the one `FILEDECK_EVIDENCE_DIR`; check names are unique, so their files do not clash.
+
+A single-process run takes about 8 to 10 minutes in each browser on a CI runner. With four shards the wall time is about one third of that.
