@@ -66,8 +66,8 @@ jobs:
       matrix:
         suite: [user, root]
     runs-on: ubuntu-latest
-    # each leg runs one suite and takes about 5 minutes; the rest is room for a slow Ubuntu mirror in "Install test tools"
-    timeout-minutes: 20
+    # each leg takes about 6 minutes (p99 6.4 on 23 Nov); the rest is room for a slow Ubuntu mirror in "Install test tools" (up to 4 minutes seen)
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -86,7 +86,7 @@ jobs:
       - name: Install test tools
         # the Ubuntu mirror is sometimes slow (single packages taking 20 s or more), which pushed this step past 5 minutes;
         # retries and a per-connection timeout get past a stalled download instead of waiting on it
-        timeout-minutes: 20
+        timeout-minutes: 8
         shell: bash
         run: |
           for attempt in 1 2 3; do
@@ -143,7 +143,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -275,7 +275,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.chart == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -299,7 +299,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -326,7 +326,7 @@ jobs:
           tags: filedeck-ci:test
           cache-from: type=gha,scope=image
           cache-to: type=gha,scope=image,mode=max
-        timeout-minutes: 30
+        timeout-minutes: 18
       - name: Smoke check the image
         run: scripts/ci-image-smoke.sh filedeck-ci:test
         timeout-minutes: 5
