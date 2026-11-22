@@ -91,6 +91,8 @@ export function Tip({ label, shortcut, fill, forceOpen, when, besideOf, children
       // The tooltip is portalled to body, so moving the pointer to it leaves this wrapper.
       // Keep it open while the pointer is over the tooltip, as required by 1.4.13.
       if (bubble.current?.contains(e.relatedTarget as Node | null)) return;
+      // A tooltip still waiting to open must not open once the pointer has gone: it would then swallow the next Escape.
+      if (!wrap.current?.contains(document.activeElement)) window.clearTimeout(timer.current);
       window.clearTimeout(hideTimer.current);
       hideTimer.current = window.setTimeout(() => {
         if (!wrap.current?.contains(document.activeElement) && !bubble.current?.matches(":hover")) hide();
