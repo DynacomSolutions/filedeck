@@ -3,6 +3,7 @@
 {{- end }}
 {{- range $i, $n := .Values.nodes }}
 {{- with $n }}
+{{- if and (ne (default "kubernetes" .mode) "native") (ne .mode (printf "%s-%s" "native" "agent")) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -220,5 +221,6 @@ spec:
     - name: http
       port: {{ $.Values.port }}
       targetPort: http
+{{- end }}
 {{- end }}
 {{- end }}

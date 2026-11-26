@@ -23,7 +23,7 @@ if (tailscale.stop) {
 if (cfg.mode === "agent") void initSandbox().then(() => selfCheckTools()); // says once at start-up when helper programs are not confined by the kernel
 if (cfg.mode === "agent") void noReplaceWarning().then((w) => w && console.warn(w)); // says once at start-up when the rename helper is missing
 const app = cfg.mode === "hub" ? createHub(cfg) : createAgent(cfg);
-const server = serve({ fetch: app.fetch, port: cfg.port }, (i) => {
+const server = serve({ fetch: app.fetch, hostname: cfg.host, port: cfg.port }, (i) => {
   console.log(`filedeck ${cfg.mode} listening on :${i.port}` + (cfg.mode === "agent" ? ` root=${cfg.root} node=${cfg.node}` : ` nodes=${cfg.nodes.map((n) => n.name).join(",")}`));
   (app as { startWatcher?: () => void }).startWatcher?.();
 });

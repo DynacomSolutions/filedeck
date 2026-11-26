@@ -229,6 +229,7 @@ agent:
 # app.kubernetes.io/instance: <release>-agent-<name>. A node can add its own `readOnlyPaths` and `indexHostPath`.
 nodes:
   - name: local
+    mode: kubernetes
     nodeName: ""
 
 sources: []

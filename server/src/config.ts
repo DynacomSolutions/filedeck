@@ -10,6 +10,7 @@ import type { SourceConfig } from "./sources/types.ts";
 
 export interface Config {
   mode: "agent" | "hub";
+  host: string | undefined;
   port: number;
   root: string;
   node: string;
@@ -244,6 +245,7 @@ export function loadConfig(env = process.env): Config {
   const root = (env.FILEDECK_ROOT ?? "/host").replace(/\/+$/, "") || "/";
   return {
     mode,
+    host: env.FILEDECK_HOST || undefined,
     port: Number(env.PORT ?? 8080),
     root,
     node: env.FILEDECK_NODE ?? "local",
