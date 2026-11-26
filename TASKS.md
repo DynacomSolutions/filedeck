@@ -166,7 +166,7 @@ ETA: 2026-11-01 01:00 ICT
 
 ## 13. Request and filesystem hardening
 Findings from the 12 November 2026 review: request handling, read-only volumes, git and search inputs, and operations that must stay inside the root.
-ETA: 2026-11-13 05:00 ICT
+ETA: 2026-11-30 18:00 ICT
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
 | 103 | State-changing requests must be same-origin JSON; read-only guard and audit read every body | done | claude-20261112-rv-hub | rv-request-guard | | | Merged https://github.com/DynacomSolutions/filedeck/pull/188, CI green, independent review clean on second pass<br>JSON bodies capped at 16 MiB; refused requests are audited |
@@ -183,6 +183,7 @@ ETA: 2026-11-13 05:00 ICT
 | 132 | Archive tools run inside the read sandbox, limited to the pinned source folder | done | claude-20261112-rv-archives | rv-archive-sandbox | 13.106, 13.108 | | Merged https://github.com/DynacomSolutions/filedeck/pull/210, CI green, five independent review rounds<br>Tools run without root capabilities; a default chart install is tested<br>7-Zip compression can read the whole source folder |
 | 133 | Git and search follow-ups: worktree lock text, launcher errors, search gate, compare skips | done | claude-20261112-rv-search-git | rv-git-search-followup | 13.106, 13.107 | | Merged https://github.com/DynacomSolutions/filedeck/pull/208, CI green, four review passes<br>Sandbox also refuses sockets; forwarded addresses need FILEDECK_TRUSTED_PROXIES<br>Default search gate is 3 |
 | 136 | Review follow-ups: interrupted move and copy, rename without replace, worktree paths in root | done | claude-20261113-rv-fsops-notes | rv-fsops-notes | 13.109, 13.133 | | Merged https://github.com/DynacomSolutions/filedeck/pull/213, CI green, three review passes<br>A move that cannot remove its source says what is where; no replace of an item that appeared late<br>A long-stopped copy fails and keeps the source; worktree locations must lie in the served root<br>The skip gate matches whole skip texts; a restore that leaves its trash copy says so |
+| 193 | Per-node scan deny list (refuse scans of / on hq0) | todo | | | | 2026-11-30 18:00 ICT | Agent env, for example FILEDECK_SCAN_DENY=/ (comma list of virtual paths): refuses a du or size job for a listed path or any path above it, 403 with a clear error. `cachedOnly` stays allowed.<br>Chart value is per node; .cluster sets `/` for hq0.<br>Trigger: 26 Nov 2026, `filedeck du -s hq0:/` without `--cached`; hq0 root is etcd's disk.<br>Stopgap: https://github.com/ThomasMcFarlane/.ais/pull/153 |
 
 ## 14. Data-safe file operations
 Findings from the 12 November 2026 review where an operation could lose, skip or corrupt data while reporting success.
