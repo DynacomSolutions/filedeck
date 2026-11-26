@@ -2,7 +2,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable } from "node:stream";
-import { listMounts } from "./mounts.ts";
+import { countMountExclusions, listMounts } from "./mounts.ts";
 import { isReservedName } from "./paths.ts";
 
 /**
@@ -134,6 +134,7 @@ export class FanWatch {
   private watchedCount = 0;
   private reconcileError = "";
   private lostEvents = 0;
+  private excludedMounts = 0;
 
   constructor(
     private store: ChangeSink,
@@ -164,6 +165,7 @@ export class FanWatch {
     this.ensureTimer(); // also drains folders a previous run left pending
     try {
       const all = await listMounts(this.o.root, this.o.procMounts);
+      this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
       const mounts = all.filter((m) => !m.network && !m.unreachable);
       this.unwatched = all.filter((m) => m.network || m.unreachable).map((m) => m.mountpoint);
       const hostPaths = mounts.map((m) => (this.o.root === "/" ? m.mountpoint : this.o.root + (m.mountpoint === "/" ? "" : m.mountpoint)));
@@ -234,6 +236,7 @@ export class FanWatch {
     if (this.stopped || this.handingOver || !this.proc) return;
     try {
       const all = await listMounts(this.o.root, this.o.procMounts);
+      this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
       const mounts = all.filter((m) => !m.network && !m.unreachable);
       const signature = mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}`).sort().join("\n");
       this.mountCount = all.length;
@@ -256,6 +259,7 @@ export class FanWatch {
       mounts: this.mountCount,
       watched: this.watchedCount,
       unwatched: this.unwatched.length,
+      excluded: this.excludedMounts,
       backlog: this.buf.size + this.flushing.size + this.mem.size + this.taken.size,
       lostEvents: this.lostEvents,
       reconcileError: this.reconcileError,

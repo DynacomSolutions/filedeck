@@ -131,3 +131,17 @@ export async function listMounts(root: string, procMounts: string): Promise<Moun
   }
   return res.sort((a, b) => a.mountpoint.localeCompare(b.mountpoint));
 }
+
+/** Count mount-table entries excluded because they are virtual or deliberately hidden runtime filesystems. */
+export async function countMountExclusions(root: string, procMounts: string): Promise<number> {
+  const text = await readMountTable(root, procMounts);
+  let count = 0;
+  for (const line of text.split("\n")) {
+    const fields = line.split(" ");
+    if (fields.length < 3) continue;
+    const mountPath = unescapeMount(fields[1] as string);
+    const fsType = fields[2] as string;
+    if (PSEUDO.has(fsType) || HIDDEN_PREFIXES.some((p) => mountPath === p || mountPath.startsWith(p + "/"))) count++;
+  }
+  return count;
+}
