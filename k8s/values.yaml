@@ -22,6 +22,12 @@ metrics:
     # Empty (default) adds no ingress rule.
     namespaceSelector: {}
 
+# Optional authoritative inventory for deployment checks. This is metadata only and does not expose a route or grant
+# access. A deployment may list native hosts here even when Kubernetes cannot run its Linux agent workload there.
+coverage:
+  enabled: false
+  inventory: []
+
 # Optional shared secret between the hub and the agents, on top of the NetworkPolicy. When `secretName` is set, an
 # existing Secret in the release namespace (created out of band, never in Git) is mounted as FILEDECK_AGENT_TOKEN
 # into the hub and every agent; agents then answer 401 to anything without it (except /healthz). Create it with a long

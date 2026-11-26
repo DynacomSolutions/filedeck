@@ -40,6 +40,8 @@ export interface FanWatchOptions {
   handoverMs?: number;
   /** how often the watcher's run reports to the store and asks for the `since` it may use (default 1000) */
   sessionMs?: number;
+  /** reconcile the host mount table, so new and removed mounts receive watcher coverage */
+  reconcileMs?: number;
 }
 
 /** a changed folder whose lock was busy is tried again after this long (ms) */
@@ -66,11 +68,14 @@ export interface ChangeSink {
   sessionEnd?(id: number, clean: boolean, lostAt: number): Promise<void>;
 }
 
-const MAXFS = 256;
+// Linux hosts in this fleet can have more than 256 bind and loop mounts.
+// Keep the limit above the supported host inventory and report any remainder as unwatched.
+const MAXFS = 4096;
 const FLUSH_MS = 250;
 const FLUSH_MAX = 2000;
 const DRAIN_BATCH = 256;
 const SESSION_MS = 1000;
+const RECONCILE_MS = 30_000;
 
 /** Agent virtual path of a helper path (as the helper's mount namespace sees it, i.e. under the agent root), or null outside the root or inside a trash store. */
 export function mapPath(root: string, hostPath: string): string | null {
@@ -123,6 +128,12 @@ export class FanWatch {
   private readyAt = Infinity;
   private settleMs: number;
   private modifyMs: number;
+  private reconcileTimer: NodeJS.Timeout | null = null;
+  private mountSignature = "";
+  private mountCount = 0;
+  private watchedCount = 0;
+  private reconcileError = "";
+  private lostEvents = 0;
 
   constructor(
     private store: ChangeSink,
@@ -160,6 +171,9 @@ export class FanWatch {
       this.marks = mounts.slice(0, MAXFS).map((m) => m.mountpoint);
       this.unwatched.push(...mounts.slice(MAXFS).map((m) => m.mountpoint));
       hostPaths.length = Math.min(hostPaths.length, MAXFS);
+      this.mountCount = all.length;
+      this.watchedCount = this.marks.length;
+      this.mountSignature = mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}`).sort().join("\n");
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
       if (this.stopped) return;
       const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["pipe", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
@@ -203,9 +217,49 @@ export class FanWatch {
           };
         }
       });
+      this.ensureReconcileTimer();
     } catch (e) {
       this.warn((e as Error).message);
     }
+  }
+
+  /** Rebuild helper marks after a mount or bind alias changes. This marks affected trees stale. */
+  private ensureReconcileTimer() {
+    if (this.reconcileTimer || this.stopped) return;
+    this.reconcileTimer = setInterval(() => void this.reconcileMounts(), this.o.reconcileMs ?? RECONCILE_MS);
+    this.reconcileTimer.unref();
+  }
+
+  private async reconcileMounts() {
+    if (this.stopped || this.handingOver || !this.proc) return;
+    try {
+      const all = await listMounts(this.o.root, this.o.procMounts);
+      const mounts = all.filter((m) => !m.network && !m.unreachable);
+      const signature = mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}`).sort().join("\n");
+      this.mountCount = all.length;
+      if (signature === this.mountSignature) return;
+      const affected = new Set([...this.marks, ...mounts.map((m) => m.mountpoint)]);
+      for (const m of affected) this.store.markStale(m);
+      this.note(`mount table changed, restarting coverage for ${affected.size} mount roots`);
+      this.mountSignature = signature;
+      this.proc.kill();
+    } catch (e) {
+      this.reconcileError = String((e as Error)?.message ?? e);
+      this.note(`mount reconciliation failed: ${this.reconcileError}`);
+    }
+  }
+
+  status() {
+    return {
+      running: !!this.proc,
+      ready: this.readyAt !== Infinity,
+      mounts: this.mountCount,
+      watched: this.watchedCount,
+      unwatched: this.unwatched.length,
+      backlog: this.buf.size + this.flushing.size + this.mem.size + this.taken.size,
+      lostEvents: this.lostEvents,
+      reconcileError: this.reconcileError,
+    };
   }
 
   /**
@@ -310,7 +364,9 @@ export class FanWatch {
     this.stopped = true;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     if (this.timer) clearInterval(this.timer);
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     this.timer = null;
+    this.reconcileTimer = null;
     this.buf.clear();
     this.mem.clear();
     this.proc?.kill();
@@ -376,6 +432,7 @@ export class FanWatch {
 
   /** Events were lost: forget the pending folders and let the next read re-scan the watched trees. */
   private overflow() {
+    this.lostEvents++;
     this.since = this.lostAt = Math.max(this.since, Date.now());
     this.buf.clear();
     this.mem.clear();

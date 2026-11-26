@@ -116,10 +116,17 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
   if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
+  const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs });
+  sizes.covers = (v) => fan.covers(v);
+  sizes.watchedSince = () => fan.watchedSince();
+  sizes.quiet = (v) => fan.settled(v);
+  sizes.chainMin = () => fan.chainMin();
+  sizes.onReopen = () => fan.storeReplaced();
   // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only counts and ages may ever be served here, nothing that names a path, a node or a size): whether the size store answers from its file, whether its file is damaged and not yet replaced, the queued jobs and the oldest wait
   app.get("/metrics", (c) => {
     const h = sizes.health();
     const q = jobs.queuedStats();
+    const w = fan.status();
     return c.text(
       [
         "# HELP filedeck_size_store_available 1 when the folder-size store answers from its file, 0 when sizes are not cached",
@@ -137,18 +144,33 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_size_lock_oldest_wait_seconds Age in seconds of the oldest size-store lock that waits and is not yet granted, 0 when none",
         "# TYPE filedeck_size_lock_oldest_wait_seconds gauge",
         `filedeck_size_lock_oldest_wait_seconds ${sizes.oldestLockWaitSeconds().toFixed(3)}`,
+        "# HELP filedeck_watcher_running 1 when the native watcher is running",
+        "# TYPE filedeck_watcher_running gauge",
+        `filedeck_watcher_running ${w.running ? 1 : 0}`,
+        "# HELP filedeck_watcher_ready 1 when all current watcher marks are installed",
+        "# TYPE filedeck_watcher_ready gauge",
+        `filedeck_watcher_ready ${w.ready ? 1 : 0}`,
+        "# HELP filedeck_watcher_mounts_total Current non-pseudo mounts visible to the agent",
+        "# TYPE filedeck_watcher_mounts_total gauge",
+        `filedeck_watcher_mounts_total ${w.mounts}`,
+        "# HELP filedeck_watcher_mounts_watched Current mounts with native event coverage",
+        "# TYPE filedeck_watcher_mounts_watched gauge",
+        `filedeck_watcher_mounts_watched ${w.watched}`,
+        "# HELP filedeck_watcher_mounts_unwatched Current mounts without native event coverage",
+        "# TYPE filedeck_watcher_mounts_unwatched gauge",
+        `filedeck_watcher_mounts_unwatched ${w.unwatched}`,
+        "# HELP filedeck_watcher_backlog Folders waiting for durable or in-memory reconciliation",
+        "# TYPE filedeck_watcher_backlog gauge",
+        `filedeck_watcher_backlog ${w.backlog}`,
+        "# HELP filedeck_watcher_lost_events_total Native events lost to overflow",
+        "# TYPE filedeck_watcher_lost_events_total counter",
+        `filedeck_watcher_lost_events_total ${w.lostEvents}`,
         "",
       ].join("\n"),
       200,
       { "content-type": "text/plain; version=0.0.4" },
     );
   });
-  const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs });
-  sizes.covers = (v) => fan.covers(v);
-  sizes.watchedSince = () => fan.watchedSince();
-  sizes.quiet = (v) => fan.settled(v);
-  sizes.chainMin = () => fan.chainMin();
-  sizes.onReopen = () => fan.storeReplaced();
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
   (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
   // On SIGTERM, at once (not after the connections drain): stop the jobs (their rows are handed to the next process), hand the watcher's events and watched time
