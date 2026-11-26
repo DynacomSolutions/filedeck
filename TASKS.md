@@ -323,3 +323,19 @@ ETA: 2026-11-20 14:00 ICT
 | 181 | Add an HTTPRoute and BackendTrafficPolicy next to the Mapping | done | Claude | eg-httproutes | | | Rendered under `mapping.enabled`, from the same values<br>Attached to the `edge` Gateway only<br>The Mapping stays until the VIP cut-over (.cluster 144.484) |
 | 182 | Release v0.5.3 or later so the HTTPRoute deploys | done | claude-20261120-release-v053 | release-v053 | 25.181 | | Released v0.5.3 (PR https://github.com/DynacomSolutions/filedeck/pull/261, a5322b1); Release run passed.<br>Release: https://github.com/DynacomSolutions/filedeck/releases/tag/v0.5.3<br>`stable` now points at a5322b1, so the HTTPRoute deploys. |
 | 183 | Release v0.5.4 with the per-node index host path | in_progress | claude-20261122-release-0-5-4 | release-0-5-4 | 25.182 | | Release v0.5.4 in PR "chore(release): v0.5.4".<br>It ships `agent.indexHostPath` and `nodes[].indexHostPath` (PR https://github.com/DynacomSolutions/filedeck/pull/262, f87e6f6). |
+
+## 26. Grouped storage view
+
+Group cached folder sizes by path rules per node and drive, with an unattributed remainder, an API, a CLI, a sunburst page and optional IO pressure. Study: .cluster hq-nvme-sunburst.
+ETA: 2026-12-18 18:00 ICT
+
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 185 | Add per-node group rules (path prefixes) as chart values and a ConfigMap | todo | | | | | Rule: name, paths, exclude, labels for the IO join<br>Prefix rules only in version 1<br>About 1 to 1.5 days |
+| 186 | Group engine: longest-prefix totals, nested rules, unattributed remainder against statfs | todo | | | 26.185 | | Reads `tot_disk` per rule path from the size store<br>Reports oldest `scanned_at`, `stale` and `not stored` per group<br>About 2 to 3 days |
+| 187 | Map each mount to its parent NVMe drive and model | todo | | | | | Resolve `device` through `/sys/class/block`<br>Fixture tests for partitions, LVM, md, btrfs<br>About 1.5 to 2 days |
+| 188 | Add `GET /api/groups`, hub merge, `filedeck groups` CLI and read-only token scope | todo | | | 26.186, 26.187 | | JSON output per node, drive and group<br>Token stays read-only, sizes only<br>About 1.5 to 2 days |
+| 189 | Sunburst page: node, drive, group rings with URL state | todo | | | 26.188 | | Plain SVG; empty, stale and unattributed states<br>View state in the URL<br>About 2.5 to 3.5 days |
+| 190 | Add node `hq` to the chart, finish first full scans, enable the fanotify watcher | todo | | | | | `hq` answers 404 unknown node today<br>hq0, eu3, eu4 answer "not stored yet" on 26 Nov 2026<br>About 0.5 to 1 day plus scan time |
+| 191 | Handle bind mounts and hard links in group totals | todo | | | 26.186 | | Bind mounts share `st_dev`, so a walk counts them twice<br>Read mountinfo roots; flag hard-link-heavy groups<br>About 1.5 to 2 days |
+| 192 | Join IO pressure per group from VictoriaMetrics (min, max, mean, resting) | todo | | | 26.188 | | Hub feature, not agent<br>Check the live series first: `node_disk_*`, `container_fs_*`<br>About 3 to 5 days |
