@@ -168,13 +168,17 @@ export class FanWatch {
       this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
       const mounts = all.filter((m) => !m.network && !m.unreachable);
       this.unwatched = all.filter((m) => m.network || m.unreachable).map((m) => m.mountpoint);
-      const hostPaths = mounts.map((m) => (this.o.root === "/" ? m.mountpoint : this.o.root + (m.mountpoint === "/" ? "" : m.mountpoint)));
-      // the helper marks at most MAXFS filesystems (server/native): the rest are not watched
-      this.marks = mounts.slice(0, MAXFS).map((m) => m.mountpoint);
+      // Fanotify marks a whole filesystem. Bind aliases on one filesystem must therefore
+      // be passed once. Repeating an alias can return EINVAL and falsely report the alias
+      // as unwatched, although the first mark already covers it.
+      const filesystems = new Map<string, (typeof mounts)[number]>();
+      for (const m of mounts) filesystems.set(`${m.device}\0${m.fstype}`, filesystems.get(`${m.device}\0${m.fstype}`) ?? m);
+      const unique = [...filesystems.values()].slice(0, MAXFS);
+      const hostPaths = unique.map((m) => (this.o.root === "/" ? m.mountpoint : this.o.root + (m.mountpoint === "/" ? "" : m.mountpoint)));
+      this.marks = unique.map((m) => m.mountpoint);
       this.unwatched.push(...mounts.slice(MAXFS).map((m) => m.mountpoint));
-      hostPaths.length = Math.min(hostPaths.length, MAXFS);
       this.mountCount = all.length;
-      this.watchedCount = this.marks.length;
+      this.watchedCount = Math.min(mounts.length, MAXFS);
       this.mountSignature = mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}`).sort().join("\n");
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
       if (this.stopped) return;
