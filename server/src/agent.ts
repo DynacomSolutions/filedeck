@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
 import { registerSizeRoutes } from "./props.ts";
 import { FanWatch } from "./fanwatch.ts";
+import { MacWatch } from "./macwatch.ts";
 import { agentError, registerFileRoutes } from "./agent-routes.ts";
 import * as trash from "./trash.ts";
 import { agentAuth, agentUser } from "./agent-auth.ts";
@@ -116,7 +117,9 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
   if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
-  const fan = new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs });
+  const fan = process.platform === "darwin"
+    ? new MacWatch(sizes, { root, procMounts: cfg.procMounts })
+    : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs });
   sizes.covers = (v) => fan.covers(v);
   sizes.watchedSince = () => fan.watchedSince();
   sizes.quiet = (v) => fan.settled(v);
