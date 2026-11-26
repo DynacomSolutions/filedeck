@@ -39,7 +39,7 @@
 #error "64-bit only (fanotify_mark takes a 64-bit mask)"
 #endif
 
-#define MAXFS 256
+#define MAXFS 4096
 #define SELF_MASK (FAN_DELETE_SELF | FAN_MOVE_SELF)
 #define STRUCT_MASK (FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO | FAN_ATTRIB | SELF_MASK)
 #define MASK (STRUCT_MASK | FAN_CLOSE_WRITE | FAN_MODIFY | FAN_ONDIR)

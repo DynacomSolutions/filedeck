@@ -1,0 +1,12 @@
+{{- if .Values.coverage.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "filedeck.name" . }}-coverage-inventory
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+data:
+  inventory.yaml: |
+    managedHosts:
+{{ toYaml .Values.coverage.inventory | indent 6 }}
+{{- end }}

@@ -21,7 +21,7 @@ test("/metrics reports the size store as available and not damaged", async () =>
     assert.match(t, /^filedeck_jobs_queued 0$/m);
     assert.match(t, /^filedeck_jobs_oldest_queued_seconds 0\.000$/m);
     assert.match(t, /^filedeck_size_lock_oldest_wait_seconds 0\.000$/m);
-    assert.equal(t.split("\n").filter((l) => l && !l.startsWith("#")).length, 5, "only the five gauges");
+    assert.equal(t.split("\n").filter((l) => l && !l.startsWith("#")).length, 11, "size and watcher gauges");
     // a job that waits shows in the gauges
     const jobs = (app as unknown as { jobs: { create(k: string, t: string, run: () => Promise<unknown>, d?: undefined, gate?: () => Promise<void>): unknown } }).jobs;
     jobs.create("du", "t", async () => undefined, undefined, () => new Promise<void>(() => {}));
