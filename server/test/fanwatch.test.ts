@@ -90,7 +90,7 @@ function setup(extra: Partial<ConstructorParameters<typeof FanWatch>[1]> & { pla
   fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n/dev/b /data xfs rw 0 0\nsrv:/x /net nfs4 rw 0 0\n");
   const w = new FanWatch(store, { helper: "fake", root, procMounts: mounts, settleMs: 40, modifyMs: 300, ...extra, spawn: (_c, a) => (args.push(a), proc) });
   cleanups.push(() => (fs.rmSync(mounts, { force: true }), fs.rmSync(root, { recursive: true, force: true })));
-  return { w, proc, calls, stale, args, root, done: () => (fs.rmSync(mounts, { force: true }), fs.rmSync(root, { recursive: true, force: true })) };
+  return { w, proc, calls, stale, args, root, mounts, done: () => (fs.rmSync(mounts, { force: true }), fs.rmSync(root, { recursive: true, force: true })) };
 }
 
 test("fanwatch: watches local filesystems only, with host paths", async () => {
@@ -99,6 +99,15 @@ test("fanwatch: watches local filesystems only, with host paths", async () => {
   assert.deepEqual(s.args, [[s.root, path.join(s.root, "data")]]);
   s.w.stop();
   assert.ok(s.proc.killed);
+  s.done();
+});
+
+test("fanwatch: passes bind aliases once because a filesystem mark covers every alias", async () => {
+  const s = setup();
+  fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/a /alias ext4 rw 0 0\n/dev/b /data xfs rw 0 0\n");
+  await s.w.start();
+  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data")]]);
+  s.w.stop();
   s.done();
 });
 
