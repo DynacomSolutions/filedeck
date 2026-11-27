@@ -32,4 +32,5 @@ export interface NodeStatus {
 
 export type HubNodeStatus =
   | { node: string; state: "available"; status: NodeStatus }
-  | { node: string; state: "unsupported" | "unavailable" };
+  | { node: string; state: "unsupported" }
+  | { node: string; state: "unavailable"; reason: string };

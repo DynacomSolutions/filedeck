@@ -82,7 +82,7 @@ export function StatusNodes({ node }: { node: string | null }) {
             <h3>{entry.node}</h3>
             {entry.state === "available" && <span className="status-subtitle">Updated <StatusTime at={entry.status.sampledAt} /></span>}
           </div>
-          {entry.state === "available" ? <NodeFacts status={entry.status} /> : <p className="status-message">{entry.state === "unsupported" ? "This agent does not provide node health yet." : "Node health is unavailable."}</p>}
+          {entry.state === "available" ? <NodeFacts status={entry.status} /> : <p className="status-message">{entry.state === "unsupported" ? "This agent does not provide node health yet." : entry.reason ?? "Node health is unavailable."}</p>}
         </section>
       ))}
     </section>

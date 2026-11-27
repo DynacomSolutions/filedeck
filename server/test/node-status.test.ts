@@ -81,7 +81,9 @@ test("agent requires a signed administrator claim when sign-in is on", async (t)
 test("hub merges current, old and unavailable agents, and selects a single node", async (t) => {
   const { tmp, agent } = await fixture(t);
   const app = agent();
-  const upstream = serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+  const upstream = serve({ port: 0, hostname: "127.0.0.1", fetch: (request) =>
+    new URL(request.url).pathname === "/refused/api/node-status" ? new Response("Private error details", { status: 401 }) : app.fetch(request),
+  });
   await new Promise<void>((resolve) => upstream.once("listening", resolve));
   const addr = upstream.address();
   assert.ok(addr && typeof addr !== "string");
@@ -89,13 +91,17 @@ test("hub merges current, old and unavailable agents, and selects a single node"
   const hub = createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_AGENT_TOKEN: token,
     FILEDECK_STATIC: tmp, FILEDECK_DIFF_DIR: path.join(tmp, "diff"),
     FILEDECK_API_TOKEN: "fixture-read-token", FILEDECK_API_TOKEN_SCOPES: "changes",
-    NODES: `a=${url},b=${url}/old,c=http://127.0.0.1:1`,
+    NODES: `a=${url},b=${url}/old,c=http://127.0.0.1:1,d=${url}/refused`,
   } as NodeJS.ProcessEnv));
   try {
     const response = await hub.request("/api/status");
     assert.equal(response.status, 200);
-    const data = await response.json() as { nodes: { node: string; state: string }[] };
-    assert.deepEqual(data.nodes.map(({ node, state }) => [node, state]), [["a", "available"], ["b", "unsupported"], ["c", "unavailable"]]);
+    const data = await response.json() as { nodes: unknown[] };
+    assert.deepEqual(data.nodes.slice(1), [
+      { node: "b", state: "unsupported" },
+      { node: "c", state: "unavailable", reason: "The hub could not read the agent response." },
+      { node: "d", state: "unavailable", reason: "The agent returned HTTP 401." },
+    ]);
     const single = await hub.request("/api/status?node=a");
     assert.deepEqual((await single.json() as { nodes: unknown[] }).nodes, data.nodes.slice(0, 1));
     assert.equal((await hub.request("/api/status?node=missing")).status, 403);

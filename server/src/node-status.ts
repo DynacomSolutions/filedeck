@@ -120,9 +120,9 @@ export async function readHubNodeStatus(nodes: string[], call: (node: string, pa
       }
       if (response.ok) return { node, state: "available", status: await response.json() as NodeStatus };
       await response.body?.cancel();
+      return { node, state: "unavailable", reason: `The agent returned HTTP ${response.status}.` };
     } catch {
-      // Other nodes can still answer when one node is down.
+      return { node, state: "unavailable", reason: "The hub could not read the agent response." };
     }
-    return { node, state: "unavailable" };
   }));
 }
