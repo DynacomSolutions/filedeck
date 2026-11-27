@@ -174,6 +174,39 @@ hub:
   # Host names (host or host:port) the hub answers to; any other Host header gets 421. Empty (the default) accepts any.
   # Set it to the names of the ingress rule to close DNS rebinding.
   allowedHosts: []
+  # MCP server (docs/mcp.md): read-only tools and live resources for MCP clients, on an HTTPS listener of its own (path /mcp). Off by default.
+  # It is never in the public route. A NetworkPolicy lets only `allowFrom` reach its port (a list of NetworkPolicy peers; empty = nobody).
+  # That policy is made whenever `enabled` is true, whatever `networkPolicy.enabled` says, and it leaves the other hub ports as they were.
+  mcp:
+    enabled: false
+    port: 9092
+    # A kubernetes.io/tls Secret (tls.crt and tls.key), for example made by cert-manager. Required: the listener never serves plain HTTP.
+    # The hub reads the files again when they change, so a renewed certificate needs no restart.
+    tls:
+      secretName: ""
+    # How often the shared watch of a node asks its agent for jobs and status while a client follows, in ms (1000 to 600000).
+    pollMs: 5000
+    # Sign-in on only: the account that a grant uses when it names none.
+    account: ""
+    # Grants: each one is read only and has its own token and scope. Add or remove one without a restart of the clients of the others.
+    #   id: 1 to 32 characters of a-z, 0-9 and - (a metrics label)
+    #   tokenSecret: {name, key}: a Secret created out of band (never in Git); the token has at least 16 characters
+    #   resources: URI prefixes or templates the grant may read and follow, for example "filedeck://nodes/web1/" or "filedeck://nodes/{node}/status";
+    #              "filedeck://" is everything
+    #   tools: tool names the grant may call; "*" is every tool
+    #   account: with sign-in on, the account the grant reads as (else hub.mcp.account)
+    grants: []
+    # for example:
+    # grants:
+    #   - id: ops-reader
+    #     tokenSecret: {name: filedeck-mcp-ops, key: token}
+    #     resources: ["filedeck://nodes/web1/"]
+    #     tools: [filedeck_du, filedeck_list, filedeck_scan_status]
+    allowFrom: []
+    # for example:
+    # allowFrom:
+    #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: assistants}}
+    #     podSelector: {matchLabels: {app: mcp-client}}
 
 agent:
   resources:
