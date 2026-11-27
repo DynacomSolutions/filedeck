@@ -459,7 +459,13 @@ export class EventBus {
     return n;
   }
 
-  async close(removeJournal = false): Promise<void> {
+  close(removeJournal = false): Promise<void> {
+    return (this.closing ??= this.doClose(removeJournal));
+  }
+
+  private closing: Promise<void> | undefined;
+
+  private async doClose(removeJournal: boolean): Promise<void> {
     this.state = "closed";
     if (this.timer) clearInterval(this.timer);
     for (const s of [...this.subs]) s.close();

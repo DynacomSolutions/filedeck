@@ -92,6 +92,11 @@ export class Journal {
   private opened = false;
   private failed = false;
   private closed = false;
+  private closing: Promise<void> | undefined;
+  /** true while `release()` runs: what is queued is dropped, and nothing more is written (the lease is gone) */
+  private dropping = false;
+  /** how many times `open()` found a journal that its last writer had not closed cleanly (a crash, a failed write, a lost lease) */
+  uncleanOpens = 0;
   /** false when the directory must not be used by this process (it has no lease on the shared state): the journal is then in memory only */
   private disk = true;
   appended = 0;
@@ -168,6 +173,7 @@ export class Journal {
         const m = JSON.parse(await fsp.readFile(path.join(dir, "meta.json"), "utf8")) as { epoch?: unknown; node?: unknown; clean?: unknown; covered?: unknown };
         if (typeof m.epoch === "string" && /^[0-9a-z]{1,16}$/.test(m.epoch) && m.node === this.o.node) epoch = m.epoch;
         clean = m.clean === true;
+        if (!clean) this.uncleanOpens++;
         this.coveredUntil = typeof m.covered === "number" ? m.covered : 0;
       } catch {
         /* no meta, or damaged: a new epoch below */
@@ -209,16 +215,22 @@ export class Journal {
 
   private async writeMeta(clean: boolean): Promise<void> {
     const dir = this.o.dir!;
-    const tmp = path.join(dir, `meta.json.${process.pid}`);
-    await fsp.writeFile(tmp, JSON.stringify({ epoch: this.epoch, node: this.o.node, clean, covered: this.o.now() }), { mode: 0o600 });
-    await fsp.rename(tmp, path.join(dir, "meta.json"));
+    // (two containers of one volume may both be process 1: the name holds random bytes, not only the process number)
+    const tmp = path.join(dir, `meta.json.${process.pid}.${randomBytes(6).toString("hex")}`);
+    try {
+      await fsp.writeFile(tmp, JSON.stringify({ epoch: this.epoch, node: this.o.node, clean, covered: this.o.now() }), { mode: 0o600 });
+      await fsp.rename(tmp, path.join(dir, "meta.json"));
+    } catch (e) {
+      await fsp.rm(tmp, { force: true }).catch(() => {});
+      throw e;
+    }
   }
 
   /** The writer is watching now: noted in `meta.json` (at most every 5 s), so the process after this one can tell whether anything went unseen between the two. */
   cover(): void {
-    if (!this.persistent || this.closed || this.o.now() - this.lastCover < 5000) return;
+    if (!this.persistent || this.closed || this.dropping || this.o.now() - this.lastCover < 5000) return;
     this.lastCover = this.o.now();
-    this.chain = this.chain.then(() => this.writeMeta(false)).catch((e) => this.fail(e));
+    this.chain = this.chain.then(() => (this.dropping ? undefined : this.writeMeta(false))).catch((e) => this.fail(e));
   }
 
   /** Last complete line of a segment: sets its `last` and `lastTime`, cuts a partial line. False when the segment holds nothing readable. */
@@ -282,7 +294,7 @@ export class Journal {
     this.ring.push({ seq, time, line });
     this.ringBytes += line.length;
     while (this.ring.length > this.o.ringEvents || this.ringBytes > this.o.ringBytes) this.ringBytes -= this.ring.shift()!.line.length;
-    if (!this.persistent || this.closed) return;
+    if (!this.persistent || this.closed || this.dropping) return;
     if (!this.pending.length) this.pendingFirst = seq;
     this.pending.push(line);
     this.pendingBytes += line.length;
@@ -300,7 +312,7 @@ export class Journal {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
-    this.chain = this.chain.then(() => this.doFlush()).catch((e) => this.fail(e));
+    this.chain = this.chain.then(() => (this.dropping ? undefined : this.doFlush())).catch((e) => this.fail(e));
     return this.chain;
   }
 
@@ -458,7 +470,12 @@ export class Journal {
    * Write what is pending and close the file. A journal that wrote every event notes `clean` in `meta.json`, so the next process continues its epoch; one
    * that failed to write, or that gave up its place (`release`), does not. With `remove`, delete the journal's directory (a journal made in a temporary place).
    */
-  async close(remove = false): Promise<void> {
+  close(remove = false): Promise<void> {
+    // (once only: a second call, after the lease went to a new process, must not write `meta.json` again with this journal's old epoch)
+    return (this.closing ??= this.doClose(remove));
+  }
+
+  private async doClose(remove: boolean): Promise<void> {
     await this.flush();
     if (this.opened && this.persistent && !remove) await this.writeMeta(true).catch(() => {});
     this.closed = true;
@@ -472,7 +489,14 @@ export class Journal {
    * reads the disk as the next writer left it. The `clean` mark is not set: the next opener, this process included, starts a new epoch.
    */
   async release(): Promise<void> {
-    await this.flush();
+    // the lease is gone: the lines that are pending and the meta writes that are queued are dropped, and nothing more is written (the new writer owns the folder)
+    this.dropping = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.pending = [];
+    this.pendingBytes = 0;
     await this.chain;
     await this.fh?.close().catch(() => {});
     this.fh = null;
@@ -488,6 +512,7 @@ export class Journal {
     this.failed = false;
     this.disk = true;
     this.opened = false;
+    this.dropping = false;
   }
 }
 
