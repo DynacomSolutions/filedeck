@@ -108,7 +108,7 @@ test("hub merges current, old and unavailable agents, and selects a single node"
 
 test("hub restricts diagnostics and the change stream to accessible administrator sessions", async (t) => {
   const { tmp, agent } = await fixture(t);
-  const app = agent({ FILEDECK_AUTH: "on" });
+  const app = agent();
   const upstream = serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
   await new Promise<void>((resolve) => upstream.once("listening", resolve));
   const addr = upstream.address();
@@ -131,9 +131,12 @@ test("hub restricts diagnostics and the change stream to accessible administrato
     assert.equal((await call("/api/status")).status, 401);
     const member = await signIn("reader");
     assert.equal((await call("/api/status", { headers: member })).status, 403);
-    assert.equal((await call("/api/nodes/a/api/node-status", { headers: member })).status, 403);
+    for (const route of ["/api/node-status", "/api/node%2Dstatus", "/api%2Fnode-status", "//api//node-status/", "/api/./node-status", "/api/%2e%2fnode-status", "/API/NODE-STATUS"]) {
+      assert.equal((await call("/api/nodes/a" + route, { headers: member })).status, 403, route);
+    }
     assert.equal((await call("/api/v1/changes?node=a", { headers: member })).status, 403);
     const admin = await signIn("operator");
+    assert.equal((await call("/api/nodes/a/api/node%2Dstatus", { headers: admin })).status, 200);
     assert.equal((await call("/api/status?node=b", { headers: admin })).status, 403);
     const response = await call("/api/status", { headers: admin });
     assert.equal(response.status, 200);

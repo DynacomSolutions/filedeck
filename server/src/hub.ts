@@ -2,7 +2,6 @@ import { FsError } from "./fsops.ts";
 import { fanIn } from "./events/fanin.ts";
 import { filterFromParams } from "./events/filter.ts";
 import { parseCursor } from "./events/cursor.ts";
-import { isChangesPath } from "./events/guard.ts";
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createAdaptorServer } from "@hono/node-server";
@@ -20,7 +19,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
-import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, withAgentToken } from "./agent-auth.ts";
+import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, normaliseAgentPath, withAgentToken } from "./agent-auth.ts";
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
@@ -878,7 +877,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const NDJSON = { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-accel-buffering": "no" };
 
   // The change events of several machines in one stream: the filter goes down to every agent, each machine has its own cursor (`since`, once per machine).
-  app.get("/api/v1/changes", async (c) => {
+  const changesPath = "/api/v1/changes";
+  app.get(changesPath, async (c) => {
     if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     const q = new URL(c.req.url).searchParams;
     const wanted = q.getAll("node").flatMap((n) => n.split(",")).map((n) => n.trim()).filter(Boolean);
@@ -924,8 +924,10 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
     // the agents' sign-in routes answer only the hub (they would be a way past its limiter)
     if (cfg.auth && isAgentAuthPath(rest)) return c.json({ error: "not found" }, 404);
-    // the change event stream of one machine: administrators only with sign-in on (the same rule as the fan-in above)
-    if ((isChangesPath(rest) || rest === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    // Apply the same administrator check to diagnostics and the change stream.
+    const agentPath = normaliseAgentPath(rest)?.replace(/\/+$/, "");
+    const isChanges = agentPath === undefined || agentPath === changesPath;
+    if ((isChanges || agentPath === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
@@ -967,7 +969,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       const out = cut(new Response(r.body, { status: r.status, headers: clean(r.headers, true) }));
       const id = currentUser();
       const type = (r.headers.get("content-type") ?? "").toLowerCase();
-      if (app.streams && session !== undefined && upstream && id && (type.startsWith("text/event-stream") || (type.startsWith("application/x-ndjson") && isChangesPath(rest)))) return trackLive(c, out, session, upstream, id);
+      if (app.streams && session !== undefined && upstream && id && (type.startsWith("text/event-stream") || (type.startsWith("application/x-ndjson") && isChanges))) return trackLive(c, out, session, upstream, id);
       return out;
     } catch (e) {
       call?.done();
