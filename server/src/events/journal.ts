@@ -219,6 +219,11 @@ export class Journal {
     const tmp = path.join(dir, `meta.json.${process.pid}.${randomBytes(6).toString("hex")}`);
     try {
       await fsp.writeFile(tmp, JSON.stringify({ epoch: this.epoch, node: this.o.node, clean, covered: this.o.now() }), { mode: 0o600 });
+      // (a release that started while the file was written: the lease is gone, so `meta.json` is not replaced, it belongs to the next writer)
+      if (this.dropping) {
+        await fsp.rm(tmp, { force: true });
+        return;
+      }
       await fsp.rename(tmp, path.join(dir, "meta.json"));
     } catch (e) {
       await fsp.rm(tmp, { force: true }).catch(() => {});
@@ -323,7 +328,7 @@ export class Journal {
   }
 
   private async doFlush(): Promise<void> {
-    if (!this.pending.length || !this.o.dir) return;
+    if (!this.pending.length || !this.o.dir || this.dropping) return;
     const lines = this.pending;
     const first = this.pendingFirst;
     const bytes = this.pendingBytes;
@@ -332,16 +337,26 @@ export class Journal {
     this.pendingBytes = 0;
     const data = lines.length === 1 ? lines[0]! : Buffer.concat(lines);
     let cur = this.segs.at(-1);
-    if (!this.fh && cur && cur.bytes < this.o.segmentBytes) this.fh = await fsp.open(cur.file, "a"); // (the first flush after open continues the last segment)
+    // Each step below checks `dropping` again: a `release()` can start while an earlier step waits on the disk, and after it started nothing may be
+    // written (the lease is gone, the next writer owns the folder). A file handle that was opened meanwhile is closed again.
+    if (!this.fh && cur && cur.bytes < this.o.segmentBytes) {
+      const fh = await fsp.open(cur.file, "a"); // (the first flush after open continues the last segment)
+      if (this.dropping) return void (await fh.close().catch(() => {}));
+      this.fh = fh;
+    }
     if (!cur || cur.bytes >= this.o.segmentBytes) {
       await this.fh?.close();
       this.fh = null;
+      if (this.dropping) return;
       const file = path.join(this.o.dir, segName(first));
-      this.fh = await fsp.open(file, "a", 0o600);
+      const fh = await fsp.open(file, "a", 0o600);
+      if (this.dropping) return void (await fh.close().catch(() => {}));
+      this.fh = fh;
       cur = { first, last: first - 1, bytes: 0, lastTime, firstTime: 0, file };
       this.segs.push(cur);
     }
     cur = this.segs.at(-1)!;
+    if (this.dropping) return;
     await this.fh!.write(data);
     cur.bytes += bytes;
     cur.last = first + lines.length - 1;
@@ -356,6 +371,7 @@ export class Journal {
       const s = this.segs[0]!;
       const total = this.segs.reduce((n, x) => n + x.bytes, 0);
       if (total <= this.o.maxBytes && s.lastTime >= now - this.o.maxAgeMs) break;
+      if (this.dropping) return;
       this.segs.shift();
       await fsp.rm(s.file, { force: true });
     }
@@ -497,6 +513,7 @@ export class Journal {
     }
     this.pending = [];
     this.pendingBytes = 0;
+    // (a write that is already running is not stopped half way: it ends at its next check of `dropping`, and this waits for that, so nothing runs after this returns)
     await this.chain;
     await this.fh?.close().catch(() => {});
     this.fh = null;
