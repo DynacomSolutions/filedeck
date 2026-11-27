@@ -102,11 +102,69 @@ test("fanwatch: watches local filesystems only, with host paths", async () => {
   s.done();
 });
 
-test("fanwatch: passes bind aliases once because a filesystem mark covers every alias", async () => {
+test("fanwatch: passes every mount of a filesystem, bind aliases too, so the helper can name an entry under each of them (it marks the filesystem once)", async () => {
   const s = setup();
-  fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/a /alias ext4 rw 0 0\n/dev/b /data xfs rw 0 0\n");
+  for (const d of ["alias", "data/bound"]) fs.mkdirSync(path.join(s.root, d), { recursive: true });
+  fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/a /alias ext4 rw 0 0\n/dev/b /data xfs rw 0 0\n/dev/a /data/bound ext4 rw 0 0\nsrv:/x /net nfs4 rw 0 0\n");
   await s.w.start();
-  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data")]]);
+  assert.deepEqual(s.args, [[s.root, path.join(s.root, "alias"), path.join(s.root, "data"), path.join(s.root, "data/bound")]]);
+  s.w.line("#ready 2");
+  // every one of them is covered, and a network mount still is not
+  assert.equal(s.w.covers("/alias/x"), true);
+  assert.equal(s.w.covers("/data/bound/x"), true);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: a mount of a single file (a file bind mount) is not given to the helper, not reported as unwatched, and does not make the root uncovered", async () => {
+  const s = setup();
+  fs.writeFileSync(path.join(s.root, "hosts"), "127.0.0.1 localhost\n");
+  fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/a /hosts ext4 rw 0 0\n/dev/b /data xfs rw 0 0\n");
+  await s.w.start();
+  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data")]], "the file is not an argument");
+  s.w.line("#ready 2");
+  const st = s.w.status();
+  assert.equal(st.unwatched, 0, "a file mount is not an unwatched filesystem");
+  assert.equal(s.w.covers("/"), true);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: a mount table with more mounts than the helper takes keeps one mount of every filesystem first, and reports the rest as unwatched", async () => {
+  const s = setup();
+  const lines = ["/dev/a / ext4 rw 0 0", "/dev/b /data xfs rw 0 0"];
+  for (let i = 0; i < 4100; i++) {
+    const n = `/alias${String(i).padStart(4, "0")}`;
+    fs.mkdirSync(path.join(s.root, n));
+    lines.push(`/dev/a ${n} ext4 rw 0 0`);
+  }
+  fs.writeFileSync(s.mounts, lines.join("\n") + "\n");
+  await s.w.start();
+  const argv = s.args[0]!;
+  assert.equal(argv.length, 4096);
+  assert.ok(argv.includes(s.root) && argv.includes(path.join(s.root, "data")), "both filesystems stay in");
+  assert.equal(s.w.status().unwatched, 4102 - 4096);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: the folder that a bind mount shows is part of the mount signature: a bind that is replaced by one of another folder restarts the helper, an unchanged table does not", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-info-"));
+  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const mounts = path.join(dir, "mounts");
+  const info = path.join(dir, "mountinfo");
+  const s = setup({ procMounts: mounts, reconcileMs: 20 });
+  fs.mkdirSync(path.join(s.root, "alias"));
+  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n/dev/a /alias ext4 rw 0 0\n");
+  const table = (fsroot: string) => `10 1 8:1 / / rw - ext4 /dev/a rw\n11 10 8:1 ${fsroot} /alias rw - ext4 /dev/a rw\n`;
+  fs.writeFileSync(info, table("/one"));
+  await s.w.start();
+  s.w.line("#ready 1");
+  await sleep(120);
+  assert.equal(s.proc.killed, false, "nothing changed");
+  fs.writeFileSync(info, table("/two"));
+  await until(() => s.proc.killed, 5000);
+  assert.equal(s.proc.killed, true, "the bind shows another folder now");
   s.w.stop();
   s.done();
 });
