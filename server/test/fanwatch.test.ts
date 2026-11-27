@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { FanWatch as RealFanWatch, mapPath, unescapeLine, type HelperProc } from "../src/fanwatch.ts";
 import { DatabaseSync } from "node:sqlite";
 import { SizeStore as RealSizeStore } from "../src/size-store.ts";
@@ -144,6 +144,19 @@ test("fanwatch: an unmarked backing mount is not covered by its marked parent", 
   assert.equal(s.w.covers("/"), false);
   assert.equal(s.w.covers("/bound"), false);
   assert.equal(s.w.status().covered, 0);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: failed marks persist across unchanged reconciliation ticks", async () => {
+  const s = setup({ reconcileMs: 20 });
+  await s.w.start();
+  s.w.line("#ready 2");
+  s.w.line(`c ${s.root}/data`);
+  await sleep(100);
+  assert.equal(s.w.status().unsupported, 1);
+  await sleep(100);
+  assert.equal(s.w.status().unsupported, 1);
   s.w.stop();
   s.done();
 });
@@ -360,6 +373,37 @@ const cc = spawnSync("cc", ["-O2", "-o", bin, path.resolve(import.meta.dirname, 
 const probe = cc.status === 0 ? spawnSync(bin, [work], { timeout: 1000, encoding: "utf8" }) : null;
 const cannot = cc.status !== 0 ? "no C compiler" : probe!.status === 2 || probe!.status === 3 ? probe!.stderr.trim() : "";
 if (cannot && process.env.FILEDECK_REQUIRE_FANWATCH) throw new Error("fanwatch live test required but helper cannot run: " + cannot);
+
+test("fanwatch native helper: FIFO startup is bounded without a writer", async () => {
+  const fifo = path.join(work, "no-writer");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  const child = spawn(bin, [fifo], { stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  let out = "";
+  let err = "";
+  let ready = false;
+  let timer: NodeJS.Timeout;
+  const closed = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+  const outcome = new Promise<void>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("fanwatch FIFO startup exceeded 1000ms")), 1000);
+    child.stdout.on("data", (chunk: string) => { out += chunk; if (out.includes("#ready")) { ready = true; resolve(); } });
+    child.stderr.on("data", (chunk: string) => { err += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (!ready && !err.includes("skipping special mount path")) reject(new Error("fanwatch FIFO exited without a bounded result"));
+      else resolve();
+    });
+  });
+  try {
+    await outcome;
+    assert.ok(ready || err.includes("skipping special mount path"), "bounded FIFO startup result");
+  } finally {
+    clearTimeout(timer!);
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await closed;
+  }
+});
 
 test("fanwatch live: skipped (needs CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH)", { skip: cannot ? `helper cannot run here: ${cannot}` : false }, async () => {
   const dir = path.join(work, "watched");

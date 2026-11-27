@@ -793,7 +793,13 @@ int main(int argc, char **argv) {
 	/* every path becomes one mount of its filesystem (a path given twice, or two paths of one mount, count once) */
 	for (int i = 1; i < argc; i++) {
 		struct statfs sf;
-		int mfd = open(argv[i], O_RDONLY | O_CLOEXEC);
+		int mfd = open(argv[i], O_PATH | O_CLOEXEC);
+		struct stat path_stat;
+		if (mfd >= 0 && (fstat(mfd, &path_stat) != 0 || (!S_ISREG(path_stat.st_mode) && !S_ISDIR(path_stat.st_mode)))) {
+			fprintf(stderr, "filedeck-fanwatch: skipping special mount path %s\n", argv[i]);
+			close(mfd);
+			mfd = -1;
+		}
 		if (mfd < 0 || fstatfs(mfd, &sf) < 0) {
 			fprintf(stderr, "filedeck-fanwatch: skipping %s: %s\n", argv[i], strerror(errno));
 			emit('c', 0, argv[i], NULL);

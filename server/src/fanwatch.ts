@@ -190,6 +190,7 @@ export class FanWatch {
     this.ensureTimer(); // also drains folders a previous run left pending
     try {
       const all = await listMounts(this.o.root, this.o.procMounts);
+      this.unsupportedMounts = [];
       this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
       const mounts = await this.localMounts(all);
       this.coverageMounts = mounts.map((m) => m.mountpoint);
@@ -259,7 +260,6 @@ export class FanWatch {
   /** Return every reachable local mount, including single-file bind aliases. */
   private async localMounts(all: Mount[]): Promise<Mount[]> {
     const local = all.filter((m) => !m.network && !m.unreachable);
-    this.unsupportedMounts = [];
     this.aliasCount = Math.max(0, local.length - new Set(local.map((m) => `${m.device}\0${m.fstype}`)).size);
     return local;
   }
