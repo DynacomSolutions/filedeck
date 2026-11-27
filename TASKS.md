@@ -349,5 +349,5 @@ ETA: 2026-11-28 18:00 ICT
 
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 195 | Per-entry fanotify events with a journal, filters, local socket and hub stream | in_progress | claude-20261127-watch-events | efficient-watch-events | | 2026-11-27 20:00 ICT | Removes FileDeck inotify watches (compare index, live feed)<br>Kinds: create, delete, modify, close_write, attrib, move<br>No watch limit, no new capability<br>Spec: docs/superpowers/specs/2026-11-27-change-events-design.md |
+| 195 | Per-entry fanotify events with a journal, filters, local socket and hub stream | in_review | claude-20261127-watch-events | efficient-watch-events | | 2026-11-27 21:00 ICT | PR https://github.com/DynacomSolutions/filedeck/pull/277<br>Removes FileDeck inotify watches (compare index, live feed)<br>Kinds: create, delete, modify, close_write, attrib, move<br>No watch limit, no new capability<br>Spec: docs/superpowers/specs/2026-11-27-change-events-design.md |
 | 196 | Release and roll out the change event service | todo | claude-20261127-watch-events | | 27.195 | 2026-11-27 23:00 ICT | Warm readiness and drain as before<br>Check metrics and the socket on each node |
