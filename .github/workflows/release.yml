@@ -160,9 +160,26 @@ jobs:
             org.opencontainers.image.title=Filedeck
             org.opencontainers.image.description=Web file manager with per-node agents and a hub
         timeout-minutes: 15
+      - name: Install Trivy from release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIVY_VERSION: 0.69.3
+        run: |
+          set -euo pipefail
+          # The action installer reads the release web page, which can fail. Use the API assets.
+          dir="$RUNNER_TEMP/trivy-download"
+          mkdir -p "$dir" "$RUNNER_TEMP/trivy-bin"
+          gh release download "v${TRIVY_VERSION}" -R aquasecurity/trivy --dir "$dir" \
+            --pattern "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --pattern "trivy_${TRIVY_VERSION}_checksums.txt"
+          (cd "$dir" && sha256sum -c --ignore-missing "trivy_${TRIVY_VERSION}_checksums.txt")
+          tar -xzf "$dir/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" -C "$RUNNER_TEMP/trivy-bin" trivy
+          echo "$RUNNER_TEMP/trivy-bin" >> "$GITHUB_PATH"
+        timeout-minutes: 5
       - name: Scan release image for high and critical vulnerabilities
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
+          skip-setup-trivy: true
           image-ref: ${{ env.FILEDECK_IMAGE }}
           format: table
           severity: HIGH,CRITICAL
