@@ -35,6 +35,10 @@ export interface McpOptions {
   grantsPollMs?: number;
   /** how often the TLS files are read again, in ms (default 5000) */
   tlsReloadMs?: number;
+  /** bytes queued on one stream or one answer before the session or the connection ends (see McpHttpOptions.maxBacklog); tests set it */
+  maxBacklog?: number;
+  /** most open sessions in all (see McpHttpOptions.maxSessions); tests set it */
+  maxSessions?: number;
 }
 
 const serverVersion = (): string => {
@@ -96,6 +100,8 @@ export async function createMcp(cfg: Config, hub: McpHub, o: McpOptions = {}): P
       hubHealthy: o.hubHealthy,
       idleMs: o.idleMs,
       keepAliveMs: o.keepAliveMs,
+      maxBacklog: o.maxBacklog,
+      maxSessions: o.maxSessions,
       log,
     });
   } catch (e) {

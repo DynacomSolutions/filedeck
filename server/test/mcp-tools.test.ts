@@ -18,7 +18,7 @@ test("the server lists every tool, each read-only with an output schema", async 
     assert.ok(tool.outputSchema, `${tool.name} has an output schema`);
   }
   assert.equal(c.client.getServerVersion()?.name, "filedeck");
-  assert.match(c.client.getInstructions() ?? "", /contract 1/);
+  assert.match(c.client.getInstructions() ?? "", /contract 2/);
 });
 
 test("nodes, du, list and stat", async (t) => {

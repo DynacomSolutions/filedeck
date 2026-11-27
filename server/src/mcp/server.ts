@@ -10,7 +10,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { matchesHostList } from "../request-guard.ts";
 import type { HubCaller } from "./hub-call.ts";
 import { ToolError } from "./hub-call.ts";
-import type { McpEventSink, McpModule, McpRelease, McpSession, McpUpdate } from "./events.ts";
+import { CONTRACT, LIST_URI, eventIdOf, type McpEventSink, type McpModule, type McpRelease, type McpSession, type McpUpdate } from "./events.ts";
 import { Scope, type Grant, type GrantStore } from "./grants.ts";
 
 import { McpMetrics } from "./metrics.ts";
@@ -48,8 +48,13 @@ export interface McpHttpOptions {
   allowedHosts: string[];
   /** most open sessions of one grant (default 32); a new session beyond it ends the oldest idle session of the grant */
   sessionsPerGrant?: number;
-  /** bytes queued on one stream before its session ends (default 1 MiB); a test sets it */
+  /**
+   * bytes queued on one event stream before its session ends, and on one answer to a POST before its connection is cut (default 1 MiB): a client
+   * that does not read. A test sets it.
+   */
   maxBacklog?: number;
+  /** most open sessions in all (default 256); a test sets it */
+  maxSessions?: number;
   serverVersion: string;
   /** Whether the hub's own listener answers; liveness and readiness need it too (main.ts asks /healthz on loopback). Default: always true. */
   hubHealthy?: () => Promise<boolean>;
@@ -69,26 +74,37 @@ interface Session {
   mcp: McpServer;
   transport: StreamableHTTPServerTransport;
   subs: Map<string, McpRelease>;
-  /** releases of the list interest, set by the first resources/list */
+  /** releases of the list interest, set when the session opens: every session gets list_changed */
   listRelease?: McpRelease;
   lastSeen: number;
   /** open event streams (GET) */
   streams: number;
-  /** the responses of those streams: what is queued on them is what a slow client has not read */
+  /** the responses of those streams, the oldest first: what is queued on them is what a slow client has not read */
   streamRes: Set<ServerResponse>;
+  /** notices that the server had no open stream for since the last notice that it wrote */
+  missed: number;
+  /** the requests of POSTs that the server has not answered yet, by JSON-RPC id: the call function ends the work of its POST */
+  calls: Map<string | number, () => void>;
   closed: boolean;
 }
 
-/** Names this process in event ids: an id is `<boot>.<n>`, so an id from before a restart never equals one after it. */
-const BOOT = randomBytes(4).toString("hex");
+/** The ids of the requests in a POST body (a message with a method and an id; a notification has no id). */
+function requestIds(body: unknown): (string | number)[] {
+  const out: (string | number)[] = [];
+  for (const m of Array.isArray(body) ? body : [body]) {
+    if (m && typeof m === "object" && "method" in m && "id" in m && (typeof m.id === "string" || typeof m.id === "number")) out.push(m.id);
+  }
+  return out;
+}
 
 export class McpHttp {
   readonly server: Server | TlsServer;
   private readonly sessions = new Map<string, Session>();
   private readonly callers = new Map<string, HubCaller>();
+  /** the id and the notice count of each event stream (a GET response) */
+  private readonly streams = new WeakMap<ServerResponse, { id: string; seq: number }>();
   private readonly sweep: NodeJS.Timeout;
   private tlsTimer?: NodeJS.Timeout;
-  private eventSeq = 0;
   private inflight = 0;
   private idleWaiters: (() => void)[] = [];
   private drainStarted?: Promise<void>;
@@ -161,14 +177,8 @@ export class McpHttp {
   // ---- notifications ----
 
   /**
-   * The same `eventId` goes to every session that gets one change. The id is `<boot>.<n>`: it is new for each change, it does not repeat after a
-   * restart, and it is the key a client uses to drop a notification that it saw (docs/mcp.md).
+   * A client that does not read its stream: what is queued on it passes the limit, so its session ends (the client connects again and reads a baseline).
    */
-  private nextEventId(): string {
-    return `${BOOT}.${++this.eventSeq}`;
-  }
-
-  /** A client that does not read its stream: what is queued on it passes the limit, so its session ends (the client connects again and reads a baseline). */
   private slow(s: Session): boolean {
     const limit = this.o.maxBacklog ?? MAX_BACKLOG;
     for (const res of s.streamRes) {
@@ -181,23 +191,52 @@ export class McpHttp {
     return false;
   }
 
+  /**
+   * The stream fields of the next notice of a session: the id of the open event stream, and the number of this notice on it (1 for the first). With
+   * no open stream the notice cannot be written (the transport has none to write to): it is counted, and the next notice that is written says how
+   * many were lost (`missed`). The client reads these fields to see a gap (docs/mcp.md).
+   */
+  private stamp(s: Session): { streamId: string; seq: number; missed?: number } | undefined {
+    for (const res of s.streamRes) {
+      if (res.destroyed || res.writableEnded) continue;
+      const st = this.streams.get(res);
+      if (!st) continue;
+      const out = { streamId: st.id, seq: ++st.seq, ...(s.missed ? { missed: s.missed } : {}) };
+      s.missed = 0;
+      return out;
+    }
+    s.missed++;
+    return undefined;
+  }
+
+  /**
+   * `_meta` of one notice. `eventId` is the same for the same audience, URI and revision (see `eventIdOf`), and is at the top of `_meta` and in
+   * `_meta.filedeck`. One change that touches several resources gives one notice for each, with its own id and a shared `changeId`.
+   */
+  private meta(s: Session, audience: string | undefined, uri: string, revision: number, changeId: string | undefined) {
+    const stream = this.stamp(s);
+    if (!stream) return undefined;
+    const eventId = eventIdOf(audience, uri, revision);
+    return { eventId, filedeck: { eventId, revision, uri, ...(changeId ? { changeId } : {}), ...stream } };
+  }
+
   private deliver(u: McpUpdate): void {
-    const eventId = this.nextEventId();
     for (const s of [...this.sessions.values()]) {
       if (!s.subs.has(u.uri) || s.closed || (u.audience !== undefined && u.audience !== s.audience) || this.slow(s)) continue;
+      const meta = this.meta(s, u.audience, u.uri, u.revision, u.changeId);
+      if (!meta) continue;
       this.o.metrics.notification(s.grantId, "resource_updated");
-      s.mcp.server.sendResourceUpdated({ uri: u.uri, _meta: { filedeck: { eventId, revision: u.revision, uri: u.uri } } }).catch(() => this.o.metrics.error(s.grantId, "notify"));
+      s.mcp.server.sendResourceUpdated({ uri: u.uri, _meta: meta }).catch(() => this.o.metrics.error(s.grantId, "notify"));
     }
   }
 
-  private deliverListChanged(c: { revision: number; audience?: string; allows?: (session: McpSession) => boolean }): void {
-    const eventId = this.nextEventId();
+  private deliverListChanged(c: { revision: number; audience?: string; changeId?: string; allows?: (session: McpSession) => boolean }): void {
     for (const s of [...this.sessions.values()]) {
       if (!s.listRelease || s.closed || (c.audience !== undefined && c.audience !== s.audience) || (c.allows && !c.allows(s.info)) || this.slow(s)) continue;
+      const meta = this.meta(s, c.audience, LIST_URI, c.revision, c.changeId);
+      if (!meta) continue;
       this.o.metrics.notification(s.grantId, "list_changed");
-      s.mcp.server
-        .notification({ method: "notifications/resources/list_changed", params: { _meta: { filedeck: { eventId, revision: c.revision, uri: "filedeck://resources" } } } })
-        .catch(() => this.o.metrics.error(s.grantId, "notify"));
+      s.mcp.server.notification({ method: "notifications/resources/list_changed", params: { _meta: meta } }).catch(() => this.o.metrics.error(s.grantId, "notify"));
     }
   }
 
@@ -223,14 +262,16 @@ export class McpHttp {
       {
         capabilities: { resources: { subscribe: true, listChanged: true }, tools: {} },
         instructions:
-          "FileDeck contract 1 (docs/mcp.md). Read-only tools and filedeck:// resources for nodes, scans, jobs and change events. " +
+          `FileDeck contract ${CONTRACT} (docs/mcp.md). Read-only tools and filedeck:// resources for nodes, scans, jobs and change events. ` +
           "Subscribe to a resource to get notifications/resources/updated, then read it: every body has `revision` and `updatedAt`. " +
-          "Every notification has _meta.filedeck.eventId: drop one that you already saw. The server keeps no history and cannot resume a stream: " +
-          "after a gap or a reconnect, subscribe again and read each resource (a baseline read) and compare revisions.",
+          "Every notification has _meta.eventId (the same value is in _meta.filedeck.eventId): drop one that you already saw. " +
+          "_meta.filedeck.streamId and .seq number the notices of one event stream: a new streamId, a seq that is not the last one plus 1, or `missed` is a gap. " +
+          "The server keeps no history and cannot resume a stream (Last-Event-ID is ignored): " +
+          "after a gap or a reconnect, subscribe again and read each resource (a baseline read) and compare revisions. A baseline read is not an event.",
       },
     );
     for (const m of o.modules) m.register(mcp, info);
-    const session: Session = { id: "", grantId: g.id, grantFingerprint: g.fingerprint, audience, info, mcp, transport: undefined as never, subs: new Map(), lastSeen: Date.now(), streams: 0, streamRes: new Set(), closed: false };
+    const session: Session = { id: "", grantId: g.id, grantFingerprint: g.fingerprint, audience, info, mcp, transport: undefined as never, subs: new Map(), lastSeen: Date.now(), streams: 0, streamRes: new Set(), missed: 0, calls: new Map(), closed: false };
     session.transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
@@ -239,10 +280,21 @@ export class McpHttp {
         o.metrics.sessionOpened(g.id);
         // the grant may have been removed or changed since the request was checked: such a session ends at once
         if (o.grants.grants.find((x) => x.id === g.id)?.fingerprint !== g.fingerprint) void this.closeSession(session, "revoked");
+        // every session gets list_changed from here on (not only after its first resources/list): the modules start the watches that it needs
+        else session.listRelease = this.followLists(info);
       },
       keepAliveMs: o.keepAliveMs ?? 15_000,
     });
     session.transport.onclose = () => void this.closeSession(session, "client");
+    // the server has done the work of a request when it sends the answer; what is left is delivery to the client (see `route`)
+    const send = session.transport.send.bind(session.transport);
+    session.transport.send = async (msg, options) => {
+      try {
+        return await send(msg, options);
+      } finally {
+        if ("id" in msg && msg.id !== undefined && ("result" in msg || "error" in msg)) session.calls.get(msg.id)?.();
+      }
+    };
     mcp.server.setRequestHandler(SubscribeRequestSchema, async (req) => {
       const uri = req.params.uri;
       if (session.subs.has(uri)) return {};
@@ -283,12 +335,10 @@ export class McpHttp {
     await s.mcp.close().catch(() => undefined);
   }
 
-  /** The first resources/list of a session: from then on it gets list_changed, and the modules start the watches it needs. */
-  private peek(s: Session, msg: JSONRPCMessage): void {
-    if ("method" in msg && msg.method === "resources/list" && !s.listRelease) {
-      const releases = this.o.modules.map((m) => m.followList(s.info));
-      s.listRelease = () => releases.forEach((r) => r());
-    }
+  /** The interest of a session in the list of resources: the modules keep the watches that the list needs, and `list_changed` reaches the session. */
+  private followLists(info: McpSession): McpRelease {
+    const releases = this.o.modules.map((m) => m.followList(info));
+    return () => releases.forEach((r) => r());
   }
 
   // ---- HTTP ----
@@ -418,25 +468,21 @@ export class McpHttp {
         metrics.request(gid, "draining");
         return this.rpcError(res, 503, ErrorCode.InternalError, "the server is shutting down", { "retry-after": "1" });
       }
-      if (this.sessions.size >= MAX_SESSIONS) {
+      // one grant may not fill the hub: at its own limit, the new session takes the place of one session of that grant. The session that goes is one with no
+      // open event stream (a client that follows keeps its stream open), and among those the one with the oldest last request; with every stream open, the
+      // one with the oldest last request. This comes before the check of the total, so a grant at its limit is never refused because the hub is full.
+      const own = [...this.sessions.values()].filter((x) => x.grantId === grant!.id && !x.closed);
+      if (own.length >= (this.o.sessionsPerGrant ?? SESSIONS_PER_GRANT)) {
+        const rank = (x: Session) => (x.streams > 0 ? 1 : 0);
+        const victim = own.reduce((a, b) => (rank(b) < rank(a) || (rank(b) === rank(a) && b.lastSeen < a.lastSeen) ? b : a));
+        await this.closeSession(victim, "evicted");
+      }
+      if (this.sessions.size >= (this.o.maxSessions ?? MAX_SESSIONS)) {
         metrics.request(gid, "busy");
         return this.rpcError(res, 503, ErrorCode.InternalError, "too many sessions", { "retry-after": "5" });
       }
-      // one grant may not fill the hub: at its own limit, the new session takes the place of the session of that grant that made no request for the longest time
-      // (a client keeps its event stream open, so an open stream does not make a session busy)
-      const own = [...this.sessions.values()].filter((x) => x.grantId === grant!.id && !x.closed);
-      if (own.length >= (this.o.sessionsPerGrant ?? SESSIONS_PER_GRANT)) {
-        const oldest = own.reduce((a, b) => (b.lastSeen < a.lastSeen ? b : a));
-        await this.closeSession(oldest, "evicted");
-      }
       session = this.newSession(grant);
       await session.mcp.connect(session.transport);
-      const s = session;
-      const original = session.transport.onmessage;
-      session.transport.onmessage = (msg, extra) => {
-        this.peek(s, msg);
-        original?.(msg, extra);
-      };
     } else {
       metrics.request(gid, "no_session");
       metrics.error(gid, "protocol");
@@ -456,34 +502,72 @@ export class McpHttp {
     const s = session;
     const track = method === "POST";
     if (track) this.inflight++;
-    let counted = false;
-    const done = () => {
-      if (counted) return;
-      counted = true;
+    // The work of a POST is over when the server has sent the answer to each request in it (or at once, when it holds none). What is left is delivery:
+    // a client that does not read must not keep a drain open. A drain waits for work, never for a client.
+    let worked = false;
+    const endWork = () => {
+      if (worked) return;
+      worked = true;
       if (track && --this.inflight === 0) for (const w of this.idleWaiters.splice(0)) w();
+    };
+    const ids = track ? requestIds(body) : [];
+    if (track && ids.length === 0) endWork();
+    let waiting = ids.length;
+    for (const id of ids) {
+      const call = () => {
+        if (s.calls.get(id) !== call) return;
+        s.calls.delete(id);
+        if (--waiting <= 0) endWork();
+      };
+      s.calls.set(id, call);
+    }
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      endWork();
+      for (const id of ids) s.calls.delete(id);
       if (method === "GET") s.streams--;
       s.lastSeen = Date.now();
     };
     if (method === "GET") {
       s.streams++;
       s.streamRes.add(res);
+      this.streams.set(res, { id: randomBytes(4).toString("hex"), seq: 0 });
       res.once("close", () => s.streamRes.delete(res));
-    }
-    res.once("close", done);
+    } else if (track) this.limitBacklog(res, s);
+    res.once("close", finish);
     try {
       await s.transport.handleRequest(req, res, body);
     } finally {
-      if (res.writableEnded || res.destroyed) done();
+      if (res.writableEnded || res.destroyed) finish();
     }
+  }
+
+  /** The answer to a POST goes to a client that does not read it: the bytes that wait in the hub pass the limit, so the connection is cut (the client asks again). */
+  private limitBacklog(res: ServerResponse, s: Session): void {
+    const limit = this.o.maxBacklog ?? MAX_BACKLOG;
+    const write = res.write.bind(res);
+    res.write = ((...args: unknown[]) => {
+      const ok = (write as (...a: unknown[]) => boolean)(...args);
+      if (res.writableLength > limit && !res.destroyed) {
+        this.o.log?.(`mcp: an answer to grant ${s.grantId} is cut: it holds ${res.writableLength} bytes that the client has not read`);
+        this.o.metrics.error(s.grantId, "slow");
+        res.destroy();
+      }
+      return ok;
+    }) as typeof res.write;
   }
 
   // ---- stop ----
 
   /**
    * Starts a drain and returns when it is done. Readiness fails from the start, and every new session and every new request gets 503 with
-   * `Retry-After`. The drain waits until every call in flight has ended, then closes every session and its streams. It has no timer and no time
-   * limit: the grace period of the pod is the only limit, and it ends the process. A second call joins the first. It does not close the listener:
-   * the caller does (`server.close()`, see main.ts), so a new connection is refused and a request on a connection that is still open gets the 503.
+   * `Retry-After`. The drain waits until the server has answered every call in flight (the work), then closes every session and its streams. It does
+   * not wait for a client to read an answer: a client that stopped reading must not keep the hub from its clean-up, so the drain ends and `stop()`
+   * cuts that connection. It has no timer and no time limit: the grace period of the pod is the only limit, and it ends the process. A second call
+   * joins the first. It does not close the listener: the caller does (`server.close()`, see main.ts), so a new connection is refused and a request on
+   * a connection that is still open gets the 503.
    */
   drain(): Promise<void> {
     this.drainStarted ??= (async () => {

@@ -180,6 +180,52 @@ test("a grant at its limit of sessions ends its own oldest session, and the othe
   assert.match(await metricsOf(b), /filedeck_mcp_sessions_closed_total\{grant="a",reason="evicted"\} 1/);
 });
 
+test("a grant at its limit ends a session with no open stream before one that holds a stream", async (t) => {
+  const a = grant("a", ["filedeck://"]);
+  const b = await boot({ grants: [a], env: { FILEDECK_MCP_SESSIONS_PER_GRANT: "2" } });
+  t.after(() => b.close());
+  const reader = await b.connect({ token: a.token }); // the client keeps its event stream open
+  await sleep(200);
+  const open = await fetch(b.url + "/mcp", { method: "POST", headers: headers(a.token), body: JSON.stringify(init) }); // no stream, and a newer last request
+  const quiet = open.headers.get("mcp-session-id")!;
+  await open.text();
+  await sleep(10);
+  const fresh = await b.connect({ token: a.token });
+  assert.equal(b.mcp.sessionCount, 2);
+  const probe = await fetch(b.url + "/mcp", { method: "POST", headers: headers(a.token, { "mcp-session-id": quiet }), body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list" }) });
+  assert.equal(probe.status, 404, "the session without a stream went");
+  await probe.text();
+  assert.equal((await call(reader, "filedeck_nodes")).isError, undefined, "the session that holds a stream stays");
+  assert.equal((await call(fresh, "filedeck_nodes")).isError, undefined);
+  // when every session holds a stream, the one with the oldest last request goes
+  const third = await b.connect({ token: a.token });
+  await sleep(200);
+  assert.equal(b.mcp.sessionCount, 2);
+  assert.equal((await call(third, "filedeck_nodes")).isError, undefined);
+});
+
+test("with the hub at its total limit, a grant at its own limit replaces its own session; another grant gets 503", async (t) => {
+  const a = grant("a", ["filedeck://"]);
+  const other = grant("other", ["filedeck://"]);
+  const b = await boot({ grants: [a, other], env: { FILEDECK_MCP_SESSIONS_PER_GRANT: "2" }, mcp: { maxSessions: 2 } });
+  t.after(() => b.close());
+  const c1 = await b.connect({ token: a.token });
+  await sleep(5);
+  const c2 = await b.connect({ token: a.token });
+  assert.equal(b.mcp.sessionCount, 2, "the hub is full");
+  await sleep(5);
+  const c3 = await b.connect({ token: a.token }); // its own limit and the total are both reached: it takes the place of its oldest session
+  assert.equal(b.mcp.sessionCount, 2);
+  assert.equal((await call(c3, "filedeck_nodes")).isError, undefined);
+  assert.equal((await call(c2, "filedeck_nodes")).isError, undefined);
+  await assert.rejects(call(c1, "filedeck_nodes"), "the oldest session of the grant went");
+  const refused = await fetch(b.url + "/mcp", { method: "POST", headers: headers(other.token), body: JSON.stringify(init) });
+  assert.equal(refused.status, 503, "another grant has no room");
+  assert.equal(refused.headers.get("retry-after"), "5");
+  await refused.text();
+  assert.match(await metricsOf(b), /filedeck_mcp_sessions_closed_total\{grant="a",reason="evicted"\} 1/);
+});
+
 // ---- finding 5: allowed hosts of the MCP listener ----
 
 const rawPost = (url: string, token: string, host: string) =>
@@ -325,6 +371,24 @@ test("watch: a re-subscribe while a poll is cut off starts a new poll, and the f
   }
 });
 
+test("watch: a poll that a halt cut off does not reset the first timed poll of the next loop", async () => {
+  const { state, caller } = fakeCaller();
+  // a long interval: a poll that is delayed by one interval is a poll that is lost for the test
+  const w = new SourceWatch({ key: "n", jobsPath: "/api/jobs", call: caller, pollMs: 5000, metrics: new McpMetrics(), emit: () => undefined });
+  try {
+    state.hang = new Promise<void>(() => undefined);
+    const r1 = w.acquire();
+    await until(() => state.calls >= 1);
+    state.hang = undefined;
+    r1(); // the last follower leaves, and one comes back in the same tick: the cut-off poll ends after the new loop has set its timer
+    const r2 = w.acquire();
+    await until(() => state.calls >= 2, 1000);
+    r2();
+  } finally {
+    await w.stop();
+  }
+});
+
 test("watch: after a failed first poll, the first good poll reports the jobs it finds", async () => {
   const { state, caller } = fakeCaller();
   const events: WatchEvent[] = [];
@@ -392,7 +456,8 @@ test("a job id is checked before it is used in a path; a missing node or job in 
   const b = await boot();
   t.after(() => b.close());
   const c = await b.connect();
-  const before = [...b.agent.state.hits.keys()].length;
+  await sleep(400); // the watches that a session starts at `initialize` have made their first polls
+  const before = [...b.agent.state.hits.keys()].filter((p) => !p.startsWith("/api/jobs")).length;
   for (const id of ["../nodes", "a/b", "x y", "a".repeat(129), "%2e%2e"]) {
     const r = await call(c, "filedeck_job_get", { id });
     assert.equal(r.isError, true, id);

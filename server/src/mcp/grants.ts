@@ -24,25 +24,56 @@ const MIN_TOKEN = 16;
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
 /**
- * A resource entry is a URI template (it has `{name}` parts; each matches one path segment), a URI prefix (it ends with `/`: every URI that starts
- * with it) or a single URI (the rest: an exact match only, so `filedeck://nodes` is the node list and nothing below it).
+ * A resource entry is a URI template (it has `{name}` parts; each matches one path segment), a URI prefix (it ends with `/`: every URI that has it
+ * as its beginning, also when it has `{name}` parts) or a single URI (the rest: an exact match only, so `filedeck://nodes` is the node list and
+ * nothing below it). Entries and URIs are compared one path segment at a time.
  */
-export function uriMatches(entry: string, uri: string): boolean {
-  if (!entry.includes("{")) return entry.endsWith("/") ? uri.startsWith(entry) : uri === entry;
-  return templateRegExp(entry).test(uri);
+interface Pattern {
+  segments: string[];
+  /** the entry ends with `/`: a URI that has these segments first, and at least one more, matches */
+  prefix: boolean;
 }
 
-const templateRegExp = (entry: string) =>
-  new RegExp(`^${entry.split(/\{[^}]+\}/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^/]+")}$`);
+const patternOf = (entry: string): Pattern => {
+  const prefix = entry.endsWith("/");
+  const segments = entry.split("/");
+  if (prefix) segments.pop();
+  return { segments, prefix };
+};
 
-const literalPrefix = (s: string) => s.slice(0, s.includes("{") ? s.indexOf("{") : s.length);
+const wildcard = (seg: string) => seg.includes("{");
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const segmentRegExp = (seg: string) => new RegExp(`^${seg.split(/\{[^}]*\}/).map(escapeRe).join("[^/]+")}$`);
 
-/** Whether an entry can match some URI of a template: the literal beginnings agree. A single URI must fit the template itself. */
+/** Whether a segment pattern matches a literal segment. */
+const segmentMatches = (pattern: string, literal: string): boolean => (wildcard(pattern) ? segmentRegExp(pattern).test(literal) : pattern === literal);
+
+/** Whether some literal segment matches both patterns. With two wildcards the literal beginnings and endings must agree (a safe answer: it can say yes too often, never no). */
+function segmentsOverlap(a: string, b: string): boolean {
+  if (!wildcard(a)) return segmentMatches(b, a);
+  if (!wildcard(b)) return segmentMatches(a, b);
+  const head = (s: string) => s.slice(0, s.indexOf("{"));
+  const tail = (s: string) => s.slice(s.lastIndexOf("}") + 1);
+  const [ha, hb, ta, tb] = [head(a), head(b), tail(a), tail(b)];
+  return (ha.startsWith(hb) || hb.startsWith(ha)) && (ta.endsWith(tb) || tb.endsWith(ta));
+}
+
+export function uriMatches(entry: string, uri: string): boolean {
+  const e = patternOf(entry);
+  const u = uri.split("/");
+  if (e.prefix ? u.length <= e.segments.length : u.length !== e.segments.length) return false;
+  return e.segments.every((seg, i) => segmentMatches(seg, u[i]!));
+}
+
+/**
+ * Whether some URI of a resource template (`filedeck://nodes/{node}/status`) is matched by an entry. The grant lists a template only when it can read
+ * at least one URI of it. The template has a fixed number of segments, and an entry is compared with it segment by segment.
+ */
 export function couldMatch(entry: string, template: string): boolean {
-  if (!entry.includes("{") && !entry.endsWith("/")) return templateRegExp(template).test(entry);
-  const a = literalPrefix(entry);
-  const b = literalPrefix(template);
-  return a.startsWith(b) || b.startsWith(a);
+  const e = patternOf(entry);
+  const t = template.split("/");
+  if (e.prefix ? t.length <= e.segments.length : t.length !== e.segments.length) return false;
+  return e.segments.every((seg, i) => segmentsOverlap(seg, t[i]!));
 }
 
 /** What a session may do: the grant's tools and resources. */

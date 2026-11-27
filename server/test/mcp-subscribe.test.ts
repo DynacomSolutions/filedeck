@@ -12,7 +12,7 @@ test("subscribe: a scan that finishes sends resources/updated, and the resource 
   b.agent.state.jobs.push(job("s1", "size", "running"));
   const c = await b.connect();
   const before = bodyOf(await c.client.readResource({ uri: SCANS }));
-  assert.equal(before.contract, 1);
+  assert.equal(before.contract, 2);
   assert.equal(before.uri, SCANS);
   assert.equal(before.scans[0].state, "running");
   assert.equal(typeof before.revision, "number");
@@ -27,7 +27,7 @@ test("subscribe: a scan that finishes sends resources/updated, and the resource 
   assert.deepEqual(Object.keys(c.updated[0]!).sort(), ["_meta", "uri"], "the notification holds the uri and _meta");
   const meta = c.updated[0]!._meta!.filedeck!;
   assert.equal(meta.uri, SCANS);
-  assert.match(meta.eventId, /^[0-9a-f]{8}\.\d+$/);
+  assert.match(meta.eventId, /^[0-9a-f]{12}\.\d+$/);
   assert.ok(meta.revision > before.revision, "the notification carries the new revision");
 
   const after = bodyOf(await c.client.readResource({ uri: SCANS }));
@@ -45,11 +45,13 @@ test("a read with no change keeps the revision; progress alone does not change i
   const uri = "filedeck://jobs/s1";
   const r1 = bodyOf(await c.client.readResource({ uri }));
   b.agent.state.jobs[0]!.progress = { entries: 99 };
+  await sleep(400); // a session follows the node from `initialize`, so a read shows what the last poll saw (one poll is 100 ms here)
   const r2 = bodyOf(await c.client.readResource({ uri }));
   assert.equal(r2.job.progress.entries, 99);
   assert.equal(r2.revision, r1.revision);
   assert.equal(r2.updatedAt, r1.updatedAt);
   b.agent.state.jobs[0]!.state = "failed";
+  await sleep(400);
   const r3 = bodyOf(await c.client.readResource({ uri }));
   assert.ok(r3.revision > r2.revision);
 });
@@ -97,7 +99,7 @@ test("a node that stops answering is an event on the node resources", async (t) 
   b.agent.state.fail.clear();
 });
 
-test("list_changed: a session that listed resources hears when a job appears or goes", async (t) => {
+test("list_changed: a session hears when a job appears or goes", async (t) => {
   const b = await boot();
   t.after(() => b.close());
   const c = await b.connect();
@@ -119,11 +121,10 @@ test("list_changed: a session that listed resources hears when a job appears or 
   await until(() => c.listChanged.n > seen);
   assert.equal((await c.client.listResources()).resources.some((r) => r.uri === "filedeck://jobs/n1"), false);
 
-  // a session that never listed gets none
+  // a session that never listed gets it too: it is armed from `initialize`
   const quiet = await b.connect();
   b.agent.state.jobs.push(job("n2", "compress", "running"));
-  await until(() => c.listChanged.n > seen + 1);
-  assert.equal(quiet.listChanged.n, 0);
+  await until(() => c.listChanged.n > seen + 1 && quiet.listChanged.n > 0);
 });
 
 test("subscribing to an unknown resource or a missing job fails", async (t) => {
@@ -138,7 +139,7 @@ test("subscribing to an unknown resource or a missing job fails", async (t) => {
   await c.client.unsubscribeResource({ uri: SCANS });
 });
 
-test("one shared watch per node: many sessions cost one poll loop, and it stops with the last one", async (t) => {
+test("one shared watch per source: many sessions cost one poll loop, and it stops with the last one", async (t) => {
   const b = await boot();
   t.after(() => b.close());
   const hits = () => b.agent.state.hits.get("/api/jobs") ?? 0;
@@ -148,7 +149,7 @@ test("one shared watch per node: many sessions cost one poll loop, and it stops 
     await c.client.subscribeResource({ uri: "filedeck://nodes/n/jobs" });
   }
   const text = async () => (await (await b.hub.metrics.request("/metrics")).text());
-  assert.match(await text(), /filedeck_mcp_watched_nodes 1/);
+  assert.match(await text(), /filedeck_mcp_watched_nodes 2/);
   assert.match(await text(), /filedeck_mcp_subscriptions\{grant="all"\} 6/);
   const h0 = hits();
   await sleep(1000);

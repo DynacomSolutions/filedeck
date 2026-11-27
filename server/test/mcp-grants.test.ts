@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { Scope, uriMatches } from "../src/mcp/grants.ts";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import { couldMatch, Scope, uriMatches } from "../src/mcp/grants.ts";
+import { RESOURCE_NOT_FOUND } from "../src/mcp/core.ts";
 import { ALL_TOKEN, bodyOf, boot, everything, job, sleep, until, type GrantDef } from "./mcp-support.ts";
 
 const web: GrantDef = { id: "reader", token: "reader-token-" + "r".repeat(24), resources: ["filedeck://nodes/n/"], tools: ["filedeck_du", "filedeck_nodes", "filedeck_jobs_list", "filedeck_job_get"] };
@@ -22,6 +24,30 @@ test("a resource entry is a URI template, a prefix (slash at the end) or one URI
   assert.equal(uriMatches("filedeck://nodes/{node}/status", "filedeck://nodes/a/scans"), false);
   assert.equal(uriMatches("filedeck://nodes/{node}/status", "filedeck://nodes/a/b/status"), false, "{node} is one segment");
   assert.equal(uriMatches("filedeck://", "filedeck://jobs/x"), true);
+});
+
+test("a template that ends with a slash is a prefix, and the parts of an entry are compared one segment at a time", () => {
+  assert.equal(uriMatches("filedeck://nodes/{node}/", "filedeck://nodes/a/status"), true);
+  assert.equal(uriMatches("filedeck://nodes/{node}/", "filedeck://nodes/a/"), true);
+  assert.equal(uriMatches("filedeck://nodes/{node}/", "filedeck://nodes/a"), false);
+  assert.equal(uriMatches("filedeck://nodes/{node}/", "filedeck://jobs/a/status"), false);
+  assert.equal(uriMatches("filedeck://nodes/web1/", "filedeck://nodes/web1"), false);
+  // a template of a resource: some URI of it must be readable
+  const t = (entry: string, template: string) => couldMatch(entry, template);
+  assert.equal(t("filedeck://nodes/{node}/status", "filedeck://nodes/{node}/status"), true);
+  assert.equal(t("filedeck://nodes/{node}/status", "filedeck://nodes/{node}/scans"), false, "the same beginning is not enough");
+  assert.equal(t("filedeck://nodes/{node}/status", "filedeck://jobs/{id}"), false);
+  assert.equal(t("filedeck://nodes/n/jobs", "filedeck://nodes/{node}/jobs"), true);
+  assert.equal(t("filedeck://nodes/n/jobs", "filedeck://nodes/{node}/status"), false);
+  assert.equal(t("filedeck://nodes/{node}/", "filedeck://nodes/{node}/status"), true, "a template with a slash at the end is a prefix");
+  assert.equal(t("filedeck://nodes/{node}/", "filedeck://jobs/{id}"), false);
+  assert.equal(t("filedeck://nodes/n/", "filedeck://nodes/{node}/scans"), true);
+  assert.equal(t("filedeck://nodes/", "filedeck://nodes/{node}/scans"), true);
+  assert.equal(t("filedeck://jobs/", "filedeck://jobs/{id}"), true);
+  assert.equal(t("filedeck://jobs/", "filedeck://nodes/{node}/jobs"), false);
+  assert.equal(t("filedeck://nodes", "filedeck://nodes/{node}/status"), false, "the node list is one URI");
+  assert.equal(t("filedeck://", "filedeck://jobs/{id}"), true);
+  assert.equal(t("filedeck://nodes/n/status/", "filedeck://nodes/{node}/status"), false, "a prefix needs one more segment than the template has");
 });
 
 test("a node is named only by its prefix or the template filedeck://nodes/{node}/", () => {
@@ -194,11 +220,82 @@ test("sign-in on: each account has its own watch, and a notification reaches onl
   const two = await b.connect({ token: "second-token-" + "s".repeat(22) });
   await one.client.subscribeResource({ uri: "filedeck://nodes/n/jobs" });
   await two.client.subscribeResource({ uri: "filedeck://nodes/n/jobs" });
-  assert.match(await (await b.hub.metrics.request("/metrics")).text(), /filedeck_mcp_watched_nodes 2/, "one watch for each account");
+  assert.match(await (await b.hub.metrics.request("/metrics")).text(), /filedeck_mcp_watched_nodes 4/, "one watch for each account and source (the node and the hub operations)");
   b.agent.state.jobs[0]!.state = "done";
   await until(() => one.updated.length > 0 && two.updated.length > 0);
   await sleep(300);
   assert.equal(one.updated.length, 1);
   assert.equal(two.updated.length, 1);
   assert.notEqual(one.updated[0]!._meta!.filedeck!.eventId, two.updated[0]!._meta!.filedeck!.eventId);
+});
+
+// ---- the list of templates is what the grant can read, and the codes of a refused or missing resource ----
+
+const code = (e: unknown) => (e as McpError).code;
+
+test("resources/templates/list holds exactly the templates that the grant can read, and no more", async (t) => {
+  const NODE = ["filedeck://nodes/{node}/jobs", "filedeck://nodes/{node}/scans", "filedeck://nodes/{node}/status"];
+  const cases: [string[], string[]][] = [
+    [["filedeck://nodes/{node}/status"], ["filedeck://nodes/{node}/status"]],
+    [["filedeck://nodes/{node}/scans", "filedeck://jobs/{id}"], ["filedeck://jobs/{id}", "filedeck://nodes/{node}/scans"]],
+    [["filedeck://nodes/n/jobs"], ["filedeck://nodes/{node}/jobs"]],
+    [["filedeck://nodes/{node}/"], NODE],
+    [["filedeck://nodes/n/"], NODE],
+    [["filedeck://jobs/"], ["filedeck://jobs/{id}"]],
+    [["filedeck://nodes", "filedeck://hub/jobs"], []],
+    [["filedeck://"], ["filedeck://jobs/{id}", ...NODE]],
+  ];
+  const all = ["filedeck://jobs/{id}", ...NODE];
+  for (const [resources, listed] of cases) {
+    const g: GrantDef = { id: "tmpl", token: "tmpl-token-" + "t".repeat(24), resources, tools: ["*"] };
+    const b = await boot({ grants: [g] });
+    try {
+      const c = await b.connect();
+      const got = (await c.client.listResourceTemplates()).resourceTemplates.map((r) => r.uriTemplate).sort();
+      assert.deepEqual(got, [...listed].sort(), JSON.stringify(resources));
+      // what is listed can be read (a node or a job that does not exist is "not found"), and what is not listed is refused
+      for (const template of all) {
+        const uri = template.replace("{node}", "n").replace("{id}", "x");
+        const e = await c.client.readResource({ uri }).then(() => undefined, (x: unknown) => x);
+        if (listed.includes(template)) assert.ok(e === undefined || code(e) === RESOURCE_NOT_FOUND, `${JSON.stringify(resources)} reads ${uri}: ${(e as Error)?.message}`);
+        else {
+          assert.equal(code(e), -32602, `${JSON.stringify(resources)} must refuse ${uri}`);
+          // a template that the grant cannot read is not registered: the SDK answers "not found" with the same code
+          assert.match((e as Error).message, /forbidden|not found/);
+        }
+      }
+    } finally {
+      await b.close();
+    }
+  }
+});
+
+test("a read of a URI outside the grant is -32602 forbidden, also for a node that the hub does not have; a bad percent escape is never an internal error", async (t) => {
+  const g: GrantDef = { id: "one", token: "one-token-" + "o".repeat(24), resources: ["filedeck://nodes/n/"], tools: ["*"] };
+  const b = await boot({ grants: [everything(), g] });
+  t.after(() => b.close());
+  const one = await b.connect({ token: g.token });
+  const err = async (c: typeof one, f: () => Promise<unknown>) => await f().then(() => undefined, (e: unknown) => e as McpError);
+  // the grant names node n only: any other node is outside it, whether the hub has it or not
+  for (const uri of ["filedeck://nodes/other/status", "filedeck://nodes/ghost/scans", "filedeck://nodes/ghost/jobs"]) {
+    const e = await err(one, () => one.client.readResource({ uri }));
+    assert.equal(code(e), -32602, uri);
+    assert.match(e!.message, /forbidden/, uri);
+  }
+  // a grant that covers every node: a node that does not exist is "not found"
+  const full = await b.connect();
+  for (const uri of ["filedeck://nodes/ghost/status", "filedeck://jobs/ghost"]) assert.equal(code(await err(full, () => full.client.readResource({ uri }))), RESOURCE_NOT_FOUND, uri);
+  // a bad percent escape names nothing: -32002 on a read, -32602 on a subscribe, and never -32603
+  for (const c of [full, one]) {
+    for (const uri of ["filedeck://nodes/%E0/status", "filedeck://nodes/%/scans", "filedeck://jobs/%E0%A4%A"]) {
+      const r = await err(c, () => c.client.readResource({ uri }));
+      assert.ok(r instanceof McpError, `${uri} is a JSON-RPC error`);
+      assert.ok([RESOURCE_NOT_FOUND, -32602].includes(r.code), `${uri}: code ${r.code} ${r.message}`);
+      assert.notEqual(r.code, -32603);
+      const sub = await err(c, () => c.client.subscribeResource({ uri }));
+      assert.ok(sub instanceof McpError && [RESOURCE_NOT_FOUND, -32602].includes(sub.code), `${uri} subscribe: ${sub?.message}`);
+    }
+  }
+  assert.equal(code(await err(full, () => full.client.readResource({ uri: "filedeck://nodes/%E0/status" }))), RESOURCE_NOT_FOUND);
+  assert.doesNotMatch(await (await b.hub.metrics.request("/metrics")).text(), /kind="internal"/);
 });

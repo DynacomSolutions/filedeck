@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { HubCaller } from "./hub-call.ts";
 import type { Scope } from "./grants.ts";
@@ -10,6 +11,12 @@ import type { McpMetrics } from "./metrics.ts";
  * in the module list and needs no change in the core.
  */
 
+/** Version of the published contract (docs/mcp.md). It rises when a field or a URI changes in a way that can break a client. */
+export const CONTRACT = 2;
+
+/** A virtual resource for the revision of `resources/list` (it has no body). Its `list_changed` notices use it as their `uri`. */
+export const LIST_URI = "filedeck://resources";
+
 /** One thing that happened: a short machine-readable summary, with a `kind` such as `scan.finished`. */
 export interface McpEvent {
   kind: string;
@@ -17,8 +24,23 @@ export interface McpEvent {
 }
 
 /**
- * A change of one resource. The notification the client gets holds the `uri` and `_meta.filedeck = {eventId, revision, uri}`. `events` say what
- * happened since the last update; they stay in the hub (logs, tests). The client reads the resource to see the new state.
+ * The id of one notice: the same for the same audience, URI and revision, in every process and after every restart, and different for any other
+ * combination. A replay of a logical event has the id of the first one, so a client drops it. The audience is part of it because each audience has its
+ * own revisions. The form is `<12 hexadecimal characters>.<revision>`: a client keeps it as an opaque string.
+ */
+export function eventIdOf(audience: string | undefined, uri: string, revision: number): string {
+  return `${createHash("sha256").update(JSON.stringify([audience ?? "", uri])).digest("hex").slice(0, 12)}.${revision}`;
+}
+
+/** The id that ties the notices of one source change together: the same for the same set of `<uri>@<revision>` parts, whatever their order. */
+export function changeIdOf(parts: readonly string[]): string {
+  return createHash("sha256").update(JSON.stringify([...parts].sort())).digest("hex").slice(0, 12);
+}
+
+/**
+ * A change of one resource. The notification the client gets holds the `uri` and `_meta.eventId` (the same value is in `_meta.filedeck.eventId`, with
+ * `revision`, `uri`, `changeId` and the stream fields). `events` say what happened since the last update; they stay in the hub (logs, tests). The
+ * client reads the resource to see the new state.
  */
 export interface McpUpdate {
   uri: string;
@@ -27,6 +49,8 @@ export interface McpUpdate {
   events: McpEvent[];
   /** only sessions with this audience get it (the account the data was read as); every session when left out */
   audience?: string;
+  /** shared by every notice (one for each resource) that one change of a source causes; see `changeIdOf` */
+  changeId?: string;
 }
 
 /** What one client session is: who it is, what it may do and what it reads as. A module gets it in `register`, `follow` and `followList`. */
@@ -44,8 +68,8 @@ export interface McpSession {
 export interface McpEventSink {
   /** The state behind `update.uri` changed. */
   updated(update: McpUpdate): void;
-  /** The set of listed resources changed. Sessions that listed resources get `notifications/resources/list_changed`. */
-  listChanged(change: { revision: number; audience?: string; allows?: (session: McpSession) => boolean }): void;
+  /** The set of listed resources changed. Every session, from `initialize`, gets `notifications/resources/list_changed` when it may see the change. */
+  listChanged(change: { revision: number; audience?: string; changeId?: string; allows?: (session: McpSession) => boolean }): void;
 }
 
 /** Ends the interest in a watch. Calling it twice is safe. */
@@ -60,7 +84,7 @@ export interface McpModule {
    * state is known (so a change after the answer is never missed), and return how to end the interest. Throw to refuse the subscription.
    */
   follow(uri: string, session: McpSession): Promise<McpRelease | null>;
-  /** A session listed resources: it will get `list_changed`. Return how to end the interest. */
+  /** A session was opened: it will get `list_changed`, so the watches that the list of resources needs must run. Return how to end the interest. */
   followList(session: McpSession): McpRelease;
   /** Called once before the first session; the module keeps the sink. */
   start(sink: McpEventSink): void;

@@ -1,7 +1,7 @@
 import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
-import type { McpEvent, McpEventSink, McpModule, McpRelease, McpSession } from "./events.ts";
+import { CONTRACT, LIST_URI, changeIdOf, type McpEvent, type McpEventSink, type McpModule, type McpRelease, type McpSession } from "./events.ts";
 import type { McpMetrics } from "./metrics.ts";
 import { failure, ToolError, type HubCaller } from "./hub-call.ts";
 import { readTool } from "./tool.ts";
@@ -53,12 +53,20 @@ const jobKey = (jobs: Iterable<JobSummary>) => JSON.stringify([...jobs].map((j) 
 const nodesKey = (nodes: { name: string; online: boolean }[]) => JSON.stringify(nodes.map((n) => [n.name, n.online]));
 const scansKey = (state: string, view: StatusView | undefined, scans: Iterable<JobSummary>) => JSON.stringify([state, view ? rootsDigest(view) : "", jobKey(scans)]);
 const jobOneKey = (j: JobSummary) => JSON.stringify([j.state, j.error ?? null]);
-/** A virtual resource for the revision of `resources/list` (it has no body). */
-export const LIST_URI = "filedeck://resources";
+export { LIST_URI };
 
 /** JSON-RPC code of the MCP specification for a resource that does not exist (`resources/read`). */
 export const RESOURCE_NOT_FOUND = -32002;
 const notFound = (what: string) => new McpError(RESOURCE_NOT_FOUND, `not found: ${what}`);
+
+/** A part of a resource URI with its percent escapes undone. A bad escape (`%E0`) names nothing that exists: `-32002`, never an internal error. */
+const decodePart = (v: string | string[] | undefined): string => {
+  try {
+    return decodeURIComponent(String(v));
+  } catch {
+    throw notFound(`resource ${String(v)}`);
+  }
+};
 
 const denied = (what: string) => new McpError(ErrorCode.InvalidParams, `forbidden: ${what} is outside the grant`);
 
@@ -67,8 +75,7 @@ const job = z.object({
   id: z.string(), kind: z.string(), title: z.string(), state: z.string(), node: z.string().describe("the node that runs the job, or `hub` for a hub operation"),
   origin: z.string().optional(), createdAt: z.number().optional(), startedAt: z.number().optional(), finishedAt: z.number().optional(), error: z.string().optional(), progress: z.unknown().optional(),
 }).passthrough();
-/** Version of the published contract (docs/mcp.md). It rises when a field or a URI changes in a way that can break a client. */
-export const CONTRACT = 1;
+export { CONTRACT };
 
 /** The core of one audience (an account, or the open hub): its own watches, revisions and tools. */
 class AudienceCore {
@@ -134,9 +141,13 @@ class AudienceCore {
       }
     }
     const audience = this.o.audience;
-    for (const [uri, list] of batch) sink.updated({ uri, revision: this.revisionOf(uri), events: list, audience });
+    const notices = [...batch].map(([uri, list]) => ({ uri, revision: this.revisionOf(uri), events: list }));
+    const listRevision = listChanged ? this.revisionOf(LIST_URI) : undefined;
+    // one notice for each resource, each with its own event id; the notices of this one change share a change id
+    const changeId = changeIdOf([...notices.map((n) => `${n.uri}@${n.revision}`), ...(listRevision === undefined ? [] : [`${LIST_URI}@${listRevision}`])]);
+    for (const n of notices) sink.updated({ ...n, audience, changeId });
     // only a session that may see this source hears that its list of jobs changed
-    if (listChanged) sink.listChanged({ revision: this.revisionOf(LIST_URI), audience, allows: (s) => this.allowed(s).includes(key) });
+    if (listRevision !== undefined) sink.listChanged({ revision: listRevision, audience, changeId, allows: (s) => this.allowed(s).includes(key) });
   }
 
   // ---- interest ----
@@ -509,7 +520,7 @@ class AudienceCore {
     const complete = { node: async (v: string) => this.o.nodes.filter((n) => n.startsWith(v) && scope.allowsNode(n)) };
     // an unknown node in a resource URI is "resource not found" (-32002), not an internal error
     const nodeOfUri = (v: string | string[] | undefined) => {
-      const node = decodeURIComponent(String(v));
+      const node = decodePart(v);
       if (!this.o.nodes.includes(node)) throw notFound(`node ${node}`);
       return node;
     };
@@ -559,7 +570,7 @@ class AudienceCore {
         },
       }), { title: "Job", mimeType: "application/json" }, async (uri, v, extra) => {
         guard(uri.href);
-        const id = decodeURIComponent(String(v.id));
+        const id = decodePart(v.id);
         const j = await this.findJob(id, undefined, extra.signal, this.allowed(session));
         if (!j) throw notFound(`job ${id}`);
         return this.resource(uri.href, jobOneKey(j), { job: j });

@@ -67,7 +67,7 @@ test("sign-in off: a missing or wrong token is 401, the right token works with n
   assert.ok(ok.headers.get("mcp-session-id"));
   const text = await ok.text();
   assert.match(text, /"protocolVersion":"2025-/);
-  assert.match(text, /contract 1/);
+  assert.match(text, /contract 2/);
   assert.match(text, /"subscribe":true/);
   const m = b.hub.metrics;
   const metrics = await (await m.request("/metrics")).text();

@@ -1,6 +1,6 @@
 # MCP server
 
-`contract: 1`
+`contract: 2`
 
 The hub can run a [Model Context Protocol](https://modelcontextprotocol.io) server. A client reads FileDeck data (sizes, folders, scans, jobs, node status, change events) with tools and resources. A client can also subscribe to resources, and the server then sends an event when a scan finishes, a job changes state or a node changes status. The client does not poll.
 
@@ -10,9 +10,15 @@ FileDeck runs no AI agent of its own. There is no ACP (Agent Client Protocol) en
 
 ## Contract version
 
-This page describes contract 1. The server tells the client the contract in three places: the `instructions` text of the `initialize` answer ("FileDeck contract 1"), the field `contract` in every resource body, and this page.
+This page describes contract 2. The server tells the client the contract in three places: the `instructions` text of the `initialize` answer ("FileDeck contract 2"), the field `contract` in every resource body, and this page.
 
 The contract number rises when a tool, a field or a URI changes in a way that can break a client. A new field, a new tool or a new resource does not raise it. A client must ignore fields that it does not know.
+
+Contract 2 differs from contract 1 in the notifications. A client of contract 1 must change these points:
+
+- `eventId` is also at the top of `_meta`, and it has a new form: it is now made of the URI and the revision, so it is stable for a replay (see [Event id and change id](#event-id-and-change-id)).
+- `_meta.filedeck` has the new fields `changeId`, `streamId`, `seq` and `missed` (see [Gaps](#gaps-baseline-reads)).
+- Every session gets `notifications/resources/list_changed` from `initialize`, not only after its first `resources/list`.
 
 ## Discovery
 
@@ -55,8 +61,10 @@ A grants file with no grants is valid. The listener then answers 401 to every re
 - One endpoint, `/mcp`. `POST` sends a request, a notification or a response. `GET` opens the stream for notifications from the server. `DELETE` ends the session. `PUT` and the other methods answer 405.
 - The first request must be `initialize`. The answer has the header `Mcp-Session-Id`. The client sends that header on every other request, with the same token. An unknown session id answers 404, and the client then starts again with `initialize`.
 - A request body has at most 4 MiB. A hub holds at most 256 sessions, a grant at most `FILEDECK_MCP_SESSIONS_PER_GRANT` (default 32), and a session at most 256 subscriptions. A session with no request and no open stream for 15 minutes ends.
-- When a grant is at its limit, a new `initialize` ends the session of that grant that made no request for the longest time (`filedeck_mcp_sessions_closed_total{reason="evicted"}`). An open event stream does not count as a request. The client of that session gets 404 and starts again. One grant cannot fill the hub.
+- When a grant is at its limit, a new `initialize` ends one session of that grant (`filedeck_mcp_sessions_closed_total{reason="evicted"}`). A session with no open event stream goes first, and among those the one that made no request for the longest time. A session that holds an open stream goes only when every session of the grant holds one, and then again the one with the oldest last request. The client of the ended session gets 404 and starts again. One grant cannot fill the hub.
+- The limit of the grant comes before the limit of the hub. When the hub holds 256 sessions and the grant is at its own limit, the new session takes the place of a session of that grant. Only a grant that is below its own limit gets 503 from a full hub.
 - A stream that holds more than 1 MiB that the client has not read ends its session (reason `error`). The client connects again and does a [baseline read](#gaps-baseline-reads).
+- The answer to a `POST` has the same limit. When more than 1 MiB of an answer waits in the hub because the client does not read it, the hub cuts the connection (`filedeck_mcp_errors_total{kind="slow"}`). The client sends the request again, or asks for a smaller answer (a lower `limit`). The kernel buffers of the connection are not part of the 1 MiB.
 - The listener answers an `Origin` header only when it names the same host as the `Host` header. Clients that are not browsers send none. With `FILEDECK_MCP_ALLOWED_HOSTS` set, any other `Host` answers 421. Clients in the cluster use the name of the Service, so list it, or leave the setting empty. The Origin check stays on in both cases.
 
 | Status | Meaning |
@@ -95,7 +103,7 @@ The grants file is a JSON array. The chart writes it from `hub.mcp.grants` into 
 
 Scope rules:
 
-- A resource entry has one of three forms. With `{name}` parts it is a URI template: each part matches one path segment, and the whole URI must match. With a slash at the end it is a prefix: it matches every URI that starts with it. Any other entry is one URI and matches only that URI. `filedeck://nodes/web1/` gives every resource of `web1`, `filedeck://nodes` gives the node list and nothing below it, and `filedeck://` gives everything.
+- A resource entry has one of three forms. With `{name}` parts it is a URI template: each part matches one path segment, and the whole URI must match. With a slash at the end it is a prefix: it matches every URI that starts with it, and its segments may be `{name}` parts (so `filedeck://nodes/{node}/` is the prefix of every node). Any other entry is one URI and matches only that URI. The parts of an entry are compared one path segment at a time. `filedeck://nodes/web1/` gives every resource of `web1`, `filedeck://nodes` gives the node list and nothing below it, and `filedeck://` gives everything.
 - A node is named by the grant when some entry matches `filedeck://nodes/<node>/`: a prefix such as `filedeck://nodes/web1/` or `filedeck://nodes/`, or a template such as `filedeck://nodes/{node}/`. An entry for one resource of a node (`filedeck://nodes/web2/status`, `.../scans` or `.../jobs`) lets the session read and follow that resource only. It does not name the node.
 - A tool that takes a `node` argument works only for nodes that the grant names. Another node gives a tool error that starts with `forbidden`. In the example above, the tools work on `web1`. The grant can read the status resource of `web2`, but no tool works on `web2`.
 - A tool with no `node` argument works on the nodes that the grant names. `filedeck_nodes` lists only those nodes, and lists the network sources only when the grant can read `filedeck://nodes`. `filedeck_storage_groups` without `node` needs a grant for every node. The hub's own operations (`hub` as a node) need `filedeck://hub/jobs` in the grant.
@@ -103,10 +111,11 @@ Scope rules:
 
 What a client sees is the same as what it may use:
 
-- `tools/list` holds only the tools that the grant names. A tool that is not named does not exist for that session: a call gets the SDK answer "not found".
-- `resources/list` and `resources/templates/list` hold only the resources and templates that the grant can read.
-- `resources/read` and `resources/subscribe` of a URI outside the grant give the JSON-RPC error `-32602` with a message that starts with `forbidden`.
-- `resources/read` of a node or a job that does not exist, or that the grant does not name, gives the JSON-RPC error `-32002` (resource not found) with a message that starts with `not found`.
+- `tools/list` holds only the tools that the grant names. A tool that is not named does not exist for that session. A call of it gets a tool result with `isError: true` and the text `MCP error -32602: Tool <name> not found` (the answer of the SDK for an unknown tool). It is not a JSON-RPC error. An unknown method gets the JSON-RPC error `-32601`.
+- `resources/list` and `resources/templates/list` hold only the resources and templates that the grant can read. A template is listed when the grant can read at least one URI of it. The test is made one path segment at a time: the grant `filedeck://nodes/{node}/status` lists the status template and not the scans template.
+- `resources/read` and `resources/subscribe` of a URI outside the grant give the JSON-RPC error `-32602`. The message starts with `forbidden`. When no template of the grant could match, the SDK gives its own message, `Resource <uri> not found`, with the same code `-32602`. This holds also for a node that the hub does not have: a node that the grant does not name is outside the grant, whether it exists or not.
+- `resources/read` of a node or a job that does not exist, and that the grant can read by its URI, gives the JSON-RPC error `-32002` (resource not found) with a message that starts with `not found`. A job of a node that the grant does not name is such a case: the job URI is in the grant, and the job is not found.
+- A bad percent escape in a URI (`filedeck://nodes/%E0/status`) names nothing. A read gives `-32002`, and a subscribe gives `-32602`. It is never an internal error (`-32603`).
 - A notification is sent only for a URI that the session subscribed to, so a grant never gets an event about a resource outside it.
 
 Revocation. The hub reads the grants file and every token file again every 2 seconds. When a grant is removed, when its token file is removed or changes, or when its scope or account changes, the hub:
@@ -370,7 +379,7 @@ The server declares the capabilities `resources.subscribe` and `resources.listCh
 
 ### `notifications/resources/updated`
 
-The params hold the `uri` and the `_meta.filedeck` object:
+The params hold the `uri` and the `_meta` object:
 
 ```json
 {
@@ -378,7 +387,17 @@ The params hold the `uri` and the `_meta.filedeck` object:
   "method": "notifications/resources/updated",
   "params": {
     "uri": "filedeck://nodes/web1/scans",
-    "_meta": {"filedeck": {"eventId": "9f3a1c2e.41", "revision": 1795600012345, "uri": "filedeck://nodes/web1/scans"}}
+    "_meta": {
+      "eventId": "3f9a0c1d2b4e.1795600012345",
+      "filedeck": {
+        "eventId": "3f9a0c1d2b4e.1795600012345",
+        "revision": 1795600012345,
+        "uri": "filedeck://nodes/web1/scans",
+        "changeId": "a41c9e07b2d3",
+        "streamId": "7c1d9e2a",
+        "seq": 3
+      }
+    }
   }
 }
 ```
@@ -387,9 +406,14 @@ The params hold the `uri` and the `_meta.filedeck` object:
 
 | Field | Meaning |
 |---|---|
-| `eventId` | The id of this change. See [Replay and dedup key](#replay-and-dedup-key). |
-| `revision` | The revision of the resource after the change. A read of the resource after the change gives this revision, unless it changed again. |
-| `uri` | The same as `params.uri`. |
+| `_meta.eventId` | The id of this notice, a non-empty string. It is the delivery identity: a client that dispatches work reads it here. See [Event id and change id](#event-id-and-change-id). |
+| `_meta.filedeck.eventId` | The same value as `_meta.eventId`. |
+| `_meta.filedeck.revision` | The revision of the resource after the change. A read of the resource after the change gives this revision, unless it changed again. |
+| `_meta.filedeck.uri` | The same as `params.uri`. |
+| `_meta.filedeck.changeId` | The id that ties together the notices of one change. See [Event id and change id](#event-id-and-change-id). |
+| `_meta.filedeck.streamId` | The id of the event stream that carries this notice. See [Gaps](#gaps-baseline-reads). |
+| `_meta.filedeck.seq` | The number of this notice on that stream: 1, 2, 3, and so on. |
+| `_meta.filedeck.missed` | Only when it is more than 0: how many notices the server could not write since the previous notice, because the session had no open stream. |
 
 The notification says that the resource changed. It does not say what changed. The client reads the resource to see the new state, for example a scan job with `state: "done"` and a `finishedAt`, and the higher `revision`.
 
@@ -409,40 +433,53 @@ How fast: the hub reads each followed node every `FILEDECK_MCP_POLL_MS` (default
 
 ### `notifications/resources/list_changed`
 
-A session gets this notification after its first `resources/list`. A session that never listed gets none. The params hold `_meta.filedeck = {eventId, revision, uri}` as above. For this notification `uri` is the fixed value `filedeck://resources` (the list itself, not a resource that can be read), and `revision` is the revision of the list: it changes when the set of job resources changes.
+Every session gets this notification, from `initialize` on. The session does not need to list resources or to subscribe first. A replacement session (after a 404, an eviction or a reconnect) is armed in the same way. The params hold `_meta.eventId` and `_meta.filedeck = {eventId, revision, uri, changeId, streamId, seq}` as above. For this notification `uri` is the fixed value `filedeck://resources` (the list itself, not a resource that can be read), and `revision` is the revision of the list: it changes when the set of job resources changes.
 
 It covers the answer of `resources/list`. That list holds the fixed resources that the grant can read (`filedeck://nodes`, `filedeck://hub/jobs` and the `status`, `scans` and `jobs` resource of each node, which change only with the hub's settings) and `filedeck://jobs/{id}` for each job that the hub knows now and the grant can read (at most 200). The notification fires when a job appears or goes in any node or in the hub's operations that the session can see. It does not fire for a state change of a job. A session gets it only for a node or for the hub's operations that its grant names. The list of templates never changes.
 
 After the notification, call `resources/list` again.
 
-### Replay and dedup key
+### Event id and change id
 
-Every `resources/updated` and every `list_changed` notification has `_meta.filedeck.eventId`.
+Every `resources/updated` and every `list_changed` notification has `_meta.eventId`, and the same value in `_meta.filedeck.eventId`.
 
-- The id has the form `<boot>.<n>`. `<boot>` is 8 hexadecimal characters that the hub picks at each start. `<n>` rises by one for each change that the hub announces. An id is new for each change, and it is never used twice, also not after a hub restart.
-- One change has one id. When several sessions get the same change, they all get the same id. When the same session gets the same notification again, it has the same id.
-- Use: keep the ids that you have handled for each `uri` (the last one is enough, since ids rise within one `<boot>`). Drop a notification whose `eventId` you have seen. Otherwise read the resource, or skip the read when you already hold a `revision` that is equal or higher than `_meta.filedeck.revision`.
-- The hub itself sends each notification once, to each session. A repeat can come from a proxy or from your own reconnect code. Ids exist to make a repeat harmless.
-- An id from before a hub restart has a different `<boot>`. After a restart every client has lost its session anyway (see below), and starts again with a baseline read.
+- The id has the form `<hash>.<revision>`. `<hash>` is 12 hexadecimal characters made from the URI and the account that the session reads as. `<revision>` is the revision of the resource after the change. A client keeps the id as an opaque string.
+- The id is stable for a replay of the same logical event: the same URI and the same revision always give the same id, in every session, after a reconnect and after a hub restart (a revision never goes down, see [Revision](#revision)). The id is unique for each URI and revision: two different resources, or two different revisions of one resource, never share an id.
+- One notice is for one resource. When one change of a source touches several resources (a job that ends changes the job, the jobs of its node, the scans of its node and the list of resources), the client gets one notice for each, and each has its own `eventId`. All of them have the same `changeId` in `_meta.filedeck`. The `changeId` is 12 hexadecimal characters made from the set of URI and revision pairs of that change: the same set gives the same `changeId`, also for a replay. A `list_changed` notice that belongs to the change has the same `changeId`.
+- Use `eventId` to drop a repeat: keep the ids that you have handled and drop a notice whose id you have seen. Use `changeId` when the cause matters: notices with one `changeId` are one cause, so a client that starts work for a cause starts it once for the `changeId`, not once for each notice. Do not use `changeId` to drop a repeat.
+- Two notices with the same URI and the same revision have the same id. The second one carries no new state: the revision did not change. Drop it.
+- The hub itself sends each notice once to each session. A repeat can come from a proxy or from your own reconnect code. Ids exist to make a repeat harmless. A baseline read does not carry an `eventId`. Only notifications do.
 
 ### Gaps: baseline reads
 
-The server keeps no history of notifications. A notification that a client did not receive is lost for good: the stream was closed, the client was offline, or the session ended. The client cannot ask for it again.
+The server keeps no history of notifications. A notification that a client did not receive is lost for good: the stream was closed, the client was offline, or the session ended. The client cannot ask for it again. SSE resumption is not supported: a `GET` with `Last-Event-ID` opens a new stream and the header is ignored. The server writes no SSE `id` field.
 
-After any gap, a client must read the resources again. This is a baseline read. Do it after a reconnect, after a new session, after a hub restart, after a 404 on a session, and when you are not sure that you got every notification.
+**How a client sees a gap.** Each event stream (each `GET` that the server accepts, one for each session at a time) has a `streamId`, 8 hexadecimal characters, new for each stream. The notices on a stream are numbered by `seq`. The first notice of a stream has `seq` 1. `resources/updated` and `list_changed` use the same count. A notice that the server cannot write because the session has no open stream is counted, and the next notice that is written has `missed` set to that number. Treat any of these as a gap:
 
-- A baseline read is not a change event. It gives the state now, with its `revision` and `updatedAt`. It says nothing about what happened during the gap. Do not treat the read as "something changed". Compare its `revision` with the one that you kept for the URI. When they are equal, nothing that you follow changed. When they differ, the content changed at least once, and you process the new state.
-- The revision is the only signal that survives a gap. A change that went one way and back between two reads can give the same revision, and then the content is the same too.
-- A baseline read does not carry an `eventId`. Only notifications do.
+1. Your stream ended or failed, for any reason: the end of the stream, a network error, an HTTP error on the `GET`, a 409 (the server still holds the old stream), a 503, or a 404.
+2. A notice has a `streamId` that is not the `streamId` of the notice before it. The stream was replaced.
+3. A notice has a `seq` that is not the previous `seq` plus 1 on the same `streamId`, or the first notice of a stream that you opened has a `seq` other than 1.
+4. A notice has `missed` (more than 0).
+5. Your session ended or changed: a 404, a new `initialize`, a hub restart, or a drain.
 
-Procedure after a reconnect:
+Rule 1 and rule 5 need no field. A client whose transport reconnects by itself and hides that from the client still sees rules 2, 3 and 4. A notice that the server wrote to a connection that broke before the client read it is lost with no field to show it. Only rule 1 finds that, so rule 1 is the main rule.
 
-1. Send `initialize` and keep the new session id.
-2. Send `resources/subscribe` for each resource that you follow.
-3. Send `resources/read` for each one (the baseline read), and compare `revision` with the one that you kept. Then keep the new revision.
-4. For the change journal of a node, continue from your last cursor (see [Change events tool](#change-events-tool)).
+**What a client does after a gap.** It does baseline reads. The server cannot say what was missed or how many changes happened.
 
-Subscribe first and read second, so a change between the two steps gives a notification and no change is lost. A notification can arrive for a state that you have already read. You then find the same revision.
+- A baseline read is the read of each followed resource (`resources/read`) after the client has subscribed again. It gives the state now, with its `revision` and `updatedAt`.
+- A baseline read is never an event. A client that starts work for each notification (for example an agent run) starts no work because of a gap, a reconnect, a new session or a baseline read. This is also true when the `revision` of the baseline read is not the one that the client kept: the client records the new state and the new revision, and starts nothing. Work starts only for a notification with a new `eventId` that arrives on an open stream. A baseline read and a gap give zero run admissions.
+- Compare the `revision` of the baseline read with the one that you kept for the URI. When they are equal, nothing that you follow changed. When they differ, the content changed at least once, and you hold the new state. The revision is the only signal that survives a gap. A change that went one way and back between two reads can give the same revision, and then the content is the same too.
+- A baseline read has no `eventId`.
+
+Procedure after a gap:
+
+1. If the session is gone (404) or you are not sure, send `initialize` and keep the new session id. Otherwise keep the session.
+2. Open the event stream (`GET`) again. On 409 wait a moment and try once more, or start a new session.
+3. Send `resources/subscribe` for each resource that you follow.
+4. Send `resources/read` for each one (the baseline read), record the `revision`, and start no work from it.
+5. For the change journal of a node, continue from your last cursor (see [Change events tool](#change-events-tool)). The journal cursor is a different thing from `streamId` and `seq`.
+
+Subscribe first and read second, so a change between the two steps gives a notification and no change is lost. A notification can arrive for a state that you have already read. You then find the same `revision`, and the notice has the `eventId` that follows from it.
 
 ### Subscriptions end with the session
 
@@ -450,7 +487,9 @@ Subscriptions belong to the session. They do not survive the end of a session: a
 
 ### Shared watch
 
-The hub does not start a poll for each session. For each account and node there is at most one shared watch (sessions of grants with the same account share it). It starts when the first session follows the node (a subscription, or a `resources/list` that returned) and it stops when the last session leaves. The hub's own operations have one shared watch in the same way. While no session follows, the hub asks no agent for anything.
+The hub does not start a poll for each session. For each account and node there is at most one shared watch (sessions of grants with the same account share it). It starts when the first session opens (`initialize`), because every session gets `list_changed`, and it stops when the last session leaves. A session starts the watches of the nodes that its grant names, and of the hub's operations when the grant names them. The hub's own operations have one shared watch in the same way. While no session is open, the hub asks no agent for anything.
+
+While a watch runs, a read of one job (`filedeck://jobs/{id}`, `filedeck_job_get`) answers from what the last poll saw, so it can be up to one poll interval old. A read after a notification is never older than the notification.
 
 ## Change events tool
 
@@ -465,7 +504,8 @@ Do not mix up these two. They are not related.
 | What it is | A place in the change journal of one node: `<node>:<epoch>:<seq>`. It is part of the data. | A header of the streamable HTTP transport. It is a place in one SSE stream of one session. |
 | Who makes it | The agent of the node, for each file change. | The transport, for each message that it sends on a stream. |
 | What it is for | To continue reading file changes after a pause, also across sessions and restarts: `since`. | To resume a stream after a broken connection, so no message of that stream is lost. |
-| Supported here | Yes. `filedeck_change_events` takes it as `since` and gives `nextCursor`. | **No.** |
+| Supported here | Yes. `filedeck_change_events` takes it as `since` and gives `nextCursor`. | **No.** The server writes no SSE `id`. |
+| Gap signal | `reset` and `overflow` events, `needsRescan`. | `_meta.filedeck.streamId`, `seq` and `missed` of the notifications (see [Gaps](#gaps-baseline-reads)). These are not SSE ids. Do not send them as `Last-Event-ID`. |
 
 The server does not support SSE stream resumption. It keeps no event store. A `GET` with the header `Last-Event-ID` is accepted, the header is ignored, and the server opens a new stream with no replay. Messages that were sent on the old stream and not received are lost. This is why a client must do a [baseline read](#gaps-baseline-reads) after a reconnect.
 
@@ -487,12 +527,61 @@ What the server keeps, and what a client gets when it is gone:
 | What | How long | After that |
 |---|---|---|
 | Journal events of a node | `FILEDECK_EVENTS_JOURNAL_HOURS` (default 24) and `FILEDECK_EVENTS_JOURNAL_BYTES` (default 2 GiB), whichever limit comes first. They are agent settings. | A `since` cursor older than the oldest kept event, from another epoch, or newer than the head gets a `reset` event. `needsRescan` is true. The client scans again and continues from `nextCursor`. |
-| Notifications (`resources/updated`, `list_changed`) | Not kept. There is no history and no replay. | A client that missed one reads the resource: a baseline read. |
+| Notifications (`resources/updated`, `list_changed`) | Not kept. There is no history and no replay. A notice with no open stream is dropped and counted in `missed`. | A client that missed one reads the resource: a baseline read. It starts no work from that read. |
+| Event streams | One for each session. It ends with the connection, the session or a drain. | A new stream has a new `streamId` and `seq` 1. A `GET` while the old stream is still open gets 409. |
 | A session | Until `DELETE`, a drain, a revocation, or 15 minutes with no request and no open stream. | 404 on the old session id. The client starts a new session, subscribes again and does a baseline read. |
 | Subscriptions | As long as the session. | They are gone with it. Subscribe again. |
 | Resource revisions | In the hub's memory. A restart starts them again from the hub clock. | The first read after a restart can give a new revision for unchanged content. The client reads the state once more. It never misses a change. |
 | Jobs | As long as the agent or the hub lists them. A finished job is removed after a time that the node sets. | The job resource then gives "not found", and a notification (`job.removed`) tells the list resources. |
-| Event ids | Not kept. They are made for each notification. | A repeat is dropped by `eventId`. |
+| Event ids | Not kept. An id is made from the URI and the revision, so the same logical event always has the same id. | A repeat is dropped by `eventId`. |
+| Domain journal cursor | In the agent: see the first row. The hub keeps none. | A `reset` event, as in the first row. It has nothing to do with the event ids of the notifications. |
+
+## Commissioning list
+
+This list is what a client records when it commissions a FileDeck connection. The names and URIs are exact.
+
+| Item | Value |
+|---|---|
+| Endpoint | `https://<service>:<port>/mcp`. The port is `hub.mcp.port` (default 9092). Streamable HTTP, protocol 2025-06-18 or 2025-11-25. |
+| Credential | `Authorization: Bearer <token>`, one token for each grant. The server sends no cookie. |
+| Contract | 2 (`instructions` of `initialize`, and `contract` in every resource body) |
+| Subscriptions | `resources/subscribe` and `resources/unsubscribe`, on every URI in the table of concrete URIs below. At most 256 for each session. |
+| List changes | `notifications/resources/list_changed`, for every session, from `initialize`. |
+| Delivery identity | `params._meta.eventId` (and `params._meta.filedeck.eventId`) on every notification. |
+| Stream resumption | None. `Last-Event-ID` is ignored. Use `streamId`, `seq` and `missed` to see a gap, and baseline reads to recover. |
+
+Tools (all read only, `readOnlyHint: true`):
+
+| Tool | Needs for the node |
+|---|---|
+| `filedeck_nodes` | none (it lists the nodes of the grant) |
+| `filedeck_du` | `node` named by the grant |
+| `filedeck_list` | `node` named by the grant |
+| `filedeck_stat` | `node` named by the grant |
+| `filedeck_scan_status` | nodes named by the grant |
+| `filedeck_node_status` | nodes named by the grant, and an administrator account when sign-in is on |
+| `filedeck_jobs_list` | nodes named by the grant, and `filedeck://hub/jobs` for `hub` |
+| `filedeck_job_get` | the node of the job named by the grant |
+| `filedeck_storage_groups` | `node` named by the grant, or every node; an administrator account when sign-in is on |
+| `filedeck_change_events` | `node` named by the grant, and an administrator account when sign-in is on |
+
+Concrete resource URIs. `<node>` is a node name from `filedeck_nodes`, percent-encoded. `<id>` is a job id of 1 to 128 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`.
+
+| URI | Content | Subscribe | `resources/list` |
+|---|---|---|---|
+| `filedeck://nodes` | the nodes and network sources | yes | yes |
+| `filedeck://nodes/<node>/status` | the status of one node | yes | yes, for each node |
+| `filedeck://nodes/<node>/scans` | the scanned roots and scan jobs of one node | yes | yes, for each node |
+| `filedeck://nodes/<node>/jobs` | the jobs of one node | yes | yes, for each node |
+| `filedeck://hub/jobs` | the hub's own operations | yes | yes |
+| `filedeck://jobs/<id>` | one job | yes | yes, for the jobs that the hub knows (at most 200) |
+| `filedeck://resources` | not a resource: the `uri` of `list_changed` notices | no | no |
+
+Resource templates (`resources/templates/list`): `filedeck://nodes/{node}/status`, `filedeck://nodes/{node}/scans`, `filedeck://nodes/{node}/jobs` and `filedeck://jobs/{id}`. A grant sees only the templates that it can read.
+
+Grant entries that give these (the field `resources` of a grant): `filedeck://nodes/<node>/` for one node with its tools, `filedeck://nodes/<node>/status` for one resource only, `filedeck://nodes` for the node list, `filedeck://hub/jobs` for the hub's operations and `filedeck://jobs/` for the job URIs.
+
+Rejection codes to prove: a missing or wrong token gives HTTP 401, a foreign `Origin` gives 403, an unknown session gives 404, a read or subscribe outside the grant gives `-32602`, a missing node or job in the grant gives `-32002`, an unknown method gives `-32601`, and a tool outside the grant gives a result with `isError: true` and the text `MCP error -32602: Tool <name> not found`.
 
 ## Metrics
 
@@ -512,15 +601,15 @@ The MCP server adds these lines to the hub metrics, on the hub metrics port (`hu
 | `filedeck_mcp_tool_calls_total` | counter | `grant`, `tool`, `outcome` | `ok` or `error`. |
 | `filedeck_mcp_tool_duration_seconds` | histogram | `grant`, `tool` | Duration of a tool call. |
 | `filedeck_mcp_http_requests_total` | counter | `grant`, `outcome` | Requests to `/mcp`: `ok`, `unauthorized`, `forbidden`, `wrong_grant`, `bad_host`, `bad_origin`, `bad_body`, `bad_method`, `unknown_session`, `no_session`, `draining`, `busy`, `not_found`, `error`. `grant` is `none` until a token matched. |
-| `filedeck_mcp_errors_total` | counter | `grant`, `kind` | `auth`, `protocol`, `internal`, `notify` or `watch`. |
+| `filedeck_mcp_errors_total` | counter | `grant`, `kind` | `auth`, `protocol`, `internal`, `notify`, `slow` (an answer was cut because the client did not read it) or `watch`. |
 | `filedeck_mcp_watch_polls_total` | counter | `source`, `outcome` | Polls of an agent by a shared watch (one for each account and node). `source` is a node name or `hub`. `outcome` is `ok` or `error`. |
 
 ## Rollout and drain
 
 - Liveness: `GET /mcp/healthz` answers 200 while the MCP listener accepts requests and the hub's own listener answers on loopback. On a connection that is open during a drain it still answers 200.
 - Readiness: `GET /mcp/readyz` answers 200 while the server takes new sessions. It answers 503 from the first moment of a drain. With the chart, `hub.mcp.enabled` makes the hub pod use these two paths as its readiness and liveness probes, with the scheme `HTTPS`.
-- Drain, on `SIGTERM`: the listener closes, so a new connection is refused. A request on a connection that is still open (keep-alive) gets 503 with `Retry-After`, and so does `initialize`. The server lets every tool call in flight finish and then closes every session and its streams. The drain has no timer and no time limit: it waits until no call is in flight. The grace period of the pod (`terminationGracePeriodSeconds`) is the only limit, and it ends the process. The timers of the hub's own shutdown start when the MCP drain ends. Then the hub stops as it does without MCP. A client that sees its stream end reconnects and follows the procedure in [Gaps: baseline reads](#gaps-baseline-reads).
+- Drain, on `SIGTERM`: the listener closes, so a new connection is refused. A request on a connection that is still open (keep-alive) gets 503 with `Retry-After`, and so does `initialize`. The server lets every tool call in flight finish and then closes every session and its streams. The drain has no timer and no time limit: it waits until the server has answered every call in flight. It waits for the work, not for the client: a client that does not read its answer does not hold the drain. The grace period of the pod (`terminationGracePeriodSeconds`) is the only limit, and it ends the process. The timers of the hub's own shutdown start when the MCP drain ends. Then the hub runs its clean-up, which cuts any MCP connection that is still open, and stops as it does without MCP. A client that sees its stream end reconnects and follows the procedure in [Gaps: baseline reads](#gaps-baseline-reads).
 
 ## Adding a module
 
-The server has an internal interface, `McpModule` (`server/src/mcp/events.ts`). A module adds tools and resources to each session, says which URIs need a live watch (`follow`), and pushes events through a sink (`updated(uri)`, `listChanged()`). The node and job watch described above is the first module. A module gets the session (`grant`, `audience`, `scope`, a caller and the metrics) in `register`, `follow` and `followList`, and must check the grant's scope for what it adds. A new source of events (for example disk verification runs) is one more module in the list that `createMcp` gets. The server core does not change. Such a module defines its own URIs under its own prefix and adds them to this page.
+The server has an internal interface, `McpModule` (`server/src/mcp/events.ts`). A module adds tools and resources to each session, says which URIs need a live watch (`follow`, and `followList` for the list of resources, which every session gets), and pushes events through a sink (`updated(uri)`, `listChanged()`). The server core gives each notice its `eventId`, from the audience, the URI and the revision. The node and job watch described above is the first module. A module gets the session (`grant`, `audience`, `scope`, a caller and the metrics) in `register`, `follow` and `followList`, and must check the grant's scope for what it adds. A new source of events (for example disk verification runs) is one more module in the list that `createMcp` gets. The server core does not change. Such a module defines its own URIs under its own prefix and adds them to this page.

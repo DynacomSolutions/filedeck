@@ -36,7 +36,7 @@ export class McpMetrics {
   private readonly sessionsClosed = new Counter("filedeck_mcp_sessions_closed_total", "MCP sessions closed, by grant and reason");
   private readonly notifications = new Counter("filedeck_mcp_notifications_total", "Notifications sent to clients, by grant and kind");
   private readonly toolCalls = new Counter("filedeck_mcp_tool_calls_total", "Tool calls, by grant, tool and outcome");
-  private readonly errors = new Counter("filedeck_mcp_errors_total", "Errors, by grant and kind (auth, protocol, internal, notify, watch)");
+  private readonly errors = new Counter("filedeck_mcp_errors_total", "Errors, by grant and kind (auth, protocol, internal, notify, slow, watch)");
   private readonly requests = new Counter("filedeck_mcp_http_requests_total", "HTTP requests to the MCP listener, by grant and outcome. The grant is none before a token matched");
   private readonly polls = new Counter("filedeck_mcp_watch_polls_total", "Polls of an agent by the shared node watch, by source and outcome");
   private readonly duration = new Map<string, { buckets: number[]; sum: number; count: number }>();
@@ -59,7 +59,7 @@ export class McpMetrics {
   notification(grant: string, kind: "resource_updated" | "list_changed"): void {
     this.notifications.inc({ grant, kind });
   }
-  error(grant: string, kind: "auth" | "protocol" | "internal" | "notify" | "watch"): void {
+  error(grant: string, kind: "auth" | "protocol" | "internal" | "notify" | "slow" | "watch"): void {
     this.errors.inc({ grant, kind });
   }
   request(grant: string, outcome: string): void {

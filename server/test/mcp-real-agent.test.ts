@@ -44,7 +44,7 @@ test("a real agent: tools answer, and a real scan that finishes is a resources/u
   const scans = bodyOf(await c.client.readResource({ uri: "filedeck://nodes/n/scans" }));
   const j = scans.scans.find((s: { id: string }) => s.id === id);
   assert.ok(j, "the scan job is listed");
-  assert.equal(scans.contract, 1);
+  assert.equal(scans.contract, 2);
   assert.ok(scans.revision > 0);
   const jobState = (await call("filedeck_job_get", { id })).structuredContent.job.state;
   assert.ok(["running", "queued", "done"].includes(jobState));

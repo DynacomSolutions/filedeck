@@ -164,8 +164,12 @@ export class SourceWatch {
   private schedule(ms: number): void {
     if (!this.running) return;
     clearTimeout(this.timer);
+    const loop = this.abort;
     this.timer = setTimeout(() => {
-      void this.poll().finally(() => this.schedule(this.o.pollMs));
+      // a poll that a halt cut off ends after a new loop began: it must not reset the first timed poll of that loop
+      void this.poll().finally(() => {
+        if (this.abort === loop && !loop.signal.aborted) this.schedule(this.o.pollMs);
+      });
     }, ms);
     this.timer.unref();
   }
