@@ -122,3 +122,12 @@ test("Properties opened for a breadcrumb folder keeps that folder in the URL", (
   const parsed = decodeState(bad);
   assert.equal(parsed?.tree.kind === "leaf" ? parsed.tree.wtPath : "x", undefined);
 });
+
+test("Disk verify view, disk and selected job round-trip in s", () => {
+  const tree = { kind: "leaf" as const, id: "p1", node: "local", path: "/" };
+  for (const diskVerify of [{}, { node: "example" }, { node: "example", serial: "SN:12 + 34" },
+    { node: "example", serial: "SN:12 + 34", job: "fixture-id" }]) {
+    const url = encodeState({ tree, active: tree.id, diskVerify });
+    assert.deepEqual(decodeState(url)?.diskVerify, diskVerify);
+  }
+});

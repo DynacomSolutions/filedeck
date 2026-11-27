@@ -1,6 +1,9 @@
 {{- if and .Values.auth.enabled (not (include "filedeck.agentTokenSecret" .)) }}
 {{- fail "auth.enabled needs agentToken" }}
 {{- end }}
+{{- if and .Values.agent.diskVerifyInventory (not .Values.auth.enabled) }}
+{{- fail "agent.diskVerifyInventory needs auth.enabled" }}
+{{- end }}
 {{- range $i, $n := .Values.nodes }}
 {{- with $n }}
 {{- if and (ne (default "kubernetes" .mode) "native") (ne .mode (printf "%s-%s" "native" "agent")) }}
@@ -81,6 +84,10 @@ spec:
               value: {{ $.Values.auth.workers.idleSeconds | quote }}
             - name: FILEDECK_PAM_SERVICE
               value: {{ $.Values.auth.pamService | quote }}
+            {{- end }}
+            {{- if $.Values.agent.diskVerifyInventory }}
+            - name: FILEDECK_DISK_VERIFY
+              value: "on"
             {{- end }}
             - name: FILEDECK_MAX_UPLOAD
               value: {{ $.Values.agent.maxUpload | quote }}

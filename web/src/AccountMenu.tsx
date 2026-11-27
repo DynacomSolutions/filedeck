@@ -1,6 +1,6 @@
 import { lazy, Suspense, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { CircleUser, KeyRound, LogOut, ShieldAlert, Users } from "lucide-react";
+import { CircleUser, HardDrive, KeyRound, LogOut, ShieldAlert, Users } from "lucide-react";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tip } from "./Tooltip";
 import { logout, type Account } from "./auth";
@@ -13,7 +13,7 @@ const AsRootDialog = lazy(() => import("./AsRootDialog").then((m) => ({ default:
  * administrator (system or virtual) gets "Accounts…", which opens the Accounts view through `onAccounts`. A Tailscale
  * session also shows "Signed in with Tailscale as <login or tag>" (the subject comes from the tailnet: shown in <bdi>).
  */
-export function AccountMenu({ account, onAsRoot, onAccounts }: { account: Account; onAsRoot: (endsAt: number) => void; onAccounts?: () => void }) {
+export function AccountMenu({ account, onAsRoot, onAccounts, onDiskVerify }: { account: Account; onAsRoot: (endsAt: number) => void; onAccounts?: () => void; onDiskVerify?: () => void }) {
   const { name } = account;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [asking, setAsking] = useState(false);
@@ -25,6 +25,7 @@ export function AccountMenu({ account, onAsRoot, onAccounts }: { account: Accoun
   }
   items.push("sep");
   if (account.admin && onAccounts) items.push({ label: "Accounts…", icon: Users, onSelect: onAccounts });
+  if (account.admin && onDiskVerify) items.push({ label: "Disk verify…", icon: HardDrive, onSelect: onDiskVerify });
   // never for a virtual account or a system account that is not an administrator
   if (account.kind === "sys" && account.admin) items.push({ label: "Act as root…", icon: ShieldAlert, onSelect: () => setAsking(true) });
   items.push({ label: "Sign out", icon: LogOut, onSelect: () => void signOut() });

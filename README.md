@@ -17,6 +17,7 @@ Filedeck lets you browse, preview, edit and move files on many machines from one
 - 📦 **Work with archives.** Browse, extract and create zip, 7z and tar archives, with passwords and split volumes.
 - 🗑️ **Undo mistakes.** Deleted files go to a trash on each volume first.
 - 🌐 **Reach network storage.** SFTP, WebDAV, S3 and SMB sources sit beside your machines.
+- **Verify disks.** Administrators can inspect disk identity and SMART data across agents. Native Linux agents can test explicitly allowed spare drives.
 - 📏 **Find what fills the disk.** `filedeck du` answers like `du`, from stored folder sizes.
 - 📱 **Use it anywhere.** Dark and light themes, a phone layout, and full keyboard control.
 
@@ -92,9 +93,40 @@ HUB_URL=http://127.0.0.1:8080 npm run dev:web     # then open the address Vite p
 
 See [Development](docs/development.md) for tests, the native helpers and running a hub with several agents.
 
+## Disk verify
+
+Open **Disk verify** from the administrator account menu. Enable sign-in on the hub and agents, with a shared agent token.
+
+- Set `FILEDECK_DISK_VERIFY=on` on each Linux agent for inventory. In Helm, set `agent.diskVerifyInventory: true`. The chart grants no raw device access.
+- For tests, use a native Linux agent in the host PID and mount namespaces with `FILEDECK_ROOT=/`.
+- Set `FILEDECK_DISK_VERIFY_TARGETS` to a comma-separated list of exact whole-disk names from `/dev/disk/by-id`.
+- Set `FILEDECK_DISK_VERIFY_STATE` to an absolute directory on persistent storage. Give it mode 0700 and make the agent its owner.
+- Install `lsblk` from util-linux and `smartctl` from smartmontools. The image includes them. A native build needs the libblkid and OpenSSL development libraries.
+
+**Warning:** A full test overwrites all bytes on the selected disk. Confirm its exact serial before starting or resuming. Only authorise spare drives.
+
+The agent holds a Linux exclusive claim and checks identity, mount and storage-stack evidence and signatures before each step.
+The check refuses a moved by-id link, a changed kernel disk sequence, a changed geometry or a serial mismatch.
+It refuses destructive operations if it cannot trace the host root to a block device.
+Run the agent with access only to the devices it needs. On native installations, use a service device policy to limit writable block devices.
+The device must support the required SMART commands for its transport. The host kernel can require `CAP_SYS_RAWIO` for ATA or SCSI passthrough and `CAP_SYS_ADMIN` for NVMe administrative commands.
+
+The full test samples addresses across the reported capacity, measures sequential and 4 KiB random I/O and fills the whole device.
+It flushes each completed write range and verifies it with direct reads against the original random pattern.
+The job compares SMART before and after testing. If the drive advertises discard, the job discards the tested ranges.
+The final wipefs check uses util-linux libblkid on the original descriptor and requires an empty signature list.
+A discovered signature stops the job, including during cleanup. A drive without discard support retains the random data and gets a warning.
+
+The agent keeps history by serial. Resume requires the same by-id link, kernel device instance and host boot.
+A newer full test invalidates older checkpoints for that serial. Linux exclusive block claims protect against mounts and recognised storage consumers.
+Keep other raw writers away from allowed disks. Privileged software can still write to a block device without an exclusive claim.
+
+To exercise the native helper on regular-file fixtures, set `FILEDECK_DISK_VERIFY_TEST_DIR` to a writable scratch directory.
+Then run `node --import tsx --test server/test/disk-verify.test.ts` from the repository root.
+
 ## ⚠️ Keep it on a trusted network
 
-Filedeck has **no user accounts**. Anyone who can reach the hub can use it, and agents can change any file they serve. Put it behind a VPN or a private ingress with its own login.
+Anyone who can reach a hub with sign-in disabled can use it. Agents can change any file they serve. For account access, see [Turning sign-in on](docs/install.md#turning-sign-in-on). Put it behind a VPN or a private ingress with its own login.
 
 To limit the risk further:
 

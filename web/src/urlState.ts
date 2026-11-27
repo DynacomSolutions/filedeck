@@ -121,6 +121,12 @@ export function isSyncPreviewReady(jobState: string | undefined): boolean {
   return jobState === "done";
 }
 
+export interface DiskVerifyRoute {
+  node?: string;
+  serial?: string;
+  job?: string;
+}
+
 export interface AppState {
   tree: Tree;
   active: string;
@@ -131,13 +137,14 @@ export interface AppState {
   panelSel?: string[];
   /** the settings view is open */
   settings?: boolean;
+  diskVerify?: DiskVerifyRoute;
   /** keyboard shortcut reference is open */
   help?: boolean;
   /** sync plan view currently open */
   sync?: SyncState;
 }
 
-export type ViewRoute = Pick<AppState, "trash" | "diff" | "folder" | "settings" | "help" | "sync">;
+export type ViewRoute = Pick<AppState, "trash" | "diff" | "folder" | "settings" | "help" | "sync" | "diskVerify">;
 /** Stable identity for an open view; its changing contents remain replaceable in place. */
 export function viewIdentity(route: ViewRoute): string {
   return Object.keys(route).sort().join("+");
@@ -169,6 +176,7 @@ interface Wire {
   ps?: string[];
   /** settings view open */
   se?: 1;
+  dv?: [string?, string?, string?];
   /** keyboard shortcut reference open */
   sh?: 1;
   /** sync plan action and selected relative paths */
@@ -240,6 +248,10 @@ function encodeWith(s: AppState, keep: { sync: boolean; sels: boolean; panels: b
   if (s.trash) w.r = [s.trash.node, s.trash.volume];
   if (keep.panels && s.panelSel?.length) w.ps = s.panelSel;
   if (s.settings) w.se = 1;
+  if (s.diskVerify) {
+    const { node, serial, job } = s.diskVerify;
+    w.dv = node ? serial ? job ? [node, serial, job] : [node, serial] : [node] : [];
+  }
   if (s.help) w.sh = 1;
   if (keep.sync && s.folder && s.sync?.paths.length) w.sy = [s.sync.action, s.sync.paths];
   if (s.diff) w.f = [s.diff.left.rev ? [s.diff.left.node, s.diff.left.path, s.diff.left.rev] : [s.diff.left.node, s.diff.left.path], [s.diff.right.node, s.diff.right.path]];
@@ -365,7 +377,10 @@ export function decodeState(search: string): AppState | null {
     const sync = folder && Array.isArray(sy) && ["copy-lr", "copy-rl", "delete-left", "delete-right"].includes(sy[0]) && Array.isArray(sy[1]) && sy[1].length > 0 && sy[1].length <= 500 && sy[1].every((p) => str(p) && p.length <= 4096)
       ? { action: sy[0] as SyncState["action"], paths: sy[1] as string[] }
       : undefined;
-    return { tree, active, ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}), ...(w.sh === 1 ? { help: true } : {}), ...(sync ? { sync } : {}) };
+    const dv = w.dv;
+    const diskVerify = Array.isArray(dv) && dv.length <= 3 && dv.every((v) => str(v) && v.length <= 255)
+      ? { ...(dv[0] ? { node: dv[0] } : {}), ...(dv[1] ? { serial: dv[1] } : {}), ...(dv[2] ? { job: dv[2] } : {}) } : undefined;
+    return { tree, active, ...(diskVerify ? { diskVerify } : {}), ...(trash ? { trash } : {}), ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(panelSel.length ? { panelSel } : {}), ...(w.se === 1 ? { settings: true } : {}), ...(w.sh === 1 ? { help: true } : {}), ...(sync ? { sync } : {}) };
   } catch {
     return null;
   }

@@ -211,6 +211,8 @@ agent:
   # If the kernel or runtime refuses, the agent logs it once and carries on as without.
   fanotify:
     enabled: false
+  # Administrator inventory from Linux sysfs. This gives the pod no raw device access.
+  diskVerifyInventory: false
   # Change events: a stream of every create, delete, modify, close-after-write, attribute change and move of the files on the node, with a journal so a
   # reader that was away can continue from its last cursor. Needs `fanotify.enabled`. See docs/change-events.md.
   events:

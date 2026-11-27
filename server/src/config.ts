@@ -31,6 +31,10 @@ export interface Config {
   indexWatches: number;
   /** agent: SQLite file that keeps background jobs visible across a restart or rollout (empty = in memory) */
   jobsFile: string;
+  /** Linux agent inventory and optional native verification. */
+  diskVerify?: boolean;
+  diskVerifyTargets?: string[];
+  diskVerifyState?: string;
   /** compare index: trust an unwatched listing with an unchanged directory mtime for this long */
   indexRevalidateMs: number;
   /** trash retention (agent): items deleted longer ago than this are purged (0 = never by age) */
@@ -292,6 +296,9 @@ export function loadConfig(env = process.env): Config {
     hashConcurrency: Number(env.FILEDECK_HASH_CONCURRENCY ?? 4),
     walkMaxEntries: Number(env.FILEDECK_WALK_MAX_ENTRIES ?? 500_000),
     indexDir: env.FILEDECK_INDEX_DIR ?? "",
+    diskVerify: env.FILEDECK_DISK_VERIFY === "on",
+    diskVerifyTargets: (env.FILEDECK_DISK_VERIFY_TARGETS ?? "").split(",").map((v) => v.trim()).filter(Boolean),
+    diskVerifyState: env.FILEDECK_DISK_VERIFY_STATE,
     // the hub keeps its jobs next to the vault (a volume that survives a restart); an agent next to its index
     jobsFile:
       env.FILEDECK_JOBS_FILE ??

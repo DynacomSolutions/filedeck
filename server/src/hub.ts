@@ -2,7 +2,7 @@ import { FsError } from "./fsops.ts";
 import { fanIn } from "./events/fanin.ts";
 import { filterFromParams } from "./events/filter.ts";
 import { parseCursor } from "./events/cursor.ts";
-import { Hono } from "hono";
+import { Hono, type Context, type Next } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createAdaptorServer } from "@hono/node-server";
 import type { Server } from "node:http";
@@ -19,7 +19,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
-import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, normaliseAgentPath, withAgentToken } from "./agent-auth.ts";
+import { DISK_VERIFY_PATH, canUseNode, isDiskVerifyPath, isAgentAuthPath, isOpenProbe, NoAccessError, normaliseAgentPath, withAgentToken } from "./agent-auth.ts";
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
@@ -36,7 +36,7 @@ import { LoginLimiter } from "./auth/limiter.ts";
 import { ProxyList, readTailnet, stripTailnetHeaders, tailnetInputOf, TailnetSource } from "./auth/tailnet.ts";
 import { TailnetLinks } from "./auth/tailnet-links.ts";
 import { currentUser, userContext } from "./auth/context.ts";
-import { USER_HEADER } from "./auth/identity.ts";
+import { signClaim, USER_HEADER } from "./auth/identity.ts";
 import { LiveStreams } from "./auth/streams.ts";
 import { markArrival, registerAuth, registerAuthOff, sessionKeyOf, sessionMethodOf, tailnetBinding, tokenIdentity, unavailableSystemAuth, type SystemAuth } from "./auth/routes.ts";
 import type { Identity } from "./auth/identity.ts";
@@ -363,6 +363,18 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     if (id?.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id)) rootCalls.track(RootCalls.key(id.name, id.asRootUntil), p);
     return p;
   };
+  const diskCall = (id: Identity, node: { name: string; url: string }, suffix: string, init?: RequestInit, revoke = false) => {
+    const token = cfg.agentToken;
+    if (!token || !id.admin) throw new Error("Disk verify requires administrator credentials");
+    const headers = new Headers(init?.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    headers.set(USER_HEADER, signClaim({
+      kind: id.kind, name: id.name, admin: true, epoch: id.epoch, iat: Date.now(),
+      ...(id.kind === "virt" ? { runAs: "", grants: [] } : {}),
+      diskVerify: { node: node.name, action: revoke ? "revoke" : "operate" },
+    }, token));
+    return agentFetch(node.url + DISK_VERIFY_PATH + suffix, { ...init, headers, redirect: "manual" });
+  };
   const agents = new Map<string, Target>(cfg.nodes.map((n) => [n.name, { fetch: async (rest, init) => agentCall(n, rest, init) }]));
   app.nodeTargets = agents; // (tests reach the agent calls through it)
   const sources = buildSources(cfg);
@@ -526,7 +538,16 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     calls.endAccount(before.kind, before.name);
     const id: Identity = { ...before, epoch: auth.accounts.epochOf(before.kind, before.name) };
     const nodes = before.kind === "sys" ? cfg.nodes.map((n) => n.name) : Object.keys(before.nodes).filter((x) => nodeNames.has(x));
-    await endAccountWork({ id, nodes, ops, diffs, call: callNode });
+    const diskRevocations = before.admin ? cfg.nodes.map(async (node) => {
+      try {
+        const response = await diskCall(id, node, "/revoke", { method: "POST", signal: AbortSignal.timeout(1500) }, true);
+        await response.body?.cancel();
+        if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status}`);
+      } catch (error) {
+        console.error(`Disk verify revocation on ${node.name}: ${(error as Error).message}`);
+      }
+    }) : [];
+    await Promise.all([endAccountWork({ id, nodes, ops, diffs, call: callNode }), ...diskRevocations]);
     // a root job runs in the agent's root process, so the raised epoch does not stop it, and one still being started was not in the
     // listing above: each switch ends as Stop ends it (its calls settle, at most 2 s; its jobs are listed and cancelled; a late relist).
     // The switches end together, so they add at most 3 s to the change however many there are.
@@ -874,6 +895,57 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       call?.done();
     }
   });
+  const mayVerifyDisks = async (c: Context, next: Next) => {
+    if (!cfg.auth || !auth || sessionKeyOf(c) === undefined || !isAdmin(cfg, auth.accounts, currentUser()))
+      return c.json({ error: "Administrators only" }, 403);
+    return next();
+  };
+  app.use(DISK_VERIFY_PATH, mayVerifyDisks);
+  app.use(`${DISK_VERIFY_PATH}/*`, mayVerifyDisks);
+  app.get(DISK_VERIFY_PATH, async (c) => {
+    const nodes = await Promise.all(cfg.nodes.map(async (node) => {
+      try {
+        const signal = AbortSignal.any([AbortSignal.timeout(5000), c.req.raw.signal]);
+        const response = await diskCall(currentUser()!, node, "", { signal });
+        const data = await response.json() as { disks?: unknown; jobs?: unknown; writable?: boolean; error?: string };
+        if (!response.ok) return { node: node.name, error: data.error ?? "Inventory unavailable" };
+        return { node: node.name, disks: data.disks, jobs: data.jobs, writable: data.writable };
+      } catch {
+        return { node: node.name, error: "Inventory unavailable" };
+      }
+    }));
+    return c.json({ nodes }, 200, { "cache-control": "no-store" });
+  });
+  app.on(["GET", "POST"], `${DISK_VERIFY_PATH}/nodes/:node/:resource/:action?`, async (c) => {
+    const node = cfg.nodes.find((entry) => entry.name === c.req.param("node"));
+    if (!node) return c.json({ error: "Unknown agent" }, 404);
+    const resource = c.req.param("resource"), action = c.req.param("action");
+    const isJob = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(resource);
+    const get = c.req.method === "GET";
+    if (get ? action || (!isJob && resource !== "history" && resource !== "smart") :
+        !(resource === "start" && !action) && !(isJob && action === "cancel")) return c.json({ error: "Unknown disk verify route" }, 404);
+    const call = startCall(!get);
+    try {
+      const signal = AbortSignal.any([c.req.raw.signal, ...(call ? [call.signal] : []), AbortSignal.timeout(60_000)]);
+      const search = get ? new URL(c.req.url).search : "";
+      const headers = new Headers();
+      let body: string | undefined;
+      if (!get) {
+        headers.set("Content-Type", "application/json");
+        body = c.req.param("resource") === "start" ? JSON.stringify(await c.req.json()) : "{}";
+      }
+      const response = await diskCall(currentUser()!, node, `/${resource}${action ? "/cancel" : ""}${search}`, {
+        method: c.req.method, headers, body, signal,
+      });
+      const data = response.status === 204 ? null : await response.arrayBuffer();
+      return new Response(data, { status: response.status, headers: clean(response.headers, true) });
+    } catch (error) {
+      if (error instanceof SyntaxError) return c.json({ error: "Invalid JSON" }, 400);
+      return c.json({ error: "Disk verify agent unreachable" }, 502);
+    } finally {
+      call?.done();
+    }
+  });
   const NDJSON = { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-accel-buffering": "no" };
 
   // The change events of several machines in one stream: the filter goes down to every agent, each machine has its own cursor (`since`, once per machine).
@@ -926,6 +998,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     if (cfg.auth && isAgentAuthPath(rest)) return c.json({ error: "not found" }, 404);
     // Apply the same administrator check to diagnostics and the change stream.
     const agentPath = normaliseAgentPath(rest)?.replace(/\/+$/, "");
+    if (agentPath && isDiskVerifyPath(agentPath)) return c.json({ error: "not found" }, 404);
     const isChanges = agentPath === undefined || agentPath === changesPath;
     if ((isChanges || agentPath === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own

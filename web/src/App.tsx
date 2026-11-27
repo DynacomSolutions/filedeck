@@ -28,6 +28,8 @@ import { usePhone } from "./viewport";
 import { PANEL_MIME, dockPanel, keyDock, pickZone, type DropZone } from "./dock";
 import * as Ic from "lucide-react";
 import { AccountMenu } from "./AccountMenu";
+import { DiskVerifyView } from "./DiskVerify";
+import type { DiskVerifyRoute } from "./urlState";
 import { AsRootBanner, useAsRoot } from "./AsRootBanner";
 import type { Account } from "./auth";
 import { openPath } from "./nodeHome";
@@ -103,7 +105,7 @@ const pathsOf = (t: Tree) => Object.fromEntries(leaves(t).map((l) => [l.id, { no
  * preview, editor) replaces the current entry. Back/forward only walks the entries
  * made by the focused panel and restores that panel's own folder.
  */
-function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, help: boolean, sync: SyncState | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void, restoreRoute: (state: NonNullable<ReturnType<typeof decodeState>>) => void, replaceOnClose: React.MutableRefObject<boolean>, closeAtRoot: React.MutableRefObject<{ root: number; fallback: () => void } | null>) {
+function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef; right: FileRef } | null, folder: FolderState | null, trash: TrashState | null, panelSel: string[], settings: boolean, help: boolean, sync: SyncState | null, diskVerify: DiskVerifyRoute | null, setTree: React.Dispatch<React.SetStateAction<Tree | null>>, setStatus: (m: string) => void, restoreRoute: (state: NonNullable<ReturnType<typeof decodeState>>) => void, replaceOnClose: React.MutableRefObject<boolean>, closeAtRoot: React.MutableRefObject<{ root: number; fallback: () => void } | null>) {
   const cur = useRef<HState | null>((history.state as HState | null) && typeof (history.state as HState).idx === "number" ? (history.state as HState) : null);
   const prev = useRef<Record<string, { node: string; path: string }> | null>(null);
   const fromPop = useRef(false);
@@ -114,7 +116,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
   useEffect(() => {
     if (!tree) return;
     const paths = pathsOf(tree);
-    const route = { ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(settings ? { settings: true } : {}), ...(help ? { help: true } : {}), ...(sync ? { sync } : {}) };
+    const route = { ...(diff ? { diff } : {}), ...(folder ? { folder } : {}), ...(trash ? { trash } : {}), ...(settings ? { settings: true } : {}), ...(help ? { help: true } : {}), ...(sync ? { sync } : {}), ...(diskVerify ? { diskVerify } : {}) };
     // Keep the history identity separate from its serialised contents. Choosing
     // another PR file or trash volume updates this view in place, while moving
     // between Settings, Trash, a diff, and a sync plan creates a real entry.
@@ -158,7 +160,7 @@ function useUrlHistory(tree: Tree | null, active: string, diff: { left: FileRef;
     } catch {
       /* history unavailable (sandboxed frame) */
     }
-  }, [tree, active, diff, folder, trash, panelSel, settings, help, sync]);
+  }, [tree, active, diff, folder, trash, panelSel, settings, help, sync, diskVerify]);
 
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
@@ -335,6 +337,7 @@ export function App({ account }: { account?: Account } = {}) {
   const [status, setStatus] = useState("");
   const [trash, setTrash] = useState<TrashState | null>(initial?.trash ?? null);
   const [settingsOpen, setSettingsOpen] = useState(initial?.settings ?? false);
+  const [diskVerify, setDiskVerify] = useState<DiskVerifyRoute | null>(initial?.diskVerify ?? null);
   const [help, setHelp] = useState(initial?.help ?? false);
   // the Accounts view (administrators): not in the URL, so a shared link never opens it
   const [accountsOpen, setAccountsOpen] = useState(false);
@@ -447,11 +450,12 @@ export function App({ account }: { account?: Account } = {}) {
     setCompare(state.folder ?? null);
     setTrash(state.trash ?? null);
     setSettingsOpen(!!state.settings);
+    setDiskVerify(state.diskVerify ?? null);
     setHelp(!!state.help);
     suppressSyncCapture.current = !state.sync;
     setSyncRoute(state.sync ?? null);
   }, []);
-  useUrlHistory(tree, activeId, diff, compare, trash, panelSel, settingsOpen, help, syncRoute, setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot);
+  useUrlHistory(tree, activeId, diff, compare, trash, panelSel, settingsOpen, help, syncRoute, account?.admin ? diskVerify : null, setTree, setStatus, restoreRoute, replaceOnClose, closeAtRoot);
   const closeView = (fallback: () => void) => {
     const entry = history.state as HState | null;
     if (entry?.view) {
@@ -719,7 +723,7 @@ export function App({ account }: { account?: Account } = {}) {
               </Tip>
             )}
                         <Tip label="Keyboard shortcuts" shortcut="?"><button className="hide-phone" onClick={() => setHelp(true)} aria-label="Keyboard shortcuts"><Keyboard /></button></Tip>
-            {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? openAccounts : undefined} />}
+            {account && <AccountMenu account={account} onAsRoot={asRoot.start} onAccounts={account.admin ? openAccounts : undefined} onDiskVerify={account.admin ? () => setDiskVerify({}) : undefined} />}
             <Tip label="Jobs">
               <button type="button" className={"jobs-btn" + (jobsInfo.asking ? " attn" : "")} data-drawer-toggle aria-controls="jobs-panel" aria-expanded={jobsShown} onClick={toggleJobs}>
                 <Ic.Activity /> <span className="bl">Jobs</span>
@@ -755,6 +759,11 @@ export function App({ account }: { account?: Account } = {}) {
             </ErrorBoundary>
           )}
           {settingsOpen && <ErrorBoundary what="Settings" onClose={() => closeView(() => setSettingsOpen(false))}><SettingsView onClose={() => closeView(() => setSettingsOpen(false))} /></ErrorBoundary>}
+          {diskVerify && account?.admin && (
+            <ErrorBoundary what="Disk verify" onClose={() => closeView(() => setDiskVerify(null))}>
+              <DiskVerifyView route={diskVerify} onRoute={setDiskVerify} onClose={() => closeView(() => setDiskVerify(null))} />
+            </ErrorBoundary>
+          )}
           {accountsOpen && account?.admin && (
             <ErrorBoundary what="The Accounts view" onClose={closeAccounts}>
               <Suspense fallback={null}>

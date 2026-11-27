@@ -92,6 +92,7 @@ async function installFixture(page, opts = {}) {
     // opts.tailnetDown: while set, every API request is the gate's tailnet 503 (a Tailscale session while tailscaled does not
     // answer; the session is kept), with its header
     if (opts.tailnetDown) return json({ error: 'tailnet identity unavailable' }, 503, TAILNET_DOWN);
+    if (opts.diskVerify && pathname.startsWith('/api/disk-verify')) return opts.diskVerify({ pathname, req, json });
     // opts.nodesBody / opts.lists: a check's own node list and folder listings (by path), answered before the shared fixtures
     if (opts.nodesBody && pathname === '/api/nodes') return json(opts.nodesBody);
     if (opts.lists?.[url.searchParams.get('path')] && pathname.includes('/api/fs/list')) return json({ path: url.searchParams.get('path'), entries: opts.lists[url.searchParams.get('path')], truncated: false });
@@ -3626,8 +3627,87 @@ async function verifyJobsStatus(browser) {
   assert.deepEqual(failures, [], 'the jobs and status sections pass axe in both themes');
 }
 
+async function verifyDiskVerify(browser, [scheme]) {
+  const failures = [];
+  const serial = 'FIXTURE-001';
+  const second = 'FIXTURE-002';
+  const id = '11111111-1111-4111-8111-111111111111';
+  const disk = { name: 'sdb', model: 'Fixture SSD', serial, transport: 'sata', size: 1073741824, byId: 'ata-fixture', fingerprint: 'a'.repeat(64) };
+  const first = { disk, id, kind: 'full', state: 'running', phase: 'verify', total: disk.size, offset: disk.size / 2,
+    started: 1791264000000, actor: 'sys:fixture-admin', findings: [], bytesPerSecond: 50000000, etaSeconds: 11, jobEtaSeconds: 11,
+    before: { exit: 0, data: { serial_number: serial } },
+    samples: [{ bps: 30000000, phase: 'fill' }, { bps: 50000000, phase: 'verify' }], details: { verify: { bytes: 536870912, seconds: 11 } } };
+  const posts = [];
+  const base = '/api/disk-verify';
+  const perNode = base + '/nodes/node-a';
+  const fixture = { account: 'fixture-admin', kind: 'sys', admin: true, diskVerify: ({ pathname, req, json }) => {
+    if (pathname === base) return json({ nodes: [
+      { node: 'node-a', writable: true, disks: [disk], jobs: [first] },
+      { node: 'node-b', writable: false, disks: [{ ...disk, name: 'sdc', serial: second }], jobs: [] },
+    ] });
+    if (pathname === perNode + '/history') return json({ jobs: [first] });
+    if (pathname === perNode + '/smart') return json({ health: true, metrics: { 'Wear used (%)': 5 }, snapshot: first.before });
+    if (pathname === perNode + '/' + id) return json(first);
+    if (pathname === perNode + '/' + id + '/cancel') {
+      assert.equal(req.method(), 'POST');
+      first.state = 'paused';
+      posts.push('cancel');
+      return json({}, 200);
+    }
+    if (pathname === perNode + '/start') {
+      assert.equal(req.method(), 'POST');
+      const body = req.postDataJSON();
+      assert.deepEqual(body, { byId: disk.byId, serial, kind: 'full', confirm: serial, fingerprint: disk.fingerprint, resume: id });
+      first.state = 'running';
+      posts.push('resume');
+      return json(first, 202);
+    }
+    return json({ error: 'fixture route missing' }, 404);
+  } };
+  const viewport = scheme === 'dark' ? { width: 390, height: 844 } : { width: 1365, height: 900 };
+  const { context, page } = await openPage(browser, { viewport, colorScheme: scheme, fixture });
+  try {
+    await page.getByRole('button', { name: 'Account: fixture-admin' }).click();
+    await page.getByRole('menuitem', { name: 'Disk verify…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Disk verify' });
+    await dialog.getByRole('button', { name: 'Fixture SSD · ' + second }).waitFor();
+    await page.screenshot({ path: resolve(evidenceDir, `disk-verify-inventory-${scheme}.png`) });
+    await dialog.getByRole('button', { name: 'node-a · FIXTURE-001 · Full read-back verification' }).click();
+    await dialog.getByRole('img', { name: /Recent throughput/ }).waitFor();
+    assert.ok((await dialog.getByText(/left in this phase/).count()) > 0);
+    const selectedUrl = page.url();
+    assert.deepEqual(JSON.parse(new URL(selectedUrl).searchParams.get('s')).dv, ['node-a', serial, id]);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await dialog.getByRole('button', { name: 'Cancel test' }).waitFor();
+    await dialog.getByRole('button', { name: 'Read SMART health and wear' }).click();
+    await dialog.getByText('SMART health: Pass').waitFor();
+    await runAxe(page, 'Disk verify ' + scheme, failures);
+    const scrollBody = dialog.locator('.disk-verify-body');
+    await scrollBody.evaluate((body) => { body.scrollTop = body.scrollHeight; });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: resolve(evidenceDir, `disk-verify-${scheme}.png`) });
+    await dialog.getByRole('button', { name: 'Cancel test' }).click();
+    const resume = dialog.getByRole('button', { name: 'Resume full destructive test' });
+    await resume.waitFor();
+    assert.equal(await resume.isEnabled(), false);
+    await dialog.getByLabel('Type the exact disk serial to confirm').fill('WRONG');
+    assert.equal(await resume.isEnabled(), false);
+    await dialog.getByLabel('Type the exact disk serial to confirm').fill(serial);
+    await resume.click();
+    await dialog.getByRole('button', { name: 'Cancel test' }).waitFor();
+    assert.deepEqual(posts, ['cancel', 'resume']);
+    await page.goBack();
+    await dialog.waitFor({ state: 'hidden' });
+    await page.goForward();
+    await dialog.getByRole('button', { name: 'Cancel test' }).waitFor();
+    assert.equal(page.url(), selectedUrl);
+  } finally { await context.close(); }
+  assert.deepEqual(failures, []);
+}
+
 const allChecks = [
   ['jobs and node status', verifyJobsStatus],
+  ...schemePair('Disk verify', verifyDiskVerify),
   ['list semantics', verifyListSemantics],
   ['keyboard shortcuts dialog and confirmations', verifyKeyboardAndConfirmation],
   ['keyboard isolation', verifyKeyboardIsolation],

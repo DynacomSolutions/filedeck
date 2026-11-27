@@ -5,6 +5,9 @@ import { claimFor, signClaim, verifyClaim, USER_HEADER, type Identity, type User
 import type { Config } from "./config.ts";
 import { auditRefusal, type AuditSink } from "./audit.ts";
 
+export const DISK_VERIFY_PATH = "/api/disk-verify";
+export const isDiskVerifyPath = (p: string) => p === DISK_VERIFY_PATH || p.startsWith(DISK_VERIFY_PATH + "/");
+
 /** The two paths that need no credentials and name nobody: the liveness probe and the metrics scrape (a query string is allowed). The hub and the agents use this one test. */
 export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)/.test(pathAndQuery);
 
@@ -82,6 +85,12 @@ export function agentUser(cfg: Config, sink?: AuditSink): MiddlewareHandler {
       auditRefusal(`agent:${cfg.node}`, c, 401, sink); // the line holds no header value
       return c.json({ error: "no user" }, 401);
     }
+    const diskRoute = isDiskVerifyPath(c.req.path);
+    if (claim.diskVerify) {
+      const revocation = c.req.method === "POST" && c.req.path === DISK_VERIFY_PATH + "/revoke";
+      if (!diskRoute || claim.diskVerify.node !== cfg.node || revocation !== (claim.diskVerify.action === "revoke"))
+        return c.json({ error: "Disk verify claim scope mismatch" }, 403);
+    } else if (diskRoute) return c.json({ error: "A disk verify claim is required" }, 403);
     c.set("user", claim);
     return next();
   };

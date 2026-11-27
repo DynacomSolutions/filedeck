@@ -30,6 +30,7 @@ export interface UserClaim {
   epoch: number;
   /** The hub grants access to node diagnostics. */
   admin?: true;
+  diskVerify?: { node: string; action: "operate" | "revoke" };
   runAs?: string;
   grants?: Grant[];
   /** the request runs in the agent's root process (act as root); only ever `true`, only on a `sys` claim */
@@ -89,6 +90,10 @@ export function verifyClaim(value: string, agentToken: string, now: number): Use
     if (c.kind !== "sys" && c.kind !== "virt") return null;
     if (typeof c.name !== "string" || typeof c.epoch !== "number") return null;
     if (c.admin !== undefined && c.admin !== true) return null;
+    if (c.diskVerify !== undefined &&
+        (c.admin !== true || !c.diskVerify || typeof c.diskVerify.node !== "string" ||
+          (c.diskVerify.action !== "operate" && c.diskVerify.action !== "revoke") ||
+          c.asRoot !== undefined || c.asRootUntil !== undefined)) return null;
     // Only system accounts can set `asRoot`, and only to `true`.
     if (c.asRoot !== undefined && (c.asRoot !== true || c.kind !== "sys")) return null;
     // and its end, a number after the issue time, goes with it: neither without the other

@@ -34,7 +34,8 @@ const built = [];
 for (const file of fs.readdirSync(srcDir).filter((f) => f.endsWith(".c")).sort()) {
   const name = file.slice(0, -2);
   const out = path.join(outDir, name);
-  const attempt = (extra) => spawnSync(cc, ["-O2", "-Wall", ...extra, "-o", out, path.join(srcDir, file)], { encoding: "utf8" });
+  const libraries = name === "filedeck-disk-verify" ? ["-lblkid", "-lcrypto"] : [];
+  const attempt = (extra) => spawnSync(cc, ["-O2", "-Wall", ...extra, "-o", out, path.join(srcDir, file), ...libraries], { encoding: "utf8" });
   let how = "static";
   let r = attempt(["-static"]);
   if (r.status !== 0) {

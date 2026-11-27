@@ -28,13 +28,14 @@ WORKDIR /src
 # samba-client by the test that runs the real smbclient with the options the code passes (the same package the final image ships).
 RUN apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
 # gcc, musl and the kernel headers build the static fanotify helper (server/native).
-RUN apk add --no-cache gcc musl-dev linux-headers
+RUN apk add --no-cache gcc musl-dev linux-headers util-linux-dev openssl-dev
 COPY server/native server/native
 RUN gcc -O2 -Wall -static -o /usr/local/bin/filedeck-fanwatch server/native/filedeck-fanwatch.c
 # The launcher that confines helper programs (git, archive tools) to the folders they are given (Landlock, server/src/sandbox.ts).
 RUN gcc -O2 -Wall -static -o /usr/local/bin/filedeck-sandbox server/native/filedeck-sandbox.c
 # The rename that never replaces what is at the destination (renameat2 with RENAME_NOREPLACE, server/src/noreplace.ts).
 RUN gcc -O2 -Wall -static -o /usr/local/bin/filedeck-rename server/native/filedeck-rename.c
+RUN gcc -O2 -Wall -o /usr/local/bin/filedeck-disk-verify server/native/filedeck-disk-verify.c -lblkid -lcrypto
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY server/package.json server/
 COPY web/package.json web/
@@ -63,13 +64,14 @@ WORKDIR /app
 # ffmpeg makes the image/video thumbnails (run as an unprivileged child, see server/src/thumbs.ts);
 # git (read-only, never writes) backs the pull request diff view of a repository folder;
 # `apk upgrade` keeps the base packages on patched versions for the Trivy gate.
-RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git
+RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samba-client ffmpeg git smartmontools lsblk libblkid libcrypto3
 # fanotify helper: only started when the chart's agent.fanotify.enabled sets FILEDECK_FANWATCH (it needs CAP_SYS_ADMIN).
 COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwatch
 # Sandbox launcher: used for every Git command when the kernel has Landlock (FILEDECK_SANDBOX, set to require below).
 COPY --from=build /usr/local/bin/filedeck-sandbox /usr/local/bin/filedeck-sandbox
 # No-replace rename: places a folder (and a file where the filesystem has no hard links) in a move or copy without overwrite.
 COPY --from=build /usr/local/bin/filedeck-rename /usr/local/bin/filedeck-rename
+COPY --from=build /usr/local/bin/filedeck-disk-verify /usr/local/bin/filedeck-disk-verify
 # Host helpers (sign-in on): run from here by descriptor inside the machine's root (the launcher's --chroot --exec-outside, server/src/host-helpers.ts).
 COPY --from=hostbuild /out/ /usr/local/lib/filedeck/host/
 COPY --from=build /src/node_modules node_modules

@@ -24,6 +24,7 @@ import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } fro
 import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
 import { Followers, registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
 import { registerNodeStatus, StatusEventBus } from "./node-status.ts";
+import { registerDiskVerify } from "./disk-verify.ts";
 import { DirWatchers } from "./events/dirwatch.ts";
 import { LabelRules } from "./events/labels.ts";
 import { ownState } from "./events/own-state.ts";
@@ -153,6 +154,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     ? new MacWatch(sizes, { root, procMounts: cfg.procMounts, bus })
     : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, bus, ignorePath: ownState({ node: cfg.node, root, journalDir, stateDir: cfg.indexDir, tmpDir: os.tmpdir() }) });
   registerNodeStatus(app, cfg, sizes, fan, bus);
+  const diskVerify = registerDiskVerify(app, cfg);
   const dirs = new DirWatchers(bus, (v) => fan.covers(v));
   feedRef.feed = dirs;
   sizes.covers = (v) => fan.covers(v);
@@ -161,7 +163,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   sizes.chainMin = () => fan.chainMin();
   sizes.onReopen = () => fan.storeReplaced();
   // Prometheus text for the size store (outside /api and exempt from the agent token, like /healthz: only counts and ages may ever be served here, nothing that names a path, a node or a size): whether the size store answers from its file, whether its file is damaged and not yet replaced, the queued jobs and the oldest wait
-  app.get("/metrics", (c) => {
+  app.get("/metrics", async (c) => {
     const h = sizes.health();
     const q = jobs.queuedStats();
     const w = fan.status();
@@ -173,6 +175,9 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_size_store_damaged 1 when the store file is damaged and the agent has not yet replaced it with a new one",
         "# TYPE filedeck_size_store_damaged gauge",
         `filedeck_size_store_damaged ${h.damaged ? 1 : 0}`,
+        "# HELP filedeck_disk_verify_active Active disk verification jobs in this agent process",
+        "# TYPE filedeck_disk_verify_active gauge",
+        `filedeck_disk_verify_active ${await diskVerify.activeCount()}`,
         "# HELP filedeck_jobs_queued Jobs of this process that wait to run",
         "# TYPE filedeck_jobs_queued gauge",
         `filedeck_jobs_queued ${q.count}`,
@@ -233,7 +238,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
       // writer's coverage check reads it), and it must do that before the hard exit of the process. The bus is closed here once, and only here.
       await leaveBounded(
         async () => {
-          await Promise.all([jobs.interrupt(), pool?.close()]);
+          await Promise.all([jobs.interrupt(), pool?.close(), diskVerify.close()]);
           await specs?.close(); // (no worker runs any more)
           await fan.handover();
           await socket?.close();

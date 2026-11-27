@@ -1,0 +1,77 @@
+.disk-verify .disk-verify-body {
+  display: block;
+  min-width: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.disk-verify-body > section,
+.disk-verify-job {
+  border-top: 1px solid var(--line);
+  margin-top: 1rem;
+  padding-top: .5rem;
+}
+
+.disk-verify-body label,
+.disk-verify-list li,
+.disk-verify-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .55rem;
+}
+
+.disk-verify-body input,
+.disk-verify-body select {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.disk-verify-list {
+  display: grid;
+  gap: .4rem;
+  list-style: none;
+  padding: 0;
+}
+
+.disk-verify-body form {
+  display: grid;
+  gap: .75rem;
+  margin: 1rem 0;
+}
+
+.disk-verify-body progress {
+  max-width: 100%;
+}
+
+.disk-verify-body pre {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.disk-verify-job figure {
+  margin: 1rem 0;
+}
+
+.disk-verify-graph {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 7rem;
+  border-bottom: 1px solid currentColor;
+}
+
+.disk-verify-graph span {
+  flex: 1;
+  background: currentColor;
+  min-height: 1px;
+}
+
+.disk-verify-results div {
+  margin-bottom: .5rem;
+}
+
+.disk-verify-results dd {
+  margin-inline-start: 0;
+}
