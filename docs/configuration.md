@@ -28,4 +28,19 @@ Job notifications (Web Push, hub): with the Settings switch on, the browser give
 
 `FILEDECK_BRAND` is JSON: `{"name","title","icon","css","themeKey"}`. Unset, the page says "Filedeck", has no logo and no header links (the header never carries logos or links to other sites; only the name, selection actions, Compare panels, theme and help). The hub also writes `name` into the installed app's name under its icon (the manifest's `short_name` and the iOS home-screen title) and `title` into the manifest's `name`; the icons stay the bundled ones.
 
+## Change events
+
+Agent settings. See [Change events](change-events.md).
+
+- `FILEDECK_FANWATCH`: the fanotify helper, for example `/usr/local/bin/filedeck-fanwatch`. Empty means off. The chart sets it with `agent.fanotify.enabled`. The helper has one setting of its own, in its environment: `FILEDECK_FANWATCH_CACHE` is the number of folder handles in its path cache (default 16384, 0 means no cache).
+- `FILEDECK_EVENTS_SOCKET`: the path of the Unix socket for other programs on the machine. Empty means off. The agent makes its folder with mode 0750 and the socket with mode 0660. The path has at most 100 bytes. Chart values: `agent.events.socket.*`.
+- `FILEDECK_EVENTS_SOCKET_GROUP`: the group of the folder and the socket, a name or a number. A number is safest, because a name is looked up in `/etc/group` of the container.
+- `FILEDECK_EVENTS_JOURNAL_BYTES` (default 2 GiB, 0 means the journal stays in memory) and `FILEDECK_EVENTS_JOURNAL_HOURS` (default 24): the journal keeps the smaller of the two limits. It is in `changes-<node>/` inside `FILEDECK_INDEX_DIR`. Chart values: `agent.events.journal.*`.
+- `FILEDECK_EVENTS_LABELS`: label templates, separated by line feeds, semicolons or commas. Example: `/srv/repos/{org}/{repo}`. The agent logs a bad template and makes no label. Chart value: `agent.events.labels`.
+- `FILEDECK_INDEX_WATCHES`: the folders that the compare index keeps under change watch (default 32768). A watch is a table entry in memory that the event bus feeds. It is not a kernel watch.
+
+Hub setting:
+
+- `FILEDECK_API_TOKEN_SCOPES`: what the token of `FILEDECK_API_TOKEN` may read, separated by commas. `du` is folder sizes and `changes` is the change event stream. The default is `du`. Chart value: `apiToken.scopes`.
+
 [Back to the README](../README.md)
