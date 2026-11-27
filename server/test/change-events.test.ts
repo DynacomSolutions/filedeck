@@ -507,6 +507,7 @@ test("bus: a demoted writer closes its files and forgets its state; when it is t
   const b = bus({ journal: { dir, flushMs: 5 }, writer: () => writer });
   for (let i = 1; i <= 3; i++) b.publish(ev("create", `/a${i}`));
   await b.whenServing();
+  await b.journal.flush(); // (what is still pending when the lease goes is dropped, so these three are written first)
   writer = false;
   b.publish(ev("create", "/during-demotion")); // a process that lost the lease writes nothing
   await until(() => b.journal.head === 0 && !b.serving);
@@ -599,4 +600,117 @@ test("bus: the watcher's events reach the journal as overflow and reset with the
   assert.equal(got[1]!.path, "/mnt/x");
   assert.deepEqual(heard, ["overflow", "reset"]);
   assert.equal(b.overflows, 1);
+});
+
+test("journal: close() twice writes meta.json once; a close after the lease went to a new process leaves its folder alone", async () => {
+  const dir = tmp();
+  const a = new Journal({ dir, node: "n1", flushMs: 5 });
+  await a.open();
+  mk(a, (n) => n, 3);
+  await a.close();
+  const meta = path.join(dir, "meta.json");
+  const mine = fs.readFileSync(meta, "utf8");
+  // the next process took the lease and wrote its own meta
+  fs.writeFileSync(meta, JSON.stringify({ epoch: "newer", node: "n1", clean: false, covered: 1 }));
+  await a.close(); // (the second close of the bus, from the app's own close after leave())
+  assert.equal(JSON.parse(fs.readFileSync(meta, "utf8")).epoch, "newer", `the second close did not rewrite meta.json (it held ${mine})`);
+  // the bus too: closing it twice is one close
+  const d2 = tmp();
+  const b = bus({ journal: { dir: d2, flushMs: 5 } });
+  b.publish(ev("create", "/a"));
+  await b.whenServing();
+  await b.close();
+  fs.writeFileSync(path.join(d2, "meta.json"), JSON.stringify({ epoch: "newer", node: "n1", clean: false, covered: 1 }));
+  await b.close();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(d2, "meta.json"), "utf8")).epoch, "newer");
+});
+
+test("journal: the temporary name of a meta write holds random bytes (two containers that are both process 1 do not share it)", async () => {
+  const dir = tmp();
+  const names = new Set<string>();
+  const real = fs.promises.writeFile;
+  const spy = async (f: unknown, ...rest: unknown[]) => {
+    if (String(f).startsWith(path.join(dir, "meta.json."))) names.add(path.basename(String(f)));
+    return (real as (...a: unknown[]) => Promise<void>)(f, ...rest);
+  };
+  (fs.promises as { writeFile: unknown }).writeFile = spy;
+  try {
+    const a = new Journal({ dir, node: "n1" });
+    await a.open();
+    await a.close();
+    const b = new Journal({ dir, node: "n1" });
+    await b.open();
+    await b.close();
+  } finally {
+    (fs.promises as { writeFile: unknown }).writeFile = real;
+  }
+  assert.ok(names.size >= 4, `four writes, four names: ${[...names].join(",")}`);
+  for (const n of names) assert.match(n, new RegExp(`^meta\\.json\\.${process.pid}\\.[0-9a-f]{12}$`));
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith("meta.json.")), [], "no temporary file is left");
+});
+
+test("journal: release() after the lease was lost drops the pending lines and the queued meta writes, and makes no new segment", async () => {
+  const dir = tmp();
+  let t = 1_000_000;
+  const j = new Journal({ dir, node: "n1", flushMs: 5, now: () => t });
+  await j.open();
+  mk(j, (n) => n, 2);
+  await j.flush();
+  const files = () => fs.readdirSync(dir).sort().join(",");
+  const before = files();
+  const meta = fs.readFileSync(path.join(dir, "meta.json"), "utf8");
+  const seg = fs.readFileSync(path.join(dir, fs.readdirSync(dir).find((n) => n.startsWith("seg-"))!), "utf8");
+  t += 60_000;
+  mk(j, (n) => 2 + n, 3); // pending, not yet written
+  j.cover(); // a meta write is queued
+  await j.release();
+  await sleep(50);
+  assert.equal(files(), before, "no file was made or changed in the folder");
+  assert.equal(fs.readFileSync(path.join(dir, "meta.json"), "utf8"), meta, "the queued meta write did not run");
+  assert.equal(fs.readFileSync(path.join(dir, fs.readdirSync(dir).find((n) => n.startsWith("seg-"))!), "utf8"), seg, "the pending lines were not appended");
+  // a segment of its own would be made at the next flush when the old one is full: none is
+  const k = new Journal({ dir, node: "n1", flushMs: 5, segmentBytes: 1, now: () => t });
+  await k.open();
+  mk(k, (n) => n, 1);
+  k.cover();
+  await k.release();
+  assert.equal(fs.readdirSync(dir).filter((n) => n.startsWith("seg-")).length, 0, "no new segment after the release (the unclean open also removed the old one)");
+});
+
+test("journal: an open that finds a journal its last writer did not close cleanly is counted", async () => {
+  const dir = tmp();
+  const a = new Journal({ dir, node: "n1", flushMs: 5 });
+  await a.open();
+  assert.equal(a.uncleanOpens, 0, "a new folder is not an unclean open");
+  mk(a, (n) => n, 2);
+  await a.flush(); // no close: a crash
+  const b = new Journal({ dir, node: "n1" });
+  await b.open();
+  assert.equal(b.uncleanOpens, 1);
+  await b.close();
+  const c = new Journal({ dir, node: "n1" });
+  await c.open();
+  assert.equal(c.uncleanOpens, 0, "after a clean close it is not");
+  await c.close();
+  const { eventMetrics } = await import("../src/events/metrics.ts");
+  const text = eventMetrics(bus({ journal: { dir: null } })).join("\n");
+  assert.match(text, /^filedeck_events_journal_unclean_opens_total 0$/m);
+});
+
+test("leave: the slow steps have a limit, then the journal is closed anyway; a failing step does not stop the close", async () => {
+  const { leaveBounded } = await import("../src/events/leave.ts");
+  const order: string[] = [];
+  const logs: string[] = [];
+  const t0 = Date.now();
+  await leaveBounded(() => new Promise<void>(() => {}), async () => void order.push("closed"), 100, (s) => logs.push(s));
+  assert.deepEqual(order, ["closed"]);
+  assert.ok(Date.now() - t0 < 2000, "it did not wait for the stuck step");
+  assert.match(logs.join(), /journal is closed now/);
+  order.length = 0;
+  await leaveBounded(async () => void order.push("steps"), async () => void order.push("closed"), 5000);
+  assert.deepEqual(order, ["steps", "closed"], "fast steps run first");
+  order.length = 0;
+  await leaveBounded(async () => { throw new Error("boom"); }, async () => void order.push("closed"), 5000, (s) => logs.push(s));
+  assert.deepEqual(order, ["closed"]);
+  assert.match(logs.join(), /boom/);
 });

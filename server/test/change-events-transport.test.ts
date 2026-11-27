@@ -146,6 +146,49 @@ test("socket: a stale socket file from an earlier process is replaced; close rem
   assert.equal(fs.existsSync(sock), false);
 });
 
+test("socket: in a hand-over the old process's close leaves the new process's socket at the shared path", async () => {
+  const b = newBus();
+  const sock = path.join(shortDir(), "e.sock");
+  const oldOne = await startEventSocket(b, { path: sock });
+  const newOne = await startEventSocket(b, { path: sock }); // the new pod binds the same path while the old one still runs
+  const st = fs.lstatSync(sock);
+  await oldOne.close();
+  assert.ok(fs.existsSync(sock), "the new socket is still there");
+  assert.equal(fs.lstatSync(sock).ino, st.ino, "and it is the new one");
+  // a client reaches the new process
+  await new Promise<void>((res, rej) => {
+    const c = net.connect(sock, () => {
+      c.destroy();
+      res();
+    });
+    c.on("error", rej);
+  });
+  await newOne.close();
+  assert.equal(fs.existsSync(sock), false, "the last one out removes its own socket");
+  assert.deepEqual(fs.readdirSync(path.dirname(sock)), [], "no per-process name is left");
+});
+
+test("socket: the folder is changed through its descriptor, not through its path (no swap for a link between the check and the change)", async () => {
+  const b = newBus();
+  const d = path.join(shortDir(), "run");
+  fs.mkdirSync(d);
+  const seen: string[] = [];
+  const realChmod = fs.chmodSync;
+  const realChown = fs.chownSync;
+  (fs as { chmodSync: unknown }).chmodSync = (p: fs.PathLike, ...r: unknown[]) => (seen.push(String(p)), (realChmod as (...a: unknown[]) => void)(p, ...r));
+  (fs as { chownSync: unknown }).chownSync = (p: fs.PathLike, ...r: unknown[]) => (seen.push(String(p)), (realChown as (...a: unknown[]) => void)(p, ...r));
+  let s;
+  try {
+    s = await startEventSocket(b, { path: path.join(d, "e.sock"), group: String(process.getgid?.() ?? 0) });
+  } finally {
+    (fs as { chmodSync: unknown }).chmodSync = realChmod;
+    (fs as { chownSync: unknown }).chownSync = realChown;
+  }
+  assert.equal(fs.statSync(d).mode & 0o777, 0o750);
+  assert.ok(!seen.includes(d), `the folder path was not used for chmod or chown: ${seen.join(",")}`);
+  await s.close();
+});
+
 // ---- agent HTTP ----
 
 test("agent GET /api/v1/changes: NDJSON, filters from the query, since, 400 for a bad filter or cursor; the subscriber goes with the client", async () => {
@@ -620,4 +663,17 @@ test("socket: it does not touch a folder it does not own, and does not remove a 
   assert.ok(fs.lstatSync(old).isSocket());
   await s.close();
   assert.equal(fs.existsSync(old), false);
+});
+
+test("agent: close() after leave() does not write the journal's meta.json again (the next process holds the lease by then)", async () => {
+  const idx = dir();
+  const { app } = await agentApp("lv", { FILEDECK_INDEX_DIR: idx });
+  const a = app as unknown as { leave(): Promise<void>; close(): Promise<void>; events: EventBus };
+  await a.events.whenServing().catch(() => false);
+  await a.leave();
+  const meta = path.join(idx, "changes-lv", "meta.json");
+  assert.ok(fs.existsSync(meta), "leave() closed the journal and wrote its mark");
+  fs.writeFileSync(meta, JSON.stringify({ epoch: "newer", node: "lv", clean: false, covered: 1 })); // the next pod's meta
+  await a.close();
+  assert.equal(JSON.parse(fs.readFileSync(meta, "utf8")).epoch, "newer", "the old process did not overwrite it");
 });
