@@ -6,6 +6,25 @@
 #ifndef FANWATCH_SRC
 #define FANWATCH_SRC "../native/filedeck-fanwatch.c"
 #endif
+/*
+ * open_by_handle_at is replaced here by a fake that no kernel or capability is needed for: a handle that starts "DIRHGONE" is a deleted folder
+ * (ESTALE), one that starts "DIRHOUTS" is a folder that no given mount shows (the descriptor is the root folder, whose path is outside every mount
+ * of these scenarios), and any other handle is not openable (EBADF: an error that may pass). The calls are counted in `fake_opens`.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+static unsigned long long fake_opens;
+static int fake_open_by_handle_at(int mfd, struct file_handle *fh, int flags) {
+	(void)mfd;
+	fake_opens++;
+	if (fh->handle_bytes == 8 && !memcmp(fh->f_handle, "DIRHGONE", 8)) return errno = ESTALE, -1;
+	if (fh->handle_bytes == 8 && !memcmp(fh->f_handle, "DIRHOUTS", 8)) return open("/", flags | O_PATH);
+	return errno = EBADF, -1;
+}
+#define open_by_handle_at fake_open_by_handle_at
 #define main fanwatch_main
 #include FANWATCH_SRC
 #undef main
@@ -16,11 +35,12 @@ struct R {
 	unsigned handle_bytes; /* what the handle header claims */
 	unsigned handle_len; /* how many handle bytes the record really holds */
 	int no_nul; /* the name has no terminating NUL inside the record */
-	int alt; /* the handle of the second folder (prime2) */
+	int alt; /* which handle: an index into HANDLES (0 = the primed folder) */
 };
 
 static const unsigned char DIRH[8] = "DIRHANDL";
 static const unsigned char DIRH2[8] = "DIRHAND2";
+static const unsigned char *const HANDLES[] = {DIRH, DIRH2, (const unsigned char *)"DIRHGONE", (const unsigned char *)"DIRHOUTS", (const unsigned char *)"DIRHNEWH"};
 static int fsid[2] = {1, 2};
 
 static void prime_h(const char *path, const unsigned char *handle) {
@@ -67,7 +87,7 @@ static void feed(uint64_t mask, int nr, const struct R *r) {
 		struct file_handle *fh = (void *)f->handle;
 		fh->handle_bytes = r[i].handle_bytes;
 		fh->handle_type = 1;
-		memcpy(fh->f_handle, r[i].alt ? DIRH2 : DIRH, r[i].handle_len < 8 ? r[i].handle_len : 8);
+		memcpy(fh->f_handle, HANDLES[r[i].alt], r[i].handle_len < 8 ? r[i].handle_len : 8);
 		if (r[i].name) memcpy((char *)fh->f_handle + r[i].handle_len, r[i].name, strlen(r[i].name) + (r[i].no_nul ? 0 : 1));
 		p += rl[i];
 	}
@@ -105,6 +125,16 @@ int main(int argc, char **argv) {
 		if (!strcmp(sc, "binds-top")) { /* a mount at "/" that shows a folder, and one that shows the whole filesystem somewhere else */
 			addm("/", "/x");
 			addm("/all", "/");
+		}
+	} else if (!strncmp(sc, "neg-", 4)) {
+		if (!strcmp(sc, "neg-gone")) { /* the whole filesystem and two binds */
+			addm("/srv/p", "/");
+			addm("/h/a", "/x/a");
+			addm("/h/b", "/x/b");
+		} else { /* three binds, none of the whole filesystem */
+			addm("/m/a", "/x/a");
+			addm("/m/b", "/x/b");
+			addm("/m/c", "/x/c");
 		}
 	} else addm("/", "/");
 	prime(dir);
@@ -147,6 +177,26 @@ int main(int argc, char **argv) {
 		struct R r[2] = {{FAN_EVENT_INFO_TYPE_OLD_DFID_NAME, "f", 8, 8, 0, 0}, {FAN_EVENT_INFO_TYPE_NEW_DFID_NAME, "g", 8, 8, 0, 1}};
 		feed(FAN_RENAME, 2, r);
 		stats_emit();
+	} else if (!strncmp(sc, "neg-", 4)) {
+		/* two events in one folder whose handle is: gone (neg-gone), outside every mount (neg-outside, then an overflow and a third event), or not openable (neg-transient) */
+		int alt = !strcmp(sc, "neg-gone") ? 2 : !strcmp(sc, "neg-outside") ? 3 : 4;
+		struct R r = {FAN_EVENT_INFO_TYPE_DFID_NAME, "f", 8, 8, 0, alt};
+		feed(FAN_CREATE, 1, &r);
+		feed(FAN_CREATE, 1, &r);
+		if (!strcmp(sc, "neg-outside")) {
+			struct fanotify_event_metadata ov = {0};
+			ov.event_len = sizeof ov;
+			ov.vers = FANOTIFY_METADATA_VERSION;
+			ov.metadata_len = sizeof ov;
+			ov.mask = FAN_Q_OVERFLOW;
+			ov.fd = FAN_NOFD;
+			handle(&ov); /* the cache is dropped: the folder is asked about again */
+			feed(FAN_CREATE, 1, &r);
+		}
+		stats_emit();
+		out_flush();
+		printf("calls=%llu\n", fake_opens);
+		return 0;
 	} else return 2;
 	out_flush();
 	return 0;

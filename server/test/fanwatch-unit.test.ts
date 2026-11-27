@@ -111,3 +111,33 @@ test("helper mounts: a move is R under a mount that shows both places, D under o
   assert.deepEqual(move("binds-move-only", "/elsewhere", "/elsewhere2"), []);
   assert.equal(Number(/unresolved=(\d+)/.exec(run("binds-move-only", "/elsewhere", "/elsewhere2").find((l) => l.startsWith("#stats")) ?? "")?.[1]), 1);
 });
+
+/** The counters of a "neg-" scenario: the lines the helper wrote, how often it asked the kernel for a folder (`opens`, the helper's own counter), and `unresolved`. */
+function neg(scenario: string) {
+  const lines = run(scenario);
+  const stats = lines.find((l) => l.startsWith("#stats")) ?? "";
+  const n = (k: string) => Number(new RegExp(`${k}=(\\d+)`).exec(stats)?.[1] ?? NaN);
+  return { lines: lines.filter((l) => !l.startsWith("#stats") && !l.startsWith("calls=")), opens: n("opens"), unresolved: n("unresolved"), calls: Number(lines.find((l) => l.startsWith("calls="))?.slice(6)) };
+}
+
+test("helper mounts: a deleted folder ends the search at the first mount and is remembered: two events cost one system call, not one per mount and event", { skip }, () => {
+  const r = neg("neg-gone"); // three mounts of the filesystem, a folder that is gone, two events in it
+  assert.deepEqual(r.lines, []);
+  assert.equal(r.unresolved, 2);
+  assert.equal(r.opens, 1, "the other two mounts are not asked, and the second event is answered from the cache");
+  assert.equal(r.calls, 1);
+});
+
+test("helper mounts: a folder that no mount shows is asked about once per mount, then remembered until a folder is renamed or events are lost", { skip }, () => {
+  const r = neg("neg-outside"); // three binds, a folder outside all of them: two events, an overflow (the cache is dropped), a third event
+  assert.deepEqual(r.lines, ["!overflow"]);
+  assert.equal(r.unresolved, 3);
+  assert.equal(r.opens, 6, "3 mounts for the first event, none for the second, 3 again after the cache was dropped");
+  assert.equal(r.calls, 6);
+});
+
+test("helper mounts: an error that may pass (a handle that cannot be opened now) is not remembered", { skip }, () => {
+  const r = neg("neg-transient"); // three mounts, two events
+  assert.equal(r.unresolved, 2);
+  assert.equal(r.opens, 6, "every event asks every mount again");
+});

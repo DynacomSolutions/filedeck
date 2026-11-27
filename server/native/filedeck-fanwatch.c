@@ -299,9 +299,11 @@ static void mi_load(void) {
 		/* id parent major:minor root mountpoint options ... (root and mountpoint hold no space: a space is written \040) */
 		if (root && mp && sscanf(line, "%d %*d %*d:%*d %s %s%n", &id, root, mp, &off) >= 3) {
 			if (nmis == capmis) {
-				capmis = capmis ? capmis * 2 : 256;
-				mis = realloc(mis, capmis * sizeof *mis);
-				if (!mis) { nmis = 0; free(root); free(mp); break; }
+				size_t ncap = capmis ? capmis * 2 : 256;
+				struct mi *grown = realloc(mis, ncap * sizeof *mis);
+				if (!grown) { free(root); free(mp); break; } /* what was read so far stays in `mis` and is freed by mi_free */
+				mis = grown;
+				capmis = ncap;
 			}
 			mi_unescape(root);
 			mi_unescape(mp);
@@ -394,7 +396,12 @@ static void cache_init(size_t entries) {
 
 static struct cent *cache_set(uint64_t h) { return cache + (size_t)(h % cache_sets) * WAYS; }
 
-static const char *cache_get(const unsigned char *key, size_t klen) {
+/*
+ * An entry whose path is "" says "no mount shows this folder": it is gone (its handle never names another folder), or every given mount was
+ * asked and none shows it. Without it each later event in that folder would ask every mount again (a tree removed with 40 binds: about
+ * 120 system calls per event). It is dropped with the rest of the cache when a folder is renamed, and a change of the mounts restarts the helper.
+ */
+static const char *cache_lookup(const unsigned char *key, size_t klen) {
 	if (!cache_sets) return NULL;
 	uint64_t h = hash64(key, klen, 14695981039346656037ULL);
 	struct cent *s = cache_set(h);
@@ -404,6 +411,12 @@ static const char *cache_get(const unsigned char *key, size_t klen) {
 			return s[i].path;
 		}
 	return NULL;
+}
+
+/* the path of a known folder, NULL when it is not in the cache or is cached as "no mount shows it" */
+static const char *cache_get(const unsigned char *key, size_t klen) {
+	const char *p = cache_lookup(key, klen);
+	return p && *p ? p : NULL;
 }
 
 static void cache_put(const unsigned char *key, size_t klen, const char *path) {
@@ -438,40 +451,48 @@ static void cache_clear(void) {
 	}
 }
 
+#define SHOWN 0 /* resolve_open: the place was found */
+#define NOT_HERE 1 /* this mount does not show the folder (a final answer for this mount) */
+#define TRY_AGAIN (-1) /* an error that may pass (no memory, no descriptor, a race): nothing is cached */
+#define GONE (-2) /* the folder is deleted: no mount shows it, and none ever will (its handle never names another folder) */
+
 /*
- * Place in the filesystem ("rel": "/" or a path from the filesystem's top) of the directory a file handle names, found through one mount,
- * or -1 (gone, not reachable, or not inside that mount's root).
+ * Place in the filesystem ("rel": "/" or a path from the filesystem's top) of the directory a file handle names, found through one mount.
+ * Returns SHOWN, NOT_HERE, GONE or TRY_AGAIN. A deleted folder (ESTALE, or a path that ends in " (deleted)") ends the search at once:
+ * asking the other mounts gives the same answer.
  */
 static int resolve_open(const struct mnt *m, struct file_handle *fh, char *dst, size_t cap) {
 	n_opens++;
 	int fd = open_by_handle_at(m->fd, fh, O_PATH | O_CLOEXEC);
-	if (fd < 0) return -1;
+	if (fd < 0) return errno == ESTALE || errno == ENOENT ? GONE : TRY_AGAIN;
 	char link[64], p[PATH_MAX];
 	snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
 	ssize_t n = readlink(link, p, sizeof p - 1);
-	int ok = n > 0;
-	if (ok) {
+	int ret = SHOWN;
+	if (n <= 0) ret = TRY_AGAIN;
+	else {
 		p[n] = 0;
-		if (n > 10 && !strcmp(p + n - 10, " (deleted)")) ok = 0;
+		if (n > 10 && !strcmp(p + n - 10, " (deleted)")) ret = GONE;
 	}
 	/* the path must lie under the mount point of this mount (a folder outside the mount's root has no path through it) */
 	const char *sub = p;
-	if (ok && m->tlen > 1) {
-		ok = !strncmp(p, m->target, m->tlen) && (p[m->tlen] == 0 || p[m->tlen] == '/');
+	if (ret == SHOWN && m->tlen > 1) {
+		if (strncmp(p, m->target, m->tlen) || (p[m->tlen] != 0 && p[m->tlen] != '/')) ret = NOT_HERE;
 		sub = p + m->tlen;
-	} else if (ok && !p[1]) sub = p + 1; /* a mount at "/", and its top */
-	if (ok && m->rlen > 1) { /* the path must be this very folder */
+	} else if (ret == SHOWN && !p[1]) sub = p + 1; /* a mount at "/", and its top */
+	if (ret == SHOWN && m->rlen > 1) { /* the path must be this very folder */
 		struct stat a, b;
-		ok = fstat(fd, &a) == 0 && stat(p, &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+		if (fstat(fd, &a) != 0 || stat(p, &b) != 0) ret = TRY_AGAIN;
+		else if (a.st_dev != b.st_dev || a.st_ino != b.st_ino) ret = NOT_HERE;
 	}
 	close(fd);
-	if (!ok) return -1;
+	if (ret != SHOWN) return ret;
 	size_t k = strlen(sub), r = m->rlen == 1 ? 0 : m->rlen;
-	if (r + k + 2 > cap) return -1;
+	if (r + k + 2 > cap) return TRY_AGAIN;
 	memcpy(dst, m->root, r);
 	memcpy(dst + r, sub, k + 1);
 	if (!dst[0]) { dst[0] = '/'; dst[1] = 0; }
-	return 0;
+	return SHOWN;
 }
 
 static int resolve(const int *fsid, struct file_handle *fh, char *dst, size_t cap) {
@@ -480,20 +501,28 @@ static int resolve(const int *fsid, struct file_handle *fh, char *dst, size_t ca
 	if (fi < 0) return -1;
 	unsigned char key[KEYMAX];
 	size_t klen = key_make(key, fsid, fh);
-	const char *hit = cache_get(key, klen);
+	const char *hit = cache_lookup(key, klen);
 	if (hit) {
 		n_hits++;
 		size_t n = strlen(hit);
-		if (n >= cap) return -1;
+		if (!n || n >= cap) return -1; /* "" is "no mount shows it" */
 		memcpy(dst, hit, n + 1);
 		return 0;
 	}
 	n_misses++;
-	int found = 0;
-	for (int i = 0; i < fss[fi].nm && !found; i++) found = resolve_open(&fss[fi].m[i], fh, dst, cap) == 0;
-	if (!found) return -1;
-	cache_put(key, klen, dst);
-	return 0;
+	int shown = 0, gone = 0, again = 0;
+	for (int i = 0; i < fss[fi].nm && !shown && !gone; i++) {
+		int r = resolve_open(&fss[fi].m[i], fh, dst, cap);
+		if (r == SHOWN) shown = 1;
+		else if (r == GONE) gone = 1;
+		else if (r == TRY_AGAIN) again = 1;
+	}
+	if (shown) {
+		cache_put(key, klen, dst);
+		return 0;
+	}
+	if (gone || !again) cache_put(key, klen, ""); /* final: gone, or every mount said "not here" */
+	return -1;
 }
 
 /* ---- modify throttle: an entry modified again within THROTTLE_MS is reported once now and once when the second ends ---- */
@@ -774,10 +803,9 @@ int main(int argc, char **argv) {
 		int fsid[2];
 		memcpy(fsid, &sf.f_fsid, sizeof fsid);
 		int mid = -1;
-		struct file_handle *probe = malloc(sizeof *probe + FHMAX);
-		probe->handle_bytes = FHMAX;
-		if (name_to_handle_at(mfd, "", probe, &mid, AT_EMPTY_PATH) != 0 && errno != EOVERFLOW) mid = -1;
-		free(probe);
+		union { struct file_handle fh; char b[sizeof(struct file_handle) + FHMAX]; } mprobe; /* (on the stack: nothing to allocate or free) */
+		mprobe.fh.handle_bytes = FHMAX;
+		if (name_to_handle_at(mfd, "", &mprobe.fh, &mid, AT_EMPTY_PATH) != 0 && errno != EOVERFLOW) mid = -1;
 		int fi = find_fs(fsid);
 		if (fi < 0 && nfs < MAXFS) {
 			fi = nfs++;
@@ -793,15 +821,14 @@ int main(int argc, char **argv) {
 		if (!f->nm) continue;
 		qsort(f->m, (size_t)f->nm, sizeof *f->m, mnt_cmp);
 		/* is a handle of this filesystem openable? (CAP_DAC_READ_SEARCH) */
-		struct file_handle *probe = malloc(sizeof *probe + FHMAX);
+		union { struct file_handle fh; char b[sizeof(struct file_handle) + FHMAX]; } probe;
 		int mount_id;
-		probe->handle_bytes = FHMAX;
-		if (name_to_handle_at(f->m[0].fd, "", probe, &mount_id, AT_EMPTY_PATH) == 0) {
-			int pfd = open_by_handle_at(f->m[0].fd, probe, O_PATH | O_CLOEXEC);
+		probe.fh.handle_bytes = FHMAX;
+		if (name_to_handle_at(f->m[0].fd, "", &probe.fh, &mount_id, AT_EMPTY_PATH) == 0) {
+			int pfd = open_by_handle_at(f->m[0].fd, &probe.fh, O_PATH | O_CLOEXEC);
 			if (pfd >= 0) close(pfd);
 			else if (errno == EPERM) denied = 1;
 		}
-		free(probe);
 		/* the filesystem is marked once, through the first mount that accepts it (the mount of the whole filesystem when there is one) */
 		int marked = 0;
 		for (int j = 0; j < f->nm && !marked; j++) {
