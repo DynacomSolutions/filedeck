@@ -795,13 +795,26 @@ int main(int argc, char **argv) {
 		struct statfs sf;
 		int mfd = open(argv[i], O_PATH | O_CLOEXEC);
 		struct stat path_stat;
+		int path_errno = 0;
 		if (mfd >= 0 && (fstat(mfd, &path_stat) != 0 || (!S_ISREG(path_stat.st_mode) && !S_ISDIR(path_stat.st_mode)))) {
 			fprintf(stderr, "filedeck-fanwatch: skipping special mount path %s\n", argv[i]);
 			close(mfd);
 			mfd = -1;
+		} else if (mfd >= 0) {
+			/* O_PATH never blocks, but open_by_handle_at needs a usable mount fd. */
+			int flags = S_ISDIR(path_stat.st_mode) ? O_RDONLY | O_DIRECTORY : O_RDONLY;
+			int usable = open(argv[i], flags | O_CLOEXEC);
+			if (usable < 0) {
+				path_errno = errno;
+				close(mfd);
+				mfd = -1;
+			} else {
+				close(mfd);
+				mfd = usable;
+			}
 		}
 		if (mfd < 0 || fstatfs(mfd, &sf) < 0) {
-			fprintf(stderr, "filedeck-fanwatch: skipping %s: %s\n", argv[i], strerror(errno));
+			fprintf(stderr, "filedeck-fanwatch: skipping %s: %s\n", argv[i], strerror(path_errno ? path_errno : errno));
 			emit('c', 0, argv[i], NULL);
 			if (mfd >= 0) close(mfd);
 			continue;
