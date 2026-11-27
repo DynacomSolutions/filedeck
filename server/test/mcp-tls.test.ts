@@ -19,6 +19,10 @@ const fingerprint = (port: number) =>
       resolve(f);
     });
     s.on("error", reject);
+    s.setTimeout(3000, () => {
+      s.destroy();
+      reject(new Error("no TLS answer in 3 seconds"));
+    });
   });
 
 test("TLS: the listener serves HTTPS, tools work over it, and plain HTTP does not", async (t) => {
@@ -57,8 +61,11 @@ test("without TLS the listener is refused unless plain HTTP is allowed by the te
   assert.equal(await createMcp(loadConfig(env), stub, { log: (m) => lines.push(m) }), undefined);
   assert.match(lines[0]!, /never serves plain HTTP/);
   const allowed = await createMcp(loadConfig({ ...env, FILEDECK_MCP_ALLOW_PLAINTEXT: "1" }), stub, { log: () => undefined });
-  assert.ok(allowed);
-  await allowed.stop();
+  try {
+    assert.ok(allowed);
+  } finally {
+    await allowed?.stop(); // also when the check fails: its grants timer and its server must not keep the test file open
+  }
 });
 
 test("TLS: a renewed certificate is used by new connections with no restart", async (t) => {
@@ -82,4 +89,9 @@ test("TLS: a renewed certificate is used by new connections with no restart", as
   fs.writeFileSync(b.tls!.cert, "not a certificate");
   await new Promise((r) => setTimeout(r, 400));
   assert.equal(await fingerprint(port), after);
+});
+
+test("a boot that fails leaves no server or timer behind (a failing test never hangs the file)", async () => {
+  await assert.rejects(boot({ tls: true, env: { FILEDECK_MCP_TLS_CERT: "/nonexistent/tls.crt" } }), /createMcp returned no server/);
+  // if a handle were left, this file would not end: the test runner waits for it (the file has a 600 s limit in `npm test`)
 });

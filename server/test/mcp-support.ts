@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -92,11 +92,16 @@ export interface GrantDef {
 export const ALL_TOKEN = "mcp-token-" + "z".repeat(30);
 export const everything = (over: Partial<GrantDef> = {}): GrantDef => ({ id: "all", token: ALL_TOKEN, resources: ["filedeck://"], tools: ["*"], ...over });
 
-/** A self-signed certificate for 127.0.0.1, made with openssl in `dir`. */
-export function makeCert(dir: string, name = "tls"): { cert: string; key: string } {
+/**
+ * A copy of a checked-in test certificate in `dir` (`tls` or `renewed`). They are self-signed, valid for 100 years, for localhost and 127.0.0.1.
+ * The tests need no openssl program: `test/fixtures/mcp-tls/make.sh` made them. A copy, because a test may overwrite the files.
+ */
+export function makeCert(dir: string, name: "tls" | "renewed" = "tls"): { cert: string; key: string } {
+  const from = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "mcp-tls");
   const cert = path.join(dir, `${name}.crt`);
   const key = path.join(dir, `${name}.key`);
-  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "2", "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1"], { stdio: "ignore" });
+  fs.copyFileSync(path.join(from, `${name}.crt`), cert);
+  fs.copyFileSync(path.join(from, `${name}.key`), key);
   return { cert, key };
 }
 
@@ -125,11 +130,30 @@ export interface Conn {
 }
 
 export async function boot(o: { agentUrl?: string; auth?: boolean; account?: string; admin?: boolean; grants?: GrantDef[]; tls?: boolean; env?: Record<string, string>; mcp?: McpOptions } = {}): Promise<Boot> {
+  // What is made so far is closed again when a later step fails: a failed boot must leave no server, timer or folder, or the test file never ends.
+  const cleanups: (() => Promise<void> | void)[] = [];
+  const unwind = async () => {
+    for (const f of cleanups.reverse()) await Promise.resolve(f()).catch(() => undefined);
+  };
+  try {
+    return await bootSteps(o, cleanups);
+  } catch (e) {
+    await unwind();
+    throw e;
+  }
+}
+
+async function bootSteps(o: Parameters<typeof boot>[0] & {}, cleanups: (() => Promise<void> | void)[]): Promise<Boot> {
   const agent = fakeAgent();
   const agentServer = o.agentUrl ? undefined : await new Promise<ReturnType<typeof serve>>((res) => {
     const s = serve({ fetch: agent.app.fetch, port: 0, hostname: "127.0.0.1" }, () => res(s));
   });
+  cleanups.push(() => {
+    agentServer?.close();
+    (agentServer as unknown as { closeAllConnections?(): void } | undefined)?.closeAllConnections?.();
+  });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-mcp-"));
+  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
   const grantsFile = path.join(dir, "grants.json");
   const setGrants = (defs: GrantDef[]) => {
     const list = defs.map((d) => {
@@ -156,11 +180,18 @@ export async function boot(o: { agentUrl?: string; auth?: boolean; account?: str
   } as never);
   const cfg = { ...base, mcpPollMs: 100 };
   const hub = createHub(cfg);
+  cleanups.push(() => hub.close());
   if (o.auth) {
     const names = new Set([o.account, ...defs.map((d) => d.account)].filter((n): n is string => !!n && n !== "root"));
     for (const name of names) hub.auth!.accounts.create({ name, password: "pw-long-enough-1", admin: o.admin ?? true, nodes: { n: { runAs: "svc", grants: [{ path: "/", write: false }] } } });
   }
-  const mcp = (await createMcp(cfg, hub as never, { log: () => undefined, keepAliveMs: 0, grantsPollMs: 50, tlsReloadMs: 100, ...o.mcp }))!;
+  const mcp = await createMcp(cfg, hub as never, { log: () => undefined, keepAliveMs: 0, grantsPollMs: 50, tlsReloadMs: 100, ...o.mcp });
+  if (!mcp) throw new Error("boot: createMcp returned no server");
+  cleanups.push(async () => {
+    await mcp.stop();
+    mcp.server.closeAllConnections();
+    if (mcp.server.listening) await new Promise<void>((r) => mcp.server.close(() => r()));
+  });
   await new Promise<void>((r) => mcp.server.listen(0, "127.0.0.1", r));
   const url = `${tls ? "https" : "http"}://127.0.0.1:${(mcp.server.address() as AddressInfo).port}`;
   const conns: Conn[] = [];
@@ -176,23 +207,36 @@ export async function boot(o: { agentUrl?: string; auth?: boolean; account?: str
         conn.listChanged.metas.push((n.params as { _meta?: unknown } | undefined)?._meta);
         conn.listChanged.n++;
       });
-      await client.connect(transport);
+      // a client is closed by close() even when its connect fails
       conns.push(conn);
+      await client.connect(transport);
       return conn;
     },
     async close() {
       for (const c of conns) await c.close().catch(() => undefined);
-      await mcp.stop();
-      mcp.server.closeAllConnections();
-      await new Promise<void>((r) => mcp.server.close(() => r()));
-      await hub.close();
-      agentServer?.close();
-      (agentServer as unknown as { closeAllConnections?(): void } | undefined)?.closeAllConnections?.();
-      fs.rmSync(dir, { recursive: true, force: true });
+      conns.length = 0;
+      await unwindAll();
     },
+  };
+  const unwindAll = async () => {
+    for (const f of cleanups.splice(0).reverse()) await Promise.resolve(f()).catch(() => undefined);
   };
   return b;
 }
 
 export const job = (id: string, kind: string, state: string, extra: Partial<FakeJob> = {}): FakeJob => ({ id, kind, title: `${kind} ${id}`, state, origin: "cli", progress: { entries: 1 }, createdAt: Date.now(), ...extra });
 export const bodyOf = (r: { contents: unknown[] }) => JSON.parse(String((r.contents[0] as { text?: unknown }).text)) as Record<string, any>;
+
+/** Two fake agents that a test serves itself, for hubs with more than one node. */
+export async function twoAgents() {
+  const make = async () => {
+    const agent = fakeAgent();
+    const server = await new Promise<ReturnType<typeof serve>>((res) => {
+      const s = serve({ fetch: agent.app.fetch, port: 0, hostname: "127.0.0.1" }, () => res(s));
+    });
+    return { agent, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => { server.close(); (server as unknown as { closeAllConnections?(): void }).closeAllConnections?.(); } };
+  };
+  const n = await make();
+  const m = await make();
+  return { n, m, nodes: `n=${n.url},m=${m.url}`, close: () => { n.close(); m.close(); } };
+}
