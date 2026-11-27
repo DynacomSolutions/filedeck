@@ -13,8 +13,10 @@ const data = path.join(work, "data");
 fs.mkdirSync(data, { recursive: true });
 fs.mkdirSync(state, { recursive: true });
 const mounts = path.join(state, "mounts");
-fs.writeFileSync(mounts, `/dev/x ${work} ext4 rw 0 0\n`);
-const cfg = loadConfig({ FILEDECK_ROOT: "/", FILEDECK_NODE: "e2e", FILEDECK_FANWATCH: helper, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_INDEX_DIR: state, FILEDECK_EVENTS_LABELS: `${work}/data/{team}` } as never);
+// the served root is the work folder and it is the filesystem's top: agent paths are relative to it, wherever the folder is (a temporary folder below
+// a runtime folder such as /run/user would be left out of the mount list)
+fs.writeFileSync(mounts, "/dev/x / ext4 rw 0 0\n");
+const cfg = loadConfig({ FILEDECK_ROOT: work, FILEDECK_NODE: "e2e", FILEDECK_FANWATCH: helper, FILEDECK_PROC_MOUNTS: mounts, FILEDECK_INDEX_DIR: state, FILEDECK_EVENTS_LABELS: "/data/{team}" } as never);
 const app = createAgent(cfg) as unknown as { fetch: never; startWatcher(): void; close(): Promise<void>; events: { ready: boolean; whenServing(): Promise<boolean> } };
 const server = await new Promise<ReturnType<typeof serve>>((res) => {
   const s: ReturnType<typeof serve> = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => res(s));
@@ -27,7 +29,7 @@ await app.events.whenServing();
 
 const seen: Record<string, unknown>[] = [];
 const ctl = new AbortController();
-const res = await fetch(`${base}/api/v1/changes?prefix=${encodeURIComponent(data)}&kind=create&kind=move&kind=delete&kind=close_write`, { signal: ctl.signal });
+const res = await fetch(`${base}/api/v1/changes?prefix=${encodeURIComponent("/data")}&kind=create&kind=move&kind=delete&kind=close_write`, { signal: ctl.signal });
 const reader = res.body!.getReader();
 const pump = (async () => {
   let buf = "";
@@ -53,7 +55,7 @@ const first = seen.find((e) => e.kind === "create" && String(e.path).endsWith("/
 // a second reader that continues from the cursor of the first event gets the rest from the journal
 let again: Record<string, unknown>[] = [];
 if (first) {
-  const r2 = await fetch(`${base}/api/v1/changes?prefix=${encodeURIComponent(data)}&since=${encodeURIComponent(String(first.cursor))}`);
+  const r2 = await fetch(`${base}/api/v1/changes?prefix=${encodeURIComponent("/data")}&since=${encodeURIComponent(String(first.cursor))}`);
   const rd = r2.body!.getReader();
   const t0 = Date.now();
   let buf = "";

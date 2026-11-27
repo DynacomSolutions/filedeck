@@ -47,7 +47,7 @@ test("agent with the real helper: changes reach a reader of /api/v1/changes with
     metrics: Record<string, number>;
     journalFiles: string[];
   };
-  const tree = path.join(w, "tree", "data");
+  const tree = "/data";
   const has = (kind: string, p: string, extra: Record<string, unknown> = {}) => out.seen.some((e) => e.kind === kind && e.path === tree + p && Object.entries(extra).every(([k, v]) => JSON.stringify((e as never)[k]) === JSON.stringify(v)));
   assert.ok(has("create", "/red", { dir: true, labels: { team: "red" } }), JSON.stringify(out.seen));
   assert.ok(has("create", "/red/a.txt", { dir: false, labels: { team: "red" } }));
@@ -56,6 +56,7 @@ test("agent with the real helper: changes reach a reader of /api/v1/changes with
   assert.ok(has("delete", "/red/b.txt"));
   assert.ok(!out.seen.some((e) => e.kind === "modify"), "the kind filter held");
   assert.ok(!out.seen.some((e) => String(e.path).includes("outside.txt")), "the prefix filter held");
+  assert.ok(!out.seen.some((e) => String(e.path).includes("..")), "paths are the agent's own");
   assert.ok(!out.seen.some((e) => String(e.path).includes("changes-e2e")), "the journal's own writes are not events");
   // the second reader started after the create of a.txt and got what followed it from the journal
   assert.ok(out.again.some((e) => e.kind === "move"), JSON.stringify(out.again));
