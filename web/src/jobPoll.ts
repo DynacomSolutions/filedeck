@@ -1,6 +1,8 @@
 /** Polling a job across an agent or hub restart: what a failed poll means and how long to wait before the next try. */
 export type PollFail = "unreachable" | "gone" | "other";
 
+export const JOBS_IDLE_POLL_MS = 10_000;
+
 export const GIVE_UP_MS = 5 * 60_000;
 export const GONE_TEXT = "The job is gone (the agent restarted). Start it again.";
 export const UNREACHABLE_TEXT = "agent unreachable";

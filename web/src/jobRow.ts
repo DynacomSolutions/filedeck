@@ -3,6 +3,12 @@ import { fmtSize } from "./api";
 export type Tone = "neutral" | "accent" | "amber" | "green" | "red" | "muted";
 type Prog = { bytes: number; totalBytes: number; entries: number; totalEntries: number; current: string };
 
+export function progressPercent(p: Prog): number | undefined {
+  if (p.totalBytes > 0) return Math.min(100, Math.round((p.bytes / p.totalBytes) * 100));
+  if (p.totalEntries > 0) return Math.min(100, Math.round((p.entries / p.totalEntries) * 100));
+  return undefined;
+}
+
 const PILLS: Record<string, { label: string; tone: Tone }> = {
   queued: { label: "queued", tone: "neutral" },
   running: { label: "running", tone: "accent" },
