@@ -1,0 +1,178 @@
+{{- if .Values.managedNodes.enabled }}
+{{- $staticNames := list }}
+{{- range .Values.nodes }}{{- $staticNames = append $staticNames .name }}{{- end }}
+{{- $staticTargets := list }}
+{{- range $i, $n := .Values.nodes }}
+{{- $target := "" }}
+{{- if or (eq (default "kubernetes" $n.mode) "native") (eq $n.mode "native-agent") }}{{- $target = required (printf "nodes[%d].url is required for native %s" $i $n.name) $n.url }}{{- else }}{{- $target = printf "http://%s.%s:%v" (include "filedeck.agentName" $n) $.Release.Namespace (int $.Values.port) }}{{- end }}
+{{- $staticTargets = append $staticTargets (printf "%s=%s" $n.name $target) }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "filedeck.name" . }}-managed-reconciler
+  labels: {{- include "filedeck.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "filedeck.name" . }}-managed-reconciler
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "filedeck.name" . }}-managed-reconciler
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: [services, pods, configmaps]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "filedeck.name" . }}-managed-reconciler
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "filedeck.name" . }}-managed-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "filedeck.name" . }}-managed-reconciler
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "filedeck.name" . }}-managed-nodes
+  labels: {{- include "filedeck.labels" . | nindent 4 }}
+data:
+  NODES: {{ join "," $staticTargets | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "filedeck.name" . }}-managed-reconciler
+  labels: {{- include "filedeck.labels" . | nindent 4 }}
+data:
+  reconcile.sh: |
+    #!/bin/sh
+    set -eu
+    namespace="$NAMESPACE"
+    label="$NODE_LABEL=$NODE_VALUE"
+    static_names="$STATIC_NAMES"
+    targets="$STATIC_TARGETS"
+    owned_services=""
+    while :; do
+      next="$STATIC_TARGETS"
+      owned_services=""
+      nodes="$(kubectl get nodes -l "$label" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)"
+      for node in $nodes; do
+        case ",$static_names," in *",$node,"*) continue;; esac
+        node_id="$(printf '%s' "$node" | sha256sum | cut -c1-12)"
+        service="filedeck-managed-agent-$node_id"
+        pod_line="$(kubectl -n "$namespace" get pods -l dynacom.dev/filedeck-managed-agent=true \
+          --field-selector "spec.nodeName=$node,status.phase=Running" \
+          -o jsonpath='{range .items[*]}{.status.podIP}{"\t"}{range .status.conditions[*]}{.type}{"="}{.status}{" "}{end}{"\n"}{end}' \
+          | awk '$2 ~ /Ready=True/ {print $1; exit}')"
+        [ -n "$pod_line" ] || continue
+        cat <<EOF | kubectl -n "$namespace" apply -f -
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: $service
+      labels:
+        app.kubernetes.io/name: {{ include "filedeck.name" . }}
+        app.kubernetes.io/component: agent
+        dynacom.dev/filedeck-managed: "true"
+    spec:
+      ports:
+        - name: http
+          port: {{ .Values.port }}
+          targetPort: http
+    EOF
+        cat <<EOF | kubectl -n "$namespace" apply -f -
+    apiVersion: discovery.k8s.io/v1
+    kind: EndpointSlice
+    metadata:
+      name: ${service}-ep
+      labels:
+        kubernetes.io/service-name: $service
+        endpointslice.kubernetes.io/managed-by: filedeck-managed-reconciler
+    addressType: IPv4
+    ports:
+      - name: http
+        protocol: TCP
+        port: {{ .Values.port }}
+    endpoints:
+      - addresses: [$pod_line]
+        conditions: {ready: true}
+    EOF
+        owned_services="$owned_services $service"
+        next="$next,$node=http://$service:$PORT"
+      done
+      for service in $(kubectl -n "$namespace" get services -l dynacom.dev/filedeck-managed=true \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+        case " $owned_services " in *" $service "*) ;; *) kubectl -n "$namespace" delete service "$service" --ignore-not-found ;; esac
+      done
+      for slice in $(kubectl -n "$namespace" get endpointslices -l endpointslice.kubernetes.io/managed-by=filedeck-managed-reconciler \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+        service="$(kubectl -n "$namespace" get endpointslice "$slice" -o jsonpath='{.metadata.labels.kubernetes\.io/service-name}')"
+        case " $owned_services " in *" $service "*) ;; *) kubectl -n "$namespace" delete endpointslice "$slice" --ignore-not-found ;; esac
+      done
+      current="$(kubectl -n "$namespace" get configmap/filedeck-managed-nodes -o jsonpath='{.data.NODES}' 2>/dev/null || true)"
+      if [ "$current" != "$next" ]; then
+      kubectl -n "$namespace" create configmap filedeck-managed-nodes --from-literal="NODES=$next" --dry-run=client -o yaml | kubectl -n "$namespace" apply -f -
+        hash="$(printf '%s' "$next" | sha256sum | cut -d ' ' -f 1)"
+        kubectl -n "$namespace" patch deployment/filedeck-hub --type merge -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"filedeck.dynacom.dev/nodes-hash\":\"$hash\"}}}}}"
+      fi
+      sleep "$INTERVAL"
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "filedeck.name" . }}-managed-reconciler
+  labels: {{- include "filedeck.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: {{ include "filedeck.name" . }}, app.kubernetes.io/component: managed-reconciler}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: {{ include "filedeck.name" . }}, app.kubernetes.io/component: managed-reconciler}
+    spec:
+      serviceAccountName: {{ include "filedeck.name" . }}-managed-reconciler
+      automountServiceAccountToken: true
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: reconciler
+          image: {{ printf "%s@%s" .Values.managedNodes.image.repository .Values.managedNodes.image.digest | quote }}
+          imagePullPolicy: {{ .Values.managedNodes.image.pullPolicy }}
+          command: [/bin/sh, /etc/filedeck/reconcile.sh]
+          env:
+            - {name: NAMESPACE, value: {{ .Release.Namespace | quote }}}
+            - {name: NODE_LABEL, value: {{ .Values.managedNodes.label | quote }}}
+            - {name: NODE_VALUE, value: {{ .Values.managedNodes.value | quote }}}
+            - {name: STATIC_NAMES, value: {{ join "," $staticNames | quote }}}
+            - {name: STATIC_TARGETS, value: {{ join "," $staticTargets | quote }}}
+            - {name: PORT, value: {{ .Values.port | quote }}}
+            - {name: INTERVAL, value: {{ .Values.managedNodes.reconcileSeconds | quote }}}
+          volumeMounts: [{name: script, mountPath: /etc/filedeck, readOnly: true}]
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {cpu: 100m, memory: 128Mi}}
+          securityContext: {runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          livenessProbe: {exec: {command: [/bin/sh, -c, kill -0 1]}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+      volumes: [{name: script, configMap: {name: {{ include "filedeck.name" . }}-managed-reconciler, defaultMode: 365}}]
+{{- end }}

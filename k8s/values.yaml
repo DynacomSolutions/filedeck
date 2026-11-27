@@ -270,6 +270,12 @@ managedNodes:
   enabled: false
   label: dynacom.dev/filedeck-managed
   value: "true"
+  reconcileSeconds: 30
+  image:
+    repository: bitnami/kubectl
+    tag: "latest"
+    digest: "sha256:ab90e1058e5a658cc94b4e7eb6d48e5758cfd6d77b5dd1869513aec3a3054673"
+    pullPolicy: IfNotPresent
 
 sources: []
 

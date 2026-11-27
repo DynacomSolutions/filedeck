@@ -35,6 +35,16 @@ hub=$(helm template t k8s -s templates/hub.yaml --set 'groups.local[0].name=Data
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_GROUPS_FILE/{getline; print $2}')" = /etc/filedeck/groups/rules.json
 printf '%s\n' "$hub" | awk '/checksum\/storage-groups:/{checksum=1} /mountPath: \/etc\/filedeck\/groups/{mount=1} END {exit !(checksum && mount)}'
 
+managed=$(helm template t k8s --set managedNodes.enabled=true)
+case "$managed" in *$'kind: DaemonSet\n'*) ;; *) echo "managed chart must render the agent DaemonSet" >&2; exit 1 ;; esac
+case "$managed" in *"name: filedeck-managed-reconciler"*) ;; *) echo "managed chart must render the reconciler" >&2; exit 1 ;; esac
+if awk '/^kind: EndpointSlice$/{found=1} END{exit !found}' <<<"$managed"; then
+  echo "offline chart must not render joined-node endpoints" >&2
+  exit 1
+fi
+! grep -R -q 'lookup "v1" "Node"' k8s/templates || { echo "chart must not depend on Helm Node lookup" >&2; exit 1; }
+scripts/test-managed-reconciler.sh
+
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_HUB_METRICS_PORT/{getline; gsub(/"/, "", $2); print $2}')" = 9091
 test "$(printf '%s\n' "$hub" | awk '/- name: metrics/{getline; print $2}')" = 9091
 if helm template t k8s -s templates/hub.yaml --set port=9091 >/dev/null 2>&1; then
