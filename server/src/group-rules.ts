@@ -27,7 +27,10 @@ function prefixes(value: unknown): string[] {
 }
 
 export function parseGroupRules(text: string, node: string): GroupRule[] {
-  const byNode = object(JSON.parse(text));
+  return rulesForNode(object(JSON.parse(text)), node);
+}
+
+function rulesForNode(byNode: Record<string, unknown>, node: string): GroupRule[] {
   if (!Object.hasOwn(byNode, node)) return [];
   const raw = byNode[node];
   if (!Array.isArray(raw)) throw new Error("expected a list of group rules");
@@ -62,4 +65,10 @@ export function parseGroupRules(text: string, node: string): GroupRule[] {
 
 export function loadGroupRules(file: string | undefined, node: string): GroupRule[] {
   return file ? parseGroupRules(readFileSync(file, "utf8"), node) : [];
+}
+
+export function loadGroupRulesByNode(file: string | undefined, nodes: string[]): Map<string, GroupRule[]> {
+  if (!file) return new Map();
+  const byNode = object(JSON.parse(readFileSync(file, "utf8")));
+  return new Map(nodes.map((node) => [node, rulesForNode(byNode, node)]));
 }

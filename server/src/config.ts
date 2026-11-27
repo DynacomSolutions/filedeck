@@ -17,6 +17,7 @@ export interface Config {
   node: string;
   procMounts: string;
   groups: GroupRule[];
+  groupRulesFile?: string;
   victoriaMetricsUrl?: string;
   maxUpload: number;
   /** Largest text file the editor will open or save (bytes) */
@@ -287,6 +288,7 @@ export function loadConfig(env = process.env): Config {
     node: env.FILEDECK_NODE ?? "local",
     procMounts: env.FILEDECK_PROC_MOUNTS ?? defaultProcMounts(root),
     groups: mode === "agent" ? loadGroupRules(env.FILEDECK_GROUPS_FILE, env.FILEDECK_NODE ?? "local") : [],
+    groupRulesFile: env.FILEDECK_GROUPS_FILE,
     victoriaMetricsUrl: mode === "hub" ? env.FILEDECK_VICTORIA_METRICS_URL?.trim() || undefined : undefined,
     maxUpload: Number(env.FILEDECK_MAX_UPLOAD ?? 1024 ** 4),
     maxEdit: Number(env.FILEDECK_MAX_EDIT ?? 5 * 1024 * 1024),

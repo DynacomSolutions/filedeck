@@ -32,6 +32,8 @@ export function apiTokenAuth(token: string | undefined, account?: () => Identity
   const du = scopes.includes("du");
   const changes = scopes.includes("changes");
   const groups = scopes.includes("groups");
+  const resources = [du && "folder sizes", changes && "change events", groups && "grouped storage sizes"].filter((resource) => typeof resource === "string");
+  const permitted = new Intl.ListFormat("en-GB", { type: "conjunction" }).format(resources);
   const want = token ? digest(token) : undefined;
   return async (c, next) => {
     // Headers.get joins repeated headers with ", ", which can never equal the token.
@@ -40,7 +42,7 @@ export function apiTokenAuth(token: string | undefined, account?: () => Identity
     if (!want || !timingSafeEqual(digest(got), want)) return c.json({ error: "unauthorized" }, 401);
     const p = c.req.path;
     const allowed = c.req.method === "GET" && ((du && (DU.test(p) || JOB.test(p))) || (changes && CHANGES.test(p)) || (groups && p === "/api/groups"));
-    if (!allowed) return c.json({ error: `forbidden: this token may only read ${changes && du ? "folder sizes and change events" : changes ? "change events" : "folder sizes"}` }, 403);
+    if (!allowed) return c.json({ error: `forbidden: this token may only read ${permitted || "no resources"}` }, 403);
     if (p === "/api/groups") c.set("storageSizesOnly", true);
     c.req.raw.headers.delete("x-filedeck-token");
     if (account) {

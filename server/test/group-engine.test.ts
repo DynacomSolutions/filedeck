@@ -16,9 +16,12 @@ const rule = (name: string, paths: string[], exclude?: string[]) => ({ name, pat
 const sample = (bytes: number, fields: Partial<StoredGroupSize> = {}): StoredGroupSize =>
   ({ bytes, dev: 2049, scannedAt: 100, stale: false, errors: 0, files: 100, links: 0, linkChecked: 100, ...fields });
 
-const run = (rules: ReturnType<typeof rule>[], rows: Record<string, StoredGroupSize>, mounts: GroupMount[] = [root], used = 1000) =>
+const run = (rules: ReturnType<typeof rule>[], rows: Record<string, StoredGroupSize>, mounts: GroupMount[] = [root],
+  used = 1000, statDevices: Record<string, number> = {}) =>
   groupStorage(mounts, parseGroupRules(JSON.stringify({ local: rules }), "local"),
-    (p) => Promise.resolve(rows[p] ?? null), () => Promise.resolve({ used, capacity: 4000 }), () => true);
+    (p) => Promise.resolve(rows[p] ?? null), () => Promise.resolve({ used, capacity: 4000 }), () => true,
+    async (p) => statDevices[p] ?? ([...mounts].sort((a, b) => b.mountpoint.length - a.mountpoint.length)
+      .find((m) => m.mountpoint === "/" || p === m.mountpoint || p.startsWith(m.mountpoint + "/"))?.dev === "8:2" ? 2050 : 2049));
 const byName = (drives: Awaited<ReturnType<typeof run>>) => Object.fromEntries(drives[0]?.groups.map((g) => [g.name, g]) ?? []);
 
 test("longest prefix wins across nested rules and exclusions; freshness follows dependencies", async () => {
@@ -51,6 +54,41 @@ test("read bind roots and remove their same-device totals and duplicate capacity
   assert.equal(groups.Root?.bytes, 300);
   assert.equal(groups.Data?.bytes, 300);
   assert.equal(groups.Unattributed?.bytes, 400);
+});
+
+test("deduct a same-device bind target even when an overmount hides its source", async () => {
+  const hidden = { ...mount2, mountpoint: "/hidden" };
+  const target = { ...bind, mountpoint: "/srv/b", root: "/hidden/b" };
+  const groups = byName(await run([rule("A", ["/"])], {
+    "/": sample(900), "/hidden": sample(100, { dev: 2050 }), "/srv/b": sample(300),
+  }, [root, hidden, target]));
+  assert.equal(groups.A?.bytes, 1000);
+  assert.equal(groups.A?.notStored, false);
+});
+
+test("validate a btrfs row against the current stat device rather than mountinfo", async () => {
+  const subvolume = { ...root, fstype: "btrfs", dev: "8:2" };
+  const groups = byName(await run([rule("A", ["/data"])], { "/data": sample(400, { dev: 81920 }) },
+    [subvolume], 1000, { "/data": 81920 }));
+  assert.equal(groups.A?.bytes, 400);
+  assert.equal(groups.A?.notStored, false);
+});
+
+test("keep separate btrfs subvolume rows when stat reports different devices", async () => {
+  const volume = { ...root, fstype: "btrfs" };
+  const child = { ...volume, id: 2, root: "/snapshot", mountpoint: "/subvolume" };
+  const groups = byName(await run([rule("A", ["/"])], {
+    "/": sample(400, { dev: 81920 }), "/subvolume": sample(100, { dev: 81921 }),
+  }, [volume, child], 1000, { "/": 81920, "/subvolume": 81921 }));
+  assert.equal(groups.A?.bytes, 500);
+  assert.equal(groups.A?.notStored, false);
+});
+
+test("a bind mounted after the scan does not invalidate its parent", async () => {
+  const groups = byName(await run([rule("Root", ["/"])], { "/": sample(900) }, [root, bind]));
+  assert.equal(groups.Root?.bytes, 900);
+  assert.equal(groups.Root?.notStored, false);
+  assert.equal(groups.Unattributed?.bytes, 100);
 });
 
 test("canonical request wins over its bind alias regardless of rule order", async () => {

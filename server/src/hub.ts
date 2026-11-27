@@ -1,4 +1,5 @@
 import { GroupIO } from "./group-io.ts";
+import { loadGroupRulesByNode } from "./group-rules.ts";
 import type { AgentGroups } from "./group-agent.ts";
 import { FsError } from "./fsops.ts";
 import { fanIn } from "./events/fanin.ts";
@@ -460,9 +461,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     return res;
   };
 
-  const groupIO = new GroupIO(cfg.victoriaMetricsUrl, fetch, Date.now, cfg.nodes.map((n) => n.name));
+  const groupNodes = cfg.nodes.map((n) => n.name);
+  const groupIO = new GroupIO(cfg.victoriaMetricsUrl, fetch, Date.now, groupNodes,
+    cfg.victoriaMetricsUrl ? loadGroupRulesByNode(cfg.groupRulesFile, groupNodes) : undefined);
   app.get("/healthz", (c) => c.text("ok"));
-  app.get("/metrics", (c) => c.text([...groupIO.metrics.lines(), ""].join("\n")));
+  app.get("/metrics", (c) => c.text([...groupIO.metricLines(), ""].join("\n")));
 
   app.get("/api/groups", async (c) => {
     if (auth && !isAdmin(cfg, auth.accounts, currentUser())) return c.json({ error: "administrators only" }, 403);

@@ -1,4 +1,5 @@
 import { GroupMetrics } from "./group-metrics.ts";
+import type { GroupRule } from "./group-rules.ts";
 import type { AgentGroups } from "./group-agent.ts";
 import type { GroupsResult, IOPressure, Statistics, StorageNode } from "./group-types.ts";
 
@@ -64,19 +65,71 @@ function pressure(series: Series[], scope: "drive" | "group"): IOPressure {
   };
 }
 
+const responseLimit = 8 * 1024 * 1024;
+
+class OversizeResponse extends Error {}
+
+async function readMatrix(response: Response, limit: number): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("missing IO response body");
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return JSON.parse(text + decoder.decode());
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        void reader.cancel().catch(() => {});
+        throw new OversizeResponse("IO response exceeds the byte limit");
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export class GroupIO {
   readonly metrics = new GroupMetrics("group_io");
   private snapshot?: Snapshot;
   private lastAttempt = -Infinity;
   private pending?: Promise<void>;
   private failed = false;
+  private oversizeResponses = 0;
 
   constructor(
     private readonly base?: string,
     private readonly request: typeof fetch = fetch,
     private readonly now = Date.now,
     private readonly nodes: string[] = [],
+    private readonly rulesByNode: ReadonlyMap<string, GroupRule[]> = new Map(),
+    private readonly maxResponseBytes = responseLimit,
   ) {}
+
+  metricLines(): string[] {
+    const name = "filedeck_group_io_oversize_responses_total";
+    return [
+      ...this.metrics.lines(),
+      `# HELP ${name} Number of IO responses rejected at the byte limit`,
+      `# TYPE ${name} counter`,
+      `${name} ${this.oversizeResponses}`,
+    ];
+  }
+
+  private containerSelectors(): string[] {
+    const selectors = new Set<string>();
+    for (const [node, rules] of this.rulesByNode) {
+      for (const { labels } of rules) {
+        const matchers = Object.entries(labels).sort(([a], [b]) => a.localeCompare(b));
+        if (!matchers.length) continue;
+        const exact = matchers.map(([key, value]) => `${key}=${JSON.stringify(value)}`);
+        selectors.add([`node=${JSON.stringify(node)}`, 'container!=""', 'container!="POD"', ...exact].join(","));
+      }
+    }
+    return [...selectors];
+  }
 
   private async collect() {
     this.metrics.requests++;
@@ -86,12 +139,18 @@ export class GroupIO {
       const end = Math.floor(sampledAt / 1000 / intervalSeconds) * intervalSeconds;
       const nodePattern = this.nodes.map((node) => node.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
       const nodeLabels = nodePattern ? `node=~${JSON.stringify(nodePattern)}` : 'node!=""';
-      const query = metrics.map(([kind, name]) =>
-        `label_set(rate(${name}{${nodeLabels}${kind.startsWith("group") ? ',container!="",container!="POD"' : ""}}[5m]), "filedeck_io_kind", "${kind}")`).join(" or ");
-      url.search = new URLSearchParams({ query, start: String(end - windowSeconds), end: String(end), step: String(intervalSeconds) }).toString();
-      const res = await this.request(url, { signal: AbortSignal.timeout(8000), redirect: "error" });
-      if (!res.ok) throw new Error("IO query failed");
-      const result = await res.json() as { status: string; data?: { resultType: string; result: Series[] } };
+      const containerSelectors = this.containerSelectors();
+      const query = metrics.flatMap(([kind, metric]) => {
+        const selectors = kind.startsWith("group") ? containerSelectors : [nodeLabels];
+        return selectors.map((selector) => `label_set(rate(${metric}{${selector}}[5m]), "filedeck_io_kind", "${kind}")`);
+      }).join(" or ");
+      const body = new URLSearchParams({ query, start: String(end - windowSeconds), end: String(end), step: String(intervalSeconds) });
+      const res = await this.request(url, { method: "POST", body, signal: AbortSignal.timeout(8000), redirect: "error" });
+      if (!res.ok) {
+        await res.body?.cancel();
+        throw new Error("IO query failed");
+      }
+      const result = await readMatrix(res, this.maxResponseBytes) as { status: string; data?: { resultType: string; result: Series[] } };
       if (result.status !== "success" || result.data?.resultType !== "matrix" || !Array.isArray(result.data.result)) throw new Error("invalid IO response");
       const byNode = new Map<string, Series[]>();
       for (const series of result.data.result) {
@@ -104,7 +163,8 @@ export class GroupIO {
       this.snapshot = { sampledAt, byNode };
       this.failed = false;
       this.metrics.lastSuccess = this.now();
-    } catch {
+    } catch (error) {
+      if (error instanceof OversizeResponse) this.oversizeResponses++;
       this.metrics.errors++;
       this.failed = true;
     }

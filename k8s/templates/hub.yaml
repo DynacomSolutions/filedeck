@@ -24,8 +24,11 @@ spec:
       labels:
         {{- include "filedeck.labels" . | nindent 8 }}
         app.kubernetes.io/component: hub
-      {{- if or .Values.brand.cssContent (and $sc.enabled $sc.serve) }}
+      {{- if or .Values.brand.cssContent (and $sc.enabled $sc.serve) .Values.groups }}
       annotations:
+        {{- if .Values.groups }}
+        checksum/storage-groups: {{ .Values.groups | toJson | sha256sum | quote }}
+        {{- end }}
         {{- if .Values.brand.cssContent }}
         checksum/brand-css: {{ .Values.brand.cssContent | sha256sum | quote }}
         {{- end }}
@@ -113,6 +116,10 @@ spec:
             - name: FILEDECK_TAILSCALE_LISTEN
               value: {{ . | quote }}
             {{- end }}
+            {{- end }}
+            {{- if .Values.groups }}
+            - name: FILEDECK_GROUPS_FILE
+              value: /etc/filedeck/groups/rules.json
             {{- end }}
             {{- with .Values.hub.victoriaMetricsUrl }}
             - name: FILEDECK_VICTORIA_METRICS_URL
@@ -211,6 +218,11 @@ spec:
             runAsUser: 1000
             runAsGroup: 1000
           volumeMounts:
+            {{- if .Values.groups }}
+            - name: storage-groups
+              mountPath: /etc/filedeck/groups
+              readOnly: true
+            {{- end }}
             - name: vault
               mountPath: /var/lib/filedeck-vault
             - name: cache
@@ -306,6 +318,11 @@ spec:
             {{- end }}
         {{- end }}
       volumes:
+        {{- if .Values.groups }}
+        - name: storage-groups
+          configMap:
+            name: {{ include "filedeck.name" . }}-storage-groups
+        {{- end }}
         {{- if and .Values.auth.enabled $sc.enabled }}
         - name: tailscale-socket
           emptyDir: {}

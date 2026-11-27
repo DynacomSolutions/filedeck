@@ -19,7 +19,7 @@ port: 8080
 metrics:
   scrapeFrom:
     # Namespace labels of the scraper, for example {matchLabels: {kubernetes.io/metadata.name: <namespace>}}.
-    # Empty (default) adds no ingress rule.
+    # Empty (default) adds no ingress rule. The same selector also applies to a restricted hub.
     namespaceSelector: {}
 
 # Optional authoritative inventory for deployment checks. This is metadata only and does not expose a route or grant
@@ -145,7 +145,7 @@ hub:
   # Optional NetworkPolicy for the hub pods. Off by default so a plain install keeps working behind any ingress. Anything
   # that can reach the hub has root-level access to every node's files, so for a shared cluster turn it on and list the
   # peers that may connect (your ingress controller, for example). `from` takes standard NetworkPolicy peers; with
-  # `enabled: true` and an empty list nothing can reach the hub. The hub's own port is the only one opened.
+  # `enabled: true` and no peers or scraper selector nothing can reach the hub. The policy opens only the hub port.
   networkPolicy:
     enabled: false
     from: []

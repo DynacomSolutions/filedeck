@@ -15,25 +15,21 @@ export interface StoredGroupSize {
 }
 
 type Space = { used: number; capacity: number };
-type Cut = { path: string; mount: GroupMount; rule: GroupRule | null; alias?: boolean; remapped?: boolean };
+type Cut = { path: string; mount: GroupMount; rule: GroupRule | null; mountBoundary?: boolean; remapped?: boolean };
 type GroupTotal = StorageGroup & { files: number; links: number; checked: number; ioDevices: Set<string> };
 export type MeasuredDrive = Omit<StorageDrive, "groups"> & { groups: (StorageGroup & { ioDevices?: string[] })[] };
 
 const deepest = <T extends { mountpoint: string }>(mounts: T[], p: string): T | undefined =>
   mounts.find((m) => containsPath(m.mountpoint, p));
 
-function deviceNumber(dev: string): number {
-  const [major = 0n, minor = 0n] = dev.split(":").map(BigInt);
-  return Number(((major & 0xfffn) << 8n) | (minor & 0xffn) | ((minor & ~0xffn) << 12n) | ((major & ~0xfffn) << 32n));
-}
-
-function mountAliases(mounts: GroupMount[]): Map<string, GroupMount> {
+function mountAliases(mounts: GroupMount[], btrfsDevices: Map<GroupMount, number | null>): Map<string, GroupMount> {
   const aliases = new Map<string, GroupMount>();
   const ordered = [...mounts].sort((a, b) => a.root.length - b.root.length ||
     a.id - b.id || a.mountpoint.localeCompare(b.mountpoint));
   for (const [i, m] of ordered.entries()) {
     const source = ordered.slice(0, i).find((other) => {
       if (other.fsKey !== m.fsKey || other.dev !== m.dev || !containsPath(other.root, m.root)) return false;
+      if (btrfsDevices.get(other) !== btrfsDevices.get(m)) return false;
       const p = posix.join(other.mountpoint, posix.relative(other.root, m.root));
       return deepest(mounts, p) === other;
     });
@@ -64,12 +60,12 @@ function buildCuts(mounts: GroupMount[], aliases: Map<string, GroupMount>, rules
       cuts.set(path, { path, mount: source ?? mount, rule: r.rule, remapped: !!source });
     }
   }
+  const boundaries: Cut[] = [];
   for (const m of mounts) {
-    if (!aliases.has(m.mountpoint)) continue;
-    const above = deepest(mounts.filter((p) => p !== m), m.mountpoint);
-    if (above?.dev === m.dev) cuts.set(m.mountpoint, { path: m.mountpoint, mount: above, rule: null, alias: true });
+    const above = mounts.find((p) => p !== m && containsPath(p.mountpoint, m.mountpoint));
+    if (above?.dev === m.dev) boundaries.push({ path: m.mountpoint, mount: above, rule: null, mountBoundary: true });
   }
-  return [...cuts.values()].sort((a, b) => a.path.length - b.path.length || a.path.localeCompare(b.path));
+  return [...cuts.values(), ...boundaries].sort((a, b) => a.path.length - b.path.length || a.path.localeCompare(b.path));
 }
 
 const empty = (name: string): GroupTotal =>
@@ -81,17 +77,31 @@ export async function groupStorage(
   stored: (path: string) => Promise<StoredGroupSize | null>,
   stat: (mountpoint: string) => Promise<Space | null>,
   isStorage: (mount: GroupMount) => boolean,
+  statDevice: (path: string) => Promise<number | null>,
 ): Promise<MeasuredDrive[]> {
   const mounts = [...mountTable].sort((a, b) => b.mountpoint.length - a.mountpoint.length);
-  const aliases = mountAliases(mounts);
+  const devices = new Map<string, Promise<number | null>>();
+  const deviceAt = (path: string) => {
+    const existing = devices.get(path);
+    if (existing) return existing;
+    const reading = statDevice(path);
+    devices.set(path, reading);
+    return reading;
+  };
+  const btrfs = mounts.filter((mount) => mount.fstype === "btrfs");
+  const btrfsDevices = new Map(await Promise.all(btrfs.map(async (mount) =>
+    [mount, await deviceAt(mount.mountpoint)] as const)));
+  const aliases = mountAliases(mounts, btrfsDevices);
   const cuts = buildCuts(mounts, aliases, rules);
   const children = new Map<Cut, Cut[]>();
-  const indexed = new Map<string, Cut>();
+  const byMount = new Map<GroupMount, Map<string, Cut>>();
   for (const c of cuts) {
+    const indexed = byMount.get(c.mount) ?? new Map<string, Cut>();
+    byMount.set(c.mount, indexed);
     for (let p = c.path; p !== "/"; ) {
       p = posix.dirname(p);
       const parent = indexed.get(p);
-      if (parent?.mount === c.mount) {
+      if (parent) {
         children.get(parent)?.push(c);
         break;
       }
@@ -107,13 +117,13 @@ export async function groupStorage(
     if (!aliases.has(m.mountpoint)) vol.mounts.add(m.mountpoint);
     volumes.set(m.fsKey, vol);
   }
-  const reads = new Map<Cut, StoredGroupSize | null>();
-  const get = async (cut: Cut) => {
-    if (!reads.has(cut)) {
-      const row = await stored(cut.path);
-      reads.set(cut, row?.dev === deviceNumber(cut.mount.dev) ? row : null);
+  const reads = new Map<string, StoredGroupSize | null>();
+  const get = async ({ path }: Cut) => {
+    if (!reads.has(path)) {
+      const row = await stored(path);
+      reads.set(path, row && row.dev === await deviceAt(path) ? row : null);
     }
-    return reads.get(cut) ?? null;
+    return reads.get(path) ?? null;
   };
   for (const c of cuts) {
     const vol = volumes.get(c.mount.fsKey);
@@ -126,17 +136,19 @@ export async function groupStorage(
       continue;
     }
     const deductions = [];
+    let missingRule = false;
     for (const child of children.get(c) ?? []) {
       const item = await get(child);
+      if (child.mountBoundary && item?.dev !== row.dev) continue;
       if (item) deductions.push(item);
-      else group.notStored = true;
+      else missingRule = true;
     }
-    const needed = (children.get(c) ?? []).length;
+    group.notStored ||= missingRule;
     for (const sample of [row, ...deductions]) {
       group.stale ||= sample.stale;
       group.scannedAt = Math.min(group.scannedAt ?? Infinity, sample.scannedAt);
     }
-    if (deductions.length !== needed) continue;
+    if (missingRule) continue;
     const bytes = row.bytes - deductions.reduce((sum, child) => sum + child.bytes, 0);
     group.stale ||= bytes < 0;
     group.bytes += Math.max(0, bytes);

@@ -37,8 +37,8 @@ filedeck groups --json workstation
 
 ## Enable IO pressure
 
-Set `hub.victoriaMetricsUrl`, or set `FILEDECK_VICTORIA_METRICS_URL` on the hub. Leave it empty to disable the join.
+Set `hub.victoriaMetricsUrl`, or set `FILEDECK_VICTORIA_METRICS_URL` on the hub. Leave it empty to disable the join. Without Helm, set `FILEDECK_GROUPS_FILE` on the hub to the same rules file as the agents.
 
-The hub requests one hour of samples, with one sample per minute. It refreshes the samples at most once per minute. Drive values use disk series. Groups use container filesystem series with exact label matches on the same node and device. Busy time for a set of devices is the highest member value at each sample. Resting is the median of the lowest quarter of samples. Missing series stay unavailable. Container throughput and utilisation need separate series. The CLI token receives storage totals only.
+The hub requests one hour of samples, with one sample per minute. It limits each reply to 8 MiB and keeps the last samples when a reply exceeds the limit. It refreshes the samples at most once per minute. Drive values use disk series. Groups use container filesystem series with exact label matches on the same node and device. Busy time for a set of devices is the highest member value at each sample. Resting is the median of the lowest quarter of samples. Missing series stay unavailable. Container throughput and utilisation need separate series. The CLI token receives storage totals only.
 
 Scrape `/metrics` on the named `http` port of agent and hub pods. Agent metrics cover grouped storage reads. Hub metrics cover IO queries. Both include errors and last successful collection time.
