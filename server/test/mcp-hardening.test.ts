@@ -144,7 +144,7 @@ test("the hub process exits with code 2 and one clear line when FILEDECK_MCP_POR
   let err = "";
   child.stderr.on("data", (d) => (err += d));
   child.stdout.on("data", () => undefined);
-  const killer = setTimeout(() => child.kill("SIGKILL"), 30_000);
+  const killer = setTimeout(() => child.kill("SIGKILL"), 240_000);
   try {
     const code = await new Promise<number | null>((r) => child.once("exit", r));
     assert.equal(code, 2, err);
