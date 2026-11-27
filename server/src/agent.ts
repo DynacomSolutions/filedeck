@@ -33,6 +33,9 @@ import { leaveBounded } from "./events/leave.ts";
 import { registerChangeRoutes } from "./events/routes.ts";
 import { startEventSocket, type EventSocket } from "./events/socket.ts";
 import type { FeedRef } from "./diff-routes.ts";
+import { PressureCollector } from "./pressure/collector.ts";
+import { iotracePath } from "./pressure/helper.ts";
+import { pressureMetricLines, registerPressureRoutes } from "./pressure/routes.ts";
 
 export interface AgentOptions {
   /** the account lookup (sign-in on); default: `makeResolver` */
@@ -159,6 +162,15 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   });
   registerChangeRoutes(app, bus);
   Object.assign(app, { events: bus }); // (tests publish to it and read its counters)
+  // Live disk pressure (docs/disk-pressure.md): off unless FILEDECK_PRESSURE is on; it samples only while a stream, a request or the metrics scrape asks
+  const pressure = cfg.pressure && process.platform === "linux"
+    ? new PressureCollector({
+        node: cfg.node, intervalMs: cfg.pressureIntervalMs, hostRoot: cfg.root, cgroupRoot: cfg.pressureCgroupRoot, procRoot: cfg.pressureProcRoot,
+        labels: cfg.pressureLabels, pathDepth: cfg.pressurePathDepth, iotrace: iotracePath(cfg.pressureIotrace), bus, log: (s) => console.error(s),
+      })
+    : undefined;
+  if (pressure) registerPressureRoutes(app, pressure);
+  Object.assign(app, { pressure });
   const fan = process.platform === "darwin"
     ? new MacWatch(sizes, { root, procMounts: cfg.procMounts, bus })
     : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, commitMs: cfg.sizeCommitMs, exclude: cfg.sizeExclude, dirtyMax: cfg.sizeDirtyMax, bus, ignorePath: ownState({ node: cfg.node, root, journalDir, stateDir: cfg.indexDir, tmpDir: os.tmpdir() }) });
@@ -250,6 +262,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         `filedeck_size_store_write_transactions_total ${sizes.writeTransactions}`,
         ...storageGroups.metrics.lines(),
         ...eventMetrics(bus, (w as { helper?: Record<string, number> }).helper, (w as { caps?: string }).caps),
+        ...(pressure ? pressureMetricLines(pressure) : []),
         "",
       ].join("\n"),
       200,
@@ -313,6 +326,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   (app as unknown as { close: () => Promise<void> }).close = async () => {
     clearTimeout(firstSweep);
     clearInterval(sweepTimer);
+    pressure?.close();
     await leave();
     files.close();
     dirs.close();
