@@ -31,7 +31,24 @@
   gap: .35rem;
 }
 
-.storage-controls { justify-content: space-between; }
+.storage-controls { justify-content: space-between; gap: .65rem; }
+
+.storage-node-picker {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .82rem;
+}
+
+.storage-node-picker select {
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: .35rem;
+  min-height: 2.2rem;
+  max-width: min(42vw, 18rem);
+}
 
 .storage-toggle {
   width: fit-content;
@@ -126,6 +143,19 @@
   gap: .35rem;
   align-items: center;
 }
+
+.storage-ring-scale {
+  flex-basis: 100%;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: .25rem .75rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.storage-ring-scale li > span { text-transform: capitalize; font-weight: 600; }
 
 .storage-swatches { gap: 1px; }
 .storage-legend i { display: inline-block; width: .65rem; height: .65rem; border-radius: 2px; }

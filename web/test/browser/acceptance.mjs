@@ -94,6 +94,7 @@ async function installFixture(page, opts = {}) {
     if (opts.tailnetDown) return json({ error: 'tailnet identity unavailable' }, 503, TAILNET_DOWN);
     // opts.nodesBody / opts.lists: a check's own node list and folder listings (by path), answered before the shared fixtures
     if (opts.nodesBody && pathname === '/api/nodes') return json(opts.nodesBody);
+    if (opts.storageGroups && pathname === '/api/groups') return json(opts.storageGroups(url.searchParams.get('node')));
     if (opts.lists?.[url.searchParams.get('path')] && pathname.includes('/api/fs/list')) return json({ path: url.searchParams.get('path'), entries: opts.lists[url.searchParams.get('path')], truncated: false });
     // Sign-in is off unless a check asks for a signed-out or signed-in hub. opts.session ({ out }) lets a check end the
     // session while the app is open: every API call is then the gate's 401 until a password sign-in starts a new one.
@@ -3396,7 +3397,110 @@ function schemePair(name, verify) {
   return ['light', 'dark'].map((scheme) => [`${name} (${scheme})`, (b) => verify(b, [scheme])]);
 }
 
+async function verifyGroupedStorage(browser, width, scheme) {
+  const context = await browser.newContext({
+    viewport: { width, height: width === 390 ? 844 : 1000 }, deviceScaleFactor: 1,
+    hasTouch: width === 390, colorScheme: scheme, serviceWorkers: 'block',
+  });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(String(error)));
+  const GiB = 1024 ** 3;
+  const stat = (mean) => ({ min: 0, mean, max: mean * 2, resting: mean / 10 });
+  const io = (read, write) => ({ read: stat(read), write: stat(write), utilisation: null });
+  const group = (name, size, pressure, flags = {}) => ({
+    name, bytes: size * GiB, scannedAt: 1795788000000,
+    stale: false, notStored: false, errors: 0, hardLinks: 'normal', io: pressure, ...flags,
+  });
+  const drive = (name, groups, pressure) => ({
+    id: name, devices: [{ name, model: 'Solid state drive' }], mounts: ['/data'],
+    usedBytes: groups.reduce((sum, entry) => sum + entry.bytes, 0), capacityBytes: 1000 * GiB,
+    overageBytes: 0, groups, io: pressure,
+  });
+  const nodes = [
+    { node: 'Studio', drives: [
+      drive('disk0', [
+        group('Projects', 414, io(640_000, 120_000)),
+        group('Media', 160, io(210_000, 750_000), { stale: true }),
+        group('Unattributed', 75, undefined, { unattributed: true }),
+      ], io(6_000_000, 4_000_000)),
+      drive('disk1', [group('Workspace', 108, io(400_000, 550_000))], io(1_000_000, 2_000_000)),
+    ] },
+    { node: 'Archive', drives: [drive('disk2', [group('Backups', 251, io(100_000, 200_000))], io(2_000_000, 3_000_000))] },
+  ];
+  const requests = [];
+  await installFixture(page, {
+    requests, nodesBody: { nodes: nodes.map(({ node }) => ({ name: node, online: true })) },
+    storageGroups: (node) => ({ nodes: node ? nodes.filter((entry) => entry.node === node) : nodes, unavailable: [], io: { status: 'available' } }),
+  });
+  const mode = (name) => page.getByRole('button', { name, exact: true });
+  const chart = page.getByRole('group', { name: 'Grouped storage sunburst' });
+  const details = page.getByRole('complementary', { name: 'Selected storage slice' });
+  const selector = page.getByLabel('Node', { exact: true });
+  try {
+    await page.goto(new URL('/', baseURL).href);
+    if (width === 390) await page.getByRole('button', { name: 'Open navigation' }).click();
+    await page.getByRole('link', { name: 'Storage', exact: true }).click();
+    await chart.waitFor();
+    assert.equal(new URL(page.url()).pathname, '/storage');
+    const entries = await page.evaluate(() => history.length);
+    for (const [name, file] of [['Storage size', 'size'], ['Read pressure', 'read'], ['Write pressure', 'write']]) {
+      await mode(name).click();
+      assert.equal(await mode(name).getAttribute('aria-pressed'), 'true');
+      assert.equal(await page.evaluate(() => window.innerWidth), width);
+      assert.ok(await page.locator('.storage-page').evaluate((element) => element.scrollWidth <= element.clientWidth));
+      if (file !== 'size') {
+        const studio = chart.getByRole('button', { name: /^Studio,/ });
+        const group = chart.getByRole('button', { name: file === 'read' ? /disk0 \/ Projects,/ : /disk0 \/ Media,/ });
+        const top = file === 'read' ? '#4f64ae' : '#ad592c';
+        assert.equal(await studio.getAttribute('fill'), top);
+        assert.equal(await group.getAttribute('fill'), top);
+      }
+      if (process.env.FILEDECK_STORAGE_SCREENSHOTS) {
+        await page.screenshot({ path: resolve(evidenceDir, `storage-${width}-${scheme}-${file}-review-v5.png`), animations: 'disabled' });
+      }
+    }
+    await selector.selectOption('Studio');
+    await chart.getByRole('button', { name: /^Archive,/ }).waitFor({ state: 'hidden' });
+    const projects = chart.getByRole('button', { name: /disk0 \/ Projects,/ });
+    await projects.waitFor();
+    await projects.focus();
+    await projects.press('Enter');
+    await details.getByRole('heading', { name: 'Projects' }).waitFor();
+    assert.equal(await page.evaluate(() => history.length), entries);
+    const deepLink = new URL(page.url());
+    assert.equal(deepLink.searchParams.get('node'), 'Studio');
+    assert.equal(deepLink.searchParams.get('storageMode'), 'write');
+    assert.equal(deepLink.searchParams.get('slice'), JSON.stringify(['Studio', 'disk0', 'Projects', false]));
+    assert.ok(requests.includes('/api/groups?node=Studio'));
+    await page.reload();
+    await details.getByRole('heading', { name: 'Projects' }).waitFor();
+    assert.equal(await selector.inputValue(), 'Studio');
+    assert.equal(await mode('Write pressure').getAttribute('aria-pressed'), 'true');
+
+    await page.evaluate(() => history.pushState(history.state, '', location.href));
+    await selector.selectOption('Archive');
+    await chart.getByRole('button', { name: /disk2 \/ Backups,/ }).waitFor();
+    await mode('Read pressure').click();
+    await page.goBack();
+    await details.getByRole('heading', { name: 'Projects' }).waitFor();
+    assert.equal(await selector.inputValue(), 'Studio');
+    assert.equal(await mode('Write pressure').getAttribute('aria-pressed'), 'true');
+    assert.equal(page.url(), deepLink.href);
+    await page.goForward();
+    await chart.getByRole('button', { name: /disk2 \/ Backups,/ }).waitFor();
+    assert.equal(await selector.inputValue(), 'Archive');
+    assert.equal(await mode('Read pressure').getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+}
+
 const allChecks = [
+  ...['light', 'dark'].flatMap((scheme) => [1440, 390].map((width) => [
+    `grouped storage ${width}px ${scheme}`, (browser) => verifyGroupedStorage(browser, width, scheme),
+  ])),
   ['list semantics', verifyListSemantics],
   ['keyboard shortcuts dialog and confirmations', verifyKeyboardAndConfirmation],
   ['keyboard isolation', verifyKeyboardIsolation],

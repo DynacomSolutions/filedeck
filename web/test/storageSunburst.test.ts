@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { sliceLabel, slicePath, sliceValue, storageMode, storageModeUrl, storageSlices } from "../src/storageSunburst";
-import type { StorageNode } from "../src/storageTypes";
+import { existsSync, readFileSync } from "node:fs";
+import { sliceLabel, slicePath, sliceValue, storageSlices } from "../src/storageSunburst";
+import * as storage from "../src/storageSunburst";
+import type { StorageNode } from "../../server/src/group-types";
 
 const statistics = { min: 0, max: 12, mean: 8, resting: 2 };
 const nodes: StorageNode[] = [
@@ -19,16 +21,6 @@ const nodes: StorageNode[] = [
       groups: [{ name: "Backups", bytes: 40, scannedAt: 345, stale: false, notStored: false, errors: 0, hardLinks: "heavy" }] },
   ] },
 ];
-
-test("URL round-trips colour and preserves unrelated parameters and the fragment", () => {
-  const start = "https://filemanager.example/status/storage?node=Blue+Room&storageMode=write#details";
-  assert.equal(storageMode(new URL(start).search), "write");
-  const read = storageModeUrl(start, "read");
-  assert.equal(read, "/status/storage?node=Blue+Room&storageMode=read#details");
-  assert.equal(storageMode(new URL(read, start).search), "read");
-  assert.equal(storageModeUrl(start, "size"), "/status/storage?node=Blue+Room#details");
-  assert.equal(storageMode("?storageMode=other"), "size");
-});
 
 test("rings partition the same space and preserve empty and unattributed states", () => {
   const { total, slices } = storageSlices(nodes);
@@ -53,4 +45,42 @@ test("single-node rings have valid paths, and pressure does not alter geometry",
   assert.equal(sliceValue(slices[2]!, "read"), 8);
   assert.equal(sliceValue(slices[2]!, "write"), 0);
   assert.equal(sliceValue(slices[3]!, "read"), null);
+});
+
+test("the URL restores the node, slice and colour mode and preserves other parameters", () => {
+  const url = "https://filemanager.example/storage?keep=yes#details";
+  const state = { node: "Blue Room", selected: '["Blue Room","disk","Photos",false]', mode: "read" } as const;
+  const changed = new URL(storage.storageViewUrl(url, state), url);
+  assert.deepEqual(storage.storageView(changed.search), state);
+  assert.equal(changed.searchParams.get("keep"), "yes");
+  assert.equal(changed.hash, "#details");
+  assert.equal(storage.storageViewUrl(changed.href, { node: null, selected: null, mode: "size" }), "/storage?keep=yes#details");
+});
+
+test("node throughput sums available drives and the maximum is independent for each ring", () => {
+  const { slices } = storageSlices([{
+    ...nodes[0]!, drives: [
+      { ...nodes[0]!.drives[0]!, io: { read: { ...statistics, mean: 1000 }, write: { ...statistics, mean: 500 }, utilisation: null } },
+      { id: "other", devices: [], mounts: [], usedBytes: 0, capacityBytes: 0, overageBytes: 0, groups: [],
+        io: { read: { ...statistics, mean: 200 }, write: { ...statistics, mean: 100 }, utilisation: null } },
+    ],
+  }, nodes[1]!]);
+  assert.equal(sliceValue(slices[0]!, "read"), 1200);
+  assert.equal(sliceValue(slices[0]!, "write"), 600);
+  assert.equal(sliceValue(slices.find((slice) => slice.label === "Archive")!, "read"), null);
+  assert.deepEqual(storage.ringMaximums(slices, "read"), { node: 1200, drive: 1000, group: 8 });
+  assert.deepEqual(storage.ringMaximums(slices, "write"), { node: 600, drive: 500, group: 0 });
+  const projects = slices.find((slice) => slice.label === "Projects")!;
+  assert.equal(storage.colourBand(projects, "read", storage.ringMaximums(slices, "read")), 3);
+});
+
+test("the app exposes Storage as a real navigation link", () => {
+  const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /<a(?=[^>]*\bdata-nav\b)(?=[^>]*href="\/storage")(?=[^>]*aria-label="Storage")[^>]*>/);
+});
+
+test("the chart and server use the same storage response types", () => {
+  const chart = readFileSync(new URL("../src/StorageSunburst.tsx", import.meta.url), "utf8");
+  assert.match(chart, /from "\.\.\/\.\.\/server\/src\/group-types"/);
+  assert.equal(existsSync(new URL("../src/storageTypes.ts", import.meta.url)), false);
 });

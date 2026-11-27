@@ -1,17 +1,30 @@
-import type { IOPressure, StorageDrive, StorageGroup, StorageNode } from "./storageTypes";
+import type { IOPressure, StorageDrive, StorageGroup, StorageNode } from "../../server/src/group-types";
 
 export const storageModes = ["size", "read", "write"] as const;
 export type StorageMode = typeof storageModes[number];
 
-export function storageMode(search: string): StorageMode {
-  const mode = new URLSearchParams(search).get("storageMode");
-  return mode === "read" || mode === "write" ? mode : "size";
+export interface StorageView {
+  mode: StorageMode;
+  node: string | null;
+  selected: string | null;
 }
 
-export function storageModeUrl(href: string, mode: StorageMode): string {
+export function storageView(search: string): StorageView {
+  const params = new URLSearchParams(search);
+  const mode = params.get("storageMode");
+  return {
+    mode: mode === "read" || mode === "write" ? mode : "size",
+    node: params.get("node") || null,
+    selected: params.get("slice") || null,
+  };
+}
+
+export function storageViewUrl(href: string, view: StorageView): string {
   const url = new URL(href);
-  if (mode === "size") url.searchParams.delete("storageMode");
-  else url.searchParams.set("storageMode", mode);
+  for (const [key, value] of [["node", view.node], ["slice", view.selected], ["storageMode", view.mode === "size" ? null : view.mode]] as const) {
+    if (value) url.searchParams.set(key, value);
+    else url.searchParams.delete(key);
+  }
   return url.pathname + url.search + url.hash;
 }
 
@@ -27,6 +40,7 @@ export interface Slice {
   drive?: StorageDrive;
   group?: StorageGroup;
   io?: IOPressure;
+  throughput?: Record<Exclude<StorageMode, "size">, number | null>;
 }
 
 export function driveLabel(drive: StorageDrive): string {
@@ -35,6 +49,14 @@ export function driveLabel(drive: StorageDrive): string {
 
 const driveBytes = (drive: StorageDrive) => drive.groups.reduce((sum, group) => sum + group.bytes, 0);
 const nodeBytes = (node: StorageNode) => node.drives.reduce((sum, drive) => sum + driveBytes(drive), 0);
+
+function sumThroughput(drives: StorageDrive[], mode: "read" | "write"): number | null {
+  const means = drives.flatMap((drive) => {
+    const stats = drive.io?.[mode];
+    return stats ? [stats.mean] : [];
+  });
+  return means.length ? means.reduce((sum, mean) => sum + mean, 0) : null;
+}
 
 export function storageSlices(nodes: StorageNode[]): { total: number; slices: Slice[] } {
   const total = nodes.reduce((sum, node) => sum + nodeBytes(node), 0);
@@ -45,7 +67,11 @@ export function storageSlices(nodes: StorageNode[]): { total: number; slices: Sl
     const nodeId = JSON.stringify([node.node]);
     const nodeStart = angle;
     const size = nodeBytes(node);
-    slices.push({ id: nodeId, label: node.node, description: node.node, level: "node", start: nodeStart, end: nodeStart + span(size), bytes: size });
+    slices.push({
+      id: nodeId, label: node.node, description: node.node, level: "node",
+      start: nodeStart, end: nodeStart + span(size), bytes: size,
+      throughput: { read: sumThroughput(node.drives, "read"), write: sumThroughput(node.drives, "write") },
+    });
     for (const drive of node.drives) {
       const driveId = JSON.stringify([node.node, drive.id]);
       const driveStart = angle;
@@ -96,5 +122,25 @@ export function sliceLabel(slice: Slice): { text: string; x: number; y: number; 
 }
 
 export function sliceValue(slice: Slice, mode: StorageMode): number | null {
-  return mode === "size" ? slice.bytes : slice.io?.[mode]?.mean ?? null;
+  if (mode === "size") return slice.bytes;
+  return slice.throughput?.[mode] ?? slice.io?.[mode]?.mean ?? null;
+}
+
+type RingMaximums = Record<Slice["level"], number | null>;
+
+export function ringMaximums(slices: Slice[], mode: StorageMode): RingMaximums {
+  const maximums: RingMaximums = { node: null, drive: null, group: null };
+  for (const slice of slices) {
+    if (!slice.bytes || slice.group?.unattributed) continue;
+    const value = sliceValue(slice, mode);
+    if (value !== null) maximums[slice.level] = Math.max(maximums[slice.level] ?? 0, value);
+  }
+  return maximums;
+}
+
+export function colourBand(slice: Slice, mode: StorageMode, maximums: RingMaximums): number | null {
+  const value = sliceValue(slice, mode);
+  if (value === null || slice.group?.unattributed) return null;
+  const maximum = maximums[slice.level];
+  return maximum ? Math.min(3, Math.floor(value / maximum * 4)) : 0;
 }

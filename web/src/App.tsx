@@ -252,7 +252,7 @@ const BrandMark = () => (
   </svg>
 );
 
-function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onCloseDrawer }: { nodesState: NodesState; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode; drawer: boolean; onCloseDrawer: () => void }) {
+function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onCloseDrawer, showStorage }: { nodesState: NodesState; showStorage: boolean; current?: { node: string; path: string }; onOpen: (node: string, path: string, how: How) => void; onTrash: (node: string) => void; footer: React.ReactNode; drawer: boolean; onCloseDrawer: () => void }) {
   const root = useRef<HTMLElement>(null);
   return (
     <>
@@ -267,6 +267,9 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
       <div className="side-scroll">
         <SideTree nodesState={nodesState} current={current} onOpen={onOpen} onTrash={onTrash} />
       </div>
+      {showStorage && <a href="/storage" data-nav aria-label="Storage" className="btn-a side-storage">
+        <Ic.HardDrive size={16} aria-hidden="true" /> Storage
+      </a>}
       {footer}
     </aside>
     </>
@@ -685,7 +688,7 @@ export function App({ account }: { account?: Account } = {}) {
   return (
     <div className="app" ref={appRef}>
       <CompareCtx.Provider value={routedCompare}>
-      <Sidebar drawer={navOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<>{!phone && notices}<div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
+      <Sidebar showStorage={!account || account.admin} drawer={navOpen} onCloseDrawer={closeDrawer} nodesState={nodesState} current={activeLeaf && { node: activeLeaf.node, path: activeLeaf.path }} onOpen={(n, p, h) => { closeDrawer(); openFromSide(n, p, h); }} onTrash={(node) => { closeDrawer(); setTrash({ node, volume: "" }); }} footer={<>{!phone && notices}<div className="side-foot"><ThemeMenu /><Tip label="Keyboard shortcuts"><button type="button" className="phone-only side-set" aria-label="Keyboard shortcuts" onClick={() => { closeDrawer(); setHelp(true); }}><Keyboard /></button></Tip><Tip label="Settings"><button type="button" className="side-set" aria-label="Settings" aria-pressed={settingsOpen} onClick={() => { closeDrawer(); if (settingsOpen) closeView(() => setSettingsOpen(false)); else setSettingsOpen(true); }}><Ic.Settings /></button></Tip></div></>} />
       {phone && drawer && <div className="drawer-back" onClick={closeDrawer} aria-hidden="true" />}
       <div className="app-col">
       <header className="site-header" ref={headerRef}>

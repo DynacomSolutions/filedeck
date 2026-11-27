@@ -2,8 +2,9 @@ import { useEffect, useId, useRef, useState } from "react";
 import useSWR from "swr";
 import { ArrowLeft, HardDrive } from "lucide-react";
 import { BACKGROUND_HEADER, fmtDate, fmtSize } from "./api";
-import { sliceLabel, slicePath, sliceValue, storageMode, storageModes, storageModeUrl, storageSlices, type Slice, type StorageMode } from "./storageSunburst";
-import type { GroupsResult, IOPressure, Statistics } from "./storageTypes";
+import { useNodes } from "./data";
+import { colourBand, ringMaximums, sliceLabel, slicePath, sliceValue, storageModes, storageRings, storageSlices, storageView, storageViewUrl, type Slice, type StorageMode, type StorageView } from "./storageSunburst";
+import type { GroupsResult, IOPressure, Statistics } from "../../server/src/group-types";
 import "./storageSunburst.css";
 
 const labels = { size: "Storage size", read: "Read pressure", write: "Write pressure" } as const;
@@ -35,17 +36,32 @@ function ioMessage(io: GroupsResult["io"]) {
   return null;
 }
 
-function useStorageMode() {
-  const [mode, setMode] = useState(() => storageMode(location.search));
+function useStorageView() {
+  const [view, setView] = useState(() => storageView(location.search));
   useEffect(() => {
-    const restore = () => setMode(storageMode(location.search));
+    const restore = () => setView(storageView(location.search));
     window.addEventListener("popstate", restore);
     return () => window.removeEventListener("popstate", restore);
   }, []);
-  return [mode, (next: StorageMode) => {
-    history.replaceState(history.state, "", storageModeUrl(location.href, next));
-    setMode(next);
+  return [view, (patch: Partial<StorageView>) => {
+    const next = { ...storageView(location.search), ...patch };
+    history.replaceState(history.state, "", storageViewUrl(location.href, next));
+    setView(next);
   }] as const;
+}
+
+function NodePicker({ node, choose }: { node: string | null; choose: (node: string | null) => void }) {
+  const id = useId();
+  const { nodes } = useNodes();
+  const choices = new Set((nodes ?? []).filter(({ kind }) => kind !== "source").map(({ name }) => name));
+  if (node) choices.add(node);
+  return <div className="storage-node-picker">
+    <label htmlFor={id}>Node</label>
+    <select id={id} value={node ?? ""} onChange={(event) => choose(event.currentTarget.value || null)}>
+      <option value="">All nodes</option>
+      {[...choices].map((name) => <option key={name} value={name}>{name}</option>)}
+    </select>
+  </div>;
 }
 
 async function fetchStorage(url: string): Promise<GroupsResult> {
@@ -125,22 +141,25 @@ function SliceDetails({ selection, slices, mode, choose }: {
 }
 
 export function StorageSunburst({ node }: { node?: string | null }) {
-  const [mode, setMode] = useStorageMode();
-  const [selected, setSelected] = useState("");
+  const [view, update] = useStorageView();
+  const { mode, selected } = view;
+  const activeNode = node === undefined ? view.node : node;
+  const setSelected = (selected: string) => update({ selected });
   const id = useId();
-  const url = node ? `/api/groups?${new URLSearchParams({ node })}` : "/api/groups";
+  const url = activeNode ? `/api/groups?${new URLSearchParams({ node: activeNode })}` : "/api/groups";
   const { data, error, isLoading } = useSWR<GroupsResult, Error>(url, fetchStorage, { refreshInterval: 60_000, shouldRetryOnError: false });
   const { slices, total } = storageSlices(data?.nodes ?? []);
   const marked = slices.filter((slice) => slice.bytes > 0);
   const emptyNodes = slices.filter((slice) => slice.level === "node" && !slice.bytes);
   const focus = slices.find((slice) => slice.id === selected) ?? slices.find((s) => s.level === "drive") ?? slices[0];
-  const maximum = marked.reduce((max, slice) => Math.max(max, sliceValue(slice, mode) ?? 0), 0);
+  const maximums = ringMaximums(marked, mode);
   const current = data && ioMessage(data.io);
 
   return <div className="storage-sunburst">
     <div className="storage-controls">
+      {node === undefined && <NodePicker node={activeNode} choose={(node) => update({ node, selected: null })} />}
       <div className="storage-toggle" role="group" aria-label="Colour by">
-        {storageModes.map((choice) => <button key={choice} type="button" aria-pressed={mode === choice} onClick={() => setMode(choice)}>
+        {storageModes.map((choice) => <button key={choice} type="button" aria-pressed={mode === choice} onClick={() => update({ mode: choice })}>
           {labels[choice]}
         </button>)}
       </div>
@@ -154,7 +173,7 @@ export function StorageSunburst({ node }: { node?: string | null }) {
         {marked.length > 0 ? <>
           <svg className="storage-wheel" viewBox="-200 -200 400 400" role="group" aria-labelledby={`${id}-title`} aria-describedby={`${id}-desc`}>
             <title id={`${id}-title`}>Grouped storage sunburst</title>
-            <desc id={`${id}-desc`}>Rings show nodes, drives and groups from inside out. The length of each segment represents allocated bytes.</desc>
+            <desc id={`${id}-desc`}>Rings show nodes, drives and groups from inside out. Segment length represents allocated bytes. Node throughput is the sum for drives with samples.</desc>
             <defs>
               <pattern id={`${id}-unknown`} width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
                 <rect width="5" height="5" className="storage-unknown-base" />
@@ -166,8 +185,8 @@ export function StorageSunburst({ node }: { node?: string | null }) {
             </defs>
             {marked.map((slice) => {
               const value = sliceValue(slice, mode);
-              const colour = value === null || slice.group?.unattributed ? `url(#${id}-unknown)`
-                : colours[mode][Math.min(3, Math.floor(maximum ? value / maximum * 4 : 0))];
+              const band = colourBand(slice, mode, maximums);
+              const colour = band === null ? `url(#${id}-unknown)` : colours[mode][band];
               const d = slicePath(slice);
               const label = sliceLabel(slice);
               const flags = dataState(slice);
@@ -191,7 +210,13 @@ export function StorageSunburst({ node }: { node?: string | null }) {
           </svg>
           <div className="storage-legend">
             <div><span className="storage-swatches" aria-hidden="true">{colours[mode].map((colour) => <i key={colour} style={{ background: colour }} />)}</span>
-              <span>{mode === "size" ? "Size" : "Mean throughput"} {format(0, mode)} to {format(maximum, mode)}</span></div>
+              <span>{mode === "size" ? "Size by ring" : "Mean throughput by ring"}</span></div>
+            <ul className="storage-ring-scale">
+              {(Object.keys(storageRings) as Slice["level"][]).map((ring) => {
+                const max = maximums[ring];
+                return <li key={ring}><span>{ring}</span> {max === null ? "Unavailable" : `${format(0, mode)} to ${format(max, mode)}`}</li>;
+              })}
+            </ul>
             <div><i className="storage-swatch-unknown" aria-hidden="true" />{mode === "size" ? "Unattributed" : "Unattributed or no IO samples"}</div>
             <div><i className="storage-swatch-stale" aria-hidden="true" />Stale or incomplete size</div>
           </div>
@@ -213,7 +238,7 @@ export function StorageSunburst({ node }: { node?: string | null }) {
 export function StoragePage() {
   return <main className="storage-page" id="filedeck-main" tabIndex={-1} aria-labelledby="storage-title">
     <div className="storage-wrap">
-      <a href="/" className="btn-a"><ArrowLeft size={16} aria-hidden="true" /> Files</a>
+      <a href="/" className="btn-a" data-nav><ArrowLeft size={16} aria-hidden="true" /> Files</a>
       <h1 id="storage-title">Storage</h1>
       <StorageSunburst />
     </div>
