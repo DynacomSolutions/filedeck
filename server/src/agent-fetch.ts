@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import { Readable } from "node:stream";
+import type { IncomingMessage } from "node:http";
 
 /**
  * fetch() for the hub's calls to an agent, without the client's built-in waits (300 s for the response headers and for
@@ -25,6 +26,51 @@ const RESET = new Set(["ECONNRESET", "EPIPE"]);
  * A request with a body of its own kind is never repeated either; see `agentFetch`.
  */
 export type AgentFetchInit = RequestInit & { replay?: boolean };
+
+/**
+ * The body of an answer as a web stream. Node's `Readable.toWeb` calls `controller.enqueue` from the `data` listener with no check that the
+ * stream is still open. When the connection is cut (the caller aborts) while a read is scheduled, the buffered chunks still reach that listener
+ * after the stream failed or closed, and the throw ("Controller is already closed") is an uncaught exception. Here, once the stream is over,
+ * every later event is ignored.
+ */
+export function bodyStream(res: IncomingMessage): ReadableStream<Uint8Array> {
+  let over = false;
+  return new ReadableStream<Uint8Array>(
+    {
+      start(ctl) {
+        res.pause();
+        res.on("data", (chunk: Buffer) => {
+          if (over) return;
+          ctl.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+          if ((ctl.desiredSize ?? 0) <= 0) res.pause();
+        });
+        res.on("end", () => {
+          if (over) return;
+          over = true;
+          ctl.close();
+        });
+        res.on("error", (e) => {
+          if (over) return;
+          over = true;
+          ctl.error(e);
+        });
+        res.on("close", () => {
+          if (over) return;
+          over = true;
+          ctl.error(new DOMException("The answer ended before its end", "AbortError"));
+        });
+      },
+      pull() {
+        res.resume();
+      },
+      cancel(reason) {
+        over = true;
+        res.destroy(reason instanceof Error ? reason : undefined);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
 
 /**
  * Fetch for the hub's calls to an agent.
@@ -68,7 +114,7 @@ function agentFetchOnce(url: string, init: RequestInit | undefined, fresh: boole
       const status = res.statusCode ?? 502;
       const noBody = status === 204 || status === 205 || status === 304 || req.method === "HEAD";
       if (noBody) res.resume();
-      resolve(new Response(noBody ? null : (Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>), { status, statusText: res.statusMessage, headers: h }));
+      resolve(new Response(noBody ? null : bodyStream(res), { status, statusText: res.statusMessage, headers: h }));
       if (signal) {
         const cut = () => res.destroy(signal.reason instanceof Error ? signal.reason : new DOMException("aborted", "AbortError"));
         if (signal.aborted) cut();
