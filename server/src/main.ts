@@ -8,6 +8,7 @@ import { selfCheckTools } from "./archive.ts";
 import { createHub, tailnetListener } from "./hub.ts";
 import { SERVER_KEEP_ALIVE_MS } from "./agent-fetch.ts";
 import { installShutdown } from "./shutdown.ts";
+import { startMcp } from "./mcp/index.ts";
 
 const cfg = loadConfig();
 if (cfg.auth && !cfg.agentToken) {
@@ -51,8 +52,19 @@ metrics?.on("error", (e) => {
   console.error(`FILEDECK_HUB_METRICS_PORT: ${e.message}`);
   process.exit(2);
 });
+// With FILEDECK_MCP_PORT set, the hub must run the MCP server or stop: a hub that runs on without it fails its probes (they ask the MCP port), and a
+// rollout that stops here keeps the old pod. The reason is in the log lines above this one.
+let mcp: Awaited<ReturnType<typeof startMcp>>;
+try {
+  mcp = hub ? await startMcp(cfg, hub) : undefined;
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(2);
+}
 const servers = [server as Server];
 if (identity) servers.push(identity);
 if (metrics) servers.push(metrics);
-const stop = installShutdown(servers, () => (app as { close?: () => Promise<void> }).close?.(), { onSignal: () => (app as { leave?: () => Promise<void> }).leave?.() });
+// The MCP server is not in `servers`: it drains on its own. Its listener closes (a new connection is refused), the calls in flight finish with no time limit (the grace period of
+// the pod is the limit), and then its streams close. The usual shutdown timers start when that ends (`hold`).
+const stop = installShutdown(servers, async () => { await mcp?.stop(); await (app as { close?: () => Promise<void> }).close?.(); }, { onSignal: () => (app as { leave?: () => Promise<void> }).leave?.(), hold: async () => { mcp?.server.close(); await mcp?.drain(); } });
 for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, stop);

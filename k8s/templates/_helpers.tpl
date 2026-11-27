@@ -69,6 +69,9 @@ helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version | replace 
 {{- if or (lt (int $sc.listenPort) 1) (gt (int $sc.listenPort) 65535) (eq (int $sc.listenPort) (int .Values.port)) -}}
 {{- fail "auth.tailscale.sidecar.listenPort must be a port from 1 to 65535 and not the hub port" -}}
 {{- end -}}
+{{- if or (lt (int $sc.udpPort) 1) (gt (int $sc.udpPort) 65535) -}}
+{{- fail "auth.tailscale.sidecar.udpPort must be a port from 1 to 65535" -}}
+{{- end -}}
 {{- else if and (or $t.headers $t.socket) (not $t.proxies) -}}
 {{- fail "auth.tailscale.headers or socket needs proxies" -}}
 {{- end -}}
@@ -96,4 +99,22 @@ helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version | replace 
 {{- /* The serve configuration: HTTPS 443 on the device to the hub's port in the same pod. */}}
 {{- define "filedeck.tailscaleServe" -}}
 {{- dict "TCP" (dict "443" (dict "HTTPS" true)) "Web" (dict "${TS_CERT_DOMAIN}:443" (dict "Handlers" (dict "/" (dict "Proxy" (printf "http://127.0.0.2:%v" (int .Values.auth.tailscale.sidecar.listenPort)))))) | toPrettyJson -}}
+{{- end -}}
+
+{{- /* Checks of hub.mcp.grants: a unique id, a token Secret, and a scope that is written out (an empty scope is a mistake, not "everything"). */}}
+{{- define "filedeck.mcpGrantChecks" -}}
+{{- $seen := dict -}}
+{{- range $i, $g := .Values.hub.mcp.grants -}}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,31}$" (toString ($g.id | default ""))) -}}
+{{- fail (printf "hub.mcp.grants[%d].id must be 1 to 32 characters of a-z, 0-9 and - (it is a metrics label)" $i) -}}
+{{- end -}}
+{{- if hasKey $seen $g.id -}}{{- fail (printf "hub.mcp.grants has the id %q twice" $g.id) -}}{{- end -}}
+{{- $_ := set $seen $g.id true -}}
+{{- if not (and $g.tokenSecret $g.tokenSecret.name) -}}{{- fail (printf "hub.mcp.grants[%d].tokenSecret.name is required" $i) -}}{{- end -}}
+{{- if not $g.resources -}}{{- fail (printf "hub.mcp.grants[%d].resources must list URI templates or prefixes (filedeck:// is everything)" $i) -}}{{- end -}}
+{{- if not $g.tools -}}{{- fail (printf "hub.mcp.grants[%d].tools must list tool names (* is every tool)" $i) -}}{{- end -}}
+{{- if and $.Values.auth.enabled (not $g.account) (not $.Values.hub.mcp.account) -}}
+{{- fail (printf "hub.mcp.grants[%d] needs an account (or set hub.mcp.account) when auth.enabled is true" $i) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}

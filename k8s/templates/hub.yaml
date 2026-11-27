@@ -8,6 +8,17 @@
 {{- if or (lt $metricsPort 1024) (gt $metricsPort 65535) (eq $metricsPort (int .Values.port)) }}
 {{- fail "hub.metricsPort must be between 1024 and 65535 and differ from port" }}
 {{- end }}
+{{- $mcp := .Values.hub.mcp }}
+{{- if $mcp.enabled }}
+{{- $mcpPort := int $mcp.port }}
+{{- if or (lt $mcpPort 1024) (gt $mcpPort 65535) (eq $mcpPort (int .Values.port)) (eq $mcpPort $metricsPort) }}
+{{- fail "hub.mcp.port must be between 1024 and 65535 and differ from port and hub.metricsPort" }}
+{{- end }}
+{{- if not $mcp.tls.secretName }}
+{{- fail "hub.mcp.tls.secretName is required when hub.mcp.enabled is true (a kubernetes.io/tls Secret: the MCP listener serves HTTPS only)" }}
+{{- end }}
+{{- include "filedeck.mcpGrantChecks" . }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -77,6 +88,31 @@ spec:
               value: {{ .Values.port | quote }}
             - name: FILEDECK_HUB_METRICS_PORT
               value: {{ $metricsPort | quote }}
+            {{- if $mcp.enabled }}
+            # MCP server (docs/mcp.md): its own HTTPS listener, never in the public route.
+            - name: FILEDECK_MCP_PORT
+              value: {{ $mcp.port | quote }}
+            # The grants (who may read what) and their tokens are files: the hub reads them again by itself, so a grant that is removed or changed stops working with no restart.
+            - name: FILEDECK_MCP_GRANTS_FILE
+              value: /etc/filedeck/mcp/grants.json
+            - name: FILEDECK_MCP_TLS_CERT
+              value: /var/run/filedeck/mcp-tls/tls.crt
+            - name: FILEDECK_MCP_TLS_KEY
+              value: /var/run/filedeck/mcp-tls/tls.key
+            - name: FILEDECK_MCP_POLL_MS
+              value: {{ $mcp.pollMs | quote }}
+            - name: FILEDECK_MCP_SESSIONS_PER_GRANT
+              value: {{ $mcp.sessionsPerGrant | quote }}
+            {{- with $mcp.allowedHosts }}
+            # Host names that the MCP listener answers to (in-cluster clients use the Service name). Empty = any; it does not use hub.allowedHosts.
+            - name: FILEDECK_MCP_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with $mcp.account }}
+            - name: FILEDECK_MCP_ACCOUNT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.auth.enabled }}
             # Sign-in (see "Turning sign-in on" in docs/install.md).
             - name: FILEDECK_AUTH
@@ -213,15 +249,31 @@ spec:
               containerPort: {{ .Values.port }}
             - name: metrics
               containerPort: {{ $metricsPort }}
+            {{- if $mcp.enabled }}
+            - name: mcp
+              containerPort: {{ $mcp.port }}
+            {{- end }}
+          # With the MCP server on, readiness and liveness use its listener. /mcp/readyz and /mcp/healthz also ask the hub's own /healthz on
+          # loopback, so one probe covers both listeners, and /mcp/readyz fails from the first moment of a drain.
           readinessProbe:
+            {{- if $mcp.enabled }}
+            httpGet: {path: /mcp/readyz, port: mcp, scheme: HTTPS}
+            {{- else }}
             httpGet: {path: /healthz, port: http}
+            {{- end }}
             periodSeconds: 5
           startupProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10
             failureThreshold: 30
           livenessProbe:
+            {{- if $mcp.enabled }}
+            httpGet: {path: /mcp/healthz, port: mcp, scheme: HTTPS}
+            timeoutSeconds: 5
+            failureThreshold: 6
+            {{- else }}
             httpGet: {path: /healthz, port: http}
+            {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
@@ -239,6 +291,19 @@ spec:
             - name: storage-groups
               mountPath: /etc/filedeck/groups
               readOnly: true
+            {{- end }}
+            {{- if $mcp.enabled }}
+            - name: mcp-grants
+              mountPath: /etc/filedeck/mcp
+              readOnly: true
+            - name: mcp-tls
+              mountPath: /var/run/filedeck/mcp-tls
+              readOnly: true
+            {{- range $mcp.grants }}
+            - name: mcp-token-{{ .id }}
+              mountPath: /var/run/filedeck/mcp/{{ .id }}
+              readOnly: true
+            {{- end }}
             {{- end }}
             - name: vault
               mountPath: /var/lib/filedeck-vault
@@ -301,6 +366,9 @@ spec:
             - name: TS_SERVE_CONFIG
               value: /etc/tailscale-serve/serve.json
             {{- end }}
+            # A fixed UDP port for direct connections: the MCP network policy allows this port (templates/hub-mcp-networkpolicy.yaml).
+            - name: TS_TAILSCALED_EXTRA_ARGS
+              value: {{ printf "--port=%d" (int $sc.udpPort) | quote }}
             {{- with $sc.extraArgs }}
             - name: TS_EXTRA_ARGS
               value: {{ join " " . | quote }}
@@ -368,6 +436,24 @@ spec:
                     - {path: namespace, fieldRef: {fieldPath: metadata.namespace}}
         {{- end }}
         {{- end }}
+        {{- if $mcp.enabled }}
+        - name: mcp-grants
+          configMap:
+            name: {{ include "filedeck.name" . }}-mcp-grant-scopes
+        - name: mcp-tls
+          secret:
+            secretName: {{ $mcp.tls.secretName }}
+            defaultMode: 0440
+        {{- range $mcp.grants }}
+        - name: mcp-token-{{ .id }}
+          secret:
+            secretName: {{ .tokenSecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .tokenSecret.key | default "token" }}
+                path: token
+        {{- end }}
+        {{- end }}
         - name: vault
           persistentVolumeClaim:
             claimName: {{ include "filedeck.name" . }}-vault
@@ -418,3 +504,9 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+    {{- if $mcp.enabled }}
+    # The MCP port is for the peers in hub.mcp.allowFrom (templates/hub-mcp-networkpolicy.yaml). No route points at it.
+    - name: mcp
+      port: {{ $mcp.port }}
+      targetPort: mcp
+    {{- end }}

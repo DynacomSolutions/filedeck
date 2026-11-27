@@ -465,7 +465,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const groupIO = new GroupIO(cfg.victoriaMetricsUrl, fetch, Date.now, groupNodes,
     cfg.victoriaMetricsUrl ? loadGroupRulesByNode(cfg.groupRulesFile, groupNodes) : undefined);
   app.get("/healthz", (c) => c.text("ok"));
-  const metrics = new Hono().get("/metrics", (c) => c.text([...groupIO.metricLines(), ""].join("\n")));
+  // more metric lines, added by parts of the hub that start later (the MCP server)
+  const extraMetrics: (() => string[])[] = [];
+  const metrics = new Hono().get("/metrics", (c) => c.text([...groupIO.metricLines(), ...extraMetrics.flatMap((f) => f()), ""].join("\n")));
   if (cfg.hubMetricsPort) app.get("/metrics", (c) => c.notFound());
   else app.route("/", metrics);
 
@@ -1051,5 +1053,5 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // a missing build file is a 404, never the app shell (an old tab asking for a chunk of a previous build must see the failure)
   app.all("/assets/*", (c) => c.text("not found", 404));
   app.get("*", page);
-  return Object.assign(app, { metrics });
+  return Object.assign(app, { metrics, addMetrics: (lines: () => string[]) => void extraMetrics.push(lines) });
 }

@@ -376,10 +376,10 @@ ETA: 2026-11-28 07:00 ICT
 
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 206 | MCP endpoint, tools and resources on the hub | in_progress | claude-20261127-watch-events | mcp-server | | 2026-11-28 04:00 ICT | Streamable HTTP, MCP 2025-06-18 or later<br>Own port, not on the public route, scoped token<br>Tools: du, list, stat, scan status, node status, jobs, storage groups |
-| 207 | MCP subscriptions and live notifications | in_progress | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | resources/subscribe, resources/updated, list_changed<br>Scan finished, job and node state changes |
-| 208 | MCP metrics, probes and drain | in_progress | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | Sessions, subscriptions, notifications, tool calls and errors<br>Liveness on the real MCP listener |
-| 209 | Publish the MCP contract | in_progress | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | docs/mcp.md: tools, resource URIs, event payloads<br>No ACP: FileDeck runs no agent of its own |
+| 206 | MCP endpoint, tools and resources on the hub | in_review | claude-20261127-watch-events | mcp-server | | 2026-11-28 04:00 ICT | Streamable HTTP over HTTPS, MCP 2025-06-18 and later, own port, not on the public route<br>Grants: each with its own token, scope and revocation without restart<br>Tools: du, list, stat, scan status, node status, jobs, storage groups, change events |
+| 207 | MCP subscriptions and live notifications | in_review | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | resources/subscribe, resources/updated, list_changed with _meta.eventId, eventId, changeId, revision, streamId and seq<br>list_changed from initialize, gap signals for a client, one shared watch per node and account |
+| 208 | MCP metrics, probes and drain | in_review | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | Metrics filedeck_mcp_*, liveness and readiness on the MCP listener, drain on SIGTERM<br>Chart: TLS Secret, grants, Service port, NetworkPolicy |
+| 209 | Publish the MCP contract | in_review | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | docs/mcp.md: contract 2, tools, resources, notifications, gaps, commissioning list, grants, retention<br>No ACP: FileDeck runs no agent of its own |
 | 210 | Disk verification in MCP | todo | claude-20261127-watch-events | | 29.207 | 2026-11-28 10:00 ICT | Runs, results, stage changes and disk alerts<br>Waits for the disk verification PR https://github.com/DynacomSolutions/filedeck/pull/288 |
 | 211 | Release, deploy and live subscription proof | todo | claude-20261127-watch-events | | 29.206, 29.207, 29.208 | 2026-11-28 07:00 ICT | Release, roll out, then a live client subscribes and gets a scan finished event |
 

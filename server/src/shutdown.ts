@@ -8,6 +8,11 @@ export interface ShutdownOptions {
   exit?: (code: number) => void;
   /** runs at the very start of the shutdown, beside the drain: work the next process waits for (releasing a lease) must not queue behind open connections */
   onSignal?: () => Promise<void> | void;
+  /**
+   * Work that has no time limit of its own, for example the drain of the MCP server (it waits for its calls in flight). It starts at the signal.
+   * `hardMs` starts when it ends, and cleanup waits for it. Until then only the kill of the process by the orchestrator (the grace period of the pod) ends it.
+   */
+  hold?: () => Promise<void> | void;
 }
 
 /**
@@ -23,7 +28,9 @@ export function installShutdown(servers: Server | Server[], cleanup: () => Promi
   return (): void => {
     if (started) return exit(1);
     started = true;
-    setTimeout(() => exit(1), hardMs).unref();
+    const held = o.hold ? Promise.resolve(o.hold()).catch(() => undefined) : undefined;
+    if (held) void held.then(() => setTimeout(() => exit(1), hardMs).unref());
+    else setTimeout(() => exit(1), hardMs).unref();
     void Promise.resolve(o.onSignal?.()).catch(() => undefined);
     const drain = setTimeout(() => all.forEach((s) => s.closeAllConnections()), drainMs);
     drain.unref();
@@ -32,6 +39,6 @@ export function installShutdown(servers: Server | Server[], cleanup: () => Promi
     all.forEach((s) => s.closeIdleConnections());
     void drained.then(() => clearTimeout(drain));
     // Cleanup (database handles, source backends) runs only after in-flight requests are done or cut.
-    void drained.then(() => cleanup()).catch(() => undefined).then(() => exit(0));
+    void Promise.all([drained, held]).then(() => cleanup()).catch(() => undefined).then(() => exit(0));
   };
 }

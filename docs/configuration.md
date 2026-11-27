@@ -48,3 +48,18 @@ Hub setting:
 - `FILEDECK_API_TOKEN_SCOPES`: what the token of `FILEDECK_API_TOKEN` may read, separated by commas. `du` is folder sizes and `changes` is the change event stream. The default is `du`. Chart value: `apiToken.scopes`.
 
 [Back to the README](../README.md)
+
+## MCP server
+
+Hub settings. See [MCP server](mcp.md). The server is off unless `FILEDECK_MCP_PORT` is set.
+
+- `FILEDECK_MCP_PORT`: the port of the MCP listener (1024 to 65535, different from `PORT` and `FILEDECK_HUB_METRICS_PORT`). The chart sets it with `hub.mcp.port` when `hub.mcp.enabled` is true.
+- `FILEDECK_MCP_GRANTS_FILE`: a JSON file that lists the grants (id, token file, resources, tools, account). The hub reads it and the token files again every 2 seconds. A grant that is removed or changed stops working with no restart. Without this file the listener does not start. Chart: `hub.mcp.grants`.
+- `FILEDECK_MCP_TLS_CERT` and `FILEDECK_MCP_TLS_KEY`: PEM files of the certificate chain and the key. With them the listener serves HTTPS only, and it reads them again every 5 seconds. Both or neither. Chart: `hub.mcp.tls.secretName` (a `kubernetes.io/tls` Secret).
+- `FILEDECK_MCP_ALLOW_PLAINTEXT`: `1` lets the listener serve plain HTTP when there is no certificate. For tests only. Without it, and without a certificate, the listener does not start.
+- `FILEDECK_MCP_ACCOUNT`: with sign-in on, the account of a grant that names none (not `root`). With sign-in off it is not used. Chart: `hub.mcp.account`.
+- `FILEDECK_MCP_POLL_MS`: how often the shared watch of a node asks its agent while a client follows it, in milliseconds. 1000 to 600000, default 5000. Chart: `hub.mcp.pollMs`.
+- `FILEDECK_MCP_SESSIONS_PER_GRANT`: most open sessions of one grant, 1 to 256, default 32. At the limit a new session ends the session of that grant that made no request for the longest time. Chart: `hub.mcp.sessionsPerGrant`.
+- `FILEDECK_MCP_ALLOWED_HOSTS`: host names (host or host:port, separated by commas) that the MCP listener answers to. Any other `Host` header gets 421. Empty (the default) means any host. It is not `FILEDECK_ALLOWED_HOSTS`: clients in the cluster use the name of the Service. The `Origin` check stays on. Chart: `hub.mcp.allowedHosts`.
+
+With `FILEDECK_MCP_PORT` set and no way to start the listener (no grants file, no or invalid TLS files), the hub logs the reason and exits with code 2. It does not run on without MCP.

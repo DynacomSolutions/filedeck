@@ -1,0 +1,23 @@
+{{- if .Values.hub.mcp.enabled }}
+{{- /*
+The list of grants. The hub watches this file and the token files. It has no checksum annotation on the pod on purpose: an edit of the list
+or of a token Secret applies in a minute or so (the kubelet refreshes mounted files) and needs no restart. Removing a grant with Helm also changes
+the pod's volumes, so the hub rolls then; the revoked grant stops working in both cases.
+*/ -}}
+{{- $grants := list }}
+{{- range .Values.hub.mcp.grants }}
+{{- $g := dict "id" .id "tokenFile" (printf "/var/run/filedeck/mcp/%s/token" .id) "resources" .resources "tools" .tools }}
+{{- with .account }}{{ $_ := set $g "account" . }}{{ end }}
+{{- $grants = append $grants $g }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Not "<name>-mcp-grants": the token Secrets of grants are often named like that, and a Secret and a ConfigMap of one name are easy to mix up.
+  name: {{ include "filedeck.name" . }}-mcp-grant-scopes
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+data:
+  grants.json: {{ $grants | toJson | quote }}
+{{- end }}
