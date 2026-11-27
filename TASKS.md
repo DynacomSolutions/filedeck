@@ -362,8 +362,8 @@ ETA: 2026-11-27 19:00 ICT
 
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 200 | Add the status page and URL state | in_progress | codex | jobs-status-page | | 2026-11-27 19:00 ICT | Link from the jobs tray |
-| 201 | Show jobs and details | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Reuse the current job views and poll |
-| 202 | Show scan and watcher status | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Read agent health through the hub |
-| 203 | Show the live event stream | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Filter one node at a time |
-| 204 | Add the storage section | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Reserve a place for the chart from 26.189 |
+| 200 | Add the status page and URL state | in_review | codex | jobs-status-page | | 2026-11-27 19:00 ICT | Link from the jobs tray<br>PR https://github.com/DynacomSolutions/filedeck/pull/282 |
+| 201 | Show jobs and details | in_review | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Reuse the current job views and poll<br>PR https://github.com/DynacomSolutions/filedeck/pull/282 |
+| 202 | Show scan and watcher status | in_review | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Read agent health through the hub<br>PR https://github.com/DynacomSolutions/filedeck/pull/282 |
+| 203 | Show the live event stream | in_review | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Filter one node at a time<br>PR https://github.com/DynacomSolutions/filedeck/pull/282 |
+| 204 | Add the storage section | in_review | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Reserve a place for the chart from 26.189<br>PR https://github.com/DynacomSolutions/filedeck/pull/282 |
