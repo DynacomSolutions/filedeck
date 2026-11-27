@@ -1,3 +1,5 @@
+import { storageView, type StorageView } from "./storageSunburst";
+
 export const STATUS_SECTIONS = ["jobs", "nodes", "events", "storage"] as const;
 export const CHANGE_KINDS = ["create", "delete", "modify", "close_write", "attrib", "move"] as const;
 export const JOB_FILTERS = ["active", "recent", "failed"] as const;
@@ -5,6 +7,7 @@ export const JOB_FILTERS = ["active", "recent", "failed"] as const;
 export interface StatusRoute {
   node: string | null;
   section: typeof STATUS_SECTIONS[number];
+  storage?: Omit<StorageView, "node">;
   job?: string;
   jobs?: typeof JOB_FILTERS[number];
   prefix?: string;
@@ -25,9 +28,12 @@ export function statusRoute(pathname: string, search: string): StatusRoute | nul
   const q = new URLSearchParams(search);
   const part = <T extends string>(name: string, allowed: readonly T[]) => allowed.find((value) => value === q.get(name));
   const value = (name: string, limit: number) => q.get(name)?.slice(0, limit) || undefined;
+  const section = part("section", STATUS_SECTIONS) ?? "jobs";
+  const { node: storageNode, mode, selected } = storageView(q);
   return {
-    node,
-    section: part("section", STATUS_SECTIONS) ?? "jobs",
+    node: section === "storage" ? storageNode ?? node : node,
+    section,
+    ...(section === "storage" || q.has("storageMode") || q.has("slice") ? { storage: { mode, selected } } : {}),
     job: value("job", 512),
     jobs: part("jobs", JOB_FILTERS),
     prefix: value("prefix", 4096),
@@ -37,18 +43,33 @@ export function statusRoute(pathname: string, search: string): StatusRoute | nul
   };
 }
 
-export function statusUrl(route: StatusRoute): string {
-  const q = new URLSearchParams();
+const statusKeys = ["job", "jobs", "prefix", "glob", "kind", "type"] as const;
+const storageKeys = ["section", "node", "storageMode", "slice"];
+
+export function statusUrl(route: StatusRoute, search = ""): string {
+  const q = new URLSearchParams(route.section === "storage" ? search : "");
+  for (const key of [...storageKeys, ...statusKeys]) q.delete(key);
   if (route.section !== "jobs") q.set("section", route.section);
-  for (const key of ["job", "jobs", "prefix", "glob", "kind", "type"] as const) {
+  if (route.section === "storage" && route.node) q.set("node", route.node);
+  if (route.storage?.mode && route.storage.mode !== "size") q.set("storageMode", route.storage.mode);
+  if (route.storage?.selected) q.set("slice", route.storage.selected);
+  for (const key of statusKeys) {
     const value = route[key];
     if (value) q.set(key, value);
   }
-  return "/status" + (route.node ? "/" + encodeURIComponent(route.node) : "") + (q.size ? "?" + q : "");
+  const pathNode = route.section === "storage" ? null : route.node;
+  return "/status" + (pathNode ? "/" + encodeURIComponent(pathNode) : "") + (q.size ? "?" + q : "");
 }
 
 export function statusHistoryAction(from: StatusRoute, to: StatusRoute): "push" | "replace" {
-  return from.node === to.node ? "replace" : "push";
+  return to.section === "storage" || from.node === to.node ? "replace" : "push";
+}
+
+export function legacyStorageUrl(pathname: string, search: string, hash: string): string | null {
+  if (pathname !== "/storage" && pathname !== "/storage/") return null;
+  const query = new URLSearchParams(search);
+  query.set("section", "storage");
+  return "/status?" + query + hash;
 }
 
 export function changesUrl(node: string, route: StatusRoute, since?: string): string {

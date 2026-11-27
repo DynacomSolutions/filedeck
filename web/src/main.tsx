@@ -3,7 +3,7 @@ import { SWRConfig } from "swr";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { StatusPage } from "./StatusPage";
-import { statusRoute } from "./statusRoute";
+import { legacyStorageUrl, statusRoute } from "./statusRoute";
 import { swrConfig } from "./data";
 import "./styles.css";
 import "./accessibility.css";
@@ -24,6 +24,8 @@ import { HubUnreachable, UpdateBanner } from "./PwaScreens";
 installViewportTracking();
 installPwa();
 
+const legacyStorage = legacyStorageUrl(location.pathname, location.search, location.hash);
+if (legacyStorage) history.replaceState(history.state, "", legacyStorage);
 const SignIn = lazy(() => import("./SignIn").then((m) => ({ default: m.SignIn })));
 
 /**

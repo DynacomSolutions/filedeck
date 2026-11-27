@@ -648,6 +648,7 @@ button.danger{color:var(--danger-text)}
 .more-tiles{grid-column:1/-1;height:2px}
 .ft tr.more td{padding:0;border:0}
 /* settings view and its sidebar entry */
+.side-storage{flex:none;align-self:flex-start;margin:.35rem .7rem 0}
 .side-foot{flex:none;display:flex;align-items:center;gap:.4rem;margin:.55rem .7rem .7rem}
 .side-foot .theme-seg{flex:1;min-width:0;margin:0}
 .side-foot .tip{flex:none;display:inline-flex}

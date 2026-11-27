@@ -1,21 +1,18 @@
-import useSWR from "swr";
-import { BACKGROUND_HEADER } from "./api";
+import { lazy, Suspense } from "react";
+import type { StorageView } from "./storageSunburst";
 
-async function fetchGroups(url: string): Promise<unknown> {
-  const response = await fetch(url, { headers: BACKGROUND_HEADER });
-  if (response.status === 404 || (response.ok && !response.headers.get("content-type")?.includes("application/json"))) return undefined;
-  if (!response.ok) throw new Error(`Storage data is unavailable (HTTP ${response.status}).`);
-  return response.json();
-}
+const StorageSunburst = lazy(() => import("./StorageSunburst").then((module) => ({ default: module.StorageSunburst })));
 
-/** Chart mount point. Replace the body when the groups response and sunburst component are available. */
-export function StorageSection({ node }: { node: string | null }) {
-  const { data, error, isLoading } = useSWR("/api/groups", fetchGroups, { shouldRetryOnError: false });
+export function StorageSection({ view, update }: {
+  view: StorageView;
+  update: (patch: Partial<Omit<StorageView, "node">>) => void;
+}) {
   return (
     <section className="status-section" aria-labelledby="status-storage-title">
-      <div className="status-section-head"><div><h2 id="status-storage-title">Storage</h2><p>Storage, read and write pressure{node ? ` on ${node}` : ""}.</p></div></div>
-      <p className="status-message" role="status">{isLoading ? "Loading storage data…" : error ? String(error.message) :
-        data === undefined ? "This hub does not provide grouped storage data yet." : "The storage charts are not available in this version."}</p>
+      <div className="status-section-head"><div><h2 id="status-storage-title">Storage</h2><p>Storage, read and write pressure{view.node ? ` on ${view.node}` : ""}.</p></div></div>
+      <Suspense fallback={<p className="status-message" role="status">Loading storage data…</p>}>
+        <StorageSunburst view={view} update={update} />
+      </Suspense>
     </section>
   );
 }
