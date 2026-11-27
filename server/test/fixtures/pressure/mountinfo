@@ -1,0 +1,7 @@
+22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
+23 22 259:1 / /boot rw,relatime shared:2 - vfat /dev/nvme0n1p1 rw
+24 22 253:0 / /var/lib/data rw,relatime shared:3 - xfs /dev/mapper/vg-data rw
+25 22 0:30 / /srv/share rw,relatime shared:4 - nfs4 server:/export rw
+26 22 0:5 / /dev rw,nosuid shared:5 - devtmpfs devtmpfs rw
+27 22 0:21 / /proc rw,nosuid shared:6 - proc proc rw
+28 22 259:3 /sub /mnt/disk\040one rw,relatime shared:7 - btrfs /dev/nvme1n1 rw
