@@ -89,7 +89,7 @@ jobs:
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            if timeout 3m bash -c 'sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev'; then
+            if timeout 3m bash -c 'sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools 7zip qpdf ffmpeg git smbclient openssh-server apache2 libpam0g-dev libbpf-dev libelf-dev zlib1g-dev'; then
               break
             fi
             if [[ "$attempt" == 3 ]]; then exit 1; fi

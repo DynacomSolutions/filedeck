@@ -39,6 +39,9 @@ const allowed = [
   // server/test/sandbox.test.ts: the x32 system call tests exist only on x86-64, and only where the kernel has x32 calls enabled.
   /^sandbox live: skipped \(x32 calls exist on x86-64 only\)$/,
   /^sandbox live: skipped \(this kernel has x32 calls disabled(?:: .*)?\)$/,
+  // server/test/iotrace-{unit,helper}.test.ts: the eBPF helper needs clang and libbpf to build (the image build sets FILEDECK_REQUIRE_IOTRACE=1 and fails instead of skipping),
+  // and its live run needs a process that may load BPF (CAP_BPF and CAP_PERFMON); an unprivileged pass skips the live run and runs the refusal test instead.
+  /^iotrace (?:unit|helper): skipped \(.+\)$/,
 ];
 
 rl.on("close", () => {

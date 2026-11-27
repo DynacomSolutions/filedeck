@@ -58,7 +58,7 @@ jobs:
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            if timeout 6m bash -c 'sudo apt-get update && sudo apt-get install --no-install-recommends -y libarchive-tools 7zip qpdf ffmpeg git smbclient'; then
+            if timeout 6m bash -c 'sudo apt-get update && sudo apt-get install --no-install-recommends -y libarchive-tools 7zip qpdf ffmpeg git smbclient libbpf-dev libelf-dev zlib1g-dev'; then
               break
             fi
             if [[ "$attempt" == 3 ]]; then exit 1; fi
