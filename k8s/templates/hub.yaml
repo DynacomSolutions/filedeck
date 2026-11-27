@@ -4,6 +4,10 @@
 {{- $tsOn := and .Values.auth.enabled (or $sc.enabled $ts.headers $ts.socket) }}
 {{- $withSecrets := false }}
 {{- range .Values.sources }}{{ if .secretRef }}{{ $withSecrets = true }}{{ end }}{{ end }}
+{{- $metricsPort := int .Values.hub.metricsPort }}
+{{- if or (lt $metricsPort 1024) (gt $metricsPort 65535) (eq $metricsPort (int .Values.port)) }}
+{{- fail "hub.metricsPort must be between 1024 and 65535 and differ from port" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,8 +28,11 @@ spec:
       labels:
         {{- include "filedeck.labels" . | nindent 8 }}
         app.kubernetes.io/component: hub
-      {{- if or .Values.brand.cssContent (and $sc.enabled $sc.serve) }}
+      {{- if or .Values.brand.cssContent (and $sc.enabled $sc.serve) .Values.groups }}
       annotations:
+        {{- if .Values.groups }}
+        checksum/storage-groups: {{ .Values.groups | toJson | sha256sum | quote }}
+        {{- end }}
         {{- if .Values.brand.cssContent }}
         checksum/brand-css: {{ .Values.brand.cssContent | sha256sum | quote }}
         {{- end }}
@@ -68,6 +75,8 @@ spec:
               value: hub
             - name: PORT
               value: {{ .Values.port | quote }}
+            - name: FILEDECK_HUB_METRICS_PORT
+              value: {{ $metricsPort | quote }}
             {{- if .Values.auth.enabled }}
             # Sign-in (see "Turning sign-in on" in docs/install.md).
             - name: FILEDECK_AUTH
@@ -113,6 +122,14 @@ spec:
             - name: FILEDECK_TAILSCALE_LISTEN
               value: {{ . | quote }}
             {{- end }}
+            {{- end }}
+            {{- if .Values.groups }}
+            - name: FILEDECK_GROUPS_FILE
+              value: /etc/filedeck/groups/rules.json
+            {{- end }}
+            {{- with .Values.hub.victoriaMetricsUrl }}
+            - name: FILEDECK_VICTORIA_METRICS_URL
+              value: {{ . | quote }}
             {{- end }}
             {{- if .Values.hub.trustedProxies }}
             - name: FILEDECK_TRUSTED_PROXIES
@@ -185,6 +202,8 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.port }}
+            - name: metrics
+              containerPort: {{ $metricsPort }}
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 5
@@ -207,6 +226,11 @@ spec:
             runAsUser: 1000
             runAsGroup: 1000
           volumeMounts:
+            {{- if .Values.groups }}
+            - name: storage-groups
+              mountPath: /etc/filedeck/groups
+              readOnly: true
+            {{- end }}
             - name: vault
               mountPath: /var/lib/filedeck-vault
             - name: cache
@@ -302,6 +326,11 @@ spec:
             {{- end }}
         {{- end }}
       volumes:
+        {{- if .Values.groups }}
+        - name: storage-groups
+          configMap:
+            name: {{ include "filedeck.name" . }}-storage-groups
+        {{- end }}
         {{- if and .Values.auth.enabled $sc.enabled }}
         - name: tailscale-socket
           emptyDir: {}

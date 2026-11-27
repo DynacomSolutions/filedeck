@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
+import { AgentGroupReader } from "./group-agent.ts";
 import { registerSizeRoutes } from "./props.ts";
 import { FanWatch } from "./fanwatch.ts";
 import { MacWatch } from "./macwatch.ts";
@@ -127,6 +128,15 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   // sign-in on: sizes and jobs follow the account (agent-jobs.ts); off: as before
   const followers = pool && workers ? new Followers(jobs) : undefined;
   const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
+  const storageGroups = new AgentGroupReader(cfg, cfg.groups, (p) => sizes.groupSize(p));
+  app.get("/api/groups", async (c) => {
+    if (cfg.auth && c.get("user")?.storageGroups !== true) return c.json({ error: "administrators only" }, 403);
+    try {
+      return c.json(await storageGroups.read(), 200, { "cache-control": "no-store" });
+    } catch {
+      return c.json({ error: "storage groups unavailable" }, 503);
+    }
+  });
   if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
   // The event bus (events/bus.ts): every change the watcher sees goes through it to the journal, the subscribers and the folder feed of the compare index and
@@ -206,6 +216,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_watcher_lost_events_total Native events lost to overflow",
         "# TYPE filedeck_watcher_lost_events_total counter",
         `filedeck_watcher_lost_events_total ${w.lostEvents}`,
+        ...storageGroups.metrics.lines(),
         ...eventMetrics(bus, (w as { helper?: Record<string, number> }).helper, (w as { caps?: string }).caps),
         "",
       ].join("\n"),

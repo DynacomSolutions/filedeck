@@ -9,6 +9,8 @@ hub = Path("k8s/templates/hub.yaml").read_text()
 sidecar = hub.split("- name: tailscaled", 1)[-1]
 scratch = values.split("testSources:", 1)[1].split("\nbrand:", 1)[0]
 checks = {
+    "storage group rules are empty by default": "groups: {}" in values,
+    "the VictoriaMetrics URL is empty by default": '  victoriaMetricsUrl: ""' in values,
     "network sources are disabled by default": "sources: []" in values,
     "scratch services are disabled by default": "  enabled: false" in scratch,
     "scratch pod chart label is empty by default": '  podChartLabel: ""' in scratch,

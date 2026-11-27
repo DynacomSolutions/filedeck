@@ -41,6 +41,7 @@ jobs:
           image=false
           while IFS= read -r file; do
             case "$file" in
+              server/src/group-types.ts) server=true; web=true; image=true ;;
               server/*) server=true; image=true ;;
               web/*) web=true; server=true; image=true ;;
               scripts/check-test-skips.mjs) server=true; web=true; chart=true; image=true ;;

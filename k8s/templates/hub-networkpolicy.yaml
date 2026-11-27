@@ -1,6 +1,7 @@
 {{- if .Values.hub.networkPolicy.enabled }}
-# Optional (hub.networkPolicy.enabled): only the listed peers may reach the hub, and only on its own port. Anything that
-# can reach the hub can browse and change every node's files, so on a shared cluster list just the ingress or proxy.
+{{- $peers := .Values.hub.networkPolicy.from }}
+{{- $scraper := .Values.metrics.scrapeFrom.namespaceSelector }}
+# The scraper can reach only the metrics port.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,14 +16,24 @@ spec:
       app.kubernetes.io/component: hub
   policyTypes:
     - Ingress
+  {{- if or $peers $scraper }}
   ingress:
-    {{- with .Values.hub.networkPolicy.from }}
+    {{- with $peers }}
     - from:
         {{- toYaml . | nindent 8 }}
       ports:
         - port: http
           protocol: TCP
-    {{- else }}
-    []
     {{- end }}
+    {{- with $scraper }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+      ports:
+        - port: metrics
+          protocol: TCP
+    {{- end }}
+  {{- else }}
+  ingress: []
+  {{- end }}
 {{- end }}

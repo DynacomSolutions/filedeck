@@ -32,6 +32,8 @@ export interface UserClaim {
   admin?: true;
   runAs?: string;
   grants?: Grant[];
+  /** The hub authorised this call to read machine-wide storage totals. */
+  storageGroups?: true;
   /** the request runs in the agent's root process (act as root); only ever `true`, only on a `sys` claim */
   asRoot?: true;
   /**
@@ -88,6 +90,7 @@ export function verifyClaim(value: string, agentToken: string, now: number): Use
     if (!c || typeof c !== "object" || typeof c.iat !== "number" || !Number.isFinite(c.iat)) return null;
     if (c.kind !== "sys" && c.kind !== "virt") return null;
     if (typeof c.name !== "string" || typeof c.epoch !== "number") return null;
+    if (c.storageGroups !== undefined && c.storageGroups !== true) return null;
     if (c.admin !== undefined && c.admin !== true) return null;
     // Only system accounts can set `asRoot`, and only to `true`.
     if (c.asRoot !== undefined && (c.asRoot !== true || c.kind !== "sys")) return null;

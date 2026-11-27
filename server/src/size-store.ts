@@ -30,10 +30,10 @@ import type { SizeResult } from "./props.ts";
  * store is skipped. Hard links are counted once per link (unlike du).
  */
 
-const METRICS = ["bytes", "disk", "files", "symlinks", "other", "dirs", "mounts", "errors"] as const;
+const METRICS = ["bytes", "disk", "files", "symlinks", "other", "dirs", "mounts", "errors", "links", "link_checked"] as const;
 type Metric = (typeof METRICS)[number];
 type Sums = Record<Metric, number>;
-const zero = (): Sums => ({ bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0 });
+const zero = (): Sums => ({ bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0, links: 0, link_checked: 0 });
 const addTo = (a: Sums, b: Sums, sign = 1) => {
   for (const m of METRICS) a[m] += sign * b[m];
 };
@@ -255,12 +255,18 @@ const SQL = {
   mountsOf: "SELECT m.path, s.scanned_at, s.tot_bytes, s.tot_disk, s.tot_files, s.tot_dirs FROM mountpoints m LEFT JOIN sizes s ON s.path = m.path AND s.dev = m.dev WHERE m.parent = ? ORDER BY m.path LIMIT ?",
   getMany: (n: number) => `SELECT s.*, ${KIDS}, ${DIRTY} FROM sizes s WHERE s.path IN (${Array(n).fill("?").join(",")})`,
 };
+const LINK_METRICS = ["links", "link_checked"] as const;
+const metricColumn = (prefix: string, metric: Metric) =>
+  `${prefix}_${metric} INTEGER NOT NULL${LINK_METRICS.some((m) => m === metric) ? " DEFAULT 0" : ""}`;
+const LINK_COLUMNS = LINK_METRICS.flatMap((m) => [
+  ["sizes", metricColumn("own", m)], ["sizes", metricColumn("tot", m)], ["partial", metricColumn("tot", m)],
+]);
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS sizes (
     path TEXT PRIMARY KEY, parent TEXT NOT NULL, ino REAL, dev REAL, mtime_ms REAL, scanned_at INTEGER, seen_at INTEGER NOT NULL DEFAULT 0,
     -- epoch of the writer lease that wrote the row; 0 = written by a version without the lease, never vouched for
     ver INTEGER NOT NULL DEFAULT 0,
-    ${METRICS.map((m) => `own_${m} INTEGER NOT NULL`).join(", ")}, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}
+    ${METRICS.map((m) => metricColumn("own", m)).join(", ")}, ${METRICS.map((m) => metricColumn("tot", m)).join(", ")}
   ) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS sizes_parent ON sizes(parent);
   -- \`taker\`: set to the run time when a process takes the folder (SizeStore.takeDue) and cleared when it reports the re-read ended (noteRan)
@@ -282,7 +288,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS watch_sessions (id INTEGER PRIMARY KEY, mounts_hash TEXT NOT NULL, ready_at INTEGER NOT NULL, since INTEGER NOT NULL, beat INTEGER NOT NULL, ended_at INTEGER, clean INTEGER NOT NULL DEFAULT 0, min_epoch INTEGER);
   -- the folders a running walk has entered and not finished (at most one per level): what it has counted so far, \`walk\` = the start folder.
   -- A folder's row here goes when its real row is written; the walk's rows go when it ends. Answers \`du --cached\` while a scan runs.
-  CREATE TABLE IF NOT EXISTS partial (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL, walk TEXT NOT NULL, at INTEGER NOT NULL, ${METRICS.map((m) => `tot_${m} INTEGER NOT NULL`).join(", ")}) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS partial (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL, walk TEXT NOT NULL, at INTEGER NOT NULL, ${METRICS.map((m) => metricColumn("tot", m)).join(", ")}) WITHOUT ROWID;
   -- child folders on another device (mount points) of a folder that was read: never entered or counted, listed by \`tree\` as entries of their own
   CREATE TABLE IF NOT EXISTS mountpoints (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS mountpoints_parent ON mountpoints(parent);
@@ -350,7 +356,7 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, uri, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, triggers, putPartial, vacuumMinFree } = workerData;
+const { file, uri, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, linkColumns, triggers, putPartial, vacuumMinFree } = workerData;
 const fs = require("node:fs");
 // \`uri\` opens the file only if it exists (mode=rw): a store file is never created here, so a deleted generation is never made again under its name (see size-gen.ts)
 const db = new DatabaseSync(uri);
@@ -497,11 +503,18 @@ const commit = ({ items, last, walkStart, walkEnd, spine }) => {
 const prepared = new Map();
 const isBusy = (e) => !!e && (e.errcode === 5 || e.errcode === 6 || /database (table )?is locked/i.test(String(e.message)));
 const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const addLinkColumns = () => {
+  for (const [table, column] of linkColumns) {
+    if (db.prepare("PRAGMA table_info(" + table + ")").all().some((c) => c.name === column.split(" ")[0])) continue;
+    try { db.exec("ALTER TABLE " + table + " ADD COLUMN " + column); }
+    catch (err) { if (!/duplicate column name/i.test(String(err.message))) throw err; }
+  }
+};
 parentPort.on("message", (m) => {
   // a busy database (another connection holds a lock past busy_timeout) is retried a few times with backoff; every op rolls back on failure, so a retry is safe
   for (let attempt = 0; ; attempt++) {
     try {
-      if (m.op === "schema") { db.exec(schema); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(addSeenAt); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "ver")) db.exec(addVer); if (!db.prepare("PRAGMA table_info(validated)").all().some((c) => c.name === "epoch")) db.exec(addValidatedEpoch); if (!db.prepare("PRAGMA table_info(pending)").all().some((c) => c.name === "taker")) db.exec(addTaker); db.exec(triggers); }
+      if (m.op === "schema") { db.exec(schema); addLinkColumns(); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "seen_at")) db.exec(addSeenAt); if (!db.prepare("PRAGMA table_info(sizes)").all().some((c) => c.name === "ver")) db.exec(addVer); if (!db.prepare("PRAGMA table_info(validated)").all().some((c) => c.name === "epoch")) db.exec(addValidatedEpoch); if (!db.prepare("PRAGMA table_info(pending)").all().some((c) => c.name === "taker")) db.exec(addTaker); db.exec(triggers); }
       else if (m.op === "acquire") { parentPort.postMessage({ id: m.id, rows: [{ epoch: acquire(m) }] }); return; }
       else if (m.op === "beat") {
         const r = fence && db.prepare("UPDATE writer SET beat = ? WHERE id = 1 AND epoch = ? AND owner = ?").run(Date.now(), fence.epoch, fence.owner);
@@ -674,6 +687,11 @@ export class SizeStore {
         db.prepare("SELECT taker FROM pending LIMIT 0"); // stores of older versions have no taker
       } catch {
         db.exec(ADD_TAKER);
+      }
+      for (const [table, column] of LINK_COLUMNS) {
+        if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column?.split(" ")[0])) {
+          db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+        }
       }
       db.exec(TRIGGERS);
       // Never MAX(seen_at): that scans the whole table before the server listens. A stamp only has to differ from earlier walks' stamps;
@@ -1210,7 +1228,7 @@ export class SizeStore {
     if (this.closed) return Promise.resolve(undefined);
     let w = read ? this.reader : this.writer;
     if (!w) {
-      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, uri: rwUri(this.file), vacuumMinFree: this.o.vacuumMinFreePages ?? VACUUM_MIN_FREE, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, triggers: TRIGGERS, putPartial: PUT_PARTIAL, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, uri: rwUri(this.file), vacuumMinFree: this.o.vacuumMinFreePages ?? VACUUM_MIN_FREE, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, linkColumns: LINK_COLUMNS, triggers: TRIGGERS, putPartial: PUT_PARTIAL, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
       const fail = (e: Error) => {
         if (this.writer === nw) this.writer = undefined;
         if (this.reader === nw) this.reader = undefined;
@@ -1915,6 +1933,8 @@ export class SizeStore {
                 node.own.disk += disk;
               } else if (g.s.isFile()) {
                 node.own.files++;
+                node.own.link_checked++;
+                if (g.s.nlink > 1) node.own.links++;
                 node.own.bytes += Number(g.s.size);
                 bytes += Number(g.s.size);
                 node.own.disk += disk;
@@ -2780,6 +2800,17 @@ export class SizeStore {
     if (row) return row;
     const p = (await this.read("partialRow", "SELECT * FROM partial WHERE path = ?", [virtual], null))?.[0];
     return p && this.partialRow(p);
+  }
+
+  /** Group totals use completed directory rows only. */
+  async groupSize(virtual: string) {
+    const row = await this.treeTop(virtual);
+    if (!row || row.partial || !row.scanned_at) return null;
+    const { disk, files, links, link_checked, errors } = row.tot;
+    return {
+      dev: row.dev, bytes: disk, files, links, linkChecked: link_checked, errors, scannedAt: row.scanned_at,
+      stale: errors > 0 || !(await this.vouches(virtual)),
+    };
   }
 
   private partialRow(r: Record<string, unknown>): Row & { partial: true } {
