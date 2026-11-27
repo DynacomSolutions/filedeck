@@ -58,6 +58,7 @@ export async function startEventSocket(bus: EventBus, o: SocketOptions): Promise
   // replaced at the end by a rename, not removed first: the new socket is bound under a name of its own and moved into place when it is ready.
   const old = lstatOrNull(o.path);
   if (old && !old.isSocket()) throw new Error(`${o.path} exists and is not a socket: it is not removed`);
+  await removeStaleSockets(o.path, o.log);
   const own = `${o.path}.${randomBytes(3).toString("hex")}`;
   const clients = new Set<net.Socket>();
   const server = net.createServer({ allowHalfOpen: true }, (sock) => {
@@ -99,6 +100,46 @@ export async function startEventSocket(bus: EventBus, o: SocketOptions): Promise
       if (now?.isSocket() && now.dev === ino.dev && now.ino === ino.ino) fs.rmSync(o.path, { force: true });
     },
   };
+}
+
+/**
+ * A process that was killed between `listen(own)` and the rename leaves its `<name>.<6 hex>` socket in the folder. At start, every such name is removed
+ * when it is a socket (not a link or a file) and nobody listens on it (the connection is refused). A name of any other kind stays, and so does a socket that
+ * answers: it belongs to a process that starts at the same time (a rolling deploy).
+ */
+async function removeStaleSockets(sockPath: string, log?: (s: string) => void): Promise<void> {
+  const dir = path.dirname(sockPath);
+  const re = new RegExp(`^${path.basename(sockPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.[0-9a-f]{6}$`);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => re.test(n));
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    const file = path.join(dir, n);
+    if (!lstatOrNull(file)?.isSocket()) continue;
+    if ((await probe(file)) !== "ECONNREFUSED") continue;
+    // (checked again: the name must still be a socket when it is removed)
+    if (!lstatOrNull(file)?.isSocket()) continue;
+    fs.rmSync(file, { force: true });
+    log?.(`event socket: the stale socket ${file} was removed`);
+  }
+}
+
+/** Connect to a socket and give the error code of the attempt (`ok` when something answered). */
+function probe(file: string): Promise<string> {
+  return new Promise((res) => {
+    const c = net.connect(file);
+    const timer = setTimeout(() => done("timeout"), 2000);
+    const done = (r: string) => {
+      clearTimeout(timer);
+      c.destroy();
+      res(r);
+    };
+    c.once("connect", () => done("ok"));
+    c.once("error", (e: NodeJS.ErrnoException) => done(e.code ?? "error"));
+  });
 }
 
 function lstatOrNull(p: string): fs.Stats | null {

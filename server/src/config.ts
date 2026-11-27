@@ -185,6 +185,25 @@ function wholeSetting(env: NodeJS.ProcessEnv, name: string, fallback: number): n
   return Number(v);
 }
 
+const warnedSettings = new Set<string>();
+
+/**
+ * A setting that must be a finite number of at least 0 (a time in ms): unset or empty gives `fallback`. Anything else (text, a negative number, `Infinity`)
+ * gives `fallback` too, and a line in the log says so, once for each name and value. (`Number("abc")` is NaN, and `setTimeout(fn, NaN)` fires at once.)
+ */
+export function nonNegativeSetting(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const v = env[name]?.trim();
+  if (!v) return fallback;
+  const n = Number(v);
+  if (Number.isFinite(n) && n >= 0) return n;
+  const key = `${name}=${v}`;
+  if (!warnedSettings.has(key)) {
+    warnedSettings.add(key);
+    console.error(`${name} must be a number of at least 0, not "${v.slice(0, 40)}": the default ${fallback} is used`);
+  }
+  return fallback;
+}
+
 /** The Tailscale settings: read only by a hub with sign-in on; a bad proxy entry or listen address stops the start. */
 function tailscaleSettings(env: NodeJS.ProcessEnv, read: boolean, port: number): Pick<Config, "tailscaleSocket" | "tailscaleHeaders" | "tailscaleProxies" | "tailscaleListen"> {
   if (!read) return { tailscaleSocket: undefined, tailscaleHeaders: false, tailscaleProxies: [] };
@@ -293,7 +312,7 @@ export function loadConfig(env = process.env): Config {
     duWaitMs: Number(env.FILEDECK_DU_WAIT_MS ?? 10_000),
     duAbandonMs: Number(env.FILEDECK_DU_ABANDON_MS ?? 120_000),
     handoverMs: Number(env.FILEDECK_HANDOVER_MS ?? 6000),
-    leaveStepsMs: Number(env.FILEDECK_LEAVE_STEPS_MS ?? 8000),
+    leaveStepsMs: nonNegativeSetting(env, "FILEDECK_LEAVE_STEPS_MS", 8000),
     listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
     diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),
     searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 3),
