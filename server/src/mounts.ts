@@ -59,22 +59,23 @@ const RUNTIME_PREFIXES = ["/proc", "/sys", "/dev", "/run/user", "/run/k3s", "/ru
  * manager hides those from the drive list, but a trashed item there is stored on that volume and must still be found.
  */
 export function parseMounts(text: string, opts: { all?: boolean } = {}) {
-  const seen = new Set<string>();
-  const out: { device: string; mountpoint: string; fstype: string }[] = [];
+  // Mounts stacked on one mount point: the table lists them in the order they were made, and the last one covers the others, so it is the one a path
+  // shows. It is kept (at the place of the first), as `readMountRoots` does with mountinfo, so the device and the folder of a mount point come from one entry.
+  const visible = new Map<string, { device: string; mountpoint: string; fstype: string }>();
   for (const line of text.split("\n")) {
     const f = line.split(" ");
     if (f.length < 3) continue;
-    const device = unescapeMount(f[0] as string);
     const mountpoint = unescapeMount(f[1] as string);
-    const fstype = f[2] as string;
-    if (PSEUDO.has(fstype)) continue;
+    visible.set(mountpoint, { device: unescapeMount(f[0] as string), mountpoint, fstype: f[2] as string });
+  }
+  const out: { device: string; mountpoint: string; fstype: string }[] = [];
+  for (const m of visible.values()) {
+    if (PSEUDO.has(m.fstype)) continue;
     if (opts.all) {
-      if (RUNTIME_PREFIXES.some((p) => mountpoint === p || mountpoint.startsWith(p + "/"))) continue;
-    } else if (fstype === "tmpfs" && !mountpoint.startsWith("/tmp") && mountpoint !== "/dev/shm") continue;
-    else if (HIDDEN_PREFIXES.some((p) => mountpoint === p || mountpoint.startsWith(p + "/"))) continue;
-    if (seen.has(mountpoint)) continue;
-    seen.add(mountpoint);
-    out.push({ device, mountpoint, fstype });
+      if (RUNTIME_PREFIXES.some((p) => m.mountpoint === p || m.mountpoint.startsWith(p + "/"))) continue;
+    } else if (m.fstype === "tmpfs" && !m.mountpoint.startsWith("/tmp") && m.mountpoint !== "/dev/shm") continue;
+    else if (HIDDEN_PREFIXES.some((p) => m.mountpoint === p || m.mountpoint.startsWith(p + "/"))) continue;
+    out.push(m);
   }
   return out;
 }
@@ -126,7 +127,7 @@ export function parseMountInfo(text: string): { mountpoint: string; fsroot: stri
 /**
  * The folder of its filesystem that each mount shows (mountinfo "root": "/" for a mount of the whole filesystem, "/repositories/x" for a bind mount of that
  * folder), by mount point, read next to the mount table `procMounts` (`.../mounts` has `.../mountinfo` beside it). Empty when it is not readable
- * (a test's own mount file): every root is then unknown. Where two mounts have one mount point (one over the other), the later one is the one that shows.
+ * (a test's own mount file): every root is then unknown. Where two mounts have one mount point (one over the other), the later one is the one that shows, as in `parseMounts`.
  */
 export async function readMountRoots(root: string, procMounts: string): Promise<Map<string, string>> {
   const roots = new Map<string, string>();

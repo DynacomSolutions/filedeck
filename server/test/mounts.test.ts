@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";
-import { parseMounts, rebaseMountTable, readMountTable } from "../src/mounts.ts";
+import { parseMounts, rebaseMountTable, readMountTable, readMountRoots } from "../src/mounts.ts";
 
 const hostTable = "/dev/nvme0n1p2 / ext4 rw 0 0\n/dev/nvme0n1p3 /home ext4 rw 0 0\nproc /proc proc rw 0 0\n";
 const containerTable = [
@@ -45,4 +45,31 @@ test("config default mount table: host init for a host root, own table for /", (
   assert.equal(loadConfig({ FILEDECK_ROOT: "/host" } as NodeJS.ProcessEnv).procMounts, "/host/proc/1/mounts");
   assert.equal(loadConfig({ FILEDECK_ROOT: "/" } as NodeJS.ProcessEnv).procMounts, "/proc/mounts");
   assert.equal(loadConfig({ FILEDECK_ROOT: "/host", FILEDECK_PROC_MOUNTS: "/x" } as NodeJS.ProcessEnv).procMounts, "/x");
+});
+
+test("mounts stacked on one mount point: the last one is the visible one, for the device (parseMounts) and for the folder it shows (readMountRoots)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-stack-"));
+  try {
+    const table = ["/dev/a / ext4 rw 0 0", "/dev/b /srv ext4 rw 0 0", "/dev/c /srv xfs rw 0 0", "/dev/a /alias ext4 rw 0 0"].join("\n") + "\n";
+    const info = [
+      "10 1 8:1 / / rw - ext4 /dev/a rw",
+      "11 10 8:2 /one /srv rw - ext4 /dev/b rw",
+      "12 10 8:3 /two /srv rw - xfs /dev/c rw",
+      "13 10 8:1 /alias-root /alias rw - ext4 /dev/a rw",
+    ].join("\n") + "\n";
+    fs.writeFileSync(path.join(dir, "mounts"), table);
+    fs.writeFileSync(path.join(dir, "mountinfo"), info);
+    const m = parseMounts(table);
+    assert.deepEqual(m.map((x) => [x.mountpoint, x.device, x.fstype]), [["/", "/dev/a", "ext4"], ["/srv", "/dev/c", "xfs"], ["/alias", "/dev/a", "ext4"]], "the visible mount, in the order of the first");
+    const roots = await readMountRoots("/", path.join(dir, "mounts"));
+    assert.equal(roots.get("/srv"), "/two", "the root of the same (last) mount");
+    assert.equal(roots.get("/alias"), "/alias-root");
+    assert.equal(roots.get("/"), "/");
+    // a pseudo filesystem mounted over a real one hides it
+    assert.deepEqual(parseMounts("/dev/a /x ext4 rw 0 0\nproc /x proc rw 0 0\n"), []);
+    // no mountinfo beside the table: no roots
+    assert.equal((await readMountRoots("/", path.join(dir, "nowhere", "mounts"))).size, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
