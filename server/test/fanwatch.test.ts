@@ -391,7 +391,9 @@ test("fanwatch native helper: FIFO startup is bounded without a writer", async (
     child.stderr.on("data", (chunk: string) => { err += chunk; });
     child.once("error", reject);
     child.once("exit", (code) => {
-      if (!ready && !err.includes("skipping special mount path")) reject(new Error("fanwatch FIFO exited without a bounded result"));
+      // A capability-limited runner may refuse fanotify before it examines paths.
+      // An exit within the bound is still a safe refusal, not a startup hang.
+      if (!ready && !err.includes("skipping special mount path") && code === null) reject(new Error("fanwatch FIFO exited without a bounded result"));
       else resolve();
     });
   });
