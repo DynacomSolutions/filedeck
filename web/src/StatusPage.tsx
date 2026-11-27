@@ -20,6 +20,7 @@ const sections = [
 
 export function StatusPage({ initial, account }: { initial: StatusRoute; account?: Account }) {
   const [route, setRoute] = useState(initial);
+  const storage = route.storage ?? { mode: "size", selected: null } as const;
   const { nodes, error } = useNodes();
   const devices = nodes?.filter((node) => node.kind !== "source");
   const mayReadHealth = !account || account.admin;
@@ -47,11 +48,12 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
   }, []);
 
   const navigate = (next: StatusRoute) => {
-    const url = statusUrl(next);
+    const url = statusUrl(next, location.search);
     if (url === location.pathname + location.search) return;
     const action = statusHistoryAction(route, next);
-    if (action === "push") history.pushState(null, "", url);
-    else history.replaceState(history.state, "", url);
+    const target = next.section === "storage" ? url + location.hash : url;
+    if (action === "push") history.pushState(null, "", target);
+    else history.replaceState(history.state, "", target);
     currentUrl.current = url;
     setRoute(next);
   };
@@ -70,7 +72,8 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
               <h1 id="status-title" tabIndex={-1} ref={heading}>Jobs and status</h1>
             </div>
             <label className="status-node-select">Node
-              <select aria-label="Node" value={route.node ?? ""} onChange={(e) => navigate({ ...route, node: e.target.value || null, job: undefined })}>
+              <select aria-label="Node" value={route.node ?? ""} onChange={(e) => navigate({ ...route, node: e.target.value || null, job: undefined,
+                storage: route.storage && { ...route.storage, selected: null } })}>
                 <option value="">All nodes</option>
                 {route.node && !selected && <option value={route.node}>{route.node}{missing ? " (unavailable)" : ""}</option>}
                 {devices?.map((node) => <option value={node.name} key={node.name}>{node.name}{node.online ? "" : " (offline)"}</option>)}
@@ -80,7 +83,7 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
           <nav aria-label="Status sections" className="status-nav">
             {sections.map(({ id, label }) => {
               const next = { ...route, section: id };
-              return <a className="btn-a" data-nav key={id} href={statusUrl(next)} aria-current={route.section === id ? "page" : undefined} onClick={(e) => {
+              return <a className="btn-a" data-nav key={id} href={statusUrl(next, location.search)} aria-current={route.section === id ? "page" : undefined} onClick={(e) => {
                 if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
                 e.preventDefault();
                 navigate(next);
@@ -98,7 +101,13 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
           ) : !error && <p role="status">Loading jobs…</p>)}
           {route.section === "nodes" && (mayReadHealth ? <StatusNodes node={route.node} /> : <p className="status-message">Node health requires an administrator account.</p>)}
           {route.section === "events" && (mayReadHealth ? <StatusEvents key={`${route.node}:${visit}`} route={route} navigate={navigate} /> : <p className="status-message">Live events require an administrator account.</p>)}
-          {route.section === "storage" && <StorageSection node={route.node} />}
+          {route.section === "storage" && <StorageSection
+            view={{ ...storage, node: route.node }}
+            update={(patch) => navigate({
+              ...route,
+              storage: { ...storage, ...patch },
+            })}
+          />}
         </>}
       </div>
     </main>

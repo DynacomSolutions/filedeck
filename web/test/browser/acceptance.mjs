@@ -3450,7 +3450,8 @@ async function verifyGroupedStorage(browser, width, scheme) {
   ];
   const requests = [];
   await installFixture(page, {
-    requests, nodesBody: { nodes: nodes.map(({ node }) => ({ name: node, online: true })) },
+    requests, status: { nodes: [], jobs: [] },
+    nodesBody: { nodes: nodes.map(({ node }) => ({ name: node, online: true })) },
     storageGroups: (node) => ({ nodes: node ? nodes.filter((entry) => entry.node === node) : nodes, unavailable: [], io: { status: 'available' } }),
   });
   const mode = (name) => page.getByRole('button', { name, exact: true });
@@ -3461,14 +3462,21 @@ async function verifyGroupedStorage(browser, width, scheme) {
     await page.goto(new URL('/', baseURL).href);
     if (width === 390) await page.getByRole('button', { name: 'Open navigation' }).click();
     await page.getByRole('link', { name: 'Storage', exact: true }).click();
+    const storageSection = page.getByRole('region', { name: 'Storage', exact: true });
+    await storageSection.getByRole('group', { name: 'Grouped storage sunburst' }).waitFor();
+    assert.equal(new URL(page.url()).pathname, '/status');
+    assert.equal(new URL(page.url()).searchParams.get('section'), 'storage');
+    const tabs = page.getByRole('navigation', { name: 'Status sections' });
+    await tabs.getByRole('link', { name: 'Jobs', exact: true }).click();
+    await chart.waitFor({ state: 'hidden' });
+    await tabs.getByRole('link', { name: 'Storage', exact: true }).click();
     await chart.waitFor();
-    assert.equal(new URL(page.url()).pathname, '/storage');
     const entries = await page.evaluate(() => history.length);
     for (const [name, file] of [['Storage size', 'size'], ['Read pressure', 'read'], ['Write pressure', 'write']]) {
       await mode(name).click();
       assert.equal(await mode(name).getAttribute('aria-pressed'), 'true');
       assert.equal(await page.evaluate(() => window.innerWidth), width);
-      assert.ok(await page.locator('.storage-page').evaluate((element) => element.scrollWidth <= element.clientWidth));
+      assert.ok(await page.locator('.status-page').evaluate((element) => element.scrollWidth <= element.clientWidth));
       const studio = chart.getByRole('button', { name: /^Studio,/ });
       assert.equal((await studio.locator('title').textContent()).includes('Partial IO samples'), file === 'write');
       assert.equal(await studio.locator('..').locator('path[fill$="-partial)"]').count(), file === 'write' ? 1 : 0);
@@ -3479,7 +3487,7 @@ async function verifyGroupedStorage(browser, width, scheme) {
         assert.equal(await group.getAttribute('fill'), top);
       }
       if (process.env.FILEDECK_STORAGE_SCREENSHOTS) {
-        await page.screenshot({ path: resolve(evidenceDir, `storage-${width}-${scheme}-${file}-review-v6.png`), animations: 'disabled' });
+        await page.screenshot({ path: resolve(evidenceDir, `storage-${width}-${scheme}-${file}-review-v7.png`), animations: 'disabled' });
       }
     }
     await selector.selectOption('Studio');
@@ -3491,6 +3499,7 @@ async function verifyGroupedStorage(browser, width, scheme) {
     await details.getByRole('heading', { name: 'Projects' }).waitFor();
     assert.equal(await page.evaluate(() => history.length), entries);
     const deepLink = new URL(page.url());
+    assert.equal(deepLink.pathname, '/status');
     assert.equal(deepLink.searchParams.get('node'), 'Studio');
     assert.equal(deepLink.searchParams.get('storageMode'), 'write');
     assert.equal(deepLink.searchParams.get('slice'), JSON.stringify(['Studio', 'disk0', 'Projects', false]));
@@ -3513,6 +3522,23 @@ async function verifyGroupedStorage(browser, width, scheme) {
     await chart.getByRole('button', { name: /disk2 \/ Backups,/ }).waitFor();
     assert.equal(await selector.inputValue(), 'Archive');
     assert.equal(await mode('Read pressure').getAttribute('aria-pressed'), 'true');
+    const legacy = new URL('/storage' + deepLink.search, baseURL);
+    legacy.searchParams.delete('section');
+    legacy.searchParams.set('keep', 'fixture');
+    legacy.hash = '#filedeck-main';
+    await page.goto(legacy.href);
+    await details.getByRole('heading', { name: 'Projects' }).waitFor();
+    const redirected = new URL(page.url());
+    assert.equal(redirected.pathname, '/status');
+    assert.equal(redirected.searchParams.get('section'), 'storage');
+    assert.equal(redirected.searchParams.get('node'), 'Studio');
+    assert.equal(redirected.searchParams.get('slice'), deepLink.searchParams.get('slice'));
+    assert.equal(redirected.searchParams.get('keep'), 'fixture');
+    assert.equal(redirected.hash, legacy.hash);
+    assert.equal(await mode('Write pressure').getAttribute('aria-pressed'), 'true');
+    await mode('Read pressure').click();
+    assert.equal(new URL(page.url()).searchParams.get('keep'), 'fixture');
+    assert.equal(new URL(page.url()).hash, legacy.hash);
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

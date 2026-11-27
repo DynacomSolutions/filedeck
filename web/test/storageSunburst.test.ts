@@ -1,3 +1,4 @@
+import { legacyStorageUrl, statusHistoryAction, statusRoute, statusUrl } from "../src/statusRoute";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { existsSync, readFileSync } from "node:fs";
@@ -47,14 +48,19 @@ test("single-node rings have valid paths, and pressure does not alter geometry",
   assert.equal(sliceValue(slices[3]!, "read"), null);
 });
 
-test("the URL restores the node, slice and colour mode and preserves other parameters", () => {
-  const url = "https://filemanager.example/storage?keep=yes#details";
-  const state = { node: "Blue Room", selected: '["Blue Room","disk","Photos",false]', mode: "read" } as const;
-  const changed = new URL(storage.storageViewUrl(url, state), url);
-  assert.deepEqual(storage.storageView(changed.search), state);
+test("the status URL restores storage filters and keeps legacy links working", () => {
+  const query = new URLSearchParams({ keep: "yes", node: "Blue Room", slice: '["Blue Room","disk","Photos",false]', storageMode: "read" });
+  const legacy = legacyStorageUrl("/storage", "?" + query, "#details");
+  const changed = new URL(legacy!, "https://filemanager.example");
+  const route = statusRoute(changed.pathname, changed.search)!;
+  assert.equal(route.section, "storage");
+  assert.equal(route.node, "Blue Room");
+  assert.deepEqual(route.storage, { selected: query.get("slice"), mode: "read" });
   assert.equal(changed.searchParams.get("keep"), "yes");
   assert.equal(changed.hash, "#details");
-  assert.equal(storage.storageViewUrl(changed.href, { node: null, selected: null, mode: "size" }), "/storage?keep=yes#details");
+  assert.equal(statusHistoryAction(route, { ...route, node: "Archive" }), "replace");
+  assert.equal(statusUrl({ ...route, node: null, storage: { mode: "size", selected: null } }, changed.search),
+    "/status?keep=yes&section=storage");
 });
 
 test("node throughput sums available drives and the maximum is independent for each ring", () => {
@@ -94,7 +100,7 @@ test("node throughput is partial only when some drives have samples for the sele
 
 test("the app exposes Storage as a real navigation link", () => {
   const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
-  assert.match(app, /<a(?=[^>]*\bdata-nav\b)(?=[^>]*href="\/storage")(?=[^>]*aria-label="Storage")[^>]*>/);
+  assert.match(app, /<a(?=[^>]*\bdata-nav\b)(?=[^>]*href="\/status\?section=storage")(?=[^>]*aria-label="Storage")[^>]*>/);
 });
 
 test("the chart and server use the same storage response types", () => {

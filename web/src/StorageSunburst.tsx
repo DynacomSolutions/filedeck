@@ -1,9 +1,8 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef } from "react";
 import useSWR from "swr";
 import { ArrowLeft, HardDrive } from "lucide-react";
 import { BACKGROUND_HEADER, fmtDate, fmtSize } from "./api";
-import { useNodes } from "./data";
-import { colourBand, ringMaximums, sliceHasPartialIO, sliceLabel, slicePath, sliceValue, storageModes, storageRings, storageSlices, storageView, storageViewUrl, type Slice, type StorageMode, type StorageView } from "./storageSunburst";
+import { colourBand, ringMaximums, sliceHasPartialIO, sliceLabel, slicePath, sliceValue, storageModes, storageRings, storageSlices, type Slice, type StorageMode, type StorageView } from "./storageSunburst";
 import type { GroupsResult, IOPressure, Statistics } from "../../server/src/group-types";
 import "./storageSunburst.css";
 
@@ -37,38 +36,12 @@ function ioMessage(io: GroupsResult["io"]) {
   return null;
 }
 
-function useStorageView() {
-  const [view, setView] = useState(() => storageView(location.search));
-  useEffect(() => {
-    const restore = () => setView(storageView(location.search));
-    window.addEventListener("popstate", restore);
-    return () => window.removeEventListener("popstate", restore);
-  }, []);
-  return [view, (patch: Partial<StorageView>) => {
-    const next = { ...storageView(location.search), ...patch };
-    history.replaceState(history.state, "", storageViewUrl(location.href, next));
-    setView(next);
-  }] as const;
-}
-
-function NodePicker({ node, choose }: { node: string | null; choose: (node: string | null) => void }) {
-  const id = useId();
-  const { nodes } = useNodes();
-  const choices = new Set((nodes ?? []).filter(({ kind }) => kind !== "source").map(({ name }) => name));
-  if (node) choices.add(node);
-  return <div className="storage-node-picker">
-    <label htmlFor={id}>Node</label>
-    <select id={id} value={node ?? ""} onChange={(event) => choose(event.currentTarget.value || null)}>
-      <option value="">All nodes</option>
-      {[...choices].map((name) => <option key={name} value={name}>{name}</option>)}
-    </select>
-  </div>;
-}
-
-async function fetchStorage(url: string): Promise<GroupsResult> {
+async function fetchStorage(url: string): Promise<GroupsResult | null> {
   const response = await fetch(url, { headers: BACKGROUND_HEADER });
   if (response.status === 403) throw new Error("Grouped storage requires an administrator account.");
-  if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) {
+  const json = response.headers.get("content-type")?.includes("application/json");
+  if (response.status === 404 || (response.ok && !json)) return null;
+  if (!response.ok) {
     throw new Error("This hub could not provide grouped storage data.");
   }
   const value = await response.json() as GroupsResult;
@@ -142,14 +115,15 @@ function SliceDetails({ selection, slices, mode, choose }: {
   </aside>;
 }
 
-export function StorageSunburst({ node }: { node?: string | null }) {
-  const [view, update] = useStorageView();
-  const { mode, selected } = view;
-  const activeNode = node === undefined ? view.node : node;
+export function StorageSunburst({ view, update }: {
+  view: StorageView;
+  update: (patch: Partial<Omit<StorageView, "node">>) => void;
+}) {
+  const { mode, selected, node } = view;
   const setSelected = (selected: string) => update({ selected });
   const id = useId();
-  const url = activeNode ? `/api/groups?${new URLSearchParams({ node: activeNode })}` : "/api/groups";
-  const { data, error, isLoading } = useSWR<GroupsResult, Error>(url, fetchStorage, { refreshInterval: 60_000, shouldRetryOnError: false });
+  const url = node ? `/api/groups?${new URLSearchParams({ node })}` : "/api/groups";
+  const { data, error, isLoading } = useSWR<GroupsResult | null, Error>(url, fetchStorage, { refreshInterval: 60_000, shouldRetryOnError: false });
   const { slices, total } = storageSlices(data?.nodes ?? []);
   const marked = slices.filter((slice) => slice.bytes > 0);
   const emptyNodes = slices.filter((slice) => slice.level === "node" && !slice.bytes);
@@ -159,7 +133,6 @@ export function StorageSunburst({ node }: { node?: string | null }) {
 
   return <div className="storage-sunburst">
     <div className="storage-controls">
-      {node === undefined && <NodePicker node={activeNode} choose={(node) => update({ node, selected: null })} />}
       <div className="storage-toggle" role="group" aria-label="Colour by">
         {storageModes.map((choice) => <button key={choice} type="button" aria-pressed={mode === choice} onClick={() => update({ mode: choice })}>
           {labels[choice]}
@@ -168,6 +141,7 @@ export function StorageSunburst({ node }: { node?: string | null }) {
       {mode !== "size" && current && <p className="storage-warning" role="status">{current}</p>}
     </div>
     {isLoading && <p className="storage-message" role="status">Loading storage data…</p>}
+    {data === null && <p className="storage-message" role="status">This hub does not provide grouped storage data yet.</p>}
     {error && <p className="storage-message" role="status">{error.message}</p>}
     {!!data?.unavailable.length && <p className="storage-warning" role="status">Unavailable nodes: {data.unavailable.join(", ")}</p>}
     {data && <div className="storage-layout">
@@ -241,14 +215,4 @@ export function StorageSunburst({ node }: { node?: string | null }) {
     </div>}
     {mode === "size" && current && <p className="storage-message" role="status">{current}</p>}
   </div>;
-}
-
-export function StoragePage() {
-  return <main className="storage-page" id="filedeck-main" tabIndex={-1} aria-labelledby="storage-title">
-    <div className="storage-wrap">
-      <a href="/" className="btn-a" data-nav><ArrowLeft size={16} aria-hidden="true" /> Files</a>
-      <h1 id="storage-title">Storage</h1>
-      <StorageSunburst />
-    </div>
-  </main>;
 }

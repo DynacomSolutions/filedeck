@@ -3,7 +3,7 @@ import { SWRConfig } from "swr";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { StatusPage } from "./StatusPage";
-import { statusRoute } from "./statusRoute";
+import { legacyStorageUrl, statusRoute } from "./statusRoute";
 import { swrConfig } from "./data";
 import "./styles.css";
 import "./accessibility.css";
@@ -24,7 +24,8 @@ import { HubUnreachable, UpdateBanner } from "./PwaScreens";
 installViewportTracking();
 installPwa();
 
-const StoragePage = lazy(() => import("./StorageSunburst").then((m) => ({ default: m.StoragePage })));
+const legacyStorage = legacyStorageUrl(location.pathname, location.search, location.hash);
+if (legacyStorage) history.replaceState(history.state, "", legacyStorage);
 const SignIn = lazy(() => import("./SignIn").then((m) => ({ default: m.SignIn })));
 
 /**
@@ -144,9 +145,7 @@ function Root() {
       <UpdateBanner />
       <AccessibilityChrome statusPage={!!status} />
       <ErrorBoundary what="Filedeck" scope="root">
-        {location.pathname === "/storage"
-          ? <Suspense fallback={<p role="status">Loading storage…</p>}><StoragePage /></Suspense>
-          : status ? <StatusPage initial={status} account={view.auth ? view : undefined} /> : <App account={view.auth ? view : undefined} />}
+        {status ? <StatusPage initial={status} account={view.auth ? view : undefined} /> : <App account={view.auth ? view : undefined} />}
       </ErrorBoundary>
       {retry && <TailnetBanner {...waitProps} />}
     </>

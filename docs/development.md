@@ -46,6 +46,6 @@ Open `/status` for all accessible nodes or `/status/<node>` for one node. The qu
 - `GET /api/status?node=<node>` reads the same snapshot through the hub. Omit `node` for all accessible agents. Each result identifies an available, unsupported or unavailable agent.
 - Scan coverage uses complete, error-free rows that still exist in the size store. The timestamp records the stored root's latest scan or watcher refresh. A refresh of a descendant can preserve that time. A stale result means the store cannot verify that the whole tree is current.
 - Live events use `GET /api/v1/changes?node=<node>` with the existing access rules. See [Change events](change-events.md) for cursor and filter behaviour.
-- `web/src/StorageSection.tsx` contains the chart mount point. The component reads `GET /api/groups` and receives the selected node. Mount the chart inside its existing section and keep the empty state for hubs without the API.
+- `web/src/StorageSection.tsx` contains the chart mount point. The component reads `GET /api/groups` and receives the selected node. The section shows an empty state when the hub does not provide grouped storage. The old `/storage` link opens this section and keeps its query values.
 
 [Back to the README](../README.md)

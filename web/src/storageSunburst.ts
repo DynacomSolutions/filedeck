@@ -9,23 +9,13 @@ export interface StorageView {
   selected: string | null;
 }
 
-export function storageView(search: string): StorageView {
-  const params = new URLSearchParams(search);
+export function storageView(params: URLSearchParams): StorageView {
   const mode = params.get("storageMode");
   return {
     mode: mode === "read" || mode === "write" ? mode : "size",
     node: params.get("node") || null,
     selected: params.get("slice") || null,
   };
-}
-
-export function storageViewUrl(href: string, view: StorageView): string {
-  const url = new URL(href);
-  for (const [key, value] of [["node", view.node], ["slice", view.selected], ["storageMode", view.mode === "size" ? null : view.mode]] as const) {
-    if (value) url.searchParams.set(key, value);
-    else url.searchParams.delete(key);
-  }
-  return url.pathname + url.search + url.hash;
 }
 
 export interface Slice {

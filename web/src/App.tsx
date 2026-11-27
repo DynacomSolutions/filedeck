@@ -267,7 +267,7 @@ function Sidebar({ nodesState, current, onOpen, onTrash, footer, drawer, onClose
       <div className="side-scroll">
         <SideTree nodesState={nodesState} current={current} onOpen={onOpen} onTrash={onTrash} />
       </div>
-      {showStorage && <a href="/storage" data-nav aria-label="Storage" className="btn-a side-storage">
+      {showStorage && <a href="/status?section=storage" data-nav aria-label="Storage" className="btn-a side-storage">
         <Ic.HardDrive size={16} aria-hidden="true" /> Storage
       </a>}
       {footer}
