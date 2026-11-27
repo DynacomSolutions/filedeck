@@ -179,7 +179,7 @@ spec:
             - name: FILEDECK_VAULT_MAX_HOURS
               value: {{ .Values.vault.maxHours | quote }}
             - name: NODES
-              value: {{ range $i, $n := .Values.nodes }}{{ if $i }},{{ end }}{{ $n.name }}={{ if or (eq (default "kubernetes" $n.mode) "native") (eq $n.mode (printf "%s-%s" "native" "agent")) }}{{ required (printf "nodes[%d].url is required for native %s" $i $n.name) $n.url }}{{ else }}http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}{{ end }}
+              value: {{ range $i, $n := (include "filedeck.managedNodes" . | fromYamlArray) }}{{ if $i }},{{ end }}{{ $n.name }}={{ if or (eq (default "kubernetes" $n.mode) "native") (eq $n.mode (printf "%s-%s" "native" "agent")) }}{{ required (printf "nodes[%d].url is required for native %s" $i $n.name) $n.url }}{{ else }}http://{{ include "filedeck.agentName" $n }}.{{ $.Release.Namespace }}:{{ $.Values.port }}{{ end }}{{ end }}
             {{- if .Values.brand }}
             - name: FILEDECK_BRAND
               value: {{ omit .Values.brand "cssContent" | toJson | quote }}

@@ -262,6 +262,15 @@ nodes:
     mode: kubernetes
     nodeName: ""
 
+# When enabled, add Kubernetes Linux Nodes carrying this label to the agent
+# set during the Argo render. Static nodes remain the place for native hosts
+# and node-specific policy. The Node API is the trusted membership source.
+# Helm template without cluster access keeps the explicit nodes only.
+managedNodes:
+  enabled: false
+  label: dynacom.dev/filedeck-managed
+  value: "true"
+
 sources: []
 
 # Scratch servers for exercising the network sources (SFTP, WebDAV and SMB through rclone/Samba, S3 through MinIO),
