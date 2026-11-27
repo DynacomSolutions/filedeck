@@ -84,6 +84,10 @@ export interface ChangeSink {
   /** false when `wait` is false and an overlapping walk holds or waits for the lock: nothing was applied, the caller tries the folder again later */
   applyChanged(virtual: string, ctl?: undefined, opts?: { wait?: boolean }): Promise<boolean | void>;
   markStale(virtual: string): void;
+  /** the same for many folders in one write transaction (the subtrees merged in one commit interval) */
+  markStaleMany?(virtuals: string[]): void;
+  /** the folders of `paths` for which a re-read can do something (stored, under a stored folder, or with stored folders below); null = unknown, apply them all */
+  needsApply?(paths: string[]): Promise<Set<string> | null>;
   /** keep changed folders on disk: false when that is not possible (the watcher then keeps them in memory) */
   notePending?(items: { path: string; dueAt: number; modify: boolean }[], modifyMs: number): Promise<boolean>;
   /** folders due at `now` (oldest first, at most `limit`), marked as run; null = the backlog was too old to drain: the store marked the pending folders stale itself and dropped the rows */
@@ -107,6 +111,8 @@ const MAXFS = 4096;
 const FLUSH_MS = 250;
 const FLUSH_MAX = 2000;
 const DRAIN_BATCH = 256;
+/** stale marks of merged subtrees written for one commit interval, at most */
+const COLLAPSED_MAX = 32;
 const SESSION_MS = 1000;
 const RECONCILE_MS = 30_000;
 
@@ -165,6 +171,8 @@ export class FanWatch {
   private commitMs: number;
   private dirtyMax: number;
   private excluded: (virtual: string) => boolean;
+  /** subtrees whose changed folders were merged in the open interval: each gets one stale mark when the interval ends (see `collapse`) */
+  private collapsed = new Set<string>();
   private lastCommit = 0;
   /** when the first change of the open commit interval arrived (0 = none waits) */
   private openAt = 0;
@@ -385,6 +393,7 @@ export class FanWatch {
     const pre = virtual === "/" ? "/" : virtual + "/";
     const hit = (p: string) => p === "/" || p === virtual || p.startsWith(pre) || virtual.startsWith(p + "/");
     for (const p of this.buf.keys()) if (hit(p)) return false;
+    for (const p of this.collapsed) if (hit(p)) return false;
     for (const p of this.flushing.keys()) if (hit(p)) return false;
     for (const p of this.mem.keys()) if (hit(p)) return false;
     for (const p of this.taken.keys()) if (hit(p)) return false;
@@ -428,12 +437,13 @@ export class FanWatch {
         // and wait for its answer. Without that (an old helper, a stuck pipe) the run is not reported clean.
         const synced = await this.sync(1500);
         await this.flush();
+        this.markCollapsed();
         const clean = synced && !this.resume && !this.buf.size && !this.mem.size && !this.inflight && !this.draining && !this.taken.size;
         this.session = null;
         await this.store.sessionEnd?.(sess.id, clean, this.lostAt);
       }
       // changes of the commit interval that is still open reach the store whatever the state of the run: the next process applies them
-      if (this.buf.size) await this.flush().catch(() => {});
+      if (this.buf.size || this.collapsed.size) await this.flush().catch(() => {});
     } finally {
       this.stop();
     }
@@ -615,6 +625,7 @@ export class FanWatch {
     this.publish({ kind: "overflow", scope: "node", window: { from: this.o.bus?.lastEventAt || now, to: now }, reason: "the kernel dropped events" });
     this.since = this.lostAt = Math.max(this.since, Date.now());
     this.buf.clear();
+    this.collapsed.clear(); // (every watched mount gets a stale mark below)
     this.mem.clear();
     void this.store.clearPending?.();
     for (const m of this.marks) this.store.markStale(m);
@@ -630,6 +641,8 @@ export class FanWatch {
     if (this.excluded(v)) return false;
     this.ensureTimer();
     if (!this.openAt) this.openAt = Date.now();
+    // inside a subtree that is already merged into one stale mark: nothing more to remember (the mark is written when the interval ends, later than this event)
+    if (this.collapsed.size && this.absorbed(v)) return true;
     const cur = this.buf.get(v);
     // a settle event wins over a modify event: it is not held back by the modify interval
     this.buf.set(v, { at: cur ? Math.min(cur.at, Date.now() + this.settleMs) : Date.now() + this.settleMs, modify: (cur?.modify ?? true) && modify });
@@ -639,9 +652,22 @@ export class FanWatch {
     return true;
   }
 
+  /** Is `v`, or a folder above it, a merged subtree of the open interval? */
+  private absorbed(v: string): boolean {
+    for (let a = v; ; ) {
+      if (this.collapsed.has(a)) return true;
+      const i = a.lastIndexOf("/");
+      if (i < 0 || a === "/") return false;
+      a = i === 0 ? "/" : a.slice(0, i);
+    }
+  }
+
   /**
    * The folders of one interval passed the cap: instead of holding every path, folders that share a subtree are replaced by one stale mark of it (one row,
    * whatever the subtree holds), which the next read of it re-scans. The deepest level that brings the buffer under half the cap is used.
+   * The marks are not written here: they are kept in `collapsed` and written together, in one transaction, when the interval ends (`markCollapsed`).
+   * Later changes inside a merged subtree are absorbed (see `schedule`), so a busy tree cannot fill the buffer again and again, and the marks of one
+   * interval stay few (COLLAPSED_MAX): past that the deepest ones are merged into their parents.
    */
   private collapse() {
     const target = this.dirtyMax >> 1;
@@ -656,15 +682,31 @@ export class FanWatch {
       for (const [prefix, members] of groups) {
         if (members.length < 2 && depth > 0) continue;
         for (const m of members) this.buf.delete(m);
-        this.store.markStale(prefix);
+        this.collapsed.add(prefix);
         this.sizeStats.collapsed++;
         if (this.buf.size <= target) break;
       }
     }
+    // few marks: the deepest subtrees are merged into their parents until the cap holds
+    for (let keep = 6; this.collapsed.size > COLLAPSED_MAX && keep >= 0; keep--) {
+      const next = new Set<string>();
+      for (const p of this.collapsed) next.add(keep === 0 ? "/" : p.split("/").slice(0, keep + 1).join("/") || "/");
+      this.collapsed = next;
+    }
+  }
+
+  /** The merged subtrees of the interval get their stale marks now: one write transaction for all of them. */
+  private markCollapsed() {
+    if (!this.collapsed.size) return;
+    const paths = [...this.collapsed];
+    this.collapsed = new Set();
+    if (this.store.markStaleMany) this.store.markStaleMany(paths);
+    else for (const p of paths) this.store.markStale(p);
   }
 
   /** Hand the buffered events to the store (disk). With no usable store they wait in memory, capped like the old behaviour. */
   private async flush(): Promise<void> {
+    this.markCollapsed();
     if (!this.buf.size) return;
     const items = [...this.buf].map(([path, e]) => ({ path, dueAt: e.at, modify: e.modify }));
     this.buf = new Map();
@@ -788,13 +830,20 @@ export class FanWatch {
           }
         }
         if (!batch.length) break;
+        batch = [...batch].sort(); // path order: neighbouring folders share table pages and ancestors, which then stay in the page cache between two re-reads
         for (const v of batch) this.taken.set(v, false);
         const ends: [string, number][] = [];
         // folders whose lock was busy: never queue behind a long walk (that would block every walk asked after it), try them again soon.
         // (Not a dirty mark: a folder that is not stored yet has no row to mark, and a stale mark would collapse on a long busy spell.)
         const busy: string[] = [];
+        // one read tells which of the batch can need a re-read at all (the others are not stored and not under a stored folder: nothing to do for them)
+        const need = (await this.store.needsApply?.(batch).catch(() => null)) ?? null;
         for (const v of batch) {
           if (this.stopped || this.handingOver) break;
+          if (need && !need.has(v)) {
+            ends.push([v, Date.now()]);
+            continue;
+          }
           try {
             if ((await this.store.applyChanged(v, undefined, { wait: false })) === false) busy.push(v);
           } catch {

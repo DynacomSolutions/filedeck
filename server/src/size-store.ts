@@ -233,13 +233,15 @@ const tick = () => new Promise<void>((r) => setImmediate(r));
 /** commits that may be in flight while the walk goes on (the walk waits for the oldest one only when this many are queued) */
 const COMMITS_IN_FLIGHT = 2;
 const SLOW_SEND_MS = 1000;
+/** ops of the writer worker that open a write transaction (`beat` is the lease heartbeat) */
+const WRITE_OPS = new Set(["commit", "tx", "many", "exec", "meta", "beat"]);
 const SLOW_READ_MS = 200;
 let lastSlowLog = 0;
 /** One structured line for a slow store call, at most one every 5 s; no file names but the scan's own path. */
-function slowLog(what: string, ms: number, path: string) {
+function slowLog(what: string, ms: number, path: string, runMs?: number) {
   if (Date.now() - lastSlowLog < 5000) return;
   lastSlowLog = Date.now();
-  console.error(JSON.stringify({ slow: what, ms: Math.round(ms), path }));
+  console.error(JSON.stringify({ slow: what, ms: Math.round(ms), ...(runMs !== undefined ? { runMs: Math.round(runMs) } : {}), path }));
 }
 const KIDS = "(SELECT COUNT(*) FROM sizes k WHERE k.parent = s.path AND k.dev = s.dev) AS kids";
 /** the dirty mark of a stored folder (null = none): such a row is never reused, see `dirty` in SCHEMA */
@@ -286,8 +288,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS walking (path TEXT PRIMARY KEY, epoch INTEGER NOT NULL, started INTEGER NOT NULL) WITHOUT ROWID;
   -- one row per watcher run (see FanWatch): \`since\` is the time from which the changes of the watched filesystems were seen without a gap
   CREATE TABLE IF NOT EXISTS watch_sessions (id INTEGER PRIMARY KEY, mounts_hash TEXT NOT NULL, ready_at INTEGER NOT NULL, since INTEGER NOT NULL, beat INTEGER NOT NULL, ended_at INTEGER, clean INTEGER NOT NULL DEFAULT 0, min_epoch INTEGER);
-  -- \`sessionTick\` asks every second whether a newer run over the same mounts exists
-  CREATE INDEX IF NOT EXISTS watch_sessions_mounts ON watch_sessions(mounts_hash, id);
+  -- (\`watch_sessions_mounts\`, for the question of \`sessionTick\`, is one of BACKGROUND_DDL)
   -- the folders a running walk has entered and not finished (at most one per level): what it has counted so far, \`walk\` = the start folder.
   -- A folder's row here goes when its real row is written; the walk's rows go when it ends. Answers \`du --cached\` while a scan runs.
   CREATE TABLE IF NOT EXISTS partial (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL, walk TEXT NOT NULL, at INTEGER NOT NULL, ${METRICS.map((m) => metricColumn("tot", m)).join(", ")}) WITHOUT ROWID;
@@ -330,6 +331,8 @@ const TRIGGERS = `
 /** pending rows that are waiting (idle rows only remember their last run). Partial indexes, built by the writer off the main thread. */
 const PENDING_LIVE = "due_at < 8640000000000000";
 const BACKGROUND_DDL = [
+  // \`sessionTick\` asks every second whether a newer run over the same mounts exists: (mounts_hash =, id >) is one index range
+  "CREATE INDEX IF NOT EXISTS watch_sessions_mounts ON watch_sessions(mounts_hash, id)",
   `CREATE INDEX IF NOT EXISTS pending_live ON pending(path) WHERE ${PENDING_LIVE}`,
   "CREATE INDEX IF NOT EXISTS pending_taker ON pending(path) WHERE taker IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS sizes_untrusted ON sizes(path) WHERE ver = 0 OR scanned_at = 0",
@@ -358,13 +361,13 @@ const WRITER_WORKER = `
 process.emitWarning = () => {};
 const { workerData, parentPort } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { file, uri, COLS, METRICS, walLimit, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, linkColumns, triggers, putPartial, vacuumMinFree } = workerData;
+const { file, uri, COLS, METRICS, walLimit, cacheKb, reader, readDelayMs, schema, addSeenAt, addTaker, addVer, addValidatedEpoch, linkColumns, triggers, putPartial, vacuumMinFree } = workerData;
 const fs = require("node:fs");
 // \`uri\` opens the file only if it exists (mode=rw): a store file is never created here, so a deleted generation is never made again under its name (see size-gen.ts)
 const db = new DatabaseSync(uri);
 // NORMAL, not OFF: with WAL an OS crash or power cut then loses at most the last commits, never the file (OFF left a broken freelist after a node crash)
 // wal_autocheckpoint: 4000 pages (16 MiB at 4 KiB), not the default 1000: the pages that every commit rewrites (the ancestors' totals) are copied to the file once per checkpoint, not four times as often
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA wal_autocheckpoint=4000; PRAGMA journal_size_limit=" + walLimit);
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000; PRAGMA cache_size=-" + cacheKb + "; PRAGMA wal_autocheckpoint=4000; PRAGMA journal_size_limit=" + walLimit);
 // the reader worker only runs "read" ops: a second connection, so a read never waits behind a commit (WAL) and the main thread never waits for the disk
 // A reader holding a snapshot stops the automatic (passive) checkpoint from restarting the WAL, which then grows without bound and slows every read and commit.
 // Past the limit, wait briefly for readers and truncate; a busy attempt is skipped and tried again 2 s later, so a pinned snapshot costs the writer at most 0.5 s in 2.5.
@@ -504,6 +507,21 @@ const commit = ({ items, last, walkStart, walkEnd, spine }) => {
   });
 };
 const prepared = new Map();
+// Which of these folders can make a re-read do anything: one with a stored row, one whose parent has a stored row, or one with stored rows below it.
+// (The rest are neither stored nor under a stored folder: \`applyChanged\` would find that out one lock and one read at a time and do nothing.)
+let probeHas, probeBelow;
+const probe = (paths) => {
+  probeHas ??= db.prepare("SELECT 1 FROM sizes WHERE path = ?");
+  probeBelow ??= db.prepare("SELECT 1 FROM sizes WHERE path > ? AND path < ? LIMIT 1");
+  const out = [];
+  for (const p of paths) {
+    const par = parentOf(p);
+    if (probeHas.get(p) || (par && probeHas.get(par))) { out.push(p); continue; }
+    const [lo, hi] = below(p);
+    if (probeBelow.get(lo, hi)) out.push(p);
+  }
+  return out.map((path) => ({ path }));
+};
 const isBusy = (e) => !!e && (e.errcode === 5 || e.errcode === 6 || /database (table )?is locked/i.test(String(e.message)));
 const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const addLinkColumns = () => {
@@ -530,7 +548,8 @@ parentPort.on("message", (m) => {
       else if (m.op === "close") { db.close(); parentPort.postMessage({ id: m.id }); process.exit(0); }
       else if (m.op === "release") { if (fence) db.prepare("UPDATE writer SET released = 1 WHERE id = 1 AND epoch = ? AND owner = ?").run(fence.epoch, fence.owner); fence = null; }
       else if (m.op === "meta") { const r = db.prepare(m.sql).run(...m.params); parentPort.postMessage({ id: m.id, rows: [{ id: Number(r.lastInsertRowid), changes: Number(r.changes) }] }); return; }
-      else if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); parentPort.postMessage({ id: m.id, rows: st.all(...m.params) }); return; }
+      else if (m.op === "read") { if (readDelayMs) nap(readDelayMs); let st = prepared.get(m.sql); if (!st) prepared.set(m.sql, st = db.prepare(m.sql)); const t0 = performance.now(); const rows = st.all(...m.params); parentPort.postMessage({ id: m.id, rows, ms: performance.now() - t0 }); return; }
+      else if (m.op === "probe") { parentPort.postMessage({ id: m.id, rows: probe(m.paths) }); return; }
       else if (m.op === "commit") commit(m);
       else if (m.op === "tx") inTx(() => { for (const part of m.parts) { const st = db.prepare(part.sql); for (const r of part.rows) st.run(...r); } });
       else if (m.op === "many") inTx(() => { const st = db.prepare(m.sql); for (const r of m.rows) st.run(...r); });
@@ -550,6 +569,24 @@ parentPort.on("message", (m) => {
 /** `pending.due_at` of a folder that is not waiting but remembers its `last_run` */
 const PENDING_IDLE = Number.MAX_SAFE_INTEGER;
 const PENDING_BATCH = 10_000;
+/** rows of the backlog that are marked dirty in one transaction, and the least pause between two (see `staleBacklog`) */
+const STALE_BATCH = 2000;
+const STALE_PAUSE_MS = 50;
+const STALE_MIN_BATCH = 25;
+/** idle pending rows dropped per delete (each row is in four indexes) */
+const PRUNE_BATCH = 2000;
+/** the time one transaction of the backlog drain should take (ms) */
+const STALE_TX_MS = 120;
+/**
+ * Page cache of each connection (KiB). The store file is many GiB; every re-read of a changed folder looks up a few rows by path in it, and with the
+ * old 8 MiB each lookup went to the file. The reader (many small lookups) gets the larger one.
+ */
+const READ_CACHE_KB = 65_536;
+const WRITE_CACHE_KB = 32_768;
+/** the earlier watcher run is a settled fact once it has ended: this marks "no earlier run" in the cache */
+const NO_ROW: Record<string, unknown> = {};
+/** the heartbeat of a watcher run is written to its row at most this often (nothing reads it but people) */
+const BEAT_WRITE_MS = 10_000;
 /** the writer lease: a holder whose heartbeat is older than this has lost it */
 const LEASE_MS = 10_000;
 /** a process starts a new generation at most this often (a failing disk must not make it loop) */
@@ -850,11 +887,30 @@ export class SizeStore {
     return this.isWriter;
   }
 
+  /**
+   * Of these changed folders, the ones a re-read can do something for: a folder with a stored row, one whose parent has a stored row, one with stored rows below it.
+   * One read for the whole list. Null when that cannot be told (no file, no store): the caller then re-reads all of them.
+   */
+  async needsApply(paths: string[]): Promise<Set<string> | null> {
+    if (!this.db || this.file === ":memory:" || !paths.length) return null;
+    try {
+      const rows = await this.post({ op: "probe", paths }, true);
+      return rows ? new Set(rows.map((r) => r.path as string)) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Housekeeping the writer does off the main thread: the partial indexes, and dirty marks of folders that are not stored (nothing to re-read). */
   private background() {
     if (this.file === ":memory:" || this.closed || !this.isWriter) return;
     void (async () => {
-      for (const sql of [...BACKGROUND_DDL, ORPHAN_DIRTY]) await this.post({ op: "exec", sql, params: [] }, false);
+      // one at a time on the writer thread, each in its own transaction, so a big file never blocks the lease or the commits for more than one index; each is logged with its time
+      for (const sql of [...BACKGROUND_DDL, ORPHAN_DIRTY]) {
+        const t0 = Date.now();
+        await this.post({ op: "exec", sql, params: [], site: "background" }, false);
+        if (Date.now() - t0 > 500) console.error(JSON.stringify({ info: "size-background-ddl", ms: Date.now() - t0, sql: sql.slice(0, 60) }));
+      }
       this.idxReady = true;
     })().catch(() => undefined);
   }
@@ -1231,18 +1287,21 @@ export class SizeStore {
     if (this.closed) return Promise.resolve(undefined);
     let w = read ? this.reader : this.writer;
     if (!w) {
-      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, uri: rwUri(this.file), vacuumMinFree: this.o.vacuumMinFreePages ?? VACUUM_MIN_FREE, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, linkColumns: LINK_COLUMNS, triggers: TRIGGERS, putPartial: PUT_PARTIAL, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
+      const nw = (w = new Worker(WRITER_WORKER, { eval: true, workerData: { file: this.file, uri: rwUri(this.file), vacuumMinFree: this.o.vacuumMinFreePages ?? VACUUM_MIN_FREE, COLS, METRICS, walLimit: this.o.walLimitBytes ?? WAL_LIMIT, cacheKb: read ? READ_CACHE_KB : WRITE_CACHE_KB, schema: SCHEMA, addSeenAt: ADD_SEEN_AT, addTaker: ADD_TAKER, addVer: ADD_VER, addValidatedEpoch: ADD_VALIDATED_EPOCH, linkColumns: LINK_COLUMNS, triggers: TRIGGERS, putPartial: PUT_PARTIAL, reader: read, readDelayMs: this.o.readDelayMs ?? 0 }, resourceLimits: { maxOldGenerationSizeMb: 128 }, stdout: false, stderr: false }));
       const fail = (e: Error) => {
         if (this.writer === nw) this.writer = undefined;
         if (this.reader === nw) this.reader = undefined;
         for (const [id, p] of this.pending) if (p.w === nw) { p.rej(e); this.pending.delete(id); }
       };
-      nw.on("message", (r: { id: number; err?: string; busy?: boolean; rows?: Record<string, unknown>[] }) => {
+      nw.on("message", (r: { id: number; err?: string; busy?: boolean; rows?: Record<string, unknown>[]; ms?: number }) => {
         const p = this.pending.get(r.id);
         this.pending.delete(r.id);
         if (![...this.pending.values()].some((q) => q.w === nw)) nw.unref(); // idle: an idle worker must not keep the process alive
         if (r.err) p?.rej(Object.assign(new Error(r.err), { busy: r.busy }));
-        else p?.res(r.rows);
+        else {
+          if (r.rows && r.ms !== undefined) Object.defineProperty(r.rows, "runMs", { value: r.ms });
+          p?.res(r.rows);
+        }
       });
       nw.once("error", fail);
       nw.once("exit", (code) => fail(new Error(`size writer exit ${code}`)));
@@ -1251,7 +1310,11 @@ export class SizeStore {
       else this.writer = nw;
     }
     const ww = w;
-    if (!read && (m.op === "commit" || m.op === "tx" || m.op === "many" || m.op === "exec" || m.op === "meta")) this.writeTransactions++;
+    if (!read && WRITE_OPS.has(m.op as string)) {
+      this.writeTransactions++;
+      const site = String(m.site ?? m.op);
+      this.writeTransactionsBySite[site] = (this.writeTransactionsBySite[site] ?? 0) + 1;
+    }
     return new Promise((res, rej) => {
       const id = ++this.seq;
       this.pending.set(id, { w: ww, res, rej });
@@ -1263,6 +1326,8 @@ export class SizeStore {
   private closed = false;
   /** write transactions sent to the writer worker (each op is one transaction): for the load test and the metrics */
   writeTransactions = 0;
+  /** the same count by call site (`site` of the request, else its op): which code path still writes, for the metrics */
+  writeTransactionsBySite: Record<string, number> = {};
   /** mark writes not yet committed: a shutdown waits for them (a mark lost at exit would let a change look fresh after the restart) */
   private markWrites = new Set<Promise<void>>();
   private markWrite(p: Promise<void>) {
@@ -1561,13 +1626,15 @@ export class SizeStore {
   private async read(q: string, sql: string, params: (string | number)[], dflt: Record<string, unknown>[] | null): Promise<Record<string, unknown>[] | null> {
     if (!this.db) return dflt;
     const t0 = performance.now();
+    let got: Record<string, unknown>[] | undefined;
     try {
-      return this.file === ":memory:" ? this.inline(q, sql, params) : ((await this.post({ op: "read", sql, params }, true)) ?? []);
+      return this.file === ":memory:" ? this.inline(q, sql, params) : ((got = await this.post({ op: "read", sql, params }, true)) ?? []);
     } catch (e) {
       this.failed(e);
       return dflt;
     } finally {
-      if (performance.now() - t0 > SLOW_READ_MS) slowLog(`size-read-${q}`, performance.now() - t0, String(params[0]));
+      // `runMs` = the time the statement itself ran on the reader thread; the rest of `ms` was the wait in its queue behind other reads
+      if (performance.now() - t0 > SLOW_READ_MS) slowLog(`size-read-${q}`, performance.now() - t0, String(params[0]), got ? (got as { runMs?: number }).runMs : undefined);
     }
   }
   /** The in-memory store reads on the main thread (no file, no disk wait). */
@@ -2435,12 +2502,12 @@ export class SizeStore {
   private write(sql: string, params: (string | number)[]): Promise<void> {
     return (this.tail = this.write1(sql, params));
   }
-  private async write1(sql: string, params: (string | number)[]): Promise<void> {
+  private async write1(sql: string, params: (string | number)[], site = "exec"): Promise<void> {
     if (!this.db) return;
     if (this.file === ":memory:") return this.safe(() => void this.db!.prepare(sql).run(...params), undefined);
     if (!(await this.canWrite())) return;
     try {
-      await this.send({ op: "exec", sql, params });
+      await this.send({ op: "exec", sql, params, site });
     } catch (e) {
       this.failed(e);
     }
@@ -2454,10 +2521,22 @@ export class SizeStore {
    * cannot make a new mark look older than a persisted one.
    */
   markStale(virtual: string, at = this.nextAt()): void {
-    if (!this.db || this.markAt(virtual) >= at) return;
-    at = Math.max(at, (this.marks.get(virtual) ?? -1) + 1); // as the stored row does (MARK_SQL): a mark written again is later than the one before
-    this.marks.set(virtual, at);
-    let rows = [[virtual, at]];
+    this.markStaleMany([virtual], at);
+  }
+  /**
+   * `markStale` for many folders in ONE write transaction (the watcher passes the subtrees it merged in one commit interval). Every mark is in memory
+   * before this returns, so `freshTree` refuses them at once; the rows follow in one commit.
+   */
+  markStaleMany(virtuals: string[], at = this.nextAt()): void {
+    if (!this.db) return;
+    let rows: (string | number)[][] = [];
+    for (const virtual of virtuals) {
+      if (this.markAt(virtual) >= at) continue;
+      const a = Math.max(at, (this.marks.get(virtual) ?? -1) + 1); // as the stored row does (MARK_SQL): a mark written again is later than the one before
+      this.marks.set(virtual, a);
+      rows.push([virtual, a]);
+    }
+    if (!rows.length) return;
     let parts: { sql: string; rows: (string | number)[][] }[] = [{ sql: MARK_SQL, rows }];
     if (this.marks.size > MARKS_MAX) {
       // too many to keep apart: one mark on "/" as new as the newest, replaced in one transaction
@@ -2473,7 +2552,7 @@ export class SizeStore {
       for (const [p, a] of rows) this.unsaved.set(p as string, Math.max(this.unsaved.get(p as string) ?? 0, a as number));
       return;
     }
-    this.markWrite((this.tail = this.txn(parts).then(() => undefined)));
+    this.markWrite((this.tail = this.txn(parts, "mark").then(() => undefined)));
   }
 
   /** Has a stale mark been made on `p`, above it or below it, at or after `t`? (An overflow or a helper exit leaves only marks: the pending rows it dropped are gone.) */
@@ -2507,7 +2586,7 @@ export class SizeStore {
   }
 
   /** Statements of one transaction, each run for every row of its list: on the writer worker for a file-backed store, else inline. False when the store is unusable. */
-  private async txn(parts: { sql: string; rows: (string | number)[][] }[]): Promise<boolean> {
+  private async txn(parts: { sql: string; rows: (string | number)[][] }[], site = "tx"): Promise<boolean> {
     if (!this.db) return false;
     if (this.file === ":memory:") {
       return this.safe(() => {
@@ -2527,7 +2606,7 @@ export class SizeStore {
     }
     if (!(await this.canWrite())) return false;
     try {
-      await this.send({ op: "tx", parts });
+      await this.send({ op: "tx", parts, site });
       return true;
     } catch (e) {
       this.failed(e);
@@ -2545,13 +2624,13 @@ export class SizeStore {
    * (or, for a folder with no row, of its stored parent), so a failure leaves nothing half done. `touch` is more of the same statements to run in it.
    * A dirty folder is never reused by a walk and never vouched for by `freshTree`; the walk that re-reads it and ends cleanly clears the mark.
    */
-  async markDirty(paths: string[], also: { sql: string; rows: (string | number)[][] }[] = []): Promise<boolean> {
+  async markDirty(paths: string[], also: { sql: string; rows: (string | number)[][] }[] = [], site = "dirty"): Promise<boolean> {
     const at = Date.now();
-    return this.txn([{ sql: DIRTY_SQL, rows: paths.map((p) => [p, parentOf(p), at]) }, ...also]);
+    return this.txn([{ sql: DIRTY_SQL, rows: paths.map((p) => [p, parentOf(p), at]) }, ...also], site);
   }
 
   /** Many rows of one statement in one transaction: on the writer worker for a file-backed store, else inline. False when the store is unusable. */
-  private async writeMany(sql: string, rows: (string | number)[][]): Promise<boolean> {
+  private async writeMany(sql: string, rows: (string | number)[][], site = "many"): Promise<boolean> {
     if (!this.db) return false;
     if (this.file === ":memory:") {
       return this.safe(() => {
@@ -2569,7 +2648,7 @@ export class SizeStore {
     }
     if (!(await this.canWrite())) return false;
     try {
-      await this.send({ op: "many", sql, rows });
+      await this.send({ op: "many", sql, rows, site });
       return true;
     } catch (e) {
       this.failed(e);
@@ -2586,6 +2665,7 @@ export class SizeStore {
     const ok = await this.writeMany(
       `INSERT INTO pending (path, due_at) VALUES (?1, ?2) ${keep("?3")}`,
       items.filter((i) => !i.modify).map((i) => [i.path, i.dueAt, PENDING_IDLE]),
+      "notePending",
     );
     // a modify event on a folder that ran lately waits for last_run + modifyMs (the SELECT is the new row's due time)
     const mod = items.filter((i) => i.modify);
@@ -2594,6 +2674,7 @@ export class SizeStore {
       (await this.writeMany(
         `INSERT INTO pending (path, due_at) SELECT ?1, MAX(?2, COALESCE((SELECT last_run FROM pending WHERE path = ?1), 0) + ?3) WHERE true ${keep("?4")}`,
         mod.map((i) => [i.path, i.dueAt, modifyMs, PENDING_IDLE]),
+        "notePending",
       )) && ok
     );
   }
@@ -2627,11 +2708,13 @@ export class SizeStore {
     // the run starts after the reads above (slow on a loaded disk), so stamp it now: a modify row then waits modifyMs from the run, not from before the reads
     const ran = Math.max(now, Date.now());
     // `taker` = the run time: other processes see the take until noteRan clears it, and the trigger of an older version's take (no taker) leaves a dirty mark
-    if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ?, taker = ? WHERE path = ?", got.map((p) => [ran, PENDING_IDLE, ran, p]));
+    if (got.length) await this.writeMany("UPDATE pending SET last_run = ?, due_at = ?, taker = ? WHERE path = ?", got.map((p) => [ran, PENDING_IDLE, ran, p]), "take");
     // idle rows only remember the last run: drop them once it is older than the modify interval (or lies in the future), one bounded batch per call
     if (ran - this.lastPrune > 1000) {
       this.lastPrune = ran;
-      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND taker IS NULL AND (last_run < ? OR last_run > ?) LIMIT ?)", [PENDING_IDLE, ran - t.modifyMs, ran + t.modifyMs, PENDING_BATCH]);
+      // a read first: a delete that finds nothing is still a write transaction
+      const any = await this.read("prunable", "SELECT 1 FROM pending WHERE due_at = ? AND taker IS NULL AND (last_run < ? OR last_run > ?) LIMIT 1", [PENDING_IDLE, ran - t.modifyMs, ran + t.modifyMs], null);
+      if (any?.length) await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending WHERE due_at = ? AND taker IS NULL AND (last_run < ? OR last_run > ?) LIMIT ?)", [PENDING_IDLE, ran - t.modifyMs, ran + t.modifyMs, PRUNE_BATCH], "prune");
     }
     return got;
   }
@@ -2647,6 +2730,7 @@ export class SizeStore {
     await this.writeMany(
       "INSERT INTO pending (path, due_at, last_run) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET last_run = ?3, taker = NULL, due_at = CASE WHEN ?4 AND due_at < ?2 THEN MAX(due_at, ?3 + ?5) ELSE due_at END",
       runs.map((r) => [r.path, PENDING_IDLE, r.endedAt, r.hold ? 1 : 0, modifyMs]),
+      "noteRan",
     );
   }
 
@@ -2657,23 +2741,41 @@ export class SizeStore {
    * ancestors and everything above it until that walk ended cleanly; so a walk that is running, or that was killed, cannot make the change look applied.
    */
   private async staleBacklog(now: number): Promise<void> {
+    let rounds = 0;
+    let rowsDone = 0;
+    let batch = 200; // rows per transaction: adapted so that one transaction takes about STALE_TX_MS (the writer thread serves one request at a time; the heartbeat and the commits wait behind it)
+    const t00 = Date.now();
     while (this.db) {
-      const rows = await this.read("pending", "SELECT path FROM pending WHERE due_at < ? LIMIT ?", [PENDING_IDLE, PENDING_BATCH], null);
-      if (!rows?.length) return;
-      const ps = rows.map((r) => r.path as string);
+      const t0 = performance.now();
+      // A bounded page of the waiting rows in path order (the partial index `pending_live`, which holds only them: the idle rows are never read). Neighbouring paths
+      // share table pages, so a page of 2000 rows writes a few hundred pages, not 2000 x the number of indexes. The next page starts where this one left the index.
+      // (Before that index exists, the age order of `pending_due`.)
+      const rows = this.idxReady
+        ? await this.read("pending", `SELECT path FROM pending WHERE ${PENDING_LIVE} ORDER BY path LIMIT ?`, [batch], null)
+        : await this.read("pending", "SELECT path FROM pending WHERE due_at < ? ORDER BY due_at LIMIT ?", [PENDING_IDLE, batch], null);
+      if (!rows?.length) break;
+      const ps = rows.map((r) => r.path as string).sort();
       const ran = Math.max(now, Date.now());
+      const tx0 = performance.now();
       // one transaction, dirty first: the change is recorded durably in the same commit that stops it being pending.
       // (The taker set and cleared again is for 0.3.31's trigger on a take without a taker; removable once no such process can share the file.)
-      if (!(await this.markDirty(ps, [{ sql: "UPDATE pending SET last_run = ?, due_at = ?, taker = ? WHERE path = ?", rows: ps.map((p) => [ran, PENDING_IDLE, ran, p]) }, { sql: "UPDATE pending SET taker = NULL WHERE path = ?", rows: ps.map((p) => [p]) }]))) return;
-      await new Promise((r) => setTimeout(r, 5));
+      if (!(await this.markDirty(ps, [{ sql: "UPDATE pending SET last_run = ?, due_at = ?, taker = ? WHERE path = ?", rows: ps.map((p) => [ran, PENDING_IDLE, ran, p]) }, { sql: "UPDATE pending SET taker = NULL WHERE path = ?", rows: ps.map((p) => [p]) }], "staleBacklog"))) return;
+      rounds++;
+      rowsDone += ps.length;
+      const txMs = performance.now() - tx0;
+      batch = Math.max(STALE_MIN_BATCH, Math.min(STALE_BATCH, Math.round((batch * STALE_TX_MS) / Math.max(5, txMs))));
+      if (rounds % 50 === 0) console.error(JSON.stringify({ info: "size-backlog-progress", rounds, rows: rowsDone, ms: Date.now() - t00 }));
+      // paced: the writer and the reader are busy at most a third of the time with this, whatever the disk speed (a backlog is drained in minutes, not in a burst of IO)
+      await new Promise((r) => setTimeout(r, Math.max(STALE_PAUSE_MS, 2 * (performance.now() - t0))));
     }
+    if (rounds) console.error(JSON.stringify({ info: "size-backlog-drained", rows: rowsDone, ms: Date.now() - t00, rounds }));
   }
 
   /** The watcher lost events: nothing pending is worth keeping, the stale marks cover it. */
   async clearPending(): Promise<void> {
     // bounded batches (the writer never holds one huge transaction), a pause between them; not `write`: size walks wait on its tail
     while (this.db && (await this.canWrite()) && (await this.read("pending", "SELECT 1 FROM pending LIMIT 1", [], null))?.length) {
-      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending LIMIT ?)", [PENDING_BATCH]);
+      await this.write1("DELETE FROM pending WHERE path IN (SELECT path FROM pending LIMIT ?)", [PENDING_BATCH], "clearPending");
       await new Promise((r) => setTimeout(r, 5));
     }
   }
@@ -2970,20 +3072,34 @@ export class SizeStore {
   async sessionTick(id: number, mountsHash: string, readyAt: number, lostAt = 0): Promise<{ since: number; newer: boolean; minEpoch: number | null } | null> {
     if (!this.db || this.file === ":memory:") return null;
     try {
-      const me = (await this.read("session", "SELECT since FROM watch_sessions WHERE id = ?", [id], null))?.[0];
-      if (!me) return null;
-      const prev = (await this.read("sessionPrev", "SELECT mounts_hash h, since, ended_at e, clean c, min_epoch m FROM watch_sessions WHERE id = (SELECT MAX(id) FROM watch_sessions WHERE id < ?)", [id], null))?.[0];
+      // the row of this run and the run before it are read once: a row never goes, and the earlier run's end is final once it has ended (a still running one is asked again)
+      if (!this.sessionKnown.has(id)) {
+        if (!(await this.read("session", "SELECT since FROM watch_sessions WHERE id = ?", [id], null))?.length) return null;
+        this.sessionKnown.add(id);
+      }
+      let prev = this.sessionPrev.get(id);
+      if (!prev) {
+        const got = await this.read("sessionPrev", "SELECT mounts_hash h, since, ended_at e, clean c, min_epoch m FROM watch_sessions WHERE id = (SELECT MAX(id) FROM watch_sessions WHERE id < ?)", [id], null);
+        prev = got?.[0];
+        if (got && (!prev || prev.e != null)) this.sessionPrev.set(id, prev ?? NO_ROW); // (a failed read is not "no earlier run")
+      }
+      if (prev === NO_ROW) prev = undefined;
       let since = readyAt;
       const carried = !!prev && prev.h === mountsHash && prev.e != null && Number(prev.e) >= readyAt && Number(prev.c) === 1;
-      if (carried) since = Math.min(since, Number(prev.since));
+      if (carried) since = Math.min(since, Number(prev!.since));
       // the chain's oldest usable epoch: the predecessor's when carried (null while it never held the lease: then this process's own first epoch), else this process's own first epoch
-      const minEpoch: number | null = carried && prev.m != null ? Number(prev.m) : null;
+      const minEpoch: number | null = carried && prev!.m != null ? Number(prev!.m) : null;
       // events lost (an overflow) and a store that was unusable are gaps: nothing from before them is vouched for, but the run goes on
       since = Math.max(since, lostAt, this.floor);
-      await this.post({ op: "meta", sql: "UPDATE watch_sessions SET beat = ?, since = ? WHERE id = ?", params: [Date.now(), since, id] }, false);
+      // `beat` is for people reading the file: written every BEAT_WRITE_MS, at once when `since` moves
+      const lastBeat = this.sessionBeat.get(id);
+      if (!lastBeat || lastBeat.since !== since || Date.now() - lastBeat.at >= BEAT_WRITE_MS) {
+        await this.post({ op: "meta", sql: "UPDATE watch_sessions SET beat = ?, since = ? WHERE id = ?", params: [Date.now(), since, id], site: "session" }, false);
+        this.sessionBeat.set(id, { at: Date.now(), since });
+      }
       const mine = minEpoch ?? (this.firstEpoch || null); // (a run that carried but never held the lease passes its predecessor's value on)
       if (mine !== null && this.minEpochWritten.get(id) !== mine) {
-        await this.post({ op: "meta", sql: "UPDATE watch_sessions SET min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [mine, id] }, false);
+        await this.post({ op: "meta", sql: "UPDATE watch_sessions SET min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [mine, id], site: "session" }, false);
         this.minEpochWritten.set(id, mine);
       }
       const newer = ((await this.read("sessionNewer", "SELECT 1 FROM watch_sessions WHERE id > ? AND mounts_hash = ? LIMIT 1", [id, mountsHash], null)) ?? []).length > 0;
@@ -2994,6 +3110,9 @@ export class SizeStore {
   }
   /** the `min_epoch` already written for a session: a heartbeat does not write it again */
   private minEpochWritten = new Map<number, number>();
+  private sessionKnown = new Set<number>();
+  private sessionPrev = new Map<number, Record<string, unknown>>();
+  private sessionBeat = new Map<number, { at: number; since: number }>();
   /** The watcher stops. `clean`: it saw every change until now and has handed them all to the store (see FanWatch.handover). */
   async sessionEnd(id: number, clean: boolean, lostAt = 0): Promise<void> {
     if (!this.db || this.file === ":memory:") return;

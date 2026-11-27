@@ -241,14 +241,16 @@ test("freshTree: no change is served while it is being taken for apply (rows alr
   fs.writeFileSync(path.join(root, "a/x/f"), "1234567890");
   await s.notePending([{ path: "/a/x", dueAt: Date.now() - 10, modify: false }], 100_000);
   const a = s as Any;
-  const orig = a.write1.bind(s);
+  // the prune is a read first (a delete that finds nothing is still a write transaction), then the delete: hold it at the read
+  const orig = a.read.bind(s);
   let go!: () => void;
   const g = new Promise<void>((r) => (go = r));
   let held = false;
-  a.write1 = async (q: string, p: unknown[]) => {
+  a.read = async (q: string, ...rest: unknown[]) => {
+    if (q !== "prunable") return orig(q, ...rest);
     held = true;
     await g;
-    return orig(q, p);
+    return orig(q, ...rest);
   };
   const t = s.takeDue(Date.now(), 10, { modifyMs: 100_000, settleMs: 1 });
   while (!held) await sleep(5);
