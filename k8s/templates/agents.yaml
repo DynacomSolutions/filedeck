@@ -1,7 +1,7 @@
 {{- if and .Values.auth.enabled (not (include "filedeck.agentTokenSecret" .)) }}
 {{- fail "auth.enabled needs agentToken" }}
 {{- end }}
-{{- range $i, $n := .Values.nodes }}
+{{- range $i, $n := (include "filedeck.managedNodes" . | fromYamlArray) }}
 {{- with $n }}
 {{- if and (ne (default "kubernetes" .mode) "native") (ne .mode (printf "%s-%s" "native" "agent")) }}
 ---
