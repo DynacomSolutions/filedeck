@@ -1,4 +1,4 @@
-.jobs-status-link {
+.jobs-status-nav {
   display: flex;
   align-items: center;
   min-height: 44px;
@@ -103,11 +103,19 @@
   gap: .5rem 1rem;
 }
 
-.status-job-summary a {
-  display: inline-flex;
-  min-height: 28px;
-  align-items: center;
-  font-weight: 700;
+.status-job-summary button {
+  max-width: 100%;
+  margin-block-end: .35rem;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.status-job-summary button svg {
+  flex: none;
+}
+
+.status-job-summary button[aria-expanded="true"] svg {
+  transform: rotate(90deg);
 }
 
 .status-job-summary .job-pill {
@@ -242,8 +250,5 @@
   }
   .status-job-time {
     grid-column: 1 / -1;
-  }
-  .status-job-summary a {
-    min-height: 44px;
   }
 }

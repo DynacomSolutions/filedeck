@@ -1,8 +1,9 @@
+import { ChevronRight } from "lucide-react";
 import { fmtSize, type OpJob } from "./api";
 import type { JobsSnapshot } from "./Jobs";
 import { jobLines, progressPercent, statusPill } from "./jobRow";
 import { isActive, jobDuration, statusJobs, type StatusJob } from "./statusJobs";
-import { JOB_FILTERS, statusUrl, type StatusRoute } from "./statusRoute";
+import { JOB_FILTERS, type StatusRoute } from "./statusRoute";
 
 export function StatusTime({ at }: { at: number | null | undefined }) {
   return at == null ? "Unavailable" : <time dateTime={new Date(at).toISOString()}>{new Date(at).toLocaleString()}</time>;
@@ -72,16 +73,13 @@ export function StatusJobsPanel({ snapshot, route, navigate }: {
           const pill = statusPill(job.state, { pct: percent });
           const where = nodes.join(", ") || (source === "compares" ? "Hub compare" : "Hub");
           const stale = snapshot.stale.has(source === "agent" ? `agent:${nodes[0]}` : source);
-          const link = { ...route, job: selected ? undefined : key };
           return (
             <li className="status-row" key={key}>
               <div className="status-job-summary">
                 <div>
-                  <a href={statusUrl(link)} aria-expanded={selected} onClick={(e) => {
-                    if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-                    e.preventDefault();
-                    navigate(link);
-                  }}>{job.title}</a>
+                  <button type="button" aria-expanded={selected} onClick={() => navigate({ ...route, job: selected ? undefined : key })}>
+                    <ChevronRight size={16} aria-hidden="true" /> {job.title}
+                  </button>
                   <div className="status-subtitle">{where} · {"op" in job ? job.op : job.kind}{stale ? " · Update delayed" : ""}</div>
                 </div>
                 <span className={"job-pill " + pill.tone}>{pill.label}</span>

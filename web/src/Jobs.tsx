@@ -452,7 +452,7 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo, renderStatus, s
         <span className="n">{asking ? "needs an answer" : running > 0 ? `${running} running` : total > 0 ? total : history.length > 0 ? `${history.length} past` : "idle"}</span>
       </h2>
       <div className="jobs-body">
-        <a className="jobs-status-link" href="/status">Open jobs and status</a>
+        <a className="jobs-status-nav" data-nav href="/status">Open jobs and status</a>
         {total > 0 ? (
           <ul>
             {upRows.map((b) => (

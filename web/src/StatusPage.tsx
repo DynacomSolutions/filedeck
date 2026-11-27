@@ -56,7 +56,7 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
       <div className="status-wrap">
         <header className="status-header">
           <div className="status-header-bar">
-            <a className="btn-a" href="/"><ArrowLeft size={16} aria-hidden="true" /> Files</a>
+            <a className="btn-a" data-nav href="/"><ArrowLeft size={16} aria-hidden="true" /> Files</a>
             <ThemeMenu />
           </div>
           <div className="status-heading">
@@ -75,7 +75,7 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
           <nav aria-label="Status sections" className="status-nav">
             {sections.map(({ id, label }) => {
               const next = { ...route, section: id };
-              return <a className="btn-a" key={id} href={statusUrl(next)} aria-current={route.section === id ? "page" : undefined} onClick={(e) => {
+              return <a className="btn-a" data-nav key={id} href={statusUrl(next)} aria-current={route.section === id ? "page" : undefined} onClick={(e) => {
                 if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
                 e.preventDefault();
                 navigate(next);

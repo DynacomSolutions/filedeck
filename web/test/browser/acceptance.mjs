@@ -3471,7 +3471,7 @@ async function verifyJobsStatus(browser) {
       await page.getByRole('link', { name: 'Open jobs and status' }).click();
       const title = page.getByRole('heading', { name: 'Jobs and status' });
       await title.waitFor();
-      const job = page.getByRole('link', { name: 'Scan /work' });
+      const job = page.getByRole('button', { name: 'Scan /work' });
       await job.focus();
       await job.press('Enter');
       await expectText(page, 'Data processed');
