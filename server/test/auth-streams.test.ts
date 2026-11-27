@@ -57,13 +57,14 @@ async function fakeAgent(): Promise<Fake> {
   };
   const srv = http.createServer(async (req, res) => {
     // a change feed, and (for the API token test) a folder-size answer that asks for one
-    if (req.url?.startsWith("/api/events") || (req.url?.startsWith("/api/du") && req.url.includes("feed=1"))) {
+    if (req.url?.startsWith("/api/events") || req.url?.startsWith("/api/v1/changes") || (req.url?.startsWith("/api/du") && req.url.includes("feed=1"))) {
       f.onArrive?.();
       if (f.hold) await f.hold;
       f.opened++;
       open.add(res);
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
-      res.write(": open\n\n");
+      const changes = req.url.startsWith("/api/v1/changes");
+      res.writeHead(200, { "content-type": changes ? "application/x-ndjson" : "text/event-stream", "cache-control": "no-store" });
+      res.write(changes ? '{"kind":"ping","node":"a","time":1}\n' : ": open\n\n");
       res.on("close", () => {
         if (open.delete(res)) f.aborted++;
       });
@@ -452,4 +453,57 @@ test("LiveStreams: an absolute end further away than a timer can hold does not e
   assert.equal(u.cancelled, false);
   assert.equal(ls.size(), 1);
   ls.close();
+});
+
+// ---- the change event stream (part of the event bus): administrators only, and it ends with the session like the other feeds ----
+
+/** The change stream through the hub (the fan-in, or one node's proxy path), first chunk read. */
+async function openChanges(h: Hub, cookie: string, p: string) {
+  const r = await call(h, p, cookie);
+  return r;
+}
+
+test("change events: a non-administrator gets 403 on the fan-in and on every spelling of the node's path; no stream is opened", async () => {
+  const h = makeHub();
+  const { cookie } = virt(h, "g1");
+  const before = agent.opened;
+  for (const p of ["/api/v1/changes?node=a", "/api/v1/changes", "/api/nodes/a/api/v1/changes", "/api/nodes/a/api/v1/%63hanges", "/api/nodes/a/api//v1/./changes", "/api/nodes/a/api/v1/CHANGES"]) {
+    const r = await openChanges(h, cookie, p);
+    assert.equal(r.status, 403, p);
+    await r.body?.cancel().catch(() => {});
+  }
+  assert.equal(agent.opened, before, "the agent was never asked");
+});
+
+test("change events: an administrator reads them, through the fan-in and the proxy, and the stream ends with the session (the agent's side is cut too)", async () => {
+  const h = makeHub();
+  const raw = h.auth!.sessions.create("sys", "alice");
+  const cookie = `__Host-filedeck=${raw}`;
+  const before = agent.opened;
+  const r = await openChanges(h, cookie, "/api/v1/changes?node=a&kind=create");
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get("content-type") ?? "", /application\/x-ndjson/);
+  const reader = r.body!.getReader();
+  const first = new TextDecoder().decode((await reader.read()).value);
+  assert.match(first, /"kind":"ping"/);
+  assert.equal(agent.opened, before + 1);
+  assert.equal(h.streams!.size(), 1, "tracked like the other feeds");
+  const p = await openChanges(h, cookie, "/api/nodes/a/api/v1/changes");
+  assert.equal(p.status, 200);
+  const pr = p.body!.getReader();
+  await pr.read();
+  assert.equal(h.streams!.size(), 2);
+  const cut = agent.aborted;
+  h.auth!.sessions.endAll("sys", "alice");
+  const ended = async (rd: ReadableStreamDefaultReader<Uint8Array>) => {
+    for (const t0 = Date.now(); Date.now() - t0 < 2000; ) {
+      const x = await Promise.race([rd.read().catch(() => ({ done: true })), new Promise<{ done: false }>((res) => setTimeout(() => res({ done: false }), 100))]);
+      if (x.done) return true;
+    }
+    return false;
+  };
+  assert.equal(await ended(reader), true, "the fan-in stream ended");
+  assert.equal(await ended(pr), true, "the proxied stream ended");
+  await waitFor(() => agent.aborted >= cut + 2);
+  assert.equal(h.streams!.size(), 0);
 });

@@ -1,16 +1,25 @@
 import type { Hono } from "hono";
 import * as ops from "./fsops.ts";
 import fs from "node:fs/promises";
-import { watch } from "node:fs";
 import path from "node:path";
 import { Semaphore, hashFile, walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
 import { IndexCache, spillPath, type DirReader, type IdxEntry } from "./index-cache.ts";
 import { isReservedName, resolveRead } from "./paths.ts";
 import { FsError } from "./fsops.ts";
 import type { Config } from "./config.ts";
+import type { DirFeed } from "./events/dirwatch.ts";
 
-/** Directory reader for this machine: readdir + lstat in small batches; symlinks reported, never followed. */
-export function localReader(): DirReader {
+/** Where the folder feed of the event bus is set, once the watcher exists (the file routes are made before it). */
+export interface FeedRef {
+  feed?: DirFeed;
+}
+
+/**
+ * Directory reader for this machine: readdir + lstat in small batches; symlinks reported, never followed. Folder changes come from the event bus
+ * (`feed`, when the kernel watcher covers the folder); without it the index checks a folder's modification time instead.
+ */
+export function localReader(root = "/", feedRef: FeedRef = {}): DirReader {
+  const virtual = (p: string) => (root === "/" ? p : p === root ? "/" : p.startsWith(root + "/") ? p.slice(root.length) : null);
   return {
     async statDir(p) {
       const st = await fs.stat(p);
@@ -40,9 +49,8 @@ export function localReader(): DirReader {
       return out;
     },
     watch(p, onChange) {
-      const w = watch(p, { persistent: false }, (_ev, name) => onChange(name ? String(name) : null));
-      w.on("error", () => w.close());
-      return () => w.close();
+      const v = virtual(p);
+      return v === null ? null : (feedRef.feed?.watch(v, () => onChange(null)) ?? null);
     },
   };
 }
@@ -58,11 +66,11 @@ const int = (v: string | undefined, d: number, lo: number, hi: number) => {
  *  - GET /api/fs/hash?path=   sha256 of one regular file, streamed, concurrency-limited
  *  - GET /api/fs/walk?path=   NDJSON listing of a tree: {"e":[...]} batches, then {"done":{...}}
  */
-export function registerDiffRoutes(app: Hono, cfg: Config): IndexCache {
+export function registerDiffRoutes(app: Hono, cfg: Config, feedRef: FeedRef = {}): IndexCache {
   const root = cfg.root;
   const hashes = new Semaphore(Math.max(1, cfg.hashConcurrency));
   const lists = new Semaphore(Math.max(1, cfg.listConcurrency));
-  const index = new IndexCache(cfg.indexDir ? path.join(cfg.indexDir, `index-${cfg.node}.db`) : spillPath("index"), localReader(), { maxWatches: cfg.indexWatches, ttlMs: cfg.indexRevalidateMs });
+  const index = new IndexCache(cfg.indexDir ? path.join(cfg.indexDir, `index-${cfg.node}.db`) : spillPath("index"), localReader(root, feedRef), { maxWatches: cfg.indexWatches, ttlMs: cfg.indexRevalidateMs });
 
   app.get("/api/fs/hash", async (c) => {
     const signal = c.req.raw.signal;
@@ -82,7 +90,7 @@ export function registerDiffRoutes(app: Hono, cfg: Config): IndexCache {
     const out = await lists.run(() => index.list(r.real), c.req.raw.signal);
     return c.json({ path: r.virtual, cached: out.cached, entries: out.entries });
   });
-  // Directories that changed since `since` (inotify on indexed directories), for live compares.
+  // Directories that changed since `since` (kernel change events on indexed directories), for live compares.
   app.get("/api/fs/index-changes", (c) => {
     const ch = index.changes(Number(c.req.query("since") ?? 0) || 0);
     const pre = root === "/" ? "" : root;

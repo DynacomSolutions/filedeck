@@ -706,6 +706,10 @@ export class SizeStore {
   get isWriter(): boolean {
     return !!this.db && this.epoch > 0;
   }
+  /** May this process write what it shares with others (the event journal)? The lease holder, and any process without a usable store to share. */
+  get mayWrite(): boolean {
+    return !this.db || this.epoch > 0;
+  }
   /** May this process scan? Yes when it holds the lease, and when there is no store to share (unusable: scans run uncached). Waits for the first lease attempt. */
   async mayScan(): Promise<boolean> {
     await this.firstLease;

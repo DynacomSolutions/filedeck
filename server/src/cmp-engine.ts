@@ -476,7 +476,7 @@ export class CompareSession {
   /* ------------------------------------------------------------------ live updates */
 
   /**
-   * Follow both sides' change feeds (inotify on the agents): every changed folder this compare has listed is
+   * Follow both sides' change feeds (the agents' kernel change events): every changed folder this compare has listed is
    * listed again, its rows are updated in place (unchanged rows and subtrees stay), new work is compared, and
    * the folder's ancestors get their status recomputed.
    */

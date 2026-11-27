@@ -10,7 +10,7 @@ import { insideGrants, type Grant } from "./grant-guard.ts";
 import { Watches } from "./watch.ts";
 import { registerArchiveRoutes } from "./archive-routes.ts";
 import { registerPdfRoutes } from "./pdf.ts";
-import { registerDiffRoutes } from "./diff-routes.ts";
+import { registerDiffRoutes, type FeedRef } from "./diff-routes.ts";
 import { registerGitDiffRoutes } from "./git-diff-routes.ts";
 import * as trash from "./trash.ts";
 import { uploadAbort, uploadChunk, uploadStatus } from "./chunked.ts";
@@ -83,9 +83,11 @@ export function registerWorkerRoutes(app: Hono, cfg: Config, grants?: Grant[]): 
 /**
  * Every route that touches files, for the agent (sign-in off) and for a worker (one signed-in account). What only the root process does stays out:
  * `/healthz`, `/metrics`, `/api/info`, folder sizes (`/api/du`, `/api/jobs/size`) and the job list. `jobs` runs the archive and permission jobs.
- * `watches` are the live change feeds' watchers (their count is in `/api/info`); `close` releases the compare index.
+ * `feedRef.feed` is the event bus's folder feed (events/dirwatch.ts): the compare index and the live change feed (`/api/events`) take their folder
+ * changes from it while the kernel watcher covers the folder. `watches` is the fallback where it does not (no watcher, a worker process): its count is in
+ * `/api/info`. `close` releases the compare index.
  */
-export function registerFileRoutes(app: Hono, cfg: Config, jobs: Jobs): { index: IndexCache; watches: Watches; close(): void } {
+export function registerFileRoutes(app: Hono, cfg: Config, jobs: Jobs, feedRef: FeedRef = {}): { index: IndexCache; watches: Watches; close(): void } {
   const watches = new Watches();
   const root = cfg.root;
 
@@ -297,21 +299,25 @@ export function registerFileRoutes(app: Hono, cfg: Config, jobs: Jobs): { index:
   registerPdfRoutes(app, cfg);
   registerPropsRoutes(app, cfg, jobs);
   registerGitRoutes(app, cfg);
-  const index = registerDiffRoutes(app, cfg);
+  const index = registerDiffRoutes(app, cfg, feedRef);
   registerGitDiffRoutes(app, cfg);
   registerSearchRoutes(app, cfg);
   registerGitWorktreeRoutes(app, cfg);
   registerThumbRoutes(app, cfg);
   registerTranscodeRoutes(app, cfg);
 
-  // Live change feed: one event per change in the watched directory.
+  // Live change feed: one event per change in the watched directory. The folder is followed through the event bus when the kernel watcher covers it
+  // (no watch of its own, no limit); otherwise (no watcher, or a worker process) through the bounded fallback.
   app.get("/api/events", (c) => {
     const dir = resolveRead(root, c.req.query("path") ?? "/");
     return streamSSE(c, async (stream) => {
       let dirty = false;
-      const unsub = watches.subscribe(dir.real, () => {
+      const mark = () => {
         dirty = true;
-      });
+      };
+      const feed = feedRef.feed;
+      const viaFeed = feed?.watch(dir.virtual, mark) ?? null;
+      const unsub = viaFeed ?? watches.subscribe(dir.real, mark);
       if (!unsub) {
         await stream.writeSSE({ event: "error", data: "watch limit reached" });
         return;
@@ -325,6 +331,7 @@ export function registerFileRoutes(app: Hono, cfg: Config, jobs: Jobs): { index:
       let idle = 0;
       while (open) {
         await stream.sleep(250);
+        if (viaFeed && !feed!.alive()) break; // the watcher stopped: the client asks again and gets the fallback
         if (dirty) {
           dirty = false;
           idle = 0;

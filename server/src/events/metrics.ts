@@ -1,0 +1,59 @@
+import type { EventBus } from "./bus.ts";
+import { KINDS } from "./types.ts";
+
+/** Prometheus text for the event bus and the helper's counters: counts and ages only, nothing that names a path (see the note on /metrics in agent-auth.ts). */
+export function eventMetrics(bus: EventBus, helper: Record<string, number> = {}, caps: string = ""): string[] {
+  const subs = bus.subscribers();
+  const j = bus.journal;
+  const lines: string[] = [
+    "# HELP filedeck_events_total Change events published by the watcher, by kind",
+    "# TYPE filedeck_events_total counter",
+    ...KINDS.map((k) => `filedeck_events_total{kind="${k}"} ${bus.events[k] ?? 0}`),
+    "# HELP filedeck_events_overflows_total Kernel event queue overflows seen by the watcher",
+    "# TYPE filedeck_events_overflows_total counter",
+    `filedeck_events_overflows_total ${bus.overflows}`,
+    "# HELP filedeck_events_resets_total Reset events published or sent: subscribers had to look at everything again",
+    "# TYPE filedeck_events_resets_total counter",
+    `filedeck_events_resets_total ${bus.resets}`,
+    "# HELP filedeck_events_subscribers Open event streams, by transport",
+    "# TYPE filedeck_events_subscribers gauge",
+    ...(["socket", "http", "internal"] as const).map((t) => `filedeck_events_subscribers{transport="${t}"} ${subs[t]}`),
+    "# HELP filedeck_events_subscribers_dropped_total Subscribers ended as lagged because they did not read fast enough",
+    "# TYPE filedeck_events_subscribers_dropped_total counter",
+    `filedeck_events_subscribers_dropped_total ${bus.droppedLagged}`,
+    "# HELP filedeck_events_replayed_total Events sent from the journal to subscribers that asked for a cursor",
+    "# TYPE filedeck_events_replayed_total counter",
+    `filedeck_events_replayed_total ${bus.replayed}`,
+    "# HELP filedeck_events_serving 1 when this process writes the journal and serves event streams",
+    "# TYPE filedeck_events_serving gauge",
+    `filedeck_events_serving ${bus.serving ? 1 : 0}`,
+    "# HELP filedeck_events_journal_bytes Bytes held by the event journal",
+    "# TYPE filedeck_events_journal_bytes gauge",
+    `filedeck_events_journal_bytes ${j.bytes}`,
+    "# HELP filedeck_events_journal_oldest_age_seconds Age in seconds of the oldest event in the journal, 0 when empty",
+    "# TYPE filedeck_events_journal_oldest_age_seconds gauge",
+    `filedeck_events_journal_oldest_age_seconds ${(j.oldestAgeMs / 1000).toFixed(3)}`,
+    "# HELP filedeck_events_bus_lag_seconds Time the bus took to hand the latest events to the subscribers (decaying maximum)",
+    "# TYPE filedeck_events_bus_lag_seconds gauge",
+    `filedeck_events_bus_lag_seconds ${(bus.lagMs / 1000).toFixed(6)}`,
+    "# HELP filedeck_fanwatch_handle_cache_hits_total Folder paths the helper took from its handle cache",
+    "# TYPE filedeck_fanwatch_handle_cache_hits_total counter",
+    `filedeck_fanwatch_handle_cache_hits_total ${helper.hits ?? 0}`,
+    "# HELP filedeck_fanwatch_handle_cache_misses_total Folder paths the helper had to look up",
+    "# TYPE filedeck_fanwatch_handle_cache_misses_total counter",
+    `filedeck_fanwatch_handle_cache_misses_total ${helper.misses ?? 0}`,
+    "# HELP filedeck_fanwatch_open_by_handle_total open_by_handle_at calls made by the helper",
+    "# TYPE filedeck_fanwatch_open_by_handle_total counter",
+    `filedeck_fanwatch_open_by_handle_total ${helper.opens ?? 0}`,
+    "# HELP filedeck_fanwatch_unresolved_total Events whose folder was gone before the helper read them",
+    "# TYPE filedeck_fanwatch_unresolved_total counter",
+    `filedeck_fanwatch_unresolved_total ${helper.unresolved ?? 0}`,
+    "# HELP filedeck_fanwatch_events_read_total Kernel events read by the helper",
+    "# TYPE filedeck_fanwatch_events_read_total counter",
+    `filedeck_fanwatch_events_read_total ${helper.events ?? 0}`,
+    "# HELP filedeck_fanwatch_unlimited_queue 1 when the helper has an unlimited kernel event queue, 0 when it can overflow",
+    "# TYPE filedeck_fanwatch_unlimited_queue gauge",
+    `filedeck_fanwatch_unlimited_queue ${/unlimited=1/.test(caps) ? 1 : 0}`,
+  ];
+  return lines;
+}

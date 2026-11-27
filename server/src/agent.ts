@@ -1,4 +1,6 @@
+import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
 import { registerSizeRoutes } from "./props.ts";
@@ -21,6 +23,14 @@ import { KeyCheck } from "./agent-keys.ts";
 import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
 import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
 import { Followers, registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
+import { EventBus } from "./events/bus.ts";
+import { DirWatchers } from "./events/dirwatch.ts";
+import { LabelRules } from "./events/labels.ts";
+import { ownState } from "./events/own-state.ts";
+import { eventMetrics } from "./events/metrics.ts";
+import { registerChangeRoutes } from "./events/routes.ts";
+import { startEventSocket, type EventSocket } from "./events/socket.ts";
+import type { FeedRef } from "./diff-routes.ts";
 
 export interface AgentOptions {
   /** the account lookup (sign-in on); default: `makeResolver` */
@@ -111,15 +121,37 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   // The jobs of this process (kept in the shared job file when there is one), the file routes, the folder sizes and the job list, all over the same jobs
   const jobs = makeAgentJobs(cfg);
   Object.assign(app, { jobs }); // (tests read a job's owner through it)
-  const files = registerFileRoutes(app, cfg, jobs);
+  const feedRef: FeedRef = {}; // set below, once the watcher exists
+  const files = registerFileRoutes(app, cfg, jobs, feedRef);
   // sign-in on: sizes and jobs follow the account (agent-jobs.ts); off: as before
   const followers = pool && workers ? new Followers(jobs) : undefined;
   const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
   if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
+  // The event bus (events/bus.ts): every change the watcher sees goes through it to the journal, the subscribers and the folder feed of the compare index and
+  // the live change feed. The journal lives next to the other agent state (the index folder), else in a temporary folder that goes with the process.
+  let labels = new LabelRules();
+  try {
+    labels = new LabelRules(cfg.eventsLabels);
+  } catch (e) {
+    console.error(`FILEDECK_EVENTS_LABELS ignored: ${(e as Error).message}`);
+  }
+  const ownJournalDir = cfg.eventsJournalBytes > 0 && cfg.eventsJournalHours > 0 && !cfg.indexDir;
+  const journalDir = cfg.eventsJournalBytes > 0 && cfg.eventsJournalHours > 0 ? (cfg.indexDir ? path.join(cfg.indexDir, `changes-${cfg.node}`) : path.join(os.tmpdir(), `filedeck-changes-${cfg.node}-${process.pid}-${randomUUID()}`)) : null;
+  const bus = new EventBus({
+    node: cfg.node,
+    labels,
+    journal: { dir: journalDir, maxBytes: cfg.eventsJournalBytes || undefined, maxAgeMs: cfg.eventsJournalHours * 3600_000 || undefined },
+    writer: () => sizes.mayWrite,
+    log: (s) => console.error(s),
+  });
+  registerChangeRoutes(app, bus);
+  Object.assign(app, { events: bus }); // (tests publish to it and read its counters)
   const fan = process.platform === "darwin"
-    ? new MacWatch(sizes, { root, procMounts: cfg.procMounts })
-    : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs });
+    ? new MacWatch(sizes, { root, procMounts: cfg.procMounts, bus })
+    : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, bus, ignoreName: ownState(cfg.node) });
+  const dirs = new DirWatchers(bus, (v) => fan.covers(v));
+  feedRef.feed = dirs;
   sizes.covers = (v) => fan.covers(v);
   sizes.watchedSince = () => fan.watchedSince();
   sizes.quiet = (v) => fan.settled(v);
@@ -171,6 +203,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_watcher_lost_events_total Native events lost to overflow",
         "# TYPE filedeck_watcher_lost_events_total counter",
         `filedeck_watcher_lost_events_total ${w.lostEvents}`,
+        ...eventMetrics(bus, (w as { helper?: Record<string, number> }).helper, (w as { caps?: string }).caps),
         "",
       ].join("\n"),
       200,
@@ -178,7 +211,16 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     );
   });
   // main.ts starts the watcher once the server listens: its backlog work must never delay the port
-  (app as unknown as { startWatcher: () => void }).startWatcher = () => void fan.start();
+  let socket: EventSocket | undefined;
+  (app as unknown as { startWatcher: () => void }).startWatcher = () => {
+    void fan.start();
+    // the node-local socket for other services on this machine (off unless FILEDECK_EVENTS_SOCKET is set)
+    if (cfg.eventsSocket && !socket)
+      void startEventSocket(bus, { path: cfg.eventsSocket, group: cfg.eventsSocketGroup || undefined, log: (s) => console.error(s) }).then(
+        (s) => (socket = s),
+        (e: Error) => console.error(`event socket ${cfg.eventsSocket} not started: ${e.message}`),
+      );
+  };
   // On SIGTERM, at once (not after the connections drain): stop the jobs (their rows are handed to the next process), hand the watcher's events and watched time
   // to the store, and release the size store's writer lease, so the next process can write while this one is still answering its last requests.
   let leaving: Promise<void> | undefined;
@@ -187,6 +229,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
       await Promise.all([jobs.interrupt(), pool?.close()]);
       await specs?.close(); // (no worker runs any more)
       await fan.handover();
+      await socket?.close();
+      await bus.close(ownJournalDir); // (writes what is pending and the time the watching ended: the next writer's coverage check reads it)
       await sizes.releaseLease();
     })());
   (app as unknown as { leave: () => Promise<void> }).leave = leave;
@@ -217,6 +261,8 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     clearInterval(sweepTimer);
     await leave();
     files.close();
+    dirs.close();
+    await bus.close(ownJournalDir);
     sizes.close();
   };
 

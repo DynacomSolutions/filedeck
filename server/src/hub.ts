@@ -1,4 +1,8 @@
-import type { FsError } from "./fsops.ts";
+import { FsError } from "./fsops.ts";
+import { fanIn } from "./events/fanin.ts";
+import { filterFromParams } from "./events/filter.ts";
+import { parseCursor } from "./events/cursor.ts";
+import { isChangesPath } from "./events/guard.ts";
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createAdaptorServer } from "@hono/node-server";
@@ -241,7 +245,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // editor saves are limited by the agent that takes them (its own maxEdit), not here
   app.use("*", requestGuard({ forward: true, allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
-  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined));
+  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined, cfg.apiTokenScopes));
   // System sign-in asks the agents in the sign-in order (auth/system.ts). Each call carries the agent token and nothing else of the
   // request: no user (nobody is signed in yet), no cookie, no client header; the body is built here.
   const signInCall = (node: string, rest: string, body: unknown, signal?: AbortSignal): Promise<Response> => {
@@ -841,6 +845,58 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     };
   };
 
+  /**
+   * An event stream of a session (sign-in on): it ends with the session, as `LiveStreams` says (see auth/streams.ts). A stream opened under the
+   * act-as-root switch ends with the switch too (turned off, its end passed, or no longer held). The gate gave the identity the switch, so the agent
+   * call may have carried it: the stream counts as one, and track ends it at once if the switch is already gone.
+   */
+  const trackLive = (c: import("hono").Context, out: Response, session: string, upstream: AbortController, id: Identity): Response => {
+    const asRoot = id.kind === "sys" && id.asRootUntil !== undefined ? { until: id.asRootUntil, ok: () => asRootOk(id) } : undefined;
+    const absolute = auth?.sessions.endsAt(session);
+    const ts = sessionMethodOf(c) === "tailscale" ? tailnetStream(c, session) : {};
+    const endsAt = ts.endsAt !== undefined ? Math.min(absolute ?? Infinity, ts.endsAt) : absolute;
+    return app.streams!.track(session, id.kind, id.name, out, { abort: () => upstream.abort(), asRoot, endsAt, ...(ts.bound ? { bound: ts.bound } : {}) });
+  };
+  /** The change event streams are for administrators when sign-in is on (they name every path of a machine). */
+  const mayReadChanges = () => !cfg.auth || (auth !== undefined && isAdmin(cfg, auth.accounts, currentUser()));
+  const NDJSON = { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-accel-buffering": "no" };
+
+  // The change events of several machines in one stream: the filter goes down to every agent, each machine has its own cursor (`since`, once per machine).
+  app.get("/api/v1/changes", async (c) => {
+    if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    const q = new URL(c.req.url).searchParams;
+    const wanted = q.getAll("node").flatMap((n) => n.split(",")).map((n) => n.trim()).filter(Boolean);
+    const names = wanted.length ? [...new Set(wanted)] : cfg.nodes.map((n) => n.name).filter((n) => mayUse(n));
+    for (const n of names) {
+      if (!agents.has(n)) return c.json({ error: "unknown node" }, 404);
+      if (!mayUse(n)) return noAccess(c);
+    }
+    if (!names.length) return c.json({ error: "no node" }, 404);
+    const since = new Map<string, string>();
+    try {
+      const filter = filterFromParams(q);
+      for (const s of q.getAll("since")) {
+        const cur = parseCursor(s);
+        if (!cur) throw new FsError(400, "since is a cursor: <node>:<epoch>:<seq>");
+        since.set(cur.node, s);
+      }
+      const session = app.streams ? sessionKeyOf(c) : undefined;
+      const upstream = new AbortController();
+      const id = currentUser();
+      const body = fanIn({
+        targets: names.map((node) => ({ node, fetch: (rest: string, init?: RequestInit) => agents.get(node)!.fetch(rest, init) })),
+        filter: filter.toParams(),
+        since,
+        signal: AbortSignal.any([c.req.raw.signal, upstream.signal]),
+      });
+      const out = new Response(body, { headers: NDJSON });
+      return app.streams && session !== undefined && id ? trackLive(c, out, session, upstream, id) : out;
+    } catch (e) {
+      if (e instanceof FsError) return c.json({ error: e.message }, e.status as 400);
+      throw e;
+    }
+  });
+
   // Reverse proxy: /api/nodes/<node>/<rest> -> <agent>/<rest>
   app.all("/api/nodes/:node/*", async (c) => {
     // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
@@ -852,6 +908,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
     // the agents' sign-in routes answer only the hub (they would be a way past its limiter)
     if (cfg.auth && isAgentAuthPath(rest)) return c.json({ error: "not found" }, 404);
+    // the change event stream of one machine: administrators only with sign-in on (the same rule as the fan-in above)
+    if (isChangesPath(rest) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
@@ -892,16 +950,8 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       const r = await target.fetch(rest + url.search, init);
       const out = cut(new Response(r.body, { status: r.status, headers: clean(r.headers, true) }));
       const id = currentUser();
-      if (app.streams && session !== undefined && upstream && id && (r.headers.get("content-type") ?? "").toLowerCase().startsWith("text/event-stream")) {
-        // a stream opened under the act-as-root switch ends with the switch too (turned off, its end passed, or no longer held). The gate
-        // gave the identity the switch, so the agent call may have carried it: the stream counts as one, and track ends it at once if the
-        // switch is already gone.
-        const asRoot = id.kind === "sys" && id.asRootUntil !== undefined ? { until: id.asRootUntil, ok: () => asRootOk(id) } : undefined;
-        const absolute = auth?.sessions.endsAt(session);
-        const ts = sessionMethodOf(c) === "tailscale" ? tailnetStream(c, session) : {};
-        const endsAt = ts.endsAt !== undefined ? Math.min(absolute ?? Infinity, ts.endsAt) : absolute;
-        return app.streams.track(session, id.kind, id.name, out, { abort: () => upstream.abort(), asRoot, endsAt, ...(ts.bound ? { bound: ts.bound } : {}) });
-      }
+      const type = (r.headers.get("content-type") ?? "").toLowerCase();
+      if (app.streams && session !== undefined && upstream && id && (type.startsWith("text/event-stream") || (type.startsWith("application/x-ndjson") && isChangesPath(rest)))) return trackLive(c, out, session, upstream, id);
       return out;
     } catch (e) {
       call?.done();
