@@ -37,7 +37,7 @@ function NodeFacts({ status }: { status: NodeStatus }) {
         <h4>Watcher</h4>
         <dl className="status-facts">
           <div><dt>{watcher.kind === "fanotify" ? "Fanotify" : "Native watcher"}</dt><dd>{watcher.running ? watcher.ready ? "On" : "Starting or degraded" : "Off"}</dd></div>
-          <div><dt>Covered mounts</dt><dd>{watcher.running ? watcher.watched : 0} of {Math.max(watcher.mounts, watcher.coverage.length)}</dd></div>
+          <div><dt>Covered mounts</dt><dd>{watcher.running ? watcher.covered : 0} of {Math.max(watcher.mounts, watcher.coverage.length)}</dd></div>
           <div><dt>Unwatched mounts</dt><dd>{Math.max(watcher.unwatched, unwatched.length)}</dd></div>
           <div><dt>Excluded mounts</dt><dd>{watcher.excluded}</dd></div>
           <div><dt>Pending reconciliation</dt><dd>{watcher.backlog.toLocaleString()}</dd></div>

@@ -125,6 +125,9 @@ test("fanwatch: a mount of a single file (a file bind mount) is not given to the
   s.w.line("#ready 2");
   const st = s.w.status();
   assert.equal(st.unwatched, 0, "a file mount is not an unwatched filesystem");
+  assert.equal(st.unsupported, 1, "the file bind mount is explicit, not silently omitted");
+  assert.equal(st.covered, 3, "the root filesystem covers the file bind mount by parent semantics");
+  assert.equal(st.aliases, 1, "the file bind mount is also reported as an alias of the root filesystem");
   assert.equal(s.w.covers("/"), true);
   s.w.stop();
   s.done();

@@ -148,6 +148,12 @@ export class FanWatch {
   private mountSignature = "";
   private mountCount = 0;
   private watchedCount = 0;
+  /** Local mount paths that the helper cannot mark directly, such as single-file bind mounts. */
+  private unsupportedMounts: string[] = [];
+  /** Extra local mount paths sharing an existing device and filesystem identity. */
+  private aliasCount = 0;
+  /** Local mount paths used to report effective parent-filesystem coverage. */
+  private coverageMounts: string[] = [];
   private reconcileError = "";
   private lostEvents = 0;
   private excludedMounts = 0;
@@ -188,6 +194,7 @@ export class FanWatch {
       const all = await listMounts(this.o.root, this.o.procMounts);
       this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
       const mounts = await this.localMounts(all);
+      this.coverageMounts = all.filter((m) => !m.network && !m.unreachable).map((m) => m.mountpoint);
       this.unwatched = all.filter((m) => m.network || m.unreachable).map((m) => m.mountpoint);
       // Fanotify marks a whole filesystem, and the helper marks each one once. It still needs every mount of it: a filesystem is often shown at more
       // than one place (bind mounts of some of its folders), and the helper reports an entry under each mount that shows it. So every local mount
@@ -259,6 +266,8 @@ export class FanWatch {
   private async localMounts(all: Mount[]): Promise<Mount[]> {
     const local = all.filter((m) => !m.network && !m.unreachable);
     const isDir = await Promise.all(local.map((m) => fs.stat(path.join(this.o.root, m.mountpoint)).then((st) => st.isDirectory(), () => true)));
+    this.unsupportedMounts = local.filter((_, i) => !isDir[i]).map((m) => m.mountpoint);
+    this.aliasCount = Math.max(0, local.length - new Set(local.map((m) => `${m.device}\0${m.fstype}`)).size);
     return local.filter((_, i) => isDir[i]);
   }
 
@@ -313,6 +322,9 @@ export class FanWatch {
       ready: this.readyAt !== Infinity,
       mounts: this.mountCount,
       watched: this.watchedCount,
+      covered: this.readyAt === Infinity ? 0 : this.coverageMounts.filter((m) => this.covers(m)).length,
+      unsupported: this.unsupportedMounts.length,
+      aliases: this.aliasCount,
       unwatched: this.unwatched.length,
       excluded: this.excludedMounts,
       backlog: this.buf.size + this.flushing.size + this.mem.size + this.taken.size,
