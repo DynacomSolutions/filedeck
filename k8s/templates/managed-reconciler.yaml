@@ -44,8 +44,12 @@ metadata:
   namespace: {{ .Release.Namespace }}
 rules:
   - apiGroups: [""]
-    resources: [services, configmaps]
+    resources: [services]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ $name }}-managed-nodes]
+    verbs: [get, patch]
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
@@ -54,6 +58,7 @@ rules:
     verbs: [get, list, create, patch, delete]
   - apiGroups: [apps]
     resources: [deployments]
+    resourceNames: [{{ $name }}-hub]
     verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -100,14 +105,12 @@ data:
       owned_services=""
       nodes_raw="$(kubectl get nodes -l "$label" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
       nodes="$(printf '%s\n' "$nodes_raw" | sort)"
+      pods_raw="$(kubectl -n "$namespace" get pods -l "app.kubernetes.io/name=$release,app.kubernetes.io/instance=$release,dynacom.dev/filedeck-managed-agent=true" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\t"}{.status.phase}{"\t"}{.status.podIP}{"\t"}{range .status.conditions[*]}{.type}{"="}{.status}{" "}{end}{"\n"}{end}')"
       for node in $nodes; do
         case ",$static_names," in *",$node,"*) continue;; esac
         node_id="$(printf '%s' "$node" | sha256sum | cut -c1-12)"
         service="${release}-managed-agent-$node_id"
-        pod_line="$(kubectl -n "$namespace" get pods -l dynacom.dev/filedeck-managed-agent=true \
-          --field-selector "spec.nodeName=$node,status.phase=Running" \
-          -o jsonpath='{range .items[*]}{.status.podIP}{"\t"}{range .status.conditions[*]}{.type}{"="}{.status}{" "}{end}{"\n"}{end}' \
-          | awk '$0 ~ /Ready=True/ {print $1; exit}')"
+        pod_line="$(printf '%s\n' "$pods_raw" | awk -v node="$node" '$1 == node && $2 == "Running" {for (i = 4; i <= NF; i++) if ($i == "Ready=True") {print $3; exit}}')"
         [ -n "$pod_line" ] || continue
         cat <<EOF | kubectl -n "$namespace" apply -f -
     apiVersion: v1
@@ -116,6 +119,7 @@ data:
       name: $service
       labels:
         app.kubernetes.io/name: {{ include "filedeck.name" . }}
+        app.kubernetes.io/instance: {{ $.Release.Name }}
         app.kubernetes.io/component: agent
         dynacom.dev/filedeck-managed: "true"
     spec:
@@ -131,6 +135,8 @@ data:
       name: ${service}-ep
       labels:
         kubernetes.io/service-name: $service
+        app.kubernetes.io/name: {{ include "filedeck.name" . }}
+        app.kubernetes.io/instance: {{ $.Release.Name }}
         endpointslice.kubernetes.io/managed-by: filedeck-managed-reconciler
     addressType: IPv4
     ports:
@@ -144,11 +150,11 @@ data:
         owned_services="$owned_services $service"
         next="$next,$node=http://$service:$PORT"
       done
-      for service in $(kubectl -n "$namespace" get services -l dynacom.dev/filedeck-managed=true \
+      for service in $(kubectl -n "$namespace" get services -l "app.kubernetes.io/name=$release,app.kubernetes.io/instance=$release,dynacom.dev/filedeck-managed=true" \
         -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
         case " $owned_services " in *" $service "*) ;; *) kubectl -n "$namespace" delete service "$service" --ignore-not-found ;; esac
       done
-      for slice in $(kubectl -n "$namespace" get endpointslices -l endpointslice.kubernetes.io/managed-by=filedeck-managed-reconciler \
+      for slice in $(kubectl -n "$namespace" get endpointslices -l "app.kubernetes.io/name=$release,app.kubernetes.io/instance=$release,endpointslice.kubernetes.io/managed-by=filedeck-managed-reconciler" \
         -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
         service="$(kubectl -n "$namespace" get endpointslice "$slice" -o jsonpath='{.metadata.labels.kubernetes\.io/service-name}')"
         case " $owned_services " in *" $service "*) ;; *) kubectl -n "$namespace" delete endpointslice "$slice" --ignore-not-found ;; esac
@@ -157,11 +163,12 @@ data:
       hash="$(printf '%s' "$next" | sha256sum | cut -d ' ' -f 1)"
       live_hash="$(kubectl -n "$namespace" get "deployment/$hub" -o jsonpath='{.spec.template.metadata.annotations.filedeck\.dynacom\.dev/nodes-hash}')"
       if [ "$current" != "$next" ]; then
-        kubectl -n "$namespace" create configmap "$configmap" --from-literal="NODES=$next" --dry-run=client -o yaml | kubectl -n "$namespace" apply -f -
+        kubectl -n "$namespace" patch configmap "$configmap" --type merge -p "{\"data\":{\"NODES\":\"$next\"}}"
       fi
       if [ "$current" != "$next" ] || [ "$live_hash" != "$hash" ]; then
         kubectl -n "$namespace" patch "deployment/$hub" --type merge -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"filedeck.dynacom.dev/nodes-hash\":\"$hash\"}}}}}"
       fi
+      date +%s >"$HEARTBEAT"
       sleep "$INTERVAL"
     done
 ---
@@ -191,6 +198,7 @@ spec:
             - {name: RELEASE_NAME, value: {{ $name | quote }}}
             - {name: CONFIGMAP_NAME, value: {{ printf "%s-managed-nodes" $name | quote }}}
             - {name: HUB_NAME, value: {{ printf "%s-hub" $name | quote }}}
+            - {name: HEARTBEAT, value: /run/filedeck/heartbeat}
             - {name: NODE_LABEL, value: {{ .Values.managedNodes.label | quote }}}
             - {name: NODE_VALUE, value: {{ .Values.managedNodes.value | quote }}}
             - {name: STATIC_NAMES, value: {{ join "," $staticNames | quote }}}
@@ -200,6 +208,11 @@ spec:
           volumeMounts: [{name: script, mountPath: /etc/filedeck, readOnly: true}]
           resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {cpu: 100m, memory: 128Mi}}
           securityContext: {runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-          livenessProbe: {exec: {command: [/bin/sh, -c, kill -0 1]}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
-      volumes: [{name: script, configMap: {name: {{ $name }}-managed-reconciler, defaultMode: 365}}]
+          livenessProbe: {exec: {command: [/bin/sh, -c, 'now=$(date +%s); then=$(cat /run/filedeck/heartbeat 2>/dev/null || echo 0); test $((now-then)) -lt 90']}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          volumeMounts: [{name: heartbeat, mountPath: /run/filedeck}]
+      volumes:
+        - name: heartbeat
+          emptyDir: {}
+        - name: script
+          configMap: {name: {{ $name }}-managed-reconciler, defaultMode: 365}
 {{- end }}
