@@ -341,3 +341,13 @@ ETA: 2026-12-18 18:00 ICT
 | 191 | Handle bind mounts and hard links in group totals | todo | | | 26.186 | | Bind mounts share `st_dev`, so a walk counts them twice<br>Read mountinfo roots; flag hard-link-heavy groups<br>About 1.5 to 2 days |
 | 192 | Join IO pressure per group from VictoriaMetrics (min, max, mean, resting) | todo | | | 26.188 | | Hub feature, not agent<br>Check the live series first: `node_disk_*`, `container_fs_*`<br>About 3 to 5 days |
 | 194 | Reconcile every mount and expose watcher coverage health | in_progress | codex | filedeck-every-node-mount-coverage | | 2026-11-26 23:00 ICT | Durable mount-table reconciliation, explicit unwatched counts, backlog and lost-event metrics<br>Deployment inventory includes eu2, eu3, eu4, hq, hq0, hq1 and macbook-m3-max<br>Live native coverage remains to verify after rollout |
+
+## 27. Change event service
+
+Track every file and folder change with one fanotify mark per filesystem, and give filtered events to other services. Owner request 27 Nov 2026; design approved by owner the same day.
+ETA: 2026-11-28 18:00 ICT
+
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 195 | Per-entry fanotify events with a journal, filters, local socket and hub stream | in_progress | claude-20261127-watch-events | efficient-watch-events | | 2026-11-27 20:00 ICT | Removes FileDeck inotify watches (compare index, live feed)<br>Kinds: create, delete, modify, close_write, attrib, move<br>No watch limit, no new capability<br>Spec: docs/superpowers/specs/2026-11-27-change-events-design.md |
+| 196 | Release and roll out the change event service | todo | claude-20261127-watch-events | | 27.195 | 2026-11-27 23:00 ICT | Warm readiness and drain as before<br>Check metrics and the socket on each node |
