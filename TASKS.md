@@ -382,3 +382,13 @@ ETA: 2026-11-28 07:00 ICT
 | 209 | Publish the MCP contract | in_review | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | docs/mcp.md: contract 1, tools, resources, notifications, grants, retention<br>No ACP: FileDeck runs no agent of its own |
 | 210 | Disk verification in MCP | todo | claude-20261127-watch-events | | 29.207 | 2026-11-28 10:00 ICT | Runs, results, stage changes and disk alerts<br>Waits for the disk verification PR https://github.com/DynacomSolutions/filedeck/pull/288 |
 | 211 | Release, deploy and live subscription proof | todo | claude-20261127-watch-events | | 29.206, 29.207, 29.208 | 2026-11-28 07:00 ICT | Release, roll out, then a live client subscribes and gets a scan finished event |
+
+## 30. Size index write load
+
+First priority, before epic 29. The size store is written on every change event and loads the shared index disk. Orchestrator request 28 Nov 2026.
+ETA: 2026-11-28 04:30 ICT
+
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 212 | Batch size writes and add size excludes | in_progress | claude-20261127-watch-events | size-write-batching | | 2026-11-28 03:30 ICT | Before: one agent at 14,612 write IOPS and 219 MB/s on its index disk over 60 s<br>One commit per 30 s per subtree, FILEDECK_SIZE_COMMIT_MS<br>FILEDECK_SIZE_EXCLUDE default pg_wal, node_modules, target, .git/objects, cargo-target<br>The change event stream stays complete |
+| 213 | Release, deploy and measure the index disk IOPS | todo | claude-20261127-watch-events | | 30.212 | 2026-11-28 04:30 ICT | Measure the agent pod cgroup io.stat before and after<br>No other disk can take the index now: the second NVMe is busy and almost full, the new SATA disks are under verification |

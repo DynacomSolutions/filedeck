@@ -126,6 +126,11 @@ spec:
             - name: FILEDECK_FANWATCH
               value: /usr/local/bin/filedeck-fanwatch
             {{- end }}
+            # Folder-size store writes (docs/configuration.md): one commit round per interval, and folders whose changes never reach the store.
+            - name: FILEDECK_SIZE_COMMIT_MS
+              value: {{ $.Values.agent.sizeStore.commitMs | int64 | quote }}
+            - name: FILEDECK_SIZE_EXCLUDE
+              value: {{ $.Values.agent.sizeStore.exclude | quote }}
             # Change events (docs/change-events.md): the journal sits in the index folder above; a label template turns a path into labels.
             - name: FILEDECK_EVENTS_JOURNAL_BYTES
               value: {{ $.Values.agent.events.journal.maxBytes | int64 | quote }}

@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
 import { AgentGroupReader } from "./group-agent.ts";
 import { registerSizeRoutes } from "./props.ts";
-import { FanWatch } from "./fanwatch.ts";
+import { FanWatch, type SizeWriteStats } from "./fanwatch.ts";
 import { MacWatch } from "./macwatch.ts";
 import { agentError, registerFileRoutes } from "./agent-routes.ts";
 import * as trash from "./trash.ts";
@@ -161,7 +161,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   Object.assign(app, { events: bus }); // (tests publish to it and read its counters)
   const fan = process.platform === "darwin"
     ? new MacWatch(sizes, { root, procMounts: cfg.procMounts, bus })
-    : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, bus, ignorePath: ownState({ node: cfg.node, root, journalDir, stateDir: cfg.indexDir, tmpDir: os.tmpdir() }) });
+    : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, commitMs: cfg.sizeCommitMs, exclude: cfg.sizeExclude, dirtyMax: cfg.sizeDirtyMax, bus, ignorePath: ownState({ node: cfg.node, root, journalDir, stateDir: cfg.indexDir, tmpDir: os.tmpdir() }) });
   registerNodeStatus(app, cfg, sizes, fan, bus);
   const dirs = new DirWatchers(bus, (v) => fan.covers(v));
   feedRef.feed = dirs;
@@ -175,6 +175,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     const h = sizes.health();
     const q = jobs.queuedStats();
     const w = fan.status();
+    const sw = (w as { size?: SizeWriteStats }).size ?? { commits: 0, dirtyPaths: 0, lastDirtyPaths: 0, excludedEvents: 0, collapsed: 0, commitSeconds: 0 };
     return c.text(
       [
         "# HELP filedeck_size_store_available 1 when the folder-size store answers from its file, 0 when sizes are not cached",
@@ -225,6 +226,28 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_watcher_lost_events_total Native events lost to overflow",
         "# TYPE filedeck_watcher_lost_events_total counter",
         `filedeck_watcher_lost_events_total ${w.lostEvents}`,
+        "# HELP filedeck_size_commits_total Size store commit rounds: one per interval (FILEDECK_SIZE_COMMIT_MS) with changed folders",
+        "# TYPE filedeck_size_commits_total counter",
+        `filedeck_size_commits_total ${sw.commits}`,
+        "# HELP filedeck_size_commit_dirty_paths_total Changed folders handed to the size store, summed over all commit rounds",
+        "# TYPE filedeck_size_commit_dirty_paths_total counter",
+        `filedeck_size_commit_dirty_paths_total ${sw.dirtyPaths}`,
+        "# HELP filedeck_size_commit_dirty_paths_last Changed folders of the latest commit round",
+        "# TYPE filedeck_size_commit_dirty_paths_last gauge",
+        `filedeck_size_commit_dirty_paths_last ${sw.lastDirtyPaths}`,
+        "# HELP filedeck_size_commit_collapsed_total Subtrees whose changed folders were merged into one stale mark because the interval held too many",
+        "# TYPE filedeck_size_commit_collapsed_total counter",
+        `filedeck_size_commit_collapsed_total ${sw.collapsed}`,
+        "# HELP filedeck_size_excluded_events_total Change events kept away from the size store by FILEDECK_SIZE_EXCLUDE (the event stream still has them)",
+        "# TYPE filedeck_size_excluded_events_total counter",
+        `filedeck_size_excluded_events_total ${sw.excludedEvents}`,
+        "# HELP filedeck_size_commit_duration_seconds Time the commit rounds took to write and re-read the changed folders",
+        "# TYPE filedeck_size_commit_duration_seconds summary",
+        `filedeck_size_commit_duration_seconds_sum ${sw.commitSeconds.toFixed(3)}`,
+        `filedeck_size_commit_duration_seconds_count ${sw.commits}`,
+        "# HELP filedeck_size_store_write_transactions_total Write transactions sent to the size store writer",
+        "# TYPE filedeck_size_store_write_transactions_total counter",
+        `filedeck_size_store_write_transactions_total ${sizes.writeTransactions}`,
         ...storageGroups.metrics.lines(),
         ...eventMetrics(bus, (w as { helper?: Record<string, number> }).helper, (w as { caps?: string }).caps),
         "",

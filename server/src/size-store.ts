@@ -286,6 +286,8 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS walking (path TEXT PRIMARY KEY, epoch INTEGER NOT NULL, started INTEGER NOT NULL) WITHOUT ROWID;
   -- one row per watcher run (see FanWatch): \`since\` is the time from which the changes of the watched filesystems were seen without a gap
   CREATE TABLE IF NOT EXISTS watch_sessions (id INTEGER PRIMARY KEY, mounts_hash TEXT NOT NULL, ready_at INTEGER NOT NULL, since INTEGER NOT NULL, beat INTEGER NOT NULL, ended_at INTEGER, clean INTEGER NOT NULL DEFAULT 0, min_epoch INTEGER);
+  -- \`sessionTick\` asks every second whether a newer run over the same mounts exists
+  CREATE INDEX IF NOT EXISTS watch_sessions_mounts ON watch_sessions(mounts_hash, id);
   -- the folders a running walk has entered and not finished (at most one per level): what it has counted so far, \`walk\` = the start folder.
   -- A folder's row here goes when its real row is written; the walk's rows go when it ends. Answers \`du --cached\` while a scan runs.
   CREATE TABLE IF NOT EXISTS partial (path TEXT PRIMARY KEY, parent TEXT NOT NULL, dev REAL, walk TEXT NOT NULL, at INTEGER NOT NULL, ${METRICS.map((m) => metricColumn("tot", m)).join(", ")}) WITHOUT ROWID;
@@ -361,7 +363,8 @@ const fs = require("node:fs");
 // \`uri\` opens the file only if it exists (mode=rw): a store file is never created here, so a deleted generation is never made again under its name (see size-gen.ts)
 const db = new DatabaseSync(uri);
 // NORMAL, not OFF: with WAL an OS crash or power cut then loses at most the last commits, never the file (OFF left a broken freelist after a node crash)
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA journal_size_limit=" + walLimit);
+// wal_autocheckpoint: 4000 pages (16 MiB at 4 KiB), not the default 1000: the pages that every commit rewrites (the ancestors' totals) are copied to the file once per checkpoint, not four times as often
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA wal_autocheckpoint=4000; PRAGMA journal_size_limit=" + walLimit);
 // the reader worker only runs "read" ops: a second connection, so a read never waits behind a commit (WAL) and the main thread never waits for the disk
 // A reader holding a snapshot stops the automatic (passive) checkpoint from restarting the WAL, which then grows without bound and slows every read and commit.
 // Past the limit, wait briefly for readers and truncate; a busy attempt is skipped and tried again 2 s later, so a pinned snapshot costs the writer at most 0.5 s in 2.5.
@@ -1248,6 +1251,7 @@ export class SizeStore {
       else this.writer = nw;
     }
     const ww = w;
+    if (!read && (m.op === "commit" || m.op === "tx" || m.op === "many" || m.op === "exec" || m.op === "meta")) this.writeTransactions++;
     return new Promise((res, rej) => {
       const id = ++this.seq;
       this.pending.set(id, { w: ww, res, rej });
@@ -1257,6 +1261,8 @@ export class SizeStore {
   }
 
   private closed = false;
+  /** write transactions sent to the writer worker (each op is one transaction): for the load test and the metrics */
+  writeTransactions = 0;
   /** mark writes not yet committed: a shutdown waits for them (a mark lost at exit would let a change look fresh after the restart) */
   private markWrites = new Set<Promise<void>>();
   private markWrite(p: Promise<void>) {
@@ -2976,13 +2982,18 @@ export class SizeStore {
       since = Math.max(since, lostAt, this.floor);
       await this.post({ op: "meta", sql: "UPDATE watch_sessions SET beat = ?, since = ? WHERE id = ?", params: [Date.now(), since, id] }, false);
       const mine = minEpoch ?? (this.firstEpoch || null); // (a run that carried but never held the lease passes its predecessor's value on)
-      if (mine !== null) await this.post({ op: "meta", sql: "UPDATE watch_sessions SET min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [mine, id] }, false);
+      if (mine !== null && this.minEpochWritten.get(id) !== mine) {
+        await this.post({ op: "meta", sql: "UPDATE watch_sessions SET min_epoch = COALESCE(min_epoch, ?) WHERE id = ?", params: [mine, id] }, false);
+        this.minEpochWritten.set(id, mine);
+      }
       const newer = ((await this.read("sessionNewer", "SELECT 1 FROM watch_sessions WHERE id > ? AND mounts_hash = ? LIMIT 1", [id, mountsHash], null)) ?? []).length > 0;
       return { since, newer, minEpoch };
     } catch {
       return null;
     }
   }
+  /** the `min_epoch` already written for a session: a heartbeat does not write it again */
+  private minEpochWritten = new Map<number, number>();
   /** The watcher stops. `clean`: it saw every change until now and has handed them all to the store (see FanWatch.handover). */
   async sessionEnd(id: number, clean: boolean, lostAt = 0): Promise<void> {
     if (!this.db || this.file === ":memory:") return;
