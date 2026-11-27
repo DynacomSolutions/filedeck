@@ -14,7 +14,7 @@ export interface StatusChange {
 export const CHANGE_ROW_LIMIT = 500;
 const MAX_LINE = 1024 * 1024;
 
-export function appendChanges(previous: StatusChange[], batch: StatusChange[]): StatusChange[] {
+export function appendChanges<T extends StatusChange>(previous: T[], batch: T[]): T[] {
   const key = (event: StatusChange) => event.cursor ? event.kind + ":" + event.cursor : undefined;
   const seen = new Set(previous.map(key));
   const fresh = batch.filter((event) => {
@@ -34,7 +34,10 @@ export async function readChanges(body: ReadableStream<Uint8Array>, onEvent: (ev
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) return;
+      if (done) {
+        if (pending) throw new Error("The change stream ended with an incomplete line.");
+        return;
+      }
       const lines = (pending + decoder.decode(value, { stream: true })).split("\n");
       pending = lines.pop() ?? "";
       if (pending.length > MAX_LINE) throw new Error("The change stream sent an oversized line.");

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { BACKGROUND_HEADER } from "./api";
-import { checkSignedIn } from "./eventStream";
+import { checkSignedIn, streamRetryDelay } from "./eventStream";
 import { StatusTime } from "./StatusJobsPanel";
 import { appendChanges, CHANGE_ROW_LIMIT, readChanges, type StatusChange } from "./statusChanges";
 import { CHANGE_KINDS, changesUrl, type StatusRoute } from "./statusRoute";
@@ -14,16 +14,20 @@ const kindLabels: Record<string, string> = {
   ready: "Watcher ready", error: "Stream error", reset: "Reset", overflow: "Overflow", offline: "Node offline", lagged: "Stream lagged",
 };
 
+type ChangeRow = StatusChange & { id: number };
+
 function ChangeFeed({ url }: { url: string }) {
   const [paused, setPaused] = useState(false);
-  const [rows, setRows] = useState<StatusChange[]>([]);
+  const [rows, setRows] = useState<ChangeRow[]>([]);
   const [message, setMessage] = useState("Connecting…");
   const cursor = useRef<string | undefined>(undefined);
-  const pending = useRef<StatusChange[]>([]);
+  const pending = useRef<ChangeRow[]>([]);
+  const nextId = useRef(0);
 
   useEffect(() => {
     if (paused) return;
     let stopped = false;
+    let failures = 0;
     let current: AbortController | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
@@ -32,13 +36,14 @@ function ChangeFeed({ url }: { url: string }) {
       if (batch.length) setRows((previous) => appendChanges(previous, batch));
     };
     const connect = async () => {
-      if (stopped || current || document.hidden) return;
+      if (stopped || current || retry !== undefined || document.hidden) return;
       const controller = new AbortController();
       current = controller;
       setMessage("Connecting…");
       const lease = setTimeout(() => controller.abort(), STREAM_LEASE_MS);
       let reconnect = true;
       let live = false;
+      let received = false;
       try {
         const href = new URL(url, location.origin);
         if (cursor.current) href.searchParams.set("since", cursor.current);
@@ -64,26 +69,37 @@ function ChangeFeed({ url }: { url: string }) {
             live = true;
             setMessage("Live");
           }
+          if (live && event.kind !== "lagged") received = true;
           if (event.kind === "ping") return;
           if (pending.current.length === CHANGE_ROW_LIMIT) pending.current.shift();
-          pending.current.push(event);
+          pending.current.push({ ...event, id: ++nextId.current });
         });
         if (current === controller) {
+          if (live && received) failures = 0;
           setMessage("Connection ended. Reconnecting…");
           void checkSignedIn();
         }
       } catch {
-        if (current === controller) setMessage("Reconnecting…");
+        if (current === controller) {
+          if (controller.signal.aborted && live && received) failures = 0;
+          setMessage("Reconnecting…");
+        }
       } finally {
         clearTimeout(lease);
         if (current === controller) {
           current = undefined;
-          if (reconnect && !document.hidden) retry = setTimeout(() => void connect(), RECONNECT_MS);
+          if (reconnect && !document.hidden) {
+            retry = setTimeout(() => {
+              retry = undefined;
+              void connect();
+            }, streamRetryDelay(RECONNECT_MS, ++failures));
+          }
         }
       }
     };
     const disconnect = () => {
       clearTimeout(retry);
+      retry = undefined;
       const controller = current;
       current = undefined;
       controller?.abort();
@@ -113,8 +129,8 @@ function ChangeFeed({ url }: { url: string }) {
       <p className="status-subtitle">Showing {rows.length} of up to {CHANGE_ROW_LIMIT} recent events</p>
       {rows.length === 0 && <p className="status-message">No events received.</p>}
       <ul className="status-rows status-event-list" aria-label="Recent change events">
-        {rows.slice().reverse().map((event, i) => (
-          <li className="status-row status-event" key={event.cursor ? event.kind + event.cursor : `${event.kind}:${event.time ?? 0}:${rows.length - i}`}>
+        {rows.slice().reverse().map((event) => (
+          <li className="status-row status-event" key={event.id}>
             <div><strong>{kindLabels[event.kind] ?? event.kind}</strong>{event.path && <span className="status-subtitle"> · {event.dir ? "Folder" : "File"}</span>}</div>
             {event.time !== undefined && <span className="status-subtitle"><StatusTime at={event.time} /></span>}
             <div className="status-event-path">{event.from && <><code>{event.from}</code> → </>}{event.path && <code>{event.path}</code>}{event.reason ?? event.error}</div>

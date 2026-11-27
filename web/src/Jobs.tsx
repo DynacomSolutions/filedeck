@@ -322,7 +322,7 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo, renderStatus, s
     const comparesP = fullStatus ? api.diffJobs().then((r) => r.jobs, () => (down.add("compares"), compareRef.current)) : Promise.resolve([]);
     await Promise.all(
       nodesRef.current
-        .filter((n) => fullStatus || n.online || prev.current.jobs[n.name]?.some(live)) // an offline node with live jobs may just be restarting
+        .filter((n) => n.online || prev.current.jobs[n.name]?.some(live)) // an offline node with live jobs may just be restarting
         .map(async (n) => {
           try {
             next[n.name] = (await api.jobs(n.name, fullStatus)).jobs;

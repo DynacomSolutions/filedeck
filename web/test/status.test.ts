@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { appendChanges, CHANGE_ROW_LIMIT, readChanges, type StatusChange } from "../src/statusChanges.ts";
+import { streamRetryDelay } from "../src/eventStream.ts";
 import { changesUrl, statusHistoryAction, statusRoute, statusUrl } from "../src/statusRoute.ts";
 import { jobDuration, statusJobs } from "../src/statusJobs.ts";
 import type { JobsSnapshot } from "../src/Jobs.tsx";
@@ -75,4 +76,20 @@ test("NDJSON reader handles split lines and releases a malformed stream", async 
   await assert.rejects(readChanges(malformed, () => {}), /oversized/);
   assert.equal(stopped, true);
   assert.equal(malformed.locked, false);
+});
+
+test("a stream retry starts at three seconds and doubles up to five minutes", () => {
+  assert.deepEqual([1, 2, 3, 7, 8, 100].map((failures) => streamRetryDelay(3000, failures)),
+    [3000, 6000, 12000, 192000, 300000, 300000]);
+});
+
+test("the reader rejects a stream that ends with an unfinished line", async () => {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"kind":'));
+      controller.close();
+    },
+  });
+  await assert.rejects(readChanges(body, () => assert.fail("The stream sent no complete event.")), /incomplete line/);
+  assert.equal(body.locked, false);
 });

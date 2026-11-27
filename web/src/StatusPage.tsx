@@ -27,13 +27,17 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
   const missing = !!devices && !!route.node && !selected;
   const waitingForNode = !!route.node && devices === undefined;
   const heading = useRef<HTMLHeadingElement>(null);
+  const currentUrl = useRef(location.pathname + location.search);
   const events = useRef(0);
   const [visit, setVisit] = useState(0);
 
   useEffect(() => {
     const pop = () => {
+      const url = location.pathname + location.search;
+      if (url === currentUrl.current) return;
       const next = statusRoute(location.pathname, location.search);
       if (!next) return;
+      currentUrl.current = url;
       setRoute(next);
       setVisit(++events.current);
       heading.current?.focus({ preventScroll: true });
@@ -48,6 +52,7 @@ export function StatusPage({ initial, account }: { initial: StatusRoute; account
     const action = statusHistoryAction(route, next);
     if (action === "push") history.pushState(null, "", url);
     else history.replaceState(history.state, "", url);
+    currentUrl.current = url;
     setRoute(next);
   };
 
