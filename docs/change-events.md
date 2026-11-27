@@ -52,6 +52,8 @@ Kinds of control event. They tell you about the stream, not about one entry. Eve
 | `overflow` | The kernel dropped events. `scope` is `node`. `window.from` and `window.to` are the time window. | Scan everything you follow again. |
 | `reset` | Events may be missing. `scope` is `node` or `filesystem`. A `filesystem` reset has the mount in `path`. `window.to` is absent while the watcher is still away. | Scan again what is in the scope. |
 
+Each new reader gets one `ready` line at once, when the watcher is running, with the state now (`unwatched` too). It comes after a `reset` line, if the cursor was not usable, and before the replayed and live lines. Its cursor is the place you started from, so a reader that stops after it loses nothing. It is not in the journal, so it has no sequence number of its own. When the watcher is not running yet, you get no `ready` line. The line `ready` comes when the watcher starts, as an event. The hub passes the `ready` line of each node through, with its `node`. The Unix socket, the HTTP stream and the hub stream all do this.
+
 Two more lines are not events. `ping` comes when nothing happened for 15 seconds. It has a `cursor`. All events up to that cursor were checked against your filter, so you can keep it as your place. `lagged` ends the stream when you read too slowly. See [Slow readers](#slow-readers).
 
 ## The cursor and the gap contract
@@ -187,7 +189,7 @@ The agent adds these to `/metrics`. They are counts and ages only.
 | `filedeck_events_bus_lag_seconds` | Time to hand an event to all readers. |
 | `filedeck_fanwatch_handle_cache_hits_total`, `..._misses_total` | Folder paths the helper took from its cache, and looked up. |
 | `filedeck_fanwatch_open_by_handle_total` | `open_by_handle_at` calls of the helper. |
-| `filedeck_fanwatch_unresolved_total` | Events in a folder that was already removed. |
+| `filedeck_fanwatch_unresolved_total` | Events in a folder that was already removed, or that no mount shows. |
 | `filedeck_fanwatch_events_read_total` | Kernel events the helper read. |
 | `filedeck_fanwatch_unlimited_queue` | 1 when the kernel queue is unlimited. |
 
