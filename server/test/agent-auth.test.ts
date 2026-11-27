@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
+import { normaliseAgentPath } from "../src/agent-auth.ts";
 import { createAgent } from "../src/agent.ts";
 import { createHub } from "../src/hub.ts";
 import { loadConfig } from "../src/config.ts";
@@ -48,4 +49,14 @@ test("agent demands the shared token, the hub supplies it and never forwards the
 test("agent without a token is unchanged", async () => {
   const app = createAgent(loadConfig({ FILEDECK_ROOT: tmp, FILEDECK_NODE: "t" } as never));
   assert.equal((await app.request("/api/fs/list?path=/")).status, 200);
+});
+
+test("normaliseAgentPath decodes and standardises paths for the hub guards", () => {
+  for (const input of ["/api/v1/changes", "/api/v1/%63hanges", "/api/v1/CHANGES", "/api//v1/./changes", "/api\\v1\\changes", "/api/v1/x/../changes"]) {
+    assert.equal(normaliseAgentPath(input + "?x=1"), "/api/v1/changes", input);
+  }
+  assert.equal(normaliseAgentPath("/api/v1/changes/?x=1"), "/api/v1/changes/");
+  for (const input of ["/api/v1/changes2", "/api/fs/list", "/api/v1", "/api/v1/%zz"]) {
+    assert.equal(normaliseAgentPath(input), input);
+  }
 });
