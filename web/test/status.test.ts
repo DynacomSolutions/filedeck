@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { appendChanges, CHANGE_ROW_LIMIT, readChanges, type StatusChange } from "../src/statusChanges.ts";
+import { appendChanges, CHANGE_ROW_LIMIT, nextChangeStreamFailureCount, readChanges, StreamFormatError, type StatusChange } from "../src/statusChanges.ts";
 import { streamRetryDelay } from "../src/eventStream.ts";
 import { changesUrl, statusHistoryAction, statusRoute, statusUrl } from "../src/statusRoute.ts";
 import { jobDuration, statusJobs } from "../src/statusJobs.ts";
@@ -92,4 +92,48 @@ test("the reader rejects a stream that ends with an unfinished line", async () =
   });
   await assert.rejects(readChanges(body, () => assert.fail("The stream sent no complete event.")), /incomplete line/);
   assert.equal(body.locked, false);
+});
+
+test("a network failure after a real event resets the reconnect delay", async () => {
+  const networkError = new TypeError("Network connection lost.");
+  const changes: StatusChange[] = [];
+  const encode = new TextEncoder();
+  let first = true;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (first) {
+        first = false;
+        controller.enqueue(encode.encode('{"kind":"modify","path":"/one"}\n'));
+      } else {
+        controller.error(networkError);
+      }
+    },
+  });
+  await assert.rejects(readChanges(body, (event) => changes.push(event)), (error) => {
+    assert.equal(error, networkError);
+    assert.deepEqual(changes, [{ kind: "modify", path: "/one" }]);
+    assert.equal(nextChangeStreamFailureCount(6, changes.length > 0, error), 1);
+    assert.equal(nextChangeStreamFailureCount(6, false, error), 7);
+    return true;
+  });
+});
+
+test("format errors after a real event preserve the reconnect back-off", async () => {
+  const encode = new TextEncoder();
+  for (const tail of ['{bad}\n', '{}\n', "x".repeat(1024 * 1024 + 1), '{"kind":']) {
+    const changes: StatusChange[] = [];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encode.encode('{"kind":"modify","path":"/one"}\n'));
+        controller.enqueue(encode.encode(tail));
+        controller.close();
+      },
+    });
+    await assert.rejects(readChanges(body, (event) => changes.push(event)), (error) => {
+      assert.ok(error instanceof StreamFormatError);
+      assert.deepEqual(changes, [{ kind: "modify", path: "/one" }]);
+      assert.equal(nextChangeStreamFailureCount(6, changes.length > 0, error), 7);
+      return true;
+    });
+  }
 });

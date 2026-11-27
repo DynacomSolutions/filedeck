@@ -3436,14 +3436,14 @@ async function verifyJobsStatus(browser) {
       if (url.pathname !== '/api/v1/changes') return original(input, init);
       const stream = { query: Object.fromEntries(url.searchParams), aborted: false };
       window.statusStreams.push(stream);
+      const reply = window.statusReplies.shift();
       const body = new ReadableStream({
         start(controller) {
           const enc = new TextEncoder();
           window.statusEmit = (rows) => controller.enqueue(enc.encode(rows.map((row) => JSON.stringify(row) + '\n').join('')));
-          const reply = window.statusReplies.shift();
-          if (reply !== undefined) {
-            controller.enqueue(enc.encode(reply));
-            controller.close();
+          if (reply) {
+            controller.enqueue(enc.encode(reply.line));
+            if (!reply.networkError) controller.close();
             return;
           }
           init.signal.addEventListener('abort', () => {
@@ -3454,6 +3454,9 @@ async function verifyJobsStatus(browser) {
             kind: stream.query.kind || 'create', path: '/work/' + name, cursor: 'fixture:' + (i + 1), time: Date.now(),
           }));
           window.statusEmit(rows);
+        },
+        pull(controller) {
+          if (reply?.networkError) controller.error(new TypeError('Network connection lost.'));
         },
       });
       return new Response(body, { headers: { 'content-type': 'application/x-ndjson' } });
@@ -3580,7 +3583,11 @@ async function verifyJobsStatus(browser) {
         await page.clock.install();
         await section('Storage').click();
         const before = await page.evaluate(() => {
-          window.statusReplies.push('{bad}\n', 'x'.repeat(1024 * 1024 + 1), '{"kind":"ping"}\n');
+          window.statusReplies.push(
+            { line: '{bad}\n' },
+            { line: 'x'.repeat(1024 * 1024 + 1) },
+            { line: '{"kind":"modify","path":"/work/healthy.log"}\n', networkError: true },
+          );
           return window.statusStreams.length;
         });
         await section('Live events').click();
@@ -3592,7 +3599,8 @@ async function verifyJobsStatus(browser) {
         assert.equal(await page.evaluate(() => window.statusStreams.length), before + 2, 'the second failure must wait six seconds');
         await page.clock.fastForward(3000);
         await page.waitForFunction((n) => window.statusStreams.length === n, before + 3);
-        await expectText(page, 'Connection ended. Reconnecting…');
+        await expectText(page, '/work/healthy.log');
+        await expectText(page, 'Reconnecting…');
         await page.clock.fastForward(3000);
         await page.waitForFunction((n) => window.statusStreams.length === n, before + 4);
         await expectText(page, '/work/report.log');

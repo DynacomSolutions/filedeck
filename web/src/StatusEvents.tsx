@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { BACKGROUND_HEADER } from "./api";
 import { checkSignedIn, streamRetryDelay } from "./eventStream";
 import { StatusTime } from "./StatusJobsPanel";
-import { appendChanges, CHANGE_ROW_LIMIT, readChanges, type StatusChange } from "./statusChanges";
+import { appendChanges, CHANGE_ROW_LIMIT, nextChangeStreamFailureCount, readChanges, type StatusChange } from "./statusChanges";
 import { CHANGE_KINDS, changesUrl, type StatusRoute } from "./statusRoute";
 
 const RECONNECT_MS = 3000;
@@ -44,6 +44,7 @@ function ChangeFeed({ url }: { url: string }) {
       let reconnect = true;
       let live = false;
       let received = false;
+      let readError: unknown;
       try {
         const href = new URL(url, location.origin);
         if (cursor.current) href.searchParams.set("since", cursor.current);
@@ -69,30 +70,28 @@ function ChangeFeed({ url }: { url: string }) {
             live = true;
             setMessage("Live");
           }
-          if (live && event.kind !== "lagged") received = true;
           if (event.kind === "ping") return;
+          if (live && event.kind !== "lagged") received = true;
           if (pending.current.length === CHANGE_ROW_LIMIT) pending.current.shift();
           pending.current.push({ ...event, id: ++nextId.current });
         });
         if (current === controller) {
-          if (live && received) failures = 0;
           setMessage("Connection ended. Reconnecting…");
           void checkSignedIn();
         }
-      } catch {
-        if (current === controller) {
-          if (controller.signal.aborted && live && received) failures = 0;
-          setMessage("Reconnecting…");
-        }
+      } catch (error) {
+        readError = error;
+        if (current === controller) setMessage("Reconnecting…");
       } finally {
         clearTimeout(lease);
         if (current === controller) {
           current = undefined;
           if (reconnect && !document.hidden) {
+            failures = nextChangeStreamFailureCount(failures, received, readError);
             retry = setTimeout(() => {
               retry = undefined;
               void connect();
-            }, streamRetryDelay(RECONNECT_MS, ++failures));
+            }, streamRetryDelay(RECONNECT_MS, failures));
           }
         }
       }

@@ -14,6 +14,12 @@ export interface StatusChange {
 export const CHANGE_ROW_LIMIT = 500;
 const MAX_LINE = 1024 * 1024;
 
+export class StreamFormatError extends Error {}
+
+export function nextChangeStreamFailureCount(failures: number, received: boolean, error: unknown): number {
+  return received && !(error instanceof StreamFormatError) ? 1 : failures + 1;
+}
+
 export function appendChanges<T extends StatusChange>(previous: T[], batch: T[]): T[] {
   const key = (event: StatusChange) => event.cursor ? event.kind + ":" + event.cursor : undefined;
   const seen = new Set(previous.map(key));
@@ -35,17 +41,23 @@ export async function readChanges(body: ReadableStream<Uint8Array>, onEvent: (ev
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        if (pending) throw new Error("The change stream ended with an incomplete line.");
+        if (pending) throw new StreamFormatError("The change stream ended with an incomplete line.");
         return;
       }
       const lines = (pending + decoder.decode(value, { stream: true })).split("\n");
       pending = lines.pop() ?? "";
-      if (pending.length > MAX_LINE) throw new Error("The change stream sent an oversized line.");
+      if (pending.length > MAX_LINE) throw new StreamFormatError("The change stream sent an oversized line.");
       for (const line of lines) {
         if (!line) continue;
-        if (line.length > MAX_LINE) throw new Error("The change stream sent an oversized line.");
-        const event = JSON.parse(line) as StatusChange | null;
-        if (event && typeof event.kind === "string") onEvent(event);
+        if (line.length > MAX_LINE) throw new StreamFormatError("The change stream sent an oversized line.");
+        let event: StatusChange | null;
+        try {
+          event = JSON.parse(line) as StatusChange | null;
+        } catch (error) {
+          throw new StreamFormatError("The change stream sent invalid JSON.", { cause: error });
+        }
+        if (!event || typeof event.kind !== "string") throw new StreamFormatError("The change stream sent an event without a kind.");
+        onEvent(event);
       }
     }
   } finally {
