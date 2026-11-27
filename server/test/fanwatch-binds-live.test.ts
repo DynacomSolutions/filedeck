@@ -159,7 +159,7 @@ test("bind mounts: a rename inside a bind is a move under every path, and a move
   // a move on the whole filesystem from a place the first bind shows to a place no bind shows: a move for the whole, a delete for the bind
   fs.renameSync(path.join(l.z, "data/one/n.txt"), path.join(l.z, "data/other/n.txt"));
   await sleep(300);
-  const ev2 = await held(r.bus);
+  const ev2 = (await held(r.bus)).slice(ev.length); // the journal is read from its start: only what the second rename added
   const all2 = ev2.map((e) => `${e.kind} ${e.path} ${e.from ?? ""}`).join("\n");
   assert.ok(ev2.some((e) => e.kind === "delete" && e.path === path.join(l.a, "n.txt")), `delete under the bind that loses it\n${all2}`);
   assert.ok(ev2.some((e) => e.kind === "move" && e.path === path.join(l.z, "data/other/n.txt") && e.from === path.join(l.z, "data/one/n.txt")), `move under the whole filesystem\n${all2}`);
