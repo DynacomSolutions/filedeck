@@ -22,6 +22,7 @@ import { HubUnreachable, UpdateBanner } from "./PwaScreens";
 installViewportTracking();
 installPwa();
 
+const StoragePage = lazy(() => import("./StorageSunburst").then((m) => ({ default: m.StoragePage })));
 const SignIn = lazy(() => import("./SignIn").then((m) => ({ default: m.SignIn })));
 
 /**
@@ -140,7 +141,9 @@ function Root() {
       <UpdateBanner />
       <AccessibilityChrome />
       <ErrorBoundary what="Filedeck" scope="root">
-        <App account={view.auth ? view : undefined} />
+        {location.pathname === "/storage"
+          ? <Suspense fallback={<p role="status">Loading storage…</p>}><StoragePage /></Suspense>
+          : <App account={view.auth ? view : undefined} />}
       </ErrorBoundary>
       {retry && <TailnetBanner {...waitProps} />}
     </>
