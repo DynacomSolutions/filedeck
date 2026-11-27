@@ -38,4 +38,14 @@ HUB_URL=http://127.0.0.1:8080 npm run dev:web   # Vite dev server, /api proxied
 
 To run both modes locally: start an agent (`FILEDECK_MODE=agent FILEDECK_ROOT=/some/dir PORT=8081`) and a hub (`FILEDECK_MODE=hub NODES=local=http://127.0.0.1:8081 FILEDECK_STATIC=web/dist PORT=8080`).
 
+## Jobs and node status
+
+Open `/status` for all accessible nodes or `/status/<node>` for one node. The query string stores the section, job, and filters.
+
+- `GET /api/node-status` reads the agent's size store, watcher counters and change journal. It uses the normal agent authentication and requires a signed administrator claim when sign-in is active.
+- `GET /api/status?node=<node>` reads the same snapshot through the hub. Omit `node` for all accessible agents. Each result identifies an available, unsupported or unavailable agent.
+- Scan coverage uses complete, error-free rows that still exist in the size store. The timestamp records the stored root's latest scan or watcher refresh. A refresh of a descendant can preserve that time. A stale result means the store cannot verify that the whole tree is current.
+- Live events use `GET /api/v1/changes?node=<node>` with the existing access rules. See [Change events](change-events.md) for cursor and filter behaviour.
+- `web/src/StorageSection.tsx` contains the chart mount point. The component reads `GET /api/groups` and receives the selected node. Mount the chart inside its existing section and keep the empty state for hubs without the API.
+
 [Back to the README](../README.md)

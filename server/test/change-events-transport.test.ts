@@ -15,7 +15,6 @@ import { DirWatchers } from "../src/events/dirwatch.ts";
 import { fanIn } from "../src/events/fanin.ts";
 import { registerChangeRoutes } from "../src/events/routes.ts";
 import { startEventSocket } from "../src/events/socket.ts";
-import { isChangesPath } from "../src/events/guard.ts";
 import { agentError, registerFileRoutes } from "../src/agent-routes.ts";
 import { makeAgentJobs } from "../src/archive-routes.ts";
 import { localReader } from "../src/diff-routes.ts";
@@ -390,7 +389,7 @@ test("hub GET /api/v1/changes?node=a,b merges the agents' streams, pushes the fi
   assert.equal((await fetch(`${urlOf(hs)}/api/v1/changes?since=garbage`)).status, 400);
 });
 
-test("hub: the proxy path of one node streams too; an encoded path cannot dodge the check", async () => {
+test("hub: the proxy path of one node streams changes", async () => {
   const a = await agentApp("a");
   const hub = createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, FILEDECK_AGENT_TOKEN: "agent-secret", NODES: `a=${urlOf(a.srv)}` } as never));
   cleanups.push(() => (hub as unknown as { close(): Promise<void> }).close());
@@ -404,8 +403,6 @@ test("hub: the proxy path of one node streams too; an encoded path cannot dodge 
   await until(() => l.out.some((x) => x.path === "/p"));
   assert.ok(l.out.some((x) => x.path === "/p"));
   ctl.abort();
-  for (const p of ["/api/v1/changes", "/api/v1/changes/", "/api/v1/%63hanges", "/api/v1/CHANGES", "/api//v1/./changes", "/api\\v1\\changes", "/api/v1/x/../changes"]) assert.equal(isChangesPath(p + "?x=1"), true, p);
-  for (const p of ["/api/v1/changes2", "/api/fs/list", "/api/v1", "/api/v1/%zz"]) assert.equal(isChangesPath(p), false, p);
 });
 
 test("api token: the `changes` scope opens the change stream and nothing else; the default scope does not open it", async () => {

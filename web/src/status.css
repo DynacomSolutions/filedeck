@@ -1,0 +1,254 @@
+.jobs-status-nav {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  width: fit-content;
+  font-size: .85rem;
+}
+
+.status-page {
+  height: var(--vvh, 100dvh);
+  overflow: auto;
+  color: var(--fg);
+}
+
+.status-wrap {
+  width: min(100%, 76rem);
+  margin-inline: auto;
+  padding: clamp(1rem, 3vw, 2.5rem);
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+
+.status-header-bar, .status-heading, .status-section-head, .status-node-head, .status-heading-text, .status-event-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .75rem 1rem;
+}
+
+.status-header-bar .btn-a, .status-nav .btn-a, .status-page button, .status-page select, .status-page input {
+  min-height: 44px;
+}
+
+.status-heading {
+  margin-block: 1.5rem 1rem;
+}
+
+.status-heading-text {
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+}
+
+.status-page h1, .status-page h2, .status-page h3, .status-page h4 {
+  margin: 0;
+  line-height: 1.25;
+}
+
+.status-page h1 {
+  font-size: clamp(1.45rem, 4vw, 2.25rem);
+}
+
+.status-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .55rem;
+  padding-block-end: 1rem;
+  border-block-end: 1px solid var(--border);
+}
+
+.status-nav [aria-current] {
+  color: var(--accent-text);
+  background: var(--accent-tint);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+.status-section {
+  margin-block-start: 1.25rem;
+}
+
+.status-section-head p, .status-subtitle {
+  color: var(--fg-soft);
+  font-size: .85rem;
+}
+
+.status-section-head p {
+  margin: .4rem 0 0;
+}
+
+.status-message, .status-card, .status-row {
+  box-sizing: border-box;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+}
+
+.status-rows, .status-paths, .status-items {
+  list-style: none;
+  padding: 0;
+  margin-block: .9rem 0;
+}
+
+.status-rows {
+  display: grid;
+  gap: .55rem;
+}
+
+.status-job-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: .5rem 1rem;
+}
+
+.status-job-summary button {
+  max-width: 100%;
+  margin-block-end: .35rem;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.status-job-summary button svg {
+  flex: none;
+}
+
+.status-job-summary button[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.status-job-summary .job-pill {
+  justify-self: start;
+  font-size: .76rem;
+}
+
+.status-job-time {
+  color: var(--fg-soft);
+  font-size: .82rem;
+}
+
+.status-row progress {
+  margin-block-start: .75rem;
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.status-job-error {
+  margin-block: .6rem 0;
+  color: var(--danger-text);
+  font-size: .85rem;
+}
+
+.status-job-detail {
+  border-block-start: 1px solid var(--border);
+  margin-block-start: .75rem;
+}
+
+.status-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: .8rem;
+  margin-block: .9rem;
+}
+
+.status-facts dt {
+  font-size: .78rem;
+  color: var(--fg-soft);
+}
+
+.status-facts dd {
+  margin: .15rem 0 0;
+  font-weight: 600;
+}
+
+.status-node {
+  margin-block: 1.25rem;
+}
+
+.status-node-head {
+  margin-block-end: .65rem;
+}
+
+.status-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+  gap: .75rem;
+}
+
+.status-paths li, .status-items li {
+  border-block-start: 1px solid var(--border);
+  padding-block: .55rem;
+}
+
+.status-card p, .status-paths, .status-items {
+  font-size: .83rem;
+}
+
+.status-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  align-items: end;
+  gap: .75rem;
+  margin-block: .9rem;
+}
+
+.status-page label {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  min-width: 0;
+  font-size: .84rem;
+  font-weight: 600;
+}
+
+.status-filters label {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.status-page select, .status-page input {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.status-page select {
+  padding-inline: .55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  background: var(--surface);
+  color: var(--fg);
+}
+
+.status-node-select select {
+  max-width: min(42vw, 18rem);
+}
+
+.status-event-toolbar {
+  justify-content: flex-start;
+}
+
+.status-event-toolbar p {
+  margin-inline-end: auto;
+}
+
+.status-event {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: .4rem .9rem;
+  align-items: start;
+}
+
+.status-event-path {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 600px) {
+  .status-job-summary {
+    grid-template-columns: 1fr auto;
+  }
+  .status-job-time {
+    grid-column: 1 / -1;
+  }
+}
