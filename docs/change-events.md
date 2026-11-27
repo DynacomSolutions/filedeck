@@ -7,7 +7,7 @@ This page describes the event stream, the filters, the cursor and the rules that
 ## What the agent needs
 
 - The fanotify helper runs (chart value `agent.fanotify.enabled`). It needs `CAP_SYS_ADMIN` and `CAP_DAC_READ_SEARCH`. Without it, the agent logs one line and sends no events. A reader then gets a stream that holds only `ping` lines.
-- Linux 5.17 or newer gives the full output. On Linux 5.9 to 5.16 the agent still works, but a move is a `delete` and a `create`, and a folder removal empties the helper's path cache.
+- Linux 5.17 or newer gives the full output. On Linux 5.9 to 5.16 the agent still works, but a move is a `delete` and a `create`, and the helper looks up the path of a new folder at its first event.
 - The helper watches whole filesystems. It has no watch limit and no recursion limit. A new folder, a bind mount and a new file are covered at once. Network filesystems and unreachable mounts are not covered. The `ready` event lists them.
 - The agent does not report changes of its own state: the journal folder `changes-<node>` and the files `index-<node>.db*`, `sizes-<node>.db*` and `jobs-<node>.db*`. Without this rule, each write of the journal would be an event that is written to the journal.
 - macOS agents use FSEvents. They send the same events as best effort: a rename is a `create` when the entry exists and a `delete` when it does not, and a folder flag is known only for a `create`.

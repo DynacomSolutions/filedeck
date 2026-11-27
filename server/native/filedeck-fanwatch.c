@@ -339,6 +339,16 @@ static int thr_modify(uint64_t key, long long now, int isdir, const char *path) 
 	return 1;
 }
 
+/* the entry is about to be renamed: its held modify report is made now, under the old name, before the rename line */
+static void thr_emit(uint64_t key) {
+	if (!npend) return;
+	struct thr *t = &thr[key % THR_SLOTS];
+	if (t->key == key && t->due) {
+		emit('M', t->isdir, t->path, NULL);
+		thr_release(t);
+	}
+}
+
 /* a close or a delete makes a held modify report unnecessary */
 static void thr_done(uint64_t key) {
 	if (!npend) return;
@@ -358,17 +368,24 @@ struct rec {
 };
 
 static void rec_read(struct rec *r, const struct fanotify_event_info_header *h) {
+	const char *rend = (const char *)h + h->len;
 	struct fanotify_event_info_fid *f = (void *)h;
+	/* the record must hold the fid header, the handle's own header and all the handle bytes before any of them is read */
+	if (h->len < sizeof *f + sizeof(struct file_handle)) return;
 	struct file_handle *fh = (void *)f->handle;
-	if (fh->handle_bytes > FHMAX) return;
+	if (fh->handle_bytes > FHMAX || (size_t)(rend - (const char *)fh->f_handle) < fh->handle_bytes) return;
+	const char *name = NULL;
+	if (h->info_type != FAN_EVENT_INFO_TYPE_FID && h->info_type != FAN_EVENT_INFO_TYPE_DFID) {
+		const char *n = (const char *)fh->f_handle + fh->handle_bytes;
+		if (n < rend) {
+			if (!memchr(n, 0, (size_t)(rend - n))) return; /* a name that does not end inside its record is not read */
+			name = n;
+		}
+	}
 	r->have = 1;
 	r->fh = fh;
 	memcpy(r->fsid, &f->fsid, sizeof r->fsid);
-	r->name = NULL;
-	if (h->info_type != FAN_EVENT_INFO_TYPE_FID && h->info_type != FAN_EVENT_INFO_TYPE_DFID) {
-		const char *name = (const char *)fh->f_handle + fh->handle_bytes;
-		if ((const char *)h + h->len > name) r->name = name;
-	}
+	r->name = name;
 }
 
 /* Full path of the entry a record names: its directory's path and the name ("." and "" mean the directory itself). */
@@ -393,6 +410,8 @@ static uint64_t rec_key(const struct rec *r) {
 static void handle(const struct fanotify_event_metadata *ev) {
 	n_events++;
 	if (ev->mask & FAN_Q_OVERFLOW) {
+		/* events were lost, among them renames of folders: no cached path can be trusted any more */
+		cache_clear();
 		out("!overflow\n", 10);
 		return;
 	}
@@ -428,7 +447,7 @@ static void handle(const struct fanotify_event_metadata *ev) {
 		int ok_old = rec_path(&oldr, old, sizeof old) == 0;
 		if (isdir) cache_clear();
 		if (ok_new && ok_old) {
-			if (npend) thr_done(rec_key(&oldr));
+			thr_emit(rec_key(&oldr));
 			emit('R', isdir, path, old);
 		} else if (ok_new) emit('C', isdir, path, NULL); /* moved in from outside what is watched */
 		else if (ok_old) emit('D', isdir, old, NULL);
@@ -456,7 +475,19 @@ static void handle(const struct fanotify_event_metadata *ev) {
 		emit('D', 1, seen, NULL);
 		return;
 	}
-	if (ev->mask & FAN_CREATE) {
+	/*
+	 * The kernel merges queued events of one name into one event with the OR of their masks, so the order is lost. The order of one entry's life is
+	 * create, then attribute, modify and close, then delete. When both create and delete are set it can have been either way round
+	 * (create ... delete, or delete ... create): the entry as it is now tells which came last.
+	 */
+	int created = (ev->mask & FAN_CREATE) != 0, deleted = (ev->mask & FAN_DELETE) != 0;
+	int delete_first = 0;
+	if (created && deleted) {
+		struct stat st;
+		delete_first = fstatat(AT_FDCWD, path, &st, AT_SYMLINK_NOFOLLOW) == 0;
+	}
+	if (delete_first) { thr_done(rec_key(&dfid)); emit('D', isdir, path, NULL); }
+	if (created) {
 		emit('C', isdir, path, NULL);
 		/* a new folder: its place is known now, so its first event needs no lookup */
 		if (isdir && fid.have && cache_sets) {
@@ -465,19 +496,16 @@ static void handle(const struct fanotify_event_metadata *ev) {
 			cache_put(key, klen, path);
 		}
 	}
-	if (ev->mask & FAN_DELETE) {
-		if (npend) thr_done(rec_key(&dfid));
-		emit('D', isdir, path, NULL);
-	}
 	if (ev->mask & FAN_ATTRIB) emit('A', isdir, path, NULL);
 	if (ev->mask & FAN_MODIFY) {
 		t = now_ms();
 		if (thr_modify(rec_key(&dfid), t, isdir, path)) emit('M', isdir, path, NULL);
 	}
 	if (ev->mask & FAN_CLOSE_WRITE) {
-		if (npend) thr_done(rec_key(&dfid));
+		thr_done(rec_key(&dfid));
 		emit('W', isdir, path, NULL);
 	}
+	if (deleted && !delete_first) { thr_done(rec_key(&dfid)); emit('D', isdir, path, NULL); }
 }
 
 static int fail(int code, const char *msg, const char *arg) {
@@ -515,7 +543,7 @@ int main(int argc, char **argv) {
 		return fail(3, "fanotify_init failed (kernel 5.9 or newer is needed)", strerror(errno));
 	}
 	if (!caps_unlimited) fprintf(stderr, "filedeck-fanwatch: no unlimited event queue (%s): a burst may overflow the kernel queue\n", strerror(first_errno ? first_errno : EINVAL));
-	if (!caps_target) fprintf(stderr, "filedeck-fanwatch: no target ids in events (kernel before 5.17): a removed folder empties the path cache\n");
+	if (!caps_target) fprintf(stderr, "filedeck-fanwatch: no target ids in events (kernel before 5.17): a new folder's path is looked up at its first event, not taken from the create event\n");
 	unsigned long long mask = BASE_MASK | FAN_RENAME;
 	caps_rename = 1;
 	int denied = 0;
