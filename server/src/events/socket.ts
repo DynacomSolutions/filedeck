@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { FsError } from "../fsops.ts";
 import type { EventBus } from "./bus.ts";
 import { Filter, type FilterSpec } from "./filter.ts";
@@ -37,22 +38,27 @@ export async function startEventSocket(bus: EventBus, o: SocketOptions): Promise
   const me = o.uid ?? process.getuid?.() ?? 0;
   const dir = path.dirname(o.path);
   // The folder is made (or kept) 0750 only when it is a real folder of this user: the agent never changes the mode or group of a folder it does not own,
-  // and never follows a link to one.
-  let st = lstatOrNull(dir);
-  if (!st) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
-    st = fs.lstatSync(dir);
+  // and never follows a link to one. The checks and the changes go through one descriptor (opened without following a link), so the folder cannot be
+  // swapped for a link between them.
+  if (!lstatOrNull(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
+  let dfd: number;
+  try {
+    dfd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  } catch (e) {
+    throw new Error(`the socket folder ${dir} is not a folder (a link is not followed): ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
   }
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`the socket folder ${dir} is not a folder (a link is not followed)`);
-  if (st.uid !== me) throw new Error(`the socket folder ${dir} is not owned by the agent's user: it is not changed`);
-  fs.chmodSync(dir, 0o750);
-  if (o.group) chgrp(dir, o.group, me);
-  // an old socket of a process that is gone is replaced; anything else at that place is kept, and the start is refused
+  try {
+    if (fs.fstatSync(dfd).uid !== me) throw new Error(`the socket folder ${dir} is not owned by the agent's user: it is not changed`);
+    fs.fchmodSync(dfd, 0o750);
+    if (o.group) fs.fchownSync(dfd, me, groupId(o.group));
+  } finally {
+    fs.closeSync(dfd);
+  }
+  // Anything but an old socket at that place is kept, and the start is refused. An old socket (of a process that is gone, or one that is going) is
+  // replaced at the end by a rename, not removed first: the new socket is bound under a name of its own and moved into place when it is ready.
   const old = lstatOrNull(o.path);
-  if (old) {
-    if (!old.isSocket()) throw new Error(`${o.path} exists and is not a socket: it is not removed`);
-    fs.rmSync(o.path, { force: true });
-  }
+  if (old && !old.isSocket()) throw new Error(`${o.path} exists and is not a socket: it is not removed`);
+  const own = `${o.path}.${randomBytes(3).toString("hex")}`;
   const clients = new Set<net.Socket>();
   const server = net.createServer({ allowHalfOpen: true }, (sock) => {
     if (clients.size >= (o.maxClients ?? 256)) {
@@ -69,17 +75,28 @@ export async function startEventSocket(bus: EventBus, o: SocketOptions): Promise
   });
   await new Promise<void>((res, rej) => {
     server.once("error", rej);
-    server.listen(o.path, () => res());
+    server.listen(own, () => res());
   });
-  fs.chmodSync(o.path, 0o660);
-  if (o.group) chgrp(o.path, o.group, me);
+  let ino: { dev: number; ino: number };
+  try {
+    fs.chmodSync(own, 0o660);
+    if (o.group) fs.chownSync(own, me, groupId(o.group));
+    fs.renameSync(own, o.path);
+    const st = fs.lstatSync(o.path);
+    ino = { dev: st.dev, ino: st.ino };
+  } catch (e) {
+    await new Promise<void>((res) => server.close(() => res()));
+    throw e;
+  }
   return {
     path: o.path,
     async close() {
       for (const c of clients) c.destroy();
       await new Promise<void>((res) => server.close(() => res()));
-      // (the server removes its own socket; this is for one that is left over, and only a socket is ever removed)
-      if (lstatOrNull(o.path)?.isSocket()) fs.rmSync(o.path, { force: true });
+      // (the server removes the name it bound, which is gone after the rename.) The socket at the shared path is removed only while it is still this one: a
+      // newer process may have put its own there already (a rolling deploy), and that one must stay.
+      const now = lstatOrNull(o.path);
+      if (now?.isSocket() && now.dev === ino.dev && now.ino === ino.ino) fs.rmSync(o.path, { force: true });
     },
   };
 }
@@ -92,15 +109,13 @@ function lstatOrNull(p: string): fs.Stats | null {
   }
 }
 
-function chgrp(p: string, group: string, uid: number) {
-  let gid = Number(group);
-  if (!Number.isInteger(gid)) {
-    // names are looked up in /etc/group (the process may not have NSS)
-    const line = fs.readFileSync("/etc/group", "utf8").split("\n").find((l) => l.startsWith(group + ":"));
-    if (!line) throw new Error(`events socket group "${group}" does not exist`);
-    gid = Number(line.split(":")[2]);
-  }
-  fs.chownSync(p, uid, gid);
+function groupId(group: string): number {
+  const gid = Number(group);
+  if (Number.isInteger(gid)) return gid;
+  // names are looked up in /etc/group (the process may not have NSS)
+  const line = fs.readFileSync("/etc/group", "utf8").split("\n").find((l) => l.startsWith(group + ":"));
+  if (!line) throw new Error(`events socket group "${group}" does not exist`);
+  return Number(line.split(":")[2]);
 }
 
 /** Read the request line, subscribe, and write what the subscriber yields until it ends or the client goes. */
