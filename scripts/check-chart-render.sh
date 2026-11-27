@@ -36,6 +36,36 @@ hub=$(helm template t k8s -s templates/hub.yaml --set 'groups.local[0].name=Data
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_GROUPS_FILE/{getline; print $2}')" = /etc/filedeck/groups/rules.json
 printf '%s\n' "$hub" | awk '/checksum\/storage-groups:/{checksum=1} /mountPath: \/etc\/filedeck\/groups/{mount=1} END {exit !(checksum && mount)}'
 
+managed=$(helm template t k8s --set managedNodes.enabled=true)
+case "$managed" in *$'kind: DaemonSet\n'*) ;; *) echo "managed chart must render the agent DaemonSet" >&2; exit 1 ;; esac
+case "$managed" in *"name: filedeck-managed-reconciler"*) ;; *) echo "managed chart must render the reconciler" >&2; exit 1 ;; esac
+if awk '/^kind: EndpointSlice$/{found=1} END{exit !found}' <<<"$managed"; then
+  echo "offline chart must not render joined-node endpoints" >&2
+  exit 1
+fi
+! grep -R -q 'lookup "v1" "Node"' k8s/templates || { echo "chart must not depend on Helm Node lookup" >&2; exit 1; }
+scripts/test-managed-reconciler.sh
+auth_managed=$(helm template t k8s --set managedNodes.enabled=true --set auth.enabled=true --set agentToken.secretName=filedeck-agent-token)
+case "$auth_managed" in *"kind: ClusterRoleBinding"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *"name: FILEDECK_AUTH"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *"name: FILEDECK_PAM_SERVICE"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *"SYS_CHROOT"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *'dynacom.dev/filedeck-managed-agent: "true"'*) ;; *) exit 1 ;; esac
+witness=$(helm template witness k8s --set fullnameOverride=custom --set managedNodes.enabled=true)
+case "$witness" in *'app.kubernetes.io/name: custom'*'app.kubernetes.io/instance: witness'*) ;; *) echo "chart name and release instance labels differ incorrectly" >&2; exit 1 ;; esac
+printf '%s\n' "$witness" | python3 -c '
+import sys, yaml
+docs = list(yaml.safe_load_all(sys.stdin))
+reconciler = next(d for d in docs if d and d.get("kind") == "Deployment" and d["metadata"]["name"] == "custom-managed-reconciler")
+container = reconciler["spec"]["template"]["spec"]["containers"][0]
+assert {m["name"] for m in container["volumeMounts"]} == {"script", "heartbeat"}
+assert container["securityContext"]["runAsNonRoot"] is True
+assert {v["name"] for v in reconciler["spec"]["template"]["spec"]["volumes"]} == {"script", "heartbeat"}
+agent = next(d for d in docs if d and d.get("kind") == "DaemonSet" and d["metadata"]["name"] == "custom-managed-agent")
+assert "startupProbe" in agent["spec"]["template"]["spec"]["containers"][0]
+print("parsed startup and volume mounts: OK")
+'
+
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_HUB_METRICS_PORT/{getline; gsub(/"/, "", $2); print $2}')" = 9091
 test "$(printf '%s\n' "$hub" | awk '/- name: metrics/{getline; print $2}')" = 9091
 if helm template t k8s -s templates/hub.yaml --set port=9091 >/dev/null 2>&1; then
