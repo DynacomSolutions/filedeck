@@ -103,3 +103,23 @@ test("tailscale start-up: a loopback proxy needs the identity listener; with it,
   const off = { FILEDECK_MODE: "hub", FILEDECK_TAILSCALE_LISTEN: "127.0.0.2:8081" };
   assert.deepEqual(tailscaleStartup(loadConfig(off as never), off as never), { lines: ["tailscale: sign-in is off, so FILEDECK_TAILSCALE_* is ignored"] });
 });
+
+test("leave steps limit: a value that is not a finite number of at least 0 gives the default, with one log line", () => {
+  const lines: string[] = [];
+  const real = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.join(" "));
+  try {
+    assert.equal(loadConfig({ FILEDECK_LEAVE_STEPS_MS: "2500" } as never).leaveStepsMs, 2500);
+    assert.equal(loadConfig({ FILEDECK_LEAVE_STEPS_MS: "0" } as never).leaveStepsMs, 0);
+    assert.equal(loadConfig({} as never).leaveStepsMs, 8000);
+    assert.equal(loadConfig({ FILEDECK_LEAVE_STEPS_MS: "" } as never).leaveStepsMs, 8000);
+    assert.deepEqual(lines, [], "valid values and an unset value log nothing");
+    for (const bad of ["abc", "-5", "Infinity", "1e999", "NaN"]) assert.equal(loadConfig({ FILEDECK_LEAVE_STEPS_MS: bad } as never).leaveStepsMs, 8000, bad);
+    assert.equal(lines.length, 5, "one line for each bad value");
+    assert.match(lines[0]!, /FILEDECK_LEAVE_STEPS_MS/);
+    loadConfig({ FILEDECK_LEAVE_STEPS_MS: "abc" } as never);
+    assert.equal(lines.length, 5, "the same bad value is logged once");
+  } finally {
+    console.error = real;
+  }
+});
