@@ -714,3 +714,113 @@ test("leave: the slow steps have a limit, then the journal is closed anyway; a f
   assert.deepEqual(order, ["closed"]);
   assert.match(logs.join(), /boom/);
 });
+
+test("journal: a meta write that is running when release() starts does not replace meta.json, and a flush that is running does not append", async () => {
+  // (1) a meta write that has written its temporary file and waits when the release starts
+  const dir = tmp();
+  let t = 1_000_000;
+  const j = new Journal({ dir, node: "n1", flushMs: 5, now: () => t });
+  await j.open();
+  mk(j, (n) => n, 2);
+  await j.flush();
+  const metaFile = path.join(dir, "meta.json");
+  const meta = fs.readFileSync(metaFile, "utf8");
+  const realWrite = fs.promises.writeFile;
+  let entered!: () => void;
+  const inWrite = new Promise<void>((res) => (entered = res));
+  let open!: () => void;
+  const gate = new Promise<void>((res) => (open = res));
+  (fs.promises as { writeFile: unknown }).writeFile = async (f: unknown, ...rest: unknown[]) => {
+    const r = await (realWrite as (...a: unknown[]) => Promise<void>)(f, ...rest);
+    if (String(f).startsWith(path.join(dir, "meta.json."))) {
+      entered();
+      await gate;
+    }
+    return r;
+  };
+  try {
+    t += 60_000;
+    j.cover(); // the meta write starts, with the epoch of this journal
+    await inWrite;
+    const released = j.release(); // the lease is lost while the write waits
+    await sleep(10);
+    open();
+    await released;
+  } finally {
+    (fs.promises as { writeFile: unknown }).writeFile = realWrite;
+  }
+  assert.equal(fs.readFileSync(metaFile, "utf8"), meta, "meta.json was not replaced after the release started");
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith("meta.json.")), [], "and its temporary file is gone");
+
+  // (2) a flush that has opened the segment and waits when the release starts
+  const dir2 = tmp();
+  const k = new Journal({ dir: dir2, node: "n1", flushMs: 5000, now: () => t });
+  await k.open();
+  mk(k, (n) => n, 2);
+  await k.close(); // (a clean mark, so the next journal continues the epoch and the segment)
+  const segFile = path.join(dir2, fs.readdirSync(dir2).find((n) => n.startsWith("seg-"))!);
+  // a second journal object continues that segment: its first flush opens the file again
+  const k3 = new Journal({ dir: dir2, node: "n1", flushMs: 5000, now: () => t });
+  await k3.open();
+  const before = fs.readFileSync(segFile, "utf8");
+  const realOpen = fs.promises.open;
+  let entered2!: () => void;
+  const inOpen = new Promise<void>((res) => (entered2 = res));
+  let open2!: () => void;
+  const gate2 = new Promise<void>((res) => (open2 = res));
+  (fs.promises as { open: unknown }).open = async (f: unknown, ...rest: unknown[]) => {
+    const r = await (realOpen as (...a: unknown[]) => Promise<fs.promises.FileHandle>)(f, ...rest);
+    if (String(f) === segFile) {
+      entered2();
+      await gate2;
+    }
+    return r;
+  };
+  try {
+    mk(k3, (n) => 10 + n, 2);
+    const flushing = k3.flush();
+    await inOpen;
+    const released = k3.release();
+    await sleep(10);
+    open2();
+    await released;
+    await flushing;
+  } finally {
+    (fs.promises as { open: unknown }).open = realOpen;
+  }
+  assert.equal(fs.readFileSync(segFile, "utf8"), before, "no line was appended after the release started");
+});
+
+test("leave: a step that runs on after the bound publishes into a closed bus: its event is not written and nobody hears it", async () => {
+  const { leaveBounded } = await import("../src/events/leave.ts");
+  const dir = tmp();
+  const b = bus({ journal: { dir, flushMs: 5 } });
+  await b.whenServing();
+  b.publish(ev("create", "/early"));
+  const heard: string[] = [];
+  b.listen((e) => void heard.push(e.path as string));
+  let late!: () => void;
+  const lateStep = new Promise<void>((res) => (late = res));
+  // (1) the step publishes in the turn right after the bound fires: the close has started in the turn of the bound itself
+  // (2) it also publishes long after, when the leave has ended
+  let after!: Promise<void>;
+  const keep = setInterval(() => {}, 1000); // (the bound's own timer does not keep the process alive)
+  await leaveBounded(
+    async () => {
+      after = lateStep.then(() => b.publish(ev("create", "/after")));
+      await lateStep;
+    },
+    () => b.close(),
+    50,
+    () => void Promise.resolve().then(() => b.publish(ev("create", "/at-the-bound"))),
+  );
+  late();
+  await after;
+  clearInterval(keep);
+  await sleep(100);
+  const lines = fs.readdirSync(dir).filter((n) => n.startsWith("seg-")).map((n) => fs.readFileSync(path.join(dir, n), "utf8")).join("");
+  assert.match(lines, /\/early/);
+  assert.doesNotMatch(lines, /\/at-the-bound/);
+  assert.doesNotMatch(lines, /\/after/);
+  assert.deepEqual(heard, [], "a listener heard neither late event");
+});

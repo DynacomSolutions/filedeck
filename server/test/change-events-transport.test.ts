@@ -677,3 +677,35 @@ test("agent: close() after leave() does not write the journal's meta.json again 
   await a.close();
   assert.equal(JSON.parse(fs.readFileSync(meta, "utf8")).epoch, "newer", "the old process did not overwrite it");
 });
+
+test("socket: at start, a stale <name>.<6 hex> socket with no listener is removed; a live one, a file and a link are kept", async () => {
+  const b = newBus();
+  const d = shortDir();
+  const sock = path.join(d, "e.sock");
+  // a socket left behind by a process that was killed between listen and rename (a child that is killed: a server that closes removes its own name)
+  const dead = path.join(d, "e.sock.a1b2c3");
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["-e", `require("net").createServer().listen(process.argv[1], () => console.log("up"))`, dead], { stdio: ["ignore", "pipe", "inherit"] });
+  cleanups.push(() => void child.kill("SIGKILL"));
+  await new Promise<void>((res) => child.stdout.once("data", () => res()));
+  child.kill("SIGKILL");
+  await new Promise<void>((res) => child.once("exit", () => res()));
+  assert.ok(fs.lstatSync(dead).isSocket(), "the killed process left its socket");
+  // a live one (a process that starts at the same time), a regular file and a link with the same kind of name
+  const live = path.join(d, "e.sock.d4e5f6");
+  const liveSrv = net.createServer();
+  await new Promise<void>((res) => liveSrv.listen(live, () => res()));
+  cleanups.push(() => void liveSrv.close());
+  fs.writeFileSync(path.join(d, "e.sock.111111"), "keep");
+  fs.symlinkSync(dead, path.join(d, "e.sock.222222"));
+  fs.writeFileSync(path.join(d, "other.sock.abcdef"), "keep");
+  const logs: string[] = [];
+  const s = await startEventSocket(b, { path: sock, log: (l) => logs.push(l) });
+  assert.equal(fs.existsSync(dead) && fs.lstatSync(dead).isSocket(), false, "the stale socket was removed");
+  assert.ok(fs.lstatSync(live).isSocket(), "a socket with a listener stays");
+  assert.equal(fs.readFileSync(path.join(d, "e.sock.111111"), "utf8"), "keep", "a file stays");
+  assert.ok(fs.lstatSync(path.join(d, "e.sock.222222")).isSymbolicLink(), "a link stays");
+  assert.equal(fs.readFileSync(path.join(d, "other.sock.abcdef"), "utf8"), "keep", "a name of another socket stays");
+  assert.match(logs.join(), /stale socket/);
+  await s.close();
+});
