@@ -116,6 +116,7 @@ export function withAgentToken(
   node: string,
   requireUser = false,
   asRootOk?: (id: Identity & { kind: "sys" }) => boolean,
+  storageGroups = false,
 ): RequestInit | undefined {
   let id = currentUser();
   if (requireUser && !id) throw new Error("agent call without an identity");
@@ -127,6 +128,7 @@ export function withAgentToken(
     if (id.kind === "sys" && id.asRootUntil !== undefined && !asRootOk?.(id)) id = { kind: "sys", name: id.name, admin: id.admin, epoch: id.epoch };
     const claim = claimFor(id, node, Date.now());
     if (!claim) throw new NoAccessError();
+    if (storageGroups) claim.storageGroups = true;
     headers.set(USER_HEADER, signClaim(claim, token));
   }
   return { ...init, headers };

@@ -14,8 +14,8 @@ image:
 
 port: 8080
 
-# Prometheus-style scraping of the agents' GET /metrics (pod IP and port, no credentials). Agent pods carry
-# app.kubernetes.io/name=<chart name> and app.kubernetes.io/component=agent, and the container port is named http.
+# GET /metrics uses the named http port on agent and hub pods.
+# Select the app.kubernetes.io/component label to identify each target.
 metrics:
   scrapeFrom:
     # Namespace labels of the scraper, for example {matchLabels: {kubernetes.io/metadata.name: <namespace>}}.
@@ -101,13 +101,16 @@ auth:
       extraArgs: []   # added to TS_EXTRA_ARGS (arguments of `tailscale up`)
       resources: {}
 
-# Optional read-only token for the `filedeck du` CLI (hub). Name an existing Secret (created out of band, never in Git)
-# that holds a long random value under `key`; the hub then lets a request with the header `X-Filedeck-Token: <token>` call only GET /api/du and
-# the du jobs it starts (`Authorization` is never read, so an ingress login in front of the hub keeps working). Empty (the default) switches the feature off.
+# Group rules keyed by agent name. Each rule has a name and absolute paths.
+# Optional exclude paths remove subtrees. Optional labels select exact IO series.
+groups: {}
+
+# Optional read-only CLI token. Set secretName to an existing Secret.
+# Requests send the token in the X-Filedeck-Token header.
 apiToken:
   secretName: ""
   key: token
-  # What the token may read. `du`: GET /api/du and the du jobs. `changes`: the change event stream (GET /api/v1/changes, docs/change-events.md).
+  # What the token may read. `du`: folder sizes and du jobs. `groups`: grouped sizes. `changes`: the change event stream.
   # With sign-in on, the token acts as the account named in `auth.apiTokenAccount`, and the change stream also needs that account to be an administrator.
   scopes: ["du"]
 
@@ -132,6 +135,8 @@ vault:
   maxHours: 24
 
 hub:
+  # Optional VictoriaMetrics base URL for the storage IO view.
+  victoriaMetricsUrl: ""
   # Number of reverse proxies (an ingress controller, a load balancer) between users and the hub whose X-Forwarded-For
   # header the hub may believe, counted from the hub's side: 1 = the last entry was added by your proxy. 0 (the default)
   # means the hub uses the connection's own address and ignores the header, so a client talking to the hub directly cannot

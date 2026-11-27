@@ -114,6 +114,10 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.hub.victoriaMetricsUrl }}
+            - name: FILEDECK_VICTORIA_METRICS_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.hub.trustedProxies }}
             - name: FILEDECK_TRUSTED_PROXIES
               value: {{ .Values.hub.trustedProxies | quote }}

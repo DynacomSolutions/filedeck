@@ -1,3 +1,5 @@
+import { GroupIO } from "./group-io.ts";
+import type { AgentGroups } from "./group-agent.ts";
 import { FsError } from "./fsops.ts";
 import { fanIn } from "./events/fanin.ts";
 import { filterFromParams } from "./events/filter.ts";
@@ -224,7 +226,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // Optional allowlist of Host values (DNS-rebinding guard); /healthz stays open for probes that use the pod address.
   if (cfg.allowedHosts.length) {
     app.use("*", async (c, next) => {
-      if (c.req.path === "/healthz") return next();
+      if (isOpenProbe(c.req.path)) return next();
       const host = (c.req.header("host") ?? "").toLowerCase();
       if (matchesHostList(host, cfg.allowedHosts)) return next();
       // an admin call is written even when refused here, before the audit middleware (other paths stay unwritten, as before)
@@ -353,11 +355,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // probes go out without a user header: they carry no data and are made for nobody in particular.
   // With auth on the client's cookie (its session) never goes to an agent, whatever path built the headers.
   // The agents' sign-in routes are the hub's alone (signInCall above): no person's request ever reaches them through here.
-  const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) => {
+  const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit, storageGroups = false) => {
     if (cfg.auth && isAgentAuthPath(rest)) return Promise.reject(new Error("the agents' sign-in routes are not forwarded"));
     if (cfg.auth) init = withoutCookie(init);
     if (isOpenProbe(rest)) return userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name)));
-    const p = agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk));
+    const p = agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk, storageGroups));
     // (a call under act as root is counted until it settles, so switching off can wait for a job that is still being started)
     const id = currentUser();
     if (id?.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id)) rootCalls.track(RootCalls.key(id.name, id.asRootUntil), p);
@@ -458,7 +460,35 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     return res;
   };
 
+  const groupIO = new GroupIO(cfg.victoriaMetricsUrl, fetch, Date.now, cfg.nodes.map((n) => n.name));
   app.get("/healthz", (c) => c.text("ok"));
+  app.get("/metrics", (c) => c.text([...groupIO.metrics.lines(), ""].join("\n")));
+
+  app.get("/api/groups", async (c) => {
+    if (auth && !isAdmin(cfg, auth.accounts, currentUser())) return c.json({ error: "administrators only" }, 403);
+    const name = c.req.query("node");
+    const visible = cfg.nodes.filter((n) => mayUse(n.name));
+    const targets = name === undefined ? visible : visible.filter((n) => n.name === name);
+    if (name !== undefined && !targets.length) return c.json({ error: "unknown node" }, 404);
+    const signal = AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(8000)]);
+    const replies = await Promise.all(targets.map(async (n): Promise<AgentGroups | null> => {
+      try {
+        const res = await agentCall(n, "/api/groups", { signal }, true);
+        if (!res.ok) {
+          await res.body?.cancel();
+          return null;
+        }
+        const report = await res.json() as AgentGroups;
+        if (!Array.isArray(report.drives) || !Array.isArray(report.labels)) return null;
+        return { ...report, node: n.name };
+      } catch {
+        return null;
+      }
+    }));
+    const nodes = replies.filter((n): n is AgentGroups => n !== null);
+    const unavailable = targets.filter((_, i) => replies[i] === null).map((n) => n.name);
+    return c.json(await groupIO.join(nodes, unavailable, c.get("storageSizesOnly")), 200);
+  });
 
   app.get("/api/nodes", async (c) => {
     // a system account sees only the machines where it exists: wait (at most 2 s) for answers that are missing or old

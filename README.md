@@ -111,6 +111,7 @@ To limit the risk further:
 | [Configuration](docs/configuration.md) | Every environment setting for the agent and the hub, branding |
 | [Archives and passwords](docs/archives-and-passwords.md) | Compress and extract, password-protected files, saved passwords (the vault) |
 | [`filedeck du`](docs/filedeck-du.md) | The disk usage command, its token and the stored sizes file |
+| [Grouped storage](docs/storage-groups.md) | Storage rules, the sizes API and CLI, and optional IO pressure |
 | [Change events](docs/change-events.md) | The stream of file changes for other programs: format, filters, cursor, Unix socket, hub API |
 | [Sandbox and safe file placement](docs/security.md) | What the sandbox allows each tool, and how moves never overwrite |
 | [Development](docs/development.md) | Repository layout, build, tests, running locally |

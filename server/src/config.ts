@@ -6,6 +6,7 @@ import { ProxyList } from "./auth/tailnet.ts";
 import { parseBrand, type Brand } from "./brand.ts";
 import { parseReadOnly } from "./readonly.ts";
 import { parseSources } from "./sources/registry.ts";
+import { loadGroupRules, type GroupRule } from "./group-rules.ts";
 import type { SourceConfig } from "./sources/types.ts";
 
 export interface Config {
@@ -15,6 +16,8 @@ export interface Config {
   root: string;
   node: string;
   procMounts: string;
+  groups: GroupRule[];
+  victoriaMetricsUrl?: string;
   maxUpload: number;
   /** Largest text file the editor will open or save (bytes) */
   maxEdit: number;
@@ -283,6 +286,8 @@ export function loadConfig(env = process.env): Config {
     root,
     node: env.FILEDECK_NODE ?? "local",
     procMounts: env.FILEDECK_PROC_MOUNTS ?? defaultProcMounts(root),
+    groups: mode === "agent" ? loadGroupRules(env.FILEDECK_GROUPS_FILE, env.FILEDECK_NODE ?? "local") : [],
+    victoriaMetricsUrl: mode === "hub" ? env.FILEDECK_VICTORIA_METRICS_URL?.trim() || undefined : undefined,
     maxUpload: Number(env.FILEDECK_MAX_UPLOAD ?? 1024 ** 4),
     maxEdit: Number(env.FILEDECK_MAX_EDIT ?? 5 * 1024 * 1024),
     staticDir: env.FILEDECK_STATIC ?? "/app/web",

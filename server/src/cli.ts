@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runGroups, GROUPS_USAGE } from "./groups-cli.ts";
 import { run, USAGE } from "./du-cli.ts";
 
 const HASH_USAGE = "       filedeck hash-password   (reads one line from stdin, prints a password hash)";
@@ -40,13 +41,13 @@ if (cmd === "hash-password") {
   process.stdout.write(`${hashPassword(pw)}\n`);
   process.exit(0);
 }
-if (cmd !== "du") {
-  process.stderr.write(`${USAGE}\n${HASH_USAGE}\n`);
+if (cmd !== "du" && cmd !== "groups") {
+  process.stderr.write(`${USAGE}\n${GROUPS_USAGE}\n${HASH_USAGE}\n`);
   process.exit(2);
 }
 const ac = new AbortController();
 process.once("SIGINT", () => ac.abort());
-process.exitCode = await run(args, process.env, {
+process.exitCode = await (cmd === "groups" ? runGroups : run)(args, process.env, {
   fetch,
   out: (s) => void process.stdout.write(s),
   err: (s) => void process.stderr.write(s),

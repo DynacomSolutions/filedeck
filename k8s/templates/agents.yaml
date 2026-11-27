@@ -40,6 +40,10 @@ spec:
       labels:
         {{- include "filedeck.instanceLabels" (dict "root" $ "instance" (include "filedeck.agentInstance" (dict "root" $ "node" .))) | nindent 8 }}
         app.kubernetes.io/component: agent
+      {{- if $.Values.groups }}
+      annotations:
+        checksum/storage-groups: {{ $.Values.groups | toJson | sha256sum | quote }}
+      {{- end }}
     spec:
       terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
@@ -59,6 +63,10 @@ spec:
               value: agent
             - name: FILEDECK_ROOT
               value: /host
+            {{- if $.Values.groups }}
+            - name: FILEDECK_GROUPS_FILE
+              value: /etc/filedeck/groups/rules.json
+            {{- end }}
             - name: FILEDECK_NODE
               value: {{ .name | quote }}
             - name: PORT
@@ -198,6 +206,11 @@ spec:
             runAsUser: 0
             runAsGroup: 0
           volumeMounts:
+            {{- if $.Values.groups }}
+            - name: storage-groups
+              mountPath: /etc/filedeck/groups
+              readOnly: true
+            {{- end }}
             - name: host
               mountPath: /host
               readOnly: false
@@ -212,6 +225,11 @@ spec:
               mountPath: /run/filedeck-events
             {{- end }}
       volumes:
+        {{- if $.Values.groups }}
+        - name: storage-groups
+          configMap:
+            name: {{ include "filedeck.name" $ }}-storage-groups
+        {{- end }}
         - name: host
           hostPath:
             path: /
