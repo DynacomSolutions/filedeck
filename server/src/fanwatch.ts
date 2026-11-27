@@ -4,12 +4,16 @@ import type { EventEmitter } from "node:events";
 import type { Readable } from "node:stream";
 import { countMountExclusions, listMounts } from "./mounts.ts";
 import { isReservedName } from "./paths.ts";
+import type { EventBus } from "./events/bus.ts";
+import type { NewEvent } from "./events/types.ts";
 
 /**
  * Keeps the size store current from kernel change notifications (fanotify, via the small native helper
- * `filedeck-fanwatch`, see server/native). The helper prints one line per changed directory:
- *   #ready N | x PATH (entry added, removed, moved, attributes) | w PATH (file closed after writing) | m PATH (file modified) | !overflow
- * Each changed folder goes to `SizeStore.applyChanged`, debounced per folder (pending folders live in the size store's SQLite file, see SizeStore.notePending): structure changes and closed writes
+ * `filedeck-fanwatch`, see server/native) and feeds every change to the event bus (events/bus.ts). The helper prints one line per changed entry:
+ *   KIND DIR PATH | R DIR NEW<TAB>OLD | #caps ... | #ready N | #stats ... | c PATH | !overflow | #sync
+ *   (KIND: C created, D deleted, M modified, W closed after writing, A attributes; DIR: d folder, f other)
+ * An older helper printed one line per changed folder (`x|w|m PATH`); those lines still feed the size store.
+ * Each changed folder (the entry's parent, and for a folder entry the folder itself) goes to `SizeStore.applyChanged`, debounced per folder (pending folders live in the size store's SQLite file, see SizeStore.notePending): structure changes and closed writes
  * settle for `settleMs`, an ongoing write (modify) re-reads a folder at most every `modifyMs`.
  * Without the helper, the capabilities or kernel support the agent logs once and keeps the TTL/mtime behaviour.
  */
@@ -42,7 +46,16 @@ export interface FanWatchOptions {
   sessionMs?: number;
   /** reconcile the host mount table, so new and removed mounts receive watcher coverage */
   reconcileMs?: number;
+  /** the event bus every change is published to (default: none) */
+  bus?: EventBus;
+  /**
+   * The agent's own state files (the event journal, the stores): a change there is not published, else every write of the journal would be an event that
+   * is written to the journal. Gets one path segment (a file or folder name); true = leave the entry out.
+   */
+  ignoreName?: (name: string) => boolean;
 }
+
+const KIND_OF = { C: "create", D: "delete", M: "modify", W: "close_write", A: "attrib" } as const;
 
 /** a changed folder whose lock was busy is tried again after this long (ms) */
 const RETRY_MS = 1000;
@@ -89,7 +102,8 @@ export function mapPath(root: string, hostPath: string): string | null {
 }
 
 /** Inverse of the helper's escaping: `\\` and `\xHH`. Lines are split on "\n" only, which the helper never leaves unescaped inside a path. */
-export const unescapeLine = (s: string) => s.replace(/\\(?:(\\)|x([0-9a-f]{2}))/g, (_, b?: string, h?: string) => (b ? "\\" : String.fromCharCode(parseInt(h!, 16))));
+export const unescapeLine = (s: string) => (s.includes("\\") ? unescapeText(s) : s);
+const unescapeText = (s: string) => s.replace(/\\(?:(\\)|x([0-9a-f]{2}))/g, (_, b?: string, h?: string) => (b ? "\\" : String.fromCharCode(parseInt(h!, 16))));
 
 export class FanWatch {
   private proc: HelperProc | null = null;
@@ -135,6 +149,11 @@ export class FanWatch {
   private reconcileError = "";
   private lostEvents = 0;
   private excludedMounts = 0;
+  /** what the helper said about itself (`#caps`) and its counters (`#stats`) */
+  private caps = "";
+  private helperStats: Record<string, number> = {};
+  /** when the watcher last stopped seeing events (0 = it has not stopped since it last was ready) */
+  private gapFrom = 0;
 
   constructor(
     private store: ChangeSink,
@@ -195,6 +214,7 @@ export class FanWatch {
         this.readyAt = Infinity;
         this.endSession(false);
         if (this.stopped) return;
+        this.announceStopped(`the helper exited (${code ?? sig})`);
         // 2 = not permitted, 3 = not supported: retrying cannot help. Anything else may have lost events.
         if (code === 2 || code === 3 || !this.o.helper) return this.warn(err.trim() || `helper exited (${code})`);
         for (const m of this.marks) this.store.markStale(m);
@@ -267,6 +287,8 @@ export class FanWatch {
       backlog: this.buf.size + this.flushing.size + this.mem.size + this.taken.size,
       lostEvents: this.lostEvents,
       reconcileError: this.reconcileError,
+      caps: this.caps,
+      helper: { ...this.helperStats },
     };
   }
 
@@ -380,12 +402,15 @@ export class FanWatch {
     this.proc?.kill();
     this.proc = null;
     this.readyAt = Infinity;
+    if (this.o.bus) this.o.bus.ready = false;
   }
 
   /** One helper output line. */
   line(l: string) {
     if (l === "!overflow") return this.overflow();
     if (l === "#sync") return void this.syncing.slice().forEach((f) => f());
+    if (l.startsWith("#stats ")) return void this.stats(l);
+    if (l.startsWith("#caps ")) return void (this.caps = l.slice(6));
     if (l.startsWith("#ready")) {
       this.backoff = 0;
       this.readyAt = Date.now();
@@ -393,17 +418,83 @@ export class FanWatch {
       this.lostAt = 0;
       this.chain = null;
       void this.beginSession(this.readyAt);
+      this.announceReady();
     }
     if (l.startsWith("c ")) {
       const host = unescapeLine(l.slice(2));
       const v = mapPath(this.o.root, host);
-      if (v) this.unwatched.push(v); // the mark failed: stored sizes there are never trusted past the TTL
+      if (v) {
+        this.unwatched.push(v); // the mark failed: stored sizes there are never trusted past the TTL
+        this.publish({ kind: "reset", scope: "filesystem", path: v, reason: "no event covers this filesystem" });
+      }
       return void this.note(`cannot watch ${host}, changes there are seen only by age and folder mtime`);
     }
-    const kind = l[0];
+    const kind = l[0] as string;
+    // an entry event: KIND DIR PATH (a move: NEW<TAB>OLD)
+    if (l[1] === " " && l[3] === " " && (l[2] === "d" || l[2] === "f") && "CDMWAR".includes(kind)) return void this.entry(kind, l[2] === "d", l.slice(4));
+    // an older helper: one line per folder
     if ((kind !== "x" && kind !== "w" && kind !== "m") || l[1] !== " ") return;
     const v = mapPath(this.o.root, unescapeLine(l.slice(2)));
     if (v) this.schedule(v, kind === "m");
+  }
+
+  /** One changed entry: it goes to the bus, and its folders (the one that holds it, and a folder entry itself) to the size store. */
+  private entry(kind: string, dir: boolean, rest: string) {
+    const tab = kind === "R" ? rest.indexOf("\t") : -1;
+    const host = unescapeLine(tab >= 0 ? rest.slice(0, tab) : rest);
+    const old = tab >= 0 ? mapPath(this.o.root, unescapeLine(rest.slice(tab + 1))) : null;
+    const v = mapPath(this.o.root, host);
+    const own = (p: string | null) => !!p && !!this.o.ignoreName && p.split("/").some((n) => n !== "" && this.o.ignoreName!(n));
+    if (kind === "R") {
+      // a move from or to a place outside what is served (or a trash store) is a create or a delete as far as this agent shows
+      if (own(v) || own(old)) return void [v, old].forEach((p) => p && this.touch(p, dir, false));
+      if (v && old) this.publish({ kind: "move", dir, path: v, from: old });
+      else if (v) this.publish({ kind: "create", dir, path: v });
+      else if (old) this.publish({ kind: "delete", dir, path: old });
+      for (const p of [v, old]) if (p) this.touch(p, dir, false);
+      return;
+    }
+    if (!v) return;
+    if (!own(v)) this.publish({ kind: KIND_OF[kind as keyof typeof KIND_OF], dir, path: v });
+    this.touch(v, dir, kind === "M");
+  }
+
+  private touch(v: string, dir: boolean, modify: boolean) {
+    const i = v.lastIndexOf("/");
+    this.schedule(i <= 0 ? "/" : v.slice(0, i), modify);
+    if (dir && !modify) this.schedule(v, false);
+  }
+
+  private publish(ev: NewEvent) {
+    this.o.bus?.publish(ev);
+  }
+
+  /** The helper is ready: subscribers learn it, and, after a time without a watcher, which window may hold missed events. */
+  private announceReady() {
+    const bus = this.o.bus;
+    if (!bus) return;
+    bus.ready = true;
+    const now = Date.now();
+    if (this.gapFrom) this.publish({ kind: "reset", scope: "node", window: { from: this.gapFrom, to: now }, reason: "the watcher was not running" });
+    this.gapFrom = 0;
+    this.publish({ kind: "ready", scope: "node", ...(this.unwatched.length ? { unwatched: [...this.unwatched] } : {}) });
+  }
+
+  /** The helper went away: what is held in memory about folders (the compare index, live feeds) is told at once. */
+  private announceStopped(why: string) {
+    const bus = this.o.bus;
+    if (!bus) return;
+    bus.ready = false;
+    if (!this.gapFrom) this.gapFrom = Date.now();
+    this.publish({ kind: "reset", scope: "node", window: { from: this.gapFrom }, reason: why });
+  }
+
+  /** `#stats events=1 hits=2 ...` */
+  private stats(l: string) {
+    for (const kv of l.slice(7).split(" ")) {
+      const [k, v] = kv.split("=");
+      if (k && v !== undefined && Number.isFinite(Number(v))) this.helperStats[k] = Number(v);
+    }
   }
 
   /**
@@ -441,6 +532,8 @@ export class FanWatch {
   /** Events were lost: forget the pending folders and let the next read re-scan the watched trees. */
   private overflow() {
     this.lostEvents++;
+    const now = Date.now();
+    this.publish({ kind: "overflow", scope: "node", window: { from: this.o.bus?.lastEventAt || now, to: now }, reason: "the kernel dropped events" });
     this.since = this.lostAt = Math.max(this.since, Date.now());
     this.buf.clear();
     this.mem.clear();
