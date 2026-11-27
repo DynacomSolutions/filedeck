@@ -50,6 +50,20 @@ case "$auth_managed" in *"name: FILEDECK_AUTH"*) ;; *) exit 1 ;; esac
 case "$auth_managed" in *"name: FILEDECK_PAM_SERVICE"*) ;; *) exit 1 ;; esac
 case "$auth_managed" in *"SYS_CHROOT"*) ;; *) exit 1 ;; esac
 case "$auth_managed" in *'dynacom.dev/filedeck-managed-agent: "true"'*) ;; *) exit 1 ;; esac
+witness=$(helm template witness k8s --set fullnameOverride=custom --set managedNodes.enabled=true)
+case "$witness" in *'app.kubernetes.io/name: custom'*'app.kubernetes.io/instance: witness'*) ;; *) echo "chart name and release instance labels differ incorrectly" >&2; exit 1 ;; esac
+printf '%s\n' "$witness" | python3 -c '
+import sys, yaml
+docs = list(yaml.safe_load_all(sys.stdin))
+reconciler = next(d for d in docs if d and d.get("kind") == "Deployment" and d["metadata"]["name"] == "custom-managed-reconciler")
+container = reconciler["spec"]["template"]["spec"]["containers"][0]
+assert {m["name"] for m in container["volumeMounts"]} == {"script", "heartbeat"}
+assert container["securityContext"]["runAsNonRoot"] is True
+assert {v["name"] for v in reconciler["spec"]["template"]["spec"]["volumes"]} == {"script", "heartbeat"}
+agent = next(d for d in docs if d and d.get("kind") == "DaemonSet" and d["metadata"]["name"] == "custom-managed-agent")
+assert "startupProbe" in agent["spec"]["template"]["spec"]["containers"][0]
+print("parsed startup and volume mounts: OK")
+'
 
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_HUB_METRICS_PORT/{getline; gsub(/"/, "", $2); print $2}')" = 9091
 test "$(printf '%s\n' "$hub" | awk '/- name: metrics/{getline; print $2}')" = 9091

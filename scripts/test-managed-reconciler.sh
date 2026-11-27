@@ -31,6 +31,7 @@ if [[ $1 == get && $2 == nodes ]]; then
   [[ ${FAIL_NODES:-0} == 1 ]] && exit 17
   printf 'join-linux\n'
 elif [[ $1 == get && $2 == pods ]]; then
+  [[ ${FAIL_PODS:-0} == 1 ]] && exit 19
   [[ $* == *app.kubernetes.io/instance=filedeck* ]] || exit 18
   if [[ ${POD_READY:-1} == 1 ]]; then
     printf 'join-linux\tRunning\t10.42.0.77\tPodScheduled=True Ready=True ContainersReady=False\n'
@@ -41,10 +42,12 @@ elif [[ $1 == get && $2 == configmap/filedeck-managed-nodes ]]; then
   cat "$state"
 elif [[ $1 == get && $2 == services ]]; then
   [[ $* == *app.kubernetes.io/instance=filedeck* ]] || exit 18
-  :
+  printf 'owned-stale-service\n'
 elif [[ $1 == get && $2 == endpointslices ]]; then
   [[ $* == *app.kubernetes.io/instance=filedeck* ]] || exit 18
-  :
+  printf 'owned-stale-slice\n'
+elif [[ $1 == get && $2 == endpointslice && $3 == owned-stale-slice ]]; then
+  printf 'owned-stale-service\n'
 elif [[ $1 == get && $2 == deployment/filedeck-hub ]]; then
   cat "$hub_state"
 elif [[ $1 == create ]]; then
@@ -62,8 +65,10 @@ data:
 EOF
 elif [[ $1 == patch ]]; then
   if [[ $2 == configmap ]]; then
-    node_id=$(printf '%s' join-linux | sha256sum | cut -c1-12)
-    printf '%s' "local=http://filedeck-agent-local.default:8080,join-linux=http://filedeck-managed-agent-$node_id:8080" >"$state"
+    patch_payload="${!#}"
+    value=$(printf '%s' "$patch_payload" | sed -n 's/.*"NODES":"\([^"]*\)".*/\1/p')
+    test -n "$value"
+    printf '%s' "$value" >"$state"
   else
     [[ ${FAIL_PATCH:-0} == 1 ]] && exit 23
     node_id=$(printf '%s' join-linux | sha256sum | cut -c1-12)
@@ -74,7 +79,11 @@ elif [[ $1 == patch ]]; then
 elif [[ $1 == apply ]]; then
   cat >>"$log"
 elif [[ $1 == delete ]]; then
-  printf 'delete observed\n' >>"$log"
+  printf 'delete %s observed\n' "$3" >>"$log"
+  case "$3" in
+    owned-stale-service) : >"${OWNED_SERVICE_FILE:?}"; rm -f "${OWNED_SERVICE_FILE:?}" ;;
+    owned-stale-slice) : >"${OWNED_SLICE_FILE:?}"; rm -f "${OWNED_SLICE_FILE:?}" ;;
+  esac
 else
   printf 'unexpected kubectl invocation: %s\n' "$*" >&2
   exit 1
@@ -90,13 +99,22 @@ log="$root/reconcile.log"
 state="$root/state"
 hub_state="$root/hub-state"
 heartbeat="$root/heartbeat"
+foreign_service="$root/foreign-service"
+foreign_slice="$root/foreign-endpoint"
+owned_service="$root/owned-stale-service"
+owned_slice="$root/owned-stale-slice"
 printf 'local=http://filedeck-agent-local.default:8080' >"$state"
 : >"$hub_state"
+printf 'foreign-service' >"$foreign_service"
+printf 'foreign-endpoint' >"$foreign_slice"
+printf 'owned-service' >"$owned_service"
+printf 'owned-endpoint' >"$owned_slice"
+export OWNED_SERVICE_FILE="$owned_service" OWNED_SLICE_FILE="$owned_slice"
 printf 'foreign-service and foreign-endpoint exist outside this release\n' >"$log"
 set +e
-PATH="$bin:$PATH" NAMESPACE=default RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
+PATH="$bin:$PATH" NAMESPACE=default APP_NAME=filedeck RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
   STATIC_NAMES=local STATIC_TARGETS=local=http://filedeck-agent-local.default:8080 PORT=8080 INTERVAL=1 \
-  RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" "$script"
+  RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" OWNED_SERVICE_FILE="$owned_service" OWNED_SLICE_FILE="$owned_slice" "$script"
 status=$?
 set -e
 test "$status" -eq 42
@@ -106,31 +124,54 @@ grep -q 'hub patch observed' "$log"
 grep -q 'endpointslice' "$log"
 grep -q 'app.kubernetes.io/name=filedeck,app.kubernetes.io/instance=filedeck' "$log"
 grep -q 'foreign-service and foreign-endpoint exist' "$log"
-! grep -q 'delete.*foreign' "$log"
+if grep -q 'delete.*foreign' "$log"; then
+  echo 'foreign resource was deleted' >&2
+  exit 1
+fi
+test -s "$foreign_service"
+test -s "$foreign_slice"
+test ! -e "$owned_service"
+test ! -e "$owned_slice"
 patches=$(grep -c 'hub patch observed' "$log")
 test "$patches" -eq 1
 : >"$log"
 set +e
-PATH="$bin:$PATH" NAMESPACE=default RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
+PATH="$bin:$PATH" NAMESPACE=default APP_NAME=filedeck RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
+  STATIC_NAMES=local STATIC_TARGETS=local=http://filedeck-agent-local.default:8080 PORT=8080 INTERVAL=1 \
+  FAIL_PODS=1 RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" "$script"
+status=$?
+set -e
+test "$status" -eq 19
+test "$(cat "$state")" = "local=http://filedeck-agent-local.default:8080,join-linux=http://filedeck-managed-agent-$(printf '%s' join-linux | sha256sum | cut -c1-12):8080"
+if grep -q 'delete' "$log"; then
+  echo 'Pod-list failure caused cleanup' >&2
+  exit 1
+fi
+: >"$log"
+set +e
+PATH="$bin:$PATH" NAMESPACE=default APP_NAME=filedeck RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
   STATIC_NAMES=local STATIC_TARGETS=local=http://filedeck-agent-local.default:8080 PORT=8080 INTERVAL=1 POD_READY=0 \
   RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" "$script"
 status=$?
 set -e
 test "$status" -eq 42
-! grep -q '10.42.0.77' "$log"
+if grep -q '10.42.0.77' "$log"; then
+  echo 'Ready=False with ContainersReady=True was accepted' >&2
+  exit 1
+fi
 set +e
-PATH="$bin:$PATH" NAMESPACE=default RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
+PATH="$bin:$PATH" NAMESPACE=default APP_NAME=filedeck RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
   STATIC_NAMES=local STATIC_TARGETS=local=http://filedeck-agent-local.default:8080 PORT=8080 INTERVAL=1 \
   RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" "$script"
 status=$?
 set -e
 test "$status" -eq 42
-test "$(grep -c 'hub patch observed' "$log")" -eq 1
+test "$(grep -c 'hub patch observed' "$log")" -eq 2
 printf 'local=http://filedeck-agent-local.default:8080' >"$state"
 : >"$hub_state"
 : >"$log"
 set +e
-PATH="$bin:$PATH" NAMESPACE=default RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
+PATH="$bin:$PATH" NAMESPACE=default APP_NAME=filedeck RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
   STATIC_NAMES=local STATIC_TARGETS=local=http://filedeck-agent-local.default:8080 PORT=8080 INTERVAL=1 \
   FAIL_PATCH=1 RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" "$script"
 status=$?
@@ -138,7 +179,7 @@ set -e
 test "$status" -eq 23
 test "$(cat "$state")" != "local=http://filedeck-agent-local.default:8080"
 set +e
-PATH="$bin:$PATH" NAMESPACE=default RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
+PATH="$bin:$PATH" NAMESPACE=default APP_NAME=filedeck RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
   STATIC_NAMES=local STATIC_TARGETS=local=http://filedeck-agent-local.default:8080 PORT=8080 INTERVAL=1 \
   RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" "$script"
 status=$?
@@ -146,7 +187,7 @@ set -e
 test "$status" -eq 42
 test "$(grep -c 'hub patch observed' "$log")" -eq 1
 set +e
-PATH="$bin:$PATH" NAMESPACE=default RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
+PATH="$bin:$PATH" NAMESPACE=default APP_NAME=filedeck RELEASE_NAME=filedeck CONFIGMAP_NAME=filedeck-managed-nodes HUB_NAME=filedeck-hub HEARTBEAT="$heartbeat" NODE_LABEL=dynacom.dev/filedeck-managed NODE_VALUE=true \
   STATIC_NAMES=local STATIC_TARGETS=local=http://filedeck-agent-local.default:8080 PORT=8080 INTERVAL=1 \
   FAIL_NODES=1 RECONCILER_LOG="$log" RECONCILER_STATE="$state" RECONCILER_HUB_STATE="$hub_state" "$script"
 status=$?

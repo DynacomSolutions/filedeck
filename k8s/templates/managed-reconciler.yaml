@@ -95,6 +95,7 @@ data:
     namespace="$NAMESPACE"
     label="$NODE_LABEL=$NODE_VALUE"
     static_names="$STATIC_NAMES"
+    app_name="$APP_NAME"
     configmap="$CONFIGMAP_NAME"
     hub="$HUB_NAME"
     release="$RELEASE_NAME"
@@ -105,11 +106,11 @@ data:
       owned_services=""
       nodes_raw="$(kubectl get nodes -l "$label" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
       nodes="$(printf '%s\n' "$nodes_raw" | sort)"
-      pods_raw="$(kubectl -n "$namespace" get pods -l "app.kubernetes.io/name=$release,app.kubernetes.io/instance=$release,dynacom.dev/filedeck-managed-agent=true" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\t"}{.status.phase}{"\t"}{.status.podIP}{"\t"}{range .status.conditions[*]}{.type}{"="}{.status}{" "}{end}{"\n"}{end}')"
+      pods_raw="$(kubectl -n "$namespace" get pods -l "app.kubernetes.io/name=$app_name,app.kubernetes.io/instance=$release,dynacom.dev/filedeck-managed-agent=true" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\t"}{.status.phase}{"\t"}{.status.podIP}{"\t"}{range .status.conditions[*]}{.type}{"="}{.status}{" "}{end}{"\n"}{end}')"
       for node in $nodes; do
         case ",$static_names," in *",$node,"*) continue;; esac
         node_id="$(printf '%s' "$node" | sha256sum | cut -c1-12)"
-        service="${release}-managed-agent-$node_id"
+        service="${app_name}-managed-agent-$node_id"
         pod_line="$(printf '%s\n' "$pods_raw" | awk -v node="$node" '$1 == node && $2 == "Running" {for (i = 4; i <= NF; i++) if ($i == "Ready=True") {print $3; exit}}')"
         [ -n "$pod_line" ] || continue
         cat <<EOF | kubectl -n "$namespace" apply -f -
@@ -150,12 +151,14 @@ data:
         owned_services="$owned_services $service"
         next="$next,$node=http://$service:$PORT"
       done
-      for service in $(kubectl -n "$namespace" get services -l "app.kubernetes.io/name=$release,app.kubernetes.io/instance=$release,dynacom.dev/filedeck-managed=true" \
-        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+      services_raw="$(kubectl -n "$namespace" get services -l "app.kubernetes.io/name=$app_name,app.kubernetes.io/instance=$release,dynacom.dev/filedeck-managed=true" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+      for service in $services_raw; do
         case " $owned_services " in *" $service "*) ;; *) kubectl -n "$namespace" delete service "$service" --ignore-not-found ;; esac
       done
-      for slice in $(kubectl -n "$namespace" get endpointslices -l "app.kubernetes.io/name=$release,app.kubernetes.io/instance=$release,endpointslice.kubernetes.io/managed-by=filedeck-managed-reconciler" \
-        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+      slices_raw="$(kubectl -n "$namespace" get endpointslices -l "app.kubernetes.io/name=$app_name,app.kubernetes.io/instance=$release,endpointslice.kubernetes.io/managed-by=filedeck-managed-reconciler" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+      for slice in $slices_raw; do
         service="$(kubectl -n "$namespace" get endpointslice "$slice" -o jsonpath='{.metadata.labels.kubernetes\.io/service-name}')"
         case " $owned_services " in *" $service "*) ;; *) kubectl -n "$namespace" delete endpointslice "$slice" --ignore-not-found ;; esac
       done
@@ -195,7 +198,8 @@ spec:
           command: [/bin/sh, /etc/filedeck/reconcile.sh]
           env:
             - {name: NAMESPACE, value: {{ .Release.Namespace | quote }}}
-            - {name: RELEASE_NAME, value: {{ $name | quote }}}
+            - {name: APP_NAME, value: {{ $name | quote }}}
+            - {name: RELEASE_NAME, value: {{ .Release.Name | quote }}}
             - {name: CONFIGMAP_NAME, value: {{ printf "%s-managed-nodes" $name | quote }}}
             - {name: HUB_NAME, value: {{ printf "%s-hub" $name | quote }}}
             - {name: HEARTBEAT, value: /run/filedeck/heartbeat}
@@ -205,11 +209,12 @@ spec:
             - {name: STATIC_TARGETS, value: {{ join "," $staticTargets | quote }}}
             - {name: PORT, value: {{ .Values.port | quote }}}
             - {name: INTERVAL, value: {{ .Values.managedNodes.reconcileSeconds | quote }}}
-          volumeMounts: [{name: script, mountPath: /etc/filedeck, readOnly: true}]
+          volumeMounts:
+            - {name: script, mountPath: /etc/filedeck, readOnly: true}
+            - {name: heartbeat, mountPath: /run/filedeck}
           resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {cpu: 100m, memory: 128Mi}}
           securityContext: {runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           livenessProbe: {exec: {command: [/bin/sh, -c, 'now=$(date +%s); then=$(cat /run/filedeck/heartbeat 2>/dev/null || echo 0); test $((now-then)) -lt 90']}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
-          volumeMounts: [{name: heartbeat, mountPath: /run/filedeck}]
       volumes:
         - name: heartbeat
           emptyDir: {}
