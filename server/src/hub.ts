@@ -11,6 +11,7 @@ import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { registerHubDiff } from "./diff-hub.ts";
+import { NODE_STATUS_PATH, readHubNodeStatus } from "./node-status.ts";
 import { registerOps } from "./ops-routes.ts";
 import type { OpQueue } from "./ops-queue.ts";
 import { JobStore } from "./job-store.ts";
@@ -859,6 +860,21 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   /** The change event streams are for administrators when sign-in is on (they name every path of a machine). */
   const mayReadChanges = () => !cfg.auth || (auth !== undefined && isAdmin(cfg, auth.accounts, currentUser()));
+  app.get("/api/status", async (c) => {
+    if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    const names = cfg.nodes.map((n) => n.name).filter(mayUse);
+    const node = c.req.query("node");
+    if (node !== undefined && !names.includes(node)) return noAccess(c);
+    const call = startCall();
+    try {
+      const signal = call ? AbortSignal.any([call.signal, c.req.raw.signal]) : c.req.raw.signal;
+      const nodes = await readHubNodeStatus(node === undefined ? names : [node], callNode, signal);
+      if (signal.aborted) return c.json({ error: "request ended" }, 403);
+      return c.json({ nodes }, 200, { "cache-control": "no-store" });
+    } finally {
+      call?.done();
+    }
+  });
   const NDJSON = { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-accel-buffering": "no" };
 
   // The change events of several machines in one stream: the filter goes down to every agent, each machine has its own cursor (`since`, once per machine).
@@ -909,7 +925,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     // the agents' sign-in routes answer only the hub (they would be a way past its limiter)
     if (cfg.auth && isAgentAuthPath(rest)) return c.json({ error: "not found" }, 404);
     // the change event stream of one machine: administrators only with sign-in on (the same rule as the fan-in above)
-    if (isChangesPath(rest) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    if ((isChangesPath(rest) || rest === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));

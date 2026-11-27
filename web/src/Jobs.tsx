@@ -1,23 +1,18 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useUploads, pauseUpload, resumeUpload, cancelUpload, retryFailed, dismissUpload, type UpBatch } from "./uploads";
-import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type JobView, type NodeInfo, type OpJob } from "./api";
+import { api, emitOpFinished, startedOps, fmtSize, onJobStarted, opLive, type DiffJobView, type JobView, type NodeInfo, type OpJob } from "./api";
 import { Check, Circle, Loader, Minus, X } from "lucide-react";
 import { Tip } from "./Tooltip";
 import * as Ic from "lucide-react";
 import { splitByOrigin } from "./jobOrigin";
-import { gaveUp } from "./jobPoll";
-import { etaText, jobLines, statusPill } from "./jobRow";
+import { gaveUp, JOBS_IDLE_POLL_MS } from "./jobPoll";
+import { etaText, jobLines, progressPercent, statusPill } from "./jobRow";
 import { notifyJobsEnded } from "./pwa";
 import { HISTORY_KEY, addToHistory, announceEnded, endTime, nextExpiry, parseHistory, stillLingering, type HistoryEntry, type Outcome } from "./jobHistory";
 
 const live = (j: JobView) => j.state === "queued" || j.state === "running";
 
-function pct(j: JobView): number | null {
-  const p = j.progress;
-  if (p.totalBytes > 0) return Math.min(100, Math.round((p.bytes / p.totalBytes) * 100));
-  if (p.totalEntries > 0) return Math.min(100, Math.round((p.entries / p.totalEntries) * 100));
-  return null;
-}
+const pct = (j: JobView) => progressPercent(j.progress) ?? null;
 
 const cut = (w: HTMLElement) => w.scrollWidth > w.clientWidth || w.scrollHeight > w.clientHeight + 1;
 /** One line (or, with `wrap`, up to two) with an ellipsis; the full text opens as a tooltip only when it is cut off, and then the text takes focus so keyboard and touch reach it. */
@@ -82,12 +77,7 @@ function JobRow({ node, job, stale, onChange }: { node: string; job: JobView; st
   );
 }
 
-const opPct = (j: OpJob): number | null => {
-  const p = j.progress;
-  if (p.totalBytes > 0) return Math.min(100, Math.round((p.bytes / p.totalBytes) * 100));
-  if (p.totalEntries > 0) return Math.min(100, Math.round((p.entries / p.totalEntries) * 100));
-  return null;
-};
+const opPct = (j: OpJob) => progressPercent(j.progress) ?? null;
 
 function detailLines(job: OpJob, eta: number | null, live: boolean): string[] {
   const p = job.progress;
@@ -241,9 +231,30 @@ export interface JobsInfo {
  * Jobs from every node, polled while anything is active. It renders the jobs panel (a right-hand column on a desktop, a drawer on a
  * phone) and stays mounted while that is closed, so polling, notifications and the announcer keep working.
  */
-export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: NodeInfo[]; shown: boolean; modal: boolean; rootRef: RefObject<HTMLElement | null>; onInfo: (info: JobsInfo) => void }) {
+export interface JobsSnapshot {
+  jobs: Record<string, JobView[]>;
+  ops: OpJob[];
+  compares: DiffJobView[];
+  uploads: UpBatch[];
+  stale: ReadonlySet<string>;
+  opDetail?: OpJob;
+  loading: boolean;
+}
+
+export function JobsTray({ nodes, shown, modal, rootRef, onInfo, renderStatus, statusOp }: {
+  nodes: NodeInfo[];
+  shown?: boolean;
+  modal?: boolean;
+  rootRef?: RefObject<HTMLElement | null>;
+  onInfo?: (info: JobsInfo) => void;
+  renderStatus?: (snapshot: JobsSnapshot) => ReactNode;
+  statusOp?: string;
+}) {
   const [jobs, setJobs] = useState<Record<string, JobView[]>>({});
   const [ops, setOps] = useState<OpJob[]>([]);
+  const [compares, setCompares] = useState<DiffJobView[]>([]);
+  const compareRef = useRef<DiffJobView[]>([]);
+  const fullStatus = !!renderStatus;
   // Nodes (and the hub) whose last poll failed: their previous list stays, marked stale, until the outage is five minutes old.
   const [stale, setStale] = useState<Set<string>>(new Set());
   const downSince = useRef(new Map<string, number>());
@@ -252,12 +263,13 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
   const [open, setOpen] = useState<string | null>(null);
   const [detail, setDetail] = useState<OpJob | undefined>();
   const openRef = useRef<string | null>(null);
-  openRef.current = open;
+  openRef.current = fullStatus ? statusOp ?? null : open;
   const seen = useRef(new Map<string, string>());
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const busy = useRef(false);
+  const mounted = useRef(false);
   const again = useRef(false);
   // Finished jobs by key: when they were first seen finished. Clean ones leave the live list soon after, but stay in history.
   const finished = useRef(new Map<string, Finished>());
@@ -305,22 +317,24 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
     busy.current = true;
     const next: Record<string, JobView[]> = {};
     const down = new Set<string>();
-    const opsP = api.opJobs().then((r) => r.jobs, () => (down.add("hub"), prev.current.ops));
-    const detailP = openRef.current ? api.opJob(openRef.current).catch(() => undefined) : Promise.resolve(undefined);
+    const opsP = api.opJobs(fullStatus).then((r) => r.jobs, () => (down.add("hub"), prev.current.ops));
+    const detailP = openRef.current ? api.opJob(openRef.current, fullStatus).catch(() => undefined) : Promise.resolve(undefined);
+    const comparesP = fullStatus ? api.diffJobs().then((r) => r.jobs, () => (down.add("compares"), compareRef.current)) : Promise.resolve([]);
     await Promise.all(
       nodesRef.current
-        .filter((n) => n.online || prev.current.jobs[n.name]?.some(live)) // an offline node with live jobs may just be restarting
+        .filter((n) => fullStatus || n.online || prev.current.jobs[n.name]?.some(live)) // an offline node with live jobs may just be restarting
         .map(async (n) => {
           try {
-            next[n.name] = (await api.jobs(n.name)).jobs;
+            next[n.name] = (await api.jobs(n.name, fullStatus)).jobs;
           } catch {
-            down.add(n.name);
+            down.add(`agent:${n.name}`);
             next[n.name] = prev.current.jobs[n.name] ?? [];
           }
         }),
     );
-    let [opList, det] = await Promise.all([opsP, detailP]);
+    let [opList, det, compareList] = await Promise.all([opsP, detailP, comparesP]);
     busy.current = false;
+    if (!mounted.current) return;
     const t = Date.now();
     for (const k of [...downSince.current.keys()]) if (!down.has(k)) downSince.current.delete(k);
     for (const k of down) {
@@ -328,22 +342,25 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
       if (!gaveUp(downSince.current.get(k) as number, t)) continue;
       down.delete(k);
       if (k === "hub") opList = [];
-      else next[k] = [];
+      else if (k === "compares") compareList = [];
+      else next[k.slice(6)] = [];
     }
     prev.current = { jobs: next, ops: opList };
     setStale(down);
     for (const [node, l] of Object.entries(next))
       for (const j of splitByOrigin(l).fore) {
         const sk = j.result?.skipped;
-        track(`j:${node}:${j.id}`, j.state, undefined, j.createdAt, j.title, node, !!sk && sk.symlinks + sk.hardlinks + sk.special > 0, j.state === "failed" ? j.error : j.result?.path, !polled.current.has(node));
+        track(`j:${node}:${j.id}`, j.state, j.finishedAt, j.createdAt, j.title, node, !!sk && sk.symlinks + sk.hardlinks + sk.special > 0, j.state === "failed" ? j.error : j.result?.path, !polled.current.has(`agent:${node}`));
       }
     for (const o of opList) trackOp(o, !polled.current.has("hub"));
-    for (const k of Object.keys(next)) if (!down.has(k)) polled.current.add(k);
+    for (const k of Object.keys(next)) if (!down.has(`agent:${k}`)) polled.current.add(`agent:${k}`);
     if (!down.has("hub")) polled.current.add("hub");
     firstLoad.current = false;
     flushHistory();
     setJobs(next);
     setOps(opList);
+    compareRef.current = compareList;
+    if (fullStatus) setCompares(compareList);
     setDetail(det);
     // Tell panels when a hub job ends (not on the first sight of an already-finished job).
     for (const o of opList) {
@@ -352,24 +369,26 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
       if (prev !== undefined && opLive({ state: prev as OpJob["state"] }) && !opLive(o)) emitOpFinished(o);
       seen.current.set(o.id, o.state);
     }
-    const active = opList.some(opLive) || Object.values(next).some((l) => l.some(live));
+    const active = opList.some(opLive) || compareList.some(live) || Object.values(next).some((l) => l.some(live));
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => void poll(), down.size ? 2000 : active ? 700 : 10000);
+    timer.current = setTimeout(() => void poll(), down.size ? 2000 : active ? 700 : JOBS_IDLE_POLL_MS);
     if (again.current) {
       again.current = false;
       void poll();
     }
-  }, [track, trackOp, flushHistory]);
+  }, [track, trackOp, flushHistory, fullStatus]);
 
   // Expanding a job's items fetches them at once; without live jobs the regular poll is 10 s apart.
   useEffect(() => {
-    if (open) void poll();
-  }, [open, poll]);
+    if (open || statusOp) void poll();
+  }, [open, statusOp, poll]);
 
   useEffect(() => {
+    mounted.current = true;
     void poll();
     const off = onJobStarted(() => void poll());
     return () => {
+      mounted.current = false;
       off();
       clearTimeout(timer.current);
     };
@@ -415,13 +434,14 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
   });
   // The announcement region stays mounted so a result that arrives as the tray appears is still read out.
   const announcer = <span className="sr-only" role="status">{announce}</span>;
-  useEffect(() => onInfo({ running, total, asking }), [running, total, asking, onInfo]);
+  useEffect(() => onInfo?.({ running, total, asking }), [running, total, asking, onInfo]);
   const clearHistory = () => {
     setHistory([]);
     setShowHistory(false);
     // Jobs finished so far must not be re-added by the next poll.
     cleared.current = new Set(finished.current.keys());
   };
+  if (renderStatus) return <>{announcer}{renderStatus({ jobs, ops, compares, uploads, stale, opDetail: detail, loading: firstLoad.current })}</>;
   return (
     <>
     {announcer}
@@ -432,6 +452,7 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
         <span className="n">{asking ? "needs an answer" : running > 0 ? `${running} running` : total > 0 ? total : history.length > 0 ? `${history.length} past` : "idle"}</span>
       </h2>
       <div className="jobs-body">
+        <a className="jobs-status-link" href="/status">Open jobs and status</a>
         {total > 0 ? (
           <ul>
             {upRows.map((b) => (
@@ -441,7 +462,7 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
               <OpRow key={job.id} job={job} stale={stale.has("hub")} detail={open === job.id ? detail : undefined} expanded={open === job.id} onToggle={() => setOpen(open === job.id ? null : job.id)} onChange={() => void poll()} />
             ))}
             {rows.map(({ node, job }) => (
-              <JobRow key={node + job.id} node={node} job={job} stale={stale.has(node)} onChange={() => void poll()} />
+              <JobRow key={node + job.id} node={node} job={job} stale={stale.has(`agent:${node}`)} onChange={() => void poll()} />
             ))}
           </ul>
         ) : (
@@ -479,7 +500,7 @@ export function JobsTray({ nodes, shown, modal, rootRef, onInfo }: { nodes: Node
           {showBg && (
             <ul id="jobs-background" className="jobs-bg-list" aria-label="Background jobs list">
               {bgRows.map(({ node, job }) => (
-                <JobRow key={node + job.id} node={node} job={job} stale={stale.has(node)} onChange={() => void poll()} />
+                <JobRow key={node + job.id} node={node} job={job} stale={stale.has(`agent:${node}`)} onChange={() => void poll()} />
               ))}
             </ul>
           )}

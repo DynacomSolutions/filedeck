@@ -52,6 +52,7 @@ export interface OpView {
   id: string;
   kind: "ops";
   op: OpSpec["op"];
+  nodes?: string[];
   title: string;
   state: OpState;
   conflictPolicy?: ConflictPolicy;
@@ -102,6 +103,7 @@ interface StatLite {
 interface Job {
   id: string;
   spec: OpSpec;
+  nodes: string[];
   /** the account that started the job, as it was then (with auth off, none); every step runs as it */
   user?: Identity;
   title: string;
@@ -234,10 +236,21 @@ export class OpQueue {
   }
 
   private build(spec: OpSpec, id: string, createdAt: number): Job {
+    const nodes = new Set<string>();
+    if (spec.op === "sync") {
+      for (const step of spec.steps) {
+        if (step.kind === "copy") { nodes.add(step.src.node); nodes.add(step.dst.node); }
+        else nodes.add(step.node);
+      }
+    } else {
+      for (const item of spec.items) nodes.add(item.node);
+      if (spec.op === "copy" || spec.op === "move") nodes.add(spec.dst.node);
+    }
     const items = itemsOf(spec);
     return {
       id,
       spec,
+      nodes: [...nodes],
       title: titleOf(spec),
       state: "queued",
       paused: false,
@@ -260,6 +273,7 @@ export class OpQueue {
       id: j.id,
       kind: "ops",
       op: j.spec.op,
+      nodes: j.nodes,
       title: j.title,
       state,
       progress: { ...j.progress },

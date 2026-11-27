@@ -127,6 +127,14 @@ export class MacWatch {
   }
 
   status(): MacWatchStatus { return { running: this.watchers.size > 0, ready: this.ready && this.unwatched.size === 0, mounts: this.mounts.length, watched: this.watchers.size, unwatched: this.unwatched.size, excluded: 0, backlog: this.pending.size, lostEvents: this.lostEvents, reconcileError: this.reconcileError }; }
+  /** Last reconciled mount list in the agent's path space. */
+  mountCoverage(): { path: string; state: "watched" | "unwatched" }[] {
+    return this.mounts.flatMap((mount) => {
+      const p = this.virtual(mount.mountpoint);
+      if (p === null) return [];
+      return [{ path: p, state: this.watchers.has(mount.mountpoint) && !this.unwatched.has(mount.mountpoint) ? "watched" : "unwatched" }];
+    });
+  }
   covers(virtual: string) { return this.ready && this.unwatched.size === 0 && [...this.watchers.keys()].some((m) => { const v = this.virtual(m); return v === "/" || v === virtual || virtual.startsWith(v + "/"); }); }
   settled(virtual: string) { return ![...this.pending.keys()].some((p) => p === virtual || p.startsWith(virtual + "/") || virtual.startsWith(p + "/")); }
   private readyAt = Infinity;

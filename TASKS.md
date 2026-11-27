@@ -354,3 +354,16 @@ ETA: 2026-11-28 18:00 ICT
 | 197 | Four minor follow-ups from the PR 277 review | done | claude-20261127-watch-events | events-followups | 27.195 | 2026-11-28 01:00 ICT | Merged in PR https://github.com/DynacomSolutions/filedeck/pull/278 (c929642), CI green<br>In-flight write at release, stale socket names, leave-steps value check, late steps after the stop limit |
 | 198 | Change events on the native agents | todo | claude-20261127-watch-events | | 27.196 | 2026-11-28 14:00 ICT | Native agents still run 0.5.8, fanotify off on one of them<br>The installer needs CAP_DAC_READ_SEARCH and the event socket settings<br>Keep sign-in on and the sandbox at require<br>Waits for the open native installer hardening change |
 | 199 | Change events under every bind mount path | in_progress | claude-20261127-watch-events | fanwatch-bind-mounts | 27.196 | 2026-11-27 22:00 ICT | One mark per filesystem resolves paths through the first mount only<br>Events inside other bind mounts of that filesystem get the wrong path<br>Fix: map each event to every visible mount path, root test with real binds<br>Then release v0.6.1 |
+
+## 28. Jobs and node status page
+ETA: 2026-11-27 19:00 ICT
+
+- Give operators one place to inspect jobs and node health.
+
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 200 | Add the status page and URL state | in_progress | codex | jobs-status-page | | 2026-11-27 19:00 ICT | Link from the jobs tray |
+| 201 | Show jobs and details | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Reuse the current job views and poll |
+| 202 | Show scan and watcher status | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Read agent health through the hub |
+| 203 | Show the live event stream | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Filter one node at a time |
+| 204 | Add the storage section | in_progress | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Reserve a place for the chart from 26.189 |

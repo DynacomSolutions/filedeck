@@ -287,7 +287,10 @@ async function installFixture(page, opts = {}) {
       if (typeof body.mode === 'number' && (body.path || tracked) === tracked) fakeMode = body.mode;
       return json({ changed: 1, errors: 0 });
     }
-    if (pathname.endsWith('/api/jobs')) return json({ jobs: [] });
+    if (opts.status && pathname === '/api/status') return json({ nodes: opts.status.nodes });
+    if (opts.status && pathname === '/api/groups') return json({ error: 'not found' }, 404);
+    if (opts.status && pathname === '/api/diff/jobs') return json({ jobs: [] });
+    if (pathname.endsWith('/api/jobs')) return json({ jobs: pathname.includes('/' + nodeName + '/') ? opts.status?.jobs ?? [] : [] });
     if (pathname === '/api/ops/jobs' && req.method() === 'POST') {
       opCalls.push(req.postDataJSON());
       return json({ id: `fixture-op-${opCalls.length}`, state: 'queued' });
@@ -3396,7 +3399,150 @@ function schemePair(name, verify) {
   return ['light', 'dark'].map((scheme) => [`${name} (${scheme})`, (b) => verify(b, [scheme])]);
 }
 
+async function verifyJobsStatus(browser) {
+  const now = Date.now();
+  const progress = { bytes: 4800, totalBytes: 8000, entries: 42, totalEntries: 70, current: '/work' };
+  const status = {
+    jobs: [
+      { id: 'size-1', kind: 'du', title: 'Scan /work', state: 'running', origin: 'cli', progress, createdAt: now - 7000, startedAt: now - 5000 },
+      { id: 'index-1', kind: 'index', title: 'Index /documents', state: 'queued', origin: 'background', progress, createdAt: now - 3500 },
+      { id: 'archive-1', kind: 'archive', title: 'Archive reports', state: 'failed', origin: 'ui', progress, error: 'Destination is read-only.', createdAt: now - 120000, startedAt: now - 117000, finishedAt: now - 60000 },
+    ],
+    nodes: [{ node: nodeName, state: 'available', status: {
+      sampledAt: now,
+      sizeStore: { available: true, damaged: false },
+      roots: [
+        { path: '/', scannedAt: now - 180000, fullScan: true, state: 'current' },
+        { path: '/archive', scannedAt: now - 380000, fullScan: true, state: 'stale' },
+        { path: '/incoming', scannedAt: null, fullScan: false, state: 'missing' },
+      ],
+      watcher: { kind: 'fanotify', running: true, ready: false, mounts: 3, watched: 2, unwatched: 1, excluded: 1, backlog: 4,
+        lostEvents: 2, unresolved: 1, unwatchedPaths: ['/incoming'],
+        coverage: [{ path: '/', state: 'watched' }, { path: '/archive', state: 'watched' }, { path: '/incoming', state: 'unwatched' }],
+      },
+      journal: { serving: true, epoch: 'fixture', oldestCursor: 'fixture:1', newestCursor: 'fixture:84', oldestAgeMs: 1000,
+        bytes: 7000, subscribers: { socket: 1, http: 2, internal: 0 }, lagMs: 12, overflows: 2, dropped: 0 },
+    } }],
+  };
+  const stream = () => {
+    const original = window.fetch.bind(window);
+    window.statusStreams = [];
+    window.fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input, location.href);
+      if (url.pathname !== '/api/v1/changes') return original(input, init);
+      const stream = { query: Object.fromEntries(url.searchParams), aborted: false };
+      window.statusStreams.push(stream);
+      const body = new ReadableStream({
+        start(controller) {
+          init.signal.addEventListener('abort', () => {
+            stream.aborted = true;
+            controller.error(init.signal.reason);
+          }, { once: true });
+          const rows = ['report.log', 'notes.log', 'daily.log'].map((name, i) => ({
+            kind: stream.query.kind || 'create', path: '/work/' + name, cursor: 'fixture:' + (i + 1), time: Date.now(),
+          }));
+          controller.enqueue(new TextEncoder().encode(rows.map((row) => JSON.stringify(row) + '\n').join('')));
+        },
+      });
+      return new Response(body, { headers: { 'content-type': 'application/x-ndjson' } });
+    };
+  };
+  const failures = [];
+  const stamp = process.env.FILEDECK_STATUS_SHOT_VERSION;
+  for (const [size, viewport, colorScheme] of [
+    ['desktop', { width: 1365, height: 900 }, 'light'],
+    ['narrow', { width: 390, height: 844 }, 'dark'],
+  ]) {
+    const { page, context } = await openPage(browser, { viewport, colorScheme, fixture: { status }, initScripts: [stream] });
+    const nav = page.getByRole('navigation', { name: 'Status sections' });
+    const widthFits = () => page.locator('.status-page').evaluate((el) => el.scrollWidth <= el.clientWidth);
+    const audit = async (section) => {
+      assert.equal(await widthFits(), true, section + ' fits at ' + size);
+      await runAxe(page, section + ' ' + size, failures);
+      if (stamp) await page.locator('.status-wrap').screenshot({
+        path: resolve(evidenceDir, `status-${section}-${size}-${stamp}.png`),
+        style: 'html, body, #root, .status-page { height: auto !important; overflow: visible !important; }',
+      });
+    };
+    const section = (name) => nav.getByRole('link', { name, exact: true });
+    const streamState = () => page.evaluate(() => window.statusStreams.at(-1));
+    try {
+      await page.locator('button[aria-controls="jobs-panel"]').click();
+      await page.getByRole('link', { name: 'Open jobs and status' }).click();
+      const title = page.getByRole('heading', { name: 'Jobs and status' });
+      await title.waitFor();
+      const job = page.getByRole('link', { name: 'Scan /work' });
+      await job.focus();
+      await job.press('Enter');
+      await expectText(page, 'Data processed');
+      assert.equal(await job.getAttribute('aria-expanded'), 'true');
+      assert.match(new URL(page.url()).searchParams.get('job'), /^agent:/);
+      await page.reload();
+      await expectText(page, 'Data processed');
+      await page.getByRole('list', { name: 'Jobs', exact: true }).getByText('Destination is read-only.').scrollIntoViewIfNeeded();
+      await title.scrollIntoViewIfNeeded();
+      await audit('jobs');
+
+      await section('Node health').click();
+      await page.getByLabel('Node', { exact: true }).selectOption(nodeName);
+      await expectText(page, 'Not stored yet');
+      assert.equal(new URL(page.url()).pathname, '/status/' + nodeName);
+      await page.getByText('Dropped readers').scrollIntoViewIfNeeded();
+      await title.scrollIntoViewIfNeeded();
+      await audit('nodes');
+      await page.goBack();
+      await expectText(page, 'Scan coverage, watcher activity and journal health.');
+      assert.equal(new URL(page.url()).pathname, '/status');
+      assert.equal(await title.evaluate((el) => el === document.activeElement), true);
+      await page.goForward();
+      await expectText(page, 'Not stored yet');
+      assert.equal(new URL(page.url()).pathname, '/status/' + nodeName);
+
+      await section('Live events').click();
+      await page.getByLabel('Path prefix').fill('/work');
+      await page.getByLabel('Glob').fill('*.log');
+      await page.getByRole('button', { name: 'Apply paths' }).click();
+      await page.getByLabel('Kind').selectOption('modify');
+      await page.getByLabel('Entry type').selectOption('file');
+      await expectText(page, '/work/report.log');
+      assert.deepEqual((await streamState()).query, { node: nodeName, prefix: '/work', glob: '*.log', kind: 'modify', type: 'file' });
+      await page.reload();
+      await expectText(page, '/work/report.log');
+      assert.equal(await page.getByLabel('Glob').inputValue(), '*.log');
+      assert.equal(await page.getByLabel('Kind').inputValue(), 'modify');
+      await audit('events');
+      await page.getByRole('button', { name: 'Pause' }).click();
+      assert.equal((await streamState()).aborted, true);
+      await page.getByRole('button', { name: 'Clear' }).click();
+      await expectText(page, 'No events received.');
+      await page.getByRole('button', { name: 'Resume' }).click();
+      await expectText(page, '/work/report.log');
+      assert.equal((await streamState()).query.since, 'fixture:3');
+
+      await page.evaluate(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      assert.equal((await streamState()).aborted, true);
+      await page.evaluate(() => {
+        delete document.hidden;
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      assert.equal((await streamState()).aborted, false);
+
+      await section('Storage').click();
+      await expectText(page, 'This hub does not provide grouped storage data yet.');
+      assert.equal((await streamState()).aborted, true);
+      await audit('storage');
+    } finally {
+      await context.close();
+    }
+  }
+  assert.deepEqual(failures, [], 'the jobs and status sections pass axe in both themes');
+}
+
 const allChecks = [
+  ['jobs and node status', verifyJobsStatus],
   ['list semantics', verifyListSemantics],
   ['keyboard shortcuts dialog and confirmations', verifyKeyboardAndConfirmation],
   ['keyboard isolation', verifyKeyboardIsolation],

@@ -41,7 +41,7 @@ test("claimFor", () => {
   assert.deepEqual(claimFor(virt, "a", 5), { kind: "virt", name: "alice", epoch: 3, runAs: "deploy", grants: [{ path: "/srv", write: true }], iat: 5 });
   const sys: Identity = { kind: "sys", name: "bob", admin: true, epoch: 1 };
   const c = claimFor(sys, "a", 7);
-  assert.deepEqual(c, { kind: "sys", name: "bob", epoch: 1, iat: 7 });
+  assert.deepEqual(c, { kind: "sys", name: "bob", epoch: 1, admin: true, iat: 7 });
   assert.ok(c && !("runAs" in c) && !("grants" in c));
   assert.equal(USER_HEADER, "x-filedeck-user");
 });
@@ -81,4 +81,5 @@ test("bad MAC and bad shape", () => {
   assert.equal(verifyClaim(forge({ ...claim, grants: [{ path: "/a", write: "yes" }] }), T, claim.iat), null);
   assert.equal(verifyClaim(forge({ ...claim, grants: "x" }), T, claim.iat), null);
   assert.equal(verifyClaim(forge({ ...claim, runAs: undefined }), T, claim.iat), null);
+  assert.equal(verifyClaim(forge({ ...claim, admin: "true" }), T, claim.iat), null);
 });
