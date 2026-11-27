@@ -824,3 +824,25 @@ test("leave: a step that runs on after the bound publishes into a closed bus: it
   assert.doesNotMatch(lines, /\/after/);
   assert.deepEqual(heard, [], "a listener heard neither late event");
 });
+
+test("bus: a new subscriber is told the watcher's state first; stopped, it is told nothing", async () => {
+  const b = bus();
+  await b.whenServing();
+  const none = await b.subscribe(new Filter(), undefined, "http");
+  b.ready = true;
+  b.setUnwatched(["/net"]);
+  const sub = await b.subscribe(new Filter(), undefined, "http");
+  const first = (await take(sub, 1))[0]!;
+  assert.equal(first.kind, "ready");
+  assert.equal(first.scope, "node");
+  assert.deepEqual(first.unwatched, ["/net"]);
+  assert.equal(first.node, "n1");
+  b.ready = false;
+  const stopped = await b.subscribe(new Filter(), undefined, "http");
+  b.publish(ev("create", "/x"));
+  assert.equal((await take(stopped, 1))[0]!.path, "/x", "no ready line while the watcher is not ready");
+  assert.equal((await take(none, 1))[0]!.path, "/x", "a subscriber that came before the watcher is not told again");
+  b.ready = true; // ready again, without unwatched
+  const again = await b.subscribe(new Filter({ kind: ["create"] }), undefined, "http");
+  assert.equal((await take(again, 1))[0]!.kind, "ready", "a control line passes any filter");
+});

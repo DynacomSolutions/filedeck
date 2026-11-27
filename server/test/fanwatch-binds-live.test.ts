@@ -92,7 +92,11 @@ async function held(bus: EventBus): Promise<{ kind: string; path?: string; from?
   while (out.length < head) {
     const batch = await Promise.race([sub.next(), sleep(500).then(() => null)]);
     if (!batch) break;
-    for (const x of batch) out.push(JSON.parse(x.toString("utf8")));
+    for (const x of batch) {
+      const e = JSON.parse(x.toString("utf8")) as { kind: string; cursor: string; path?: string; from?: string };
+      if (e.kind === "ready" && e.cursor.endsWith(":0")) continue; // the state a new subscriber is told first: not in the journal
+      out.push(e);
+    }
   }
   sub.close();
   return out;
