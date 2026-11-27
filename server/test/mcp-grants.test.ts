@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { uriMatches } from "../src/mcp/grants.ts";
+import { Scope, uriMatches } from "../src/mcp/grants.ts";
 import { ALL_TOKEN, bodyOf, boot, everything, job, sleep, until, type GrantDef } from "./mcp-support.ts";
 
 const web: GrantDef = { id: "reader", token: "reader-token-" + "r".repeat(24), resources: ["filedeck://nodes/n/"], tools: ["filedeck_du", "filedeck_nodes", "filedeck_jobs_list", "filedeck_job_get"] };
@@ -11,14 +11,33 @@ const tool = async (c: { client: { callTool(a: object): Promise<unknown> } }, na
 const post = (url: string, token: string) =>
   fetch(url + "/mcp", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } }) });
 
-test("a resource entry is a prefix or a URI template", () => {
+test("a resource entry is a URI template, a prefix (slash at the end) or one URI", () => {
   assert.equal(uriMatches("filedeck://nodes/web1/", "filedeck://nodes/web1/status"), true);
   assert.equal(uriMatches("filedeck://nodes/web1/", "filedeck://nodes/web10/status"), false);
-  assert.equal(uriMatches("filedeck://nodes/web1", "filedeck://nodes/web10/status"), true, "a prefix without a slash also matches web10: write the slash");
+  assert.equal(uriMatches("filedeck://nodes/web1", "filedeck://nodes/web10/status"), false, "no slash at the end: one URI, not a prefix");
+  assert.equal(uriMatches("filedeck://nodes/web1", "filedeck://nodes/web1"), true);
+  assert.equal(uriMatches("filedeck://nodes", "filedeck://nodes/n/status"), false, "the node list is not every node");
+  assert.equal(uriMatches("filedeck://nodes", "filedeck://nodes"), true);
   assert.equal(uriMatches("filedeck://nodes/{node}/status", "filedeck://nodes/a/status"), true);
   assert.equal(uriMatches("filedeck://nodes/{node}/status", "filedeck://nodes/a/scans"), false);
   assert.equal(uriMatches("filedeck://nodes/{node}/status", "filedeck://nodes/a/b/status"), false, "{node} is one segment");
   assert.equal(uriMatches("filedeck://", "filedeck://jobs/x"), true);
+});
+
+test("a node is named only by its prefix or the template filedeck://nodes/{node}/", () => {
+  const scope = (...resources: string[]) => new Scope({ tools: ["*"], resources });
+  assert.equal(scope("filedeck://nodes/n/").allowsNode("n"), true);
+  assert.equal(scope("filedeck://nodes/n/").allowsNode("m"), false);
+  assert.equal(scope("filedeck://nodes/{node}/").allowsNode("anything"), true);
+  assert.equal(scope("filedeck://nodes/").allowsNode("n"), true);
+  assert.equal(scope("filedeck://").allowsNode("n"), true);
+  for (const one of ["filedeck://nodes/{node}/status", "filedeck://nodes/{node}/scans", "filedeck://nodes/n/jobs", "filedeck://nodes", "filedeck://nodes/n", "filedeck://jobs/", "filedeck://hub/jobs"]) {
+    assert.equal(scope(one).allowsNode("n"), false, one);
+  }
+  // a single URI cannot match a template that it does not fit
+  assert.equal(scope("filedeck://nodes").allowsTemplate("filedeck://nodes/{node}/status"), false);
+  assert.equal(scope("filedeck://nodes/n/status").allowsTemplate("filedeck://nodes/{node}/status"), true);
+  assert.equal(scope("filedeck://nodes/n/status").allowsTemplate("filedeck://nodes/{node}/jobs"), false);
 });
 
 test("an unknown token is 401, a known one opens a session, and each grant has its own token", async (t) => {

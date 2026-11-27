@@ -96,7 +96,8 @@ export class SourceWatch {
   private refs = 0;
   private timer?: NodeJS.Timeout;
   private current?: Promise<void>;
-  private firstPoll?: Promise<void>;
+  /** the poll that `current` is part of: a poll of an earlier loop (after a halt) is never joined */
+  private currentAbort?: AbortController;
   private stopped = false;
   private abort = new AbortController();
 
@@ -125,11 +126,24 @@ export class SourceWatch {
     };
   }
 
-  /** Resolves once the state is known: the first poll has answered (also with an error). */
+  /**
+   * Resolves once the state of the loop that runs now is known: a poll of this loop has answered (also with an error). A poll of an earlier loop
+   * (one that a halt cut off) does not count: it never sets the state.
+   */
   async ready(timeoutMs = 10_000): Promise<void> {
-    if (this.snap.polledAt !== undefined) return;
-    this.firstPoll ??= this.poll();
-    await Promise.race([this.firstPoll, new Promise<void>((r) => setTimeout(r, timeoutMs).unref())]);
+    const deadline = Date.now() + timeoutMs;
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<"limit">((r) => {
+      timer = setTimeout(() => r("limit"), timeoutMs);
+      timer.unref();
+    });
+    try {
+      while (this.snap.polledAt === undefined && this.running && Date.now() < deadline) {
+        if ((await Promise.race([this.poll().then(() => "done" as const), limit])) === "limit") return;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async stop(): Promise<void> {
@@ -145,7 +159,6 @@ export class SourceWatch {
     this.abort.abort();
     // a later follower starts a clean loop with a fresh baseline: what happened while nobody followed is not an event
     this.snap = {};
-    this.firstPoll = undefined;
   }
 
   private schedule(ms: number): void {
@@ -157,19 +170,20 @@ export class SourceWatch {
     this.timer.unref();
   }
 
-  /** One poll. A poll that is still running is joined, never doubled. */
+  /** One poll. A poll of this loop that is still running is joined, never doubled. A poll that a halt cut off is not joined: it never sets the state. */
   poll(): Promise<void> {
-    if (this.current) return this.current;
-    const run = this.pollOnce().finally(() => {
-      this.current = undefined;
+    if (this.current && this.currentAbort === this.abort && !this.abort.signal.aborted) return this.current;
+    const abort = this.abort;
+    const run: Promise<void> = this.pollOnce(abort.signal).finally(() => {
+      if (this.current === run) this.current = this.currentAbort = undefined;
     });
     this.current = run;
+    this.currentAbort = abort;
     return run;
   }
 
-  private async pollOnce(): Promise<void> {
+  private async pollOnce(signal: AbortSignal): Promise<void> {
     const { call, key, statusNode } = this.o;
-    const signal = this.abort.signal;
     const [jobsRes, statusRes] = await Promise.all([
       call.json(this.o.jobsPath, signal).catch((e: unknown) => ({ status: 0, body: { error: (e as Error).message } })),
       statusNode ? call.json(`/api/status?node=${encodeURIComponent(statusNode)}`, signal).catch(() => undefined) : Promise.resolve(undefined),
@@ -190,13 +204,15 @@ export class SourceWatch {
         if (s) jobs.set(s.id, s);
       }
       next.jobs = jobs;
-      if (prev.jobs) {
+      // a first poll that failed left no list: the first good poll is then compared with an empty list, so a client that read nothing hears of every job
+      const known = prev.jobs ?? (prev.polledAt !== undefined ? new Map<string, JobSummary>() : undefined);
+      if (known) {
         for (const [id, job] of jobs) {
-          const before = prev.jobs.get(id);
+          const before = known.get(id);
           if (!before) events.push({ kind: "job.created", job });
           else if (before.state !== job.state) events.push({ kind: "job.state", job, previous: before.state });
         }
-        for (const [id, job] of prev.jobs) if (!jobs.has(id)) events.push({ kind: "job.removed", job });
+        for (const [id, job] of known) if (!jobs.has(id)) events.push({ kind: "job.removed", job });
       }
     } else next.jobs = prev.jobs; // a failed poll keeps what was known: no job is "removed" because an agent did not answer
     if (prev.reachable !== undefined && prev.reachable !== answered) events.push({ kind: "reachable", reachable: answered });

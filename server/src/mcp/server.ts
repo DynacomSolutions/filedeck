@@ -27,6 +27,10 @@ export const MCP_PATH = "/mcp";
 const MAX_BODY = 4 * 1024 * 1024;
 const MAX_SUBSCRIPTIONS = 256;
 const MAX_SESSIONS = 256;
+/** Sessions of one grant, when the options give no other number (FILEDECK_MCP_SESSIONS_PER_GRANT). */
+export const SESSIONS_PER_GRANT = 32;
+/** A stream with more than this many bytes queued is a client that does not read: its session ends. */
+const MAX_BACKLOG = 1024 * 1024;
 
 export interface McpHttpOptions {
   grants: GrantStore;
@@ -40,8 +44,12 @@ export interface McpHttpOptions {
   tls?: { cert: string; key: string; reloadMs?: number };
   modules: McpModule[];
   metrics: McpMetrics;
-  /** Host values the listener serves (the hub's FILEDECK_ALLOWED_HOSTS); empty = any */
+  /** Host values the listener serves (FILEDECK_MCP_ALLOWED_HOSTS); empty = any */
   allowedHosts: string[];
+  /** most open sessions of one grant (default 32); a new session beyond it ends the oldest idle session of the grant */
+  sessionsPerGrant?: number;
+  /** bytes queued on one stream before its session ends (default 1 MiB); a test sets it */
+  maxBacklog?: number;
   serverVersion: string;
   /** Whether the hub's own listener answers; liveness and readiness need it too (main.ts asks /healthz on loopback). Default: always true. */
   hubHealthy?: () => Promise<boolean>;
@@ -66,6 +74,8 @@ interface Session {
   lastSeen: number;
   /** open event streams (GET) */
   streams: number;
+  /** the responses of those streams: what is queued on them is what a slow client has not read */
+  streamRes: Set<ServerResponse>;
   closed: boolean;
 }
 
@@ -158,19 +168,32 @@ export class McpHttp {
     return `${BOOT}.${++this.eventSeq}`;
   }
 
+  /** A client that does not read its stream: what is queued on it passes the limit, so its session ends (the client connects again and reads a baseline). */
+  private slow(s: Session): boolean {
+    const limit = this.o.maxBacklog ?? MAX_BACKLOG;
+    for (const res of s.streamRes) {
+      if (res.writableLength <= limit) continue;
+      this.o.log?.(`mcp: the session of grant ${s.grantId} ends: its stream holds ${res.writableLength} bytes that the client has not read`);
+      this.o.metrics.error(s.grantId, "notify");
+      void this.closeSession(s, "error");
+      return true;
+    }
+    return false;
+  }
+
   private deliver(u: McpUpdate): void {
     const eventId = this.nextEventId();
-    for (const s of this.sessions.values()) {
-      if (!s.subs.has(u.uri) || s.closed || (u.audience !== undefined && u.audience !== s.audience)) continue;
+    for (const s of [...this.sessions.values()]) {
+      if (!s.subs.has(u.uri) || s.closed || (u.audience !== undefined && u.audience !== s.audience) || this.slow(s)) continue;
       this.o.metrics.notification(s.grantId, "resource_updated");
       s.mcp.server.sendResourceUpdated({ uri: u.uri, _meta: { filedeck: { eventId, revision: u.revision, uri: u.uri } } }).catch(() => this.o.metrics.error(s.grantId, "notify"));
     }
   }
 
-  private deliverListChanged(c: { revision: number; audience?: string }): void {
+  private deliverListChanged(c: { revision: number; audience?: string; allows?: (session: McpSession) => boolean }): void {
     const eventId = this.nextEventId();
-    for (const s of this.sessions.values()) {
-      if (!s.listRelease || s.closed || (c.audience !== undefined && c.audience !== s.audience)) continue;
+    for (const s of [...this.sessions.values()]) {
+      if (!s.listRelease || s.closed || (c.audience !== undefined && c.audience !== s.audience) || (c.allows && !c.allows(s.info)) || this.slow(s)) continue;
       this.o.metrics.notification(s.grantId, "list_changed");
       s.mcp.server
         .notification({ method: "notifications/resources/list_changed", params: { _meta: { filedeck: { eventId, revision: c.revision, uri: "filedeck://resources" } } } })
@@ -207,13 +230,15 @@ export class McpHttp {
       },
     );
     for (const m of o.modules) m.register(mcp, info);
-    const session: Session = { id: "", grantId: g.id, grantFingerprint: g.fingerprint, audience, info, mcp, transport: undefined as never, subs: new Map(), lastSeen: Date.now(), streams: 0, closed: false };
+    const session: Session = { id: "", grantId: g.id, grantFingerprint: g.fingerprint, audience, info, mcp, transport: undefined as never, subs: new Map(), lastSeen: Date.now(), streams: 0, streamRes: new Set(), closed: false };
     session.transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
         session.id = id;
         this.sessions.set(id, session);
         o.metrics.sessionOpened(g.id);
+        // the grant may have been removed or changed since the request was checked: such a session ends at once
+        if (o.grants.grants.find((x) => x.id === g.id)?.fingerprint !== g.fingerprint) void this.closeSession(session, "revoked");
       },
       keepAliveMs: o.keepAliveMs ?? 15_000,
     });
@@ -245,7 +270,7 @@ export class McpHttp {
     return session;
   }
 
-  private async closeSession(s: Session, reason: "client" | "idle" | "drain" | "revoked" | "error"): Promise<void> {
+  private async closeSession(s: Session, reason: "client" | "idle" | "drain" | "revoked" | "error" | "evicted"): Promise<void> {
     if (s.closed) return;
     s.closed = true;
     if (s.id) this.sessions.delete(s.id);
@@ -397,6 +422,13 @@ export class McpHttp {
         metrics.request(gid, "busy");
         return this.rpcError(res, 503, ErrorCode.InternalError, "too many sessions", { "retry-after": "5" });
       }
+      // one grant may not fill the hub: at its own limit, the new session takes the place of the session of that grant that made no request for the longest time
+      // (a client keeps its event stream open, so an open stream does not make a session busy)
+      const own = [...this.sessions.values()].filter((x) => x.grantId === grant!.id && !x.closed);
+      if (own.length >= (this.o.sessionsPerGrant ?? SESSIONS_PER_GRANT)) {
+        const oldest = own.reduce((a, b) => (b.lastSeen < a.lastSeen ? b : a));
+        await this.closeSession(oldest, "evicted");
+      }
       session = this.newSession(grant);
       await session.mcp.connect(session.transport);
       const s = session;
@@ -432,7 +464,11 @@ export class McpHttp {
       if (method === "GET") s.streams--;
       s.lastSeen = Date.now();
     };
-    if (method === "GET") s.streams++;
+    if (method === "GET") {
+      s.streams++;
+      s.streamRes.add(res);
+      res.once("close", () => s.streamRes.delete(res));
+    }
     res.once("close", done);
     try {
       await s.transport.handleRequest(req, res, body);
@@ -444,25 +480,28 @@ export class McpHttp {
   // ---- stop ----
 
   /**
-   * Starts a drain and returns when it is done: readiness fails and new sessions and new requests get 503 at once, the calls in flight finish
-   * (at most `waitMs`), and then every stream is closed. A second call joins the first.
+   * Starts a drain and returns when it is done. Readiness fails from the start, and every new session and every new request gets 503 with
+   * `Retry-After`. The drain waits until every call in flight has ended, then closes every session and its streams. It has no timer and no time
+   * limit: the grace period of the pod is the only limit, and it ends the process. A second call joins the first. It does not close the listener:
+   * the caller does (`server.close()`, see main.ts), so a new connection is refused and a request on a connection that is still open gets the 503.
    */
-  drain(waitMs = 4000): Promise<void> {
+  drain(): Promise<void> {
     this.drainStarted ??= (async () => {
-      if (this.inflight > 0) {
-        await Promise.race([new Promise<void>((r) => this.idleWaiters.push(r)), new Promise<void>((r) => setTimeout(r, waitMs).unref())]);
-      }
+      if (this.inflight > 0) await new Promise<void>((r) => this.idleWaiters.push(r));
       await Promise.all([...this.sessions.values()].map((s) => this.closeSession(s, "drain")));
+      this.server.closeIdleConnections();
     })();
     return this.drainStarted;
   }
 
-  /** Stops the modules and the sweep. Call after `drain` (or on its own in tests). */
+  /** Stops the modules and the sweep, and ends every session without waiting for calls in flight. Call after `drain` (or on its own in tests). */
   async stop(): Promise<void> {
     clearInterval(this.sweep);
     clearInterval(this.tlsTimer);
     this.o.grants.stop();
-    await this.drain(0);
+    this.drainStarted ??= Promise.resolve();
+    await Promise.all([...this.sessions.values()].map((s) => this.closeSession(s, "drain")));
     await Promise.all(this.o.modules.map((m) => m.stop()));
+    this.server.closeAllConnections();
   }
 }

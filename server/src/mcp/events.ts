@@ -45,7 +45,7 @@ export interface McpEventSink {
   /** The state behind `update.uri` changed. */
   updated(update: McpUpdate): void;
   /** The set of listed resources changed. Sessions that listed resources get `notifications/resources/list_changed`. */
-  listChanged(change: { revision: number; audience?: string }): void;
+  listChanged(change: { revision: number; audience?: string; allows?: (session: McpSession) => boolean }): void;
 }
 
 /** Ends the interest in a watch. Calling it twice is safe. */

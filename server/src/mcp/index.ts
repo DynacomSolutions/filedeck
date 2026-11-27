@@ -77,37 +77,59 @@ export async function createMcp(cfg: Config, hub: McpHub, o: McpOptions = {}): P
     log("the MCP server is not started: its grants file cannot be used");
     return undefined;
   }
-  grants.start();
   const metrics = new McpMetrics();
   const callerFor = (account: string | undefined) => makeHubCaller({ cfg, fetch: (req) => hub.fetch(req), accounts: hub.auth?.accounts, account });
   const core = new CoreModule({ nodes: cfg.nodes.map((n) => n.name), pollMs: cfg.mcpPollMs });
-  const http = new McpHttp({
-    grants,
-    callerFor,
-    signIn: cfg.auth,
-    defaultAccount: cfg.mcpAccount,
-    tls,
-    modules: [core, ...(o.modules?.(metrics) ?? [])],
-    metrics,
-    allowedHosts: cfg.allowedHosts,
-    serverVersion: serverVersion(),
-    hubHealthy: o.hubHealthy,
-    idleMs: o.idleMs,
-    keepAliveMs: o.keepAliveMs,
-    log,
-  });
+  let http: McpHttp;
+  try {
+    http = new McpHttp({
+      grants,
+      callerFor,
+      signIn: cfg.auth,
+      defaultAccount: cfg.mcpAccount,
+      tls,
+      modules: [core, ...(o.modules?.(metrics) ?? [])],
+      metrics,
+      allowedHosts: cfg.mcpAllowedHosts,
+      sessionsPerGrant: cfg.mcpSessionsPerGrant,
+      serverVersion: serverVersion(),
+      hubHealthy: o.hubHealthy,
+      idleMs: o.idleMs,
+      keepAliveMs: o.keepAliveMs,
+      log,
+    });
+  } catch (e) {
+    // a certificate or key that is empty or not a valid PEM pair makes the TLS server throw
+    log(`the MCP server is not started: its TLS certificate or key is not valid (${(e as Error).message})`);
+    return undefined;
+  }
+  grants.start();
   metrics.gauges.watches = () => core.running;
   hub.addMetrics(() => metrics.lines());
   return http;
 }
 
-/** Makes the server and starts it listening on the configured port. */
+/** The MCP port is set, but the server cannot run: the hub must not run on without it (see `startMcp`). */
+export class McpStartError extends Error {
+  constructor() {
+    super("FILEDECK_MCP_PORT is set but the MCP server cannot start (the reason is in the line above): the hub stops, so a rollout keeps the old pod");
+  }
+}
+
+/**
+ * Makes the server and starts it listening on the configured port. Returns undefined when MCP is off (a hub without FILEDECK_MCP_PORT).
+ * Throws `McpStartError` when the port is set and the server cannot start (no grants file, no or bad TLS files): the pod must not become ready
+ * without a listener that its probes ask for, and a failed start must stop a rollout while the old pod still serves. The caller exits with 2.
+ */
 export async function startMcp(cfg: Config, hub: McpHub, o: McpOptions = {}): Promise<McpHttp | undefined> {
   // the hub's own listener, asked on loopback: the probes of the MCP listener fail when it does not answer
   const loopback = !cfg.host || cfg.host === "0.0.0.0" || cfg.host === "::" ? "127.0.0.1" : cfg.host.includes(":") ? `[${cfg.host}]` : cfg.host;
   const hubHealthy = async () => (await fetch(`http://${loopback}:${cfg.port}/healthz`, { signal: AbortSignal.timeout(2000) })).ok;
   const http = await createMcp(cfg, hub, { hubHealthy, ...o });
-  if (!http) return undefined;
+  if (!http) {
+    if (cfg.mode === "hub" && cfg.mcpPort !== undefined) throw new McpStartError();
+    return undefined;
+  }
   http.server.on("error", (e) => {
     console.error(`FILEDECK_MCP_PORT: ${(e as Error).message}`);
     process.exit(2);

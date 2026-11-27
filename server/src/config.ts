@@ -28,6 +28,10 @@ export interface Config {
   mcpAccount?: string;
   /** hub: how often the shared watch of a node asks its agent for jobs and status, in ms (FILEDECK_MCP_POLL_MS) */
   mcpPollMs: number;
+  /** hub: Host values the MCP listener serves (FILEDECK_MCP_ALLOWED_HOSTS, comma separated); empty = any. It does not use FILEDECK_ALLOWED_HOSTS: the clients are in the cluster and use the Service name */
+  mcpAllowedHosts: string[];
+  /** hub: most open MCP sessions of one grant (FILEDECK_MCP_SESSIONS_PER_GRANT); at the limit the session of the grant with the oldest last request ends */
+  mcpSessionsPerGrant: number;
   root: string;
   node: string;
   procMounts: string;
@@ -315,6 +319,8 @@ export function loadConfig(env = process.env): Config {
   if (!env.FILEDECK_MCP_TLS_CERT !== !env.FILEDECK_MCP_TLS_KEY) throw new Error("FILEDECK_MCP_TLS_CERT and FILEDECK_MCP_TLS_KEY go together");
   const mcpPollMs = Number(env.FILEDECK_MCP_POLL_MS ?? 5000);
   if (!Number.isInteger(mcpPollMs) || mcpPollMs < 1000 || mcpPollMs > 600_000) throw new Error("FILEDECK_MCP_POLL_MS must be between 1000 and 600000");
+  const mcpSessionsPerGrant = Number(env.FILEDECK_MCP_SESSIONS_PER_GRANT ?? 32);
+  if (!Number.isInteger(mcpSessionsPerGrant) || mcpSessionsPerGrant < 1 || mcpSessionsPerGrant > 256) throw new Error("FILEDECK_MCP_SESSIONS_PER_GRANT must be between 1 and 256");
   return {
     mode,
     host: env.FILEDECK_HOST || undefined,
@@ -327,6 +333,8 @@ export function loadConfig(env = process.env): Config {
     mcpAllowPlaintext: mode === "hub" && env.FILEDECK_MCP_ALLOW_PLAINTEXT === "1",
     mcpAccount: env.FILEDECK_MCP_ACCOUNT || undefined,
     mcpPollMs,
+    mcpAllowedHosts: (env.FILEDECK_MCP_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+    mcpSessionsPerGrant,
     root,
     node: env.FILEDECK_NODE ?? "local",
     procMounts: env.FILEDECK_PROC_MOUNTS ?? defaultProcMounts(root),
@@ -446,6 +454,7 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     mcpTlsKey: undefined,
     mcpAllowPlaintext: false,
     mcpAccount: undefined,
+    mcpAllowedHosts: [],
     eventsSocket: "",
     vaultKey: undefined,
     bootstrapAdminFile: undefined,

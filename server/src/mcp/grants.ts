@@ -23,17 +23,23 @@ export const GRANT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const MIN_TOKEN = 16;
 const digest = (s: string) => createHash("sha256").update(s).digest();
 
-/** A resource entry is a URI template (it has `{name}` parts; each matches one path segment) or a URI prefix. */
+/**
+ * A resource entry is a URI template (it has `{name}` parts; each matches one path segment), a URI prefix (it ends with `/`: every URI that starts
+ * with it) or a single URI (the rest: an exact match only, so `filedeck://nodes` is the node list and nothing below it).
+ */
 export function uriMatches(entry: string, uri: string): boolean {
-  if (!entry.includes("{")) return uri === entry || uri.startsWith(entry);
-  const re = entry.split(/\{[^}]+\}/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^/]+");
-  return new RegExp(`^${re}$`).test(uri);
+  if (!entry.includes("{")) return entry.endsWith("/") ? uri.startsWith(entry) : uri === entry;
+  return templateRegExp(entry).test(uri);
 }
+
+const templateRegExp = (entry: string) =>
+  new RegExp(`^${entry.split(/\{[^}]+\}/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^/]+")}$`);
 
 const literalPrefix = (s: string) => s.slice(0, s.includes("{") ? s.indexOf("{") : s.length);
 
-/** Whether an entry can match some URI of a template: the literal beginnings agree. */
+/** Whether an entry can match some URI of a template: the literal beginnings agree. A single URI must fit the template itself. */
 export function couldMatch(entry: string, template: string): boolean {
+  if (!entry.includes("{") && !entry.endsWith("/")) return templateRegExp(template).test(entry);
   const a = literalPrefix(entry);
   const b = literalPrefix(template);
   return a.startsWith(b) || b.startsWith(a);
@@ -56,10 +62,12 @@ export class Scope {
     return this.grant.resources.some((e) => couldMatch(e, template));
   }
 
-  /** A tool with a `node` argument needs a resource of that node in the grant. */
+  /**
+   * A tool with a `node` argument, and the node watches, need the node itself in the grant: the prefix `filedeck://nodes/<node>/` (or a template
+   * such as `filedeck://nodes/{node}/`). A grant for one resource of a node (its status, scans or jobs) does not give the tools on that node.
+   */
   allowsNode(node: string): boolean {
-    const n = encodeURIComponent(node);
-    return ["status", "scans", "jobs"].some((k) => this.allowsResource(`filedeck://nodes/${n}/${k}`));
+    return this.allowsResource(`filedeck://nodes/${encodeURIComponent(node)}/`);
   }
 
   get allowsHubJobs(): boolean {

@@ -89,3 +89,34 @@ test("a busy index file is not deleted", () => {
   a.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("shutdown with a hold: the hard limit and the cleanup wait for it, however long it takes", async () => {
+  const server = http.createServer();
+  await listen(server);
+  let release!: () => void;
+  const hold = new Promise<void>((r) => (release = r));
+  const order: string[] = [];
+  const done = new Promise<number>((resolve) =>
+    installShutdown(server, () => void order.push("cleanup"), { drainMs: 50, hardMs: 100, hold: () => hold.then(() => void order.push("hold ended")), exit: (c) => (order.push(`exit ${c}`), resolve(c)) })(),
+  );
+  // far beyond hardMs and drainMs: nothing has cut the hold, and nothing has exited
+  await new Promise((r) => setTimeout(r, 400));
+  assert.deepEqual(order, []);
+  release();
+  assert.equal(await done, 0);
+  assert.deepEqual(order, ["hold ended", "cleanup", "exit 0"]);
+});
+
+test("shutdown with a hold that never ends still exits at the hard limit once the hold is over, and a failed hold does not block", async () => {
+  const server = http.createServer();
+  await listen(server);
+  const keepAlive = setInterval(() => undefined, 1_000);
+  try {
+    const code = await new Promise<number>((resolve) =>
+      installShutdown(server, () => new Promise(() => undefined), { drainMs: 50, hardMs: 150, hold: () => Promise.reject(new Error("drain failed")), exit: resolve })(),
+    );
+    assert.equal(code, 1, "the cleanup hangs, so the hard limit ends it");
+  } finally {
+    clearInterval(keepAlive);
+  }
+});

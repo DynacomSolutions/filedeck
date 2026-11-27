@@ -52,11 +52,19 @@ metrics?.on("error", (e) => {
   console.error(`FILEDECK_HUB_METRICS_PORT: ${e.message}`);
   process.exit(2);
 });
-const mcp = hub ? await startMcp(cfg, hub) : undefined;
+// With FILEDECK_MCP_PORT set, the hub must run the MCP server or stop: a hub that runs on without it fails its probes (they ask the MCP port), and a
+// rollout that stops here keeps the old pod. The reason is in the log lines above this one.
+let mcp: Awaited<ReturnType<typeof startMcp>>;
+try {
+  mcp = hub ? await startMcp(cfg, hub) : undefined;
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(2);
+}
 const servers = [server as Server];
-if (mcp) servers.push(mcp.server as unknown as Server);
 if (identity) servers.push(identity);
 if (metrics) servers.push(metrics);
-// the MCP server drains first: readiness fails, calls in flight finish, then its streams close (the other listeners follow the usual shutdown)
-const stop = installShutdown(servers, async () => { await mcp?.stop(); await (app as { close?: () => Promise<void> }).close?.(); }, { onSignal: async () => { await Promise.all([mcp?.drain(), (app as { leave?: () => Promise<void> }).leave?.()]); } });
+// The MCP server is not in `servers`: it drains on its own. Its listener closes (a new connection is refused), the calls in flight finish with no time limit (the grace period of
+// the pod is the limit), and then its streams close. The usual shutdown timers start when that ends (`hold`).
+const stop = installShutdown(servers, async () => { await mcp?.stop(); await (app as { close?: () => Promise<void> }).close?.(); }, { onSignal: () => (app as { leave?: () => Promise<void> }).leave?.(), hold: async () => { mcp?.server.close(); await mcp?.drain(); } });
 for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, stop);

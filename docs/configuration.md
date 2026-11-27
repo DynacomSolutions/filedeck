@@ -59,3 +59,7 @@ Hub settings. See [MCP server](mcp.md). The server is off unless `FILEDECK_MCP_P
 - `FILEDECK_MCP_ALLOW_PLAINTEXT`: `1` lets the listener serve plain HTTP when there is no certificate. For tests only. Without it, and without a certificate, the listener does not start.
 - `FILEDECK_MCP_ACCOUNT`: with sign-in on, the account of a grant that names none (not `root`). With sign-in off it is not used. Chart: `hub.mcp.account`.
 - `FILEDECK_MCP_POLL_MS`: how often the shared watch of a node asks its agent while a client follows it, in milliseconds. 1000 to 600000, default 5000. Chart: `hub.mcp.pollMs`.
+- `FILEDECK_MCP_SESSIONS_PER_GRANT`: most open sessions of one grant, 1 to 256, default 32. At the limit a new session ends the session of that grant that made no request for the longest time. Chart: `hub.mcp.sessionsPerGrant`.
+- `FILEDECK_MCP_ALLOWED_HOSTS`: host names (host or host:port, separated by commas) that the MCP listener answers to. Any other `Host` header gets 421. Empty (the default) means any host. It is not `FILEDECK_ALLOWED_HOSTS`: clients in the cluster use the name of the Service. The `Origin` check stays on. Chart: `hub.mcp.allowedHosts`.
+
+With `FILEDECK_MCP_PORT` set and no way to start the listener (no grants file, no or invalid TLS files), the hub logs the reason and exits with code 2. It does not run on without MCP.

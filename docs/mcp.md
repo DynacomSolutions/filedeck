@@ -30,17 +30,21 @@ Everything a client needs to find the server is a setting of the hub. There is n
 | TLS | `FILEDECK_MCP_TLS_CERT` and `FILEDECK_MCP_TLS_KEY` (PEM files). Chart: `hub.mcp.tls.secretName`, a `kubernetes.io/tls` Secret. |
 | Default account | `FILEDECK_MCP_ACCOUNT` (chart: `hub.mcp.account`). Sign-in on only. A grant may name its own account. |
 | Poll interval | `FILEDECK_MCP_POLL_MS` (chart: `hub.mcp.pollMs`, default 5000, 1000 to 600000) |
+| Sessions for each grant | `FILEDECK_MCP_SESSIONS_PER_GRANT` (chart: `hub.mcp.sessionsPerGrant`, default 32, 1 to 256) |
+| Allowed hosts | `FILEDECK_MCP_ALLOWED_HOSTS` (chart: `hub.mcp.allowedHosts`): host names, separated by commas. Empty (the default) means any host. It is not `FILEDECK_ALLOWED_HOSTS`. |
 | Chart switch | `hub.mcp.enabled` (default `false`) |
 | Allowed clients | `hub.mcp.allowFrom`: a list of NetworkPolicy peers. Empty (the default) means no peer can reach the port. |
 | Plain HTTP | `FILEDECK_MCP_ALLOW_PLAINTEXT=1`. For tests only. The chart has no value for it. |
 
 The server never uses the port of the file API and never appears in the public route. The Service has a port named `mcp`, and a NetworkPolicy lets only `hub.mcp.allowFrom` reach it. That policy is made whenever `hub.mcp.enabled` is true. It does not close the other hub ports.
 
-The listener does not start, and the hub runs on without MCP, in these cases. Each case writes one log line that names the missing setting.
+With `FILEDECK_MCP_PORT` set, the hub runs the MCP server or it stops. The hub does not run on without it: the probes of the chart ask the MCP port, so a hub without the listener would fail them and Kubernetes would restart the pod again and again. The hub writes one log line that names the reason, then one line that says that the MCP server cannot start, and then it exits with code 2. A rollout then stops with the old pod still serving. These are the cases:
 
 - `FILEDECK_MCP_GRANTS_FILE` is not set, or the file is not valid JSON at start. The listener never runs without a way to check a token.
 - There is no TLS certificate and `FILEDECK_MCP_ALLOW_PLAINTEXT` is not `1`. The listener never serves plain HTTP.
-- The certificate or key file cannot be read.
+- The certificate or key file cannot be read, is empty, or is not a valid PEM pair.
+
+Without `FILEDECK_MCP_PORT` the MCP server is off and the hub starts as before.
 
 A grants file with no grants is valid. The listener then answers 401 to every request.
 
@@ -50,16 +54,18 @@ A grants file with no grants is valid. The listener then answers 401 to every re
 - MCP protocol versions 2025-11-25 and 2025-06-18 are tested. The server answers with the version that the client asks for when it knows that version.
 - One endpoint, `/mcp`. `POST` sends a request, a notification or a response. `GET` opens the stream for notifications from the server. `DELETE` ends the session. `PUT` and the other methods answer 405.
 - The first request must be `initialize`. The answer has the header `Mcp-Session-Id`. The client sends that header on every other request, with the same token. An unknown session id answers 404, and the client then starts again with `initialize`.
-- A request body has at most 4 MiB. A hub holds at most 256 sessions and a session at most 256 subscriptions. A session with no request and no open stream for 15 minutes ends.
-- The listener answers an `Origin` header only when it names the same host as the `Host` header. Clients that are not browsers send none. With `FILEDECK_ALLOWED_HOSTS` set, any other `Host` answers 421.
+- A request body has at most 4 MiB. A hub holds at most 256 sessions, a grant at most `FILEDECK_MCP_SESSIONS_PER_GRANT` (default 32), and a session at most 256 subscriptions. A session with no request and no open stream for 15 minutes ends.
+- When a grant is at its limit, a new `initialize` ends the session of that grant that made no request for the longest time (`filedeck_mcp_sessions_closed_total{reason="evicted"}`). An open event stream does not count as a request. The client of that session gets 404 and starts again. One grant cannot fill the hub.
+- A stream that holds more than 1 MiB that the client has not read ends its session (reason `error`). The client connects again and does a [baseline read](#gaps-baseline-reads).
+- The listener answers an `Origin` header only when it names the same host as the `Host` header. Clients that are not browsers send none. With `FILEDECK_MCP_ALLOWED_HOSTS` set, any other `Host` answers 421. Clients in the cluster use the name of the Service, so list it, or leave the setting empty. The Origin check stays on in both cases.
 
 | Status | Meaning |
 |---|---|
 | 401 | The token is missing or matches no grant. The header `WWW-Authenticate: Bearer realm="filedeck-mcp"` is set. |
 | 403 | Sign-in is on and the grant has no account. Or the `Origin` is foreign. Or the session belongs to another grant. |
 | 404 | Unknown session id, or an unknown path. |
-| 421 | The `Host` is not in `FILEDECK_ALLOWED_HOSTS`. |
-| 503 | The server drains (see [Rollout](#rollout-and-drain)). The header `Retry-After` is set. |
+| 421 | The `Host` is not in `FILEDECK_MCP_ALLOWED_HOSTS`. |
+| 503 | The server drains (see [Rollout](#rollout-and-drain)), or the hub holds 256 sessions. The header `Retry-After` is set. |
 
 ## Grants
 
@@ -72,7 +78,7 @@ The grants file is a JSON array. The chart writes it from `hub.mcp.grants` into 
   {
     "id": "ops-reader",
     "tokenFile": "/var/run/filedeck/mcp/ops-reader/token",
-    "resources": ["filedeck://nodes/web1/", "filedeck://nodes/{node}/status"],
+    "resources": ["filedeck://nodes/web1/", "filedeck://nodes/web2/status"],
     "tools": ["filedeck_du", "filedeck_scan_status"],
     "account": "svc-mcp"
   }
@@ -89,16 +95,18 @@ The grants file is a JSON array. The chart writes it from `hub.mcp.grants` into 
 
 Scope rules:
 
-- A resource entry with `{name}` parts is a URI template: each part matches one path segment, and the whole URI must match. Any other entry is a prefix. `filedeck://nodes/web1/` gives every resource of `web1`, and `filedeck://` gives everything. Write the slash at the end of a prefix: `filedeck://nodes/web1` also matches `filedeck://nodes/web10/status`.
-- A tool that takes a `node` argument works only for nodes that the grant names: a node is named when some entry matches one of `filedeck://nodes/{node}/status`, `.../scans` or `.../jobs`. Another node gives a tool error that starts with `forbidden`.
+- A resource entry has one of three forms. With `{name}` parts it is a URI template: each part matches one path segment, and the whole URI must match. With a slash at the end it is a prefix: it matches every URI that starts with it. Any other entry is one URI and matches only that URI. `filedeck://nodes/web1/` gives every resource of `web1`, `filedeck://nodes` gives the node list and nothing below it, and `filedeck://` gives everything.
+- A node is named by the grant when some entry matches `filedeck://nodes/<node>/`: a prefix such as `filedeck://nodes/web1/` or `filedeck://nodes/`, or a template such as `filedeck://nodes/{node}/`. An entry for one resource of a node (`filedeck://nodes/web2/status`, `.../scans` or `.../jobs`) lets the session read and follow that resource only. It does not name the node.
+- A tool that takes a `node` argument works only for nodes that the grant names. Another node gives a tool error that starts with `forbidden`. In the example above, the tools work on `web1`. The grant can read the status resource of `web2`, but no tool works on `web2`.
 - A tool with no `node` argument works on the nodes that the grant names. `filedeck_nodes` lists only those nodes, and lists the network sources only when the grant can read `filedeck://nodes`. `filedeck_storage_groups` without `node` needs a grant for every node. The hub's own operations (`hub` as a node) need `filedeck://hub/jobs` in the grant.
-- A job is visible when its node is. `filedeck_job_get` gives `not found` for a job of another node.
+- A job is visible when its node is named by the grant. `filedeck_job_get` gives `not found` for a job of another node. The server asks only the nodes of the grant, so it never reads a job of another node. A job id has 1 to 128 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. Any other id is not found.
 
 What a client sees is the same as what it may use:
 
 - `tools/list` holds only the tools that the grant names. A tool that is not named does not exist for that session: a call gets the SDK answer "not found".
 - `resources/list` and `resources/templates/list` hold only the resources and templates that the grant can read.
 - `resources/read` and `resources/subscribe` of a URI outside the grant give the JSON-RPC error `-32602` with a message that starts with `forbidden`.
+- `resources/read` of a node or a job that does not exist, or that the grant does not name, gives the JSON-RPC error `-32002` (resource not found) with a message that starts with `not found`.
 - A notification is sent only for a URI that the session subscribed to, so a grant never gets an event about a resource outside it.
 
 Revocation. The hub reads the grants file and every token file again every 2 seconds. When a grant is removed, when its token file is removed or changes, or when its scope or account changes, the hub:
@@ -106,7 +114,7 @@ Revocation. The hub reads the grants file and every token file again every 2 sec
 1. stops accepting its old token (a request with it gets 401), and
 2. closes every open session of that grant, with its subscriptions and its watches (`filedeck_mcp_sessions_closed_total{reason="revoked"}`).
 
-The client of a revoked session gets 404 on its next request and must open a new session with its new token. A grants file that is not valid JSON at a reload changes nothing: a half-written file never revokes everyone. A grant whose token file cannot be read, or has fewer than 16 characters, is off until the file is good.
+A request with a token that no grant has now gets 401. This is the token of a removed grant and the old token of a changed grant. A session that was open when its grant was revoked is closed, and its id gets 404. The client must open a new session with its new token. A session that opens in the moment of the revocation is closed at once. A grants file that is not valid JSON at a reload changes nothing: a half-written file never revokes everyone. A grant whose token file cannot be read, or has fewer than 16 characters, is off until the file is good.
 
 No restart is needed. With the chart, editing a token Secret or the grants ConfigMap takes effect when the kubelet refreshes the mounted file (about a minute). Removing a grant from `hub.mcp.grants` with Helm also changes the volumes of the hub pod, so Helm rolls the hub too. The grant is revoked in both ways.
 
@@ -334,7 +342,7 @@ Compare revisions for equality only. The number is not a counter: it is the larg
 |---|---|---|
 | `job` | object | The [job](#job). |
 
-An unknown id gives the JSON-RPC error "not found". A job that the agent or the hub no longer lists gives the same error.
+An unknown id gives the JSON-RPC error `-32002` (resource not found). A job that the agent or the hub no longer lists gives the same error. So does a job of a node that the grant does not name.
 
 ### Job
 
@@ -358,7 +366,7 @@ The server declares the capabilities `resources.subscribe` and `resources.listCh
 
 ### Subscribe
 
-`resources/subscribe` with a `uri` follows one resource. The URI must be one of the URIs above for a node or a job that exists. Any other URI gives the JSON-RPC error `-32602` (unknown resource, unknown node or unknown job). The answer comes when the server knows the current state, so a change after the answer is never missed. Subscribing again to the same URI is not an error. `resources/unsubscribe` ends it, and it is not an error to unsubscribe from a URI that was never subscribed.
+`resources/subscribe` with a `uri` follows one resource. The URI must be one of the URIs above for a node or a job that exists. Any other URI gives the JSON-RPC error `-32602` (unknown resource, unknown node or unknown job). A job counts as unknown when its node is not named by the grant: the hub searches only the nodes of the grant, so it never reads, polls or announces a job of another node. The answer comes when the server knows the current state, so a change after the answer is never missed. Subscribing again to the same URI is not an error. `resources/unsubscribe` ends it, and it is not an error to unsubscribe from a URI that was never subscribed.
 
 ### `notifications/resources/updated`
 
@@ -403,7 +411,7 @@ How fast: the hub reads each followed node every `FILEDECK_MCP_POLL_MS` (default
 
 A session gets this notification after its first `resources/list`. A session that never listed gets none. The params hold `_meta.filedeck = {eventId, revision, uri}` as above. For this notification `uri` is the fixed value `filedeck://resources` (the list itself, not a resource that can be read), and `revision` is the revision of the list: it changes when the set of job resources changes.
 
-It covers the answer of `resources/list`. That list holds the fixed resources that the grant can read (`filedeck://nodes`, `filedeck://hub/jobs` and the `status`, `scans` and `jobs` resource of each node, which change only with the hub's settings) and `filedeck://jobs/{id}` for each job that the hub knows now and the grant can read (at most 200). The notification fires when a job appears or goes in any node or in the hub's operations that the session can see. It does not fire for a state change of a job. The list of templates never changes.
+It covers the answer of `resources/list`. That list holds the fixed resources that the grant can read (`filedeck://nodes`, `filedeck://hub/jobs` and the `status`, `scans` and `jobs` resource of each node, which change only with the hub's settings) and `filedeck://jobs/{id}` for each job that the hub knows now and the grant can read (at most 200). The notification fires when a job appears or goes in any node or in the hub's operations that the session can see. It does not fire for a state change of a job. A session gets it only for a node or for the hub's operations that its grant names. The list of templates never changes.
 
 After the notification, call `resources/list` again.
 
@@ -442,7 +450,7 @@ Subscriptions belong to the session. They do not survive the end of a session: a
 
 ### Shared watch
 
-The hub does not start a poll for each session. For each node there is at most one shared watch. It starts when the first session follows the node (a subscription, or a `resources/list` that returned) and it stops when the last session leaves. The hub's own operations have one shared watch in the same way. While no session follows, the hub asks no agent for anything.
+The hub does not start a poll for each session. For each account and node there is at most one shared watch (sessions of grants with the same account share it). It starts when the first session follows the node (a subscription, or a `resources/list` that returned) and it stops when the last session leaves. The hub's own operations have one shared watch in the same way. While no session follows, the hub asks no agent for anything.
 
 ## Change events tool
 
@@ -499,7 +507,7 @@ The MCP server adds these lines to the hub metrics, on the hub metrics port (`hu
 | `filedeck_mcp_watched_nodes` | gauge | | Sources (nodes and the hub's operations) with a running shared watch. |
 | `filedeck_mcp_draining` | gauge | | 1 while the server drains. |
 | `filedeck_mcp_sessions_opened_total` | counter | `grant` | Sessions opened. |
-| `filedeck_mcp_sessions_closed_total` | counter | `grant`, `reason` | `client`, `idle`, `drain`, `revoked` or `error`. |
+| `filedeck_mcp_sessions_closed_total` | counter | `grant`, `reason` | `client`, `idle`, `drain`, `revoked`, `evicted` (the grant was at its limit of sessions) or `error`. |
 | `filedeck_mcp_notifications_total` | counter | `grant`, `kind` | `resource_updated` or `list_changed`. |
 | `filedeck_mcp_tool_calls_total` | counter | `grant`, `tool`, `outcome` | `ok` or `error`. |
 | `filedeck_mcp_tool_duration_seconds` | histogram | `grant`, `tool` | Duration of a tool call. |
@@ -509,9 +517,9 @@ The MCP server adds these lines to the hub metrics, on the hub metrics port (`hu
 
 ## Rollout and drain
 
-- Liveness: `GET /mcp/healthz` answers 200 while the MCP listener accepts requests and the hub's own listener answers on loopback. It stays 200 during a drain, so a drain is not a restart.
+- Liveness: `GET /mcp/healthz` answers 200 while the MCP listener accepts requests and the hub's own listener answers on loopback. On a connection that is open during a drain it still answers 200.
 - Readiness: `GET /mcp/readyz` answers 200 while the server takes new sessions. It answers 503 from the first moment of a drain. With the chart, `hub.mcp.enabled` makes the hub pod use these two paths as its readiness and liveness probes, with the scheme `HTTPS`.
-- Drain, on `SIGTERM`: the server fails readiness, answers `initialize` and every new request with 503 and `Retry-After`, lets the tool calls in flight finish (at most 4 seconds), and then closes every session and its streams. Then the hub stops as it does without MCP. A client that sees its stream end reconnects and follows the procedure in [Gaps: baseline reads](#gaps-baseline-reads).
+- Drain, on `SIGTERM`: the listener closes, so a new connection is refused. A request on a connection that is still open (keep-alive) gets 503 with `Retry-After`, and so does `initialize`. The server lets every tool call in flight finish and then closes every session and its streams. The drain has no timer and no time limit: it waits until no call is in flight. The grace period of the pod (`terminationGracePeriodSeconds`) is the only limit, and it ends the process. The timers of the hub's own shutdown start when the MCP drain ends. Then the hub stops as it does without MCP. A client that sees its stream end reconnects and follows the procedure in [Gaps: baseline reads](#gaps-baseline-reads).
 
 ## Adding a module
 

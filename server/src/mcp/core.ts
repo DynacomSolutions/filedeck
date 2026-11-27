@@ -32,6 +32,8 @@ export const URI = {
 
 const NODE_URI = /^filedeck:\/\/nodes\/([^/]+)\/(status|scans|jobs)$/;
 const JOB_URI = /^filedeck:\/\/jobs\/([^/]+)$/;
+/** A job id as the agents make it. The id goes into a request path, so nothing else is asked. */
+const JOB_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_LISTED_JOBS = 200;
 
 export interface CoreOptions {
@@ -53,6 +55,10 @@ const scansKey = (state: string, view: StatusView | undefined, scans: Iterable<J
 const jobOneKey = (j: JobSummary) => JSON.stringify([j.state, j.error ?? null]);
 /** A virtual resource for the revision of `resources/list` (it has no body). */
 export const LIST_URI = "filedeck://resources";
+
+/** JSON-RPC code of the MCP specification for a resource that does not exist (`resources/read`). */
+export const RESOURCE_NOT_FOUND = -32002;
+const notFound = (what: string) => new McpError(RESOURCE_NOT_FOUND, `not found: ${what}`);
 
 const denied = (what: string) => new McpError(ErrorCode.InvalidParams, `forbidden: ${what} is outside the grant`);
 
@@ -129,7 +135,8 @@ class AudienceCore {
     }
     const audience = this.o.audience;
     for (const [uri, list] of batch) sink.updated({ uri, revision: this.revisionOf(uri), events: list, audience });
-    if (listChanged) sink.listChanged({ revision: this.revisionOf(LIST_URI), audience });
+    // only a session that may see this source hears that its list of jobs changed
+    if (listChanged) sink.listChanged({ revision: this.revisionOf(LIST_URI), audience, allows: (s) => this.allowed(s).includes(key) });
   }
 
   // ---- interest ----
@@ -182,21 +189,27 @@ class AudienceCore {
     return key === undefined ? this.book.stamp(uri, this.book.keyOf(uri) ?? "unknown").revision : this.book.stamp(uri, key).revision;
   }
 
-  async follow(uri: string, _s?: McpSession): Promise<McpRelease | null> {
+  async follow(uri: string, s: McpSession): Promise<McpRelease | null> {
     let watches: SourceWatch[];
     if (uri === URI.nodes) watches = this.o.nodes.map((n) => this.watches.get(n)!);
-    else if (uri === URI.hubJobs) watches = [this.watches.get(HUB_KEY)!];
-    else {
+    else if (uri === URI.hubJobs) {
+      if (!s.scope.allowsHubJobs) throw denied(uri);
+      watches = [this.watches.get(HUB_KEY)!];
+    } else {
       const n = NODE_URI.exec(uri);
       const j = JOB_URI.exec(uri);
       if (n) {
+        // the grant names this URI (the server checked it), and it names this one node
         const node = decodeURIComponent(n[1]!);
         const w = this.watches.get(node);
         if (!w || node === HUB_KEY) throw new ToolError(`unknown node: ${node}`);
+        if (!s.scope.allowsResource(uri)) throw denied(uri);
         watches = [w];
       } else if (j) {
-        const found = await this.findJob(decodeURIComponent(j[1]!));
-        if (!found) throw new ToolError(`unknown job: ${decodeURIComponent(j[1]!)}`);
+        // only the sources of the grant are searched: a job of another node is "unknown", as if it did not exist, and no watch of it starts
+        const id = decodeURIComponent(j[1]!);
+        const found = await this.findJob(id, undefined, undefined, this.allowed(s));
+        if (!found) throw new ToolError(`unknown job: ${id}`);
         watches = [this.watches.get(found.node)!];
       } else return null;
     }
@@ -207,9 +220,10 @@ class AudienceCore {
 
   // ---- reads ----
 
-  /** A job by id: from the running watches first, else asked of every source. */
-  async findJob(id: string, only?: string, signal?: AbortSignal): Promise<JobSummary | undefined> {
-    const keys = only ? [only] : [...this.watches.keys()];
+  /** A job by id: from the running watches first, else asked of every source (`among`: only these sources, the sources of a grant). */
+  async findJob(id: string, only?: string, signal?: AbortSignal, among?: readonly string[]): Promise<JobSummary | undefined> {
+    if (!JOB_ID.test(id)) return undefined;
+    const keys = (only ? [only] : [...this.watches.keys()]).filter((k) => !among || among.includes(k));
     for (const k of keys) {
       const hit = this.watches.get(k)?.snapshot.jobs?.get(id);
       if (hit) return hit;
@@ -375,7 +389,7 @@ class AudienceCore {
       output: { job },
     }, async (a, signal) => {
       if (a.node !== undefined && a.node !== HUB_KEY) nodeOk(a.node);
-      const j = await this.findJob(a.id, a.node, signal);
+      const j = await this.findJob(a.id, a.node, signal, this.allowed(session));
       // a job of a source that the grant does not name is reported as not found
       if (!j || (j.node === HUB_KEY ? !scope.allowsHubJobs : !scope.allowsNode(j.node))) throw new ToolError(`not found: job ${a.id}`);
       return { job: j as unknown as Record<string, unknown> };
@@ -493,7 +507,12 @@ class AudienceCore {
       resources: this.o.nodes.map((n) => ({ uri: make(n), name: `${n} ${what}`, mimeType: "application/json" })).filter((r) => scope.allowsResource(r.uri)),
     });
     const complete = { node: async (v: string) => this.o.nodes.filter((n) => n.startsWith(v) && scope.allowsNode(n)) };
-    const nodeOfUri = (v: string | string[] | undefined) => this.knownNode(decodeURIComponent(String(v)));
+    // an unknown node in a resource URI is "resource not found" (-32002), not an internal error
+    const nodeOfUri = (v: string | string[] | undefined) => {
+      const node = decodeURIComponent(String(v));
+      if (!this.o.nodes.includes(node)) throw notFound(`node ${node}`);
+      return node;
+    };
     const template = (pattern: string, list: ResourceTemplate extends never ? never : ConstructorParameters<typeof ResourceTemplate>[1]) => new ResourceTemplate(pattern, list);
 
     if (scope.allowsResource(URI.nodes))
@@ -541,8 +560,8 @@ class AudienceCore {
       }), { title: "Job", mimeType: "application/json" }, async (uri, v, extra) => {
         guard(uri.href);
         const id = decodeURIComponent(String(v.id));
-        const j = await this.findJob(id, undefined, extra.signal);
-        if (!j || (j.node === HUB_KEY ? !scope.allowsHubJobs : !scope.allowsNode(j.node))) throw new ToolError(`not found: job ${id}`);
+        const j = await this.findJob(id, undefined, extra.signal, this.allowed(session));
+        if (!j) throw notFound(`job ${id}`);
         return this.resource(uri.href, jobOneKey(j), { job: j });
       });
   }
