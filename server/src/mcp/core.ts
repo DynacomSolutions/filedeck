@@ -82,6 +82,8 @@ class AudienceCore {
   private readonly watches = new Map<string, SourceWatch>();
   private readonly o: AudienceOptions;
   private readonly book = new RevisionBook();
+  /** Counts the notices that had no key to compare (see `revisionOf`). */
+  private unknownSeq = 0;
 
   constructor(o: AudienceOptions) {
     this.o = o;
@@ -176,10 +178,11 @@ class AudienceCore {
     const n = NODE_URI.exec(uri);
     if (n) {
       const snap = this.watches.get(decodeURIComponent(n[1]!))?.snapshot;
+      // the status of a node does not depend on its job list: a node whose job list never answers still has a status key
+      if (n[2] === "status") return snap?.status && statusDigest(snap.status);
       if (!snap?.jobs) return undefined;
       if (n[2] === "jobs") return jobKey(snap.jobs.values());
       if (!snap.status) return undefined;
-      if (n[2] === "status") return statusDigest(snap.status);
       return scansKey(snap.status.state, snap.status, [...snap.jobs.values()].filter((j) => SCAN_KINDS.has(j.kind)));
     }
     const j = JOB_URI.exec(uri);
@@ -196,8 +199,8 @@ class AudienceCore {
 
   /** The revision of a resource after a change: stamped from the watches' state, as a read stamps it from its own. */
   private revisionOf(uri: string): number {
-    const key = this.snapKey(uri);
-    return key === undefined ? this.book.stamp(uri, this.book.keyOf(uri) ?? "unknown").revision : this.book.stamp(uri, key).revision;
+    // a notice announces a change: with no key to compare, it gets a new unique key, so it never repeats the revision (and the event id) of an earlier notice
+    return this.book.stamp(uri, this.snapKey(uri) ?? `unknown:${++this.unknownSeq}`).revision;
   }
 
   async follow(uri: string, s: McpSession): Promise<McpRelease | null> {

@@ -197,3 +197,21 @@ test("a stream has an id and a count from 1; a new stream has a new id; notices 
   assert.equal("missed" in f3, false);
   two.stop();
 });
+
+test("status notices of a node whose job list never answers have one event id each", async (t) => {
+  const b = await boot();
+  t.after(() => b.close());
+  b.agent.state.fail.add("/api/jobs");
+  const c = await b.connect();
+  await c.client.subscribeResource({ uri: "filedeck://nodes/n/status" });
+  for (const running of [false, true, false]) {
+    const n0 = c.updated.length;
+    b.agent.state.watcherRunning = running;
+    await until(() => c.updated.length > n0, 5000);
+  }
+  await sleep(300);
+  const ids = c.updated.filter((u) => u.uri === "filedeck://nodes/n/status").map((u) => u._meta!.filedeck!);
+  assert.equal(ids.length, 3);
+  assert.equal(new Set(ids.map((x) => x.eventId)).size, 3, "three changes, three event ids");
+  assert.equal(new Set(ids.map((x) => x.revision)).size, 3);
+});
