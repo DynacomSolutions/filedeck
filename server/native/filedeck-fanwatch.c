@@ -2,6 +2,8 @@
  * filedeck-fanwatch: print every entry that changed on the given filesystems, one line each.
  *
  *   filedeck-fanwatch PATH...        PATH = any path on a local filesystem; the whole filesystem is watched
+ *                                    Give every mount point that shows the filesystem (bind mounts too): an entry is reported
+ *                                    under each of them that shows it (see "Mounts" below).
  *
  * Needs CAP_SYS_ADMIN (fanotify filesystem marks) and CAP_DAC_READ_SEARCH (open_by_handle_at). Linux 5.9 or newer;
  * 5.17 or newer gives the full output (FAN_RENAME and FAN_REPORT_TARGET_FID). No dependencies;
@@ -26,7 +28,23 @@
  * Messages go to stderr. Exit status: 0 stdout closed, 1 usage or runtime error, 2 not permitted
  * (missing capability), 3 not supported (old kernel, or no filesystem could be marked).
  *
- * Directory paths come from open_by_handle_at and are kept in a cache (fsid and handle to path), so most events
+ * Mounts: one filesystem can be shown at many places (the mount of the whole filesystem and bind mounts of some of its
+ * folders). A mount has a root: the folder of the filesystem that it shows ("/" for the whole filesystem; field 4 of
+ * /proc/self/mountinfo, found with the mount id that name_to_handle_at gives for the PATH). The filesystem is marked once. The
+ * helper knows each event's place in the filesystem ("rel", for example /repositories/.data/org/x), and reports it under every
+ * given mount whose root is a path prefix of rel (whole path segments), as MOUNTPOINT + rel without the root. An entry that two
+ * mounts show gives one line for each, one after the other. An entry that no given mount shows is not reported (counted as
+ * "unresolved"). A move gives R where both places are shown by a mount, D where only the old place is, C where only the new one is.
+ *
+ * Finding rel: open_by_handle_at(MOUNTFD, handle) gives a descriptor of the folder whatever the mount fd shows. Measured on a real
+ * kernel (tmpfs, 7.x, bind mounts of /data/one and /data/two): readlink(/proc/self/fd/N) gives the mount point plus the path below the
+ * root for a folder inside the root of that mount. For a folder outside the root (the other bind, or a folder that only the whole
+ * filesystem shows) the kernel cannot build a path through that mount, and it gives "/". So a path is taken only when it starts with
+ * the mount's own mount point (this refuses "/") and, for a root other than "/", fstat of the descriptor and stat of the path name the
+ * same inode. A mount that shows the whole filesystem (root "/") shows every folder, so it is tried first, then the others by the
+ * length of their root. rel is then the root plus the rest of the path.
+ *
+ * Directory paths come from open_by_handle_at and are kept in a cache (fsid and handle to rel), so most events
  * need no system call to learn their place. The cache is dropped as a whole when a folder is renamed. A folder
  * that is deleted leaves it alone: it had no children, and its handle never names another folder.
  * An event inside a folder that was removed before the event was read has no place to name and is not reported
@@ -80,7 +98,22 @@
 #define PEND_POLL_MS 250
 #define STATS_MS 5000
 
-static struct { int fsid[2]; int fd; } fss[MAXFS];
+/* A mount that is given on the command line: where it is (target, as this process sees it) and which folder of the filesystem it shows (root). */
+struct mnt {
+	char *target;
+	size_t tlen;
+	char *root; /* "/" or a path without a trailing "/" */
+	size_t rlen;
+	int fd;
+	const char *arg; /* the command line path: used to mark the filesystem and to name it in a message */
+	int id; /* mount id (name_to_handle_at, mountinfo field 1), -1 when unknown */
+};
+struct fsrec {
+	int fsid[2];
+	struct mnt *m; /* sorted: the root "/" first, then by the length of the root */
+	int nm;
+};
+static struct fsrec fss[MAXFS];
 static int nfs;
 
 /* ---- output: one buffer, written when it fills, when a batch of events ends and before a #sync answer ---- */
@@ -165,8 +198,162 @@ static void stats_emit(void) {
 
 static int find_fs(const int *fsid) {
 	for (int i = 0; i < nfs; i++)
-		if (fss[i].fsid[0] == fsid[0] && fss[i].fsid[1] == fsid[1]) return fss[i].fd;
+		if (fss[i].fsid[0] == fsid[0] && fss[i].fsid[1] == fsid[1]) return i;
 	return -1;
+}
+
+/* the suffix of rel that a mount shows ("" for its root itself, else "/..."), or NULL when the mount does not show rel. Whole path segments only. */
+static const char *mnt_shows(const struct mnt *m, const char *rel) {
+	if (m->rlen == 1) return rel[1] ? rel : "";
+	if (strncmp(rel, m->root, m->rlen) != 0 || (rel[m->rlen] != 0 && rel[m->rlen] != '/')) return NULL;
+	return rel + m->rlen;
+}
+
+/* the path of rel under one mount (mount point + suffix), 0, or -1 when the mount does not show rel or the path is too long */
+static int mnt_path(const struct mnt *m, const char *rel, char *dst, size_t cap) {
+	const char *suffix = mnt_shows(m, rel);
+	if (!suffix) return -1;
+	size_t n = m->tlen == 1 ? 0 : m->tlen, k = strlen(suffix);
+	if (n + k + 2 > cap) return -1;
+	memcpy(dst, m->target, n);
+	memcpy(dst + n, suffix, k + 1);
+	if (!dst[0]) { dst[0] = '/'; dst[1] = 0; } /* a mount at "/" and the root of it */
+	return 0;
+}
+
+/* mounts of one filesystem: the root "/" first (it shows every entry), then the shortest roots; the mount point breaks a tie */
+static int mnt_cmp(const void *x, const void *y) {
+	const struct mnt *a = x, *b = y;
+	if (a->rlen != b->rlen) return a->rlen < b->rlen ? -1 : 1;
+	return strcmp(a->target, b->target);
+}
+
+/* Report one entry under every mount of its filesystem that shows it. Nothing is reported when no mount does (counted as unresolved). */
+static int emit_vis(char kind, int isdir, const int *fsid, const char *rel) {
+	int fi = find_fs(fsid), n = 0;
+	char buf[PATH_MAX];
+	if (fi >= 0)
+		for (int i = 0; i < fss[fi].nm; i++)
+			if (mnt_path(&fss[fi].m[i], rel, buf, sizeof buf) == 0) { emit(kind, isdir, buf, NULL); n++; }
+	if (!n) n_unresolved++;
+	return n;
+}
+
+/* A move: R under a mount that shows both places, D under one that shows only the old place, C under one that shows only the new place. */
+static void emit_move(int isdir, const int *nfsid, const char *newrel, const int *ofsid, const char *oldrel) {
+	int fn = find_fs(nfsid), fo = find_fs(ofsid), n = 0;
+	char np[PATH_MAX], op[PATH_MAX];
+	if (fn < 0 || fn != fo) { /* (a rename never crosses filesystems: this is for a record that names two) */
+		emit_vis('C', isdir, nfsid, newrel);
+		emit_vis('D', isdir, ofsid, oldrel);
+		return;
+	}
+	for (int i = 0; i < fss[fn].nm; i++) {
+		int vn = mnt_path(&fss[fn].m[i], newrel, np, sizeof np) == 0, vo = mnt_path(&fss[fn].m[i], oldrel, op, sizeof op) == 0;
+		if (vn && vo) emit('R', isdir, np, op);
+		else if (vn) emit('C', isdir, np, NULL);
+		else if (vo) emit('D', isdir, op, NULL);
+		n += vn || vo;
+	}
+	if (!n) n_unresolved++;
+}
+
+/* a path that shows rel now, for a look at the entry itself: the first mount that shows it */
+static int first_path(const int *fsid, const char *rel, char *dst, size_t cap) {
+	int fi = find_fs(fsid);
+	if (fi < 0) return -1;
+	for (int i = 0; i < fss[fi].nm; i++)
+		if (mnt_path(&fss[fi].m[i], rel, dst, cap) == 0) return 0;
+	return -1;
+}
+
+/* ---- mounts: root and mount point of each mount, from /proc/self/mountinfo ---- */
+
+struct mi { int id; char *root; char *mp; };
+static struct mi *mis;
+static size_t nmis;
+
+/* "\040" and the like (the kernel writes a space, a tab, a line break and a backslash so) */
+static void mi_unescape(char *s) {
+	char *w = s;
+	for (; *s; s++) {
+		if (s[0] == '\\' && s[1] >= '0' && s[1] <= '3' && s[2] >= '0' && s[2] <= '7' && s[3] >= '0' && s[3] <= '7') {
+			*w++ = (char)(((s[1] - '0') << 6) | ((s[2] - '0') << 3) | (s[3] - '0'));
+			s += 3;
+		} else *w++ = *s;
+	}
+	*w = 0;
+}
+
+static void mi_load(void) {
+	FILE *f = fopen("/proc/self/mountinfo", "re");
+	if (!f) {
+		fprintf(stderr, "filedeck-fanwatch: cannot read /proc/self/mountinfo (%s): every mount is taken to show its whole filesystem\n", strerror(errno));
+		return;
+	}
+	char *line = NULL;
+	size_t cap = 0, capmis = 0;
+	while (getline(&line, &cap, f) > 0) {
+		int id, off = 0;
+		char *root = malloc(strlen(line) + 1), *mp = malloc(strlen(line) + 1);
+		/* id parent major:minor root mountpoint options ... (root and mountpoint hold no space: a space is written \040) */
+		if (root && mp && sscanf(line, "%d %*d %*d:%*d %s %s%n", &id, root, mp, &off) >= 3) {
+			if (nmis == capmis) {
+				capmis = capmis ? capmis * 2 : 256;
+				mis = realloc(mis, capmis * sizeof *mis);
+				if (!mis) { nmis = 0; free(root); free(mp); break; }
+			}
+			mi_unescape(root);
+			mi_unescape(mp);
+			mis[nmis++] = (struct mi){id, root, mp};
+		} else {
+			free(root);
+			free(mp);
+		}
+	}
+	free(line);
+	fclose(f);
+}
+
+static void mi_free(void) {
+	for (size_t i = 0; i < nmis; i++) { free(mis[i].root); free(mis[i].mp); }
+	free(mis);
+	mis = NULL;
+	nmis = 0;
+}
+
+/* Add a mount (an open directory of it) to a filesystem. 1 added, 0 that mount is in it already, -1 no memory or no usable path. */
+static int fs_add(struct fsrec *f, int fd, const char *arg, int id) {
+	for (int i = 0; id >= 0 && i < f->nm; i++)
+		if (f->m[i].id == id) return 0;
+	const struct mi *mi = NULL;
+	for (size_t i = 0; id >= 0 && i < nmis && !mi; i++)
+		if (mis[i].id == id) mi = &mis[i];
+	struct mnt *grown = realloc(f->m, (size_t)(f->nm + 1) * sizeof *f->m);
+	if (!grown) return -1;
+	f->m = grown;
+	struct mnt *m = &f->m[f->nm];
+	memset(m, 0, sizeof *m);
+	if (mi) {
+		m->target = strdup(mi->mp);
+		m->root = strdup(mi->root);
+	} else {
+		/* mount not known: it is taken to show the whole filesystem, under the path that the descriptor has now (what the older helper did) */
+		char link[64], p[PATH_MAX];
+		snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
+		ssize_t n = readlink(link, p, sizeof p - 1);
+		m->target = strdup(n > 0 ? (p[n] = 0, p) : arg);
+		m->root = strdup("/");
+	}
+	if (!m->target || !m->root) { free(m->target); free(m->root); return -1; }
+	m->tlen = strlen(m->target);
+	m->rlen = strlen(m->root);
+	if (!m->tlen || !m->rlen) { free(m->target); free(m->root); return -1; }
+	m->fd = fd;
+	m->arg = arg;
+	m->id = id;
+	f->nm++;
+	return 1;
 }
 
 /* ---- directory path cache: (fsid, handle) -> path, 4-way sets, the least recently used way is replaced ---- */
@@ -251,25 +438,46 @@ static void cache_clear(void) {
 	}
 }
 
-/* Path (as this process sees it) of the directory a file handle names, or -1 (gone, or not reachable). */
-static int resolve_open(int mfd, struct file_handle *fh, char *dst, size_t cap) {
+/*
+ * Place in the filesystem ("rel": "/" or a path from the filesystem's top) of the directory a file handle names, found through one mount,
+ * or -1 (gone, not reachable, or not inside that mount's root).
+ */
+static int resolve_open(const struct mnt *m, struct file_handle *fh, char *dst, size_t cap) {
 	n_opens++;
-	int fd = open_by_handle_at(mfd, fh, O_PATH | O_CLOEXEC);
+	int fd = open_by_handle_at(m->fd, fh, O_PATH | O_CLOEXEC);
 	if (fd < 0) return -1;
-	char link[64];
+	char link[64], p[PATH_MAX];
 	snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
-	ssize_t n = readlink(link, dst, cap - 1);
+	ssize_t n = readlink(link, p, sizeof p - 1);
+	int ok = n > 0;
+	if (ok) {
+		p[n] = 0;
+		if (n > 10 && !strcmp(p + n - 10, " (deleted)")) ok = 0;
+	}
+	/* the path must lie under the mount point of this mount (a folder outside the mount's root has no path through it) */
+	const char *sub = p;
+	if (ok && m->tlen > 1) {
+		ok = !strncmp(p, m->target, m->tlen) && (p[m->tlen] == 0 || p[m->tlen] == '/');
+		sub = p + m->tlen;
+	} else if (ok && !p[1]) sub = p + 1; /* a mount at "/", and its top */
+	if (ok && m->rlen > 1) { /* the path must be this very folder */
+		struct stat a, b;
+		ok = fstat(fd, &a) == 0 && stat(p, &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+	}
 	close(fd);
-	if (n <= 0) return -1;
-	dst[n] = 0;
-	if (n > 10 && !strcmp(dst + n - 10, " (deleted)")) return -1;
+	if (!ok) return -1;
+	size_t k = strlen(sub), r = m->rlen == 1 ? 0 : m->rlen;
+	if (r + k + 2 > cap) return -1;
+	memcpy(dst, m->root, r);
+	memcpy(dst + r, sub, k + 1);
+	if (!dst[0]) { dst[0] = '/'; dst[1] = 0; }
 	return 0;
 }
 
 static int resolve(const int *fsid, struct file_handle *fh, char *dst, size_t cap) {
 	if (fh->handle_bytes > FHMAX) return -1;
-	int mfd = find_fs(fsid);
-	if (mfd < 0) return -1;
+	int fi = find_fs(fsid);
+	if (fi < 0) return -1;
 	unsigned char key[KEYMAX];
 	size_t klen = key_make(key, fsid, fh);
 	const char *hit = cache_get(key, klen);
@@ -281,7 +489,9 @@ static int resolve(const int *fsid, struct file_handle *fh, char *dst, size_t ca
 		return 0;
 	}
 	n_misses++;
-	if (resolve_open(mfd, fh, dst, cap) < 0) return -1;
+	int found = 0;
+	for (int i = 0; i < fss[fi].nm && !found; i++) found = resolve_open(&fss[fi].m[i], fh, dst, cap) == 0;
+	if (!found) return -1;
 	cache_put(key, klen, dst);
 	return 0;
 }
@@ -293,7 +503,8 @@ struct thr {
 	long long last;
 	long long due; /* when the held report is made (0 = none held) */
 	int isdir;
-	char *path;
+	int fsid[2];
+	char *path; /* the entry's place in its filesystem */
 };
 static struct thr thr[THR_SLOTS];
 static int npend;
@@ -310,27 +521,28 @@ static void thr_flush(long long now, int force) {
 	for (int i = 0; i < THR_SLOTS && npend; i++) {
 		struct thr *t = &thr[i];
 		if (!t->due || (!force && t->due > now)) continue;
-		emit('M', t->isdir, t->path, NULL);
+		emit_vis('M', t->isdir, t->fsid, t->path);
 		t->last = now;
 		thr_release(t);
 	}
 }
 
 /* true when this modify is reported now; false when it is held (the report is made later by thr_flush) */
-static int thr_modify(uint64_t key, long long now, int isdir, const char *path) {
+static int thr_modify(uint64_t key, long long now, int isdir, const int *fsid, const char *path) {
 	struct thr *t = &thr[key % THR_SLOTS];
 	if (t->key == key && t->last && now - t->last < THROTTLE_MS) {
 		if (!t->due) {
 			t->path = strdup(path);
 			if (!t->path) return 1;
 			t->isdir = isdir;
+			memcpy(t->fsid, fsid, sizeof t->fsid);
 			t->due = t->last + THROTTLE_MS;
 			npend++;
 		}
 		return 0;
 	}
 	if (t->key != key && t->due) { /* another entry takes the slot: its held report is made first */
-		emit('M', t->isdir, t->path, NULL);
+		emit_vis('M', t->isdir, t->fsid, t->path);
 		thr_release(t);
 	}
 	if (t->due) thr_release(t); /* the window ended: this report takes the held one's place */
@@ -344,7 +556,7 @@ static void thr_emit(uint64_t key) {
 	if (!npend) return;
 	struct thr *t = &thr[key % THR_SLOTS];
 	if (t->key == key && t->due) {
-		emit('M', t->isdir, t->path, NULL);
+		emit_vis('M', t->isdir, t->fsid, t->path);
 		thr_release(t);
 	}
 }
@@ -388,7 +600,7 @@ static void rec_read(struct rec *r, const struct fanotify_event_info_header *h) 
 	r->name = name;
 }
 
-/* Full path of the entry a record names: its directory's path and the name ("." and "" mean the directory itself). */
+/* Place in its filesystem of the entry a record names: its directory's place and the name ("." and "" mean the directory itself). */
 static int rec_path(const struct rec *r, char *dst, size_t cap) {
 	if (!r->have) return -1;
 	if (resolve(r->fsid, r->fh, dst, cap) < 0) return -1;
@@ -448,16 +660,16 @@ static void handle(const struct fanotify_event_metadata *ev) {
 		if (isdir) cache_clear();
 		if (ok_new && ok_old) {
 			thr_emit(rec_key(&oldr));
-			emit('R', isdir, path, old);
-		} else if (ok_new) emit('C', isdir, path, NULL); /* moved in from outside what is watched */
-		else if (ok_old) emit('D', isdir, old, NULL);
+			emit_move(isdir, newr.fsid, path, oldr.fsid, old);
+		} else if (ok_new) emit_vis('C', isdir, newr.fsid, path); /* moved in from outside what is watched */
+		else if (ok_old) emit_vis('D', isdir, oldr.fsid, old);
 		else n_unresolved++;
 		return;
 	}
 	if (ev->mask & (FAN_MOVED_FROM | FAN_MOVED_TO)) { /* kernels without FAN_RENAME */
 		if (isdir) cache_clear();
 		if (rec_path(&dfid, path, sizeof path) < 0) { n_unresolved++; return; }
-		emit((ev->mask & FAN_MOVED_FROM) ? 'D' : 'C', isdir, path, NULL);
+		emit_vis((ev->mask & FAN_MOVED_FROM) ? 'D' : 'C', isdir, dfid.fsid, path);
 		return;
 	}
 	if (!(ev->mask & ENTRY_MASK)) return;
@@ -472,7 +684,7 @@ static void handle(const struct fanotify_event_metadata *ev) {
 			seen = cache_get(key, key_make(key, fid.fsid, fid.fh));
 		}
 		if (!seen) { n_unresolved++; return; }
-		emit('D', 1, seen, NULL);
+		emit_vis('D', 1, fid.fsid, seen);
 		return;
 	}
 	/*
@@ -484,11 +696,12 @@ static void handle(const struct fanotify_event_metadata *ev) {
 	int delete_first = 0;
 	if (created && deleted) {
 		struct stat st;
-		delete_first = fstatat(AT_FDCWD, path, &st, AT_SYMLINK_NOFOLLOW) == 0;
+		char here[PATH_MAX];
+		delete_first = first_path(dfid.fsid, path, here, sizeof here) == 0 && fstatat(AT_FDCWD, here, &st, AT_SYMLINK_NOFOLLOW) == 0;
 	}
-	if (delete_first) { thr_done(rec_key(&dfid)); emit('D', isdir, path, NULL); }
+	if (delete_first) { thr_done(rec_key(&dfid)); emit_vis('D', isdir, dfid.fsid, path); }
 	if (created) {
-		emit('C', isdir, path, NULL);
+		emit_vis('C', isdir, dfid.fsid, path);
 		/* a new folder: its place is known now, so its first event needs no lookup */
 		if (isdir && fid.have && cache_sets) {
 			unsigned char key[KEYMAX];
@@ -496,16 +709,16 @@ static void handle(const struct fanotify_event_metadata *ev) {
 			cache_put(key, klen, path);
 		}
 	}
-	if (ev->mask & FAN_ATTRIB) emit('A', isdir, path, NULL);
+	if (ev->mask & FAN_ATTRIB) emit_vis('A', isdir, dfid.fsid, path);
 	if (ev->mask & FAN_MODIFY) {
 		t = now_ms();
-		if (thr_modify(rec_key(&dfid), t, isdir, path)) emit('M', isdir, path, NULL);
+		if (thr_modify(rec_key(&dfid), t, isdir, dfid.fsid, path)) emit_vis('M', isdir, dfid.fsid, path);
 	}
 	if (ev->mask & FAN_CLOSE_WRITE) {
 		thr_done(rec_key(&dfid));
-		emit('W', isdir, path, NULL);
+		emit_vis('W', isdir, dfid.fsid, path);
 	}
-	if (deleted && !delete_first) { thr_done(rec_key(&dfid)); emit('D', isdir, path, NULL); }
+	if (deleted && !delete_first) { thr_done(rec_key(&dfid)); emit_vis('D', isdir, dfid.fsid, path); }
 }
 
 static int fail(int code, const char *msg, const char *arg) {
@@ -547,7 +760,9 @@ int main(int argc, char **argv) {
 	unsigned long long mask = BASE_MASK | FAN_RENAME;
 	caps_rename = 1;
 	int denied = 0;
-	for (int i = 1; i < argc && nfs < MAXFS; i++) {
+	mi_load();
+	/* every path becomes one mount of its filesystem (a path given twice, or two paths of one mount, count once) */
+	for (int i = 1; i < argc; i++) {
 		struct statfs sf;
 		int mfd = open(argv[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
 		if (mfd < 0 || fstatfs(mfd, &sf) < 0) {
@@ -558,36 +773,64 @@ int main(int argc, char **argv) {
 		}
 		int fsid[2];
 		memcpy(fsid, &sf.f_fsid, sizeof fsid);
-		if (find_fs(fsid) >= 0) { close(mfd); continue; }
-		/* is a handle of this path openable? (CAP_DAC_READ_SEARCH) */
-		struct file_handle *probe = malloc(sizeof *probe + 128);
+		int mid = -1;
+		struct file_handle *probe = malloc(sizeof *probe + FHMAX);
+		probe->handle_bytes = FHMAX;
+		if (name_to_handle_at(mfd, "", probe, &mid, AT_EMPTY_PATH) != 0 && errno != EOVERFLOW) mid = -1;
+		free(probe);
+		int fi = find_fs(fsid);
+		if (fi < 0 && nfs < MAXFS) {
+			fi = nfs++;
+			memcpy(fss[fi].fsid, fsid, sizeof fsid);
+		}
+		int added = fi < 0 ? -1 : fs_add(&fss[fi], mfd, argv[i], mid);
+		if (added < 0) emit('c', 0, argv[i], NULL);
+		if (added <= 0) close(mfd);
+	}
+	int kept = 0;
+	for (int i = 0; i < nfs; i++) {
+		struct fsrec *f = &fss[i];
+		if (!f->nm) continue;
+		qsort(f->m, (size_t)f->nm, sizeof *f->m, mnt_cmp);
+		/* is a handle of this filesystem openable? (CAP_DAC_READ_SEARCH) */
+		struct file_handle *probe = malloc(sizeof *probe + FHMAX);
 		int mount_id;
-		probe->handle_bytes = 128;
-		if (name_to_handle_at(mfd, "", probe, &mount_id, AT_EMPTY_PATH) == 0) {
-			int pfd = open_by_handle_at(mfd, probe, O_PATH | O_CLOEXEC);
+		probe->handle_bytes = FHMAX;
+		if (name_to_handle_at(f->m[0].fd, "", probe, &mount_id, AT_EMPTY_PATH) == 0) {
+			int pfd = open_by_handle_at(f->m[0].fd, probe, O_PATH | O_CLOEXEC);
 			if (pfd >= 0) close(pfd);
 			else if (errno == EPERM) denied = 1;
 		}
 		free(probe);
-		long rc = syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, AT_FDCWD, argv[i]);
-		if (rc < 0 && errno == EINVAL && caps_rename) {
-			/* no FAN_RENAME (kernel before 5.17): moves are reported as a delete and a create */
-			caps_rename = 0;
-			mask = (mask & ~(unsigned long long)FAN_RENAME) | FAN_MOVED_FROM | FAN_MOVED_TO;
-			fprintf(stderr, "filedeck-fanwatch: no FAN_RENAME: a move is reported as a delete and a create\n");
-			rc = syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, AT_FDCWD, argv[i]);
+		/* the filesystem is marked once, through the first mount that accepts it (the mount of the whole filesystem when there is one) */
+		int marked = 0;
+		for (int j = 0; j < f->nm && !marked; j++) {
+			long rc = syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, AT_FDCWD, f->m[j].arg);
+			if (rc < 0 && errno == EINVAL && caps_rename) {
+				/* no FAN_RENAME (kernel before 5.17): moves are reported as a delete and a create */
+				caps_rename = 0;
+				mask = (mask & ~(unsigned long long)FAN_RENAME) | FAN_MOVED_FROM | FAN_MOVED_TO;
+				fprintf(stderr, "filedeck-fanwatch: no FAN_RENAME: a move is reported as a delete and a create\n");
+				rc = syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, AT_FDCWD, f->m[j].arg);
+			}
+			if (rc == 0) marked = 1;
+			else {
+				if (errno == EPERM) denied = 1;
+				fprintf(stderr, "filedeck-fanwatch: cannot watch %s: %s\n", f->m[j].arg, strerror(errno));
+			}
 		}
-		if (rc < 0) {
-			if (errno == EPERM) denied = 1;
-			fprintf(stderr, "filedeck-fanwatch: cannot watch %s: %s\n", argv[i], strerror(errno));
-			emit('c', 0, argv[i], NULL);
-			close(mfd);
+		if (!marked) {
+			for (int j = 0; j < f->nm; j++) {
+				emit('c', 0, f->m[j].arg, NULL);
+				close(f->m[j].fd);
+			}
 			continue;
 		}
-		fss[nfs].fsid[0] = fsid[0];
-		fss[nfs].fsid[1] = fsid[1];
-		fss[nfs++].fd = mfd;
+		if (kept != i) fss[kept] = *f;
+		kept++;
 	}
+	nfs = kept;
+	mi_free();
 	if (denied) return fail(2, "not permitted: fanotify needs CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH", NULL);
 	if (!nfs) return fail(3, "no filesystem could be watched", NULL);
 	size_t cache_n = 16384;

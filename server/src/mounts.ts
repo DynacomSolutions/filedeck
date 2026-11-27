@@ -112,6 +112,55 @@ export async function readMountTable(root: string, procMounts: string): Promise<
   }
 }
 
+/** Fields 4 (root) and 5 (mount point) of one /proc/<pid>/mountinfo line, unescaped. */
+export function parseMountInfo(text: string): { mountpoint: string; fsroot: string }[] {
+  const out: { mountpoint: string; fsroot: string }[] = [];
+  for (const line of text.split("\n")) {
+    const f = line.split(" ");
+    if (f.length < 6) continue;
+    out.push({ fsroot: unescapeMount(f[3] as string), mountpoint: unescapeMount(f[4] as string) });
+  }
+  return out;
+}
+
+/**
+ * The folder of its filesystem that each mount shows (mountinfo "root": "/" for a mount of the whole filesystem, "/repositories/x" for a bind mount of that
+ * folder), by mount point, read next to the mount table `procMounts` (`.../mounts` has `.../mountinfo` beside it). Empty when it is not readable
+ * (a test's own mount file): every root is then unknown. Where two mounts have one mount point (one over the other), the later one is the one that shows.
+ */
+export async function readMountRoots(root: string, procMounts: string): Promise<Map<string, string>> {
+  const roots = new Map<string, string>();
+  const info = procMounts.endsWith("/mounts") ? procMounts.slice(0, -"mounts".length) + "mountinfo" : "";
+  if (!info) return roots;
+  let text = "";
+  try {
+    text = await fs.readFile(info, "utf8");
+  } catch {
+    if (root === "/" || procMounts !== `${root}/proc/1/mounts`) return roots;
+    try {
+      text = rebaseMountInfo(await fs.readFile(`${root}/proc/self/mountinfo`, "utf8"), root);
+    } catch {
+      return roots;
+    }
+  }
+  for (const m of parseMountInfo(text)) roots.set(m.mountpoint, m.fsroot);
+  return roots;
+}
+
+/** Like `rebaseMountTable`, for mountinfo text. */
+function rebaseMountInfo(text: string, root: string): string {
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    const f = line.split(" ");
+    if (f.length < 6) continue;
+    const mp = unescapeMount(f[4] as string);
+    if (mp !== root && !mp.startsWith(root + "/")) continue;
+    f[4] = (mp.slice(root.length) || "/").replace(/[\\ \t\n]/g, (c) => "\\" + c.charCodeAt(0).toString(8).padStart(3, "0"));
+    out.push(f.join(" "));
+  }
+  return out.join("\n");
+}
+
 export async function listMounts(root: string, procMounts: string): Promise<Mount[]> {
   const text = await readMountTable(root, procMounts);
   const res: Mount[] = [];
