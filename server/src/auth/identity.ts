@@ -88,8 +88,8 @@ export function verifyClaim(value: string, agentToken: string, now: number): Use
     if (!c || typeof c !== "object" || typeof c.iat !== "number" || !Number.isFinite(c.iat)) return null;
     if (c.kind !== "sys" && c.kind !== "virt") return null;
     if (typeof c.name !== "string" || typeof c.epoch !== "number") return null;
-    // act as root: only `true`, and never on a virtual account's claim
     if (c.admin !== undefined && c.admin !== true) return null;
+    // Only system accounts can set `asRoot`, and only to `true`.
     if (c.asRoot !== undefined && (c.asRoot !== true || c.kind !== "sys")) return null;
     // and its end, a number after the issue time, goes with it: neither without the other
     if ((c.asRoot === true) !== (c.asRootUntil !== undefined)) return null;
