@@ -106,7 +106,7 @@ export interface Config {
   /** hub: account the `filedeck du` API token acts as; unset = none */
   apiTokenAccount: string | undefined;
   /** hub: what the API token may read (FILEDECK_API_TOKEN_SCOPES, comma separated): `du` (folder sizes, the default) and `changes` (the change event stream) */
-  apiTokenScopes: string[];
+  apiScopes: string[];
   /** agent: path of the node-local Unix socket that serves change events (FILEDECK_EVENTS_SOCKET); empty = off. Its folder is made mode 0750 and the socket 0660 */
   eventsSocket: string;
   /** agent: group that may use the socket (a name or a number; FILEDECK_EVENTS_SOCKET_GROUP); empty = the process's own group */
@@ -327,7 +327,7 @@ export function loadConfig(env = process.env): Config {
     sessionIdleMs: Number(env.FILEDECK_SESSION_IDLE_SECONDS ?? 8 * 3600) * 1000,
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
-    apiTokenScopes: [...new Set((env.FILEDECK_API_TOKEN_SCOPES ?? "du").split(",").map((x) => x.trim()).filter(Boolean))],
+    apiScopes: [...new Set((env.FILEDECK_API_TOKEN_SCOPES ?? "du").split(",").map((x) => x.trim()).filter(Boolean))],
     eventsSocket: env.FILEDECK_EVENTS_SOCKET ?? "",
     eventsSocketGroup: env.FILEDECK_EVENTS_SOCKET_GROUP ?? "",
     eventsJournalBytes: Math.max(0, Number(env.FILEDECK_EVENTS_JOURNAL_BYTES ?? 2 * 1024 ** 3) || 0),
@@ -364,7 +364,7 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     agentToken: undefined,
     apiToken: undefined,
     apiTokenAccount: undefined,
-    apiTokenScopes: [],
+    apiScopes: [],
     eventsSocket: "",
     vaultKey: undefined,
     bootstrapAdminFile: undefined,

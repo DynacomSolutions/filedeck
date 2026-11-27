@@ -245,7 +245,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // editor saves are limited by the agent that takes them (its own maxEdit), not here
   app.use("*", requestGuard({ forward: true, allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
-  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined, cfg.apiTokenScopes));
+  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined, cfg.apiScopes));
   // System sign-in asks the agents in the sign-in order (auth/system.ts). Each call carries the agent token and nothing else of the
   // request: no user (nobody is signed in yet), no cookie, no client header; the body is built here.
   const signInCall = (node: string, rest: string, body: unknown, signal?: AbortSignal): Promise<Response> => {

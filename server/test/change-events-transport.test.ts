@@ -396,12 +396,12 @@ test("api token: the `changes` scope opens the change stream and nothing else; t
 
 test("config: scopes, socket, journal limits and label templates come from the environment, with safe defaults", () => {
   const c = loadConfig({ FILEDECK_MODE: "hub" } as never);
-  assert.deepEqual(c.apiTokenScopes, ["du"]);
+  assert.deepEqual(c.apiScopes, ["du"]);
   assert.equal(c.eventsSocket, "");
   assert.equal(c.eventsJournalBytes, 2 * 1024 ** 3);
   assert.equal(c.eventsJournalHours, 24);
   const d = loadConfig({ FILEDECK_API_TOKEN_SCOPES: " du , changes,du", FILEDECK_EVENTS_SOCKET: "/run/x/e.sock", FILEDECK_EVENTS_SOCKET_GROUP: "events", FILEDECK_EVENTS_JOURNAL_BYTES: "1000", FILEDECK_EVENTS_JOURNAL_HOURS: "2", FILEDECK_EVENTS_LABELS: "/srv/{a}" } as never);
-  assert.deepEqual(d.apiTokenScopes, ["du", "changes"]);
+  assert.deepEqual(d.apiScopes, ["du", "changes"]);
   assert.equal(d.eventsSocket, "/run/x/e.sock");
   assert.equal(d.eventsSocketGroup, "events");
   assert.equal(d.eventsJournalBytes, 1000);
