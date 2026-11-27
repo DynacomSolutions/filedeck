@@ -191,8 +191,8 @@ agent:
   # thumbCacheBytes / (2 x auth.workers.max) (at least 1 MiB), and a cache is emptied once its account's worker stops.
   thumbCacheBytes: "268435456"
   thumbCacheVolume: 512Mi
-  # Compare index: folders per agent that are kept under change watch (LRU, memory only: the watch is a table entry fed by the
-  # kernel change events when `fanotify` is on, not a kernel watch, so there is no kernel limit). A watched folder's listing is served
+  # Compare index: folders per agent that are kept under change watch (LRU). With `fanotify` on, a watch is a table entry in memory fed by the
+  # kernel change events (no kernel watch). Without it, or for a folder the kernel watcher does not cover, it is an fs.watch of the folder. A watched folder's listing is served
   # from the index (hostPath /var/lib/filedeck on the node) until it changes; others are re-read on every compare.
   indexWatches: 32768
   # Beyond the watch budget (or after a restart) a stored listing is reused while the folder's mtime is unchanged,

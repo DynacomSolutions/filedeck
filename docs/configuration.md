@@ -37,7 +37,7 @@ Agent settings. See [Change events](change-events.md).
 - `FILEDECK_EVENTS_SOCKET_GROUP`: the group of the folder and the socket, a name or a number. A number is safest, because a name is looked up in `/etc/group` of the container.
 - `FILEDECK_EVENTS_JOURNAL_BYTES` (default 2 GiB, 0 means the journal stays in memory) and `FILEDECK_EVENTS_JOURNAL_HOURS` (default 24): the journal keeps the smaller of the two limits. It is in `changes-<node>/` inside `FILEDECK_INDEX_DIR`. Chart values: `agent.events.journal.*`.
 - `FILEDECK_EVENTS_LABELS`: label templates, separated by line feeds, semicolons or commas. Example: `/srv/repos/{org}/{repo}`. The agent logs a bad template and makes no label. Chart value: `agent.events.labels`.
-- `FILEDECK_INDEX_WATCHES`: the folders that the compare index keeps under change watch (default 32768). A watch is a table entry in memory that the event bus feeds. It is not a kernel watch.
+- `FILEDECK_INDEX_WATCHES`: the folders that the compare index keeps under change watch (default 32768). With the fanotify helper on, a watch is a table entry in memory that the event bus feeds, not a kernel watch. For a folder that no kernel watcher covers, it is an `fs.watch` of the folder.
 
 Hub setting:
 

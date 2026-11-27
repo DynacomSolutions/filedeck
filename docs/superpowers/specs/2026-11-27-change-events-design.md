@@ -56,7 +56,7 @@ This design is approved by the owner. The user guide is [Change events](../../ch
 
 ### 6. FileDeck stops using inotify
 
-- The compare index asks the bus for folder changes while the watcher covers the folder. A watch is a table entry in memory, so no kernel watch is made. A `reset` or an `overflow` tells every watch that it may have missed something. Without the watcher the index uses the folder modification time, as before.
+- The compare index asks the bus for folder changes while the watcher covers the folder. A watch is a table entry in memory, so no kernel watch is made. A `reset` or an `overflow` tells every watch that it may have missed something. Where the watcher does not cover a folder, the index keeps one `fs.watch` for it, as before, and trusts a folder that it does not watch by its modification time for a limited time.
 - `GET /api/events` keeps its response shape. It follows the folder through the bus, with no `fs.watch` and no cap. It ends when the watcher stops, so the web app asks again.
 - macOS: the FSEvents watcher publishes its folder events to the bus as best effort.
 
@@ -67,8 +67,7 @@ This design is approved by the owner. The user guide is [Change events](../../ch
 
 ## Remaining limits
 
-- With sign-in on, each account's live feed runs in a worker process that has no bus. It uses the old bounded `fs.watch` set, and so does the compare index of that worker. Giving workers a feed from the root process needs a stream over the worker connection. This is a separate change.
-- Without the helper (no capability, an old kernel, macOS), `GET /api/events` keeps the bounded `fs.watch` fallback for folders that no kernel watcher covers.
+- The bounded `fs.watch` set stays as a fallback where no kernel watcher covers a folder. That is the case without the helper (the chart default has it off), for a folder on a network filesystem, and in the worker process of a signed-in account. A worker has no bus, and giving it a feed from the root process needs a stream over the worker connection. This is a separate change. When the helper is on and ready, FileDeck makes no inotify watch for the folders it covers.
 - An event inside a folder tree that was removed before the helper read the event cannot name its place. The removal of the folder is reported, and a counter shows the rest.
 - A paused helper (the size store is behind) leaves events in the kernel queue. The queue is unlimited when the kernel allows it.
 

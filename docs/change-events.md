@@ -215,5 +215,6 @@ connect();
 
 ## Fallbacks
 
-- No helper, no capability or an old kernel: the agent logs one line. Folder sizes and the compare index use the folder modification time, as before. `GET /api/events` (the live feed of the web app) uses a bounded set of per-folder watches for folders that no kernel watcher covers. With sign-in on, the live feed of a signed-in account runs in that account's worker process, and it uses this fallback.
-- The compare index follows folder changes through the event bus when the watcher runs. A watched folder is a table entry in memory, not a kernel watch. The setting `FILEDECK_INDEX_WATCHES` caps the table (default 32768).
+- No helper, no capability or an old kernel: the agent logs one line. Folder sizes use the folder modification time, as before.
+- The compare index and `GET /api/events` (the live feed of the web app) follow folder changes through the event bus while the kernel watcher covers the folder. A watched folder is then a table entry in memory, not a kernel watch. The setting `FILEDECK_INDEX_WATCHES` caps the table (default 32768).
+- For a folder that no kernel watcher covers, they use a bounded set of per-folder `fs.watch` watches, as before. This is the case without the helper (the chart default), on a network filesystem, and in the worker process of a signed-in account.

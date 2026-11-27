@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import * as ops from "./fsops.ts";
 import fs from "node:fs/promises";
+import { watch } from "node:fs";
 import path from "node:path";
 import { Semaphore, hashFile, walkTree, type WalkEntry, type WalkSummary } from "./walk.ts";
 import { IndexCache, spillPath, type DirReader, type IdxEntry } from "./index-cache.ts";
@@ -16,7 +17,9 @@ export interface FeedRef {
 
 /**
  * Directory reader for this machine: readdir + lstat in small batches; symlinks reported, never followed. Folder changes come from the event bus
- * (`feed`, when the kernel watcher covers the folder); without it the index checks a folder's modification time instead.
+ * (`feedRef.feed`, while the kernel watcher covers the folder): no watch of the kernel is made. Where it does not cover (no helper, an old kernel, a folder on
+ * a network filesystem, a worker process) the reader keeps one `fs.watch` for the folder as it did before; the index bounds how many (`maxWatches`), and
+ * a folder it does not watch is trusted by its modification time for a limited time.
  */
 export function localReader(root = "/", feedRef: FeedRef = {}): DirReader {
   const virtual = (p: string) => (root === "/" ? p : p === root ? "/" : p.startsWith(root + "/") ? p.slice(root.length) : null);
@@ -50,7 +53,11 @@ export function localReader(root = "/", feedRef: FeedRef = {}): DirReader {
     },
     watch(p, onChange) {
       const v = virtual(p);
-      return v === null ? null : (feedRef.feed?.watch(v, () => onChange(null)) ?? null);
+      const viaBus = v === null ? null : (feedRef.feed?.watch(v, () => onChange(null)) ?? null);
+      if (viaBus) return viaBus;
+      const w = watch(p, { persistent: false }, (_ev, name) => onChange(name ? String(name) : null));
+      w.on("error", () => w.close());
+      return () => w.close();
     },
   };
 }

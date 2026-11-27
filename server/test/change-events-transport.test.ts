@@ -18,6 +18,7 @@ import { startEventSocket } from "../src/events/socket.ts";
 import { isChangesPath } from "../src/events/guard.ts";
 import { agentError, registerFileRoutes } from "../src/agent-routes.ts";
 import { makeAgentJobs } from "../src/archive-routes.ts";
+import { localReader } from "../src/diff-routes.ts";
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "events-transport-")));
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -523,4 +524,35 @@ test("live change feed (/api/events): through the folder feed when the watcher c
   assert.equal(files.watches.size, 1, "the fallback watch");
   ctl2.abort();
   await r2.cancel().catch(() => {});
+});
+
+test("compare index reader: a folder is watched through the event bus while the watcher covers it, and by a watch of its own where it does not", async () => {
+  const root = dir();
+  fs.mkdirSync(path.join(root, "sub"));
+  const callbacks: (() => void)[] = [];
+  let covers = true;
+  const feed = {
+    watch(v: string, cb: () => void) {
+      if (!covers) return null;
+      assert.equal(v, "/sub", "the feed is asked with the agent's path, not the machine's");
+      callbacks.push(cb);
+      return () => void callbacks.splice(callbacks.indexOf(cb), 1);
+    },
+    alive: () => true,
+  };
+  const reader = localReader(root, { feed });
+  let told = 0;
+  const close = reader.watch!(path.join(root, "sub"), () => told++)!;
+  assert.equal(callbacks.length, 1, "no watch of its own was made");
+  callbacks[0]!();
+  assert.equal(told, 1);
+  close();
+  assert.equal(callbacks.length, 0);
+  covers = false;
+  const close2 = reader.watch!(path.join(root, "sub"), () => told++)!;
+  assert.equal(callbacks.length, 0);
+  fs.writeFileSync(path.join(root, "sub", "x"), "x");
+  await until(() => told >= 2);
+  assert.ok(told >= 2, "the folder's own watch told it");
+  close2();
 });
