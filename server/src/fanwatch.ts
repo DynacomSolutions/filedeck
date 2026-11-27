@@ -6,6 +6,7 @@ import { countMountExclusions, listMounts, readMountRoots, type Mount } from "./
 import { isReservedName } from "./paths.ts";
 import type { EventBus } from "./events/bus.ts";
 import type { NewEvent } from "./events/types.ts";
+import { sizeExcluder } from "./size-exclude.ts";
 
 /**
  * Keeps the size store current from kernel change notifications (fanotify, via the small native helper
@@ -53,6 +54,25 @@ export interface FanWatchOptions {
    * is written to the journal. Gets an agent path; true = leave the entry out (see events/own-state.ts: it must be the agent's own folder, not a name alike).
    */
   ignorePath?: (virtual: string) => boolean;
+  /**
+   * How often the folders that changed are written to the size store and re-read, at most (ms). Changes of one interval are merged per folder in memory and
+   * handed to the store together. 0 (the default here; the agent sets FILEDECK_SIZE_COMMIT_MS) = every 250 ms, as before.
+   */
+  commitMs?: number;
+  /** folder names, globs or runs of names (`.git/objects`): changes inside them do not reach the size store (the event bus still gets them) */
+  exclude?: string[];
+  /** changed folders held in memory for one interval; beyond it they are merged into stale marks of their subtrees (default 2000) */
+  dirtyMax?: number;
+}
+
+/** What the size writes did, for the agent's metrics */
+export interface SizeWriteStats {
+  commits: number;
+  dirtyPaths: number;
+  lastDirtyPaths: number;
+  excludedEvents: number;
+  collapsed: number;
+  commitSeconds: number;
 }
 
 const KIND_OF = { C: "create", D: "delete", M: "modify", W: "close_write", A: "attrib" } as const;
@@ -142,6 +162,13 @@ export class FanWatch {
   private readyAt = Infinity;
   private settleMs: number;
   private modifyMs: number;
+  private commitMs: number;
+  private dirtyMax: number;
+  private excluded: (virtual: string) => boolean;
+  private lastCommit = 0;
+  /** when the first change of the open commit interval arrived (0 = none waits) */
+  private openAt = 0;
+  private sizeStats: SizeWriteStats = { commits: 0, dirtyPaths: 0, lastDirtyPaths: 0, excludedEvents: 0, collapsed: 0, commitSeconds: 0 };
   private reconcileTimer: NodeJS.Timeout | null = null;
   private mountSignature = "";
   private mountCount = 0;
@@ -167,6 +194,9 @@ export class FanWatch {
   ) {
     this.settleMs = o.settleMs ?? 1000;
     this.modifyMs = o.modifyMs ?? 30_000;
+    this.commitMs = Math.max(0, o.commitMs ?? 0);
+    this.dirtyMax = Math.max(16, o.dirtyMax ?? 2000);
+    this.excluded = sizeExcluder(o.exclude ?? []);
   }
 
   private warn(msg: string) {
@@ -323,6 +353,7 @@ export class FanWatch {
       excluded: this.excludedMounts,
       backlog: this.buf.size + this.flushing.size + this.mem.size + this.taken.size,
       lostEvents: this.lostEvents,
+      size: { ...this.sizeStats },
       reconcileError: this.reconcileError,
       caps: this.caps,
       helper: { ...this.helperStats },
@@ -401,6 +432,8 @@ export class FanWatch {
         this.session = null;
         await this.store.sessionEnd?.(sess.id, clean, this.lostAt);
       }
+      // changes of the commit interval that is still open reach the store whatever the state of the run: the next process applies them
+      if (this.buf.size) await this.flush().catch(() => {});
     } finally {
       this.stop();
     }
@@ -476,7 +509,7 @@ export class FanWatch {
     // an older helper: one line per folder
     if ((kind !== "x" && kind !== "w" && kind !== "m") || l[1] !== " ") return;
     const v = mapPath(this.o.root, unescapeLine(l.slice(2)));
-    if (v) this.schedule(v, kind === "m");
+    if (v && !this.schedule(v, kind === "m")) this.sizeStats.excludedEvents++;
   }
 
   /** One changed entry: it goes to the bus, and its folders (the one that holds it, and a folder entry itself) to the size store. */
@@ -502,8 +535,12 @@ export class FanWatch {
 
   private touch(v: string, dir: boolean, modify: boolean) {
     const i = v.lastIndexOf("/");
-    this.schedule(i <= 0 ? "/" : v.slice(0, i), modify);
-    if (dir && !modify) this.schedule(v, false);
+    const parent = i <= 0 ? "/" : v.slice(0, i);
+    // a folder inside an excluded one (or an excluded folder itself) is never handed to the size store; the event bus has already got the event
+    let kept = false;
+    if (!this.excluded(parent)) kept = this.schedule(parent, modify);
+    if (dir && !modify && !this.excluded(v)) kept = this.schedule(v, false) || kept;
+    if (!kept) this.sizeStats.excludedEvents++;
   }
 
   private publish(ev: NewEvent) {
@@ -589,12 +626,41 @@ export class FanWatch {
     this.timer.unref();
   }
 
-  private schedule(v: string, modify: boolean) {
+  private schedule(v: string, modify: boolean): boolean {
+    if (this.excluded(v)) return false;
     this.ensureTimer();
+    if (!this.openAt) this.openAt = Date.now();
     const cur = this.buf.get(v);
     // a settle event wins over a modify event: it is not held back by the modify interval
     this.buf.set(v, { at: cur ? Math.min(cur.at, Date.now() + this.settleMs) : Date.now() + this.settleMs, modify: (cur?.modify ?? true) && modify });
-    if (this.buf.size >= FLUSH_MAX) void this.flush();
+    if (this.commitMs > 0) {
+      if (this.buf.size >= this.dirtyMax) this.collapse();
+    } else if (this.buf.size >= FLUSH_MAX) void this.flush();
+    return true;
+  }
+
+  /**
+   * The folders of one interval passed the cap: instead of holding every path, folders that share a subtree are replaced by one stale mark of it (one row,
+   * whatever the subtree holds), which the next read of it re-scans. The deepest level that brings the buffer under half the cap is used.
+   */
+  private collapse() {
+    const target = this.dirtyMax >> 1;
+    for (let depth = 6; depth >= 0 && this.buf.size > target; depth--) {
+      const groups = new Map<string, string[]>();
+      for (const p of this.buf.keys()) {
+        let end = 0;
+        for (let d = 0; d < depth && end >= 0; d++) end = p.indexOf("/", end + 1) < 0 ? -1 : p.indexOf("/", end + 1);
+        const prefix = depth === 0 ? "/" : end < 0 ? p : p.slice(0, end);
+        (groups.get(prefix) ?? groups.set(prefix, []).get(prefix)!).push(p);
+      }
+      for (const [prefix, members] of groups) {
+        if (members.length < 2 && depth > 0) continue;
+        for (const m of members) this.buf.delete(m);
+        this.store.markStale(prefix);
+        this.sizeStats.collapsed++;
+        if (this.buf.size <= target) break;
+      }
+    }
   }
 
   /** Hand the buffered events to the store (disk). With no usable store they wait in memory, capped like the old behaviour. */
@@ -636,9 +702,26 @@ export class FanWatch {
   }
 
   private async tick() {
+    // with a commit interval the changes of the whole interval are written and applied together; without one, every tick
+    const now = Date.now();
+    if (!this.commitMs || now - (this.openAt || this.lastCommit) >= this.commitMs) await this.commit();
+    await this.sessionTick();
+  }
+
+  /** Write the folders that changed since the last commit to the store and re-read them, once. */
+  private async commit() {
+    const t0 = Date.now();
+    this.lastCommit = t0;
+    this.openAt = 0;
+    const n = this.buf.size;
     await this.flush();
     await this.drain();
-    await this.sessionTick();
+    if (!n) return;
+    const s = this.sizeStats;
+    s.commits++;
+    s.dirtyPaths += n;
+    s.lastDirtyPaths = n;
+    s.commitSeconds += (Date.now() - t0) / 1000;
   }
 
   /** The re-reads ended (or failed): modifyMs counts from their end, not from when the folders were taken. One write per batch. */

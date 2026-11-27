@@ -8,6 +8,7 @@ import { parseReadOnly } from "./readonly.ts";
 import { parseSources } from "./sources/registry.ts";
 import { loadGroupRules, type GroupRule } from "./group-rules.ts";
 import type { SourceConfig } from "./sources/types.ts";
+import { DEFAULT_SIZE_EXCLUDE, parseSizeExclude } from "./size-exclude.ts";
 
 export interface Config {
   mode: "agent" | "hub";
@@ -51,6 +52,12 @@ export interface Config {
   duWaitMs: number;
   /** a CLI du job nobody waits on or polls for this long is dropped (0 = never) */
   duAbandonMs: number;
+  /** the folder-size store is written and re-read once per this many ms for all changes of the interval (0 = every 250 ms) */
+  sizeCommitMs: number;
+  /** folder names, globs or runs of names whose changes never reach the size store (see size-exclude.ts) */
+  sizeExclude: string[];
+  /** changed folders held in memory for one interval; beyond it they are merged into stale marks of their subtrees */
+  sizeDirtyMax: number;
   /** on SIGTERM, how long the change watcher keeps running for a newer process to take over its watched time (ms) */
   handoverMs: number;
   /** on SIGTERM, how long the jobs, the pool, the watcher hand-over and the socket may take before the event journal is closed anyway (default 8000) */
@@ -328,6 +335,9 @@ export function loadConfig(env = process.env): Config {
     duWaitMs: Number(env.FILEDECK_DU_WAIT_MS ?? 10_000),
     duAbandonMs: Number(env.FILEDECK_DU_ABANDON_MS ?? 120_000),
     handoverMs: Number(env.FILEDECK_HANDOVER_MS ?? 6000),
+    sizeCommitMs: nonNegativeSetting(env, "FILEDECK_SIZE_COMMIT_MS", 30_000),
+    sizeExclude: parseSizeExclude(env.FILEDECK_SIZE_EXCLUDE ?? DEFAULT_SIZE_EXCLUDE),
+    sizeDirtyMax: nonNegativeSetting(env, "FILEDECK_SIZE_DIRTY_MAX", 2000),
     leaveStepsMs: nonNegativeSetting(env, "FILEDECK_LEAVE_STEPS_MS", 8000),
     listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
     diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),
