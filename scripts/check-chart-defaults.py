@@ -16,6 +16,8 @@ checks = {
     "no deployment-specific sealed data is embedded": "  sealed: {}" in values,
     "the fanotify watcher (extra capability) is off by default": "  fanotify:\n    enabled: false" in values,
     "the du API token is off by default": "apiToken:\n  secretName: \"\"" in values,
+    "the API token reads folder sizes only by default": '  scopes: ["du"]' in values,
+    "the node-local event socket is off by default": "    socket:\n      enabled: false" in values,
     "the tailscale sidecar is off by default": "    sidecar:\n      enabled: false" in values,
     "tailscale headers are off by default": "    headers: false" in values,
     "the sidecar refuses to render without hub.trustedProxies": "lt (int .Values.hub.trustedProxies) 1" in helpers,
