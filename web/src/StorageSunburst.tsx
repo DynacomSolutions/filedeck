@@ -3,7 +3,7 @@ import useSWR from "swr";
 import { ArrowLeft, HardDrive } from "lucide-react";
 import { BACKGROUND_HEADER, fmtDate, fmtSize } from "./api";
 import { useNodes } from "./data";
-import { colourBand, ringMaximums, sliceLabel, slicePath, sliceValue, storageModes, storageRings, storageSlices, storageView, storageViewUrl, type Slice, type StorageMode, type StorageView } from "./storageSunburst";
+import { colourBand, ringMaximums, sliceHasPartialIO, sliceLabel, slicePath, sliceValue, storageModes, storageRings, storageSlices, storageView, storageViewUrl, type Slice, type StorageMode, type StorageView } from "./storageSunburst";
 import type { GroupsResult, IOPressure, Statistics } from "../../server/src/group-types";
 import "./storageSunburst.css";
 
@@ -19,8 +19,9 @@ function format(n: number, mode: StorageMode) {
   return n < 1024 ? `${Number(n.toFixed(1))} B/s` : `${fmtSize(n)}/s`;
 }
 
-function dataState(slice: Slice): string[] {
+function dataState(slice: Slice, mode: StorageMode): string[] {
   const flags = [];
+  if (sliceHasPartialIO(slice, mode)) flags.push("Partial IO samples");
   if (slice.group?.unattributed) flags.push("Unattributed");
   if (slice.group?.notStored) flags.push(slice.bytes ? "Some sizes not stored" : "Size not stored");
   if (slice.group?.stale) flags.push("Stale size");
@@ -101,6 +102,7 @@ function SliceDetails({ selection, slices, mode, choose }: {
     choose(id);
     heading.current?.focus();
   };
+  const flags = dataState(selection, mode);
   const parent = slices.find((s) => s.id === selection.parent);
   const children = slices.filter((slice) => slice.parent === selection.id);
   return <aside className="storage-detail" aria-label="Selected storage slice">
@@ -109,8 +111,8 @@ function SliceDetails({ selection, slices, mode, choose }: {
       <h3 tabIndex={-1} ref={heading}>{selection.label}</h3>
       <p className="storage-detail-bytes">{selection.group?.notStored && !selection.bytes ? "Size not stored" : format(selection.bytes, "size")}</p>
     </div>
-    {selection.group && dataState(selection).length > 0 && <ul className="storage-flags">
-      {dataState(selection).map((flag) => <li key={flag}>{flag}</li>)}
+    {flags.length > 0 && <ul className="storage-flags">
+      {flags.map((flag) => <li key={flag}>{flag}</li>)}
     </ul>}
     {selection.group?.scannedAt != null && <p>Oldest scan <time dateTime={new Date(selection.group.scannedAt).toISOString()}>
       {fmtDate(selection.group.scannedAt)}
@@ -130,7 +132,7 @@ function SliceDetails({ selection, slices, mode, choose }: {
     {children.length > 0 && <ul className="storage-slice-list">
       {children.map((slice) => {
         const value = sliceValue(slice, mode);
-        const flags = dataState(slice);
+        const flags = dataState(slice, mode);
         return <li key={slice.id}><button type="button" onClick={() => jump(slice.id)}>
           <span>{slice.label}{flags.length > 0 && <small>{flags.join(" · ")}</small>}</span>
           <span>{value === null ? "Unavailable" : slice.group?.notStored && !value && mode === "size" ? "Not stored" : format(value, mode)}</span>
@@ -179,6 +181,9 @@ export function StorageSunburst({ node }: { node?: string | null }) {
                 <rect width="5" height="5" className="storage-unknown-base" />
                 <path d="M0 0V5" className="storage-unknown-line" />
               </pattern>
+              <pattern id={`${id}-partial`} width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                <path d="M0 0V7" className="storage-partial-line" />
+              </pattern>
               <pattern id={`${id}-stale`} width="6" height="6" patternUnits="userSpaceOnUse">
                 <circle cx="3" cy="3" r="1" className="storage-stale-mark" />
               </pattern>
@@ -189,7 +194,7 @@ export function StorageSunburst({ node }: { node?: string | null }) {
               const colour = band === null ? `url(#${id}-unknown)` : colours[mode][band];
               const d = slicePath(slice);
               const label = sliceLabel(slice);
-              const flags = dataState(slice);
+              const flags = dataState(slice, mode);
               const name = `${slice.description}, ${fmtSize(slice.bytes)}${mode !== "size" ? `, ${value === null ? "pressure unavailable" : format(value, mode)}` : ""}${flags.length ? `, ${flags.join(", ")}` : ""}`;
               return <g key={slice.id}>
                 <path d={d} fill={colour} className="storage-mark" role="button" tabIndex={0}
@@ -200,6 +205,7 @@ export function StorageSunburst({ node }: { node?: string | null }) {
                       setSelected(slice.id);
                     }
                   }}><title>{name}</title></path>
+                {sliceHasPartialIO(slice, mode) && <path d={d} fill={`url(#${id}-partial)`} className="storage-overlay" />}
                 {(slice.group?.stale || slice.group?.notStored) && <path d={d} fill={`url(#${id}-stale)`} className="storage-overlay" />}
                 {label && <text aria-hidden="true" className="storage-mark-label" x={label.x} y={label.y}
                   transform={`rotate(${label.angle} ${label.x} ${label.y})`}>{label.text}</text>}
@@ -218,6 +224,8 @@ export function StorageSunburst({ node }: { node?: string | null }) {
               })}
             </ul>
             <div><i className="storage-swatch-unknown" aria-hidden="true" />{mode === "size" ? "Unattributed" : "Unattributed or no IO samples"}</div>
+            {mode !== "size" && marked.some((slice) => sliceHasPartialIO(slice, mode)) &&
+              <div><i className="storage-swatch-partial" aria-hidden="true" />Partial IO samples</div>}
             <div><i className="storage-swatch-stale" aria-hidden="true" />Stale or incomplete size</div>
           </div>
         </> : <div className="storage-empty" role="status">

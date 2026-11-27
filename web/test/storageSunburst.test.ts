@@ -74,6 +74,24 @@ test("node throughput sums available drives and the maximum is independent for e
   assert.equal(storage.colourBand(projects, "read", storage.ringMaximums(slices, "read")), 3);
 });
 
+test("node throughput is partial only when some drives have samples for the selected metric", () => {
+  const studio = nodes[0]!;
+  const { slices } = storageSlices([{
+    ...studio,
+    drives: [
+      { ...studio.drives[0]!, io: { read: statistics, write: { ...statistics, mean: 0 }, utilisation: null } },
+      { ...studio.drives[0]!, id: "second", io: { read: statistics, write: null, utilisation: null } },
+    ],
+  }, nodes[1]!]);
+  const studioSlice = slices.find((slice) => slice.label === "Studio")!;
+  const archiveSlice = slices.find((slice) => slice.label === "Archive")!;
+  assert.equal(sliceValue(studioSlice, "write"), 0);
+  assert.equal(storage.sliceHasPartialIO(studioSlice, "write"), true);
+  assert.equal(storage.sliceHasPartialIO(studioSlice, "read"), false);
+  assert.equal(storage.sliceHasPartialIO(studioSlice, "size"), false);
+  assert.equal(storage.sliceHasPartialIO(archiveSlice, "write"), false);
+});
+
 test("the app exposes Storage as a real navigation link", () => {
   const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(app, /<a(?=[^>]*\bdata-nav\b)(?=[^>]*href="\/storage")(?=[^>]*aria-label="Storage")[^>]*>/);

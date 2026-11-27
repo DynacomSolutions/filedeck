@@ -40,7 +40,7 @@ export interface Slice {
   drive?: StorageDrive;
   group?: StorageGroup;
   io?: IOPressure;
-  throughput?: Record<Exclude<StorageMode, "size">, number | null>;
+  throughput?: Record<Exclude<StorageMode, "size">, { mean: number | null; partial: boolean }>;
 }
 
 export function driveLabel(drive: StorageDrive): string {
@@ -50,12 +50,15 @@ export function driveLabel(drive: StorageDrive): string {
 const driveBytes = (drive: StorageDrive) => drive.groups.reduce((sum, group) => sum + group.bytes, 0);
 const nodeBytes = (node: StorageNode) => node.drives.reduce((sum, drive) => sum + driveBytes(drive), 0);
 
-function sumThroughput(drives: StorageDrive[], mode: "read" | "write"): number | null {
+function sumThroughput(drives: StorageDrive[], mode: "read" | "write") {
   const means = drives.flatMap((drive) => {
     const stats = drive.io?.[mode];
     return stats ? [stats.mean] : [];
   });
-  return means.length ? means.reduce((sum, mean) => sum + mean, 0) : null;
+  return {
+    mean: means.length ? means.reduce((sum, mean) => sum + mean, 0) : null,
+    partial: means.length > 0 && means.length < drives.length,
+  };
 }
 
 export function storageSlices(nodes: StorageNode[]): { total: number; slices: Slice[] } {
@@ -123,7 +126,11 @@ export function sliceLabel(slice: Slice): { text: string; x: number; y: number; 
 
 export function sliceValue(slice: Slice, mode: StorageMode): number | null {
   if (mode === "size") return slice.bytes;
-  return slice.throughput?.[mode] ?? slice.io?.[mode]?.mean ?? null;
+  return slice.throughput?.[mode].mean ?? slice.io?.[mode]?.mean ?? null;
+}
+
+export function sliceHasPartialIO(slice: Slice, mode: StorageMode): boolean {
+  return mode !== "size" && slice.throughput?.[mode].partial === true;
 }
 
 type RingMaximums = Record<Slice["level"], number | null>;

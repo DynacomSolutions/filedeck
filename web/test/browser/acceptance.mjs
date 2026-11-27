@@ -3424,7 +3424,7 @@ async function verifyGroupedStorage(browser, width, scheme) {
         group('Media', 160, io(210_000, 750_000), { stale: true }),
         group('Unattributed', 75, undefined, { unattributed: true }),
       ], io(6_000_000, 4_000_000)),
-      drive('disk1', [group('Workspace', 108, io(400_000, 550_000))], io(1_000_000, 2_000_000)),
+      drive('disk1', [group('Workspace', 108, io(400_000, 550_000))], { ...io(1_000_000, 2_000_000), write: null }),
     ] },
     { node: 'Archive', drives: [drive('disk2', [group('Backups', 251, io(100_000, 200_000))], io(2_000_000, 3_000_000))] },
   ];
@@ -3449,15 +3449,17 @@ async function verifyGroupedStorage(browser, width, scheme) {
       assert.equal(await mode(name).getAttribute('aria-pressed'), 'true');
       assert.equal(await page.evaluate(() => window.innerWidth), width);
       assert.ok(await page.locator('.storage-page').evaluate((element) => element.scrollWidth <= element.clientWidth));
+      const studio = chart.getByRole('button', { name: /^Studio,/ });
+      assert.equal((await studio.locator('title').textContent()).includes('Partial IO samples'), file === 'write');
+      assert.equal(await studio.locator('..').locator('path[fill$="-partial)"]').count(), file === 'write' ? 1 : 0);
       if (file !== 'size') {
-        const studio = chart.getByRole('button', { name: /^Studio,/ });
         const group = chart.getByRole('button', { name: file === 'read' ? /disk0 \/ Projects,/ : /disk0 \/ Media,/ });
         const top = file === 'read' ? '#4f64ae' : '#ad592c';
         assert.equal(await studio.getAttribute('fill'), top);
         assert.equal(await group.getAttribute('fill'), top);
       }
       if (process.env.FILEDECK_STORAGE_SCREENSHOTS) {
-        await page.screenshot({ path: resolve(evidenceDir, `storage-${width}-${scheme}-${file}-review-v5.png`), animations: 'disabled' });
+        await page.screenshot({ path: resolve(evidenceDir, `storage-${width}-${scheme}-${file}-review-v6.png`), animations: 'disabled' });
       }
     }
     await selector.selectOption('Studio');

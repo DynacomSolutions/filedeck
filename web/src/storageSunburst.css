@@ -110,6 +110,7 @@
 .storage-overlay, .storage-mark-label { pointer-events: none; }
 .storage-unknown-base { fill: #657286; }
 .storage-unknown-line { stroke: #a2afbe; stroke-width: 1.5px; }
+.storage-partial-line { stroke: #fff; stroke-width: 1.5px; }
 .storage-stale-mark { fill: #202e3b; }
 
 .storage-mark-label {
@@ -160,6 +161,7 @@
 .storage-swatches { gap: 1px; }
 .storage-legend i { display: inline-block; width: .65rem; height: .65rem; border-radius: 2px; }
 .storage-swatch-unknown { background: repeating-linear-gradient(45deg, #657286 0 2px, #a2afbe 2px 4px); }
+.storage-swatch-partial { background: repeating-linear-gradient(45deg, #fff 0 1px, #4f64ae 1px 5px); }
 .storage-swatch-stale { background: radial-gradient(circle, #202e3b 1px, #acdbd2 1.5px) 0 0 / 5px 5px; }
 
 .storage-message, .storage-warning { margin: .55rem 0 0; color: var(--muted); font-size: .86rem; }
