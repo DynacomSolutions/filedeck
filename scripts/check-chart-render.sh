@@ -73,3 +73,22 @@ if helm template t k8s -s templates/hub.yaml --set port=9091 >/dev/null 2>&1; th
 fi
 
 echo "chart render check passed"
+
+# Disk pressure (docs/disk-pressure.md): off by default. When on, the settings reach the agent; the host cgroup tree and the host process list are opt-in.
+off=$(helm template t k8s --set 'nodes[0].name=a')
+case "$off" in *FILEDECK_PRESSURE*|*host-cgroup*|*hostPID*|*SYS_PTRACE*) echo "disk pressure must render nothing by default" >&2; exit 1 ;; esac
+on=$(helm template t k8s --set 'nodes[0].name=a' --set agent.pressure.enabled=true)
+case "$on" in *"name: FILEDECK_PRESSURE"*) ;; *) echo "agent.pressure.enabled must set FILEDECK_PRESSURE" >&2; exit 1 ;; esac
+case "$on" in *host-cgroup*|*hostPID*|*SYS_PTRACE*) echo "agent.pressure.enabled alone must not mount the cgroup tree or share the process list" >&2; exit 1 ;; esac
+full=$(helm template t k8s --set 'nodes[0].name=a' --set agent.pressure.enabled=true --set agent.pressure.cgroupMount=true --set agent.pressure.hostPID=true)
+for want in "mountPath: /host-cgroup" "path: /sys/fs/cgroup" "value: /host-cgroup" "hostPID: true" '"SYS_PTRACE"'; do
+  case "$full" in *"$want"*) ;; *) echo "pressure render lacks: $want" >&2; exit 1 ;; esac
+done
+# the host cgroup tree is read only
+printf '%s\n' "$full" | awk '/name: host-cgroup$/ {f=1; next} f && /readOnly: true/ {ok=1} f && /^      volumes:/ {f=0} END {exit !ok}'
+# liveness stays on the real listener
+test "$(printf '%s\n' "$full" | awk '/name: agent$/ {a=1} a && !d && /livenessProbe:/ {getline; print $0; d=1}' | grep -c 'path: /healthz')" = 1
+managedp=$(helm template t k8s --set managedNodes.enabled=true --set agent.pressure.enabled=true --set agent.pressure.cgroupMount=true --set agent.pressure.hostPID=true)
+for want in "hostPID: true" "mountPath: /host-cgroup" "FILEDECK_PRESSURE_CGROUP_ROOT" "SYS_PTRACE"; do
+  case "$managedp" in *"$want"*) ;; *) echo "managed pressure render lacks: $want" >&2; exit 1 ;; esac
+done

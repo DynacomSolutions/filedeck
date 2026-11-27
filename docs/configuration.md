@@ -41,6 +41,18 @@ Agent settings. See [Change events](change-events.md).
 - `FILEDECK_EVENTS_SOCKET_GROUP`: the group of the folder and the socket, a name or a number. A number is safest, because a name is looked up in `/etc/group` of the container.
 - `FILEDECK_EVENTS_JOURNAL_BYTES` (default 2 GiB, 0 means the journal stays in memory) and `FILEDECK_EVENTS_JOURNAL_HOURS` (default 24): the journal keeps the smaller of the two limits. It is in `changes-<node>/` inside `FILEDECK_INDEX_DIR`. Chart values: `agent.events.journal.*`.
 - `FILEDECK_EVENTS_LABELS`: label templates, separated by line feeds, semicolons or commas. Example: `/srv/repos/{org}/{repo}`. The agent logs a bad template and makes no label. Chart value: `agent.events.labels`.
+
+## Disk pressure
+
+Agent settings. See [Disk pressure](disk-pressure.md). The feature is off by default. It samples only while a stream, a request or the metrics scrape reads.
+
+- `FILEDECK_PRESSURE`: `1` (or `on`, `true`, `yes`) turns it on. Chart value: `agent.pressure.enabled`.
+- `FILEDECK_PRESSURE_INTERVAL_MS` (default 1000, from 250 to 60000): the time between samples while a stream or request reads. Chart value: `agent.pressure.intervalMs`.
+- `FILEDECK_PRESSURE_CGROUP_ROOT` (default `/sys/fs/cgroup`): the cgroup v2 tree. The chart mounts the host tree read only at `/host-cgroup` and sets this with `agent.pressure.cgroupMount`.
+- `FILEDECK_PRESSURE_PROC_ROOT` (default `/proc`): the process folders. With `agent.pressure.hostPID` the `/proc` of the container is the one of the host, and the pod gets `CAP_SYS_PTRACE`.
+- `FILEDECK_PRESSURE_PATH_DEPTH` (default 3, from 1 to 12): folder parts under a mount that make one path consumer. Chart value: `agent.pressure.pathDepth`.
+- `FILEDECK_PRESSURE_LABELS`: a JSON list of label rules `{"match": "<regular expression on the cgroup path>", "label": "<template>", "link": "<optional URL template>"}`. There are no default rules. Chart value: `agent.pressure.labels`.
+- `FILEDECK_IOTRACE`: the path of the eBPF helper `filedeck-iotrace`. Empty: look in `/usr/local/bin` and next to the other helpers. `off`: never use it.
 - `FILEDECK_INDEX_WATCHES`: the folders that the compare index keeps under change watch (default 32768). With the fanotify helper on, a watch is a table entry in memory that the event bus feeds, not a kernel watch. For a folder that no kernel watcher covers, it is an `fs.watch` of the folder.
 
 Hub setting:

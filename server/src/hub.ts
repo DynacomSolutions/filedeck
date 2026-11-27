@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { registerHubDiff } from "./diff-hub.ts";
 import { NODE_STATUS_PATH, readHubNodeStatus } from "./node-status.ts";
+import { PRESSURE_PATH, PRESSURE_STREAM_PATH, pressureQuery } from "./pressure/routes.ts";
 import { registerOps } from "./ops-routes.ts";
 import type { OpQueue } from "./ops-queue.ts";
 import { JobStore } from "./job-store.ts";
@@ -948,6 +949,81 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     }
   });
 
+  // Disk pressure (docs/disk-pressure.md): one node at a time, or a summary of every node. Administrators only, like the change events.
+  const pressureNode = (c: import("hono").Context): { node: string; rest: string } | Response => {
+    const q = new URL(c.req.url).searchParams;
+    const node = q.get("node");
+    if (!node) return c.json({ error: "node is required" }, 400);
+    if (!agents.has(node)) return c.json({ error: "unknown node" }, 404);
+    if (!mayUse(node)) return noAccess(c);
+    const p = pressureQuery(q);
+    if ("error" in p) return c.json({ error: p.error }, 400);
+    return { node, rest: new URLSearchParams([...(p.disk !== undefined ? [["disk", p.disk]] : []), ["top", String(p.top)]]).toString() };
+  };
+  app.get(PRESSURE_PATH, async (c) => {
+    if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    const t = pressureNode(c);
+    if (t instanceof Response) return t;
+    const call = startCall();
+    try {
+      const signal = call ? AbortSignal.any([call.signal, c.req.raw.signal, AbortSignal.timeout(15_000)]) : AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(15_000)]);
+      const r = await agents.get(t.node)!.fetch(`${PRESSURE_PATH}?${t.rest}`, { signal });
+      return new Response(r.body, { status: r.status, headers: { "content-type": r.headers.get("content-type") ?? "application/json", "cache-control": "no-store" } });
+    } catch {
+      return c.json({ error: "agent unreachable" }, 502);
+    } finally {
+      call?.done();
+    }
+  });
+  app.get(`${PRESSURE_PATH}/nodes`, async (c) => {
+    if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    const wanted = new URL(c.req.url).searchParams.getAll("node").flatMap((n) => n.split(",")).map((n) => n.trim()).filter(Boolean);
+    for (const n of wanted) {
+      if (!agents.has(n)) return c.json({ error: "unknown node" }, 404);
+      if (!mayUse(n)) return noAccess(c);
+    }
+    const names = wanted.length ? [...new Set(wanted)] : cfg.nodes.map((n) => n.name).filter((n) => mayUse(n));
+    const call = startCall();
+    try {
+      const signal = call ? AbortSignal.any([call.signal, c.req.raw.signal]) : c.req.raw.signal;
+      const rows = await Promise.all(
+        names.map(async (node) => {
+          try {
+            const r = await agents.get(node)!.fetch(`${PRESSURE_PATH}?top=0`, { signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]) });
+            if (!r.ok) {
+              await r.body?.cancel();
+              return { node, state: r.status === 404 ? "unsupported" : "unavailable", disks: [], source: null, at: 0 };
+            }
+            const s = (await r.json()) as { source: string; at: number; psi: { full: { avg10: number } }; disks: { name: string; util: number }[] };
+            return { node, state: "ok", disks: s.disks.map((d) => ({ name: d.name, util: d.util, psiFull10: s.psi.full.avg10 })), source: s.source, at: s.at };
+          } catch {
+            return { node, state: "unavailable", disks: [], source: null, at: 0 };
+          }
+        }),
+      );
+      return c.json(rows, 200, { "cache-control": "no-store" });
+    } finally {
+      call?.done();
+    }
+  });
+  app.get(PRESSURE_STREAM_PATH, async (c) => {
+    if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    const t = pressureNode(c);
+    if (t instanceof Response) return t;
+    const session = app.streams ? sessionKeyOf(c) : undefined;
+    const upstream = new AbortController();
+    const id = currentUser();
+    try {
+      const r = await agents.get(t.node)!.fetch(`${PRESSURE_STREAM_PATH}?${t.rest}`, { signal: AbortSignal.any([c.req.raw.signal, upstream.signal]) });
+      if (!r.ok) return new Response(r.body, { status: r.status, headers: { "content-type": r.headers.get("content-type") ?? "application/json", "cache-control": "no-store" } });
+      const out = new Response(r.body, { headers: NDJSON });
+      return app.streams && session !== undefined && id ? trackLive(c, out, session, upstream, id) : out;
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return new Response(null, { status: 499 });
+      return c.json({ error: "agent unreachable" }, 502);
+    }
+  });
+
   // Reverse proxy: /api/nodes/<node>/<rest> -> <agent>/<rest>
   app.all("/api/nodes/:node/*", async (c) => {
     // a node the caller may not use and one that does not exist look the same, so hidden node names stay hidden
@@ -961,8 +1037,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     if (cfg.auth && isAgentAuthPath(rest)) return c.json({ error: "not found" }, 404);
     // Apply the same administrator check to diagnostics and the change stream.
     const agentPath = normaliseAgentPath(rest)?.replace(/\/+$/, "");
+    const isPressure = agentPath === PRESSURE_PATH || agentPath === PRESSURE_STREAM_PATH;
     const isChanges = agentPath === undefined || agentPath === changesPath;
-    if ((isChanges || agentPath === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    if ((isChanges || isPressure || agentPath === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
@@ -1004,7 +1081,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       const out = cut(new Response(r.body, { status: r.status, headers: clean(r.headers, true) }));
       const id = currentUser();
       const type = (r.headers.get("content-type") ?? "").toLowerCase();
-      if (app.streams && session !== undefined && upstream && id && (type.startsWith("text/event-stream") || (type.startsWith("application/x-ndjson") && isChanges))) return trackLive(c, out, session, upstream, id);
+      if (app.streams && session !== undefined && upstream && id && (type.startsWith("text/event-stream") || (type.startsWith("application/x-ndjson") && (isChanges || isPressure)))) return trackLive(c, out, session, upstream, id);
       return out;
     } catch (e) {
       call?.done();

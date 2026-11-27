@@ -41,7 +41,8 @@ const digest = (s: string) => createHash("sha256").update(s).digest();
  * on both). When set, an agent answers 401 to every request that does not
  * carry `Authorization: Bearer <token>`, except the unauthenticated liveness
  * probe `/healthz` and `/metrics`. `/metrics` is scraped by pod IP without credentials and exposes only counts and ages (keep it that way:
- * nothing that names a path, a node or a size may be added to it). It sits behind the NetworkPolicy as a second layer: a pod
+ * nothing that names a path, a node or a size may be added to it). The one exception is the disk pressure consumers (FILEDECK_PRESSURE, off by
+ * default): the names of the ten busiest workloads of each disk, never a folder (docs/disk-pressure.md). It sits behind the NetworkPolicy as a second layer: a pod
  * that is allowed to reach an agent still cannot use it without the secret.
  */
 export function agentAuth(token: string | undefined): MiddlewareHandler {

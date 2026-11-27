@@ -113,6 +113,7 @@ To limit the risk further:
 | [`filedeck du`](docs/filedeck-du.md) | The disk usage command, its token and the stored sizes file |
 | [Grouped storage](docs/storage-groups.md) | Storage rules, the sizes API and CLI, and optional IO pressure |
 | [Change events](docs/change-events.md) | The stream of file changes for other programs: format, filters, cursor, Unix socket, hub API |
+| [Disk pressure](docs/disk-pressure.md) | Live disk load and the cgroups, services, processes and folders that cause it: API, metrics, settings, cost |
 | [Sandbox and safe file placement](docs/security.md) | What the sandbox allows each tool, and how moves never overwrite |
 | [Development](docs/development.md) | Repository layout, build, tests, running locally |
 | [Contributing](CONTRIBUTING.md) | Rules for code and pull requests |
