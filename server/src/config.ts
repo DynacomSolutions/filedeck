@@ -13,6 +13,7 @@ export interface Config {
   mode: "agent" | "hub";
   host: string | undefined;
   port: number;
+  hubMetricsPort?: number;
   root: string;
   node: string;
   procMounts: string;
@@ -280,10 +281,18 @@ export function loadConfig(env = process.env): Config {
   const vaultFile = env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite";
   const mode = env.FILEDECK_MODE === "hub" ? "hub" : "agent";
   const root = (env.FILEDECK_ROOT ?? "/host").replace(/\/+$/, "") || "/";
+  const port = Number(env.PORT ?? 8080);
+  const hubMetricsPort = mode === "hub" && env.FILEDECK_HUB_METRICS_PORT
+    ? Number(env.FILEDECK_HUB_METRICS_PORT) : undefined;
+  if (hubMetricsPort !== undefined && (!Number.isInteger(hubMetricsPort) || hubMetricsPort < 1024 ||
+    hubMetricsPort > 65535 || hubMetricsPort === port)) {
+    throw new Error("FILEDECK_HUB_METRICS_PORT must be between 1024 and 65535 and differ from PORT");
+  }
   return {
     mode,
     host: env.FILEDECK_HOST || undefined,
-    port: Number(env.PORT ?? 8080),
+    port,
+    hubMetricsPort,
     root,
     node: env.FILEDECK_NODE ?? "local",
     procMounts: env.FILEDECK_PROC_MOUNTS ?? defaultProcMounts(root),

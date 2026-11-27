@@ -8,6 +8,21 @@ import { loadConfig } from "../src/config.ts";
 import { runGroups } from "../src/groups-cli.ts";
 import { signClaim, USER_HEADER } from "../src/auth/identity.ts";
 
+test("the dedicated hub metrics listener only serves metrics with sign-in off", async (t) => {
+  const cfg = loadConfig({ FILEDECK_MODE: "hub", FILEDECK_HUB_METRICS_PORT: "9091" });
+  const hub = createHub(cfg);
+  t.after(() => hub.close());
+  assert.equal(cfg.hubMetricsPort, 9091);
+  assert.equal((await hub.request("/metrics")).status, 404);
+  const res = await hub.metrics.request("/metrics");
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /filedeck_group_io_requests_total 0/);
+  assert.equal((await hub.metrics.request("/api/nodes")).status, 404);
+  assert.equal((await hub.metrics.request("/api/nodes/local/api/delete", { method: "POST" })).status, 404);
+  assert.throws(() => loadConfig({ FILEDECK_MODE: "hub", PORT: "9091", FILEDECK_HUB_METRICS_PORT: "9091" }),
+    /must be between 1024 and 65535 and differ from PORT/);
+});
+
 test("agent storage reports require the signed capability when sign-in is on", async (t) => {
   const agent = createAgent(loadConfig({ FILEDECK_ROOT: process.cwd(), FILEDECK_AUTH: "on", FILEDECK_AGENT_TOKEN: "fixture",
     FILEDECK_EVENTS_JOURNAL_BYTES: "0" }));

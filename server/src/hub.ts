@@ -465,7 +465,9 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   const groupIO = new GroupIO(cfg.victoriaMetricsUrl, fetch, Date.now, groupNodes,
     cfg.victoriaMetricsUrl ? loadGroupRulesByNode(cfg.groupRulesFile, groupNodes) : undefined);
   app.get("/healthz", (c) => c.text("ok"));
-  app.get("/metrics", (c) => c.text([...groupIO.metricLines(), ""].join("\n")));
+  const metrics = new Hono().get("/metrics", (c) => c.text([...groupIO.metricLines(), ""].join("\n")));
+  if (cfg.hubMetricsPort) app.get("/metrics", (c) => c.notFound());
+  else app.route("/", metrics);
 
   app.get("/api/groups", async (c) => {
     if (auth && !isAdmin(cfg, auth.accounts, currentUser())) return c.json({ error: "administrators only" }, 403);
@@ -1031,5 +1033,5 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // a missing build file is a 404, never the app shell (an old tab asking for a chunk of a previous build must see the failure)
   app.all("/assets/*", (c) => c.text("not found", 404));
   app.get("*", page);
-  return app;
+  return Object.assign(app, { metrics });
 }

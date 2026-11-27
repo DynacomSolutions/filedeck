@@ -22,7 +22,8 @@ if (tailscale.stop) {
 }
 if (cfg.mode === "agent") void initSandbox().then(() => selfCheckTools()); // says once at start-up when helper programs are not confined by the kernel
 if (cfg.mode === "agent") void noReplaceWarning().then((w) => w && console.warn(w)); // says once at start-up when the rename helper is missing
-const app = cfg.mode === "hub" ? createHub(cfg) : createAgent(cfg);
+const hub = cfg.mode === "hub" ? createHub(cfg) : undefined;
+const app = hub ?? createAgent(cfg);
 const server = serve({ fetch: app.fetch, hostname: cfg.host, port: cfg.port }, (i) => {
   console.log(`filedeck ${cfg.mode} listening on :${i.port}` + (cfg.mode === "agent" ? ` root=${cfg.root} node=${cfg.node}` : ` nodes=${cfg.nodes.map((n) => n.name).join(",")}`));
   (app as { startWatcher?: () => void }).startWatcher?.();
@@ -43,5 +44,15 @@ if (identity) {
     process.exit(2);
   });
 }
-const stop = installShutdown(identity ? [server as Server, identity] : (server as Server), () => (app as { close?: () => Promise<void> }).close?.(), { onSignal: () => (app as { leave?: () => Promise<void> }).leave?.() });
+const metrics = cfg.hubMetricsPort && hub
+  ? serve({ fetch: hub.metrics.fetch, hostname: cfg.host, port: cfg.hubMetricsPort }) as Server
+  : undefined;
+metrics?.on("error", (e) => {
+  console.error(`FILEDECK_HUB_METRICS_PORT: ${e.message}`);
+  process.exit(2);
+});
+const servers = [server as Server];
+if (identity) servers.push(identity);
+if (metrics) servers.push(metrics);
+const stop = installShutdown(servers, () => (app as { close?: () => Promise<void> }).close?.(), { onSignal: () => (app as { leave?: () => Promise<void> }).leave?.() });
 for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, stop);

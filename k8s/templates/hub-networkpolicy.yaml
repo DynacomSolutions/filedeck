@@ -1,7 +1,7 @@
 {{- if .Values.hub.networkPolicy.enabled }}
 {{- $peers := .Values.hub.networkPolicy.from }}
 {{- $scraper := .Values.metrics.scrapeFrom.namespaceSelector }}
-# Only configured peers and the metrics scraper may reach the hub port. Use a trusted namespace for the scraper.
+# The scraper can reach only the metrics port.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -30,7 +30,7 @@ spec:
         - namespaceSelector:
             {{- toYaml . | nindent 12 }}
       ports:
-        - port: http
+        - port: metrics
           protocol: TCP
     {{- end }}
   {{- else }}

@@ -14,7 +14,7 @@ image:
 
 port: 8080
 
-# GET /metrics uses the named http port on agent and hub pods.
+# Scrape GET /metrics on the agent http port and the hub metrics port.
 # Select the app.kubernetes.io/component label to identify each target.
 metrics:
   scrapeFrom:
@@ -135,6 +135,8 @@ vault:
   maxHours: 24
 
 hub:
+  # Port for the hub metrics listener. Use a different port from the file API.
+  metricsPort: 9091
   # Optional VictoriaMetrics base URL for the storage IO view.
   victoriaMetricsUrl: ""
   # Number of reverse proxies (an ingress controller, a load balancer) between users and the hub whose X-Forwarded-For
@@ -145,7 +147,7 @@ hub:
   # Optional NetworkPolicy for the hub pods. Off by default so a plain install keeps working behind any ingress. Anything
   # that can reach the hub has root-level access to every node's files, so for a shared cluster turn it on and list the
   # peers that may connect (your ingress controller, for example). `from` takes standard NetworkPolicy peers; with
-  # `enabled: true` and no peers or scraper selector nothing can reach the hub. The policy opens only the hub port.
+  # `enabled: true`, only these peers can reach the file API. The scraper can reach the metrics port.
   networkPolicy:
     enabled: false
     from: []
