@@ -28,6 +28,7 @@ import { DirWatchers } from "./events/dirwatch.ts";
 import { LabelRules } from "./events/labels.ts";
 import { ownState } from "./events/own-state.ts";
 import { eventMetrics } from "./events/metrics.ts";
+import { leaveBounded } from "./events/leave.ts";
 import { registerChangeRoutes } from "./events/routes.ts";
 import { startEventSocket, type EventSocket } from "./events/socket.ts";
 import type { FeedRef } from "./diff-routes.ts";
@@ -227,11 +228,19 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   let leaving: Promise<void> | undefined;
   const leave = () =>
     (leaving ??= (async () => {
-      await Promise.all([jobs.interrupt(), pool?.close()]);
-      await specs?.close(); // (no worker runs any more)
-      await fan.handover();
-      await socket?.close();
-      await bus.close(ownJournalDir); // (writes what is pending and the time the watching ended: the next writer's coverage check reads it)
+      // The slow steps have a limit, then the journal is closed whatever happened: it writes what is pending and the time the watching ended (the next
+      // writer's coverage check reads it), and it must do that before the hard exit of the process. The bus is closed here once, and only here.
+      await leaveBounded(
+        async () => {
+          await Promise.all([jobs.interrupt(), pool?.close()]);
+          await specs?.close(); // (no worker runs any more)
+          await fan.handover();
+          await socket?.close();
+        },
+        () => bus.close(ownJournalDir),
+        cfg.leaveStepsMs,
+        (s) => console.error(s),
+      );
       await sizes.releaseLease();
     })());
   (app as unknown as { leave: () => Promise<void> }).leave = leave;
@@ -263,8 +272,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     await leave();
     files.close();
     dirs.close();
-    await bus.close(ownJournalDir);
-    sizes.close();
+    sizes.close(); // (the bus was closed by leave(), once: a second close would write the journal's `meta.json` after the next process took the lease)
   };
 
   return app;
