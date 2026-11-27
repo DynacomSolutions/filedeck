@@ -14,6 +14,19 @@ export interface Config {
   host: string | undefined;
   port: number;
   hubMetricsPort?: number;
+  /** hub: port of the MCP listener (FILEDECK_MCP_PORT); unset = the MCP server is off */
+  mcpPort?: number;
+  /** hub: JSON file that lists the MCP grants (FILEDECK_MCP_GRANTS_FILE); the listener does not start without it. Watched: a change takes effect with no restart */
+  mcpGrantsFile?: string;
+  /** hub: certificate chain and key of the MCP listener (FILEDECK_MCP_TLS_CERT, FILEDECK_MCP_TLS_KEY), PEM files, read again when they change */
+  mcpTlsCert?: string;
+  mcpTlsKey?: string;
+  /** hub: serve the MCP listener without TLS (FILEDECK_MCP_ALLOW_PLAINTEXT=1; tests only) */
+  mcpAllowPlaintext: boolean;
+  /** hub: account a grant acts as when sign-in is on and the grant names none (FILEDECK_MCP_ACCOUNT) */
+  mcpAccount?: string;
+  /** hub: how often the shared watch of a node asks its agent for jobs and status, in ms (FILEDECK_MCP_POLL_MS) */
+  mcpPollMs: number;
   root: string;
   node: string;
   procMounts: string;
@@ -288,11 +301,25 @@ export function loadConfig(env = process.env): Config {
     hubMetricsPort > 65535 || hubMetricsPort === port)) {
     throw new Error("FILEDECK_HUB_METRICS_PORT must be between 1024 and 65535 and differ from PORT");
   }
+  const mcpPort = mode === "hub" && env.FILEDECK_MCP_PORT ? Number(env.FILEDECK_MCP_PORT) : undefined;
+  if (mcpPort !== undefined && (!Number.isInteger(mcpPort) || mcpPort < 1024 || mcpPort > 65535 || mcpPort === port || mcpPort === hubMetricsPort)) {
+    throw new Error("FILEDECK_MCP_PORT must be between 1024 and 65535 and differ from PORT and FILEDECK_HUB_METRICS_PORT");
+  }
+  if (!env.FILEDECK_MCP_TLS_CERT !== !env.FILEDECK_MCP_TLS_KEY) throw new Error("FILEDECK_MCP_TLS_CERT and FILEDECK_MCP_TLS_KEY go together");
+  const mcpPollMs = Number(env.FILEDECK_MCP_POLL_MS ?? 5000);
+  if (!Number.isInteger(mcpPollMs) || mcpPollMs < 1000 || mcpPollMs > 600_000) throw new Error("FILEDECK_MCP_POLL_MS must be between 1000 and 600000");
   return {
     mode,
     host: env.FILEDECK_HOST || undefined,
     port,
     hubMetricsPort,
+    mcpPort,
+    mcpGrantsFile: mode === "hub" ? env.FILEDECK_MCP_GRANTS_FILE || undefined : undefined,
+    mcpTlsCert: mode === "hub" ? env.FILEDECK_MCP_TLS_CERT || undefined : undefined,
+    mcpTlsKey: mode === "hub" ? env.FILEDECK_MCP_TLS_KEY || undefined : undefined,
+    mcpAllowPlaintext: mode === "hub" && env.FILEDECK_MCP_ALLOW_PLAINTEXT === "1",
+    mcpAccount: env.FILEDECK_MCP_ACCOUNT || undefined,
+    mcpPollMs,
     root,
     node: env.FILEDECK_NODE ?? "local",
     procMounts: env.FILEDECK_PROC_MOUNTS ?? defaultProcMounts(root),
@@ -403,6 +430,12 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     apiToken: undefined,
     apiTokenAccount: undefined,
     apiScopes: [],
+    mcpPort: undefined,
+    mcpGrantsFile: undefined,
+    mcpTlsCert: undefined,
+    mcpTlsKey: undefined,
+    mcpAllowPlaintext: false,
+    mcpAccount: undefined,
     eventsSocket: "",
     vaultKey: undefined,
     bootstrapAdminFile: undefined,

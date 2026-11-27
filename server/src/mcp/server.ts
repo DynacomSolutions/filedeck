@@ -1,0 +1,468 @@
+import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createTlsServer, type Server as TlsServer } from "node:https";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ErrorCode, McpError, isInitializeRequest, SubscribeRequestSchema, UnsubscribeRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { matchesHostList } from "../request-guard.ts";
+import type { HubCaller } from "./hub-call.ts";
+import { ToolError } from "./hub-call.ts";
+import type { McpEventSink, McpModule, McpRelease, McpSession, McpUpdate } from "./events.ts";
+import { Scope, type Grant, type GrantStore } from "./grants.ts";
+
+import { McpMetrics } from "./metrics.ts";
+
+/**
+ * The MCP listener: MCP 2025-06-18 and later, streamable HTTP, on a port of its own. Paths:
+ *   /mcp           the MCP endpoint (bearer token)
+ *   /mcp/healthz   liveness: 200 while this listener accepts requests (also while draining)
+ *   /mcp/readyz    readiness: 200 while it takes new sessions, 503 from the start of a drain
+ * One session has one `McpServer`. Subscriptions are per session and end with it.
+ */
+
+export const MCP_PATH = "/mcp";
+const MAX_BODY = 4 * 1024 * 1024;
+const MAX_SUBSCRIPTIONS = 256;
+const MAX_SESSIONS = 256;
+
+export interface McpHttpOptions {
+  grants: GrantStore;
+  /** the caller for an account (sign-in on) or for the open hub (undefined) */
+  callerFor: (account: string | undefined) => HubCaller;
+  /** sign-in is on: a grant then needs an account */
+  signIn: boolean;
+  /** the account of a grant that names none (FILEDECK_MCP_ACCOUNT) */
+  defaultAccount?: string;
+  /** serve HTTPS with these PEM files, and read them again when they change */
+  tls?: { cert: string; key: string; reloadMs?: number };
+  modules: McpModule[];
+  metrics: McpMetrics;
+  /** Host values the listener serves (the hub's FILEDECK_ALLOWED_HOSTS); empty = any */
+  allowedHosts: string[];
+  serverVersion: string;
+  /** Whether the hub's own listener answers; liveness and readiness need it too (main.ts asks /healthz on loopback). Default: always true. */
+  hubHealthy?: () => Promise<boolean>;
+  /** a session with no request and no open stream for this long is closed */
+  idleMs?: number;
+  /** keep-alive comment on an open stream, in ms */
+  keepAliveMs?: number;
+  log?: (msg: string) => void;
+}
+
+interface Session {
+  id: string;
+  grantId: string;
+  grantFingerprint: string;
+  audience: string;
+  info: McpSession;
+  mcp: McpServer;
+  transport: StreamableHTTPServerTransport;
+  subs: Map<string, McpRelease>;
+  /** releases of the list interest, set by the first resources/list */
+  listRelease?: McpRelease;
+  lastSeen: number;
+  /** open event streams (GET) */
+  streams: number;
+  closed: boolean;
+}
+
+/** Names this process in event ids: an id is `<boot>.<n>`, so an id from before a restart never equals one after it. */
+const BOOT = randomBytes(4).toString("hex");
+
+export class McpHttp {
+  readonly server: Server | TlsServer;
+  private readonly sessions = new Map<string, Session>();
+  private readonly callers = new Map<string, HubCaller>();
+  private readonly sweep: NodeJS.Timeout;
+  private tlsTimer?: NodeJS.Timeout;
+  private eventSeq = 0;
+  private inflight = 0;
+  private idleWaiters: (() => void)[] = [];
+  private drainStarted?: Promise<void>;
+
+  constructor(private readonly o: McpHttpOptions) {
+    const count = (f: (s: Session) => number) => () => {
+      const m = new Map<string, number>();
+      for (const s of this.sessions.values()) m.set(s.grantId, (m.get(s.grantId) ?? 0) + f(s));
+      return m;
+    };
+    o.metrics.gauges = {
+      sessions: count(() => 1),
+      subscriptions: count((s) => s.subs.size),
+      inflight: () => this.inflight,
+      draining: () => this.draining,
+      watches: o.metrics.gauges.watches,
+      grants: () => o.grants.grants.map((g) => g.id),
+    };
+    const sink: McpEventSink = { updated: (u) => this.deliver(u), listChanged: (c) => this.deliverListChanged(c) };
+    for (const m of o.modules) m.start(sink);
+    o.grants.onRevoked((ids) => {
+      for (const s of [...this.sessions.values()]) if (ids.includes(s.grantId)) void this.closeSession(s, "revoked");
+    });
+    const handler = (req: IncomingMessage, res: ServerResponse) => void this.handle(req, res);
+    this.server = o.tls ? this.tlsServer(o.tls, handler) : createServer(handler);
+    this.server.requestTimeout = 0;
+    const idleMs = o.idleMs ?? 15 * 60_000;
+    this.sweep = setInterval(() => {
+      const t = Date.now();
+      for (const s of [...this.sessions.values()]) if (s.streams === 0 && t - s.lastSeen > idleMs) void this.closeSession(s, "idle");
+    }, Math.min(60_000, Math.max(1000, idleMs / 4)));
+    this.sweep.unref();
+  }
+
+  /** The HTTPS server. The certificate and key are read again every few seconds, and a changed pair is used for new connections (a renewal needs no restart). */
+  private tlsServer(tls: { cert: string; key: string; reloadMs?: number }, handler: (req: IncomingMessage, res: ServerResponse) => void): TlsServer {
+    let cert = readFileSync(tls.cert);
+    let key = readFileSync(tls.key);
+    const server = createTlsServer({ cert, key, minVersion: "TLSv1.2" }, handler);
+    this.tlsTimer = setInterval(() => {
+      void (async () => {
+        try {
+          const [c, k] = await Promise.all([readFile(tls.cert), readFile(tls.key)]);
+          if (c.equals(cert) && k.equals(key)) return;
+          server.setSecureContext({ cert: c, key: k, minVersion: "TLSv1.2" });
+          cert = c;
+          key = k;
+          this.o.log?.("mcp: the TLS certificate was read again");
+        } catch (e) {
+          this.o.log?.(`mcp: the TLS certificate was not reloaded: ${(e as Error).message}`);
+        }
+      })();
+    }, tls.reloadMs ?? 5000);
+    this.tlsTimer.unref();
+    return server;
+  }
+
+  get draining(): boolean {
+    return this.drainStarted !== undefined;
+  }
+
+  get sessionCount(): number {
+    return this.sessions.size;
+  }
+
+  get subscriptionCount(): number {
+    return [...this.sessions.values()].reduce((n, s) => n + s.subs.size, 0);
+  }
+
+  // ---- notifications ----
+
+  /**
+   * The same `eventId` goes to every session that gets one change. The id is `<boot>.<n>`: it is new for each change, it does not repeat after a
+   * restart, and it is the key a client uses to drop a notification that it saw (docs/mcp.md).
+   */
+  private nextEventId(): string {
+    return `${BOOT}.${++this.eventSeq}`;
+  }
+
+  private deliver(u: McpUpdate): void {
+    const eventId = this.nextEventId();
+    for (const s of this.sessions.values()) {
+      if (!s.subs.has(u.uri) || s.closed || (u.audience !== undefined && u.audience !== s.audience)) continue;
+      this.o.metrics.notification(s.grantId, "resource_updated");
+      s.mcp.server.sendResourceUpdated({ uri: u.uri, _meta: { filedeck: { eventId, revision: u.revision, uri: u.uri } } }).catch(() => this.o.metrics.error(s.grantId, "notify"));
+    }
+  }
+
+  private deliverListChanged(c: { revision: number; audience?: string }): void {
+    const eventId = this.nextEventId();
+    for (const s of this.sessions.values()) {
+      if (!s.listRelease || s.closed || (c.audience !== undefined && c.audience !== s.audience)) continue;
+      this.o.metrics.notification(s.grantId, "list_changed");
+      s.mcp.server
+        .notification({ method: "notifications/resources/list_changed", params: { _meta: { filedeck: { eventId, revision: c.revision, uri: "filedeck://resources" } } } })
+        .catch(() => this.o.metrics.error(s.grantId, "notify"));
+    }
+  }
+
+  // ---- sessions ----
+
+  private callerFor(audience: string): HubCaller {
+    let c = this.callers.get(audience);
+    if (!c) this.callers.set(audience, (c = this.o.callerFor(this.o.signIn ? audience : undefined)));
+    return c;
+  }
+
+  /** The account a grant reads as: with sign-in off none (the empty audience). */
+  private audienceOf(g: Grant): string {
+    return this.o.signIn ? g.account ?? this.o.defaultAccount ?? "" : "";
+  }
+
+  private newSession(g: Grant): Session {
+    const o = this.o;
+    const audience = this.audienceOf(g);
+    const info: McpSession = { grant: g.id, audience, scope: new Scope(g), call: this.callerFor(audience), metrics: o.metrics };
+    const mcp = new McpServer(
+      { name: "filedeck", title: "FileDeck", version: o.serverVersion },
+      {
+        capabilities: { resources: { subscribe: true, listChanged: true }, tools: {} },
+        instructions:
+          "FileDeck contract 1 (docs/mcp.md). Read-only tools and filedeck:// resources for nodes, scans, jobs and change events. " +
+          "Subscribe to a resource to get notifications/resources/updated, then read it: every body has `revision` and `updatedAt`. " +
+          "Every notification has _meta.filedeck.eventId: drop one that you already saw. The server keeps no history and cannot resume a stream: " +
+          "after a gap or a reconnect, subscribe again and read each resource (a baseline read) and compare revisions.",
+      },
+    );
+    for (const m of o.modules) m.register(mcp, info);
+    const session: Session = { id: "", grantId: g.id, grantFingerprint: g.fingerprint, audience, info, mcp, transport: undefined as never, subs: new Map(), lastSeen: Date.now(), streams: 0, closed: false };
+    session.transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => {
+        session.id = id;
+        this.sessions.set(id, session);
+        o.metrics.sessionOpened(g.id);
+      },
+      keepAliveMs: o.keepAliveMs ?? 15_000,
+    });
+    session.transport.onclose = () => void this.closeSession(session, "client");
+    mcp.server.setRequestHandler(SubscribeRequestSchema, async (req) => {
+      const uri = req.params.uri;
+      if (session.subs.has(uri)) return {};
+      if (!info.scope.allowsResource(uri)) throw new McpError(ErrorCode.InvalidParams, `forbidden: ${uri} is outside the grant`);
+      if (session.subs.size >= MAX_SUBSCRIPTIONS) throw new McpError(ErrorCode.InvalidParams, `at most ${MAX_SUBSCRIPTIONS} subscriptions for each session`);
+      let release: McpRelease | null = null;
+      try {
+        for (const m of o.modules) if ((release = await m.follow(uri, info))) break;
+      } catch (e) {
+        throw new McpError(ErrorCode.InvalidParams, e instanceof ToolError ? e.message : `cannot subscribe to ${uri}`);
+      }
+      if (!release) throw new McpError(ErrorCode.InvalidParams, `unknown resource: ${uri}`);
+      if (session.closed || session.subs.has(uri)) {
+        release();
+        return {};
+      }
+      session.subs.set(uri, release);
+      return {};
+    });
+    mcp.server.setRequestHandler(UnsubscribeRequestSchema, async (req) => {
+      session.subs.get(req.params.uri)?.();
+      session.subs.delete(req.params.uri);
+      return {};
+    });
+    return session;
+  }
+
+  private async closeSession(s: Session, reason: "client" | "idle" | "drain" | "revoked" | "error"): Promise<void> {
+    if (s.closed) return;
+    s.closed = true;
+    if (s.id) this.sessions.delete(s.id);
+    for (const r of s.subs.values()) r();
+    s.subs.clear();
+    s.listRelease?.();
+    s.listRelease = undefined;
+    this.o.metrics.sessionClosed(s.grantId, reason);
+    s.transport.onclose = undefined;
+    await s.mcp.close().catch(() => undefined);
+  }
+
+  /** The first resources/list of a session: from then on it gets list_changed, and the modules start the watches it needs. */
+  private peek(s: Session, msg: JSONRPCMessage): void {
+    if ("method" in msg && msg.method === "resources/list" && !s.listRelease) {
+      const releases = this.o.modules.map((m) => m.followList(s.info));
+      s.listRelease = () => releases.forEach((r) => r());
+    }
+  }
+
+  // ---- HTTP ----
+
+  private async hubUp(): Promise<boolean> {
+    try {
+      return (await this.o.hubHealthy?.()) ?? true;
+    } catch {
+      return false;
+    }
+  }
+
+  private reply(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
+    if (res.headersSent) return;
+    const text = typeof body === "string" ? body : JSON.stringify(body);
+    res.writeHead(status, { "content-type": typeof body === "string" ? "text/plain; charset=utf-8" : "application/json", "cache-control": "no-store", ...headers });
+    res.end(text);
+  }
+
+  private rpcError(res: ServerResponse, status: number, code: number, message: string, headers: Record<string, string> = {}): void {
+    this.reply(res, status, { jsonrpc: "2.0", error: { code, message }, id: null }, headers);
+  }
+
+  /** The grant whose token the request carries. */
+  private grantOf(req: IncomingMessage): Grant | undefined {
+    const m = /^bearer +(.+)$/i.exec(req.headers.authorization ?? "");
+    return m ? this.o.grants.match(m[1]!.trim()) : undefined;
+  }
+
+  private async readBody(req: IncomingMessage): Promise<unknown> {
+    const chunks: Buffer[] = [];
+    let n = 0;
+    for await (const c of req) {
+      n += (c as Buffer).length;
+      if (n > MAX_BODY) throw new RangeError("body too large");
+      chunks.push(c as Buffer);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  }
+
+  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const { metrics } = this.o;
+    let grant: Grant | undefined;
+    const gid = () => grant?.id ?? "none";
+    try {
+      const path = (req.url ?? "/").split("?")[0]!;
+      // Probes first: no token, no data. Liveness answers whenever this listener answers; readiness fails from the start of a drain.
+      if (path === `${MCP_PATH}/healthz`) return (await this.hubUp()) ? this.reply(res, 200, "ok") : this.reply(res, 503, "hub listener does not answer");
+      if (path === `${MCP_PATH}/readyz`) {
+        if (this.draining) return this.reply(res, 503, "draining");
+        return (await this.hubUp()) ? this.reply(res, 200, "ready") : this.reply(res, 503, "hub listener does not answer");
+      }
+      if (path !== MCP_PATH && path !== `${MCP_PATH}/`) {
+        metrics.request(gid(), "not_found");
+        return this.reply(res, 404, { error: "not found" });
+      }
+      const host = (req.headers.host ?? "").toLowerCase();
+      if (this.o.allowedHosts.length && !matchesHostList(host, this.o.allowedHosts)) {
+        metrics.request(gid(), "bad_host");
+        metrics.error(gid(), "protocol");
+        return this.reply(res, 421, { error: "unknown host" });
+      }
+      // a browser page must not drive this listener (DNS rebinding): an Origin header is allowed only when it names this host
+      const origin = req.headers.origin;
+      if (origin !== undefined && (() => { try { return new URL(origin).host.toLowerCase() !== host; } catch { return true; } })()) {
+        metrics.request(gid(), "bad_origin");
+        metrics.error(gid(), "protocol");
+        return this.reply(res, 403, { error: "origin not allowed" });
+      }
+      grant = this.grantOf(req);
+      if (!grant) {
+        metrics.request(gid(), "unauthorized");
+        metrics.error(gid(), "auth");
+        return this.reply(res, 401, { error: "unauthorized" }, { "www-authenticate": 'Bearer realm="filedeck-mcp"' });
+      }
+      // sign-in on: the grant reads as an account, and a grant without one is refused
+      const id = this.o.signIn ? this.callerFor(this.audienceOf(grant)).identity() : undefined;
+      if (id && "error" in id) {
+        metrics.request(gid(), "forbidden");
+        metrics.error(gid(), "auth");
+        return this.reply(res, 403, { error: `forbidden: ${id.error}` });
+      }
+      await this.route(req, res, grant);
+    } catch (e) {
+      metrics.error(gid(), "internal");
+      metrics.request(gid(), "error");
+      this.o.log?.(`mcp: ${(e as Error).message}`);
+      if (!res.headersSent) this.rpcError(res, 500, ErrorCode.InternalError, "internal error");
+      else res.destroy();
+    }
+  }
+
+  private async route(req: IncomingMessage, res: ServerResponse, grant: Grant): Promise<void> {
+    const { metrics } = this.o;
+    const gid = grant.id;
+    const method = req.method ?? "GET";
+    const sid = req.headers["mcp-session-id"];
+    if (method !== "POST" && method !== "GET" && method !== "DELETE") {
+      metrics.request(gid, "bad_method");
+      return this.reply(res, 405, { error: "method not allowed" }, { allow: "GET, POST, DELETE" });
+    }
+    let body: unknown;
+    if (method === "POST") {
+      try {
+        body = await this.readBody(req);
+      } catch (e) {
+        metrics.request(gid, "bad_body");
+        metrics.error(gid, "protocol");
+        return e instanceof RangeError ? this.rpcError(res, 413, ErrorCode.InvalidRequest, "request body too large") : this.rpcError(res, 400, ErrorCode.ParseError, "parse error");
+      }
+    }
+    let session: Session | undefined;
+    if (typeof sid === "string") {
+      session = this.sessions.get(sid);
+      if (!session) {
+        metrics.request(gid, "unknown_session");
+        return this.rpcError(res, 404, ErrorCode.InvalidRequest, "session not found");
+      }
+      // a session belongs to the grant that opened it, as that grant was when it opened it
+      if (session.grantId !== grant.id || session.grantFingerprint !== grant.fingerprint) {
+        metrics.request(gid, "wrong_grant");
+        metrics.error(gid, "auth");
+        return this.rpcError(res, 403, ErrorCode.InvalidRequest, "the session belongs to another grant");
+      }
+    } else if (method === "POST" && isInitializeRequest(body)) {
+      if (this.draining) {
+        metrics.request(gid, "draining");
+        return this.rpcError(res, 503, ErrorCode.InternalError, "the server is shutting down", { "retry-after": "1" });
+      }
+      if (this.sessions.size >= MAX_SESSIONS) {
+        metrics.request(gid, "busy");
+        return this.rpcError(res, 503, ErrorCode.InternalError, "too many sessions", { "retry-after": "5" });
+      }
+      session = this.newSession(grant);
+      await session.mcp.connect(session.transport);
+      const s = session;
+      const original = session.transport.onmessage;
+      session.transport.onmessage = (msg, extra) => {
+        this.peek(s, msg);
+        original?.(msg, extra);
+      };
+    } else {
+      metrics.request(gid, "no_session");
+      metrics.error(gid, "protocol");
+      return this.rpcError(res, 400, ErrorCode.InvalidRequest, "the Mcp-Session-Id header is missing or the first request is not initialize");
+    }
+    if (this.draining && method !== "DELETE") {
+      // a drain finishes the calls in flight and takes no new request; a notification or a response to the server may still pass
+      const batch = Array.isArray(body) ? body : [body];
+      const isNew = method === "GET" || batch.some((m) => m && typeof m === "object" && "method" in m && "id" in m);
+      if (isNew && !(batch.length === 1 && isInitializeRequest(batch[0]))) {
+        metrics.request(gid, "draining");
+        return this.rpcError(res, 503, ErrorCode.InternalError, "the server is shutting down", { "retry-after": "1" });
+      }
+    }
+    session.lastSeen = Date.now();
+    metrics.request(gid, "ok");
+    const s = session;
+    const track = method === "POST";
+    if (track) this.inflight++;
+    let counted = false;
+    const done = () => {
+      if (counted) return;
+      counted = true;
+      if (track && --this.inflight === 0) for (const w of this.idleWaiters.splice(0)) w();
+      if (method === "GET") s.streams--;
+      s.lastSeen = Date.now();
+    };
+    if (method === "GET") s.streams++;
+    res.once("close", done);
+    try {
+      await s.transport.handleRequest(req, res, body);
+    } finally {
+      if (res.writableEnded || res.destroyed) done();
+    }
+  }
+
+  // ---- stop ----
+
+  /**
+   * Starts a drain and returns when it is done: readiness fails and new sessions and new requests get 503 at once, the calls in flight finish
+   * (at most `waitMs`), and then every stream is closed. A second call joins the first.
+   */
+  drain(waitMs = 4000): Promise<void> {
+    this.drainStarted ??= (async () => {
+      if (this.inflight > 0) {
+        await Promise.race([new Promise<void>((r) => this.idleWaiters.push(r)), new Promise<void>((r) => setTimeout(r, waitMs).unref())]);
+      }
+      await Promise.all([...this.sessions.values()].map((s) => this.closeSession(s, "drain")));
+    })();
+    return this.drainStarted;
+  }
+
+  /** Stops the modules and the sweep. Call after `drain` (or on its own in tests). */
+  async stop(): Promise<void> {
+    clearInterval(this.sweep);
+    clearInterval(this.tlsTimer);
+    this.o.grants.stop();
+    await this.drain(0);
+    await Promise.all(this.o.modules.map((m) => m.stop()));
+  }
+}

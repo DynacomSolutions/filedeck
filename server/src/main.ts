@@ -8,6 +8,7 @@ import { selfCheckTools } from "./archive.ts";
 import { createHub, tailnetListener } from "./hub.ts";
 import { SERVER_KEEP_ALIVE_MS } from "./agent-fetch.ts";
 import { installShutdown } from "./shutdown.ts";
+import { startMcp } from "./mcp/index.ts";
 
 const cfg = loadConfig();
 if (cfg.auth && !cfg.agentToken) {
@@ -51,8 +52,11 @@ metrics?.on("error", (e) => {
   console.error(`FILEDECK_HUB_METRICS_PORT: ${e.message}`);
   process.exit(2);
 });
+const mcp = hub ? await startMcp(cfg, hub) : undefined;
 const servers = [server as Server];
+if (mcp) servers.push(mcp.server as unknown as Server);
 if (identity) servers.push(identity);
 if (metrics) servers.push(metrics);
-const stop = installShutdown(servers, () => (app as { close?: () => Promise<void> }).close?.(), { onSignal: () => (app as { leave?: () => Promise<void> }).leave?.() });
+// the MCP server drains first: readiness fails, calls in flight finish, then its streams close (the other listeners follow the usual shutdown)
+const stop = installShutdown(servers, async () => { await mcp?.stop(); await (app as { close?: () => Promise<void> }).close?.(); }, { onSignal: async () => { await Promise.all([mcp?.drain(), (app as { leave?: () => Promise<void> }).leave?.()]); } });
 for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, stop);
