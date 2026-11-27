@@ -112,14 +112,19 @@ export class Subscriber {
   async start(since: { epoch: string; seq: number } | null, head: number): Promise<void> {
     if (!since) {
       this.state = "live";
+      this.queueReady(head);
       return;
     }
     this.state = "replay";
     this.delivered = since.seq;
     try {
       const gap = this.bus.journal.check(since.epoch, since.seq);
-      if (gap) this.queueReset(gap.why);
-      else {
+      if (gap) {
+        this.queueReset(gap.why);
+        this.queueReady(head);
+      } else {
+        // the current state comes before the journal lines; its cursor is the point this subscriber starts from, so a client that stops after it loses nothing
+        this.queueReady(since.seq);
         for await (const chunk of this.bus.journal.read(since.seq, head)) {
           if (this.state !== "replay") return;
           let start = 0;
@@ -159,6 +164,12 @@ export class Subscriber {
     } catch {
       return false;
     }
+  }
+
+  /** The watcher state now, as one `ready` line (when the watcher is ready): a new subscriber learns it without waiting for the next change of it. Not in the journal. */
+  private queueReady(seq: number) {
+    const line = this.bus.readyLine(seq);
+    if (line) this.enqueue(line, 0);
   }
 
   /** The cursor asked for cannot be continued from: one `reset` line (its cursor is the journal's head), then live events. */
@@ -247,6 +258,7 @@ export class EventBus {
   private waiters: ((ok: boolean) => void)[] = [];
   private readonly o: BusOptions;
   private _ready = false;
+  private _unwatched: string[] | undefined;
   // counters for /metrics (counts only)
   events: Record<string, number> = {};
   overflows = 0;
@@ -282,7 +294,19 @@ export class EventBus {
   set ready(v: boolean) {
     const was = this._ready;
     this._ready = v;
+    if (!v) this._unwatched = undefined;
     if (was && !v) for (const f of [...this.stopListeners]) this.safely(f);
+  }
+
+  /** The mounts that no event covers, as the watcher reported them with its `ready` (kept while it is ready, for each new subscriber's `ready` line). */
+  setUnwatched(paths: string[] | undefined) {
+    this._unwatched = paths?.length ? [...paths] : undefined;
+  }
+
+  /** The `ready` line of the watcher's state now, with the cursor `seq`, or null while the watcher is not ready (nothing is sent then, and `ready` follows when it starts). */
+  readyLine(seq: number): Buffer | null {
+    if (!this._ready) return null;
+    return encodeEvent({ cursor: this.cursorOf(seq), time: this.now(), node: this.node, kind: "ready", dir: false, scope: "node", ...(this._unwatched ? { unwatched: [...this._unwatched] } : {}) });
   }
 
   /** Told when the watcher stops: what is held in memory about folders (the folder feed) is no longer kept current. */

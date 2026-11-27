@@ -492,6 +492,7 @@ export class FanWatch {
     const bus = this.o.bus;
     if (!bus) return;
     bus.ready = true;
+    bus.setUnwatched(this.unwatched);
     const now = Date.now();
     if (this.gapFrom) this.publish({ kind: "reset", scope: "node", window: { from: this.gapFrom, to: now }, reason: "the watcher was not running" });
     this.gapFrom = 0;
