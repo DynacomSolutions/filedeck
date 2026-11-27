@@ -75,6 +75,10 @@ printf '%s\n' "$mcphub" | awk '/- key: tok$/{getline; if ($2 == "token") ok=1} E
 # the pod has no checksum of the grants: editing the list or a token must not roll the hub
 ! grep -q 'checksum/mcp' <<<"$mcphub"
 grants=$("${mcp[@]}" -s templates/hub-mcp-grants.yaml)
+# the grants ConfigMap has its own name, apart from the token Secrets (a Secret named like the release plus -mcp-grants is common)
+grep -q 'name: filedeck-mcp-grant-scopes' <<<"$grants"
+grep -q 'name: filedeck-mcp-grant-scopes' <<<"$mcphub"
+! grep -q 'name: filedeck-mcp-grants$' <<<"$grants$mcphub"
 grep -q 'grants.json: "\[{\\"id\\":\\"ops\\"' <<<"$grants"
 grep -q 'filedeck://nodes/web1/' <<<"$grants"
 grep -q '/var/run/filedeck/mcp/ops/token' <<<"$grants"
@@ -91,5 +95,19 @@ printf '%s\n' "$peers" | awk '/role: client/{found=1} END {exit !found}'
 both=$("${mcp[@]}" -s templates/hub-mcp-networkpolicy.yaml --set hub.networkPolicy.enabled=true --set-string 'hub.mcp.allowFrom[0].podSelector.matchLabels.role=client')
 test "$(printf '%s\n' "$both" | awk '/- port:/{print $3}' | tr '\n' ' ')" = 'mcp '
 test -z "$(helm template t k8s -s templates/hub-mcp-networkpolicy.yaml 2>/dev/null || true)" || { echo "MCP policy rendered while MCP is off"; exit 1; }
+# the session limit of one grant is always set; the allowed hosts only when listed (empty = any host), and they are not hub.allowedHosts
+test "$(printf '%s\n' "$mcphub" | awk '/name: FILEDECK_MCP_SESSIONS_PER_GRANT/{getline; gsub(/"/, "", $2); print $2}')" = 32
+! grep -q FILEDECK_MCP_ALLOWED_HOSTS <<<"$mcphub"
+! grep -q FILEDECK_MCP_ALLOWED_HOSTS <<<"$("${mcp[@]}" -s templates/hub.yaml --set 'hub.allowedHosts[0]=files.example.org')"
+hosts=$("${mcp[@]}" -s templates/hub.yaml --set 'hub.mcp.allowedHosts[0]=filedeck-hub.apps.svc:9092' --set 'hub.mcp.allowedHosts[1]=filedeck-hub.apps.svc')
+test "$(printf '%s\n' "$hosts" | awk '/name: FILEDECK_MCP_ALLOWED_HOSTS/{getline; gsub(/"/, "", $2); print $2}')" = 'filedeck-hub.apps.svc:9092,filedeck-hub.apps.svc'
+# With the Tailscale sidecar on and no other hub policy, the MCP policy isolates the pod, so it must allow the UDP port of tailscaled
+sidecar=("${mcp[@]}" --set auth.enabled=true --set agentToken.secretName=agent-tok --set hub.mcp.account=svc --set hub.trustedProxies=1
+  --set auth.tailscale.sidecar.enabled=true --set auth.tailscale.sidecar.authKey.secretName=ts-key --set auth.tailscale.sidecar.image.repository=ts --set auth.tailscale.sidecar.image.tag=v1)
+udp=$("${sidecar[@]}" -s templates/hub-mcp-networkpolicy.yaml)
+printf '%s\n' "$udp" | awk '/- port: 41641/{getline; if ($2 == "UDP") ok=1} END {exit !ok}'
+! grep -q 'protocol: UDP' <<<"$open"                                                          # no sidecar, no UDP rule
+! grep -q 'protocol: UDP' <<<"$("${sidecar[@]}" -s templates/hub-mcp-networkpolicy.yaml --set hub.networkPolicy.enabled=true)"
+grep -A1 'name: TS_TAILSCALED_EXTRA_ARGS' <<<"$("${sidecar[@]}" -s templates/hub.yaml)" | grep -q -- '--port=41641'
 
 echo "chart render check passed"

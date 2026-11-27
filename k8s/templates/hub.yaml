@@ -101,6 +101,13 @@ spec:
               value: /var/run/filedeck/mcp-tls/tls.key
             - name: FILEDECK_MCP_POLL_MS
               value: {{ $mcp.pollMs | quote }}
+            - name: FILEDECK_MCP_SESSIONS_PER_GRANT
+              value: {{ $mcp.sessionsPerGrant | quote }}
+            {{- with $mcp.allowedHosts }}
+            # Host names that the MCP listener answers to (in-cluster clients use the Service name). Empty = any; it does not use hub.allowedHosts.
+            - name: FILEDECK_MCP_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with $mcp.account }}
             - name: FILEDECK_MCP_ACCOUNT
               value: {{ . | quote }}
@@ -350,6 +357,9 @@ spec:
             - name: TS_SERVE_CONFIG
               value: /etc/tailscale-serve/serve.json
             {{- end }}
+            # A fixed UDP port for direct connections: the MCP network policy allows this port (templates/hub-mcp-networkpolicy.yaml).
+            - name: TS_TAILSCALED_EXTRA_ARGS
+              value: {{ printf "--port=%d" (int $sc.udpPort) | quote }}
             {{- with $sc.extraArgs }}
             - name: TS_EXTRA_ARGS
               value: {{ join " " . | quote }}
@@ -420,7 +430,7 @@ spec:
         {{- if $mcp.enabled }}
         - name: mcp-grants
           configMap:
-            name: {{ include "filedeck.name" . }}-mcp-grants
+            name: {{ include "filedeck.name" . }}-mcp-grant-scopes
         - name: mcp-tls
           secret:
             secretName: {{ $mcp.tls.secretName }}

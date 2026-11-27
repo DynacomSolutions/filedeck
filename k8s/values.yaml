@@ -87,6 +87,8 @@ auth:
       # The identity listener's port, on 127.0.0.2 (tailscaled in userspace mode forwards other ports to 127.0.0.1, never to 127.0.0.2).
       # Serve points at it. It is not in the Service. Needs hub.trustedProxies of 1 or more.
       listenPort: 8081
+      # The UDP port of tailscaled for direct connections (tailscaled --port). The hub-mcp NetworkPolicy allows it when it isolates the hub pod.
+      udpPort: 41641
       # You pick and pin the image (a `digest` wins over `tag`). It must start tailscaled as the official image does (containerboot).
       image: {repository: "", tag: "", digest: ""}
       # A Secret you make out of band (never in Git) that holds a Tailscale auth key under `key`. Prefer an ephemeral key.
@@ -186,6 +188,12 @@ hub:
       secretName: ""
     # How often the shared watch of a node asks its agent for jobs and status while a client follows, in ms (1000 to 600000).
     pollMs: 5000
+    # Most open sessions of one grant. At the limit a new session ends the session of that grant that made no request for the longest time. The hub holds at most 256 in all.
+    sessionsPerGrant: 32
+    # Host names (host or host:port) that the MCP listener answers to; any other Host header gets 421. Empty (the default) accepts any.
+    # It does not use hub.allowedHosts: in-cluster clients call the Service name, for example filedeck-hub.<namespace>.svc:9092.
+    # The Origin check stays on whatever this says.
+    allowedHosts: []
     # Sign-in on only: the account that a grant uses when it names none.
     account: ""
     # Grants: each one is read only and has its own token and scope. Add or remove one without a restart of the clients of the others.

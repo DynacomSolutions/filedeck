@@ -27,6 +27,13 @@ spec:
           protocol: TCP
         - port: metrics
           protocol: TCP
+    {{- if and .Values.auth.enabled .Values.auth.tailscale.sidecar.enabled }}
+    # The Tailscale sidecar takes direct connections from the tailnet on a UDP port. A policy that isolates the pod drops them, and then the sidecar
+    # falls back to relayed paths. The port is fixed by auth.tailscale.sidecar.udpPort (tailscaled --port).
+    - ports:
+        - port: {{ .Values.auth.tailscale.sidecar.udpPort }}
+          protocol: UDP
+    {{- end }}
     {{- end }}
     {{- with .Values.hub.mcp.allowFrom }}
     - from:

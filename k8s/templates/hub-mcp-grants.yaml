@@ -13,7 +13,8 @@ the pod's volumes, so the hub rolls then; the revoked grant stops working in bot
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "filedeck.name" . }}-mcp-grants
+  # Not "<name>-mcp-grants": the token Secrets of grants are often named like that, and a Secret and a ConfigMap of one name are easy to mix up.
+  name: {{ include "filedeck.name" . }}-mcp-grant-scopes
   labels:
     {{- include "filedeck.labels" . | nindent 4 }}
     app.kubernetes.io/component: hub
