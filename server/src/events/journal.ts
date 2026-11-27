@@ -11,7 +11,9 @@ import { formatCursor } from "./cursor.ts";
  * The last events are also kept in memory (the ring), so a client that is close behind reads no file.
  *
  * Only the process that holds the agent's writer lease appends (the Bus asks, see bus.ts). The cursor is `<node>:<epoch>:<seq>`; a new epoch starts
- * when the journal is lost or started over (no segment left, an unreadable `meta.json`), so an old cursor is never read against new numbers.
+ * when the journal is lost or started over (no segment left, an unreadable `meta.json`), and whenever the last writer did not stop cleanly: `meta.json` says
+ * `clean` only after `close()` wrote every event, and `open()` clears it. A crash, a failed write or a lost lease leaves it cleared, so a restart never
+ * continues an epoch from a disk that is behind what readers were told (sequence numbers would then mean other events).
  * Without a directory (`dir` null) the journal lives in memory only, with a new epoch at every start.
  */
 
@@ -90,6 +92,8 @@ export class Journal {
   private opened = false;
   private failed = false;
   private closed = false;
+  /** false when the directory must not be used by this process (it has no lease on the shared state): the journal is then in memory only */
+  private disk = true;
   appended = 0;
   /** until when the writer before this one watched (its last heartbeat or clean stop); 0 = unknown or a new journal */
   coveredUntil = 0;
@@ -144,35 +148,39 @@ export class Journal {
 
   /** false when the directory could not be used: the journal then lives in memory only */
   get persistent(): boolean {
-    return this.o.dir !== null && !this.failed;
+    return this.o.dir !== null && !this.failed && this.disk;
   }
 
   /** Read what is on disk: the epoch, the segments and where the sequence continues. A directory that cannot be used leaves the journal in memory. */
-  async open(): Promise<void> {
+  async open(disk = true): Promise<void> {
     if (this.opened) return;
     this.opened = true;
+    this.disk = disk;
     const dir = this.o.dir;
-    if (!dir) return;
+    if (!dir || !disk) return;
     try {
       await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
       const names = (await fsp.readdir(dir)).filter((n) => SEG.test(n)).sort();
       let epoch = "";
+      let clean = false;
+      this.coveredUntil = 0;
       try {
-        const m = JSON.parse(await fsp.readFile(path.join(dir, "meta.json"), "utf8")) as { epoch?: unknown; node?: unknown };
+        const m = JSON.parse(await fsp.readFile(path.join(dir, "meta.json"), "utf8")) as { epoch?: unknown; node?: unknown; clean?: unknown; covered?: unknown };
         if (typeof m.epoch === "string" && /^[0-9a-z]{1,16}$/.test(m.epoch) && m.node === this.o.node) epoch = m.epoch;
+        clean = m.clean === true;
+        this.coveredUntil = typeof m.covered === "number" ? m.covered : 0;
       } catch {
         /* no meta, or damaged: a new epoch below */
       }
-      this.coveredUntil = await this.readCovered(dir);
       const segs: Segment[] = [];
       for (const n of names) {
         const file = path.join(dir, n);
         const st = await fsp.stat(file);
         segs.push({ first: Number(SEG.exec(n)![1]), last: Number(SEG.exec(n)![1]) - 1, bytes: st.size, lastTime: st.mtimeMs, firstTime: 0, file });
       }
-      // the tail of the newest segment tells where the sequence continues; a half-written last line (a crash) is cut off
+      // the tail of the newest segment tells where the sequence continues; a half-written last line is cut off
       const lastSeg = segs.at(-1);
-      let ok = !!epoch && segs.length > 0;
+      let ok = !!epoch && clean && segs.length > 0;
       if (ok && lastSeg) ok = await this.scanTail(lastSeg);
       if (ok) {
         for (let i = 0; i < segs.length - 1; i++) segs[i]!.last = segs[i + 1]!.first - 1;
@@ -182,14 +190,14 @@ export class Journal {
         const first = this.segs[0];
         if (first) first.firstTime = await this.firstTimeOf(first);
       } else {
-        // lost, damaged or empty: nothing on disk is trusted, the epoch changes, and old cursors get a reset
+        // not stopped cleanly, lost or damaged: nothing on disk is trusted, the epoch changes, and old cursors get a reset
         for (const s of segs) await fsp.rm(s.file, { force: true });
         this.segs = [];
         this.seq = 0;
         this.epoch = newEpoch();
         this.coveredUntil = 0;
-        await this.writeMeta();
       }
+      await this.writeMeta(false); // (the clean mark is cleared while this process writes)
     } catch (e) {
       this.failed = true;
       this.segs = [];
@@ -199,19 +207,10 @@ export class Journal {
     }
   }
 
-  private async readCovered(dir: string): Promise<number> {
-    try {
-      const m = JSON.parse(await fsp.readFile(path.join(dir, "meta.json"), "utf8")) as { covered?: unknown };
-      return typeof m.covered === "number" ? m.covered : 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  private async writeMeta(): Promise<void> {
+  private async writeMeta(clean: boolean): Promise<void> {
     const dir = this.o.dir!;
     const tmp = path.join(dir, `meta.json.${process.pid}`);
-    await fsp.writeFile(tmp, JSON.stringify({ epoch: this.epoch, node: this.o.node, covered: this.o.now() }), { mode: 0o600 });
+    await fsp.writeFile(tmp, JSON.stringify({ epoch: this.epoch, node: this.o.node, clean, covered: this.o.now() }), { mode: 0o600 });
     await fsp.rename(tmp, path.join(dir, "meta.json"));
   }
 
@@ -219,7 +218,7 @@ export class Journal {
   cover(): void {
     if (!this.persistent || this.closed || this.o.now() - this.lastCover < 5000) return;
     this.lastCover = this.o.now();
-    this.chain = this.chain.then(() => this.writeMeta()).catch((e) => this.fail(e));
+    this.chain = this.chain.then(() => this.writeMeta(false)).catch((e) => this.fail(e));
   }
 
   /** Last complete line of a segment: sets its `last` and `lastTime`, cuts a partial line. False when the segment holds nothing readable. */
@@ -361,7 +360,7 @@ export class Journal {
     this.ringBytes = 0;
     this.seq = 0;
     this.epoch = newEpoch();
-    if (this.persistent) await this.writeMeta().catch((e) => this.fail(e));
+    if (this.persistent) await this.writeMeta(false).catch((e) => this.fail(e));
   }
 
   /** Can a reader holding `since` (a parsed cursor's epoch and sequence) continue from here? Else why not. */
@@ -380,11 +379,15 @@ export class Journal {
     if (after >= upTo) return;
     const r0 = this.ring[0];
     if (r0 && after + 1 >= r0.seq) {
+      // a copy of what is wanted, taken at once: `write()` may shift the ring while a chunk is being passed on, and an index into the live ring would skip events
+      const first = Math.max(0, after + 1 - r0.seq);
+      const wanted = this.ring.slice(first, Math.max(first, upTo - r0.seq + 1));
       let batch: Buffer[] = [];
       let n = 0;
-      for (const r of this.ring) {
-        if (r.seq <= after) continue;
-        if (r.seq > upTo) break;
+      let expect = after + 1;
+      for (const r of wanted) {
+        if (r.seq !== expect) throw new JournalGap("lost"); // (the ring is in order: this cannot happen, and a hole is never passed on silently)
+        expect++;
         batch.push(r.line);
         n += r.line.length;
         if (n >= READ_CHUNK) {
@@ -451,14 +454,40 @@ export class Journal {
     }
   }
 
-  /** Write what is pending and close the file. With `remove`, delete the journal's directory (a journal made in a temporary place). */
+  /**
+   * Write what is pending and close the file. A journal that wrote every event notes `clean` in `meta.json`, so the next process continues its epoch; one
+   * that failed to write, or that gave up its place (`release`), does not. With `remove`, delete the journal's directory (a journal made in a temporary place).
+   */
   async close(remove = false): Promise<void> {
     await this.flush();
-    if (this.persistent && !remove) await this.writeMeta().catch(() => {}); // the final coverage time: a clean stop
+    if (this.opened && this.persistent && !remove) await this.writeMeta(true).catch(() => {});
     this.closed = true;
     await this.fh?.close().catch(() => {});
     this.fh = null;
     if (remove && this.o.dir) fs.rmSync(this.o.dir, { recursive: true, force: true });
+  }
+
+  /**
+   * This process is no longer the writer: write what is pending, close the file, and forget everything held (sequence, segments, ring), so a later `open()`
+   * reads the disk as the next writer left it. The `clean` mark is not set: the next opener, this process included, starts a new epoch.
+   */
+  async release(): Promise<void> {
+    await this.flush();
+    await this.chain;
+    await this.fh?.close().catch(() => {});
+    this.fh = null;
+    this.segs = [];
+    this.ring = [];
+    this.ringBytes = 0;
+    this.pending = [];
+    this.pendingBytes = 0;
+    this.seq = 0;
+    this.epoch = newEpoch();
+    this.coveredUntil = 0;
+    this.lastCover = 0;
+    this.failed = false;
+    this.disk = true;
+    this.opened = false;
   }
 }
 

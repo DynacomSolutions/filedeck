@@ -1,5 +1,5 @@
 import type { EventBus } from "./bus.ts";
-import { CONTROL_KINDS, type Encoded } from "./types.ts";
+import { CONTROL_KINDS, type Matchable } from "./types.ts";
 
 /**
  * Folder watches on top of the bus, in memory only: no kernel watch, no limit from the kernel. A callback is told when an entry of the folder it
@@ -16,6 +16,7 @@ export interface DirFeed {
 export class DirWatchers implements DirFeed {
   private map = new Map<string, Set<() => void>>();
   private off: () => void;
+  private offStopped: () => void;
   count = 0;
 
   /** `covers`: whether the watcher keeps `virtual` current (FanWatch.covers) */
@@ -24,9 +25,19 @@ export class DirWatchers implements DirFeed {
     private covers: (virtual: string) => boolean,
   ) {
     this.off = bus.listen((e) => this.event(e));
+    // the kernel watcher stopped: no folder is kept current any more. Every watcher is told (it may have missed changes) and dropped, so the callers
+    // fall back to their own way of noticing changes (the index to a watch of its own or the folder's modification time)
+    this.offStopped = bus.onStopped(() => this.dropAll());
   }
 
-  private event(e: Encoded) {
+  private dropAll() {
+    const sets = [...this.map.values()];
+    this.map.clear();
+    this.count = 0;
+    for (const set of sets) for (const cb of [...set]) cb();
+  }
+
+  private event(e: Matchable) {
     if (!this.count) return;
     if (CONTROL_KINDS.has(e.kind)) {
       if (e.kind === "ready") return;
@@ -62,6 +73,7 @@ export class DirWatchers implements DirFeed {
 
   close() {
     this.off();
+    this.offStopped();
     this.map.clear();
     this.count = 0;
   }

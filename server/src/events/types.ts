@@ -43,6 +43,7 @@ export interface ChangeEvent extends NewEvent {
   node: string;
   dir: boolean;
   labels?: Record<string, string>;
+  fromLabels?: Record<string, string>;
 }
 
 /** The fields a filter looks at. */
@@ -52,6 +53,8 @@ export interface Matchable {
   path?: string;
   from?: string;
   labels?: Record<string, string>;
+  /** a move: the labels of the place the entry came from (absent when they are the labels of `path`) */
+  fromLabels?: Record<string, string>;
 }
 
 /** An event as the bus holds it: the fields a filter needs and the finished line (JSON and a line feed). */
@@ -79,6 +82,7 @@ export function encodeEvent(ev: ChangeEvent): Buffer {
   if (ev.path !== undefined) o.path = ev.path;
   if (ev.from !== undefined) o.from = ev.from;
   if (ev.labels) o.labels = ev.labels;
+  if (ev.fromLabels) o.fromLabels = ev.fromLabels;
   if (ev.scope) o.scope = ev.scope;
   if (ev.window) o.window = ev.window;
   if (ev.reason) o.reason = ev.reason;

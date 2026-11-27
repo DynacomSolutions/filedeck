@@ -76,12 +76,16 @@ export class Filter {
     if (CONTROL_KINDS.has(e.kind)) return true;
     if (this.kinds && !this.kinds.has(e.kind)) return false;
     if (this.type && e.dir !== (this.type === "dir")) return false;
-    if (this.labels) {
-      if (!e.labels) return false;
-      for (const [k, vs] of this.labels) if (!vs.has(e.labels[k] as string)) return false;
-    }
+    // a move matches by the labels of either place, as it does by the path of either place
+    if (this.labels && !this.labelsMatch(e.labels) && !(e.from !== undefined && this.labelsMatch(e.fromLabels))) return false;
     if (this.prefixes.length && !this.underPrefix(e.path) && !this.underPrefix(e.from)) return false;
     if (this.globs && !this.globHit(e)) return false;
+    return true;
+  }
+
+  private labelsMatch(labels: Record<string, string> | undefined): boolean {
+    if (!labels) return false;
+    for (const [k, vs] of this.labels!) if (!vs.has(labels[k] as string)) return false;
     return true;
   }
 

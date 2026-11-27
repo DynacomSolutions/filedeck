@@ -397,20 +397,36 @@ test("bus: a subscriber waits at most the writer wait, then gets 503", async () 
   await assert.rejects(b.subscribe(new Filter(), undefined, "http"), (x: { status?: number }) => x.status === 503);
 });
 
-test("bus: losing the lease ends the subscribers (they come back to the new writer); a gap between two writers is a reset", async () => {
+test("bus: losing the lease ends the subscribers; the journal is released and the next opener starts a new epoch", async () => {
   const dir = tmp();
   let writer = true;
   const b = bus({ journal: { dir, flushMs: 5 }, writer: () => writer });
   b.publish(ev("create", "/a"));
   const sub = await b.subscribe(new Filter(), undefined, "http");
   await take(sub, 1);
+  const epoch = b.journal.epoch;
   writer = false;
   const end = await take(sub, 1);
   assert.equal(end[0]!.kind, "lagged");
+  await until(() => !b.serving && b.journal.head === 0);
+  assert.equal(b.journal.head, 0, "the journal let go of its state");
+  await b.close();
+  const b2 = bus({ journal: { dir, flushMs: 5 } });
+  b2.publish({ kind: "ready", scope: "node" });
+  assert.ok(await b2.whenServing());
+  assert.notEqual(b2.journal.epoch, epoch, "a writer that lost its lease did not stop cleanly: the next one starts a new epoch");
+});
+
+test("bus: a gap between two writers that both stopped cleanly is a reset, in the same epoch", async () => {
+  const dir = tmp();
+  const b = bus({ journal: { dir, flushMs: 5 } });
+  b.publish(ev("create", "/a"));
+  await b.whenServing();
   await b.close();
   // a second process opens the same journal; the first stopped covering it long ago, and the second saw nothing before it started
-  const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf8")) as { covered: number };
-  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf8")), covered: meta.covered - 60_000 }));
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf8")) as { covered: number; clean: boolean };
+  assert.equal(meta.clean, true);
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ ...meta, covered: meta.covered - 60_000 }));
   const b2 = bus({ journal: { dir, flushMs: 5 } });
   b2.publish({ kind: "ready", scope: "node" });
   assert.ok(await b2.whenServing());
@@ -421,6 +437,152 @@ test("bus: losing the lease ends the subscribers (they come back to the new writ
   assert.match(String(reset.reason), /not seen/);
   assert.equal(typeof (reset.window as { from: number }).from, "number");
   assert.equal(typeof (reset.window as { to: number }).to, "number");
+});
+
+// ---- review fixes ----
+
+test("journal: the ring replay does not skip events when new ones push old ones out while a chunk is being passed on", async () => {
+  const j = new Journal({ dir: null, node: "n1", ringEvents: 12, ringBytes: 10 * 1024 * 1024 });
+  await j.open();
+  const big = (seq: number) => Buffer.from(`{"cursor":"n1:e:${seq}","pad":"${"x".repeat(100_000)}"}\n`);
+  for (let i = 1; i <= 10; i++) j.write(j.next().seq, i, big(i));
+  const got: number[] = [];
+  for await (const chunk of j.read(0, 10)) {
+    for (const l of chunk.toString("utf8").split("\n").filter(Boolean)) got.push(lineSeq(Buffer.from(l)));
+    // while the reader holds a chunk, more events arrive and the ring drops its oldest
+    for (let i = 0; i < 10; i++) j.write(j.next().seq, 100 + i, big(j.head + 1));
+  }
+  assert.deepEqual(got, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+});
+
+test("journal: a journal that was not closed (a crash) is not continued in its epoch", async () => {
+  const dir = tmp();
+  const a = new Journal({ dir, node: "n1", flushMs: 5 });
+  await a.open();
+  mk(a, (n) => n, 5);
+  await a.flush(); // on disk, but no close: no clean mark
+  const b = new Journal({ dir, node: "n1" });
+  await b.open();
+  assert.notEqual(b.epoch, a.epoch, "a new epoch: readers hold cursors that the disk may not reach");
+  assert.equal(b.head, 0);
+  assert.equal(fs.readdirSync(dir).filter((n) => n.startsWith("seg-")).length, 0, "the old epoch's segments are gone");
+  await b.close();
+  // a clean close is continued
+  const c = new Journal({ dir, node: "n1" });
+  await c.open();
+  mk(c, (n) => n, 3);
+  await c.close();
+  const d = new Journal({ dir, node: "n1" });
+  await d.open();
+  assert.equal(d.epoch, c.epoch);
+  assert.equal(d.head, 3);
+  await d.close();
+});
+
+test("journal: a failed write starts a new epoch at the next open (the memory held events that the disk lacks)", async () => {
+  const dir = tmp();
+  const j = new Journal({ dir, node: "n1", flushMs: 5, segmentBytes: 1, log: () => {} });
+  await j.open();
+  mk(j, (n) => n, 2);
+  await j.flush();
+  const blocker = path.join(dir, "seg-000000000000003.jsonl");
+  fs.mkdirSync(blocker); // the next segment cannot be made (also for root)
+  mk(j, (n) => n, 2);
+  await j.flush();
+  assert.equal(j.persistent, false, "the journal went to memory only");
+  assert.equal(j.head, 4, "readers were given events 3 and 4 from memory");
+  const epoch = j.epoch;
+  await j.close();
+  fs.rmdirSync(blocker); // the fault is over, and the disk holds events 1 and 2 only
+  const k = new Journal({ dir, node: "n1" });
+  await k.open();
+  assert.notEqual(k.epoch, epoch, "the disk is behind what readers were told: a new epoch");
+  assert.equal(k.head, 0);
+  await k.close();
+});
+
+test("bus: a demoted writer closes its files and forgets its state; when it is the writer again it reads the disk as the other writer left it", async () => {
+  const dir = tmp();
+  let writer = true;
+  const b = bus({ journal: { dir, flushMs: 5 }, writer: () => writer });
+  for (let i = 1; i <= 3; i++) b.publish(ev("create", `/a${i}`));
+  await b.whenServing();
+  writer = false;
+  b.publish(ev("create", "/during-demotion")); // a process that lost the lease writes nothing
+  await until(() => b.journal.head === 0 && !b.serving);
+  assert.equal(b.serving, false);
+  const files = fs.readdirSync(dir).filter((n) => n.startsWith("seg-"));
+  const lines = files.map((f) => fs.readFileSync(path.join(dir, f), "utf8")).join("").split("\n").filter(Boolean);
+  assert.equal(lines.length, 3, "the three events before the loss are on disk and the fourth is not");
+  // another process wrote the folder meanwhile: it stopped cleanly with a longer journal
+  const other = new Journal({ dir, node: "n1", flushMs: 5 });
+  await other.open();
+  assert.notEqual(other.epoch, "");
+  mk(other, (n) => 100 + n, 7);
+  await other.close();
+  writer = true;
+  assert.ok(await b.whenServing());
+  assert.equal(b.journal.epoch, other.epoch, "it continues the journal the other writer left");
+  assert.equal(b.journal.head, 8, "its sequence comes from the disk (7), plus the one event that it staged meanwhile, not from what it held before");
+  b.publish(ev("create", "/after"));
+  const sub = await b.subscribe(new Filter(), b.cursorOf(6), "http");
+  const got = await take(sub, 3);
+  assert.deepEqual(got.map((x) => x.cursor), [b.cursorOf(7), b.cursorOf(8), b.cursorOf(9)]);
+  assert.equal(got[1]!.path, "/during-demotion");
+});
+
+test("bus: the lease is checked at each event: a process that lost it does not write the next event, even before the timer notices", async () => {
+  const dir = tmp();
+  let writer = true;
+  const b = bus({ journal: { dir, flushMs: 5 }, writer: () => writer });
+  b.publish(ev("create", "/a"));
+  await b.whenServing();
+  await b.journal.flush();
+  const sub = await b.subscribe(new Filter(), undefined, "http");
+  writer = false;
+  b.publish(ev("create", "/b")); // at once, with no wait for the 200 ms check
+  const end = await take(sub, 1);
+  assert.equal(end[0]!.kind, "lagged", "the subscriber was not given /b");
+  await until(() => b.journal.head === 0);
+  const text = fs.readdirSync(dir).filter((n) => n.startsWith("seg-")).map((f) => fs.readFileSync(path.join(dir, f), "utf8")).join("");
+  assert.ok(!text.includes("/b"), "nothing was written after the lease was lost");
+});
+
+test("bus: with no usable size store (no lease) the journal stays in memory, so two processes never write one folder", async () => {
+  const dir = tmp();
+  const a = bus({ journal: { dir, flushMs: 5 }, writer: () => true, disk: () => false });
+  const c = bus({ journal: { dir, flushMs: 5 }, writer: () => true, disk: () => false });
+  a.publish(ev("create", "/a"));
+  c.publish(ev("create", "/c"));
+  assert.ok(await a.whenServing());
+  assert.ok(await c.whenServing());
+  await a.journal.flush();
+  await c.journal.flush();
+  assert.deepEqual(fs.readdirSync(dir), [], "nothing was written");
+  assert.equal(a.journal.persistent, false);
+});
+
+test("bus: listeners hear every event also in a process that is not the writer", async () => {
+  const b = bus({ journal: { dir: tmp() }, writer: () => false, writerWaitMs: 20 });
+  const heard: string[] = [];
+  b.listen((x) => heard.push(`${x.kind}:${x.path}`));
+  b.publish(ev("create", "/a"));
+  b.publish(ev("delete", "/b"));
+  assert.equal(b.serving, false);
+  assert.deepEqual(heard, ["create:/a", "delete:/b"]);
+});
+
+test("bus: a move carries the labels of the place it came from, and a label filter matches by either place", async () => {
+  const b = bus({ labels: new LabelRules("/srv/{org}") });
+  const sub = await b.subscribe(new Filter({ label: ["org:acme"] }), undefined, "http");
+  b.publish(ev("move", "/elsewhere/new", { from: "/srv/acme/old" })); // out of a labelled place
+  b.publish(ev("move", "/srv/acme/new", { from: "/elsewhere/old" })); // into one
+  b.publish(ev("move", "/srv/beta/new", { from: "/srv/beta/old" })); // not acme
+  b.publish(ev("create", "/elsewhere/x"));
+  const got = await take(sub, 2);
+  assert.deepEqual(got.map((x) => x.path), ["/elsewhere/new", "/srv/acme/new"]);
+  assert.deepEqual(got[0]!.fromLabels, { org: "acme" });
+  assert.equal(got[1]!.fromLabels, undefined);
 });
 
 test("bus: the watcher's events reach the journal as overflow and reset with their window; listeners see every event first", async () => {

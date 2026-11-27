@@ -20,8 +20,13 @@ export interface BusOptions {
   node: string;
   journal: Omit<JournalOptions, "node" | "now" | "log">;
   labels?: LabelRules;
-  /** may this process write the journal? (the size store's lease). Default: always. Only asked when the journal is on disk. */
+  /** may this process write the journal and serve readers? (the size store's lease). Default: always. Only asked when the journal is on disk. */
   writer?: () => boolean;
+  /**
+   * may this process use the journal's folder? Asked when the journal is opened. False (the size store is unusable, so there is no lease to say who writes):
+   * the journal stays in memory, so two processes never write the same files. Default: yes.
+   */
+  disk?: () => boolean;
   now?: () => number;
   /** the most bytes one subscriber may have queued before it is ended as lagged (default 1 MiB) */
   maxQueueBytes?: number;
@@ -35,7 +40,7 @@ export interface BusOptions {
 }
 
 /** An event as it was published, with its labels, waiting for the journal. */
-type Staged = NewEvent & { time: number; labels?: Record<string, string> };
+type Staged = NewEvent & { time: number; labels?: Record<string, string>; fromLabels?: Record<string, string> };
 
 /** Seen again after the previous writer's last event: the overlap that makes a hand-over lose nothing (a repeat is allowed, a gap is not). */
 const ADOPT_SLACK_MS = 2000;
@@ -232,15 +237,16 @@ export class EventBus {
   readonly pingMs: number;
   now: () => number;
   private subs = new Set<Subscriber>();
-  private listeners = new Set<(e: Encoded) => void>();
+  private listeners = new Set<(e: Matchable) => void>();
+  private stopListeners = new Set<() => void>();
+  private releasing: Promise<void> | undefined;
   private stage: Staged[] = [];
   private stageLost = false;
-  private state: "staging" | "opening" | "serving" | "closed" = "staging";
+  private state: "staging" | "opening" | "serving" | "demoting" | "closed" = "staging";
   private timer: NodeJS.Timeout | undefined;
   private waiters: ((ok: boolean) => void)[] = [];
   private readonly o: BusOptions;
-  /** true while the kernel watcher runs and has every mark in place (set by the watcher) */
-  ready = false;
+  private _ready = false;
   // counters for /metrics (counts only)
   events: Record<string, number> = {};
   overflows = 0;
@@ -268,6 +274,31 @@ export class EventBus {
     return formatCursor(this.node, this.journal.epoch, seq);
   }
 
+  /** true while the kernel watcher runs and has every mark in place (set by the watcher). When it turns false, `onStopped` listeners are told at once. */
+  get ready(): boolean {
+    return this._ready;
+  }
+
+  set ready(v: boolean) {
+    const was = this._ready;
+    this._ready = v;
+    if (was && !v) for (const f of [...this.stopListeners]) this.safely(f);
+  }
+
+  /** Told when the watcher stops: what is held in memory about folders (the folder feed) is no longer kept current. */
+  onStopped(fn: () => void): () => void {
+    this.stopListeners.add(fn);
+    return () => void this.stopListeners.delete(fn);
+  }
+
+  private safely(f: () => void) {
+    try {
+      f();
+    } catch {
+      /* a listener's fault is its own */
+    }
+  }
+
   get serving(): boolean {
     return this.state === "serving";
   }
@@ -284,8 +315,11 @@ export class EventBus {
     return !this.journal.dir || !this.o.writer || this.o.writer();
   }
 
-  /** A listener sees every event as the bus holds it, before the filters of the subscribers (used by the folder watchers of the compare index and the live feed). */
-  listen(fn: (e: Encoded) => void): () => void {
+  /**
+   * A listener sees every event the watcher publishes, at once and whether or not this process writes the journal (the folder feed of the compare index and
+   * the live feed need the events of the kernel watcher also while another process is the writer). It runs before the filters of the subscribers.
+   */
+  listen(fn: (e: Matchable) => void): () => void {
     this.listeners.add(fn);
     return () => void this.listeners.delete(fn);
   }
@@ -294,9 +328,19 @@ export class EventBus {
   publish(ev: NewEvent): void {
     if (this.state === "closed") return;
     const time = ev.time ?? this.now();
-    const labels = ev.path !== undefined && !CONTROL_KINDS.has(ev.kind) ? this.labels.labels(ev.path) : undefined;
-    const s: Staged = { ...ev, time, ...(labels ? { labels } : {}) };
-    if (this.state === "serving") return this.commit(s);
+    const control = CONTROL_KINDS.has(ev.kind);
+    const labels = ev.path !== undefined && !control ? this.labels.labels(ev.path) : undefined;
+    const fromLabels = ev.from !== undefined ? this.labels.labels(ev.from) : undefined;
+    const s: Staged = { ...ev, time, ...(labels ? { labels } : {}), ...(fromLabels && fromLabels !== labels ? { fromLabels } : {}) };
+    if (this.listeners.size) {
+      const m: Matchable = { kind: s.kind, dir: !!s.dir, path: s.path, from: s.from, labels: s.labels, fromLabels: s.fromLabels };
+      for (const l of this.listeners) this.safely(() => l(m));
+    }
+    if (this.state === "serving") {
+      // the lease is checked at each event: a process that lost it writes nothing more
+      if (this.mayWrite()) return this.commit(s);
+      this.demote("this process is no longer the writer");
+    }
     this.stage.push(s);
     if (this.stage.length > (this.o.stageMax ?? 100_000)) {
       this.stage.splice(0, this.stage.length - (this.o.stageMax ?? 100_000) + 1000);
@@ -315,7 +359,7 @@ export class EventBus {
     if (this.state !== "staging" || !this.mayWrite()) return;
     this.state = "opening";
     try {
-      await this.journal.open();
+      await this.journal.open(this.o.disk ? this.o.disk() : true);
       const last = this.journal.lastTime;
       const covered = this.journal.coveredUntil;
       // Where did this process start to watch? Its first `ready` event, else its first event. A journal that was covered up to then (the process
@@ -338,11 +382,18 @@ export class EventBus {
     }
   }
 
-  /** This process lost the writer lease: it stages again, and its subscribers are told to come back. */
+  /**
+   * This process lost the writer lease: its subscribers are told to come back, the journal writes what it holds and lets go of its files and its state, and
+   * the events that come meanwhile are staged. Re-promotion opens the journal again and reads the disk as the new writer left it.
+   */
   private demote(why: string) {
-    this.state = "staging";
+    this.state = "demoting";
     for (const s of [...this.subs]) s.endWith(laggedLine(this.node, s.delivered ? this.cursorOf(s.delivered) : undefined));
     this.o.log?.(`event bus: ${why}`);
+    const done = () => {
+      if (this.state === "demoting") this.state = "staging";
+    };
+    this.releasing = this.journal.release().catch(() => {}).then(done);
   }
 
   private commit(s: Staged): void {
@@ -350,19 +401,12 @@ export class EventBus {
     const ev: ChangeEvent = { ...s, cursor, time: s.time, node: this.node, dir: !!s.dir };
     const line = encodeEvent(ev);
     this.journal.write(seq, ev.time, line);
-    const enc: Encoded = { seq, time: ev.time, kind: ev.kind, dir: ev.dir, path: ev.path, from: ev.from, labels: ev.labels, line };
+    const enc: Encoded = { seq, time: ev.time, kind: ev.kind, dir: ev.dir, path: ev.path, from: ev.from, labels: ev.labels, fromLabels: ev.fromLabels, line };
     this.events[ev.kind] = (this.events[ev.kind] ?? 0) + 1;
     if (ev.kind === "overflow") this.overflows++;
     if (ev.kind === "reset") this.resets++;
     this.lastEventAt = ev.time;
     const t0 = performance.now();
-    for (const l of this.listeners) {
-      try {
-        l(enc);
-      } catch {
-        /* a listener's fault is its own */
-      }
-    }
     for (const sub of this.subs) sub.offer(enc);
     this.lagMs = Math.max(this.lagMs * 0.9, performance.now() - t0);
   }
@@ -421,6 +465,8 @@ export class EventBus {
     for (const s of [...this.subs]) s.close();
     for (const w of this.waiters.splice(0)) w(false);
     this.listeners.clear();
+    this.stopListeners.clear();
+    await this.releasing;
     await this.journal.close(removeJournal);
   }
 }
