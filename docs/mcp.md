@@ -69,6 +69,7 @@ A grants file with no grants is valid. The listener then answers 401 to every re
 
 | Status | Meaning |
 |---|---|
+| 400 | A POST holds a request with an id that another request of the same session still uses. The error is a JSON-RPC `InvalidRequest`. Use a new id for each request. |
 | 401 | The token is missing or matches no grant. The header `WWW-Authenticate: Bearer realm="filedeck-mcp"` is set. |
 | 403 | Sign-in is on and the grant has no account. Or the `Origin` is foreign. Or the session belongs to another grant. |
 | 404 | Unknown session id, or an unknown path. |
@@ -444,7 +445,7 @@ After the notification, call `resources/list` again.
 Every `resources/updated` and every `list_changed` notification has `_meta.eventId`, and the same value in `_meta.filedeck.eventId`.
 
 - The id has the form `<hash>.<revision>`. `<hash>` is 12 hexadecimal characters made from the URI and the account that the session reads as. `<revision>` is the revision of the resource after the change. A client keeps the id as an opaque string.
-- The id is stable for a replay of the same logical event: the same URI and the same revision always give the same id, in every session, after a reconnect and after a hub restart (a revision never goes down, see [Revision](#revision)). The id is unique for each URI and revision: two different resources, or two different revisions of one resource, never share an id.
+- The same URI and the same revision give the same id, in every session of one hub process and after a reconnect. The id is unique for each URI and revision: two different resources, or two different revisions of one resource, never share an id. A hub restart is a gap: the client sees a new `streamId` (see [Gaps](#gaps-baseline-reads)) and must do baseline reads. It must not match an id from before the restart with an id from after it.
 - One notice is for one resource. When one change of a source touches several resources (a job that ends changes the job, the jobs of its node, the scans of its node and the list of resources), the client gets one notice for each, and each has its own `eventId`. All of them have the same `changeId` in `_meta.filedeck`. The `changeId` is 12 hexadecimal characters made from the set of URI and revision pairs of that change: the same set gives the same `changeId`, also for a replay. A `list_changed` notice that belongs to the change has the same `changeId`.
 - Use `eventId` to drop a repeat: keep the ids that you have handled and drop a notice whose id you have seen. Use `changeId` when the cause matters: notices with one `changeId` are one cause, so a client that starts work for a cause starts it once for the `changeId`, not once for each notice. Do not use `changeId` to drop a repeat.
 - Two notices with the same URI and the same revision have the same id. The second one carries no new state: the revision did not change. Drop it.
@@ -533,7 +534,7 @@ What the server keeps, and what a client gets when it is gone:
 | Subscriptions | As long as the session. | They are gone with it. Subscribe again. |
 | Resource revisions | In the hub's memory. A restart starts them again from the hub clock. | The first read after a restart can give a new revision for unchanged content. The client reads the state once more. It never misses a change. |
 | Jobs | As long as the agent or the hub lists them. A finished job is removed after a time that the node sets. | The job resource then gives "not found", and a notification (`job.removed`) tells the list resources. |
-| Event ids | Not kept. An id is made from the URI and the revision, so the same logical event always has the same id. | A repeat is dropped by `eventId`. |
+| Event ids | Not kept. An id is made from the URI and the revision: the same URI and revision give the same id. | A repeat is dropped by `eventId`. After a hub restart the client sees a gap (a new `streamId`) and does baseline reads. |
 | Domain journal cursor | In the agent: see the first row. The hub keeps none. | A `reset` event, as in the first row. It has nothing to do with the event ids of the notifications. |
 
 ## Commissioning list
@@ -608,7 +609,7 @@ The MCP server adds these lines to the hub metrics, on the hub metrics port (`hu
 
 - Liveness: `GET /mcp/healthz` answers 200 while the MCP listener accepts requests and the hub's own listener answers on loopback. On a connection that is open during a drain it still answers 200.
 - Readiness: `GET /mcp/readyz` answers 200 while the server takes new sessions. It answers 503 from the first moment of a drain. With the chart, `hub.mcp.enabled` makes the hub pod use these two paths as its readiness and liveness probes, with the scheme `HTTPS`.
-- Drain, on `SIGTERM`: the listener closes, so a new connection is refused. A request on a connection that is still open (keep-alive) gets 503 with `Retry-After`, and so does `initialize`. The server lets every tool call in flight finish and then closes every session and its streams. The drain has no timer and no time limit: it waits until the server has answered every call in flight. It waits for the work, not for the client: a client that does not read its answer does not hold the drain. The grace period of the pod (`terminationGracePeriodSeconds`) is the only limit, and it ends the process. The timers of the hub's own shutdown start when the MCP drain ends. Then the hub runs its clean-up, which cuts any MCP connection that is still open, and stops as it does without MCP. A client that sees its stream end reconnects and follows the procedure in [Gaps: baseline reads](#gaps-baseline-reads).
+- Drain, on `SIGTERM`: the listener closes, so a new connection is refused. A request on a connection that is still open (keep-alive) gets 503 with `Retry-After`, and so does `initialize`. The server lets every tool call in flight finish and then closes every session and its streams. The drain has no timer and no time limit: it waits until the server has answered every call in flight. It waits for the work, not for the client: a client that does not read its answer does not hold the drain, and a call that the client cancelled (`notifications/cancelled`) is not work in flight. The grace period of the pod (`terminationGracePeriodSeconds`) is the only limit, and it ends the process. The timers of the hub's own shutdown start when the MCP drain ends. Then the hub runs its clean-up, which cuts any MCP connection that is still open, and stops as it does without MCP. A client that sees its stream end reconnects and follows the procedure in [Gaps: baseline reads](#gaps-baseline-reads).
 
 ## Adding a module
 
