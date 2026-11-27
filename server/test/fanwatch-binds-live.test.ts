@@ -72,6 +72,23 @@ function layout(whole: boolean) {
   return { base, a, b, z, mounts };
 }
 
+function regularFileLayout() {
+  const base = fs.mkdtempSync(path.join(work, "file-l-"));
+  const z = path.join(base, "zz-whole");
+  const alias = path.join(base, "file-bind");
+  fs.mkdirSync(z);
+  mount(["-t", "tmpfs", "tmpfs", z]);
+  mounted.push(z);
+  const source = path.join(z, "source.txt");
+  fs.writeFileSync(source, "before\n");
+  fs.writeFileSync(alias, "placeholder\n");
+  mount(["--bind", source, alias]);
+  mounted.push(alias);
+  const mounts = path.join(base, "mounts");
+  fs.writeFileSync(mounts, [`/dev/test ${alias} ext4 rw 0 0`, `/dev/test ${z} ext4 rw 0 0`].join("\n") + "\n");
+  return { base, alias, source, z, mounts };
+}
+
 async function watch(mounts: string) {
   const bus = new EventBus({ node: "n1", journal: { dir: null } });
   buses.push(bus);
@@ -187,4 +204,21 @@ test("bind mounts: with no mount of the whole filesystem, a change in the second
   assert.ok(seen(ev, "create", path.join(l.b, "sub")), all);
   assert.ok(seen(ev, "create", path.join(l.b, "sub/in-two.txt")), all);
   assert.ok(!ev.some((e) => e.path?.includes("data/")), "paths are the bind paths");
+});
+
+test("bind mounts: a regular-file alias reports its exact alias event path", { skip }, async () => {
+  const l = regularFileLayout();
+  // Replace the source pathname after the bind exists. The mounted inode remains the pinned object.
+  fs.renameSync(l.source, `${l.source}.replaced`);
+  fs.writeFileSync(l.source, "replacement\n");
+  const r = await watch(l.mounts);
+  fs.appendFileSync(l.alias, "after\n");
+  let ev: { kind: string; path?: string }[] = [];
+  for (let i = 0; i < 100; i++) {
+    ev = await held(r.bus);
+    if (ev.some((e) => e.path === l.alias && e.kind !== "ready")) break;
+    await sleep(100);
+  }
+  const all = ev.map((e) => `${e.kind} ${e.path}`).join("\n");
+  assert.ok(ev.some((e) => e.path === l.alias && ["modify", "close_write", "attrib"].includes(e.kind)), `regular-file alias event\n${all}`);
 });

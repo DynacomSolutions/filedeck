@@ -17,7 +17,7 @@ export interface MacWatchStore {
 export interface MacWatchOptions { root: string; procMounts: string; settleMs?: number; reconcileMs?: number; /** every change is published here as well, as well as FSEvents tells it (no entry names for a rename: a lookup tells created from removed) */ bus?: EventBus }
 
 export interface MacWatchStatus {
-  running: boolean; ready: boolean; mounts: number; watched: number; unwatched: number; excluded: number;
+  running: boolean; ready: boolean; mounts: number; watched: number; covered: number; unsupported: number; aliases: number; unwatched: number; excluded: number;
   backlog: number; lostEvents: number; reconcileError: string;
 }
 
@@ -126,7 +126,7 @@ export class MacWatch {
     this.reconcileTimer.unref?.();
   }
 
-  status(): MacWatchStatus { return { running: this.watchers.size > 0, ready: this.ready && this.unwatched.size === 0, mounts: this.mounts.length, watched: this.watchers.size, unwatched: this.unwatched.size, excluded: 0, backlog: this.pending.size, lostEvents: this.lostEvents, reconcileError: this.reconcileError }; }
+  status(): MacWatchStatus { return { running: this.watchers.size > 0, ready: this.ready && this.unwatched.size === 0, mounts: this.mounts.length, watched: this.watchers.size, covered: this.watchers.size, unsupported: 0, aliases: 0, unwatched: this.unwatched.size, excluded: 0, backlog: this.pending.size, lostEvents: this.lostEvents, reconcileError: this.reconcileError }; }
   /** Last reconciled mount list in the agent's path space. */
   mountCoverage(): { path: string; state: "watched" | "unwatched" }[] {
     return this.mounts.flatMap((mount) => {

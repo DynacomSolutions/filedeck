@@ -6,6 +6,12 @@ import { changesUrl, statusHistoryAction, statusRoute, statusUrl } from "../src/
 import { jobDuration, statusJobs } from "../src/statusJobs.ts";
 import type { JobsSnapshot } from "../src/Jobs.tsx";
 import type { DiffJobView, JobView, OpJob } from "../src/api.ts";
+import { coveredMountCount } from "../src/StatusNodes.tsx";
+
+test("mixed-version node payloads derive the covered numerator when the field is absent", () => {
+  assert.equal(coveredMountCount({ coverage: [{ state: "watched" }, { state: "unknown" }] }), 1);
+  assert.equal(coveredMountCount({ covered: 2, coverage: [{ state: "watched" }] }), 2);
+});
 
 test("status route round trips escaped nodes, selected jobs and filters", () => {
   const route = statusRoute("/status/Node%20A", "?section=events&job=scan%3A1&jobs=active&prefix=%2Fdata&glob=*.txt&kind=move&type=file")!;

@@ -8,6 +8,9 @@ export interface NodeStatus {
     ready: boolean;
     mounts: number;
     watched: number;
+    covered: number;
+    unsupported: number;
+    aliases: number;
     unwatched: number;
     excluded: number;
     backlog: number;

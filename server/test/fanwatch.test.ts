@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { FanWatch as RealFanWatch, mapPath, unescapeLine, type HelperProc } from "../src/fanwatch.ts";
 import { DatabaseSync } from "node:sqlite";
 import { SizeStore as RealSizeStore } from "../src/size-store.ts";
@@ -116,16 +116,59 @@ test("fanwatch: passes every mount of a filesystem, bind aliases too, so the hel
   s.done();
 });
 
-test("fanwatch: a mount of a single file (a file bind mount) is not given to the helper, not reported as unwatched, and does not make the root uncovered", async () => {
+test("fanwatch: a single-file bind is passed to the helper and needs exact-path coverage", async () => {
   const s = setup();
   fs.writeFileSync(path.join(s.root, "hosts"), "127.0.0.1 localhost\n");
   fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/a /hosts ext4 rw 0 0\n/dev/b /data xfs rw 0 0\n");
   await s.w.start();
-  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data")]], "the file is not an argument");
+  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data"), path.join(s.root, "hosts")]], "the file alias reaches the helper");
   s.w.line("#ready 2");
   const st = s.w.status();
-  assert.equal(st.unwatched, 0, "a file mount is not an unwatched filesystem");
+  assert.equal(st.unwatched, 0, "the helper accepted the file alias");
+  assert.equal(st.unsupported, 0, "the file alias is supported when passed to the helper");
+  assert.equal(st.covered, 3, "root, data and the exact file alias are covered");
+  assert.equal(st.aliases, 1, "the file bind mount is also reported as an alias of the root filesystem");
   assert.equal(s.w.covers("/"), true);
+  assert.equal(s.w.covers("/hosts"), true);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: an unmarked backing mount is not covered by its marked parent", async () => {
+  const s = setup();
+  fs.mkdirSync(path.join(s.root, "bound"));
+  fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/b /bound xfs rw 0 0\n");
+  await s.w.start();
+  s.w.line("#ready 1");
+  s.w.line(`c ${s.root}/bound`);
+  assert.equal(s.w.covers("/"), false);
+  assert.equal(s.w.covers("/bound"), false);
+  assert.equal(s.w.status().covered, 0);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: failed marks persist across unchanged reconciliation ticks", async () => {
+  const s = setup({ reconcileMs: 20 });
+  await s.w.start();
+  s.w.line("#ready 2");
+  s.w.line(`c ${s.root}/data`);
+  await sleep(100);
+  assert.equal(s.w.status().unsupported, 1);
+  await sleep(100);
+  assert.equal(s.w.status().unsupported, 1);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: a file-only mount added after readiness triggers reconciliation", async () => {
+  const s = setup({ reconcileMs: 20 });
+  await s.w.start();
+  s.w.line("#ready 2");
+  fs.writeFileSync(path.join(s.root, "alias"), "alias");
+  fs.appendFileSync(s.mounts, "/dev/a /alias ext4 rw 0 0\n");
+  await until(() => s.proc.killed, 5000);
+  assert.equal(s.proc.killed, true);
   s.w.stop();
   s.done();
 });
@@ -330,6 +373,39 @@ const cc = spawnSync("cc", ["-O2", "-o", bin, path.resolve(import.meta.dirname, 
 const probe = cc.status === 0 ? spawnSync(bin, [work], { timeout: 1000, encoding: "utf8" }) : null;
 const cannot = cc.status !== 0 ? "no C compiler" : probe!.status === 2 || probe!.status === 3 ? probe!.stderr.trim() : "";
 if (cannot && process.env.FILEDECK_REQUIRE_FANWATCH) throw new Error("fanwatch live test required but helper cannot run: " + cannot);
+
+test("fanwatch native helper: FIFO startup is bounded without a writer", async () => {
+  const fifo = path.join(work, "no-writer");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  const child = spawn(bin, [fifo], { stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  let out = "";
+  let err = "";
+  let ready = false;
+  let timer: NodeJS.Timeout;
+  const closed = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+  const outcome = new Promise<void>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("fanwatch FIFO startup exceeded 1000ms")), 1000);
+    child.stdout.on("data", (chunk: string) => { out += chunk; if (out.includes("#ready")) { ready = true; resolve(); } });
+    child.stderr.on("data", (chunk: string) => { err += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      // A capability-limited runner may refuse fanotify before it examines paths.
+      // An exit within the bound is still a safe refusal, not a startup hang.
+      if (!ready && !err.includes("skipping special mount path") && code === null) reject(new Error("fanwatch FIFO exited without a bounded result"));
+      else resolve();
+    });
+  });
+  try {
+    await outcome;
+    assert.ok(ready || child.exitCode !== null, "bounded FIFO startup result");
+  } finally {
+    clearTimeout(timer!);
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await closed;
+  }
+});
 
 test("fanwatch live: skipped (needs CAP_SYS_ADMIN and CAP_DAC_READ_SEARCH)", { skip: cannot ? `helper cannot run here: ${cannot}` : false }, async () => {
   const dir = path.join(work, "watched");

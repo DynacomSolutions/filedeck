@@ -1,6 +1,4 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import fs from "node:fs/promises";
-import path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable } from "node:stream";
@@ -148,6 +146,12 @@ export class FanWatch {
   private mountSignature = "";
   private mountCount = 0;
   private watchedCount = 0;
+  /** Local mount paths for which the helper reported a failed mark. */
+  private unsupportedMounts: string[] = [];
+  /** Extra local mount paths sharing an existing device and filesystem identity. */
+  private aliasCount = 0;
+  /** Local mount paths used to report effective parent-filesystem coverage. */
+  private coverageMounts: string[] = [];
   private reconcileError = "";
   private lostEvents = 0;
   private excludedMounts = 0;
@@ -186,8 +190,10 @@ export class FanWatch {
     this.ensureTimer(); // also drains folders a previous run left pending
     try {
       const all = await listMounts(this.o.root, this.o.procMounts);
+      this.unsupportedMounts = [];
       this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
       const mounts = await this.localMounts(all);
+      this.coverageMounts = mounts.map((m) => m.mountpoint);
       this.unwatched = all.filter((m) => m.network || m.unreachable).map((m) => m.mountpoint);
       // Fanotify marks a whole filesystem, and the helper marks each one once. It still needs every mount of it: a filesystem is often shown at more
       // than one place (bind mounts of some of its folders), and the helper reports an entry under each mount that shows it. So every local mount
@@ -251,15 +257,11 @@ export class FanWatch {
     }
   }
 
-  /**
-   * The local mounts the helper can mark: no network or unreachable mount, and no mount of a single file (a file bind mount such as a container's
-   * `/etc/hosts` is not a folder: the helper cannot open it as one, so it would be reported as unwatched and make `covers("/")` false at every start).
-   * A mount point that cannot be looked at stays in (the helper decides).
-   */
+  /** Return every reachable local mount, including single-file bind aliases. */
   private async localMounts(all: Mount[]): Promise<Mount[]> {
     const local = all.filter((m) => !m.network && !m.unreachable);
-    const isDir = await Promise.all(local.map((m) => fs.stat(path.join(this.o.root, m.mountpoint)).then((st) => st.isDirectory(), () => true)));
-    return local.filter((_, i) => isDir[i]);
+    this.aliasCount = Math.max(0, local.length - new Set(local.map((m) => `${m.device}\0${m.fstype}`)).size);
+    return local;
   }
 
   /** The mounts the helper is given: all of them, or the first MAXFS when there are more (one mount of every filesystem first, so none is left out for an alias). */
@@ -295,6 +297,7 @@ export class FanWatch {
       const mounts = await this.localMounts(all);
       const signature = await this.signature(mounts);
       this.mountCount = all.length;
+      this.coverageMounts = mounts.map((m) => m.mountpoint);
       if (signature === this.mountSignature) return;
       const affected = new Set([...this.marks, ...mounts.map((m) => m.mountpoint)]);
       for (const m of affected) this.store.markStale(m);
@@ -313,6 +316,9 @@ export class FanWatch {
       ready: this.readyAt !== Infinity,
       mounts: this.mountCount,
       watched: this.watchedCount,
+      covered: this.readyAt === Infinity ? 0 : this.coverageMounts.filter((m) => this.covers(m)).length,
+      unsupported: this.unsupportedMounts.length,
+      aliases: this.aliasCount,
       unwatched: this.unwatched.length,
       excluded: this.excludedMounts,
       backlog: this.buf.size + this.flushing.size + this.mem.size + this.taken.size,
@@ -331,6 +337,9 @@ export class FanWatch {
     if (!this.proc || this.readyAt === Infinity) return false; // marks are not all in place yet
     const under = (dir: string, v: string) => dir === "/" || v === dir || v.startsWith(dir + "/");
     const home = (v: string, dirs: string[]) => dirs.filter((d) => under(d, v)).reduce((a, d) => Math.max(a, d.length), -1);
+    const localHome = this.coverageMounts.filter((d) => under(d, virtual)).sort((a, b) => b.length - a.length)[0];
+    if (!localHome || !this.marks.includes(localHome)) return false;
+    if (home(virtual, this.marks) < localHome.length) return false;
     if (home(virtual, this.marks) <= home(virtual, this.unwatched)) return false;
     return !this.unwatched.some((d) => d !== virtual && under(virtual, d));
   }
@@ -456,6 +465,7 @@ export class FanWatch {
       const v = mapPath(this.o.root, host);
       if (v) {
         this.unwatched.push(v); // the mark failed: stored sizes there are never trusted past the TTL
+        if (!this.unsupportedMounts.includes(v)) this.unsupportedMounts.push(v);
         this.publish({ kind: "reset", scope: "filesystem", path: v, reason: "no event covers this filesystem" });
       }
       return void this.note(`cannot watch ${host}, changes there are seen only by age and folder mtime`);

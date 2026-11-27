@@ -30,11 +30,14 @@ export class StatusEventBus extends EventBus {
 }
 
 function watcherSnapshot(fan: FanWatch | MacWatch, bus: StatusEventBus): Omit<NodeStatus["watcher"], "coverage"> {
-  const status = fan.status();
+  const status = fan.status() as ReturnType<FanWatch["status"]> & Partial<Pick<NodeStatus["watcher"], "covered" | "unsupported" | "aliases">>;
   const { running, ready, mounts, watched, unwatched, excluded, backlog, lostEvents } = status;
+  const covered = status.covered ?? watched;
+  const unsupported = status.unsupported ?? 0;
+  const aliases = status.aliases ?? 0;
   return {
     kind: fan instanceof MacWatch ? "native" : "fanotify",
-    running, ready, mounts, watched, unwatched, excluded, backlog, lostEvents,
+    running, ready, mounts, watched, covered, unsupported, aliases, unwatched, excluded, backlog, lostEvents,
     unresolved: fan instanceof FanWatch ? fan.status().helper.unresolved ?? 0 : null,
     unwatchedPaths: running ? bus.unwatchedPaths() : [],
   };
@@ -75,13 +78,10 @@ async function readStatus(cfg: Config, sizes: SizeStore, fan: FanWatch | MacWatc
   }
 
   const watcher = watcherSnapshot(fan, bus);
-  const unwatched = new Set(watcher.unwatchedPaths);
-  const uncoveredDevices = new Set(mounts.filter((m) => unwatched.has(m.mountpoint)).map((m) => `${m.device}\0${m.fstype}`));
   const coverage = nativeCoverage ?? mounts.map((m) => {
-    const failedMark = watcher.kind === "fanotify" && uncoveredDevices.has(`${m.device}\0${m.fstype}`);
     return {
       path: m.mountpoint,
-      state: !watcher.running || unwatched.has(m.mountpoint) || networkKind(m.fstype) || failedMark
+      state: !watcher.running || networkKind(m.fstype)
         ? "unwatched" : fan.covers(m.mountpoint) ? "watched" : "unknown",
     } as const;
   });

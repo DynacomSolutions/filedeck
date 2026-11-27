@@ -755,6 +755,19 @@ static int fail(int code, const char *msg, const char *arg) {
 	return code;
 }
 
+/* The O_PATH descriptor pins the object selected by the caller. Reopen through its proc link, never through argv[i]. */
+static int reopen_pinned(int pathfd, int isdir) {
+	char link[64];
+	snprintf(link, sizeof link, "/proc/self/fd/%d", pathfd);
+	return open(link, (isdir ? O_RDONLY | O_DIRECTORY : O_RDONLY) | O_CLOEXEC);
+}
+
+static int mark_pinned(int fan, const struct mnt *m, unsigned long long mask) {
+	char link[64];
+	snprintf(link, sizeof link, "/proc/self/fd/%d", m->fd);
+	return (int)syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, AT_FDCWD, link);
+}
+
 static int fan_init(unsigned flags, unsigned *used) {
 	*used = flags;
 	return (int)syscall(SYS_fanotify_init, flags | FAN_CLASS_NOTIF | FAN_CLOEXEC | FAN_NONBLOCK, O_RDONLY | O_LARGEFILE);
@@ -793,9 +806,27 @@ int main(int argc, char **argv) {
 	/* every path becomes one mount of its filesystem (a path given twice, or two paths of one mount, count once) */
 	for (int i = 1; i < argc; i++) {
 		struct statfs sf;
-		int mfd = open(argv[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		int mfd = open(argv[i], O_PATH | O_CLOEXEC);
+		struct stat path_stat;
+		int path_errno = 0;
+		if (mfd >= 0 && (fstat(mfd, &path_stat) != 0 || (!S_ISREG(path_stat.st_mode) && !S_ISDIR(path_stat.st_mode)))) {
+			fprintf(stderr, "filedeck-fanwatch: skipping special mount path %s\n", argv[i]);
+			close(mfd);
+			mfd = -1;
+		} else if (mfd >= 0) {
+			/* O_PATH never blocks, but open_by_handle_at needs a usable mount fd. */
+			int usable = reopen_pinned(mfd, S_ISDIR(path_stat.st_mode));
+			if (usable < 0) {
+				path_errno = errno;
+				close(mfd);
+				mfd = -1;
+			} else {
+				close(mfd);
+				mfd = usable;
+			}
+		}
 		if (mfd < 0 || fstatfs(mfd, &sf) < 0) {
-			fprintf(stderr, "filedeck-fanwatch: skipping %s: %s\n", argv[i], strerror(errno));
+			fprintf(stderr, "filedeck-fanwatch: skipping %s: %s\n", argv[i], strerror(path_errno ? path_errno : errno));
 			emit('c', 0, argv[i], NULL);
 			if (mfd >= 0) close(mfd);
 			continue;
@@ -832,13 +863,13 @@ int main(int argc, char **argv) {
 		/* the filesystem is marked once, through the first mount that accepts it (the mount of the whole filesystem when there is one) */
 		int marked = 0;
 		for (int j = 0; j < f->nm && !marked; j++) {
-			long rc = syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, AT_FDCWD, f->m[j].arg);
+			long rc = mark_pinned(fan, &f->m[j], mask);
 			if (rc < 0 && errno == EINVAL && caps_rename) {
 				/* no FAN_RENAME (kernel before 5.17): moves are reported as a delete and a create */
 				caps_rename = 0;
 				mask = (mask & ~(unsigned long long)FAN_RENAME) | FAN_MOVED_FROM | FAN_MOVED_TO;
 				fprintf(stderr, "filedeck-fanwatch: no FAN_RENAME: a move is reported as a delete and a create\n");
-				rc = syscall(SYS_fanotify_mark, fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, AT_FDCWD, f->m[j].arg);
+				rc = mark_pinned(fan, &f->m[j], mask);
 			}
 			if (rc == 0) marked = 1;
 			else {
