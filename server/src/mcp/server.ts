@@ -97,6 +97,18 @@ function requestIds(body: unknown): (string | number)[] {
   return out;
 }
 
+/** The request ids that the notifications/cancelled in a POST body name. */
+function cancelledIds(body: unknown): (string | number)[] {
+  const out: (string | number)[] = [];
+  for (const m of Array.isArray(body) ? body : [body]) {
+    if (m && typeof m === "object" && "method" in m && m.method === "notifications/cancelled" && !("id" in m)) {
+      const id = (m as { params?: { requestId?: unknown } }).params?.requestId;
+      if (typeof id === "string" || typeof id === "number") out.push(id);
+    }
+  }
+  return out;
+}
+
 export class McpHttp {
   readonly server: Server | TlsServer;
   private readonly sessions = new Map<string, Session>();
@@ -497,10 +509,17 @@ export class McpHttp {
         return this.rpcError(res, 503, ErrorCode.InternalError, "the server is shutting down", { "retry-after": "1" });
       }
     }
-    session.lastSeen = Date.now();
-    metrics.request(gid, "ok");
     const s = session;
     const track = method === "POST";
+    const ids = track ? requestIds(body) : [];
+    if (new Set(ids).size < ids.length || ids.some((id) => s.calls.has(id))) {
+      // one id for two calls in flight: the answer to the second could not be told from the first, and the first would never end its work
+      metrics.request(gid, "bad_body");
+      metrics.error(gid, "protocol");
+      return this.rpcError(res, 400, ErrorCode.InvalidRequest, "a request with this id is already in progress in this session");
+    }
+    session.lastSeen = Date.now();
+    metrics.request(gid, "ok");
     if (track) this.inflight++;
     // The work of a POST is over when the server has sent the answer to each request in it (or at once, when it holds none). What is left is delivery:
     // a client that does not read must not keep a drain open. A drain waits for work, never for a client.
@@ -510,7 +529,6 @@ export class McpHttp {
       worked = true;
       if (track && --this.inflight === 0) for (const w of this.idleWaiters.splice(0)) w();
     };
-    const ids = track ? requestIds(body) : [];
     if (track && ids.length === 0) endWork();
     let waiting = ids.length;
     for (const id of ids) {
@@ -521,6 +539,8 @@ export class McpHttp {
       };
       s.calls.set(id, call);
     }
+    // The SDK sends no answer to a cancelled call and leaves its POST stream open: the cancel ends the work of that call (the drain waits for work, not for a stream)
+    for (const id of cancelledIds(body)) s.calls.get(id)?.();
     let finished = false;
     const finish = () => {
       if (finished) return;

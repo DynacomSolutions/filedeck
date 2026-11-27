@@ -117,3 +117,71 @@ test("an answer that waits for a client that does not read, above the limit, end
   await until(() => stalled.closed(), 4000);
   await Promise.race([b.mcp.drain(), sleep(4000).then(() => assert.fail("the drain does not end"))]);
 });
+
+// ---- calls that end without an answer ----
+
+const hdr = (b: Boot, sid: string) => ({ authorization: `Bearer ${b.token}`, "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18", "mcp-session-id": sid });
+
+async function rawSession(b: Boot): Promise<string> {
+  const r = await fetch(b.url + "/mcp", { method: "POST", headers: { authorization: `Bearer ${b.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(init) });
+  const sid = r.headers.get("mcp-session-id")!;
+  await r.text();
+  const n = await fetch(b.url + "/mcp", { method: "POST", headers: hdr(b, sid), body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+  await n.text();
+  return sid;
+}
+
+/** A raw POST on its own socket, and a client that reads everything. */
+function rawPost(b: Boot, sid: string, msg: unknown) {
+  const url = new URL(b.url);
+  const body = JSON.stringify(msg);
+  const sock = net.connect(Number(url.port), url.hostname);
+  let got = "";
+  let closed = false;
+  sock.on("data", (d) => void (got += d.toString()));
+  sock.on("error", () => undefined);
+  sock.on("close", () => void (closed = true));
+  sock.write(`POST /mcp HTTP/1.1\r\nhost: ${url.host}\r\nauthorization: Bearer ${b.token}\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\nmcp-session-id: ${sid}\r\nmcp-protocol-version: 2025-06-18\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+  return { sock, got: () => got, closed: () => closed };
+}
+
+const drainIn = (b: Boot, ms: number) => Promise.race([b.mcp.drain().then(() => "drained"), sleep(ms).then(() => "still draining")]);
+const call = (id: number) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "filedeck_jobs_list", arguments: {} } });
+
+test("a cancelled call does not hold the drain, although its POST stream stays open", async (t) => {
+  const b = await boot();
+  t.after(() => b.close());
+  const sid = await rawSession(b);
+  b.agent.state.delay.set("/api/jobs", 1200);
+  const pending = rawPost(b, sid, call(7));
+  t.after(() => pending.sock.destroy());
+  await sleep(300); // the watches of the session also read the job list, so a hit count does not tell that the call is running
+  const cancel = await fetch(b.url + "/mcp", { method: "POST", headers: hdr(b, sid), body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 7, reason: "user" } }) });
+  await cancel.text();
+  assert.equal(cancel.status, 202);
+  await sleep(2000); // the tool work is over (the agent answered after 1.2 s); the SDK sends no answer to a cancelled call
+  assert.equal(await drainIn(b, 6000), "drained", "the drain waits for work, and the cancel ended the work");
+  assert.equal(b.mcp.sessionCount, 0);
+  await b.mcp.stop();
+});
+
+test("a second call with the id of a call in progress is refused, and the drain ends", async (t) => {
+  const b = await boot();
+  t.after(() => b.close());
+  const sid = await rawSession(b);
+  b.agent.state.delay.set("/api/jobs", 800);
+  const first = rawPost(b, sid, call(9));
+  t.after(() => first.sock.destroy());
+  await sleep(200);
+  const dup = await fetch(b.url + "/mcp", { method: "POST", headers: hdr(b, sid), body: JSON.stringify(call(9)) });
+  assert.equal(dup.status, 400);
+  assert.match(((await dup.json()) as { error: { message: string } }).error.message, /already in progress/);
+  // an array that holds the same id twice is refused as well
+  const twice = await fetch(b.url + "/mcp", { method: "POST", headers: hdr(b, sid), body: JSON.stringify([call(11), call(11)]) });
+  assert.equal(twice.status, 400);
+  await twice.text();
+  await until(() => first.got().includes(`"id":9`), 4000);
+  assert.match(first.got(), /"id":9/, "the first call has its answer");
+  assert.equal(await drainIn(b, 6000), "drained");
+  assert.equal(b.mcp.sessionCount, 0);
+});
