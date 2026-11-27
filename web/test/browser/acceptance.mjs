@@ -1450,6 +1450,21 @@ async function verifyAxeViews(browser) {
   assert.deepEqual(failures, [], `axe-core reports no ${AXE_TAGS.join(', ')} violations in ${views.length} views x 2 colour schemes`);
 }
 
+// Closes the open menu with Escape. A menu item with a tooltip opens it 150 ms after the item takes focus, and an open tooltip takes the
+// next Escape (it dismisses itself first, WCAG 1.4.13). So the number of presses must not depend on speed: when the focused item has a
+// tooltip, wait until it is open, check that one Escape only dismisses it, and press Escape again for the menu.
+async function closeMenuWithEscape(page, menu, failures, name) {
+  const tipped = await page.evaluate(() => !!document.activeElement?.closest('.ctx .tip'));
+  if (tipped) {
+    await page.locator('.tip-bubble').waitFor({ state: 'attached', timeout: 5000 });
+    await page.keyboard.press('Escape');
+    await page.locator('.tip-bubble').waitFor({ state: 'detached', timeout: 5000 });
+    if (!(await menu.isVisible())) failures.push(`the first Escape closed the ${name} menu instead of only dismissing the open tooltip`);
+  }
+  await page.keyboard.press('Escape');
+  await menu.waitFor({ state: 'detached' });
+}
+
 // A compact Compare toolbar on a phone: at most two rows (100 px) and enough compared rows stay in view; every moved action is
 // reachable with the keyboard and the menu gives focus back to its button.
 async function verifyCompareToolbarCompact(browser) {
@@ -1483,8 +1498,7 @@ async function verifyCompareToolbarCompact(browser) {
           const names = await menu.getByRole(name === 'Filter' ? 'menuitemcheckbox' : 'menuitem').evaluateAll((els) => els.map((e) => e.textContent.trim()));
           const want = name === 'Filter' ? 3 : 6;
           if (names.length < want || names.some((x) => !x)) failures.push(`${name} menu items: ${JSON.stringify(names)}`);
-          await page.keyboard.press('Escape');
-          await menu.waitFor({ state: 'detached' });
+          await closeMenuWithEscape(page, menu, failures, name);
           const focused = await page.evaluate(() => document.activeElement?.textContent?.trim() || '');
           if (!focused.startsWith(name)) failures.push(`after closing the ${name} menu focus is on "${focused}"`);
         }
