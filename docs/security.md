@@ -168,3 +168,15 @@ Network source grants: a network source (SFTP, WebDAV, S3, SMB) is reached with 
 Passwords saved with sign-in off: they have no owner, so with sign-in on nobody uses them (see above). The hub says at start how many there are; the Accounts view shows a notice with the number and a "Forget them" button, and `DELETE /api/admin/vault/unowned` removes them. Until then they stay in the vault until they expire.
 
 [Back to the README](../README.md)
+
+## Change events
+
+The change event stream (see [Change events](change-events.md)) names every file that changes on a machine. Treat it as read access to all paths of that machine.
+
+- The fanotify helper needs `CAP_SYS_ADMIN` for a filesystem mark and `CAP_DAC_READ_SEARCH` for `open_by_handle_at`. The chart adds `SYS_ADMIN` only when `agent.fanotify.enabled` is on. The helper is the same program at the same path with the same arguments (the paths of the filesystems to watch) and the same mark type as before. It takes its settings from the environment, and a line on its standard input asks it to confirm that it has read all queued events. It does not write files, open sockets or start programs. It escapes a backslash (as two backslashes) and every byte below 0x20 or 0x7f in a path, so a path cannot add a line or a field to the output.
+- The agent's HTTP route `/api/v1/changes` needs the agent token. Only the hub calls it. With sign-in on, the hub allows it for administrators only, on the fan-in route and on the per-node route in every spelling of the path (percent escapes, `\`, repeated slashes and dot segments are read the way the agent reads them, and a path that cannot be read is refused). The stream ends with the session, as the other live feeds do.
+- The API token may read the stream only when its scopes hold `changes`. The default scope is `du`. A token with the `changes` scope can call `GET /api/v1/changes` and `GET /api/nodes/<node>/api/v1/changes`, and nothing else beyond its other scopes. With sign-in on, the account of the token must be an administrator.
+- The Unix socket is off by default. It has no token and no TLS. Its folder (mode 0750) and the socket (mode 0660) belong to `FILEDECK_EVENTS_SOCKET_GROUP`. Give that group only to programs that may see every path of the machine. The agent removes an old socket file at start, but never any other kind of file. It changes the mode and group of the folder only when the agent's user owns it and it is not a link.
+- The filter is evaluated in the agent. A glob runs in linear time with a step budget, and label templates match whole segments, so a request cannot use a pattern to stall the agent. A request has at most 32 values for each filter part. A reader has a bounded buffer, so a slow or hostile reader costs at most 1 MiB of memory and never blocks the watcher.
+- The journal holds paths and times, not file content. It is in the agent state folder, with mode 0700 for the folder and 0600 for the files. Its size and age are limited.
+- `/metrics` keeps to counts and ages. The new metrics hold no path, node name or size.

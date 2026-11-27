@@ -26,7 +26,7 @@ export interface Config {
   /** folder diff: agent-side concurrent hash streams and walk entry ceiling */
   hashConcurrency: number;
   walkMaxEntries: number;
-  /** compare index: SQLite directory (empty = in memory), inotify watch budget, concurrent directory listings; hub: session spill dir */
+  /** compare index: SQLite directory (empty = in memory), folders kept under change watch (memory only), concurrent directory listings; hub: session spill dir */
   indexDir: string;
   indexWatches: number;
   /** agent: SQLite file that keeps background jobs visible across a restart or rollout (empty = in memory) */
@@ -48,6 +48,8 @@ export interface Config {
   duAbandonMs: number;
   /** on SIGTERM, how long the change watcher keeps running for a newer process to take over its watched time (ms) */
   handoverMs: number;
+  /** on SIGTERM, how long the jobs, the pool, the watcher hand-over and the socket may take before the event journal is closed anyway (default 8000) */
+  leaveStepsMs: number;
   listConcurrency: number;
   diffDir: string;
   /** search: concurrent searches per agent, per-file and total content bytes read */
@@ -105,6 +107,18 @@ export interface Config {
   sessionMaxMs: number;
   /** hub: account the `filedeck du` API token acts as; unset = none */
   apiTokenAccount: string | undefined;
+  /** hub: what the API token may read (FILEDECK_API_TOKEN_SCOPES, comma separated): `du` (folder sizes, the default) and `changes` (the change event stream) */
+  apiScopes: string[];
+  /** agent: path of the node-local Unix socket that serves change events (FILEDECK_EVENTS_SOCKET); empty = off. Its folder is made mode 0750 and the socket 0660 */
+  eventsSocket: string;
+  /** agent: group that may use the socket (a name or a number; FILEDECK_EVENTS_SOCKET_GROUP); empty = the process's own group */
+  eventsSocketGroup: string;
+  /** agent: the event journal keeps at most this many bytes (FILEDECK_EVENTS_JOURNAL_BYTES, default 2 GiB; 0 = memory only) */
+  eventsJournalBytes: number;
+  /** agent: and at most this many hours of events (FILEDECK_EVENTS_JOURNAL_HOURS, default 24) */
+  eventsJournalHours: number;
+  /** agent: path templates that give events their labels (FILEDECK_EVENTS_LABELS), for example `/srv/repos/{org}/{repo}`; separated by line feeds, semicolons or commas */
+  eventsLabels: string;
   /** agent, sign-in on: folder that holds the host helpers (`filedeck-id`); unset = the image's folder, else the built one (host-helpers.ts) */
   hostHelpers: string | undefined;
   /** agent, sign-in on: the PAM service `filedeck-pam` uses for system users' passwords (FILEDECK_PAM_SERVICE: /etc/pam.d/<name> on the machine) */
@@ -279,6 +293,7 @@ export function loadConfig(env = process.env): Config {
     duWaitMs: Number(env.FILEDECK_DU_WAIT_MS ?? 10_000),
     duAbandonMs: Number(env.FILEDECK_DU_ABANDON_MS ?? 120_000),
     handoverMs: Number(env.FILEDECK_HANDOVER_MS ?? 6000),
+    leaveStepsMs: Number(env.FILEDECK_LEAVE_STEPS_MS ?? 8000),
     listConcurrency: Number(env.FILEDECK_LIST_CONCURRENCY ?? 16),
     diffDir: env.FILEDECK_DIFF_DIR ?? path.join(os.tmpdir(), `filedeck-diff-${process.pid}`),
     searchConcurrency: Number(env.FILEDECK_SEARCH_CONCURRENCY ?? 3),
@@ -315,6 +330,12 @@ export function loadConfig(env = process.env): Config {
     sessionIdleMs: Number(env.FILEDECK_SESSION_IDLE_SECONDS ?? 8 * 3600) * 1000,
     sessionMaxMs: Number(env.FILEDECK_SESSION_MAX_SECONDS ?? 7 * 86400) * 1000,
     apiTokenAccount: env.FILEDECK_API_TOKEN_ACCOUNT || undefined,
+    apiScopes: [...new Set((env.FILEDECK_API_TOKEN_SCOPES ?? "du").split(",").map((x) => x.trim()).filter(Boolean))],
+    eventsSocket: env.FILEDECK_EVENTS_SOCKET ?? "",
+    eventsSocketGroup: env.FILEDECK_EVENTS_SOCKET_GROUP ?? "",
+    eventsJournalBytes: Math.max(0, Number(env.FILEDECK_EVENTS_JOURNAL_BYTES ?? 2 * 1024 ** 3) || 0),
+    eventsJournalHours: Math.max(0, Number(env.FILEDECK_EVENTS_JOURNAL_HOURS ?? 24) || 0),
+    eventsLabels: env.FILEDECK_EVENTS_LABELS ?? "",
     hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
     pamService: env.FILEDECK_PAM_SERVICE || "filedeck",
     worker: false,
@@ -346,6 +367,8 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     agentToken: undefined,
     apiToken: undefined,
     apiTokenAccount: undefined,
+    apiScopes: [],
+    eventsSocket: "",
     vaultKey: undefined,
     bootstrapAdminFile: undefined,
     // whatever a worker holds, its account can read: hub settings (network sources and the folder of their credentials, the administrators, the hub's

@@ -107,6 +107,9 @@ auth:
 apiToken:
   secretName: ""
   key: token
+  # What the token may read. `du`: GET /api/du and the du jobs. `changes`: the change event stream (GET /api/v1/changes, docs/change-events.md).
+  # With sign-in on, the token acts as the account named in `auth.apiTokenAccount`, and the change stream also needs that account to be an administrator.
+  scopes: ["du"]
 
 # Saved-password vault (hub). Encrypted archive and PDF passwords that someone typed are kept server-side,
 # AES-256-GCM encrypted in a small sqlite file on `storage`; the key is derived from the Secret below, which is
@@ -188,7 +191,8 @@ agent:
   # thumbCacheBytes / (2 x auth.workers.max) (at least 1 MiB), and a cache is emptied once its account's worker stops.
   thumbCacheBytes: "268435456"
   thumbCacheVolume: 512Mi
-  # Compare index: inotify watches per agent on recently listed folders (LRU). A watched folder's listing is served
+  # Compare index: folders per agent that are kept under change watch (LRU). With `fanotify` on, a watch is a table entry in memory fed by the
+  # kernel change events (no kernel watch). Without it, or for a folder the kernel watcher does not cover, it is an fs.watch of the folder. A watched folder's listing is served
   # from the index (hostPath /var/lib/filedeck on the node) until it changes; others are re-read on every compare.
   indexWatches: 32768
   # Beyond the watch budget (or after a restart) a stored listing is reused while the folder's mtime is unchanged,
@@ -207,6 +211,25 @@ agent:
   # If the kernel or runtime refuses, the agent logs it once and carries on as without.
   fanotify:
     enabled: false
+  # Change events: a stream of every create, delete, modify, close-after-write, attribute change and move of the files on the node, with a journal so a
+  # reader that was away can continue from its last cursor. Needs `fanotify.enabled`. See docs/change-events.md.
+  events:
+    # The journal is a bounded record in the index folder (`indexHostPath`): it keeps at most `maxBytes` and at most `maxHours` of events.
+    journal:
+      maxBytes: "2147483648"
+      maxHours: 24
+    # Path templates that give events labels, for example "/srv/repos/{org}/{repo}": a `{name}` takes one folder name and becomes the label `name`.
+    # A template with more fixed names wins over one with fewer. Example list:
+    #   - /srv/repos/{org}/{repo}
+    #   - /srv/repos/.worktrees/{org}/{task}/{repo}
+    labels: []
+    # A Unix socket on the node for other services on the same machine (no TLS, no token: its folder, mode 0750, and its group decide who may read).
+    # Off by default. `hostPath` is the node folder that holds the socket (a node can set its own `eventsSocketHostPath`);
+    # `group` is the group (a number is safest: names are looked up in the container) that may connect.
+    socket:
+      enabled: false
+      hostPath: /run/filedeck-events
+      group: ""
   # How helper programs that run on repositories (Git: status, details, diffs) are confined. Repositories are other people's data: a link inside a git
   # directory can lead anywhere. With Landlock (Linux 5.13 or newer, enabled in the kernel and not blocked by the
   # container's seccomp profile) those programs can only read beneath the served folder. require (the default): without

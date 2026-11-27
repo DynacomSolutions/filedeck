@@ -13,7 +13,7 @@ import { Worker } from "node:worker_threads";
  * SQLite so a second compare of the same trees is served mostly from disk.
  *
  * Freshness rules:
- *  - a listing is trusted as-is while an inotify watch on that directory has
+ *  - a listing is trusted as-is while a change watch on that directory (the event bus, when the kernel watcher runs) has
  *    been live since it was read (any event marks it dirty);
  *  - without a live watch (beyond the watch budget, after a restart, network
  *    sources) it is trusted while the directory's inode and mtime are
@@ -26,7 +26,7 @@ import { Worker } from "node:worker_threads";
  *  - a stored hash is reused only while (inode, size, mtime) of the file match
  *    what was hashed, so any change to size or mtime invalidates it.
  *
- * Watches are bounded (`maxWatches`, LRU) and never survive a restart, so after
+ * The folders that are watched are bounded (`maxWatches`, LRU: only memory is spent, no kernel watch) and never survive a restart, so after
  * a restart listings are revalidated once while hashes stay valid.
  */
 

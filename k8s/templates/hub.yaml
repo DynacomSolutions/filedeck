@@ -141,6 +141,9 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.apiToken.secretName }}
                   key: {{ .Values.apiToken.key }}
+            # What the token may read: `du` (folder sizes) and `changes` (the change event stream).
+            - name: FILEDECK_API_TOKEN_SCOPES
+              value: {{ join "," .Values.apiToken.scopes | quote }}
             {{- end }}
             # Saved-password vault: the AES key comes from a Secret created out of band (never in Git); the sqlite file
             # lives on its own small volume, not in user data. A missing Secret leaves the vault memory-only.

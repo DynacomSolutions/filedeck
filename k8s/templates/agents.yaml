@@ -118,6 +118,24 @@ spec:
             - name: FILEDECK_FANWATCH
               value: /usr/local/bin/filedeck-fanwatch
             {{- end }}
+            # Change events (docs/change-events.md): the journal sits in the index folder above; a label template turns a path into labels.
+            - name: FILEDECK_EVENTS_JOURNAL_BYTES
+              value: {{ $.Values.agent.events.journal.maxBytes | int64 | quote }}
+            - name: FILEDECK_EVENTS_JOURNAL_HOURS
+              value: {{ $.Values.agent.events.journal.maxHours | quote }}
+            {{- if $.Values.agent.events.labels }}
+            - name: FILEDECK_EVENTS_LABELS
+              value: {{ join "\n" $.Values.agent.events.labels | quote }}
+            {{- end }}
+            {{- if $.Values.agent.events.socket.enabled }}
+            # The node-local Unix socket other services on this machine read events from (folder mode 0750, socket 0660).
+            - name: FILEDECK_EVENTS_SOCKET
+              value: /run/filedeck-events/events.sock
+            {{- with $.Values.agent.events.socket.group }}
+            - name: FILEDECK_EVENTS_SOCKET_GROUP
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             # Keep the V8 heap well under the container memory limit so the GC works before the cgroup would OOM-kill.
             - name: NODE_OPTIONS
               value: {{ $.Values.agent.nodeOptions | quote }}
@@ -189,6 +207,10 @@ spec:
               mountPath: /var/cache/filedeck
             - name: index
               mountPath: /var/lib/filedeck
+            {{- if $.Values.agent.events.socket.enabled }}
+            - name: events
+              mountPath: /run/filedeck-events
+            {{- end }}
       volumes:
         - name: host
           hostPath:
@@ -203,6 +225,12 @@ spec:
           hostPath:
             path: {{ default $.Values.agent.indexHostPath .indexHostPath }}
             type: DirectoryOrCreate
+        {{- if $.Values.agent.events.socket.enabled }}
+        - name: events
+          hostPath:
+            path: {{ default $.Values.agent.events.socket.hostPath .eventsSocketHostPath }}
+            type: DirectoryOrCreate
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
