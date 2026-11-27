@@ -117,6 +117,7 @@ export class Subscriber {
     }
     this.state = "replay";
     this.delivered = since.seq;
+    let ready: Buffer | null = null;
     try {
       const gap = this.bus.journal.check(since.epoch, since.seq);
       if (gap) {
@@ -124,7 +125,7 @@ export class Subscriber {
         this.queueReady(head);
       } else {
         // the current state comes before the journal lines; its cursor is the point this subscriber starts from, so a client that stops after it loses nothing
-        this.queueReady(since.seq);
+        ready = this.queueReady(since.seq);
         for await (const chunk of this.bus.journal.read(since.seq, head)) {
           if (this.state !== "replay") return;
           let start = 0;
@@ -146,7 +147,16 @@ export class Subscriber {
       }
     } catch (e) {
       if (!(e instanceof JournalGap)) throw e;
+      // the journal was lost while it was read: the `reset` comes before the `ready` line, so the `ready` that is still waiting in the queue is put after it
+      // (one that the reader took already stays where it was, and `ready` follows the reset again)
+      const at = ready ? this.q.indexOf(ready) : -1;
+      if (at >= 0) {
+        this.q.splice(at, 1);
+        this.qSeq.splice(at, 1);
+        this.qBytes -= ready!.length;
+      }
       this.queueReset(e.why);
+      if (ready) this.queueReady(head);
     }
     if (this.state !== "replay") return;
     // events that came while the journal was read follow, in order, with nothing between
@@ -167,9 +177,10 @@ export class Subscriber {
   }
 
   /** The watcher state now, as one `ready` line (when the watcher is ready): a new subscriber learns it without waiting for the next change of it. Not in the journal. */
-  private queueReady(seq: number) {
+  private queueReady(seq: number): Buffer | null {
     const line = this.bus.readyLine(seq);
     if (line) this.enqueue(line, 0);
+    return line;
   }
 
   /** The cursor asked for cannot be continued from: one `reset` line (its cursor is the journal's head), then live events. */

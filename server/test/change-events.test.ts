@@ -846,3 +846,18 @@ test("bus: a new subscriber is told the watcher's state first; stopped, it is to
   const again = await b.subscribe(new Filter({ kind: ["create"] }), undefined, "http");
   assert.equal((await take(again, 1))[0]!.kind, "ready", "a control line passes any filter");
 });
+
+test("bus: when the journal is lost while a new reader replays it, `reset` comes before `ready`", async () => {
+  const b = bus();
+  await b.whenServing();
+  b.ready = true;
+  for (let i = 1; i <= 3; i++) b.publish(ev("create", `/f${i}`));
+  // the replay fails as a journal does when its files are gone under the reader
+  (b.journal as unknown as { read: () => AsyncGenerator<Buffer> }).read = async function* () {
+    throw new JournalGap("lost");
+  };
+  const sub = await b.subscribe(new Filter(), b.cursorOf(0), "http");
+  const got = await take(sub, 2);
+  assert.deepEqual(got.map((x) => x.kind), ["reset", "ready"]);
+  assert.match(String(got[0]!.reason), /lost/);
+});
