@@ -390,5 +390,18 @@ ETA: 2026-11-28 04:30 ICT
 
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 212 | Batch size writes and add size excludes | in_progress | claude-20261127-watch-events | size-write-batching | | 2026-11-28 03:30 ICT | Before: one agent at 14,612 write IOPS and 219 MB/s on its index disk over 60 s<br>One commit per 30 s per subtree, FILEDECK_SIZE_COMMIT_MS<br>FILEDECK_SIZE_EXCLUDE default pg_wal, node_modules, target, .git/objects, cargo-target<br>The change event stream stays complete |
-| 213 | Release, deploy and measure the index disk IOPS | todo | claude-20261127-watch-events | | 30.212 | 2026-11-28 04:30 ICT | Measure the agent pod cgroup io.stat before and after<br>No other disk can take the index now: the second NVMe is busy and almost full, the new SATA disks are under verification |
+| 212 | Batch size writes and add size excludes | done | claude-20261127-watch-events | size-write-batching | | 2026-11-28 03:30 ICT | Before: one agent at 14,612 write IOPS and 219 MB/s on its index disk over 60 s<br>One commit per 30 s per subtree, FILEDECK_SIZE_COMMIT_MS<br>FILEDECK_SIZE_EXCLUDE default pg_wal, node_modules, target, .git/objects, cargo-target<br>The change event stream stays complete |
+| 213 | Release, deploy and measure the index disk IOPS | in_progress | claude-20261127-watch-events | | 30.212 | 2026-11-28 04:30 ICT | PR 293 merged a24121f, v0.7.2 published after a Trivy installer failure, fixed in PR 295<br>v0.7.2 on the hq0 agent 18:5x GMT 27 Nov<br>Measure the agent pod cgroup io.stat before and after<br>No other disk can take the index now: the second NVMe is busy and almost full, the new SATA disks are under verification |
+
+## 31. Disk pressure
+
+Owner order, 28 Nov 2026, top priority after the size write fix. Live disk pressure and IO attribution for every node, with history, alerts and MCP events.
+ETA: 2026-11-28 14:00 ICT
+
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 214 | Disk pressure collector, API and metrics | in_progress | claude-20261127-watch-events | disk-pressure | | 2026-11-28 07:30 ICT | Per disk: util, IOPS, MB/s, queue depth, latency, PSI io some and full<br>Attribution per process, cgroup, pod, unit and top folder from proc, cgroup io.stat and change events<br>In-memory only, probe under 1% CPU, no disk writes |
+| 215 | eBPF block IO attribution helper | in_progress | claude-20261127-watch-events | disk-pressure-ebpf | | 2026-11-28 09:00 ICT | Block request tracepoints keyed by cgroup, process and disk<br>Aggregated in kernel maps, read once per second<br>Falls back to the proc and cgroup collector when the kernel or privileges do not allow it |
+| 216 | Disk pressure view in the web app | in_progress | claude-20261127-watch-events | disk-pressure-ui | 31.214 | 2026-11-28 09:00 ICT | Live graph and a ranked consumer table<br>Node and disk in the URL path, view options in the query string<br>A path opens in the file browser |
+| 217 | Disk pressure in the MCP server | todo | claude-20261127-watch-events | | 29.207, 31.214 | 2026-11-28 11:00 ICT | Tools for disk snapshots and top consumers<br>A disk pressure event subscription |
+| 218 | Release and prove disk pressure on the first node, then all nodes | todo | claude-20261127-watch-events | | 31.214, 31.216 | 2026-11-28 14:00 ICT | First proof on the root NVMe and the second NVMe, with the real top consumers<br>Then every node |
