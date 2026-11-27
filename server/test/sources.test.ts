@@ -47,11 +47,12 @@ test("mounts: network filesystems are labelled", async () => {
     proc,
     ["/dev/sda1 /m1 ext4 rw 0 0", "nas:/export /m1 nfs4 rw 0 0", "//srv/share /smb cifs rw 0 0", "sshfs#u@h: /fuse fuse.sshfs rw 0 0"].join("\n"),
   );
-  assert.deepEqual(parseMounts(fs.readFileSync(proc, "utf8")).map((m) => m.fstype), ["ext4", "cifs", "fuse.sshfs"]);
+  // (the NFS mount is stacked on the ext4 one at /m1 and covers it: the visible mount is the one that counts)
+  assert.deepEqual(parseMounts(fs.readFileSync(proc, "utf8")).map((m) => m.fstype), ["nfs4", "cifs", "fuse.sshfs"]);
   fs.mkdirSync(path.join(tmp, "smb"));
   fs.mkdirSync(path.join(tmp, "fuse"));
   const ms = await listMounts(tmp, proc);
-  assert.deepEqual(ms.map((m) => [m.mountpoint, m.network, m.netKind ?? null]), [["/fuse", true, "SSHFS"], ["/m1", false, null], ["/smb", true, "SMB/CIFS"]]);
+  assert.deepEqual(ms.map((m) => [m.mountpoint, m.network, m.netKind ?? null]), [["/fuse", true, "SSHFS"], ["/m1", true, "NFS"], ["/smb", true, "SMB/CIFS"]]);
 });
 
 test("source config parsing rejects bad names and duplicates", () => {

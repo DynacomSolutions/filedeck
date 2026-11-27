@@ -1,8 +1,10 @@
+import { GroupIO } from "./group-io.ts";
+import { loadGroupRulesByNode } from "./group-rules.ts";
+import type { AgentGroups } from "./group-agent.ts";
 import { FsError } from "./fsops.ts";
 import { fanIn } from "./events/fanin.ts";
 import { filterFromParams } from "./events/filter.ts";
 import { parseCursor } from "./events/cursor.ts";
-import { isChangesPath } from "./events/guard.ts";
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createAdaptorServer } from "@hono/node-server";
@@ -11,6 +13,7 @@ import { readFile } from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { registerHubDiff } from "./diff-hub.ts";
+import { NODE_STATUS_PATH, readHubNodeStatus } from "./node-status.ts";
 import { registerOps } from "./ops-routes.ts";
 import type { OpQueue } from "./ops-queue.ts";
 import { JobStore } from "./job-store.ts";
@@ -19,7 +22,7 @@ import { makeThumbnailer } from "./thumbs.ts";
 import { createSourceApp } from "./sources/source-app.ts";
 import { buildSources } from "./sources/registry.ts";
 import type { SourceBackend } from "./sources/types.ts";
-import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, withAgentToken } from "./agent-auth.ts";
+import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, normaliseAgentPath, withAgentToken } from "./agent-auth.ts";
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
@@ -224,7 +227,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // Optional allowlist of Host values (DNS-rebinding guard); /healthz stays open for probes that use the pod address.
   if (cfg.allowedHosts.length) {
     app.use("*", async (c, next) => {
-      if (c.req.path === "/healthz") return next();
+      if (isOpenProbe(c.req.path)) return next();
       const host = (c.req.header("host") ?? "").toLowerCase();
       if (matchesHostList(host, cfg.allowedHosts)) return next();
       // an admin call is written even when refused here, before the audit middleware (other paths stay unwritten, as before)
@@ -353,11 +356,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // probes go out without a user header: they carry no data and are made for nobody in particular.
   // With auth on the client's cookie (its session) never goes to an agent, whatever path built the headers.
   // The agents' sign-in routes are the hub's alone (signInCall above): no person's request ever reaches them through here.
-  const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit) => {
+  const agentCall = (n: { name: string; url: string }, rest: string, init?: RequestInit, storageGroups = false) => {
     if (cfg.auth && isAgentAuthPath(rest)) return Promise.reject(new Error("the agents' sign-in routes are not forwarded"));
     if (cfg.auth) init = withoutCookie(init);
     if (isOpenProbe(rest)) return userContext.exit(() => agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name)));
-    const p = agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk));
+    const p = agentFetch(n.url + rest, withAgentToken(init, cfg.agentToken, n.name, cfg.auth, asRootOk, storageGroups));
     // (a call under act as root is counted until it settles, so switching off can wait for a job that is still being started)
     const id = currentUser();
     if (id?.kind === "sys" && id.asRootUntil !== undefined && asRootOk(id)) rootCalls.track(RootCalls.key(id.name, id.asRootUntil), p);
@@ -458,7 +461,39 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     return res;
   };
 
+  const groupNodes = cfg.nodes.map((n) => n.name);
+  const groupIO = new GroupIO(cfg.victoriaMetricsUrl, fetch, Date.now, groupNodes,
+    cfg.victoriaMetricsUrl ? loadGroupRulesByNode(cfg.groupRulesFile, groupNodes) : undefined);
   app.get("/healthz", (c) => c.text("ok"));
+  const metrics = new Hono().get("/metrics", (c) => c.text([...groupIO.metricLines(), ""].join("\n")));
+  if (cfg.hubMetricsPort) app.get("/metrics", (c) => c.notFound());
+  else app.route("/", metrics);
+
+  app.get("/api/groups", async (c) => {
+    if (auth && !isAdmin(cfg, auth.accounts, currentUser())) return c.json({ error: "administrators only" }, 403);
+    const name = c.req.query("node");
+    const visible = cfg.nodes.filter((n) => mayUse(n.name));
+    const targets = name === undefined ? visible : visible.filter((n) => n.name === name);
+    if (name !== undefined && !targets.length) return c.json({ error: "unknown node" }, 404);
+    const signal = AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(8000)]);
+    const replies = await Promise.all(targets.map(async (n): Promise<AgentGroups | null> => {
+      try {
+        const res = await agentCall(n, "/api/groups", { signal }, true);
+        if (!res.ok) {
+          await res.body?.cancel();
+          return null;
+        }
+        const report = await res.json() as AgentGroups;
+        if (!Array.isArray(report.drives) || !Array.isArray(report.labels)) return null;
+        return { ...report, node: n.name };
+      } catch {
+        return null;
+      }
+    }));
+    const nodes = replies.filter((n): n is AgentGroups => n !== null);
+    const unavailable = targets.filter((_, i) => replies[i] === null).map((n) => n.name);
+    return c.json(await groupIO.join(nodes, unavailable, c.get("storageSizesOnly")), 200);
+  });
 
   app.get("/api/nodes", async (c) => {
     // a system account sees only the machines where it exists: wait (at most 2 s) for answers that are missing or old
@@ -859,10 +894,26 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   };
   /** The change event streams are for administrators when sign-in is on (they name every path of a machine). */
   const mayReadChanges = () => !cfg.auth || (auth !== undefined && isAdmin(cfg, auth.accounts, currentUser()));
+  app.get("/api/status", async (c) => {
+    if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    const names = cfg.nodes.map((n) => n.name).filter(mayUse);
+    const node = c.req.query("node");
+    if (node !== undefined && !names.includes(node)) return noAccess(c);
+    const call = startCall();
+    try {
+      const signal = call ? AbortSignal.any([call.signal, c.req.raw.signal]) : c.req.raw.signal;
+      const nodes = await readHubNodeStatus(node === undefined ? names : [node], callNode, signal);
+      if (signal.aborted) return c.json({ error: "request ended" }, 403);
+      return c.json({ nodes }, 200, { "cache-control": "no-store" });
+    } finally {
+      call?.done();
+    }
+  });
   const NDJSON = { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-accel-buffering": "no" };
 
   // The change events of several machines in one stream: the filter goes down to every agent, each machine has its own cursor (`since`, once per machine).
-  app.get("/api/v1/changes", async (c) => {
+  const changesPath = "/api/v1/changes";
+  app.get(changesPath, async (c) => {
     if (!mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     const q = new URL(c.req.url).searchParams;
     const wanted = q.getAll("node").flatMap((n) => n.split(",")).map((n) => n.trim()).filter(Boolean);
@@ -908,8 +959,10 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     const rest = /^\/api\/nodes\/[^/]+(\/.*)$/.exec(url.pathname)?.[1] ?? "/";
     // the agents' sign-in routes answer only the hub (they would be a way past its limiter)
     if (cfg.auth && isAgentAuthPath(rest)) return c.json({ error: "not found" }, 404);
-    // the change event stream of one machine: administrators only with sign-in on (the same rule as the fan-in above)
-    if (isChangesPath(rest) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    // Apply the same administrator check to diagnostics and the change stream.
+    const agentPath = normaliseAgentPath(rest)?.replace(/\/+$/, "");
+    const isChanges = agentPath === undefined || agentPath === changesPath;
+    if ((isChanges || agentPath === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
@@ -951,7 +1004,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
       const out = cut(new Response(r.body, { status: r.status, headers: clean(r.headers, true) }));
       const id = currentUser();
       const type = (r.headers.get("content-type") ?? "").toLowerCase();
-      if (app.streams && session !== undefined && upstream && id && (type.startsWith("text/event-stream") || (type.startsWith("application/x-ndjson") && isChangesPath(rest)))) return trackLive(c, out, session, upstream, id);
+      if (app.streams && session !== undefined && upstream && id && (type.startsWith("text/event-stream") || (type.startsWith("application/x-ndjson") && isChanges))) return trackLive(c, out, session, upstream, id);
       return out;
     } catch (e) {
       call?.done();
@@ -998,5 +1051,5 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // a missing build file is a 404, never the app shell (an old tab asking for a chunk of a previous build must see the failure)
   app.all("/assets/*", (c) => c.text("not found", 404));
   app.get("*", page);
-  return app;
+  return Object.assign(app, { metrics });
 }

@@ -1,0 +1,10 @@
+{{- if .Values.groups }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "filedeck.name" . }}-storage-groups
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+data:
+  rules.json: {{ .Values.groups | toJson | quote }}
+{{- end }}

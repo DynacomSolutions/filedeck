@@ -110,7 +110,7 @@ test("inode numbers above 2^53 are stored and a second scan works", async () => 
 test("a folder with 150k stored children can be listed", async () => {
   const s = mk(60_000, 1_000_000);
   const db = s as unknown as { put(r: unknown): void; db: { exec(q: string): void } };
-  const own = { bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0 };
+  const own = { bytes: 0, disk: 0, files: 0, symlinks: 0, other: 0, dirs: 0, mounts: 0, errors: 0, links: 0, link_checked: 0 };
   const row = (p: string, parent: string) => ({ path: p, parent, ino: 1, dev: 1, mtime_ms: 1, scanned_at: 1, seen_at: 1, ver: 1, own, tot: own });
   db.db.exec("BEGIN");
   db.put(row("/big", "/"));

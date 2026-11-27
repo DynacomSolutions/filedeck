@@ -20,8 +20,8 @@ const asan = cc.status === 0;
 if (!asan) cc = spawnSync("cc", args, { encoding: "utf8" });
 const skip = cc.status !== 0 ? "helper cannot run here: no C compiler" : false;
 
-function run(scenario: string, dir = "/work") {
-  const r = spawnSync(bin, [scenario, dir], { encoding: "utf8", env: { ...process.env, LD_PRELOAD: "", ASAN_OPTIONS: "detect_leaks=0" } });
+function run(scenario: string, dir = "/work", dir2?: string) {
+  const r = spawnSync(bin, [scenario, dir, ...(dir2 ? [dir2] : [])], { encoding: "utf8", env: { ...process.env, LD_PRELOAD: "", ASAN_OPTIONS: "detect_leaks=0" } });
   assert.equal(r.status, 0, `${scenario}: ${r.stderr}`);
   return r.stdout.split("\n").filter(Boolean);
 }
@@ -51,4 +51,93 @@ test("helper events: a held modify report is made under the old name before the 
 test("helper events: a record that is shorter than its handle, or a name without an end, is ignored and never read past", { skip }, () => {
   assert.deepEqual(run("short-handle"), ["C f /work/ok"]);
   assert.deepEqual(run("name-no-nul"), ["C f /work/ok"]);
+});
+
+/** What the helper writes for a create of "f" in a folder of the filesystem (`rel`), as lines, without the counters line. */
+const created = (scenario: string, rel: string) => run(scenario, rel).filter((l) => !l.startsWith("#stats"));
+const unresolved = (scenario: string, ...rels: string[]) => Number(/unresolved=(\d+)/.exec(run(scenario, ...(rels as [string, string?])).find((l) => l.startsWith("#stats")) ?? "")?.[1] ?? 0);
+
+test("helper mounts: an entry is reported under every mount that shows it, the whole filesystem first, then the binds by the length of their root", { skip }, () => {
+  // the mount of the whole filesystem, and binds of /repositories/.archives, /repositories/.data/o and /repositories/.data/o2
+  assert.deepEqual(created("binds", "/repositories/.data/o/x"), ["C f /srv/p/repositories/.data/o/x/f", "C f /h/.data/o/x/f"]);
+  assert.deepEqual(created("binds", "/repositories/.archives/deep/er"), ["C f /srv/p/repositories/.archives/deep/er/f", "C f /h/.archives/deep/er/f"]);
+  // the root of a bind itself is shown by it
+  assert.deepEqual(created("binds", "/repositories/.data/o"), ["C f /srv/p/repositories/.data/o/f", "C f /h/.data/o/f"]);
+  // an entry that only the whole filesystem shows
+  assert.deepEqual(created("binds", "/repositories/.data"), ["C f /srv/p/repositories/.data/f"]);
+  assert.deepEqual(created("binds", "/"), ["C f /srv/p/f"]);
+});
+
+test("helper mounts: a root matches whole path segments only (.../o does not show .../o2)", { skip }, () => {
+  assert.deepEqual(created("binds", "/repositories/.data/o2/y"), ["C f /srv/p/repositories/.data/o2/y/f", "C f /h/.data/o2/y/f"]);
+  assert.deepEqual(created("binds", "/repositories/.data/o2x/y"), ["C f /srv/p/repositories/.data/o2x/y/f"]);
+  assert.deepEqual(created("binds", "/repositories/.archivesX"), ["C f /srv/p/repositories/.archivesX/f"]);
+});
+
+test("helper mounts: with no mount of the whole filesystem, binds and a bind of a folder of a bind each show what is below their root", { skip }, () => {
+  assert.deepEqual(created("binds-nobase", "/repositories/.data/a/b/c"), ["C f /m/a/b/c/f", "C f /m/ab/c/f"]);
+  assert.deepEqual(created("binds-nobase", "/repositories/.data/a/other"), ["C f /m/a/other/f"]);
+  assert.deepEqual(created("binds-nobase", "/repositories/.data/a/b"), ["C f /m/a/b/f", "C f /m/ab/f"]);
+});
+
+test("helper mounts: an entry that no mount shows is not reported and is counted as unresolved", { skip }, () => {
+  for (const rel of ["/repositories/other", "/repositories/.data/ab/c", "/repositories/.data", "/"]) assert.deepEqual(created("binds-nobase", rel), [], rel);
+  assert.equal(unresolved("binds-nobase", "/repositories/other"), 1);
+  assert.equal(unresolved("binds-nobase", "/repositories/.data/a/x"), 0);
+});
+
+test("helper mounts: a mount at / that shows a folder, next to a mount of the whole filesystem", { skip }, () => {
+  assert.deepEqual(created("binds-top", "/x/a"), ["C f /all/x/a/f", "C f /a/f"]);
+  assert.deepEqual(created("binds-top", "/x"), ["C f /all/x/f", "C f /f"]);
+  assert.deepEqual(created("binds-top", "/xy"), ["C f /all/xy/f"]);
+});
+
+test("helper mounts: a move is R under a mount that shows both places, D under one that shows the old place only, C under one that shows the new place only", { skip }, () => {
+  const move = (sc: string, a: string, b: string) => run(sc, a, b).filter((l) => !l.startsWith("#stats"));
+  // between two folders that two different binds show
+  assert.deepEqual(move("binds-move", "/repositories/.data/o/s", "/repositories/.data/o2"), [
+    "R f /srv/p/repositories/.data/o2/g\t/srv/p/repositories/.data/o/s/f",
+    "D f /h/.data/o/s/f",
+    "C f /h/.data/o2/g",
+  ]);
+  // inside one bind: a move for the whole and for the bind, nothing for the others
+  assert.deepEqual(move("binds-move", "/repositories/.data/o/s", "/repositories/.data/o/t"), ["R f /srv/p/repositories/.data/o/t/g\t/srv/p/repositories/.data/o/s/f", "R f /h/.data/o/t/g\t/h/.data/o/s/f"]);
+  // out of a bind to a place only the whole shows
+  assert.deepEqual(move("binds-move", "/repositories/.data/o/s", "/elsewhere"), ["R f /srv/p/elsewhere/g\t/srv/p/repositories/.data/o/s/f", "D f /h/.data/o/s/f"]);
+  // binds only: out of a bind to a place no mount shows is a delete, into a bind from such a place a create
+  assert.deepEqual(move("binds-move-only", "/repositories/.data/o/s", "/elsewhere"), ["D f /h/.data/o/s/f"]);
+  assert.deepEqual(move("binds-move-only", "/elsewhere", "/repositories/.data/o/s"), ["C f /h/.data/o/s/g"]);
+  // two places that no mount shows: no line, and one unresolved
+  assert.deepEqual(move("binds-move-only", "/elsewhere", "/elsewhere2"), []);
+  assert.equal(Number(/unresolved=(\d+)/.exec(run("binds-move-only", "/elsewhere", "/elsewhere2").find((l) => l.startsWith("#stats")) ?? "")?.[1]), 1);
+});
+
+/** The counters of a "neg-" scenario: the lines the helper wrote, how often it asked the kernel for a folder (`opens`, the helper's own counter), and `unresolved`. */
+function neg(scenario: string) {
+  const lines = run(scenario);
+  const stats = lines.find((l) => l.startsWith("#stats")) ?? "";
+  const n = (k: string) => Number(new RegExp(`${k}=(\\d+)`).exec(stats)?.[1] ?? NaN);
+  return { lines: lines.filter((l) => !l.startsWith("#stats") && !l.startsWith("calls=")), opens: n("opens"), unresolved: n("unresolved"), calls: Number(lines.find((l) => l.startsWith("calls="))?.slice(6)) };
+}
+
+test("helper mounts: a deleted folder ends the search at the first mount and is remembered: two events cost one system call, not one per mount and event", { skip }, () => {
+  const r = neg("neg-gone"); // three mounts of the filesystem, a folder that is gone, two events in it
+  assert.deepEqual(r.lines, []);
+  assert.equal(r.unresolved, 2);
+  assert.equal(r.opens, 1, "the other two mounts are not asked, and the second event is answered from the cache");
+  assert.equal(r.calls, 1);
+});
+
+test("helper mounts: a folder that no mount shows is asked about once per mount, then remembered until a folder is renamed or events are lost", { skip }, () => {
+  const r = neg("neg-outside"); // three binds, a folder outside all of them: two events, an overflow (the cache is dropped), a third event
+  assert.deepEqual(r.lines, ["!overflow"]);
+  assert.equal(r.unresolved, 3);
+  assert.equal(r.opens, 6, "3 mounts for the first event, none for the second, 3 again after the cache was dropped");
+  assert.equal(r.calls, 6);
+});
+
+test("helper mounts: an error that may pass (a handle that cannot be opened now) is not remembered", { skip }, () => {
+  const r = neg("neg-transient"); // three mounts, two events
+  assert.equal(r.unresolved, 2);
+  assert.equal(r.opens, 6, "every event asks every mount again");
 });

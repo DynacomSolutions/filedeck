@@ -15,20 +15,23 @@ export const isOpenProbe = (pathAndQuery: string) => /^\/(healthz|metrics)(\?|$)
 export const isAgentAuthRoute = (p: string) => /^\/api\/auth\/[a-z-]+$/.test(p);
 
 /**
- * Whether a path (a query string allowed) the hub would send to an agent could reach the agent's sign-in routes, read the wide way:
- * percent escapes decoded (the agent's router decodes them), `\` taken as `/`, repeated slashes as one, `.` and `..` resolved, and
- * letters in any case. Only the hub's own sign-in calls may go there, so the proxy and every other agent call refuse these paths. A path
- * that cannot be read is refused too.
+ * Decode escapes and standardise slashes, dot segments and case before checking access.
+ * Return null if the path cannot be read.
  */
-export function isAgentAuthPath(pathAndQuery: string): boolean {
+export function normaliseAgentPath(pathAndQuery: string): string | null {
   try {
     const decoded = (pathAndQuery.split("?")[0] ?? "").replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
     const flat = ("/" + decoded.replace(/\\/g, "/")).replace(/\/{2,}/g, "/");
-    const resolved = new URL(flat, "http://x").pathname.toLowerCase();
-    return /^\/api\/auth(\/|$)/.test(resolved);
+    return new URL(flat, "http://x").pathname.toLowerCase();
   } catch {
-    return true;
+    return null;
   }
+}
+
+/** Only the hub's own sign-in calls can reach these routes. Refuse unreadable paths too. */
+export function isAgentAuthPath(pathAndQuery: string): boolean {
+  const path = normaliseAgentPath(pathAndQuery);
+  return path === null || /^\/api\/auth(\/|$)/.test(path);
 }
 
 const digest = (s: string) => createHash("sha256").update(s).digest();
@@ -116,6 +119,7 @@ export function withAgentToken(
   node: string,
   requireUser = false,
   asRootOk?: (id: Identity & { kind: "sys" }) => boolean,
+  storageGroups = false,
 ): RequestInit | undefined {
   let id = currentUser();
   if (requireUser && !id) throw new Error("agent call without an identity");
@@ -127,6 +131,7 @@ export function withAgentToken(
     if (id.kind === "sys" && id.asRootUntil !== undefined && !asRootOk?.(id)) id = { kind: "sys", name: id.name, admin: id.admin, epoch: id.epoch };
     const claim = claimFor(id, node, Date.now());
     if (!claim) throw new NoAccessError();
+    if (storageGroups) claim.storageGroups = true;
     headers.set(USER_HEADER, signClaim(claim, token));
   }
   return { ...init, headers };

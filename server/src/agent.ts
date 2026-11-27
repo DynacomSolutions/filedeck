@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { makeAgentJobs, registerJobRoutes } from "./archive-routes.ts";
+import { AgentGroupReader } from "./group-agent.ts";
 import { registerSizeRoutes } from "./props.ts";
 import { FanWatch } from "./fanwatch.ts";
 import { MacWatch } from "./macwatch.ts";
@@ -23,7 +24,7 @@ import { KeyCheck } from "./agent-keys.ts";
 import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } from "./worker-pool.ts";
 import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
 import { Followers, registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
-import { EventBus } from "./events/bus.ts";
+import { registerNodeStatus, StatusEventBus } from "./node-status.ts";
 import { DirWatchers } from "./events/dirwatch.ts";
 import { LabelRules } from "./events/labels.ts";
 import { ownState } from "./events/own-state.ts";
@@ -127,6 +128,15 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   // sign-in on: sizes and jobs follow the account (agent-jobs.ts); off: as before
   const followers = pool && workers ? new Followers(jobs) : undefined;
   const sizes = registerSizeRoutes(app, cfg, jobs, pool && workers && followers ? sizeAccess(cfg, { pool, workers, jobs, followers }) : undefined);
+  const storageGroups = new AgentGroupReader(cfg, cfg.groups, (p) => sizes.groupSize(p));
+  app.get("/api/groups", async (c) => {
+    if (cfg.auth && c.get("user")?.storageGroups !== true) return c.json({ error: "administrators only" }, 403);
+    try {
+      return c.json(await storageGroups.read(), 200, { "cache-control": "no-store" });
+    } catch {
+      return c.json({ error: "storage groups unavailable" }, 503);
+    }
+  });
   if (pool && workers && followers) registerOwnedJobRoutes(app, jobs, { pool, workers, followers });
   else registerJobRoutes(app, jobs);
   // The event bus (events/bus.ts): every change the watcher sees goes through it to the journal, the subscribers and the folder feed of the compare index and
@@ -139,7 +149,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   }
   const ownJournalDir = cfg.eventsJournalBytes > 0 && cfg.eventsJournalHours > 0 && !cfg.indexDir;
   const journalDir = cfg.eventsJournalBytes > 0 && cfg.eventsJournalHours > 0 ? (cfg.indexDir ? path.join(cfg.indexDir, `changes-${cfg.node}`) : path.join(os.tmpdir(), `filedeck-changes-${cfg.node}-${process.pid}-${randomUUID()}`)) : null;
-  const bus = new EventBus({
+  const bus = new StatusEventBus({
     node: cfg.node,
     labels,
     journal: { dir: journalDir, maxBytes: cfg.eventsJournalBytes || undefined, maxAgeMs: cfg.eventsJournalHours * 3600_000 || undefined },
@@ -152,6 +162,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   const fan = process.platform === "darwin"
     ? new MacWatch(sizes, { root, procMounts: cfg.procMounts, bus })
     : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, bus, ignorePath: ownState({ node: cfg.node, root, journalDir, stateDir: cfg.indexDir, tmpDir: os.tmpdir() }) });
+  registerNodeStatus(app, cfg, sizes, fan, bus);
   const dirs = new DirWatchers(bus, (v) => fan.covers(v));
   feedRef.feed = dirs;
   sizes.covers = (v) => fan.covers(v);
@@ -205,6 +216,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         "# HELP filedeck_watcher_lost_events_total Native events lost to overflow",
         "# TYPE filedeck_watcher_lost_events_total counter",
         `filedeck_watcher_lost_events_total ${w.lostEvents}`,
+        ...storageGroups.metrics.lines(),
         ...eventMetrics(bus, (w as { helper?: Record<string, number> }).helper, (w as { caps?: string }).caps),
         "",
       ].join("\n"),

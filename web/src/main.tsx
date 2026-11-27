@@ -2,6 +2,8 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { SWRConfig } from "swr";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { StatusPage } from "./StatusPage";
+import { statusRoute } from "./statusRoute";
 import { swrConfig } from "./data";
 import "./styles.css";
 import "./accessibility.css";
@@ -136,14 +138,15 @@ function Root() {
   if (view === "offline") return <><HubUnreachable retry={() => ask().then(() => {})} /><UpdateBanner /></>;
   // the sign-in chunk loads on demand; a page of an older build may no longer find it, so a failure shows the error screen (with reload), never a blank page
   if (view === "sign-in") return <><ErrorBoundary what="Sign-in" scope="root"><Suspense fallback={null}><SignIn onSignedIn={() => void afterSignIn(shownAs.current, setView)} /></Suspense></ErrorBoundary><UpdateBanner /></>;
+  const status = statusRoute(location.pathname, location.search);
   return (
     <>
       <UpdateBanner />
-      <AccessibilityChrome />
+      <AccessibilityChrome statusPage={!!status} />
       <ErrorBoundary what="Filedeck" scope="root">
         {location.pathname === "/storage"
           ? <Suspense fallback={<p role="status">Loading storage…</p>}><StoragePage /></Suspense>
-          : <App account={view.auth ? view : undefined} />}
+          : status ? <StatusPage initial={status} account={view.auth ? view : undefined} /> : <App account={view.auth ? view : undefined} />}
       </ErrorBoundary>
       {retry && <TailnetBanner {...waitProps} />}
     </>

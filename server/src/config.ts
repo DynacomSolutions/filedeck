@@ -6,15 +6,20 @@ import { ProxyList } from "./auth/tailnet.ts";
 import { parseBrand, type Brand } from "./brand.ts";
 import { parseReadOnly } from "./readonly.ts";
 import { parseSources } from "./sources/registry.ts";
+import { loadGroupRules, type GroupRule } from "./group-rules.ts";
 import type { SourceConfig } from "./sources/types.ts";
 
 export interface Config {
   mode: "agent" | "hub";
   host: string | undefined;
   port: number;
+  hubMetricsPort?: number;
   root: string;
   node: string;
   procMounts: string;
+  groups: GroupRule[];
+  groupRulesFile?: string;
+  victoriaMetricsUrl?: string;
   maxUpload: number;
   /** Largest text file the editor will open or save (bytes) */
   maxEdit: number;
@@ -276,13 +281,24 @@ export function loadConfig(env = process.env): Config {
   const vaultFile = env.FILEDECK_VAULT_FILE ?? "/var/lib/filedeck-vault/vault.sqlite";
   const mode = env.FILEDECK_MODE === "hub" ? "hub" : "agent";
   const root = (env.FILEDECK_ROOT ?? "/host").replace(/\/+$/, "") || "/";
+  const port = Number(env.PORT ?? 8080);
+  const hubMetricsPort = mode === "hub" && env.FILEDECK_HUB_METRICS_PORT
+    ? Number(env.FILEDECK_HUB_METRICS_PORT) : undefined;
+  if (hubMetricsPort !== undefined && (!Number.isInteger(hubMetricsPort) || hubMetricsPort < 1024 ||
+    hubMetricsPort > 65535 || hubMetricsPort === port)) {
+    throw new Error("FILEDECK_HUB_METRICS_PORT must be between 1024 and 65535 and differ from PORT");
+  }
   return {
     mode,
     host: env.FILEDECK_HOST || undefined,
-    port: Number(env.PORT ?? 8080),
+    port,
+    hubMetricsPort,
     root,
     node: env.FILEDECK_NODE ?? "local",
     procMounts: env.FILEDECK_PROC_MOUNTS ?? defaultProcMounts(root),
+    groups: mode === "agent" ? loadGroupRules(env.FILEDECK_GROUPS_FILE, env.FILEDECK_NODE ?? "local") : [],
+    groupRulesFile: env.FILEDECK_GROUPS_FILE,
+    victoriaMetricsUrl: mode === "hub" ? env.FILEDECK_VICTORIA_METRICS_URL?.trim() || undefined : undefined,
     maxUpload: Number(env.FILEDECK_MAX_UPLOAD ?? 1024 ** 4),
     maxEdit: Number(env.FILEDECK_MAX_EDIT ?? 5 * 1024 * 1024),
     staticDir: env.FILEDECK_STATIC ?? "/app/web",

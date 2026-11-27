@@ -1,8 +1,10 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable } from "node:stream";
-import { countMountExclusions, listMounts } from "./mounts.ts";
+import { countMountExclusions, listMounts, readMountRoots, type Mount } from "./mounts.ts";
 import { isReservedName } from "./paths.ts";
 import type { EventBus } from "./events/bus.ts";
 import type { NewEvent } from "./events/types.ts";
@@ -185,20 +187,20 @@ export class FanWatch {
     try {
       const all = await listMounts(this.o.root, this.o.procMounts);
       this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
-      const mounts = all.filter((m) => !m.network && !m.unreachable);
+      const mounts = await this.localMounts(all);
       this.unwatched = all.filter((m) => m.network || m.unreachable).map((m) => m.mountpoint);
-      // Fanotify marks a whole filesystem. Bind aliases on one filesystem must therefore
-      // be passed once. Repeating an alias can return EINVAL and falsely report the alias
-      // as unwatched, although the first mark already covers it.
-      const filesystems = new Map<string, (typeof mounts)[number]>();
-      for (const m of mounts) filesystems.set(`${m.device}\0${m.fstype}`, filesystems.get(`${m.device}\0${m.fstype}`) ?? m);
-      const unique = [...filesystems.values()].slice(0, MAXFS);
+      // Fanotify marks a whole filesystem, and the helper marks each one once. It still needs every mount of it: a filesystem is often shown at more
+      // than one place (bind mounts of some of its folders), and the helper reports an entry under each mount that shows it. So every local mount
+      // is passed, aliases too (an absolute path each, nothing else). When there are more than the helper takes, one mount of every
+      // filesystem comes first, and the rest of the aliases are reported as unwatched.
+      const unique = this.limit(mounts);
       const hostPaths = unique.map((m) => (this.o.root === "/" ? m.mountpoint : this.o.root + (m.mountpoint === "/" ? "" : m.mountpoint)));
       this.marks = unique.map((m) => m.mountpoint);
-      this.unwatched.push(...mounts.slice(MAXFS).map((m) => m.mountpoint));
+      const kept = new Set(this.marks);
+      this.unwatched.push(...mounts.filter((m) => !kept.has(m.mountpoint)).map((m) => m.mountpoint));
       this.mountCount = all.length;
-      this.watchedCount = Math.min(mounts.length, MAXFS);
-      this.mountSignature = mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}`).sort().join("\n");
+      this.watchedCount = unique.length;
+      this.mountSignature = await this.signature(mounts);
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
       if (this.stopped) return;
       const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["pipe", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
@@ -249,6 +251,35 @@ export class FanWatch {
     }
   }
 
+  /**
+   * The local mounts the helper can mark: no network or unreachable mount, and no mount of a single file (a file bind mount such as a container's
+   * `/etc/hosts` is not a folder: the helper cannot open it as one, so it would be reported as unwatched and make `covers("/")` false at every start).
+   * A mount point that cannot be looked at stays in (the helper decides).
+   */
+  private async localMounts(all: Mount[]): Promise<Mount[]> {
+    const local = all.filter((m) => !m.network && !m.unreachable);
+    const isDir = await Promise.all(local.map((m) => fs.stat(path.join(this.o.root, m.mountpoint)).then((st) => st.isDirectory(), () => true)));
+    return local.filter((_, i) => isDir[i]);
+  }
+
+  /** The mounts the helper is given: all of them, or the first MAXFS when there are more (one mount of every filesystem first, so none is left out for an alias). */
+  private limit(mounts: Mount[]): Mount[] {
+    if (mounts.length <= MAXFS) return mounts;
+    const first = new Map<string, Mount>();
+    for (const m of mounts) first.set(`${m.device}\0${m.fstype}`, first.get(`${m.device}\0${m.fstype}`) ?? m);
+    const lead = new Set(first.values());
+    return [...lead, ...mounts.filter((m) => !lead.has(m))].slice(0, MAXFS);
+  }
+
+  /**
+   * What the helper's view depends on: each mount, its filesystem and the folder of it that the mount shows (mountinfo "root"). The helper reads the
+   * roots itself when it starts, so a change of any of them (a bind mount that is replaced by one of another folder) restarts it, and its table is made again.
+   */
+  private async signature(mounts: Mount[]): Promise<string> {
+    const roots = await readMountRoots(this.o.root, this.o.procMounts);
+    return mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}\0${roots.get(m.mountpoint) ?? ""}`).sort().join("\n");
+  }
+
   /** Rebuild helper marks after a mount or bind alias changes. This marks affected trees stale. */
   private ensureReconcileTimer() {
     if (this.reconcileTimer || this.stopped) return;
@@ -261,8 +292,8 @@ export class FanWatch {
     try {
       const all = await listMounts(this.o.root, this.o.procMounts);
       this.excludedMounts = await countMountExclusions(this.o.root, this.o.procMounts);
-      const mounts = all.filter((m) => !m.network && !m.unreachable);
-      const signature = mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}`).sort().join("\n");
+      const mounts = await this.localMounts(all);
+      const signature = await this.signature(mounts);
       this.mountCount = all.length;
       if (signature === this.mountSignature) return;
       const affected = new Set([...this.marks, ...mounts.map((m) => m.mountpoint)]);
@@ -474,6 +505,7 @@ export class FanWatch {
     const bus = this.o.bus;
     if (!bus) return;
     bus.ready = true;
+    bus.setUnwatched(this.unwatched);
     const now = Date.now();
     if (this.gapFrom) this.publish({ kind: "reset", scope: "node", window: { from: this.gapFrom, to: now }, reason: "the watcher was not running" });
     this.gapFrom = 0;

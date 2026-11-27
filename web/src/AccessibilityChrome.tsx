@@ -45,7 +45,7 @@ function pageTitle() {
 }
 
 /** Adds a skip target and keeps the browser title useful as panels and dialogs change. */
-export function AccessibilityChrome() {
+export function AccessibilityChrome({ statusPage = false }: { statusPage?: boolean }) {
   useEffect(() => {
     const main = document.querySelector<HTMLElement>("main");
     if (main) {
@@ -54,7 +54,7 @@ export function AccessibilityChrome() {
     }
 
     const updateTitle = () => {
-      document.title = pageTitle();
+      document.title = statusPage ? `Jobs and status · ${APP_TITLE}` : pageTitle();
     };
     const observer = new MutationObserver(updateTitle);
     observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "aria-labelledby", "aria-modal", "aria-hidden", "class", "hidden", "style"] });
@@ -65,7 +65,7 @@ export function AccessibilityChrome() {
       observer.disconnect();
       document.removeEventListener("focusin", updateTitle);
     };
-  }, []);
+  }, [statusPage]);
 
-  return <a className="skip-navigation" data-nav href="#filedeck-main">Skip to file panels</a>;
+  return <a className="skip-navigation" data-nav href="#filedeck-main">{statusPage ? "Skip to jobs and status" : "Skip to file panels"}</a>;
 }
