@@ -115,9 +115,7 @@ test("kernel check: what a handle gives through a bind mount for a folder the bi
   for (const [what, m, e] of rows) {
     const msg = `${what}: mount ${m} entry ${e} -> ${ask(m, e)}`;
     t.diagnostic(msg);
-    console.log("PROBE " + msg);
   }
-  console.log("PROBE mountinfo\n" + fs.readFileSync("/proc/self/mountinfo", "utf8").split("\n").filter((x) => x.includes(l.base)).join("\n"));
 });
 
 const seen = (ev: { kind: string; path?: string }[], kind: string, p: string) => ev.some((e) => e.kind === kind && e.path === p);

@@ -134,6 +134,27 @@ test("fanwatch: a mount table with more mounts than the helper takes keeps one m
   s.done();
 });
 
+test("fanwatch: the folder that a bind mount shows is part of the mount signature: a bind that is replaced by one of another folder restarts the helper, an unchanged table does not", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fanwatch-info-"));
+  cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const mounts = path.join(dir, "mounts");
+  const info = path.join(dir, "mountinfo");
+  const s = setup({ procMounts: mounts, reconcileMs: 20 });
+  fs.mkdirSync(path.join(s.root, "alias"));
+  fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n/dev/a /alias ext4 rw 0 0\n");
+  const table = (fsroot: string) => `10 1 8:1 / / rw - ext4 /dev/a rw\n11 10 8:1 ${fsroot} /alias rw - ext4 /dev/a rw\n`;
+  fs.writeFileSync(info, table("/one"));
+  await s.w.start();
+  s.w.line("#ready 1");
+  await sleep(120);
+  assert.equal(s.proc.killed, false, "nothing changed");
+  fs.writeFileSync(info, table("/two"));
+  await until(() => s.proc.killed, 5000);
+  assert.equal(s.proc.killed, true, "the bind shows another folder now");
+  s.w.stop();
+  s.done();
+});
+
 test("fanwatch: events of one folder coalesce, other folders stay separate, paths are mapped", async () => {
   const s = setup();
   await s.w.start();
