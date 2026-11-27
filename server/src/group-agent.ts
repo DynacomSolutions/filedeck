@@ -46,8 +46,10 @@ export class AgentGroupReader {
         const s = await fs.statfs(target).catch(() => null);
         return s && { used: (s.blocks - s.bfree) * s.bsize, capacity: s.blocks * s.bsize };
       }, isStorageMount, async (p) => {
-        const info = await fs.stat(path.join(root, p)).catch(() => null);
-        return info?.dev ?? null;
+        return fs.stat(path.join(root, p)).then(
+          (info) => info.dev,
+          (error: NodeJS.ErrnoException) => error.code === "ENOENT" ? null : undefined,
+        );
       });
       if (drives.some((drive) => drive.usedBytes === null)) this.metrics.errors++;
       else this.metrics.lastSuccess = Date.now();

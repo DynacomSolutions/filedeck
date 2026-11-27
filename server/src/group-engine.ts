@@ -77,10 +77,11 @@ export async function groupStorage(
   stored: (path: string) => Promise<StoredGroupSize | null>,
   stat: (mountpoint: string) => Promise<Space | null>,
   isStorage: (mount: GroupMount) => boolean,
-  statDevice: (path: string) => Promise<number | null>,
+  // A missing path returns null. Other stat errors return undefined.
+  statDevice: (path: string) => Promise<number | null | undefined>,
 ): Promise<MeasuredDrive[]> {
   const mounts = [...mountTable].sort((a, b) => b.mountpoint.length - a.mountpoint.length);
-  const devices = new Map<string, Promise<number | null>>();
+  const devices = new Map<string, ReturnType<typeof statDevice>>();
   const deviceAt = (path: string) => {
     const existing = devices.get(path);
     if (existing) return existing;
@@ -90,7 +91,7 @@ export async function groupStorage(
   };
   const btrfs = mounts.filter((mount) => mount.fstype === "btrfs");
   const btrfsDevices = new Map(await Promise.all(btrfs.map(async (mount) =>
-    [mount, await deviceAt(mount.mountpoint)] as const)));
+    [mount, (await deviceAt(mount.mountpoint)) ?? null] as const)));
   const aliases = mountAliases(mounts, btrfsDevices);
   const cuts = buildCuts(mounts, aliases, rules);
   const children = new Map<Cut, Cut[]>();
@@ -117,11 +118,13 @@ export async function groupStorage(
     if (!aliases.has(m.mountpoint)) vol.mounts.add(m.mountpoint);
     volumes.set(m.fsKey, vol);
   }
-  const reads = new Map<string, StoredGroupSize | null>();
-  const get = async ({ path }: Cut) => {
+  const reads = new Map<string, StoredGroupSize | "gone" | null>();
+  const get = async ({ path, mountBoundary }: Cut) => {
     if (!reads.has(path)) {
       const row = await stored(path);
-      reads.set(path, row && row.dev === await deviceAt(path) ? row : null);
+      if (!row && mountBoundary) return null;
+      const device = await deviceAt(path);
+      reads.set(path, device === null ? "gone" : row && row.dev === device ? row : null);
     }
     return reads.get(path) ?? null;
   };
@@ -131,6 +134,7 @@ export async function groupStorage(
     const group = vol.groups.get(c.rule.name) ?? empty(c.rule.name);
     vol.groups.set(c.rule.name, group);
     const row = await get(c);
+    if (row === "gone") continue;
     if (!row) {
       group.notStored = true;
       continue;
@@ -139,7 +143,9 @@ export async function groupStorage(
     let missingRule = false;
     for (const child of children.get(c) ?? []) {
       const item = await get(child);
+      if (item === "gone") continue;
       if (child.mountBoundary && item?.dev !== row.dev) continue;
+      if (child.mountBoundary && item && item.scannedAt > row.scannedAt) group.stale = true;
       if (item) deductions.push(item);
       else missingRule = true;
     }

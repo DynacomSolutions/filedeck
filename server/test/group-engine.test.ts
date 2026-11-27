@@ -17,11 +17,14 @@ const sample = (bytes: number, fields: Partial<StoredGroupSize> = {}): StoredGro
   ({ bytes, dev: 2049, scannedAt: 100, stale: false, errors: 0, files: 100, links: 0, linkChecked: 100, ...fields });
 
 const run = (rules: ReturnType<typeof rule>[], rows: Record<string, StoredGroupSize>, mounts: GroupMount[] = [root],
-  used = 1000, statDevices: Record<string, number> = {}) =>
+  used = 1000, statDevices: Record<string, number | null> = {}) =>
   groupStorage(mounts, parseGroupRules(JSON.stringify({ local: rules }), "local"),
     (p) => Promise.resolve(rows[p] ?? null), () => Promise.resolve({ used, capacity: 4000 }), () => true,
-    async (p) => statDevices[p] ?? ([...mounts].sort((a, b) => b.mountpoint.length - a.mountpoint.length)
-      .find((m) => m.mountpoint === "/" || p === m.mountpoint || p.startsWith(m.mountpoint + "/"))?.dev === "8:2" ? 2050 : 2049));
+    async (p) => {
+      if (statDevices[p] === null) return null;
+      return statDevices[p] ?? ([...mounts].sort((a, b) => b.mountpoint.length - a.mountpoint.length)
+          .find((m) => m.mountpoint === "/" || p === m.mountpoint || p.startsWith(m.mountpoint + "/"))?.dev === "8:2" ? 2050 : 2049);
+    });
 const byName = (drives: Awaited<ReturnType<typeof run>>) => Object.fromEntries(drives[0]?.groups.map((g) => [g.name, g]) ?? []);
 
 test("longest prefix wins across nested rules and exclusions; freshness follows dependencies", async () => {
@@ -46,6 +49,29 @@ test("a missing boundary keeps the ambiguous parent in the remainder", async () 
   assert.equal(groups.A?.scannedAt, 49);
   assert.equal(groups.B?.bytes, 50);
   assert.equal(groups.Unattributed?.bytes, 950);
+});
+
+test("deleted rules and exclusions deduct zero, even with a cached row", async () => {
+  const volume = { ...root, fstype: "btrfs" };
+  const groups = byName(await run(
+    [rule("Root", ["/"], ["/tmp/job"]), rule("Gone", ["/gone"])],
+    { "/": sample(500, { dev: 81920 }), "/gone": sample(100, { dev: 81920 }) },
+    [volume], 700, { "/": 81920, "/gone": null, "/tmp/job": null },
+  ));
+  assert.equal(groups.Root?.bytes, 500);
+  assert.equal(groups.Root?.notStored, false);
+  assert.equal(groups.Gone?.bytes, 0);
+  assert.equal(groups.Gone?.notStored, false);
+  assert.equal(groups.Unattributed?.bytes, 200);
+});
+
+test("a bind boundary scanned after its parent makes the derived total stale", async () => {
+  const groups = byName(await run([rule("Root", ["/"]), rule("Data", ["/data"])],
+    { "/": sample(900), "/data": sample(100), "/copy": sample(100, { scannedAt: 101 }) }, [root, bind]));
+  assert.equal(groups.Root?.stale, true);
+  assert.equal(groups.Root?.scannedAt, 100);
+  assert.equal(groups.Root?.notStored, false);
+  assert.equal(groups.Data?.stale, false);
 });
 
 test("read bind roots and remove their same-device totals and duplicate capacity", async () => {
