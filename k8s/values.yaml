@@ -87,7 +87,9 @@ auth:
       # The identity listener's port, on 127.0.0.2 (tailscaled in userspace mode forwards other ports to 127.0.0.1, never to 127.0.0.2).
       # Serve points at it. It is not in the Service. Needs hub.trustedProxies of 1 or more.
       listenPort: 8081
-      # The UDP port of tailscaled for direct connections (tailscaled --port). The hub-mcp NetworkPolicy allows it when it isolates the hub pod.
+      # The UDP port of tailscaled for direct connections (tailscaled --port), 1 to 65535. The hub-mcp NetworkPolicy allows it when it isolates the hub pod
+      # (hub.mcp.enabled true and hub.networkPolicy.enabled false). With hub.networkPolicy.enabled true, the hub policy isolates the pod and allows only the
+      # file API and metrics ports, so this UDP port is dropped: direct connections fail and the sidecar uses relayed paths (it still works, but slower).
       udpPort: 41641
       # You pick and pin the image (a `digest` wins over `tag`). It must start tailscaled as the official image does (containerboot).
       image: {repository: "", tag: "", digest: ""}

@@ -69,6 +69,9 @@ helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version | replace 
 {{- if or (lt (int $sc.listenPort) 1) (gt (int $sc.listenPort) 65535) (eq (int $sc.listenPort) (int .Values.port)) -}}
 {{- fail "auth.tailscale.sidecar.listenPort must be a port from 1 to 65535 and not the hub port" -}}
 {{- end -}}
+{{- if or (lt (int $sc.udpPort) 1) (gt (int $sc.udpPort) 65535) -}}
+{{- fail "auth.tailscale.sidecar.udpPort must be a port from 1 to 65535" -}}
+{{- end -}}
 {{- else if and (or $t.headers $t.socket) (not $t.proxies) -}}
 {{- fail "auth.tailscale.headers or socket needs proxies" -}}
 {{- end -}}

@@ -139,5 +139,10 @@ printf '%s\n' "$udp" | awk '/- port: 41641/{getline; if ($2 == "UDP") ok=1} END 
 ! grep -q 'protocol: UDP' <<<"$open"                                                          # no sidecar, no UDP rule
 ! grep -q 'protocol: UDP' <<<"$("${sidecar[@]}" -s templates/hub-mcp-networkpolicy.yaml --set hub.networkPolicy.enabled=true)"
 grep -A1 'name: TS_TAILSCALED_EXTRA_ARGS' <<<"$("${sidecar[@]}" -s templates/hub.yaml)" | grep -q -- '--port=41641'
+# the UDP port must be a real port: the chart refuses to render with 0, 70000 or a word
+for bad in 0 70000 -5; do
+  if "${sidecar[@]}" --set "auth.tailscale.sidecar.udpPort=$bad" >/dev/null 2>&1; then echo "udpPort $bad must not render" >&2; exit 1; fi
+done
+"${sidecar[@]}" --set auth.tailscale.sidecar.udpPort=65535 >/dev/null
 
 echo "chart render check passed"
