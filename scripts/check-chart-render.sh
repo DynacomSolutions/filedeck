@@ -44,6 +44,12 @@ if awk '/^kind: EndpointSlice$/{found=1} END{exit !found}' <<<"$managed"; then
 fi
 ! grep -R -q 'lookup "v1" "Node"' k8s/templates || { echo "chart must not depend on Helm Node lookup" >&2; exit 1; }
 scripts/test-managed-reconciler.sh
+auth_managed=$(helm template t k8s --set managedNodes.enabled=true --set auth.enabled=true --set agentToken.secretName=filedeck-agent-token)
+case "$auth_managed" in *"kind: ClusterRoleBinding"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *"name: FILEDECK_AUTH"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *"name: FILEDECK_PAM_SERVICE"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *"SYS_CHROOT"*) ;; *) exit 1 ;; esac
+case "$auth_managed" in *'dynacom.dev/filedeck-managed-agent: "true"'*) ;; *) exit 1 ;; esac
 
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_HUB_METRICS_PORT/{getline; gsub(/"/, "", $2); print $2}')" = 9091
 test "$(printf '%s\n' "$hub" | awk '/- name: metrics/{getline; print $2}')" = 9091

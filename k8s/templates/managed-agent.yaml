@@ -1,11 +1,12 @@
 {{- if .Values.managedNodes.enabled }}
+{{- $name := include "filedeck.name" . }}
 {{- $staticKube := list }}
 {{- range .Values.nodes }}{{- if and (ne (default "kubernetes" .mode) "native") .nodeName }}{{- $staticKube = append $staticKube .nodeName }}{{- end }}{{- end }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "filedeck.name" . }}-managed-agent
+  name: {{ $name }}-managed-agent
   labels:
     {{- include "filedeck.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent
@@ -50,6 +51,13 @@ spec:
             - name: FILEDECK_AGENT_TOKEN
               valueFrom: {secretKeyRef: {name: {{ include "filedeck.agentTokenSecret" . }}, key: {{ .Values.agentToken.key }}}}
             {{- end }}
+            {{- if .Values.auth.enabled }}
+            - {name: FILEDECK_AUTH, value: "on"}
+            - {name: FILEDECK_MAX_WORKERS, value: {{ .Values.auth.workers.max | quote }}}
+            - {name: FILEDECK_WORKER_IDLE_SECONDS, value: {{ .Values.auth.workers.idleSeconds | quote }}}
+            - {name: FILEDECK_PAM_SERVICE, value: {{ .Values.auth.pamService | quote }}}
+            {{- end }}
+            - {name: FILEDECK_MAX_UPLOAD, value: {{ .Values.agent.maxUpload | quote }}}
             - {name: FILEDECK_READONLY, value: {{ join "," .Values.agent.readOnlyPaths | quote }}}
             - {name: FILEDECK_INDEX_DIR, value: /var/lib/filedeck/index}
             - {name: FILEDECK_SANDBOX, value: {{ .Values.agent.sandbox | default "require" | quote }}}
@@ -70,7 +78,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
-              add: [DAC_OVERRIDE, DAC_READ_SEARCH, CHOWN, FOWNER, SETUID, SETGID{{ if .Values.agent.fanotify.enabled }}, SYS_ADMIN{{ end }}]
+              add: [DAC_OVERRIDE, DAC_READ_SEARCH, CHOWN, FOWNER, SETUID, SETGID{{ if .Values.agent.fanotify.enabled }}, SYS_ADMIN{{ end }}{{ if .Values.auth.enabled }}, SYS_CHROOT{{ end }}]
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
