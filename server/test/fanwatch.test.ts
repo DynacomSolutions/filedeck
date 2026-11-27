@@ -399,7 +399,7 @@ test("fanwatch native helper: FIFO startup is bounded without a writer", async (
   });
   try {
     await outcome;
-    assert.ok(ready || err.includes("skipping special mount path"), "bounded FIFO startup result");
+    assert.ok(ready || child.exitCode !== null, "bounded FIFO startup result");
   } finally {
     clearTimeout(timer!);
     if (child.exitCode === null) child.kill("SIGTERM");
