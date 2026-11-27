@@ -17,6 +17,8 @@ export interface SocketOptions {
   path: string;
   /** group that may connect (name or number); the socket and its directory are given to it */
   group?: string;
+  /** the user that must own the socket's folder (default: the user of this process): a folder of anyone else is never changed */
+  uid?: number;
   /** most clients at once (default 256) */
   maxClients?: number;
   log?: (s: string) => void;
@@ -32,11 +34,25 @@ export interface EventSocket {
 
 export async function startEventSocket(bus: EventBus, o: SocketOptions): Promise<EventSocket> {
   if (Buffer.byteLength(o.path) > 100) throw new Error("the socket path is longer than 100 bytes (the limit of a Unix socket address)");
+  const me = o.uid ?? process.getuid?.() ?? 0;
   const dir = path.dirname(o.path);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
+  // The folder is made (or kept) 0750 only when it is a real folder of this user: the agent never changes the mode or group of a folder it does not own,
+  // and never follows a link to one.
+  let st = lstatOrNull(dir);
+  if (!st) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
+    st = fs.lstatSync(dir);
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`the socket folder ${dir} is not a folder (a link is not followed)`);
+  if (st.uid !== me) throw new Error(`the socket folder ${dir} is not owned by the agent's user: it is not changed`);
   fs.chmodSync(dir, 0o750);
-  if (o.group) chgrp(dir, o.group);
-  fs.rmSync(o.path, { force: true }); // a socket left by an earlier process
+  if (o.group) chgrp(dir, o.group, me);
+  // an old socket of a process that is gone is replaced; anything else at that place is kept, and the start is refused
+  const old = lstatOrNull(o.path);
+  if (old) {
+    if (!old.isSocket()) throw new Error(`${o.path} exists and is not a socket: it is not removed`);
+    fs.rmSync(o.path, { force: true });
+  }
   const clients = new Set<net.Socket>();
   const server = net.createServer({ allowHalfOpen: true }, (sock) => {
     if (clients.size >= (o.maxClients ?? 256)) {
@@ -56,18 +72,27 @@ export async function startEventSocket(bus: EventBus, o: SocketOptions): Promise
     server.listen(o.path, () => res());
   });
   fs.chmodSync(o.path, 0o660);
-  if (o.group) chgrp(o.path, o.group);
+  if (o.group) chgrp(o.path, o.group, me);
   return {
     path: o.path,
     async close() {
       for (const c of clients) c.destroy();
       await new Promise<void>((res) => server.close(() => res()));
-      fs.rmSync(o.path, { force: true });
+      // (the server removes its own socket; this is for one that is left over, and only a socket is ever removed)
+      if (lstatOrNull(o.path)?.isSocket()) fs.rmSync(o.path, { force: true });
     },
   };
 }
 
-function chgrp(p: string, group: string) {
+function lstatOrNull(p: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(p);
+  } catch {
+    return null;
+  }
+}
+
+function chgrp(p: string, group: string, uid: number) {
   let gid = Number(group);
   if (!Number.isInteger(gid)) {
     // names are looked up in /etc/group (the process may not have NSS)
@@ -75,7 +100,7 @@ function chgrp(p: string, group: string) {
     if (!line) throw new Error(`events socket group "${group}" does not exist`);
     gid = Number(line.split(":")[2]);
   }
-  fs.chownSync(p, process.getuid?.() ?? 0, gid);
+  fs.chownSync(p, uid, gid);
 }
 
 /** Read the request line, subscribe, and write what the subscriber yields until it ends or the client goes. */

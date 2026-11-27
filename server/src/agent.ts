@@ -143,13 +143,14 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     labels,
     journal: { dir: journalDir, maxBytes: cfg.eventsJournalBytes || undefined, maxAgeMs: cfg.eventsJournalHours * 3600_000 || undefined },
     writer: () => sizes.mayWrite,
+    disk: () => sizes.isWriter, // (no usable store, no lease: the journal stays in memory, so two processes never write one folder)
     log: (s) => console.error(s),
   });
   registerChangeRoutes(app, bus);
   Object.assign(app, { events: bus }); // (tests publish to it and read its counters)
   const fan = process.platform === "darwin"
     ? new MacWatch(sizes, { root, procMounts: cfg.procMounts, bus })
-    : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, bus, ignoreName: ownState(cfg.node) });
+    : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, bus, ignorePath: ownState({ node: cfg.node, root, journalDir, stateDir: cfg.indexDir, tmpDir: os.tmpdir() }) });
   const dirs = new DirWatchers(bus, (v) => fan.covers(v));
   feedRef.feed = dirs;
   sizes.covers = (v) => fan.covers(v);

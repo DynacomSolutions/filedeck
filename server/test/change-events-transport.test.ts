@@ -137,7 +137,9 @@ test("socket: a bad request gets one error line and is closed; an idle client ge
 test("socket: a stale socket file from an earlier process is replaced; close removes it", async () => {
   const b = newBus();
   const sock = path.join(shortDir(), "e.sock");
-  fs.writeFileSync(sock, "stale");
+  const stale = net.createServer(); // the socket of an earlier process
+  await new Promise<void>((res) => stale.listen(sock, () => res()));
+  cleanups.push(() => void stale.close());
   const s = await startEventSocket(b, { path: sock });
   assert.ok(fs.statSync(sock).isSocket());
   await s.close();
@@ -278,7 +280,7 @@ test("fan-in: a node that refuses (4xx) is reported and left alone, the others g
 test("fan-in: a client that does not read is ended with a lagged line that holds a cursor per node", async () => {
   const many = Array.from({ length: 300 }, (_, i) => evt("a", i + 1, "/" + "p".repeat(200) + i));
   const a = fakeNode("a", () => ndjson(many, true));
-  const body = fanIn({ targets: [a], filter: new URLSearchParams(), maxQueueBytes: 20_000, pingMs: 10_000 });
+  const body = fanIn({ targets: [a], filter: new URLSearchParams(), since: new Map([["a", "a:e1:0"]]), maxQueueBytes: 20_000, pingMs: 10_000 });
   const reader = body.getReader();
   await sleep(100); // nothing is read yet
   const dec = new TextDecoder();
@@ -291,7 +293,8 @@ test("fan-in: a client that does not read is ended with a lagged line that holds
   const ls = text.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
   const last = ls.at(-1)!;
   assert.equal(last.kind, "lagged");
-  assert.deepEqual(Object.keys(last.cursors as object), []); // nothing had been given to the client yet: it starts from its own since
+  // nothing had been given to the client yet: its own `since` is where it resumes (it must not lose the node's starting cursor)
+  assert.deepEqual(last.cursors, { a: "a:e1:0" });
 });
 
 // ---- hub end to end ----
@@ -555,4 +558,66 @@ test("compare index reader: a folder is watched through the event bus while the 
   await until(() => told >= 2);
   assert.ok(told >= 2, "the folder's own watch told it");
   close2();
+});
+
+test("folder feed: when the watcher stops every watch is told and dropped, so the callers fall back to their own way of noticing changes", async () => {
+  const b = newBus();
+  b.ready = true;
+  const feed = new DirWatchers(b, () => true);
+  cleanups.push(() => feed.close());
+  const told: string[] = [];
+  feed.watch("/a", () => told.push("a"));
+  feed.watch("/b", () => told.push("b"));
+  assert.equal(feed.count, 2);
+  b.ready = false; // the helper exited and does not come back (no capability, an old kernel)
+  assert.deepEqual(told.sort(), ["a", "b"]);
+  assert.equal(feed.count, 0);
+  pub(b, "create", "/a/x");
+  assert.deepEqual(told.sort(), ["a", "b"], "a dropped watch hears nothing more");
+  assert.equal(feed.watch("/a", () => {}), null, "and no new one is made while the watcher is away");
+  b.ready = true;
+  assert.ok(feed.watch("/a", () => {}), "the watcher is back");
+});
+
+test("folder feed: a process that is not the writer still gets the kernel events of its folders", async () => {
+  const b = newBus({ journal: { dir: dir() }, writer: () => false, writerWaitMs: 20 });
+  b.ready = true;
+  const feed = new DirWatchers(b, () => true);
+  cleanups.push(() => feed.close());
+  let told = 0;
+  feed.watch("/a", () => told++);
+  pub(b, "create", "/a/x");
+  assert.equal(b.serving, false);
+  assert.equal(told, 1);
+});
+
+test("socket: it does not touch a folder it does not own, and does not remove a path that is not a socket", async () => {
+  const b = newBus();
+  // a folder that belongs to someone else: refused, and its mode is not changed
+  const foreign = shortDir();
+  fs.chmodSync(foreign, 0o755);
+  await assert.rejects(startEventSocket(b, { path: path.join(foreign, "e.sock"), uid: (process.getuid?.() ?? 0) + 1 }), /not owned/);
+  assert.equal(fs.statSync(foreign).mode & 0o777, 0o755);
+  // a regular file at the socket's place is kept
+  const d = shortDir();
+  const f = path.join(d, "e.sock");
+  fs.writeFileSync(f, "precious");
+  await assert.rejects(startEventSocket(b, { path: f }), /not a socket/);
+  assert.equal(fs.readFileSync(f, "utf8"), "precious");
+  // a link in place of the folder is refused
+  const real = path.join(d, "real");
+  fs.mkdirSync(real);
+  fs.symlinkSync(real, path.join(d, "link"));
+  fs.chmodSync(real, 0o755);
+  await assert.rejects(startEventSocket(b, { path: path.join(d, "link", "e.sock") }), /not a folder/);
+  assert.equal(fs.statSync(real).mode & 0o777, 0o755, "the folder behind the link was not changed");
+  // an old socket of a dead process is replaced, and close removes only a socket
+  const old = path.join(d, "old.sock");
+  const stale = net.createServer();
+  await new Promise<void>((res) => stale.listen(old, () => res()));
+  cleanups.push(() => void stale.close());
+  const s = await startEventSocket(b, { path: old });
+  assert.ok(fs.lstatSync(old).isSocket());
+  await s.close();
+  assert.equal(fs.existsSync(old), false);
 });

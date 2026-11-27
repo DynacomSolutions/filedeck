@@ -175,18 +175,28 @@ test("thousands of events a second are published without holding the helper's pi
 
 test("the agent's own state files (journal, stores) are not published, so writing the journal makes no event; the size store still hears of the folder", async () => {
   const r = rig();
-  const w = new RealFanWatch({ applyChanged: async (v: string) => void r.calls.push(v), markStale: () => {} }, { helper: "fake", root: r.root, procMounts: path.join(r.root, "mounts"), settleMs: 10, bus: r.bus, ignoreName: ownState("n1"), spawn: () => new Fake() });
+  const state = path.join(r.root, "var/lib/filedeck/index");
+  fs.mkdirSync(path.join(state, "changes-n1"), { recursive: true });
+  fs.mkdirSync(path.join(r.root, "data/changes-n1"), { recursive: true }); // a user's folder with the same name
+  fs.mkdirSync(path.join(r.root, "data/sub"), { recursive: true });
+  const ignorePath = ownState({ node: "n1", root: r.root, journalDir: path.join(state, "changes-n1"), stateDir: state, tmpDir: os.tmpdir() });
+  const w = new RealFanWatch({ applyChanged: async (v: string) => void r.calls.push(v), markStale: () => {} }, { helper: "fake", root: r.root, procMounts: path.join(r.root, "mounts"), settleMs: 10, bus: r.bus, ignorePath, spawn: () => new Fake() });
   watchers.push(w);
   await w.start();
   w.line(`M f ${r.host("/var/lib/filedeck/index/changes-n1/seg-000000000000001.jsonl")}`);
   w.line(`C f ${r.host("/var/lib/filedeck/index/sizes-n1.db-wal")}`);
   w.line(`R f ${r.host("/var/lib/filedeck/index/changes-n1/meta.json")}\t${r.host("/var/lib/filedeck/index/changes-n1/meta.json.123")}`);
-  w.line(`C f ${r.host("/var/lib/filedeck/index/changes-other/x")}`);
-  w.line(`C f ${r.host("/data/sizes-n1.db-notes.txt")}`);
+  w.line(`C f ${r.host("/data/changes-n1/x")}`); // not the agent's folder: an ordinary folder that has the same name
+  w.line(`C f ${r.host("/data/sub/sizes-n1.db")}`); // a file with the name of a store, in another folder
+  w.line(`C f ${r.host("/data/sub/changes-n1")}`);
   const ev = (await held(r.bus)).map((e) => [e.kind, e.path]);
-  assert.deepEqual(ev, [["create", "/var/lib/filedeck/index/changes-other/x"]], "a name like another node's state is an ordinary file");
+  assert.deepEqual(ev, [["create", "/data/changes-n1/x"], ["create", "/data/sub/sizes-n1.db"], ["create", "/data/sub/changes-n1"]]);
   await until(() => r.calls.includes("/var/lib/filedeck/index/changes-n1"));
   assert.ok(r.calls.includes("/var/lib/filedeck/index/changes-n1"), "the size store is still told, as before");
-  assert.equal(ownState("n1")("filedeck-changes-n1-123-abc"), true);
-  assert.equal(ownState("n1")("filedeck-notes"), false);
+  // the temporary folder's spill files of this process
+  const tmp = fs.realpathSync(os.tmpdir());
+  const spill = ownState({ node: "n1", root: "/", journalDir: null, stateDir: "", tmpDir: tmp });
+  assert.equal(spill(path.join(tmp, `filedeck-sizes-${process.pid}-abc.db-wal`)), true);
+  assert.equal(spill(path.join(tmp, "filedeck-sizes-1-abc.db")), false, "another process's file");
+  assert.equal(spill(path.join(tmp, "elsewhere", `filedeck-sizes-${process.pid}-abc.db`)), false, "not in the temporary folder itself");
 });

@@ -52,7 +52,8 @@ export function fanIn(o: FanInOptions): ReadableStream<Uint8Array> {
   let bytes = 0;
   let waiter: (() => void) | null = null;
   let ended = false;
-  const delivered = new Map<string, string>();
+  // where each node resumes: the cursor the client started from, then the last one handed to it
+  const delivered = new Map<string, string>(o.since);
   const stop = new AbortController();
   o.signal?.addEventListener("abort", () => finish(), { once: true });
 

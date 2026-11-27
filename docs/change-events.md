@@ -9,7 +9,7 @@ This page describes the event stream, the filters, the cursor and the rules that
 - The fanotify helper runs (chart value `agent.fanotify.enabled`). It needs `CAP_SYS_ADMIN` and `CAP_DAC_READ_SEARCH`. Without it, the agent logs one line and sends no events. A reader then gets a stream that holds only `ping` lines.
 - Linux 5.17 or newer gives the full output. On Linux 5.9 to 5.16 the agent still works, but a move is a `delete` and a `create`, and the helper looks up the path of a new folder at its first event.
 - The helper watches whole filesystems. It has no watch limit and no recursion limit. A new folder, a bind mount and a new file are covered at once. Network filesystems and unreachable mounts are not covered. The `ready` event lists them.
-- The agent does not report changes of its own state: the journal folder `changes-<node>` and the files `index-<node>.db*`, `sizes-<node>.db*` and `jobs-<node>.db*`. Without this rule, each write of the journal would be an event that is written to the journal.
+- The agent does not report changes of its own state: its journal folder `changes-<node>` and its files `index-<node>.db*`, `sizes-<node>.db*` and `jobs-<node>.db*`. A path counts only when it is the agent's own folder (the same device and inode). A folder of a user with the same name is reported. Without this rule, each write of the journal would be an event that is written to the journal.
 - macOS agents use FSEvents. They send the same events as best effort: a rename is a `create` when the entry exists and a `delete` when it does not, and a folder flag is known only for a `create`.
 
 ## Event format
@@ -30,6 +30,7 @@ Each event is one JSON object on one line (NDJSON). The agent encodes the line o
 | `path` | The path of the entry, as the agent shows it (the same virtual path as in the file API). For a `move`: where the entry is now. A control event for the whole node has no path. |
 | `from` | A `move` only: where the entry was. |
 | `labels` | Present when a [label template](#labels) matches the path. |
+| `fromLabels` | A `move` only: the labels of the old place, when they differ from `labels`. |
 | `scope`, `window`, `reason`, `unwatched` | Control events only. See below. |
 
 Kinds of entry events:
@@ -87,7 +88,7 @@ The agent evaluates the filter before it sends a byte. An event passes when it p
 | `glob` | The path matches one glob. Patterns without a `/` match the name at any depth. Patterns with a `/` match the whole path, written from the root: `/srv/**/*.log`. A trailing `/` matches folders only. `*`, `**`, `?`, `[a-z]`, `[!a]` and `{a,b}` work. The matcher is the one of the folder compare. It takes linear time, so a hostile pattern cannot stall the agent. |
 | `kind` | One or more of `create`, `delete`, `modify`, `close_write`, `attrib`, `move`. Give the part more than once, or separate the values with commas. |
 | `type` | `file` or `dir`. |
-| `label` | `key:value`. The same key twice means that either value is good. |
+| `label` | `key:value`. The same key twice means that either value is good. For a `move`, the labels of the old place count too. |
 
 Limits: 32 values for each part, 4096 characters for each value. A bad filter gives `400`.
 
@@ -108,7 +109,7 @@ All three transports give the same lines and use the same filter.
 
 ### Unix socket on the node
 
-Off by default. Set `FILEDECK_EVENTS_SOCKET` (chart: `agent.events.socket.enabled`). The agent makes the folder with mode 0750 and the socket with mode 0660, and gives both to `FILEDECK_EVENTS_SOCKET_GROUP`. A program on the same machine that is in that group can connect. There is no TLS and no token. The file modes decide.
+Off by default. Set `FILEDECK_EVENTS_SOCKET` (chart: `agent.events.socket.enabled`). The agent makes the folder with mode 0750 and the socket with mode 0660, and gives both to `FILEDECK_EVENTS_SOCKET_GROUP`. It changes only a folder that it owns, and it never follows a link. It replaces an old socket file, and it refuses to start when another kind of file is at that path. A program on the same machine that is in that group can connect. There is no TLS and no token. The file modes decide.
 
 The client sends one JSON line. Both parts are optional.
 
@@ -166,7 +167,9 @@ The agent keeps a bounded journal of the encoded lines, so a reader that was awa
 - Size: the smaller of 24 hours (`FILEDECK_EVENTS_JOURNAL_HOURS`) and 2 GiB (`FILEDECK_EVENTS_JOURNAL_BYTES`). The agent removes whole segment files from the old end. `0` bytes gives a journal in memory only.
 - The last events are also in memory, so a reader that is close behind reads no file.
 - Only the process that holds the writer lease of the agent state writes the journal and serves readers. During a rolling update the new process keeps what it sees, and takes over when the old one stops. A reader that connects before that waits up to 15 seconds, then gets `503`.
-- A new epoch starts when the journal has no segment left, or when its `meta.json` is damaged.
+- A new epoch starts when the journal has no segment left, when its `meta.json` is damaged, and whenever the last writer did not stop cleanly: a crash, a failed write, or a lost writer lease. The journal notes `clean` in `meta.json` only after it wrote every event and stopped. A restart after a crash therefore never continues a sequence that the disk may not reach, and readers get a `reset`.
+- A process that loses the writer lease writes no more events, closes its files and ends its readers with `lagged`. When it is the writer again, it reads the journal as the other writer left it.
+- Without a usable size store (no writer lease to say who writes), the journal stays in memory, so two processes never write the same files.
 
 ## Metrics
 

@@ -50,9 +50,9 @@ export interface FanWatchOptions {
   bus?: EventBus;
   /**
    * The agent's own state files (the event journal, the stores): a change there is not published, else every write of the journal would be an event that
-   * is written to the journal. Gets one path segment (a file or folder name); true = leave the entry out.
+   * is written to the journal. Gets an agent path; true = leave the entry out (see events/own-state.ts: it must be the agent's own folder, not a name alike).
    */
-  ignoreName?: (name: string) => boolean;
+  ignorePath?: (virtual: string) => boolean;
 }
 
 const KIND_OF = { C: "create", D: "delete", M: "modify", W: "close_write", A: "attrib" } as const;
@@ -444,7 +444,7 @@ export class FanWatch {
     const host = unescapeLine(tab >= 0 ? rest.slice(0, tab) : rest);
     const old = tab >= 0 ? mapPath(this.o.root, unescapeLine(rest.slice(tab + 1))) : null;
     const v = mapPath(this.o.root, host);
-    const own = (p: string | null) => !!p && !!this.o.ignoreName && p.split("/").some((n) => n !== "" && this.o.ignoreName!(n));
+    const own = (p: string | null) => !!p && !!this.o.ignorePath && this.o.ignorePath(p);
     if (kind === "R") {
       // a move from or to a place outside what is served (or a trash store) is a create or a delete as far as this agent shows
       if (own(v) || own(old)) return void [v, old].forEach((p) => p && this.touch(p, dir, false));
