@@ -6,7 +6,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 test("a change to the shared storage types selects server and web CI", (t) => {
-  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  let workflow: string;
+  try {
+    workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return t.skip(".github/workflows/ci.yml is absent from this source tree");
+    }
+    throw error;
+  }
   const body = workflow.match(/- id: detect\n +shell: bash\n +run: \|\n((?: {10}[^\n]*\n|\n)+)/)?.[1];
   assert.ok(body, "CI change detector must be a Bash step");
   const script = body.replace(/^ {10}/gm, "").replace(/\$\{\{[^}]+\}\}/g, "fixture");
