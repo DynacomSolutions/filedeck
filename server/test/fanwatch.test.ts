@@ -116,6 +116,20 @@ test("fanwatch: passes every mount of a filesystem, bind aliases too, so the hel
   s.done();
 });
 
+test("fanwatch: a mount of a single file (a file bind mount) is not given to the helper, not reported as unwatched, and does not make the root uncovered", async () => {
+  const s = setup();
+  fs.writeFileSync(path.join(s.root, "hosts"), "127.0.0.1 localhost\n");
+  fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/a /hosts ext4 rw 0 0\n/dev/b /data xfs rw 0 0\n");
+  await s.w.start();
+  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data")]], "the file is not an argument");
+  s.w.line("#ready 2");
+  const st = s.w.status();
+  assert.equal(st.unwatched, 0, "a file mount is not an unwatched filesystem");
+  assert.equal(s.w.covers("/"), true);
+  s.w.stop();
+  s.done();
+});
+
 test("fanwatch: a mount table with more mounts than the helper takes keeps one mount of every filesystem first, and reports the rest as unwatched", async () => {
   const s = setup();
   const lines = ["/dev/a / ext4 rw 0 0", "/dev/b /data xfs rw 0 0"];
