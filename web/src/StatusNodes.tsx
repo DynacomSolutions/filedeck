@@ -2,7 +2,10 @@ import useSWR from "swr";
 import type { HubNodeStatus, NodeStatus } from "../../server/src/node-status-types.ts";
 import { BACKGROUND_HEADER } from "./api";
 import { JOBS_IDLE_POLL_MS } from "./jobPoll";
+import { PressureSummary } from "./DiskPressure";
+import type { PressureNodeSummary } from "./pressure";
 import { StatusTime } from "./StatusJobsPanel";
+import type { StatusRoute } from "./statusRoute";
 
 async function getStatus(url: string): Promise<{ nodes: HubNodeStatus[] }> {
   const response = await fetch(url, { headers: BACKGROUND_HEADER, signal: AbortSignal.timeout(JOBS_IDLE_POLL_MS) });
@@ -16,7 +19,7 @@ export function coveredMountCount(watcher: { covered?: number; coverage: { state
   return typeof watcher.covered === "number" ? watcher.covered : watcher.coverage.filter((mount) => mount.state === "watched").length;
 }
 
-function NodeFacts({ status }: { status: NodeStatus }) {
+function NodeFacts({ status, pressure, route, navigate }: { status: NodeStatus; pressure?: PressureNodeSummary; route?: StatusRoute; navigate?: (route: StatusRoute) => void }) {
   const { watcher, journal, roots, sizeStore } = status;
   const scanned = roots.filter((root) => root.scannedAt !== null);
   const full = roots.filter((root) => root.fullScan).length;
@@ -66,15 +69,17 @@ function NodeFacts({ status }: { status: NodeStatus }) {
           <div><dt>Dropped readers</dt><dd>{journal.dropped}</dd></div>
         </dl>
       </section>
+      {pressure && route && navigate && <PressureSummary entries={[pressure]} route={route} navigate={navigate} heading={false} />}
     </div>
   );
 }
 
-export function StatusNodes({ node }: { node: string | null }) {
+export function StatusNodes({ node, route, navigate, pressure }: { node: string | null; route?: StatusRoute; navigate?: (route: StatusRoute) => void; pressure?: readonly PressureNodeSummary[] }) {
   const url = "/api/status" + (node ? "?" + new URLSearchParams({ node }) : "");
   const { data, error, isLoading } = useSWR(url, getStatus, {
     refreshInterval: JOBS_IDLE_POLL_MS, revalidateOnFocus: false, revalidateOnReconnect: false, shouldRetryOnError: false,
   });
+  const pressureOf = (name: string) => pressure?.find((p) => p.node === name);
   return (
     <section className="status-section" aria-labelledby="status-nodes-title">
       <div className="status-section-head"><div><h2 id="status-nodes-title">Node health</h2><p>Scan coverage, watcher activity and journal health.</p></div></div>
@@ -87,7 +92,7 @@ export function StatusNodes({ node }: { node: string | null }) {
             <h3>{entry.node}</h3>
             {entry.state === "available" && <span className="status-subtitle">Updated <StatusTime at={entry.status.sampledAt} /></span>}
           </div>
-          {entry.state === "available" ? <NodeFacts status={entry.status} /> : <p className="status-message">{entry.state === "unsupported" ? "This agent does not provide node health yet." : entry.reason ?? "Node health is unavailable."}</p>}
+          {entry.state === "available" ? <NodeFacts status={entry.status} {...(route ? { route } : {})} {...(navigate ? { navigate } : {})} {...(pressureOf(entry.node) ? { pressure: pressureOf(entry.node)! } : {})} /> : <p className="status-message">{entry.state === "unsupported" ? "This agent does not provide node health yet." : entry.reason ?? "Node health is unavailable."}</p>}
         </section>
       ))}
     </section>
