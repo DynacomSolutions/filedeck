@@ -218,6 +218,12 @@ agent:
   # If the kernel or runtime refuses, the agent logs it once and carries on as without.
   fanotify:
     enabled: false
+  # How the folder-size store follows changes (needs `fanotify.enabled`). The changes of `commitMs` are merged per folder and written and re-read together.
+  # Folders named in `exclude` (names, globs or runs like `.git/objects`, at any depth) never write to the size store: their size comes from the scheduled
+  # scans. The change event stream and its journal are not affected. An empty `exclude` turns excludes off.
+  sizeStore:
+    commitMs: 30000
+    exclude: "pg_wal,node_modules,target,.git/objects,cargo-target"
   # Change events: a stream of every create, delete, modify, close-after-write, attribute change and move of the files on the node, with a journal so a
   # reader that was away can continue from its last cursor. Needs `fanotify.enabled`. See docs/change-events.md.
   events:
