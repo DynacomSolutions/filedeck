@@ -706,3 +706,122 @@ test("socket: at start, a stale <name>.<6 hex> socket with no listener is remove
   assert.match(logs.join(), /stale socket/);
   await s.close();
 });
+
+// ---- the watcher state a new subscriber is told ----
+
+/** A bus whose watcher is ready, with one mount that no event covers. */
+function readyBus() {
+  const b = newBus();
+  b.ready = true;
+  b.setUnwatched(["/net"]);
+  return b;
+}
+const isReady = (x: Record<string, unknown>) => x.kind === "ready" && x.scope === "node" && JSON.stringify(x.unwatched) === '["/net"]';
+
+test("http: a new subscriber gets the watcher's `ready` line first, with unwatched; none while the watcher has not started, and ready follows when it starts", async () => {
+  const b = readyBus();
+  const app = new Hono();
+  app.onError(agentError);
+  registerChangeRoutes(app, b);
+  const srv = await listen(app as never);
+  await b.whenServing();
+  const ctl = new AbortController();
+  const l = lines(await fetch(`${urlOf(srv)}/api/v1/changes`, { signal: ctl.signal }));
+  await until(() => l.out.length >= 1);
+  assert.ok(isReady(l.out[0]!), JSON.stringify(l.out));
+  assert.equal(typeof l.out[0]!.cursor, "string");
+  pub(b, "create", "/after.md");
+  await until(() => l.out.length >= 2);
+  assert.equal(l.out[1]!.path, "/after.md", "live lines follow the ready line");
+  ctl.abort();
+  // the watcher is not ready: nothing is sent; its `ready` reaches the subscriber when it comes
+  const c = newBus();
+  const app2 = new Hono();
+  registerChangeRoutes(app2, c);
+  const srv2 = await listen(app2 as never);
+  await c.whenServing();
+  const ctl2 = new AbortController();
+  const l2 = lines(await fetch(`${urlOf(srv2)}/api/v1/changes`, { signal: ctl2.signal }));
+  await sleep(150);
+  assert.deepEqual(l2.out, [], "no ready line before the watcher starts");
+  c.ready = true;
+  c.publish({ kind: "ready", scope: "node" });
+  await until(() => l2.out.length >= 1);
+  assert.equal((l2.out as Record<string, unknown>[])[0]!.kind, "ready");
+  ctl2.abort();
+});
+
+test("http: with a cursor, `ready` comes after a reset line and before the replayed lines", async () => {
+  const b = readyBus();
+  for (let i = 1; i <= 2; i++) pub(b, "create", `/old${i}.md`);
+  await b.whenServing();
+  const app = new Hono();
+  registerChangeRoutes(app, b);
+  const srv = await listen(app as never);
+  const ctl = new AbortController();
+  const l = lines(await fetch(`${urlOf(srv)}/api/v1/changes?since=${encodeURIComponent(b.cursorOf(0))}`, { signal: ctl.signal }));
+  await until(() => l.out.length >= 3);
+  assert.deepEqual(l.out.map((x) => x.kind), ["ready", "create", "create"]);
+  assert.ok(isReady(l.out[0]!));
+  ctl.abort();
+  const ctl2 = new AbortController();
+  const gap = lines(await fetch(`${urlOf(srv)}/api/v1/changes?since=${encodeURIComponent("n1:other:1")}`, { signal: ctl2.signal }));
+  await until(() => gap.out.length >= 2);
+  assert.deepEqual(gap.out.slice(0, 2).map((x) => x.kind), ["reset", "ready"]);
+  ctl2.abort();
+});
+
+test("socket: a new client gets the watcher's `ready` line first, with unwatched", async () => {
+  const b = readyBus();
+  await b.whenServing();
+  const sock = path.join(shortDir(), "run", "e.sock");
+  const s = await startEventSocket(b, { path: sock });
+  cleanups.push(() => s.close());
+  const c = net.connect(sock);
+  cleanups.push(() => void c.destroy());
+  const got: Record<string, unknown>[] = [];
+  let buf = "";
+  c.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      got.push(JSON.parse(buf.slice(0, i)));
+      buf = buf.slice(i + 1);
+    }
+  });
+  c.write("{}\n");
+  await until(() => got.length >= 1);
+  assert.ok(isReady(got[0]!), JSON.stringify(got));
+  pub(b, "create", "/x");
+  await until(() => got.some((x) => x.path === "/x"));
+  assert.equal(got.findIndex((x) => x.path === "/x"), 1, "the live line follows the ready line");
+});
+
+test("fan-in: a node's `ready` line is passed on as written, with its node and unwatched", async () => {
+  const ready = { cursor: "a:e1:0", time: 1, node: "a", kind: "ready", dir: false, scope: "node", unwatched: ["/net"] };
+  const a = fakeNode("a", () => ndjson([ready, evt("a", 1, "/x")], true));
+  const got = await collect(fanIn({ targets: [a], filter: new URLSearchParams(), retryMs: 20 }), 2);
+  assert.deepEqual(got[0], ready);
+  assert.equal(got[1]!.path, "/x");
+});
+
+test("hub: a subscriber of the merged stream gets each node's `ready` line, naming its node, with unwatched", async () => {
+  const a = await agentApp("a");
+  const b = await agentApp("b");
+  a.app.events.ready = true;
+  a.app.events.setUnwatched(["/net"]);
+  b.app.events.ready = true;
+  const hub = createHub(loadConfig({ FILEDECK_MODE: "hub", FILEDECK_STATIC: tmp, FILEDECK_AGENT_TOKEN: "agent-secret", NODES: `a=${urlOf(a.srv)},b=${urlOf(b.srv)}` } as never));
+  cleanups.push(() => (hub as unknown as { close(): Promise<void> }).close());
+  const hs = await listen(hub as never);
+  await a.app.events.whenServing();
+  await b.app.events.whenServing();
+  const ctl = new AbortController();
+  const l = lines(await fetch(`${urlOf(hs)}/api/v1/changes?node=a,b`, { signal: ctl.signal }));
+  await until(() => l.out.filter((x) => x.kind === "ready").length >= 2);
+  const ready = l.out.filter((x) => x.kind === "ready");
+  assert.deepEqual(ready.map((x) => x.node).sort(), ["a", "b"]);
+  assert.deepEqual(ready.find((x) => x.node === "a")!.unwatched, ["/net"]);
+  assert.equal(ready.find((x) => x.node === "b")!.unwatched, undefined);
+  ctl.abort();
+});
