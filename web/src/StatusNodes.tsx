@@ -12,12 +12,17 @@ async function getStatus(url: string): Promise<{ nodes: HubNodeStatus[] }> {
 
 const rootState = { missing: "Not stored yet", partial: "Partial scan", stale: "Stale", current: "Current", unknown: "Unavailable" };
 
+export function coveredMountCount(watcher: { covered?: number; coverage: { state: "watched" | "unwatched" | "unknown" }[] }): number {
+  return typeof watcher.covered === "number" ? watcher.covered : watcher.coverage.filter((mount) => mount.state === "watched").length;
+}
+
 function NodeFacts({ status }: { status: NodeStatus }) {
   const { watcher, journal, roots, sizeStore } = status;
   const scanned = roots.filter((root) => root.scannedAt !== null);
   const full = roots.filter((root) => root.fullScan).length;
   const lastScan = Math.max(0, ...scanned.map((root) => root.scannedAt ?? 0));
   const watched = watcher.coverage.filter((mount) => mount.state === "watched");
+  const covered = coveredMountCount(watcher);
   const unwatched = [...new Set([...watcher.unwatchedPaths, ...watcher.coverage.filter((mount) => mount.state === "unwatched").map((mount) => mount.path)])];
   const uncertain = watcher.coverage.filter((mount) => mount.state === "unknown");
   return (
@@ -37,7 +42,7 @@ function NodeFacts({ status }: { status: NodeStatus }) {
         <h4>Watcher</h4>
         <dl className="status-facts">
           <div><dt>{watcher.kind === "fanotify" ? "Fanotify" : "Native watcher"}</dt><dd>{watcher.running ? watcher.ready ? "On" : "Starting or degraded" : "Off"}</dd></div>
-          <div><dt>Covered mounts</dt><dd>{watcher.running ? watcher.covered : 0} of {Math.max(watcher.mounts, watcher.coverage.length)}</dd></div>
+          <div><dt>Covered mounts</dt><dd>{watcher.running ? covered : 0} of {Math.max(watcher.mounts, watcher.coverage.length)}</dd></div>
           <div><dt>Unwatched mounts</dt><dd>{Math.max(watcher.unwatched, unwatched.length)}</dd></div>
           <div><dt>Excluded mounts</dt><dd>{watcher.excluded}</dd></div>
           <div><dt>Pending reconciliation</dt><dd>{watcher.backlog.toLocaleString()}</dd></div>

@@ -78,13 +78,10 @@ async function readStatus(cfg: Config, sizes: SizeStore, fan: FanWatch | MacWatc
   }
 
   const watcher = watcherSnapshot(fan, bus);
-  const unwatched = new Set(watcher.unwatchedPaths);
-  const uncoveredDevices = new Set(mounts.filter((m) => unwatched.has(m.mountpoint)).map((m) => `${m.device}\0${m.fstype}`));
   const coverage = nativeCoverage ?? mounts.map((m) => {
-    const failedMark = watcher.kind === "fanotify" && uncoveredDevices.has(`${m.device}\0${m.fstype}`);
     return {
       path: m.mountpoint,
-      state: !watcher.running || unwatched.has(m.mountpoint) || networkKind(m.fstype) || failedMark
+      state: !watcher.running || networkKind(m.fstype)
         ? "unwatched" : fan.covers(m.mountpoint) ? "watched" : "unknown",
     } as const;
   });

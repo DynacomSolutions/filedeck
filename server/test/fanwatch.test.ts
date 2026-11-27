@@ -116,19 +116,46 @@ test("fanwatch: passes every mount of a filesystem, bind aliases too, so the hel
   s.done();
 });
 
-test("fanwatch: a mount of a single file (a file bind mount) is not given to the helper, not reported as unwatched, and does not make the root uncovered", async () => {
+test("fanwatch: a single-file bind is passed to the helper and needs exact-path coverage", async () => {
   const s = setup();
   fs.writeFileSync(path.join(s.root, "hosts"), "127.0.0.1 localhost\n");
   fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/a /hosts ext4 rw 0 0\n/dev/b /data xfs rw 0 0\n");
   await s.w.start();
-  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data")]], "the file is not an argument");
+  assert.deepEqual(s.args, [[s.root, path.join(s.root, "data"), path.join(s.root, "hosts")]], "the file alias reaches the helper");
   s.w.line("#ready 2");
   const st = s.w.status();
-  assert.equal(st.unwatched, 0, "a file mount is not an unwatched filesystem");
-  assert.equal(st.unsupported, 1, "the file bind mount is explicit, not silently omitted");
-  assert.equal(st.covered, 3, "the root filesystem covers the file bind mount by parent semantics");
+  assert.equal(st.unwatched, 0, "the helper accepted the file alias");
+  assert.equal(st.unsupported, 0, "the file alias is supported when passed to the helper");
+  assert.equal(st.covered, 3, "root, data and the exact file alias are covered");
   assert.equal(st.aliases, 1, "the file bind mount is also reported as an alias of the root filesystem");
   assert.equal(s.w.covers("/"), true);
+  assert.equal(s.w.covers("/hosts"), true);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: an unmarked backing mount is not covered by its marked parent", async () => {
+  const s = setup();
+  fs.mkdirSync(path.join(s.root, "bound"));
+  fs.writeFileSync(s.mounts, "/dev/a / ext4 rw 0 0\n/dev/b /bound xfs rw 0 0\n");
+  await s.w.start();
+  s.w.line("#ready 1");
+  s.w.line(`c ${s.root}/bound`);
+  assert.equal(s.w.covers("/"), false);
+  assert.equal(s.w.covers("/bound"), false);
+  assert.equal(s.w.status().covered, 0);
+  s.w.stop();
+  s.done();
+});
+
+test("fanwatch: a file-only mount added after readiness triggers reconciliation", async () => {
+  const s = setup({ reconcileMs: 20 });
+  await s.w.start();
+  s.w.line("#ready 2");
+  fs.writeFileSync(path.join(s.root, "alias"), "alias");
+  fs.appendFileSync(s.mounts, "/dev/a /alias ext4 rw 0 0\n");
+  await until(() => s.proc.killed, 5000);
+  assert.equal(s.proc.killed, true);
   s.w.stop();
   s.done();
 });
