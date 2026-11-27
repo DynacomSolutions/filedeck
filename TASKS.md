@@ -368,3 +368,17 @@ ETA: 2026-11-27 19:00 ICT
 | 203 | Show the live event stream | done | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Filter one node at a time<br>PR https://github.com/DynacomSolutions/filedeck/pull/282 |
 | 204 | Add the storage section | done | codex | jobs-status-page | 28.200 | 2026-11-27 19:00 ICT | Reserve a place for the chart from 26.189<br>PR https://github.com/DynacomSolutions/filedeck/pull/282 |
 | 205 | Fix flaky Compare toolbar phone test in Firefox | done | claude-20261127-fix-ff-compare-flake | fix-firefox-compare-flake | | 2026-11-27 19:00 ICT | Failed once in CI run 45978267121, Firefox only, rerun passed<br>Cause: a menu item tooltip opens 150 ms after focus and takes the first Escape<br>Fix: the test waits for the tooltip, then presses Escape twice<br>PR https://github.com/DynacomSolutions/filedeck/pull/286, Firefox 30 of 30, merged 6590438 |
+
+## 29. MCP server
+
+Give MCP clients the FileDeck data and live events, with no polling. Owner request 28 Nov 2026.
+ETA: 2026-11-28 07:00 ICT
+
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 206 | MCP endpoint, tools and resources on the hub | in_progress | claude-20261127-watch-events | mcp-server | | 2026-11-28 04:00 ICT | Streamable HTTP, MCP 2025-06-18 or later<br>Own port, not on the public route, scoped token<br>Tools: du, list, stat, scan status, node status, jobs, storage groups |
+| 207 | MCP subscriptions and live notifications | in_progress | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | resources/subscribe, resources/updated, list_changed<br>Scan finished, job and node state changes |
+| 208 | MCP metrics, probes and drain | in_progress | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | Sessions, subscriptions, notifications, tool calls and errors<br>Liveness on the real MCP listener |
+| 209 | Publish the MCP contract | in_progress | claude-20261127-watch-events | mcp-server | 29.206 | 2026-11-28 04:00 ICT | docs/mcp.md: tools, resource URIs, event payloads<br>No ACP: FileDeck runs no agent of its own |
+| 210 | Disk verification in MCP | todo | claude-20261127-watch-events | | 29.207 | 2026-11-28 10:00 ICT | Runs, results, stage changes and disk alerts<br>Waits for the disk verification PR https://github.com/DynacomSolutions/filedeck/pull/288 |
+| 211 | Release, deploy and live subscription proof | todo | claude-20261127-watch-events | | 29.206, 29.207, 29.208 | 2026-11-28 07:00 ICT | Release, roll out, then a live client subscribes and gets a scan finished event |
