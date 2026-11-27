@@ -182,6 +182,7 @@ export interface JobView {
   result?: { path?: string; size?: number; files?: number; skipped?: { symlinks: number; hardlinks: number; special: number } };
   createdAt: number;
   startedAt?: number;
+  finishedAt?: number;
   /** queued compare jobs: what runs or waits ahead of this one */
   queue?: { position: number; ahead: { id: string; title: string; state: JobState }[] };
 }
@@ -259,6 +260,7 @@ export interface OpItem {
 export interface OpJob {
   id: string;
   kind: "ops";
+  nodes?: string[];
   op: "copy" | "move" | "trash" | "delete" | "sync";
   title: string;
   state: OpState;
@@ -376,7 +378,7 @@ export interface DiffStats {
   incomplete?: boolean;
   skipped?: { count: number; paths: string[] };
 }
-export type DiffJobView = JobView & { startedAt?: number; finishedAt?: number; stats?: DiffStats; files?: DiffCounts; dirs?: DiffCounts };
+export type DiffJobView = JobView & { left?: OpLoc; right?: OpLoc; startedAt?: number; finishedAt?: number; stats?: DiffStats; files?: DiffCounts; dirs?: DiffCounts };
 export interface DiffFolder {
   rel: string;
   listed: boolean;
@@ -533,8 +535,8 @@ export const api = {
         jobStarted("hub");
         return v;
       }),
-  opJobs: () => opReq("").then((r) => j<{ jobs: OpJob[] }>(r)),
-  opJob: (id: string) => opReq(`/${id}`).then((r) => j<OpJob>(r)),
+  opJobs: (background = false) => fetch("/api/ops/jobs", { headers: background ? BACKGROUND_HEADER : undefined }).then((r) => j<{ jobs: OpJob[] }>(r)),
+  opJob: (id: string, background = false) => fetch(`/api/ops/jobs/${enc(id)}`, { headers: background ? BACKGROUND_HEADER : undefined }).then((r) => j<OpJob>(r)),
   opAction: (id: string, action: "pause" | "resume" | "cancel") => opReq(`/${id}/${action}`, "POST").then((r) => j<OpJob>(r)),
   opResolve: (id: string, action: "skip" | "overwrite" | "rename", all: boolean) => opReq(`/${id}/resolve`, "POST", { action, all }).then((r) => j<OpJob>(r)),
   dismissOp: (id: string) => opReq(`/${id}`, "DELETE").then((r) => j<unknown>(r)),
@@ -604,7 +606,7 @@ export const api = {
     postJob(node, "compress", { dir, names, format, name, ...o }, password),
   startExtract: (node: string, path: string, destDir: string, subfolder: boolean, o: { overwrite?: OverwritePolicy; entries?: string[] } = {}, password?: Pw) =>
     postJob(node, "extract", { path, destDir, subfolder, ...o }, password),
-  jobs: (node: string) => fetch(`${nodeBase(node)}/api/jobs`).then((r) => j<{ jobs: JobView[] }>(r)),
+  jobs: (node: string, background = false) => fetch(`${nodeBase(node)}/api/jobs`, { headers: background ? BACKGROUND_HEADER : undefined }).then((r) => j<{ jobs: JobView[] }>(r)),
   cancelJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}/cancel`, { method: "POST" }).then((r) => j<JobView>(r)),
   dismissJob: (node: string, id: string) => fetch(`${nodeBase(node)}/api/jobs/${id}`, { method: "DELETE" }).then((r) => j<unknown>(r)),
   archiveList: (node: string, path: string, password?: Pw, limit?: number) =>
@@ -636,6 +638,7 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ left, right, options }),
     }).then((r) => j<JobView>(r)),
+  diffJobs: () => fetch("/api/diff/jobs", { headers: BACKGROUND_HEADER }).then((r) => j<{ jobs: DiffJobView[] }>(r)),
   diffJob: (id: string) => fetch(`/api/diff/jobs/${id}`).then((r) => j<DiffJobView>(r)),
   diffRows: (id: string, rel: string, signal?: AbortSignal) => fetch(`/api/diff/jobs/${id}/rows?rel=${encodeURIComponent(rel)}`, { signal }).then((r) => j<DiffFolder>(r)),
   diffFocus: (id: string, rels: string[]) =>

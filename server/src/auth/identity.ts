@@ -28,6 +28,8 @@ export interface UserClaim {
   kind: "sys" | "virt";
   name: string;
   epoch: number;
+  /** The hub grants access to node diagnostics. */
+  admin?: true;
   runAs?: string;
   grants?: Grant[];
   /** The hub authorised this call to read machine-wide storage totals. */
@@ -50,13 +52,14 @@ const MAX_SKEW_MS = 5_000;
 
 /** The claim for one node, or null when a virtual account has no access there. */
 export function claimFor(id: Identity, node: string, now: number): UserClaim | null {
+  const admin = id.admin ? { admin: true as const } : {};
   if (id.kind === "sys") {
     const root = id.asRootUntil !== undefined && id.asRootUntil > now ? { asRoot: true as const, asRootUntil: id.asRootUntil } : {};
-    return { kind: "sys", name: id.name, epoch: id.epoch, ...root, iat: now };
+    return { kind: "sys", name: id.name, epoch: id.epoch, ...admin, ...root, iat: now };
   }
   const access = Object.hasOwn(id.nodes, node) ? id.nodes[node] : undefined;
   if (!access) return null;
-  return { kind: "virt", name: id.name, epoch: id.epoch, runAs: access.runAs, grants: access.grants.map((g) => ({ ...g })), iat: now };
+  return { kind: "virt", name: id.name, epoch: id.epoch, ...admin, runAs: access.runAs, grants: access.grants.map((g) => ({ ...g })), iat: now };
 }
 
 function key(agentToken: string): Buffer {
@@ -88,7 +91,8 @@ export function verifyClaim(value: string, agentToken: string, now: number): Use
     if (c.kind !== "sys" && c.kind !== "virt") return null;
     if (typeof c.name !== "string" || typeof c.epoch !== "number") return null;
     if (c.storageGroups !== undefined && c.storageGroups !== true) return null;
-    // act as root: only `true`, and never on a virtual account's claim
+    if (c.admin !== undefined && c.admin !== true) return null;
+    // Only system accounts can set `asRoot`, and only to `true`.
     if (c.asRoot !== undefined && (c.asRoot !== true || c.kind !== "sys")) return null;
     // and its end, a number after the issue time, goes with it: neither without the other
     if ((c.asRoot === true) !== (c.asRootUntil !== undefined)) return null;

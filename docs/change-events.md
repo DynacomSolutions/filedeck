@@ -8,7 +8,7 @@ This page describes the event stream, the filters, the cursor and the rules that
 
 - The fanotify helper runs (chart value `agent.fanotify.enabled`). It needs `CAP_SYS_ADMIN` and `CAP_DAC_READ_SEARCH`. Without it, the agent logs one line and sends no events. A reader then gets a stream that holds only `ping` lines.
 - Linux 5.17 or newer gives the full output. On Linux 5.9 to 5.16 the agent still works, but a move is a `delete` and a `create`, and the helper looks up the path of a new folder at its first event.
-- The helper watches whole filesystems. It has no watch limit and no recursion limit. A new folder, a bind mount and a new file are covered at once. Network filesystems and unreachable mounts are not covered. The `ready` event lists them.
+- The helper watches whole filesystems. It has no watch limit and no recursion limit. A new folder, a bind mount and a new file are covered at once. The agent gives the helper every local mount of a filesystem, bind mounts too. The helper reports a change under every mount that shows it: a change in a folder that two mounts show has one event for each path, one after the other. A change that no mount shows has no event. After a mount change, the agent starts the helper again, and it reads the mount roots again. Network filesystems and unreachable mounts are not covered. The `ready` event lists them.
 - The agent does not report changes of its own state: its journal folder `changes-<node>` and its files `index-<node>.db*`, `sizes-<node>.db*` and `jobs-<node>.db*`. A path counts only when it is the agent's own folder (the same device and inode). A folder of a user with the same name is reported. Without this rule, each write of the journal would be an event that is written to the journal.
 - macOS agents use FSEvents. They send the same events as best effort: a rename is a `create` when the entry exists and a `delete` when it does not, and a folder flag is known only for a `create`.
 
@@ -51,6 +51,8 @@ Kinds of control event. They tell you about the stream, not about one entry. Eve
 | `ready` | The watcher is running. `unwatched` lists the mounts that no event covers. | Nothing. |
 | `overflow` | The kernel dropped events. `scope` is `node`. `window.from` and `window.to` are the time window. | Scan everything you follow again. |
 | `reset` | Events may be missing. `scope` is `node` or `filesystem`. A `filesystem` reset has the mount in `path`. `window.to` is absent while the watcher is still away. | Scan again what is in the scope. |
+
+Each new reader gets one `ready` line at once, when the watcher is running, with the state now (`unwatched` too). It comes after a `reset` line, if the cursor was not usable, and before the replayed and live lines. Its cursor is the place you started from, so a reader that stops after it loses nothing. It is not in the journal, so it has no sequence number of its own. When the watcher is not running yet, you get no `ready` line. The line `ready` comes when the watcher starts, as an event. The hub passes the `ready` line of each node through, with its `node`. The Unix socket, the HTTP stream and the hub stream all do this.
 
 Two more lines are not events. `ping` comes when nothing happened for 15 seconds. It has a `cursor`. All events up to that cursor were checked against your filter, so you can keep it as your place. `lagged` ends the stream when you read too slowly. See [Slow readers](#slow-readers).
 
@@ -187,7 +189,7 @@ The agent adds these to `/metrics`. They are counts and ages only.
 | `filedeck_events_bus_lag_seconds` | Time to hand an event to all readers. |
 | `filedeck_fanwatch_handle_cache_hits_total`, `..._misses_total` | Folder paths the helper took from its cache, and looked up. |
 | `filedeck_fanwatch_open_by_handle_total` | `open_by_handle_at` calls of the helper. |
-| `filedeck_fanwatch_unresolved_total` | Events in a folder that was already removed. |
+| `filedeck_fanwatch_unresolved_total` | Events in a folder that was already removed, or that no mount shows. |
 | `filedeck_fanwatch_events_read_total` | Kernel events the helper read. |
 | `filedeck_fanwatch_unlimited_queue` | 1 when the kernel queue is unlimited. |
 

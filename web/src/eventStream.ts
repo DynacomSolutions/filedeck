@@ -65,6 +65,10 @@ const CLOSED = 2;
 /** The longest wait before a stream the browser gave up on is opened again. */
 const MAX_RETRY_MS = 5 * 60_000;
 
+export function streamRetryDelay(initialMs: number, failures: number): number {
+  return Math.min(MAX_RETRY_MS, initialMs * 2 ** (failures - 1));
+}
+
 export function createChangeHub(o: ChangeHubOptions) {
   const entries = new Map<string, Entry>();
   let visible = true;
@@ -124,7 +128,7 @@ export function createChangeHub(o: ChangeHubOptions) {
               src.close();
               en.src = undefined;
               en.fails = (en.fails ?? 0) + 1;
-              en.retryAt = now() + Math.min(MAX_RETRY_MS, o.pollMs * 2 ** (en.fails - 1));
+              en.retryAt = now() + streamRetryDelay(o.pollMs, en.fails);
               rebalance();
             }
           }
