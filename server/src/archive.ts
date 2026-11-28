@@ -17,6 +17,7 @@ import { readTar, TarError, type TarHeader } from "./tar.ts";
 import { PasswordError, SandboxError, failIfLauncher, haveSevenZip, listSz, runSz, szFailure, szReadArgs, validPassword, verifyPassword, type SzSource } from "./sevenzip.ts";
 import { UNPRIVILEGED, launcherAvailable, readerCapability, sandboxInfo, sandboxRequiredError, spawnSandboxed, type Root, type RunAs } from "./sandbox.ts";
 import { downloadGate, type Slot } from "./tool-gate.ts";
+import { Deadline } from "./deadline.ts";
 
 /**
  * Archive support. bsdtar (libarchive) does format decoding/encoding for zip,
@@ -790,7 +791,8 @@ async function volumeWork(root: string, destReal: string, guard?: Guard): Promis
 
 const swept = new Set<string>();
 const sweepTargets = new Set<string>();
-let sweepTimer: NodeJS.Timeout | undefined;
+/** One one-shot timer, set for the time the next foreign staging entry goes idle; no such entry and no job here: no timer. */
+const sweepAt = new Deadline(() => void Promise.all([...sweepTargets].map((d) => sweepDir(d, true).catch(() => undefined))));
 
 /** "Now" as the filesystem holding `dir` stamps it: the time of a file made there this moment, so a clock that differs between machines sharing the folder does not matter. */
 async function fsNow(dir: string): Promise<number> {
@@ -810,18 +812,16 @@ async function fsNow(dir: string): Promise<number> {
  * neither the folder nor its heartbeat file has touched for a long time, measured against the filesystem's own clock
  * (the heartbeat is rewritten, not stamped with the writer's clock). A running job refreshes its heartbeat, so another
  * agent's live job (a rolling update, a shared mount) is never removed; process ids are never consulted.
- * Every folder swept once is swept again from time to time.
+ * A folder with a foreign entry that is not yet idle is swept again when that entry becomes idle (one timer for the nearest).
  */
 async function sweepDir(real: string, force = false) {
   sweepTargets.add(real);
-  if (!sweepTimer) {
-    sweepTimer = setInterval(() => void Promise.all([...sweepTargets].map((d) => sweepDir(d, true).catch(() => undefined))), Math.min(3_600_000, Math.max(1000, idleMs() / 4)));
-    sweepTimer.unref();
-  }
   if (!force && swept.has(real)) return;
   swept.add(real);
   const now = await fsNow(real);
   const old = (st: { mtimeMs: number } | null) => !st || now - st.mtimeMs > idleMs();
+  let wait = Infinity; // time until the next entry that is not idle yet becomes idle
+  const left = (st: { mtimeMs: number } | null) => (st ? idleMs() - (now - st.mtimeMs) : 0);
   for (const n of await fs.readdir(real).catch(() => [] as string[])) {
     if (n.includes(`.${PROC_ID}.`)) continue;
     const staging = n.endsWith(".alive") ? n.slice(0, -6) : n;
@@ -832,8 +832,9 @@ async function sweepDir(real: string, force = false) {
     if (old(d) && old(m)) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
       await fs.rm(`${dir}.alive`, { force: true }).catch(() => undefined);
-    }
+    } else wait = Math.min(wait, Math.max(left(d), left(m)));
   }
+  if (wait !== Infinity) sweepAt.arm(Date.now() + wait + 1000);
 }
 
 /** Start-up sweep: the temp work folder and the `.filedeck-work` of the root and of every local mount; nothing else is looked at. */
@@ -894,6 +895,9 @@ async function makeWork(tag: string, root: string, destReal: string, need?: numb
   }
   const dir = await fs.mkdtemp(path.join(base, `${HOST}.${PROC_ID}.${tag}.`));
   const marker = `${dir}.alive`;
+  // a crash of this process leaves this folder: the next sweep of the volume finds it idle after `idleMs`
+  sweepTargets.add(base);
+  sweepAt.arm(Date.now() + idleMs() + 1000);
   let fh: import("node:fs/promises").FileHandle | undefined;
   let beat: NodeJS.Timeout | undefined;
   const done = async () => {
