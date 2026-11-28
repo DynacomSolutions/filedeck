@@ -32,6 +32,7 @@ Each event is one JSON object on one line (NDJSON). The agent encodes the line o
 | `labels` | Present when a [label template](#labels) matches the path. |
 | `fromLabels` | A `move` only: the labels of the old place, when they differ from `labels`. |
 | `scope`, `window`, `reason`, `unwatched` | Control events only. See below. |
+| `level`, `availBytes`, `sizeBytes`, `loss1h`, `loss6h` | `pressure` events only. See [Pressure](#pressure). |
 
 Kinds of entry events:
 
@@ -43,6 +44,7 @@ Kinds of entry events:
 | `close_write` | A file that was open for writing was closed. |
 | `attrib` | Mode, owner, times, link count or extended attributes changed. |
 | `move` | An entry was renamed or moved. `path` is the new place and `from` is the old place. |
+| `pressure` | The free space of a filesystem crossed a level, or fell too fast. Not about one entry: see [Pressure](#pressure). Only readers that ask for it (`kind=pressure`) or that have no `kind` filter get it. |
 
 Kinds of control event. They tell you about the stream, not about one entry. Every reader gets them, whatever its filter says.
 
@@ -88,11 +90,48 @@ The agent evaluates the filter before it sends a byte. An event passes when it p
 |---|---|
 | `prefix` | The path is the prefix or is below it. For a `move`, the old path counts too. Give an absolute path. |
 | `glob` | The path matches one glob. Patterns without a `/` match the name at any depth. Patterns with a `/` match the whole path, written from the root: `/srv/**/*.log`. A trailing `/` matches folders only. `*`, `**`, `?`, `[a-z]`, `[!a]` and `{a,b}` work. The matcher is the one of the folder compare. It takes linear time, so a hostile pattern cannot stall the agent. |
-| `kind` | One or more of `create`, `delete`, `modify`, `close_write`, `attrib`, `move`. Give the part more than once, or separate the values with commas. |
+| `kind` | One or more of `create`, `delete`, `modify`, `close_write`, `attrib`, `move`, `pressure`. Give the part more than once, or separate the values with commas. |
 | `type` | `file` or `dir`. |
 | `label` | `key:value`. The same key twice means that either value is good. For a `move`, the labels of the old place count too. |
 
 Limits: 32 values for each part, 4096 characters for each value. A bad filter gives `400`.
+
+## Pressure
+
+A `pressure` event says that the free space of a filesystem changed level, or that it falls too fast. A reader that watches for full disks needs no cron job and no metrics query: it reads `GET /api/v1/changes?kind=pressure` and keeps its cursor.
+
+It is off while `FILEDECK_PRESSURE_LEVELS` is empty. In the chart that is `agent.pressure.levels`. It needs the change flow (`agent.fanotify.enabled`).
+
+```json
+{"cursor":"web1:lq3x9a2b4f:2210","time":1795600100000,"node":"web1","kind":"pressure","dir":true,"path":"/srv","reason":"level reserve","level":"reserve","availBytes":181000000000,"sizeBytes":1000000000000,"loss1h":12000000000,"loss6h":48000000000}
+```
+
+- `path` is the mount point of the filesystem. `level` is `ok`, `reserve` or `critical`. `availBytes` is the space that a normal user can use (`statfs` `bavail`). `loss1h` and `loss6h` are the bytes lost in the last hour and six hours, never below 0.
+- An event comes on a **level change** (also back to `ok`) and when a **growth breach** starts (`growthBytes` lost inside `growthWindowSec`). A breach that goes on gives no second event. A level inside 1% of the size of a threshold does not flap: the free space must rise 1% above it to leave the level. A `reset` on the stream makes the agent publish the current level of each filesystem once more (`reason` ends with `(replayed)`).
+- The change flow is the clock. When changes happen on a filesystem, the agent reads `statfs` at most once every 10 seconds for it, plus one trailing read at the end of a burst. A delete or an attribute change counts as a change too, because the space of a deleted file comes back at its last close. When no change comes, there is no read and no timer.
+- A level is reached when the free space is at or below the bytes threshold or the percent threshold (0 turns a threshold off). The setting is a JSON object. `default` holds for every local filesystem. An entry of `filesystems` (any path on the filesystem) overrides it:
+
+```json
+{"default":{"reserveFreePercent":15,"criticalFreePercent":5},
+ "filesystems":[{"path":"/srv","reserveFreeBytes":200000000000,"criticalFreeBytes":50000000000,"growthBytes":100000000000,"growthWindowSec":3600}]}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `reserveFreePercent`, `reserveFreeBytes` | 15, 0 | The level is `reserve` at or below this free space. |
+| `criticalFreePercent`, `criticalFreeBytes` | 5, 0 | The level is `critical` at or below this free space. |
+| `growthBytes` | 0 (off) | Bytes lost inside `growthWindowSec` that make a growth breach. |
+| `growthWindowSec` | 3600 | The window, from 60 to 21600. |
+
+`GET /api/v1/pressure` on the agent (and `GET /api/nodes/<node>/api/v1/pressure` through the hub) gives the level now of each local filesystem, with one `statfs` for each. It is the call for a reader that was away, or that got a `reset` or `overflow`:
+
+```json
+{"node":"web1","at":1795600100000,"filesystems":[{"path":"/","level":"ok","availBytes":300000000000,"sizeBytes":500000000000,"freePercent":60,"loss1h":0,"loss6h":0,"growthBreach":false,"at":1795600100000}]}
+```
+
+It is for administrators when sign-in is on. A hub API token needs the scope `changes` for it. A pod ServiceAccount token cannot read it.
+
+A `pressure` event above `ok`, or a growth breach, also makes the [disk pressure](disk-pressure.md) collector read once, if that feature is on, so that its latest snapshot holds the attribution of that moment.
 
 ## Labels
 

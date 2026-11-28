@@ -25,6 +25,9 @@ spec:
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
+      {{- if and .Values.agent.pressure.enabled .Values.agent.pressure.hostPID }}
+      hostPID: true
+      {{- end }}
       nodeSelector:
         kubernetes.io/os: linux
         {{ .Values.managedNodes.label }}: {{ .Values.managedNodes.value | quote }}
@@ -68,6 +71,20 @@ spec:
             {{- if .Values.agent.pressure.ebpf }}
             - {name: FILEDECK_IOTRACE, value: /usr/local/bin/filedeck-iotrace}
             {{- end }}
+            {{- if .Values.agent.pressure.enabled }}
+            - {name: FILEDECK_PRESSURE, value: "1"}
+            - {name: FILEDECK_PRESSURE_INTERVAL_MS, value: {{ .Values.agent.pressure.intervalMs | int64 | quote }}}
+            - {name: FILEDECK_PRESSURE_PATH_DEPTH, value: {{ .Values.agent.pressure.pathDepth | int64 | quote }}}
+            {{- if .Values.agent.pressure.cgroupMount }}
+            - {name: FILEDECK_PRESSURE_CGROUP_ROOT, value: /host-cgroup}
+            {{- end }}
+            {{- if .Values.agent.pressure.labels }}
+            - {name: FILEDECK_PRESSURE_LABELS, value: {{ toJson .Values.agent.pressure.labels | quote }}}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.agent.pressure.levels }}
+            - {name: FILEDECK_PRESSURE_LEVELS, value: {{ toJson .Values.agent.pressure.levels | quote }}}
+            {{- end }}
             - {name: NODE_OPTIONS, value: {{ .Values.agent.nodeOptions | quote }}}
             - {name: FILEDECK_EVENTS_JOURNAL_BYTES, value: {{ .Values.agent.events.journal.maxBytes | int64 | quote }}}
             - {name: FILEDECK_EVENTS_JOURNAL_HOURS, value: {{ .Values.agent.events.journal.maxHours | quote }}}
@@ -83,7 +100,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
-              add: [DAC_OVERRIDE, DAC_READ_SEARCH, CHOWN, FOWNER, SETUID, SETGID{{ if .Values.agent.fanotify.enabled }}, SYS_ADMIN{{ end }}{{ if .Values.agent.pressure.ebpf }}, BPF, PERFMON{{ end }}{{ if .Values.auth.enabled }}, SYS_CHROOT{{ end }}]
+              add: [DAC_OVERRIDE, DAC_READ_SEARCH, CHOWN, FOWNER, SETUID, SETGID{{ if .Values.agent.fanotify.enabled }}, SYS_ADMIN{{ end }}{{ if .Values.agent.pressure.ebpf }}, BPF, PERFMON{{ end }}{{ if .Values.auth.enabled }}, SYS_CHROOT{{ end }}{{ if and .Values.agent.pressure.enabled .Values.agent.pressure.hostPID }}, SYS_PTRACE{{ end }}]
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
@@ -95,6 +112,9 @@ spec:
             {{- if .Values.agent.events.socket.enabled }}
             - {name: events, mountPath: /run/filedeck-events}
             {{- end }}
+            {{- if and .Values.agent.pressure.enabled .Values.agent.pressure.cgroupMount }}
+            - {name: host-cgroup, mountPath: /host-cgroup, readOnly: true}
+            {{- end }}
       volumes:
         - name: host
           hostPath: {path: /, type: Directory}
@@ -105,5 +125,8 @@ spec:
         {{- if .Values.agent.events.socket.enabled }}
         - name: events
           hostPath: {path: {{ .Values.agent.events.socket.hostPath }}, type: DirectoryOrCreate}
+        {{- end }}
+        {{- if and .Values.agent.pressure.enabled .Values.agent.pressure.cgroupMount }}
+        - {name: host-cgroup, hostPath: {path: /sys/fs/cgroup, type: Directory}}
         {{- end }}
 {{- end }}

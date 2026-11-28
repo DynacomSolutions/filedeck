@@ -133,6 +133,22 @@ export interface Config {
   eventsJournalBytes: number;
   /** agent: and at most this many hours of events (FILEDECK_EVENTS_JOURNAL_HOURS, default 24) */
   eventsJournalHours: number;
+  /** agent: live disk pressure on (FILEDECK_PRESSURE=1): the routes, the metrics and the collector. Off, nothing is sampled and the routes answer 404 */
+  pressure: boolean;
+  /** agent: sample interval in ms while a stream is open (FILEDECK_PRESSURE_INTERVAL_MS, default 1000, 250 to 60000) */
+  pressureIntervalMs: number;
+  /** agent: the cgroup v2 tree to read (FILEDECK_PRESSURE_CGROUP_ROOT, default /sys/fs/cgroup) */
+  pressureCgroupRoot: string;
+  /** agent: the process folders (FILEDECK_PRESSURE_PROC_ROOT, default /proc; with hostPID that is the host's) */
+  pressureProcRoot: string;
+  /** agent: JSON list of label rules for cgroup paths (FILEDECK_PRESSURE_LABELS) */
+  pressureLabels: string;
+  /** agent: folder parts under a mount that make one path consumer (FILEDECK_PRESSURE_PATH_DEPTH, default 3) */
+  pressurePathDepth: number;
+  /** agent: the eBPF helper (FILEDECK_IOTRACE); empty = look for filedeck-iotrace next to the other helpers, `off` = never use it */
+  pressureIotrace: string;
+  /** agent: filesystem free-space levels for the `pressure` change event (FILEDECK_PRESSURE_LEVELS, a JSON object, see docs/change-events.md); empty = no pressure events */
+  pressureLevels: string;
   /** agent: path templates that give events their labels (FILEDECK_EVENTS_LABELS), for example `/srv/repos/{org}/{repo}`; separated by line feeds, semicolons or commas */
   eventsLabels: string;
   /** agent, sign-in on: folder that holds the host helpers (`filedeck-id`); unset = the image's folder, else the built one (host-helpers.ts) */
@@ -387,6 +403,14 @@ export function loadConfig(env = process.env): Config {
     eventsJournalBytes: Math.max(0, Number(env.FILEDECK_EVENTS_JOURNAL_BYTES ?? 2 * 1024 ** 3) || 0),
     eventsJournalHours: Math.max(0, Number(env.FILEDECK_EVENTS_JOURNAL_HOURS ?? 24) || 0),
     eventsLabels: env.FILEDECK_EVENTS_LABELS ?? "",
+    pressure: /^(1|on|true|yes)$/i.test(env.FILEDECK_PRESSURE ?? ""),
+    pressureIntervalMs: Math.min(60_000, Math.max(250, Number(env.FILEDECK_PRESSURE_INTERVAL_MS ?? 1000) || 1000)),
+    pressureCgroupRoot: (env.FILEDECK_PRESSURE_CGROUP_ROOT ?? "/sys/fs/cgroup").replace(/\/+$/, "") || "/",
+    pressureProcRoot: (env.FILEDECK_PRESSURE_PROC_ROOT ?? "/proc").replace(/\/+$/, "") || "/",
+    pressureLabels: env.FILEDECK_PRESSURE_LABELS ?? "",
+    pressurePathDepth: Math.min(12, Math.max(1, Math.floor(Number(env.FILEDECK_PRESSURE_PATH_DEPTH ?? 3)) || 3)),
+    pressureIotrace: env.FILEDECK_IOTRACE ?? "",
+    pressureLevels: env.FILEDECK_PRESSURE_LEVELS ?? "",
     hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
     pamService: env.FILEDECK_PAM_SERVICE || "filedeck",
     worker: false,
@@ -441,6 +465,8 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     sourceSecretDir: "",
     jobsFile: "",
     fanwatch: "",
+    pressure: false,
+    pressureLevels: "",
     trashSweepMs: 0,
     // the account's own folders: a worker never shares the root process's index or thumbnail cache
     thumbDir: dirs.thumbs,

@@ -3,7 +3,7 @@
  * An event is encoded to one JSON line once (see `encodeEvent`); every subscriber gets the same bytes.
  */
 
-export const KINDS = ["create", "delete", "modify", "close_write", "attrib", "move", "overflow", "reset", "ready"] as const;
+export const KINDS = ["create", "delete", "modify", "close_write", "attrib", "move", "overflow", "reset", "ready", "pressure"] as const;
 export type EventKind = (typeof KINDS)[number];
 
 /** Kinds that say something about the stream and not about one entry: every subscriber gets them, whatever its filter says. */
@@ -35,6 +35,12 @@ export interface NewEvent {
   reason?: string;
   /** `ready`: mounts that no event covers (virtual paths) */
   unwatched?: string[];
+  /** `pressure`: the level of the filesystem that is mounted at `path`, its free and total bytes, and the bytes lost in the last hour and six hours */
+  level?: "ok" | "reserve" | "critical";
+  availBytes?: number;
+  sizeBytes?: number;
+  loss1h?: number;
+  loss6h?: number;
 }
 
 export interface ChangeEvent extends NewEvent {
@@ -87,5 +93,6 @@ export function encodeEvent(ev: ChangeEvent): Buffer {
   if (ev.window) o.window = ev.window;
   if (ev.reason) o.reason = ev.reason;
   if (ev.unwatched) o.unwatched = ev.unwatched;
+  if (ev.kind === "pressure") Object.assign(o, { level: ev.level, availBytes: ev.availBytes, sizeBytes: ev.sizeBytes, loss1h: ev.loss1h, loss6h: ev.loss6h });
   return Buffer.from(JSON.stringify(o) + "\n");
 }

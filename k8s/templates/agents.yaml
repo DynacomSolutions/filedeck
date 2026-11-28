@@ -47,6 +47,10 @@ spec:
     spec:
       terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
+      {{- if and $.Values.agent.pressure.enabled $.Values.agent.pressure.hostPID }}
+      # The machine's process list, for the IO of single processes (agent.pressure.hostPID).
+      hostPID: true
+      {{- end }}
       {{- with .nodeName }}
       nodeSelector:
         kubernetes.io/hostname: {{ . | quote }}
@@ -154,6 +158,28 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if $.Values.agent.pressure.enabled }}
+            # Live disk pressure (docs/disk-pressure.md).
+            - name: FILEDECK_PRESSURE
+              value: "1"
+            - name: FILEDECK_PRESSURE_INTERVAL_MS
+              value: {{ $.Values.agent.pressure.intervalMs | int64 | quote }}
+            - name: FILEDECK_PRESSURE_PATH_DEPTH
+              value: {{ $.Values.agent.pressure.pathDepth | int64 | quote }}
+            {{- if $.Values.agent.pressure.cgroupMount }}
+            - name: FILEDECK_PRESSURE_CGROUP_ROOT
+              value: /host-cgroup
+            {{- end }}
+            {{- if $.Values.agent.pressure.labels }}
+            - name: FILEDECK_PRESSURE_LABELS
+              value: {{ toJson $.Values.agent.pressure.labels | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $.Values.agent.pressure.levels }}
+            # Filesystem pressure events and GET /api/v1/pressure (docs/change-events.md). They need agent.fanotify.enabled for the change flow.
+            - name: FILEDECK_PRESSURE_LEVELS
+              value: {{ toJson $.Values.agent.pressure.levels | quote }}
+            {{- end }}
             # Keep the V8 heap well under the container memory limit so the GC works before the cgroup would OOM-kill.
             - name: NODE_OPTIONS
               value: {{ $.Values.agent.nodeOptions | quote }}
@@ -210,7 +236,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"{{ if $.Values.agent.fanotify.enabled }}, "SYS_ADMIN"{{ end }}{{ if $.Values.agent.pressure.ebpf }}, "BPF", "PERFMON"{{ end }}{{ if $.Values.auth.enabled }}, "SYS_CHROOT"{{ end }}]
+              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"{{ if $.Values.agent.fanotify.enabled }}, "SYS_ADMIN"{{ end }}{{ if $.Values.agent.pressure.ebpf }}, "BPF", "PERFMON"{{ end }}{{ if $.Values.auth.enabled }}, "SYS_CHROOT"{{ end }}{{ if and $.Values.agent.pressure.enabled $.Values.agent.pressure.hostPID }}, "SYS_PTRACE"{{ end }}]
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
@@ -233,6 +259,11 @@ spec:
             {{- if $.Values.agent.events.socket.enabled }}
             - name: events
               mountPath: /run/filedeck-events
+            {{- end }}
+            {{- if and $.Values.agent.pressure.enabled $.Values.agent.pressure.cgroupMount }}
+            - name: host-cgroup
+              mountPath: /host-cgroup
+              readOnly: true
             {{- end }}
       volumes:
         {{- if $.Values.groups }}
@@ -258,6 +289,12 @@ spec:
           hostPath:
             path: {{ default $.Values.agent.events.socket.hostPath .eventsSocketHostPath }}
             type: DirectoryOrCreate
+        {{- end }}
+        {{- if and $.Values.agent.pressure.enabled $.Values.agent.pressure.cgroupMount }}
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
         {{- end }}
 ---
 apiVersion: v1

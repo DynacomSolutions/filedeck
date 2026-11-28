@@ -181,3 +181,13 @@ The change event stream (see [Change events](change-events.md)) names every file
 - The filter is evaluated in the agent. A glob runs in linear time with a step budget, and label templates match whole segments, so a request cannot use a pattern to stall the agent. A request has at most 32 values for each filter part. A reader has a bounded buffer, so a slow or hostile reader costs at most 1 MiB of memory and never blocks the watcher.
 - The journal holds paths and times, not file content. It is in the agent state folder, with mode 0700 for the folder and 0600 for the files. Its size and age are limited.
 - `/metrics` keeps to counts and ages. The new metrics hold no path, node name or size.
+
+## Disk pressure
+
+The disk pressure feature (see [Disk pressure](disk-pressure.md)) is off by default. It names the busiest pods, services and processes of a machine, and the busiest folders. Treat it as read access to the workload names of that machine.
+
+- The agent routes `/api/v1/disk-pressure` and `/api/v1/disk-pressure/stream` need the agent token. Only the hub calls them. With sign-in on, the hub allows them for administrators only, on its own routes and on the per-node route in every spelling of the path. A hub API token reads them only with the scope `disk-pressure` (read only, `GET`). A pod ServiceAccount token never reads them. The filesystem levels (`/api/v1/pressure`) follow the rules of the change events. The agent answers them from its root process, with a limit of 32 open streams.
+- The agent only reads: `/proc/diskstats`, `/proc/pressure/io`, the cgroup tree and, with `agent.pressure.hostPID`, `/proc/<pid>/io`, `/proc/<pid>/stat`, `/proc/<pid>/comm` and `/proc/<pid>/cgroup`. It reads the folder names under `/var/log/pods` and `/var/log/containers`, never a log file. It makes no API call and writes nothing to disk.
+- The host cgroup tree is mounted read only, and only with `agent.pressure.cgroupMount`. The host process list and `CAP_SYS_PTRACE` come only with `agent.pressure.hostPID`. The eBPF helper needs more capabilities, set by its own chart values.
+- `/metrics` stays open to the scraper. With the feature on it also holds the names of the 10 busiest pods, services and processes of each disk (cut to 80 characters). It never holds a folder. If these names are private, keep the feature off or limit who can reach the metrics port with the network policy (`metrics.scrapeFrom`).
+- Label rules (`FILEDECK_PRESSURE_LABELS`) are set by the operator. A link from a rule is kept only when it starts with `https://`, `http://` or `/`, and the captures in it are URL-encoded, so a cgroup name cannot add a script link.

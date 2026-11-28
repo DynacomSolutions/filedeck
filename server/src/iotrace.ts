@@ -14,9 +14,10 @@ export interface IotraceSource {
 
 /**
  * The helper process. It is started by the first read and waits on its stdin: one "read" line gives one JSON line back. It has no timer.
- * A failure line (`ok:false`), an exit or a spawn error rejects the read.
+ * A failure line (`ok:false`), an exit or a spawn error rejects the read. A helper that does not answer within `readTimeoutMs` is stopped and the read is rejected
+ * (the timer exists only while a read is pending).
  */
-export function helperSource(bin: string): IotraceSource {
+export function helperSource(bin: string, readTimeoutMs = 5000): IotraceSource {
   let child: ChildProcess | undefined;
   let buf = "";
   let waiting: { ok: (v: { t: number; rows: IotraceRow[] }) => void; fail: (e: Error) => void } | undefined;
@@ -58,7 +59,12 @@ export function helperSource(bin: string): IotraceSource {
       if (waiting) return Promise.reject(new Error("a read is already pending"));
       const c = child ?? start();
       return new Promise((ok, fail) => {
-        waiting = { ok, fail };
+        const timer = setTimeout(() => {
+          c.kill("SIGKILL");
+          end(new Error("the helper did not answer"));
+        }, readTimeoutMs);
+        timer.unref();
+        waiting = { ok: (v) => (clearTimeout(timer), ok(v)), fail: (e) => (clearTimeout(timer), fail(e)) };
         c.stdin!.write("read\n");
       });
     },
@@ -87,6 +93,7 @@ export class IotraceSampler {
     private readonly source: IotraceSource | undefined,
     private readonly fallback: () => Promise<{ t: number; rows: IotraceRow[] }>,
     private readonly intervalMs = 1000,
+    private readonly log?: (s: string) => void,
   ) {}
 
   get subscribers() {
@@ -116,9 +123,10 @@ export class IotraceSampler {
     if (this.source && !this.helperDown) {
       try {
         return { ...(await this.source.read()), source: "ebpf" };
-      } catch {
+      } catch (e) {
         this.helperDown = true;
         this.source.close();
+        this.log?.(`disk pressure: eBPF helper failed (${(e as Error).message}); using /proc and /sys instead`);
       }
     }
     return { ...(await this.fallback()), source: "proc" };
