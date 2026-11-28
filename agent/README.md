@@ -58,6 +58,8 @@ The file is TOML, named by `--config <file>` or `FILEDECK_CONFIG`. Its keys are 
 | `PORT` | `port` | `8080` | `0` picks a free port |
 | `FILEDECK_INDEX_DIR` | `index_dir` | none | state folder (not used yet) |
 | `FILEDECK_READONLY` | `read_only` | none | comma separated absolute prefixes, checked at start |
+| `FILEDECK_PROC_MOUNTS` | `proc_mounts` | system table | a mount table in `/proc/mounts` format, read instead of the system's own |
+| `FILEDECK_MAX_EDIT` | `max_edit` | `5242880` | the largest file `/api/fs/text` returns, in bytes |
 | `FILEDECK_AGENT_TOKEN_FILE` | `agent_token_file` | none | see below |
 | `FILEDECK_AGENT_TOKEN` | | none | the token itself; prefer the file |
 | `FILEDECK_AUTH` | | off | `on` is refused: sign-in is not ported |
