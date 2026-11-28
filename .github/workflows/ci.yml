@@ -17,6 +17,7 @@ jobs:
       web: ${{ steps.detect.outputs.web }}
       chart: ${{ steps.detect.outputs.chart }}
       image: ${{ steps.detect.outputs.image }}
+      agent: ${{ steps.detect.outputs.agent }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -32,6 +33,7 @@ jobs:
             echo 'web=true' >> "$GITHUB_OUTPUT"
             echo 'chart=true' >> "$GITHUB_OUTPUT"
             echo 'image=true' >> "$GITHUB_OUTPUT"
+            echo 'agent=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -39,22 +41,25 @@ jobs:
           web=false
           chart=false
           image=false
+          agent=false
           while IFS= read -r file; do
             case "$file" in
               server/src/group-types.ts) server=true; web=true; image=true ;;
               server/*) server=true; image=true ;;
               web/*) web=true; server=true; image=true ;;
               scripts/check-test-skips.mjs) server=true; web=true; chart=true; image=true ;;
+              agent/*) agent=true ;;
               scripts/ci-image-smoke.sh) image=true ;;
               k8s/*|scripts/*) chart=true ;;
               package.json|package-lock.json|tsconfig.base.json|Dockerfile|.dockerignore|.github/workflows/*)
-                server=true; web=true; chart=true; image=true ;;
+                server=true; web=true; chart=true; image=true; agent=true ;;
             esac
           done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
           echo "server=$server" >> "$GITHUB_OUTPUT"
           echo "web=$web" >> "$GITHUB_OUTPUT"
           echo "chart=$chart" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "agent=$agent" >> "$GITHUB_OUTPUT"
 
   server:
     needs: changes
@@ -123,7 +128,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          (cd server && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SSHD=1 FILEDECK_REQUIRE_APACHE=1 node --import tsx --test --test-timeout=600000 --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
+          (cd server && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SSHD=1 FILEDECK_REQUIRE_APACHE=1 node --import tsx --test --test-timeout=600000 --test-reporter=tap test/*.test.ts test/contract/*.test.ts) | node scripts/check-test-skips.mjs
         timeout-minutes: 15
       # The image build runs the whole suite as root (Dockerfile), so run it that way here too; a skip of the fanotify helper test is a failure,
       # and so is a skip of the live host helper tests (this runner has glibc; the image's Alpine build stage does not).
@@ -330,9 +335,74 @@ jobs:
         run: scripts/ci-image-smoke.sh filedeck-ci:test
         timeout-minutes: 5
 
+  contract:
+    # the contract files (server/test/contract) against a TS agent started as a child process on loopback; docs/contract-tests.md
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+        timeout-minutes: 5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+        timeout-minutes: 5
+      - run: npm ci --no-audit --no-fund
+        timeout-minutes: 5
+      - name: Run the contract files against a child-process agent
+        working-directory: server
+        env:
+          FILEDECK_CONTRACT_MODE: spawn
+        run: node --import tsx --test --test-timeout=600000 --test-concurrency=1 test/contract/*.test.ts
+        timeout-minutes: 10
+
+  # The Rust agent (agent/). GitHub-hosted runners only: the repository is public.
+  rust:
+    name: rust (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+        timeout-minutes: 5
+      - name: Install the pinned toolchain
+        # rust-toolchain.toml names the version and the components; rustup is on both runner images
+        run: rustup toolchain install
+        timeout-minutes: 10
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: agent
+        timeout-minutes: 5
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2.90.11
+        with:
+          tool: cargo-deny
+        timeout-minutes: 5
+      - run: cargo fmt --check
+        timeout-minutes: 2
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        timeout-minutes: 10
+      - run: cargo test --locked
+        timeout-minutes: 10
+      - run: cargo deny --locked check
+        timeout-minutes: 5
+
   aggregate:
     if: always()
-    needs: [changes, server, web, browser, chart, image]
+    needs: [changes, server, contract, web, browser, chart, image, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -342,11 +412,13 @@ jobs:
           set -euo pipefail
           echo "changes=${{ needs.changes.result }}"
           echo "server=${{ needs.server.result }}"
+          echo "contract=${{ needs.contract.result }}"
           echo "web=${{ needs.web.result }}"
           echo "browser=${{ needs.browser.result }}"
           echo "chart=${{ needs.chart.result }}"
           echo "image=${{ needs.image.result }}"
-          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.web.result }}" "${{ needs.browser.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}"; do
+          echo "rust=${{ needs.rust.result }}"
+          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.contract.result }}" "${{ needs.web.result }}" "${{ needs.browser.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}" "${{ needs.rust.result }}"; do
             if [[ "$result" == failure || "$result" == cancelled ]]; then
               exit 1
             fi

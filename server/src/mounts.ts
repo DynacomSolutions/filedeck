@@ -171,7 +171,8 @@ export async function listMounts(root: string, procMounts: string): Promise<Moun
     try {
       const real = path.join(root, m.mountpoint);
       // A dead NFS/SMB server can hang statfs for minutes; show the mount as unreachable instead of blocking the list.
-      const s = kind ? await Promise.race([fs.statfs(real), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000).unref())]) : await fs.statfs(real);
+      let deadline: NodeJS.Timeout | undefined;
+      const s = kind ? await Promise.race([fs.statfs(real), new Promise<never>((_, rej) => (deadline = setTimeout(() => rej(new Error("timeout")), 3000)).unref())]).finally(() => clearTimeout(deadline)) : await fs.statfs(real);
       const total = s.blocks * s.bsize;
       res.push({ ...m, ...label, total, free: s.bavail * s.bsize, used: total - s.bfree * s.bsize });
     } catch (e) {

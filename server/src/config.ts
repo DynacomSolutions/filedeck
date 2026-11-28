@@ -87,6 +87,10 @@ export interface Config {
   allowedHosts: string[];
   /** hub: read-only token for the `filedeck du` CLI (FILEDECK_API_TOKEN or the file FILEDECK_API_TOKEN_FILE); unset = off */
   apiToken: string | undefined;
+  /** hub: ServiceAccounts (`namespace/name` or `namespace/*`) whose projected token may read folder sizes (FILEDECK_K8S_ALLOW); empty = off */
+  k8sAllow: string[];
+  /** hub: audience of that token (FILEDECK_K8S_AUDIENCE, default `filedeck`) */
+  k8sAudience: string;
   /** hub: name -> agent base URL */
   nodes: { name: string; url: string }[];
   /** hub, sign-in on: the nodes asked for a system sign-in, in order (FILEDECK_AUTH_NODES); empty = the order of `nodes` */
@@ -355,6 +359,8 @@ export function loadConfig(env = process.env): Config {
     agentToken: env.FILEDECK_AGENT_TOKEN || undefined,
     allowedHosts: (env.FILEDECK_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
     apiToken: mode === "hub" ? readSecret(env, "FILEDECK_API_TOKEN") : undefined,
+    k8sAllow: mode === "hub" ? (env.FILEDECK_K8S_ALLOW ?? "").split(",").map((a) => a.trim()).filter(Boolean) : [],
+    k8sAudience: env.FILEDECK_K8S_AUDIENCE || "filedeck",
     nodes: parseNodes(env.NODES),
     authNodes: [...new Set((env.FILEDECK_AUTH_NODES ?? "").split(",").map((n) => n.trim()).filter(Boolean))],
     sources: parseSources(env.FILEDECK_SOURCES),
@@ -413,6 +419,7 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     apiToken: undefined,
     apiTokenAccount: undefined,
     apiScopes: [],
+    k8sAllow: [],
     eventsSocket: "",
     vaultKey: undefined,
     bootstrapAdminFile: undefined,

@@ -9,6 +9,8 @@ import { FanWatch, type SizeWriteStats } from "./fanwatch.ts";
 import { MacWatch } from "./macwatch.ts";
 import { agentError, registerFileRoutes } from "./agent-routes.ts";
 import * as trash from "./trash.ts";
+import { onTrashed } from "./fsops.ts";
+import { Deadline } from "./deadline.ts";
 import { agentAuth, agentUser } from "./agent-auth.ts";
 import { sandboxInfo, sandboxSummary } from "./sandbox.ts";
 import { audit, trustProxies, type AuditSink } from "./audit.ts";
@@ -289,30 +291,67 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     })());
   (app as unknown as { leave: () => Promise<void> }).leave = leave;
 
-  // Trash retention: every volume's trash loses what is older than the age limit, then its oldest items while it is over its cap. A minute after start,
-  // then on a timer; one sweep at a time.
+  // Trash retention: every volume's trash loses what is older than the age limit, then its oldest items while it is over its cap. No timer runs while the
+  // trash is empty. One one-shot timer waits for the next deadline: the oldest item's age limit, a short delay after an item went in (for the cap), or a retry
+  // after a failed removal. A first sweep a minute after start finds what the last process left. One sweep at a time.
   let sweeping = false;
+  let trashedMeanwhile = false;
+  const retentionOn = cfg.trashSweepMs > 0 && (cfg.trashMaxAgeDays > 0 || cfg.trashMaxPercent > 0 || cfg.trashMaxBytes > 0);
+  const capOn = cfg.trashMaxPercent > 0 || cfg.trashMaxBytes > 0;
+  const ageMs = cfg.trashMaxAgeDays * 86400_000;
+  const settle = Math.min(60_000, cfg.trashSweepMs);
+  const sweepAt = new Deadline(() => void sweepTrash());
   const sweepTrash = async () => {
     if (sweeping || leaving) return;
     sweeping = true;
+    trashedMeanwhile = false;
+    let oldest = Infinity;
+    let failed = 0;
     try {
-      const policy = { maxAgeDays: cfg.trashMaxAgeDays, maxPercent: cfg.trashMaxPercent, maxBytes: cfg.trashMaxBytes, blocked: (v: string) => hitsReadOnly(root, cfg.readOnly, v) }; // only a read-only volume: its trash folder sits at its top, never in a read-only folder below it (each removal checks that too)
+      const policy = {
+        maxAgeDays: cfg.trashMaxAgeDays,
+        maxPercent: cfg.trashMaxPercent,
+        maxBytes: cfg.trashMaxBytes,
+        blocked: (v: string) => hitsReadOnly(root, cfg.readOnly, v), // only a read-only volume: its trash folder sits at its top, never in a read-only folder below it (each removal checks that too)
+        seen: (at: number) => void (oldest = Math.min(oldest, at)),
+      };
       // (outside a request: the pinned removals check read-only prefixes in a scope of their own, like a job)
-      for (const r of await withReadOnly(root, cfg.readOnly, () => trash.applyRetention(root, cfg.procMounts, policy))) console.error(JSON.stringify({ trashRetention: r.volume, removed: r.removed, freedBytes: r.freed, failed: r.failed }));
+      for (const r of await withReadOnly(root, cfg.readOnly, () => trash.applyRetention(root, cfg.procMounts, policy))) {
+        failed += r.failed;
+        console.error(JSON.stringify({ trashRetention: r.volume, removed: r.removed, freedBytes: r.freed, failed: r.failed }));
+      }
     } catch (e) {
+      failed++;
       console.error(JSON.stringify({ trashRetention: "failed", error: String((e as Error)?.message ?? e) }));
     } finally {
       sweeping = false;
     }
+    if (leaving) return;
+    // the next deadline: the oldest item left reaches the age limit; a failure is tried again after a delay; an empty trash waits for the next item
+    const now = Date.now();
+    sweepAt.set(
+      Math.min(
+        oldest !== Infinity && ageMs > 0 ? Math.max(oldest + ageMs, now + 1000) : Infinity,
+        failed ? now + cfg.trashSweepMs : Infinity,
+        trashedMeanwhile ? now + settle : Infinity, // an item went in during the sweep: it may have been missed
+      ),
+    );
   };
-  const retentionOn = cfg.trashSweepMs > 0 && (cfg.trashMaxAgeDays > 0 || cfg.trashMaxPercent > 0 || cfg.trashMaxBytes > 0);
-  const firstSweep = retentionOn ? setTimeout(() => void sweepTrash(), Math.min(60_000, cfg.trashSweepMs)).unref() : undefined;
-  const sweepTimer = retentionOn ? setInterval(() => void sweepTrash(), cfg.trashSweepMs).unref() : undefined;
+  const stopTrashWatch = retentionOn
+    ? onTrashed((m) => {
+        if (leaving) return;
+        trashedMeanwhile = true;
+        // an item that goes in now reaches the age limit at the latest after `ageMs`; the cap is checked a short while after the delete (one sweep for a burst)
+        if (capOn) sweepAt.arm(Date.now() + settle);
+        else sweepAt.arm(m.deletedAt + ageMs);
+      })
+    : undefined;
+  if (retentionOn) sweepAt.set(Date.now() + settle);
   (app as unknown as { sweepTrash: () => Promise<void> }).sweepTrash = sweepTrash;
 
   (app as unknown as { close: () => Promise<void> }).close = async () => {
-    clearTimeout(firstSweep);
-    clearInterval(sweepTimer);
+    stopTrashWatch?.();
+    sweepAt.clear();
     await leave();
     files.close();
     dirs.close();

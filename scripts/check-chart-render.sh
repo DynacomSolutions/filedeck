@@ -63,6 +63,18 @@ assert {v["name"] for v in reconciler["spec"]["template"]["spec"]["volumes"]} ==
 agent = next(d for d in docs if d and d.get("kind") == "DaemonSet" and d["metadata"]["name"] == "custom-managed-agent")
 assert "startupProbe" in agent["spec"]["template"]["spec"]["containers"][0]
 print("parsed startup and volume mounts: OK")
+# the reconciler is event driven: no sleep loop, a watch on nodes and pods, a liveness probe on each watch heartbeat
+script = next(d for d in docs if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "custom-managed-reconciler")["data"]["reconcile.sh"]
+assert "sleep \"$INTERVAL\"" not in script and "INTERVAL" not in script
+assert "/api/v1/nodes?" in script and "allowWatchBookmarks=true" in script and "/pods?" in script
+assert {e["name"] for e in container["env"]} >= {"WATCH_SECONDS"} and "INTERVAL" not in {e["name"] for e in container["env"]}
+probe = " ".join(container["livenessProbe"]["exec"]["command"])
+assert "heartbeat.$w" in probe and "nodes pods" in probe
+role = next(d for d in docs if d and d.get("kind") == "Role" and d["metadata"]["name"] == "custom-managed-reconciler")
+assert any("pods" in r["resources"] and "watch" in r["verbs"] for r in role["rules"])
+cluster = next(d for d in docs if d and d.get("kind") == "ClusterRole" and d["metadata"]["name"] == "custom-managed-reconciler")
+assert any("nodes" in r["resources"] and "watch" in r["verbs"] for r in cluster["rules"])
+print("reconciler watches nodes and pods, no timer loop: OK")
 '
 
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_HUB_METRICS_PORT/{getline; gsub(/"/, "", $2); print $2}')" = 9091
@@ -73,3 +85,13 @@ if helm template t k8s -s templates/hub.yaml --set port=9091 >/dev/null 2>&1; th
 fi
 
 echo "chart render check passed"
+
+# Pod sign-in (k8sAuth): off by default, no RBAC; on, the hub reads the allowlist and may only create TokenReviews.
+off=$(helm template t k8s)
+case "$off" in *tokenreviews*|*FILEDECK_K8S_ALLOW*) echo "k8sAuth must render nothing by default" >&2; exit 1 ;; esac
+pod=$(helm template t k8s --set-string 'k8sAuth.allow[0]=agents/*' --set-string 'k8sAuth.allow[1]=dynacom/scanner')
+test "$(printf '%s\n' "$pod" | awk '/name: FILEDECK_K8S_ALLOW/{getline; print $2}')" = '"agents/*,dynacom/scanner"'
+test "$(printf '%s\n' "$pod" | awk '/name: FILEDECK_K8S_AUDIENCE/{getline; print $2}')" = '"filedeck"'
+test "$(printf '%s\n' "$pod" | awk '/resources: \["tokenreviews"\]/{getline; print $2}')" = '["create"]'
+printf '%s\n' "$pod" | awk '/serviceAccountName: filedeck-hub$/{found=1} END {exit !found}'
+printf '%s\n' "$pod" | awk '/kind: ClusterRoleBinding/{b=1} b && /name: filedeck-hub$/{found=1} END {exit !found}'

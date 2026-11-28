@@ -288,8 +288,25 @@ export class EventBus {
     this.maxQueueBytes = o.maxQueueBytes ?? 1024 * 1024;
     this.pingMs = o.pingMs ?? 15_000;
     this.journal = new Journal({ ...o.journal, node: o.node, now: this.now, log: o.log });
-    this.timer = setInterval(() => void this.advance(), 200);
+  }
+
+  /**
+   * The 200 ms tick (writer lease: promotion, loss) runs only while something needs it: a subscriber, a waiter, staged events, or a journal that is
+   * opening or giving up the lease. It stops itself when none is left. A writer with no subscriber checks the lease at each event, so an idle bus has no timer.
+   */
+  private arm() {
+    if (this.timer || this.state === "closed") return;
+    this.timer = setInterval(() => {
+      void this.advance();
+      if (this.needsTick()) return;
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }, 200);
     this.timer.unref();
+  }
+
+  private needsTick(): boolean {
+    return this.state !== "closed" && (this.subs.size > 0 || this.waiters.length > 0 || this.stage.length > 0 || this.state === "opening" || this.state === "demoting");
   }
 
   /** `<node>:<epoch>:<seq>` of the journal as it is now */
@@ -377,6 +394,7 @@ export class EventBus {
       this.demote("this process is no longer the writer");
     }
     this.stage.push(s);
+    this.arm();
     if (this.stage.length > (this.o.stageMax ?? 100_000)) {
       this.stage.splice(0, this.stage.length - (this.o.stageMax ?? 100_000) + 1000);
       this.stageLost = true;
@@ -451,6 +469,7 @@ export class EventBus {
     if (this.state === "serving") return Promise.resolve(true);
     void this.advance();
     return new Promise((res) => {
+      this.arm();
       const t = setTimeout(() => {
         this.waiters = this.waiters.filter((w) => w !== done);
         res(false);
@@ -480,6 +499,7 @@ export class EventBus {
     const head = this.journal.head;
     sub.state = cur ? "replay" : "live";
     this.subs.add(sub);
+    this.arm();
     sub.start(cur, head).catch(() => sub.close());
     return sub;
   }

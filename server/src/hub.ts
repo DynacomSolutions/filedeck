@@ -26,6 +26,7 @@ import { canUseNode, isAgentAuthPath, isOpenProbe, NoAccessError, normaliseAgent
 import { agentFetch, type AgentFetchInit } from "./agent-fetch.ts";
 import { ChildListError, listChildren } from "./child-list.ts";
 import { apiTokenAuth } from "./api-token.ts";
+import { createReviewer, type PostReview } from "./k8s-auth.ts";
 import { renderIndex, renderManifest } from "./brand.ts";
 import { shellCsp, staticCacheControl, textCompression, webHeaders } from "./hub-web.ts";
 import { isBodyTooLarge, matchesHostList, requestGuard, stripBrowserContext } from "./request-guard.ts";
@@ -190,7 +191,7 @@ export async function pushBound(auth: HubAuth, key: string): Promise<"ok" | "wai
   return b === "ok" ? "ok" : b === "unavailable" ? "wait" : "drop";
 }
 
-export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
+export function createHub(cfg: Config, injected?: Record<string, SourceBackend>, auditSink?: AuditSink, opts?: { now?: () => number; k8sReview?: PostReview; system?: SystemAuth; nodesWaitMs?: number; streamCheckMs?: number }) {
   const app = new Hono() as Hono & { close(): Promise<void>; vault: Vault; auth?: HubAuth; streams?: LiveStreams; systemAuth?: AgentSystemAuth; presence?: SysPresence; nodeTargets: ReadonlyMap<string, Target>; accountChanged(before: Identity): Promise<void>; accountCalls: AccountCalls };
   // Sign-in state, only with auth on (off, nothing is opened or created).
   let auth: HubAuth | undefined;
@@ -248,7 +249,28 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
   // editor saves are limited by the agent that takes them (its own maxEdit), not here
   app.use("*", requestGuard({ forward: true, allowedHosts: cfg.allowedHosts, audit: { who: "hub", sink: auditSink } }));
   app.use("*", audit("hub", auditSink));
-  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined, cfg.apiScopes));
+  const k8s = cfg.k8sAllow.length
+    ? {
+        review: createReviewer(
+          {
+            allow: cfg.k8sAllow,
+            audience: cfg.k8sAudience,
+            api: `https://${process.env.KUBERNETES_SERVICE_HOST ?? "kubernetes.default.svc"}:${process.env.KUBERNETES_SERVICE_PORT ?? "443"}`,
+            tokenFile: "/var/run/secrets/filedeck-k8s/token",
+            caFile: "/var/run/secrets/filedeck-k8s/ca.crt",
+          },
+          opts?.k8sReview,
+          opts?.now,
+        ),
+        sink: auditSink ?? ((l: string) => console.log(l)),
+      }
+    : undefined;
+  // a call that changes something may start or end a job: the push watch looks at the jobs soon (it has no timer of its own while none runs)
+  app.use("/api/*", async (c, next) => {
+    await next();
+    if (c.req.method !== "GET" && c.req.method !== "HEAD" && c.req.method !== "OPTIONS") push?.watch.poke();
+  });
+  app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined, cfg.apiScopes, k8s));
   // System sign-in asks the agents in the sign-in order (auth/system.ts). Each call carries the agent token and nothing else of the
   // request: no user (nobody is signed in yet), no cookie, no client header; the body is built here.
   const signInCall = (node: string, rest: string, body: unknown, signal?: AbortSignal): Promise<Response> => {

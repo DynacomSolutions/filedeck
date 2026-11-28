@@ -1,3 +1,4 @@
+import { Deadline } from "./deadline.ts";
 import type { Hono } from "hono";
 import { FsError } from "./fsops.ts";
 import { Jobs, type JobView } from "./jobs.ts";
@@ -59,18 +60,18 @@ export function agentSource(base: Target, vpath: string, label: string): DirSour
         if (!r.ok) throw await agentError(r, "hash");
         return ((await r.json()) as { sha256: string }).sha256;
       }),
-    changes: (since, signal) =>
+    changes: (since, signal, holdMs) =>
       withAbort(signal, async (s) => {
-        const r = await base.fetch(`/api/fs/index-changes?since=${since}`, { signal: s });
+        const r = await base.fetch(`/api/fs/index-changes?since=${since}${holdMs ? `&wait=${Math.ceil(holdMs / 1000)}` : ""}`, { signal: s });
         if (!r.ok) throw await agentError(r, `${label} changes`);
-        const j = (await r.json()) as { seq: number; dirs: string[]; reset: boolean };
+        const j = (await r.json()) as { seq: number; dirs: string[]; reset: boolean; held?: boolean };
         const pre = vpath === "/" ? "" : vpath;
         const dirs: string[] = [];
         for (const d of j.dirs) {
           if (d === vpath) dirs.push("");
           else if (d.startsWith(pre + "/")) dirs.push(d.slice(pre.length + 1));
         }
-        return { seq: j.seq, dirs, reset: j.reset };
+        return { seq: j.seq, dirs, reset: j.reset, held: j.held === true };
       }),
   };
 }
@@ -141,20 +142,28 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
     for (const [id, s] of sessions) if (!jobs.get(id)) (s.close(), sessions.delete(id));
   };
 
+  // One one-shot timer, set for the nearest time an idle compare is due. A new compare sets it; a request only moves a compare's own deadline later, so the
+  // timer fires early, finds nothing due, and sets itself again. No compare, no timer.
+  const retryMs = Math.max(20, Math.min(10_000, graceMs / 2));
+  const sweepAt = new Deadline(() => sweep());
   const sweep = () => {
     const now = Date.now();
+    let next = Infinity;
     for (const j of jobs.list()) {
-      if (now - (seen.get(j.id) ?? j.createdAt) < graceMs) continue;
+      const due = (seen.get(j.id) ?? j.createdAt) + graceMs;
+      if (now < due) {
+        next = Math.min(next, due);
+        continue;
+      }
       jobs.cancel(j.id); // a running one settles shortly; the next sweep dismisses it
       if (jobs.dismiss(j.id)) {
         sessions.get(j.id)?.close();
         sessions.delete(j.id);
-      }
+      } else next = Math.min(next, now + retryMs);
     }
     prune();
+    sweepAt.set(next);
   };
-  const sweeper = setInterval(sweep, Math.max(20, Math.min(10_000, graceMs / 2)));
-  sweeper.unref();
 
   const loc = (v: unknown, what: string): Loc => {
     const o = v as Partial<Loc> | null;
@@ -210,6 +219,7 @@ export function registerHubDiff(app: Hono, agents: Map<string, Target>, diffDir 
       sessions.set(job.id, sess);
       if (owner) owners.set(job.id, owner);
       seen.set(job.id, Date.now());
+      sweepAt.arm(Date.now() + graceMs);
       sess.startLive(); // follow both agents' change feeds while the compare is open
       meta.set(job.id, { left, right, options });
       prune();

@@ -80,20 +80,53 @@ export interface PushWatchDeps {
 
 export class PushWatch {
   private timer?: NodeJS.Timeout;
+  private everyMs = 15_000;
+  private started = false;
+  /** a pass saw a job that is not over, or could not list one: look again after `everyMs` */
+  private busy = false;
+  /** a job event came while a pass ran: the pass may have missed it */
+  private poked = false;
   private running?: Promise<void>;
   private readonly logged = new Set<string>();
   private readonly stopping = new AbortController();
 
   constructor(private readonly d: PushWatchDeps) {}
 
+  /**
+   * Starts the watch. It runs no free timer: one pass at start (it finds the ends of the time the hub was down), then a pass only after a job event
+   * (`poke`), and again after `everyMs` for as long as a pass still sees a job that is not over (the end of a job on a machine has no event here).
+   * With no job running, no timer exists.
+   */
   start(everyMs = 15_000): void {
-    this.timer = setInterval(() => void this.tick(), everyMs);
+    this.everyMs = everyMs;
+    this.started = true;
+    this.arm(everyMs);
+  }
+
+  /** A job may have started, changed or ended (a call that changes something went through the hub): look soon. */
+  poke(): void {
+    if (!this.started || this.stopping.signal.aborted) return;
+    if (this.running) this.poked = true;
+    else if (!this.timer) this.arm(Math.min(1000, this.everyMs));
+  }
+
+  private arm(ms: number) {
+    if (this.timer || this.stopping.signal.aborted) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.busy = false;
+      void this.tick().then(() => {
+        if (this.busy || this.poked) this.arm(this.everyMs);
+        this.poked = false;
+      });
+    }, ms);
     this.timer.unref();
   }
 
   /** Ends a pass at once: its waits are cut and the claims of sends not made are given back, for the next hub to send. */
   async stop(): Promise<void> {
-    clearInterval(this.timer);
+    clearTimeout(this.timer);
+    this.timer = undefined;
     this.stopping.abort();
     await this.running;
   }
@@ -157,7 +190,9 @@ export class PushWatch {
         if (!id) return void store.removeOwner(owner);
       }
       const since = Math.min(...subs.map((s) => s.created));
-      const ends = endsToSend(await this.d.listJobs(id, this.stopping.signal), since, now());
+      const jobs = await this.d.listJobs(id, this.stopping.signal);
+      if (jobs.some((j) => j.state !== "done" && j.state !== "failed" && j.state !== "canceled")) this.busy = true;
+      const ends = endsToSend(jobs, since, now());
       if (!ends.length || this.stopping.signal.aborted) return;
       // the sessions are looked at again: one may have ended while the jobs were listed
       const still = new Set(this.live(owner).map((s) => s.endpoint));
@@ -170,6 +205,7 @@ export class PushWatch {
       }
       await Promise.all(sends.map((s) => this.sendTo(s, ends)));
     } catch (e) {
+      this.busy = true; // not looked at: try again
       if (!this.stopping.signal.aborted) this.logOnce(`owner:${owner}`, `push: job watch for an account failed: ${String((e as Error)?.message ?? e).split("\n")[0]}`);
     }
   }
@@ -183,7 +219,10 @@ export class PushWatch {
       if (store.claim(k)) keys.set(k, j);
     }
     if (!keys.size) return;
-    const giveBack = () => keys.forEach((_, k) => store.unclaim(k));
+    const giveBack = () => {
+      this.busy = true; // a send that failed is tried again at the next pass
+      keys.forEach((_, k) => store.unclaim(k));
+    };
     const host = new URL(s.endpoint).host;
     try {
       const status = await (this.d.send ?? sendPush)({

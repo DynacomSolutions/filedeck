@@ -136,21 +136,32 @@ test("the du CLI whose job was forgotten while it was away asks for the scan aga
   const err: string[] = [];
   const out: string[] = [];
   let sleeps = 0;
+  let released = false;
+  let away = false;
   const io: RunIo = {
-    fetch: (async (u: string) => a.app.request(String(u).replace("https://hub.example/api/nodes/t", ""))) as never,
-    out: (s) => out.push(s),
-    err: (s) => err.push(s),
-    sleep: async () => {
-      sleeps++;
-      if (sleeps === 1) {
-        // the client is away until its queued job has been forgotten (the grace period passed and the agent dropped it), however long a loaded host takes for that
+    // The first job request comes after the client was away until its queued job was forgotten (the grace period passed and the agent dropped it,
+    // however long a loaded host takes for that). A client that waits on a long poll keeps its job alive, so the test cannot just wait on one.
+    fetch: (async (u: string) => {
+      if (String(u).includes("/jobs/") && !away) {
+        away = true;
         for (let i = 0; i < 3000; i++) {
           const list = (await (await a.app.request("/api/jobs")).json()) as { jobs: { kind?: string; state: string }[] };
           if (!list.jobs.some((j) => j.state === "queued" || j.state === "running")) break;
           await sleep(20);
         }
-      } else if (sleeps === 2) await holder.close(); // then the other process leaves and the scan can run
-      else await sleep(20);
+      }
+      const r = await a.app.request(String(u).replace("https://hub.example/api/nodes/t", ""));
+      if (String(u).includes("/jobs/") && r.status === 404 && !released) {
+        released = true;
+        await holder.close(); // then the other process leaves and the scan can run
+      }
+      return r;
+    }) as never,
+    out: (s) => out.push(s),
+    err: (s) => err.push(s),
+    sleep: async () => {
+      sleeps++;
+      await sleep(20);
     },
     now: Date.now,
   };

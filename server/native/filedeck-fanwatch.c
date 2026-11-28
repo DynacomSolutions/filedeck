@@ -23,6 +23,7 @@
  *   #stats K=V ...        counters (events, hits, misses, opens, unresolved), printed every few seconds while events flow and before a #sync answer
  *   c PATH                PATH could not be watched (aliases of an already watched filesystem are not reported)
  *   !overflow             the kernel dropped events: everything watched must be rescanned
+ *   #mounts               the mount table changed (poll on the mountinfo file reported it): the caller reads the mounts again
  *   #sync                 answer to a line on stdin: every event the kernel had queued by then has been printed above
  * Without FAN_RENAME (kernel before 5.17) a move is reported as D (old place) and C (new place).
  * Messages go to stderr. Exit status: 0 stdout closed, 1 usage or runtime error, 2 not permitted
@@ -186,6 +187,11 @@ static long long now_ms(void) {
 
 static unsigned long long n_events, n_hits, n_misses, n_opens, n_unresolved;
 static unsigned long long stats_sent[5];
+
+static int stats_pending(void) {
+	unsigned long long cur[5] = {n_events, n_hits, n_misses, n_opens, n_unresolved};
+	return memcmp(cur, stats_sent, sizeof cur) != 0;
+}
 
 static void stats_emit(void) {
 	unsigned long long cur[5] = {n_events, n_hits, n_misses, n_opens, n_unresolved};
@@ -896,18 +902,33 @@ int main(int argc, char **argv) {
 	if (env && *env) cache_n = (size_t)strtoul(env, NULL, 10);
 	if (cache_n > 4u * 1024 * 1024) cache_n = 4u * 1024 * 1024;
 	cache_init(cache_n);
-	emitf("#caps rename=%d target=%d unlimited=%d cache=%zu\n", caps_rename, caps_target, caps_unlimited, cache_sets * WAYS);
+	/* a mount change wakes the poll below (POLLPRI and POLLERR on the mount table file): no timer asks for it */
+	const char *mpath = getenv("FILEDECK_FANWATCH_MOUNTINFO");
+	int mfd = open(mpath && *mpath ? mpath : "/proc/self/mountinfo", O_RDONLY | O_CLOEXEC);
+	if (mfd < 0) fprintf(stderr, "filedeck-fanwatch: cannot watch the mount table (%s): mount changes are not reported\n", strerror(errno));
+	emitf("#caps rename=%d target=%d unlimited=%d cache=%zu mounts=%d\n", caps_rename, caps_target, caps_unlimited, cache_sets * WAYS, mfd >= 0);
 	emitf("#ready %d\n", nfs);
 	out_flush();
 
 	static char buf[256 * 1024] __attribute__((aligned(8)));
-	struct pollfd pfd[2] = {{.fd = fan, .events = POLLIN}, {.fd = 0, .events = POLLIN}};
+	struct pollfd pfd[3] = {{.fd = fan, .events = POLLIN}, {.fd = 0, .events = POLLIN}, {.fd = mfd, .events = POLLPRI}};
 	long long last_stats = now_ms();
 	for (;;) {
-		int r = poll(pfd, 2, npend ? PEND_POLL_MS : STATS_MS);
+		/* nothing pending and no counters to report: sleep until a descriptor has news */
+		int wait = -1;
+		if (npend) wait = PEND_POLL_MS;
+		else if (stats_pending()) {
+			long long left = last_stats + STATS_MS - now_ms();
+			wait = left > 0 ? (int)left : 0;
+		}
+		int r = poll(pfd, 3, wait);
 		if (r < 0) {
 			if (errno == EINTR) continue;
 			return fail(1, "poll failed", strerror(errno));
+		}
+		if (pfd[2].fd >= 0 && (pfd[2].revents & (POLLPRI | POLLERR))) {
+			out("#mounts\n", 8);
+			out_flush();
 		}
 		int want_sync = 0;
 		if (pfd[1].fd >= 0 && (pfd[1].revents & (POLLIN | POLLHUP | POLLERR))) {
