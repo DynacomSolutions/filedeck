@@ -265,6 +265,11 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
         sink: auditSink ?? ((l: string) => console.log(l)),
       }
     : undefined;
+  // a call that changes something may start or end a job: the push watch looks at the jobs soon (it has no timer of its own while none runs)
+  app.use("/api/*", async (c, next) => {
+    await next();
+    if (c.req.method !== "GET" && c.req.method !== "HEAD" && c.req.method !== "OPTIONS") push?.watch.poke();
+  });
   app.use("*", apiTokenAuth(cfg.apiToken, auth ? () => tokenIdentity(cfg, auth.accounts) : undefined, cfg.apiScopes, k8s));
   // System sign-in asks the agents in the sign-in order (auth/system.ts). Each call carries the agent token and nothing else of the
   // request: no user (nobody is signed in yet), no cookie, no client header; the body is built here.
