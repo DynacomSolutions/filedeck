@@ -40,6 +40,27 @@ filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached] [--json
 
 - `FILEDECK_URL`: base URL of the filedeck server.
 - `FILEDECK_TOKEN`: read-only token. It can call only the du API (sizes), nothing else.
+- In a Kubernetes pod (`KUBERNETES_SERVICE_HOST` set) both are optional. The URL defaults to
+  `http://filedeck.dynacom.svc`. The token is read from `/var/run/secrets/filedeck/token` (a projected ServiceAccount
+  token, audience `filedeck`) on each call. `FILEDECK_SA_TOKEN_FILE` changes the path. The pod needs this, and its
+  ServiceAccount must be in the hub's `k8sAuth.allow`:
+
+```yaml
+spec:
+  serviceAccountName: my-agent        # must be allowed in the chart value k8sAuth.allow
+  containers:
+    - name: main
+      volumeMounts:
+        - {name: filedeck, mountPath: /var/run/secrets/filedeck, readOnly: true}
+  volumes:
+    - name: filedeck
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: filedeck
+              expirationSeconds: 3600
+              path: token
+```
 
 ## Behaviour
 

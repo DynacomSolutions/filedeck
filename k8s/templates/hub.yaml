@@ -2,6 +2,8 @@
 {{- $ts := .Values.auth.tailscale }}
 {{- $sc := $ts.sidecar }}
 {{- $tsOn := and .Values.auth.enabled (or $sc.enabled $ts.headers $ts.socket) }}
+{{- $k8sAuth := .Values.k8sAuth }}
+{{- $k8sOn := gt (len $k8sAuth.allow) 0 }}
 {{- $withSecrets := false }}
 {{- range .Values.sources }}{{ if .secretRef }}{{ $withSecrets = true }}{{ end }}{{ end }}
 {{- $metricsPort := int .Values.hub.metricsPort }}
@@ -45,6 +47,8 @@ spec:
       automountServiceAccountToken: false
       {{- if and $sc.enabled $sc.stateSecret }}
       serviceAccountName: {{ include "filedeck.name" . }}-hub-tailscale
+      {{- else if $k8sOn }}
+      serviceAccountName: {{ include "filedeck.name" . }}-hub
       {{- end }}
       nodeSelector:
         {{- toYaml .Values.hub.nodeSelector | nindent 8 }}
@@ -162,6 +166,13 @@ spec:
             - name: FILEDECK_API_TOKEN_SCOPES
               value: {{ join "," .Values.apiToken.scopes | quote }}
             {{- end }}
+            {{- if $k8sOn }}
+            # Pods that mount a projected ServiceAccount token (audience below) may read folder sizes without a shared secret.
+            - name: FILEDECK_K8S_ALLOW
+              value: {{ join "," $k8sAuth.allow | quote }}
+            - name: FILEDECK_K8S_AUDIENCE
+              value: {{ $k8sAuth.audience | quote }}
+            {{- end }}
             # Saved-password vault: the AES key comes from a Secret created out of band (never in Git); the sqlite file
             # lives on its own small volume, not in user data. A missing Secret leaves the vault memory-only.
             - name: FILEDECK_VAULT_FILE
@@ -238,6 +249,11 @@ spec:
             {{- if .Values.groups }}
             - name: storage-groups
               mountPath: /etc/filedeck/groups
+              readOnly: true
+            {{- end }}
+            {{- if $k8sOn }}
+            - name: k8s-api
+              mountPath: /var/run/secrets/filedeck-k8s
               readOnly: true
             {{- end }}
             - name: vault
@@ -367,6 +383,19 @@ spec:
                   items:
                     - {path: namespace, fieldRef: {fieldPath: metadata.namespace}}
         {{- end }}
+        {{- end }}
+        {{- if $k8sOn }}
+        # The hub's own token and the cluster CA, only to call the TokenReview API for pod tokens (k8sAuth).
+        - name: k8s-api
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: ca.crt}]
         {{- end }}
         - name: vault
           persistentVolumeClaim:

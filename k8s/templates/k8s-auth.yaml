@@ -1,0 +1,44 @@
+{{- if gt (len .Values.k8sAuth.allow) 0 }}
+{{- $sc := .Values.auth.tailscale.sidecar }}
+{{- $tsSa := and $sc.enabled $sc.stateSecret }}
+{{- $hubSa := ternary (printf "%s-hub-tailscale" (include "filedeck.name" .)) (printf "%s-hub" (include "filedeck.name" .)) (and $tsSa true) }}
+{{- if not $tsSa }}
+---
+# The account of the hub pod. It mounts no token by default; the hub gets one projected volume to call TokenReview.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hubSa }}
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+automountServiceAccountToken: false
+{{- end }}
+---
+# The only cluster permission the hub needs for pod sign-in: create TokenReviews.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "filedeck.name" . }}-hub-tokenreview
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "filedeck.name" . }}-hub-tokenreview-{{ .Release.Namespace }}
+  labels:
+    {{- include "filedeck.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "filedeck.name" . }}-hub-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: {{ $hubSa }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -73,3 +73,13 @@ if helm template t k8s -s templates/hub.yaml --set port=9091 >/dev/null 2>&1; th
 fi
 
 echo "chart render check passed"
+
+# Pod sign-in (k8sAuth): off by default, no RBAC; on, the hub reads the allowlist and may only create TokenReviews.
+off=$(helm template t k8s)
+case "$off" in *tokenreviews*|*FILEDECK_K8S_ALLOW*) echo "k8sAuth must render nothing by default" >&2; exit 1 ;; esac
+pod=$(helm template t k8s --set-string 'k8sAuth.allow[0]=agents/*' --set-string 'k8sAuth.allow[1]=dynacom/scanner')
+test "$(printf '%s\n' "$pod" | awk '/name: FILEDECK_K8S_ALLOW/{getline; print $2}')" = '"agents/*,dynacom/scanner"'
+test "$(printf '%s\n' "$pod" | awk '/name: FILEDECK_K8S_AUDIENCE/{getline; print $2}')" = '"filedeck"'
+test "$(printf '%s\n' "$pod" | awk '/resources: \["tokenreviews"\]/{getline; print $2}')" = '["create"]'
+printf '%s\n' "$pod" | awk '/serviceAccountName: filedeck-hub$/{found=1} END {exit !found}'
+printf '%s\n' "$pod" | awk '/kind: ClusterRoleBinding/{b=1} b && /name: filedeck-hub$/{found=1} END {exit !found}'

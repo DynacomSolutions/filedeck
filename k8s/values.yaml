@@ -114,6 +114,14 @@ apiToken:
   # With sign-in on, the token acts as the account named in `auth.apiTokenAccount`, and the change stream also needs that account to be an administrator.
   scopes: ["du"]
 
+# Pod sign-in for `filedeck du`: a pod that mounts a projected ServiceAccount token with this audience needs no shared secret.
+# The hub checks the token with the TokenReview API and lets only the listed ServiceAccounts read folder sizes (the `du` scope, nothing else).
+# Each entry is `namespace/name` or `namespace/*` (a whole namespace). Empty = off, and the chart adds no RBAC.
+k8sAuth:
+  allow: []
+  # for example: allow: ["agents/*", "dynacom/storage-scanner"]
+  audience: filedeck
+
 # Saved-password vault (hub). Encrypted archive and PDF passwords that someone typed are kept server-side,
 # AES-256-GCM encrypted in a small sqlite file on `storage`; the key is derived from the Secret below, which is
 # generated in-cluster and never lives in Git: the pre-install/pre-upgrade hook Job (templates/vault-key-job.yaml) creates
