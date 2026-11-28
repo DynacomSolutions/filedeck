@@ -45,13 +45,33 @@ struct inode;
 struct super_block;
 struct vfsmount;
 struct seq_file;
+struct socket;
+struct msghdr;
+struct renamedata;
+struct scm_fp_list;
+
+/* what `__scm_send` fills for a message with descriptors in it */
+struct scm_cookie {
+	struct scm_fp_list *fp;
+};
 
 struct path {
 	struct vfsmount *mnt;
 	struct dentry *dentry;
 };
+struct qstr {
+	union {
+		struct {
+			u32 hash;
+			u32 len;
+		};
+		u64 hash_len;
+	};
+	const unsigned char *name;
+};
 struct dentry {
 	struct dentry *d_parent;
+	struct qstr d_name;
 	struct inode *d_inode;
 	struct super_block *d_sb;
 };
@@ -132,6 +152,8 @@ struct pt_regs {
 #if defined(__TARGET_ARCH_x86)
 	unsigned long di;
 	unsigned long si;
+	unsigned long bx; /* the arguments of a 32-bit call (__ia32_sys_*) */
+	unsigned long cx;
 #elif defined(__TARGET_ARCH_arm64)
 	u64 regs[31];
 #endif

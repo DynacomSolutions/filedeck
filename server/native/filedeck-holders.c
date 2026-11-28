@@ -11,11 +11,15 @@
  *   snap PID      read the facts of one process again with the iterators. The answer is the records SNAPBEG, SFD/SCWD/SROOT/SEXE/SMMAP..., SNAPEND for that pid
  *                 on stdout. The agent asks for this when events of a pid may have been lost.
  *   seed          read every process again (the agent asks for this when events of unknown pids were lost). The answer ends with SEEDEND.
+ *   sync N        a barrier. The helper copies every record that the ring holds, reads the `dirty` map and the skipped program runs (recursion_misses),
+ *                 writes the DIRTY records that they give, and then writes one SYNC record with aux = N. A process that made an event before the agent
+ *                 sent `sync` has its record, or a DIRTY record, before the SYNC record. The agent answers a question only after that reply.
  * A closed stdin ends the helper.
  *
  * Lost events. When the ring is full the program puts the pid in the `dirty` map and counts a drop. After each batch this loader reads that map, empties
- * it and writes a DIRTY record per pid (pid 0 = events of unknown pids were lost: all of them). The same record is written when the kernel skipped a
- * program run because the same program was already running on that CPU (recursion_misses of the program, read at most once a second).
+ * it and writes a DIRTY record per pid (pid 0 = events of unknown pids were lost: all of them; the programs put pid 0 there when a FORK or MOVED record
+ * is lost). The same record is written when the kernel skipped a program run because the same program was already running on that CPU
+ * (recursion_misses of the programs, read after a batch when the ring dropped something, and at every `sync`).
  *
  * Output: records only (see filedeck-holders.h). A start failure is one line {"ok":false,"error":"..."} instead, and exit status 3 (not supported or not
  * permitted). Needs: Linux 5.14 or newer with BTF (iterators and fentry), CAP_BPF and CAP_PERFMON (or CAP_SYS_ADMIN), and the host pid namespace (the pids
@@ -29,6 +33,7 @@
  */
 #define _GNU_SOURCE
 #include <bpf/bpf.h>
+#include <bpf/btf.h>
 #include <bpf/libbpf.h>
 #include <dirent.h>
 #include <errno.h>
@@ -153,8 +158,9 @@ static int lib_print(enum libbpf_print_level level, const char *fmt, va_list ap)
 	return 0;
 }
 
-/* Programs that the agent can run without: the table then says that it is not complete (HELLO.aux bit). */
-static const char *const SOFT[] = {"h_dup3", "h_dup2", "h_rename", "h_chroot_fs_refs"};
+/* Programs that the agent can run without: the table then says that it is not complete (HELLO.aux bit). The order is the order of the bits, and of
+ * SOFT_HOOKS in server/src/holders.ts. The two 32-bit calls are not loaded (and not counted) where the kernel has no 32-bit emulation. */
+static const char *const SOFT[] = {"h_dup3", "h_dup2", "h_rename", "h_chroot_fs_refs", "h_replace_fd", "h_scm_send", "h_ia32_dup3", "h_ia32_dup2"};
 #define NSOFT (sizeof SOFT / sizeof *SOFT)
 static const char *const ITERS[] = {"snap_files", "snap_vmas", "snap_tasks"};
 #define NITER 3
@@ -171,6 +177,17 @@ struct tracer {
 	size_t ring_bytes;
 	int ncpu;
 };
+
+static unsigned absent_soft; /* bit i = SOFT[i] has no function in this kernel: it is not needed */
+
+/* Does the kernel have this function (in its BTF)? Where that cannot be told, yes. */
+static int kernel_has_func(const char *name) {
+	struct btf *b = btf__load_vmlinux_btf();
+	if (!b) return 1;
+	int id = btf__find_by_name_kind(b, name, BTF_KIND_FUNC);
+	btf__free(b);
+	return id >= 0 || id == -EINVAL;
+}
 
 static int is_soft(const char *name) {
 	for (size_t i = 0; i < NSOFT; i++)
@@ -194,7 +211,7 @@ static int try_load(struct tracer *t, unsigned off) {
 	struct bpf_program *p;
 	bpf_object__for_each_program(p, obj) {
 		int s = is_soft(bpf_program__name(p));
-		if (s >= 0 && (off >> s & 1)) bpf_program__set_autoload(p, false);
+		if (s >= 0 && ((off | absent_soft) >> s & 1)) bpf_program__set_autoload(p, false);
 	}
 	int e = bpf_object__load(obj);
 	if (e) {
@@ -239,7 +256,7 @@ static int tracer_open(struct tracer *t, char *err, size_t errlen) {
 	int first = 1;
 	for (int off_count = 0; off_count <= (int)NSOFT; off_count++) {
 		for (unsigned off = 0; off < (1u << NSOFT); off++) {
-			if (__builtin_popcount(off) != off_count) continue;
+			if (__builtin_popcount(off) != off_count || (off & absent_soft)) continue;
 			int e = try_load(t, off);
 			if (!e) return 0;
 			if (first) snprintf(err, errlen, "cannot load the BPF programs: %s%s%s", strerror(e < 0 ? -e : e), lib_msg[0] ? ": " : "", lib_msg);
@@ -332,7 +349,7 @@ static void seed(struct tracer *t) {
 
 /* ---- counters, dirty pids ---- */
 
-static uint64_t last_events, last_drops, last_lost, last_misses;
+static uint64_t last_events, last_drops, last_lost, last_cut, last_misses;
 static struct timespec last_stats;
 
 static uint64_t prog_misses(struct tracer *t) {
@@ -351,12 +368,17 @@ static void emit_stats(struct tracer *t, uint64_t events, uint64_t drops) {
 	put_simple(HT_STATS, 0, 0, 0, 0, chain, 3, NULL);
 }
 
-/* After a batch: writes the dirty pids, and the counters when they changed (the events at most once a second). */
-static void housekeeping(struct tracer *t) {
+/*
+ * Writes the dirty pids, and the counters when they changed. After a batch (`force` = 0) the map is read only when a counter says that something was
+ * put in it, and the skipped program runs once a second. At a `sync` (`force` = 1) both are read every time: the answer to a question may not wait
+ * for the next batch or the next second.
+ */
+static void housekeeping(struct tracer *t, int force) {
 	uint64_t drops = stat_sum(t->stats_fd, HS_DROPS, t->ncpu);
 	uint64_t lost = stat_sum(t->stats_fd, HS_DIRTY_LOST, t->ncpu);
+	uint64_t cut = stat_sum(t->stats_fd, HS_CUT, t->ncpu);
 	int all = 0;
-	if (drops != last_drops || lost != last_lost) {
+	if (force || drops != last_drops || lost != last_lost || cut != last_cut) {
 		uint32_t key, next;
 		int rc = bpf_map_get_next_key(t->dirty_fd, NULL, &next);
 		while (!rc) {
@@ -369,7 +391,7 @@ static void housekeeping(struct tracer *t) {
 	}
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
-	int due = (now.tv_sec - last_stats.tv_sec) >= 1 || drops != last_drops;
+	int due = force || (now.tv_sec - last_stats.tv_sec) >= 1 || drops != last_drops;
 	if (due) {
 		uint64_t events = stat_sum(t->stats_fd, HS_EVENTS, t->ncpu);
 		uint64_t misses = prog_misses(t);
@@ -382,6 +404,7 @@ static void housekeeping(struct tracer *t) {
 	if (all) put_simple(HT_DIRTY, 0, 0, 0, 0, NULL, 0, NULL);
 	last_drops = drops;
 	last_lost = lost;
+	last_cut = cut;
 	flush_out();
 }
 
@@ -391,6 +414,15 @@ static volatile sig_atomic_t stop;
 static void on_signal(int s) {
 	(void)s;
 	stop = 1;
+}
+
+/* every record that the kernel had made before this command is in the output now, the lost ones as DIRTY records; then the reply */
+static void sync_barrier(struct tracer *t, uint32_t n) {
+	drain();
+	housekeeping(t, 1);
+	drain();
+	put_simple(HT_SYNC, 0, n, 0, 0, NULL, 0, NULL);
+	flush_out();
 }
 
 static char cmd_buf[256];
@@ -409,6 +441,7 @@ static int handle_stdin(struct tracer *t) {
 		char *end;
 		if (!strcmp(start, "seed")) seed(t);
 		else if (!strncmp(start, "snap ", 5) && (pid = strtoul(start + 5, &end, 10)) > 0 && !*end) snapshot(t, (uint32_t)pid, (uint32_t)pid);
+		else if (!strncmp(start, "sync ", 5) && (pid = strtoul(start + 5, &end, 10)) > 0 && !*end) sync_barrier(t, (uint32_t)pid);
 		start = nl + 1;
 	}
 	cmd_len = (size_t)(cmd_buf + cmd_len - start);
@@ -462,6 +495,8 @@ int main(int argc, char **argv) {
 	libbpf_set_print(lib_print);
 
 	struct tracer t = {0};
+	for (size_t i = 0; i < NSOFT; i++)
+		if (!strncmp(SOFT[i], "h_ia32_", 7) && !kernel_has_func(strcmp(SOFT[i], "h_ia32_dup3") ? "__ia32_sys_dup2" : "__ia32_sys_dup3")) absent_soft |= 1u << i;
 	t.ring_bytes = (size_t)ring_mb << 20;
 	t.ncpu = libbpf_num_possible_cpus();
 	if (t.ncpu < 1) t.ncpu = 1;
@@ -490,7 +525,7 @@ int main(int argc, char **argv) {
 	clock_gettime(CLOCK_MONOTONIC, &last_stats);
 	flush_out();
 	seed(&t);
-	housekeeping(&t);
+	housekeeping(&t, 0);
 
 	int status = 0;
 	while (!stop && !out_failed) {
@@ -505,7 +540,7 @@ int main(int argc, char **argv) {
 			if (evs[i].data.fd == rb_ep) drain();
 			else if (handle_stdin(&t)) closed = 1;
 		}
-		housekeeping(&t);
+		housekeeping(&t, 0);
 		if (closed) break;
 	}
 	flush_out();
