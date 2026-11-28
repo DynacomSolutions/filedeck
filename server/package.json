@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "build:native": "node scripts/build-native.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test --test-timeout=600000 test/*.test.ts",
+    "test": "node --import tsx --test --test-timeout=600000 test/*.test.ts test/contract/*.test.ts",
     "start": "node dist/main.js"
   },
   "dependencies": {

@@ -128,7 +128,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          (cd server && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SSHD=1 FILEDECK_REQUIRE_APACHE=1 node --import tsx --test --test-timeout=600000 --test-reporter=tap test/*.test.ts) | node scripts/check-test-skips.mjs
+          (cd server && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SSHD=1 FILEDECK_REQUIRE_APACHE=1 node --import tsx --test --test-timeout=600000 --test-reporter=tap test/*.test.ts test/contract/*.test.ts) | node scripts/check-test-skips.mjs
         timeout-minutes: 15
       # The image build runs the whole suite as root (Dockerfile), so run it that way here too; a skip of the fanotify helper test is a failure,
       # and so is a skip of the live host helper tests (this runner has glibc; the image's Alpine build stage does not).
@@ -335,6 +335,31 @@ jobs:
         run: scripts/ci-image-smoke.sh filedeck-ci:test
         timeout-minutes: 5
 
+  contract:
+    # the contract files (server/test/contract) against a TS agent started as a child process on loopback; docs/contract-tests.md
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+        timeout-minutes: 5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+        timeout-minutes: 5
+      - run: npm ci --no-audit --no-fund
+        timeout-minutes: 5
+      - name: Run the contract files against a child-process agent
+        working-directory: server
+        env:
+          FILEDECK_CONTRACT_MODE: spawn
+        run: node --import tsx --test --test-timeout=600000 --test-concurrency=1 test/contract/*.test.ts
+        timeout-minutes: 10
+
   # The Rust agent (agent/). GitHub-hosted runners only: the repository is public.
   rust:
     name: rust (${{ matrix.os }})
@@ -377,7 +402,7 @@ jobs:
 
   aggregate:
     if: always()
-    needs: [changes, server, web, browser, chart, image, rust]
+    needs: [changes, server, contract, web, browser, chart, image, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -387,12 +412,13 @@ jobs:
           set -euo pipefail
           echo "changes=${{ needs.changes.result }}"
           echo "server=${{ needs.server.result }}"
+          echo "contract=${{ needs.contract.result }}"
           echo "web=${{ needs.web.result }}"
           echo "browser=${{ needs.browser.result }}"
           echo "chart=${{ needs.chart.result }}"
           echo "image=${{ needs.image.result }}"
           echo "rust=${{ needs.rust.result }}"
-          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.web.result }}" "${{ needs.browser.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}" "${{ needs.rust.result }}"; do
+          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.contract.result }}" "${{ needs.web.result }}" "${{ needs.browser.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}" "${{ needs.rust.result }}"; do
             if [[ "$result" == failure || "$result" == cancelled ]]; then
               exit 1
             fi

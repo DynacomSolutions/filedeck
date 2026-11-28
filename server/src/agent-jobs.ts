@@ -4,7 +4,7 @@ import type { Config } from "./config.ts";
 import { FsError } from "./fsops.ts";
 import { insideGrants } from "./grant-guard.ts";
 import { cleanVirtual } from "./paths.ts";
-import type { JobView, Jobs } from "./jobs.ts";
+import { jobWait, untilEnded, type JobView, type Jobs } from "./jobs.ts";
 import type { SizeAccess } from "./props.ts";
 import { MAX_CAN_LIST } from "./agent-routes.ts";
 import type { WorkerPool, WorkerSpec } from "./worker-pool.ts";
@@ -124,14 +124,16 @@ export function registerOwnedJobRoutes(
 
   app.get("/api/jobs/:id", async (c) => {
     const id = c.req.param("id");
+    const wait = jobWait(c.req.query("wait"));
+    if (typeof wait === "string") return c.json({ error: wait }, 400);
     const l = local(c, id);
     if (l) {
       if (!l.root && !l.mine && !l.follower) return notFound();
-      jobs.touch(id); // a client polling a CLI du job keeps it alive
-      const v = jobs.get(id) ?? l.v;
+      // a client polling a CLI du job keeps it alive; `?wait=<seconds>` holds the answer until the job has ended (a long poll)
+      const v = (await untilEnded(() => (jobs.touch(id), jobs.get(id)), wait, c.req.raw.signal)) ?? l.v;
       return c.json(l.root ? v : l.mine ? ownView(jobs, l.me, v) : followerView(v));
     }
-    return (await toWorker(c, claimOf(c), path(id), "GET")) ?? notFound();
+    return (await toWorker(c, claimOf(c), path(id) + (wait ? `?wait=${wait}` : ""), "GET")) ?? notFound();
   });
   app.post("/api/jobs/:id/cancel", async (c) => {
     const id = c.req.param("id");
