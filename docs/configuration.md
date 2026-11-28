@@ -45,6 +45,7 @@ Agent settings. See [Change events](change-events.md).
 
 Hub setting:
 
+- `FILEDECK_K8S_ALLOW` (hub): the ServiceAccounts whose projected token may read folder sizes, separated by commas: `namespace/name`, or `namespace/*` for a whole namespace. Empty is off. The hub checks the token with the TokenReview API, using its own token and CA from `/var/run/secrets/filedeck-k8s`. `FILEDECK_K8S_AUDIENCE` is the audience the token must have (default `filedeck`). Chart values: `k8sAuth.allow` and `k8sAuth.audience`. See [`filedeck du`](filedeck-du.md).
 - `FILEDECK_API_TOKEN_SCOPES`: what the token of `FILEDECK_API_TOKEN` may read, separated by commas. `du` is folder sizes and `changes` is the change event stream. The default is `du`. Chart value: `apiToken.scopes`.
 
 [Back to the README](../README.md)

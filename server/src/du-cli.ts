@@ -1,4 +1,5 @@
 /** `filedeck du`: GNU du look-alike on top of the hub's `GET /api/nodes/<node>/api/du` (see props.ts for the 202 + job polling contract). */
+import { hubToken, hubUrl } from "./cli-auth.ts";
 
 export interface DuOptions {
   summarize: boolean;
@@ -29,6 +30,7 @@ export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size]
       --json          print the hub's answer as JSON
       --timeout SECONDS  give up after this long in total (default: 600; 0 follows a live job until it ends)
 environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token)
+            in a pod both are optional: the hub is http://filedeck.dynacom.svc and the token is /var/run/secrets/filedeck/token
 exit status: 0 success, 1 an argument failed, 2 usage or configuration error, 130 interrupted (Ctrl-C)`;
 
 export class UsageError extends Error {}
@@ -199,13 +201,11 @@ export async function run(argv: string[], env: Record<string, string | undefined
     io.err(`filedeck du: ${(e as Error).message}\n${USAGE}\n`);
     return 2;
   }
-  const base = env.FILEDECK_URL?.replace(/\/+$/, "");
-  const token = env.FILEDECK_TOKEN;
-  if (!base || !token) {
-    io.err("filedeck du: set FILEDECK_URL and FILEDECK_TOKEN\n");
+  const base = hubUrl(env);
+  if (!base || !hubToken(env)) {
+    io.err("filedeck du: set FILEDECK_URL and FILEDECK_TOKEN (in a pod: mount the projected token, see the filedeck-du skill)\n");
     return 2;
   }
-  const headers = { "x-filedeck-token": token };
   const deadline = o.timeout === 0 ? Infinity : io.now() + o.timeout * 1000;
   const stopIfAsked = () => {
     if (io.signal?.aborted) throw new Interrupted();
@@ -213,7 +213,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
   const get = async (url: string) => {
     let r: Response;
     try {
-      r = await io.fetch(url, { headers, redirect: "manual", signal: AbortSignal.any([...(io.signal ? [io.signal] : []), ...(deadline === Infinity ? [] : [AbortSignal.timeout(Math.max(1, deadline - io.now()))])]) });
+      r = await io.fetch(url, { headers: { "x-filedeck-token": hubToken(env) ?? "" }, redirect: "manual", signal: AbortSignal.any([...(io.signal ? [io.signal] : []), ...(deadline === Infinity ? [] : [AbortSignal.timeout(Math.max(1, deadline - io.now()))])]) });
     } catch (e) {
       stopIfAsked();
       throw new Transient(`cannot reach ${base}: ${(e as Error).message}`);

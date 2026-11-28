@@ -23,6 +23,25 @@ Environment: `FILEDECK_URL` (hub base URL, for example `https://filedeck.example
 
 Token setup: create a Secret with a long random value (`kubectl create secret generic filedeck-api-token --from-literal=token="$(openssl rand -base64 48)"`) and set `apiToken.secretName: filedeck-api-token` in the chart values; the hub reads it as `FILEDECK_API_TOKEN` (or the file named by `FILEDECK_API_TOKEN_FILE`). The CLI sends the token in the header `X-Filedeck-Token: <token>`; `Authorization` is never read or changed, so an ingress or OIDC login in front of the hub keeps working. A request with a matching `X-Filedeck-Token` may call only `GET /api/nodes/<node>/api/du` and `GET /api/nodes/<node>/api/jobs/<id>` for du jobs; every other route answers 403. If the header is present with any other value (wrong, empty, repeated), or present while the feature is off, the answer is 401. The hub removes the header before it talks to an agent. Requests without the header are handled as before. Unset, the feature is off.
 
+Pods need no secret. With the chart value `k8sAuth.allow` set (for example `["agents/*", "dynacom/storage-scanner"]`: `namespace/name`, or `namespace/*` for a whole namespace), a pod that mounts a projected ServiceAccount token with audience `filedeck` can run `filedeck du` with no environment. In a pod (`KUBERNETES_SERVICE_HOST` set) the CLI uses `http://filedeck.dynacom.svc` when `FILEDECK_URL` is unset, and reads `/var/run/secrets/filedeck/token` (or `FILEDECK_SA_TOKEN_FILE`) when `FILEDECK_TOKEN` is unset. The token goes in the same `X-Filedeck-Token` header. The hub checks it with the Kubernetes TokenReview API (audience `filedeck`), caches the answer by token hash until the token expires (at most 5 minutes), and checks the ServiceAccount against the allowlist: an unknown or expired token answers 401, a ServiceAccount that is not listed answers 403. Such a token may read `du` and its jobs only, never `changes` or `groups`. Each call is written to the audit log with the ServiceAccount. The chart adds a ClusterRole that may only create TokenReviews, bound to the hub account. Pod spec:
+
+```yaml
+spec:
+  serviceAccountName: my-agent        # must be allowed in the chart value k8sAuth.allow
+  containers:
+    - name: main
+      volumeMounts:
+        - {name: filedeck, mountPath: /var/run/secrets/filedeck, readOnly: true}
+  volumes:
+    - name: filedeck
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: filedeck
+              expirationSeconds: 3600
+              path: token
+```
+
 Ingress rule: skip login only when `X-Filedeck-Token` is present; the hub then enforces the token and the du-only scope itself, so a request carrying the header with anything else is refused.
 
 Run it from the image (`filedeck du ...` is on the `PATH`), from a checkout after `npm run build` (`npx filedeck du ...` or `node server/dist/cli.js du ...`), or anywhere with Node 22 and the built `server/dist`.
