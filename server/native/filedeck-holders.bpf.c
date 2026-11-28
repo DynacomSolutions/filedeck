@@ -6,7 +6,7 @@
  * What a process holds, and the hook that sees it begin:
  *   open file descriptor   fentry fd_install(fd, file)       every way a descriptor is made: open, dup, F_DUPFD, SCM_RIGHTS, pidfd_getfd, ...
  *                          fexit  __x64_sys_dup2/dup3        dup2 and dup3 set a descriptor without fd_install (arm64: __arm64_sys_dup3)
- *   descriptor closed      fentry filp_close(file, owner)    close, close_range, exec of a close-on-exec file, exit, and the file that dup2 replaced
+ *   descriptor closed      fentry filp_flush(file, owner)    close, close_range, exec of a close-on-exec file, exit, and the file that dup2 replaced
  *   working/root folder    fentry set_fs_pwd, set_fs_root    chdir, fchdir, chroot (pivot_root also sets fs_struct for other tasks: chroot_fs_refs marks the pid)
  *   executable             fentry begin_new_exec, then tp_btf sched_process_exec
  *   file mapping           fentry security_mmap_file(file)   every mmap of a file, also those of an exec
@@ -245,8 +245,9 @@ int BPF_PROG(h_fd_install, unsigned int fd, struct file *file)
 	return file_event(0, HT_FD, fd, file, true);
 }
 
-SEC("fentry/filp_close")
-int BPF_PROG(h_filp_close, struct file *file, void *owner)
+/* filp_flush, not filp_close: recent kernels (7.2 for sure) make the close system call call filp_flush and fput_close_sync itself, and filp_close (which calls filp_flush) is for the other paths */
+SEC("fentry/filp_flush")
+int BPF_PROG(h_filp_flush, struct file *file, void *owner)
 {
 	/* The owner is the file table that the descriptor is closed in. A task that drops the last reference of another process's table (a reader of
 	 * /proc/<pid>/fd) closes files of that table: those are not its own. At exit the task has no table any more (files is NULL), and the table is its own. */

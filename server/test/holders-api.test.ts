@@ -70,7 +70,7 @@ function make(extra: Partial<ConstructorParameters<typeof Holders>[0]> = {}) {
     const f = new Fake();
     helpers.push(f);
     return f;
-  }, log: () => {}, platform: "linux", ...extra });
+  }, log: () => {}, platform: "linux", untrackedFs: new Map(), ...extra });
   return { h, helpers };
 }
 /** the chain of a file in `tree/sub/deep`: its folders up to the root of the device (the numbers are real, so that the question's stat finds them) */

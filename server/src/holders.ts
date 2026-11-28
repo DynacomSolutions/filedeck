@@ -32,6 +32,8 @@ export interface HoldersOptions {
   /** mappings are read again for a process whose last read is older than this (ms, default 2000) */
   mapsFreshMs?: number;
   platform?: NodeJS.Platform;
+  /** the filesystems that are not tracked, by `statfs` type (default: the list of the kernel side; a test on an overlay folder sets its own) */
+  untrackedFs?: ReadonlyMap<number, string>;
   log?: (s: string) => void;
 }
 
@@ -363,7 +365,7 @@ export class Holders extends EventEmitter {
     if (st.ino >= 1n << 53n) reasons.push("the inode number of the path is too large to compare");
     roots.push({ dev: kernelDev(st.dev), ino: Number(st.ino) });
     const fsType = (await fs.statfs(real).catch(() => undefined))?.type;
-    const untracked = fsType !== undefined ? UNTRACKED_FS.get(Number(fsType)) : undefined;
+    const untracked = fsType !== undefined ? (this.o.untrackedFs ?? UNTRACKED_FS).get(Number(fsType)) : undefined;
     if (untracked) reasons.push(`the filesystem of the path (${untracked}) is not tracked`);
 
     // mounts inside the path hold files of other filesystems that belong to it; overlay layers are held by the kernel
