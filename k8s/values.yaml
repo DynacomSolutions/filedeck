@@ -226,6 +226,12 @@ agent:
   # If the kernel or runtime refuses, the agent logs it once and carries on as without.
   fanotify:
     enabled: false
+  # Disk pressure: which process and cgroup uses a disk. `ebpf` runs the helper filedeck-iotrace, which counts block IO per disk, cgroup and process with
+  # eBPF (no per-event output, no disk writes). Off by default: it adds the BPF and PERFMON capabilities to the agent container (Linux 5.8 or newer with BTF;
+  # the node's cgroup folders must be readable to name a cgroup, see docs/disk-pressure.md). If the kernel or the runtime refuses it, the agent reports
+  # the proc source and carries on.
+  pressure:
+    ebpf: false
   # How the folder-size store follows changes (needs `fanotify.enabled`). The changes of `commitMs` are merged per folder and written and re-read together.
   # Folders named in `exclude` (names, globs or runs like `.git/objects`, at any depth) never write to the size store: their size comes from the scheduled
   # scans. The change event stream and its journal are not affected. An empty `exclude` turns excludes off.
