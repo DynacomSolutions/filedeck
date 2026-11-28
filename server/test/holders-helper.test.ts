@@ -16,8 +16,18 @@ import { Holders, type HoldersAnswer } from "../src/holders.ts";
 const out = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-holders-build-")));
 const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-holders-work-")));
 const children: ChildProcess[] = [];
+/** every child and what it started: each child leads its own process group */
+const killAll = () => {
+  for (const c of children) {
+    try {
+      process.kill(-c.pid!, "SIGKILL");
+    } catch {
+      // gone already
+    }
+  }
+};
 after(() => {
-  for (const c of children) c.kill("SIGKILL");
+  killAll();
   fs.rmSync(out, { recursive: true, force: true });
   fs.rmSync(work, { recursive: true, force: true });
 });
@@ -82,7 +92,7 @@ const until = async (f: () => Promise<boolean>, ms = 15_000, what = "the conditi
   }
 };
 const start = (cmd: string, args: string[], cwd = work): ChildProcess => {
-  const c = spawn(cmd, args, { cwd, stdio: "ignore" });
+  const c = spawn(cmd, args, { cwd, stdio: "ignore", detached: true });
   children.push(c);
   return c;
 };
@@ -137,11 +147,11 @@ test("holders helper: with the privilege, the table sees what processes hold, as
     if (spawnSync("python3", ["--version"]).status === 0) {
       const mp = start("python3", ["-c", `import mmap,time\nf=open(${JSON.stringify(path.join(tree, "sub/deep/file"))},'rb')\nm=mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ)\nf.close()\ntime.sleep(300)\n`]);
       await until(async () => (await kindsOf(mp.pid!)).includes("mmap"), 15_000, "the mapping");
-      mp.kill("SIGKILL");
+      process.kill(-mp.pid!, "SIGKILL");
     }
 
     // a process that ends is forgotten, and then the answer is a proof of no holder
-    for (const c of children) c.kill("SIGKILL");
+    killAll();
     await until(async () => (await holdersOf(h, tree)).holders.length === 0, 20_000, "every holder gone");
     const done = await holdersOf(h, tree);
     assert.equal(done.proven, true, done.reasons.join("; "));
