@@ -1,0 +1,166 @@
+{
+  "tree": "links",
+  "queries": [
+    {
+      "q": "depth=0&fresh=1",
+      "answer": {
+        "path": "/links",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/links",
+            "type": "dir",
+            "bytes": 17,
+            "files": 3,
+            "dirs": 1
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&fresh=1",
+      "answer": {
+        "path": "/links",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/links",
+            "type": "dir",
+            "bytes": 17,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/links/d",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=3&fresh=1",
+      "answer": {
+        "path": "/links",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/links",
+            "type": "dir",
+            "bytes": 17,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/links/d",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=2&all=1&fresh=1",
+      "answer": {
+        "path": "/links",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/links",
+            "type": "dir",
+            "bytes": 17,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/links/a",
+            "type": "file",
+            "bytes": 7,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/links/b",
+            "type": "file",
+            "bytes": 7,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/links/broken",
+            "type": "symlink",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/links/d",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/links/d/f",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/links/dirlink",
+            "type": "symlink",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/links/self",
+            "type": "symlink",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&cachedOnly=1",
+      "answer": {
+        "path": "/links",
+        "cached": true,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/links",
+            "type": "dir",
+            "bytes": 17,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/links/d",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false,
+        "stale": true
+      }
+    }
+  ]
+}
