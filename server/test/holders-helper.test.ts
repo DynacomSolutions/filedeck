@@ -127,9 +127,10 @@ test("holders helper: with the privilege, the table sees what processes hold, as
 
     // an executable that lives in the tree
     const exe = path.join(tree, "sleeper");
-    fs.copyFileSync(fs.realpathSync("/bin/sleep"), exe);
-    fs.chmodSync(exe, 0o755);
-    const ex = start(exe, ["300"], work);
+    // (a program of our own: a copy of /bin/sleep may be a multi-call binary that needs its name)
+    fs.writeFileSync(path.join(work, "sleeper.c"), "#include <unistd.h>\nint main(void){for(;;)pause();}\n");
+    assert.equal(spawnSync("cc", ["-O1", "-o", exe, path.join(work, "sleeper.c")], { encoding: "utf8" }).status, 0, "cc builds the test program");
+    const ex = start(exe, [], work);
     await until(async () => (await kindsOf(ex.pid!)).includes("exe"), 15_000, "the executable");
 
     // a mapping (python is on every runner; the test is skipped without it)

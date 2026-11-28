@@ -27,7 +27,7 @@ test("/metrics reports the size store as available and not damaged", async () =>
     assert.match(t, /^filedeck_watcher_mounts_covered \d+$/m);
     assert.match(t, /^filedeck_watcher_mounts_unsupported \d+$/m);
     assert.match(t, /^filedeck_watcher_mount_aliases \d+$/m);
-    assert.equal(t.split("\n").filter((l) => l && !l.startsWith("#")).length, 54);
+    assert.equal(t.split("\n").filter((l) => l && !l.startsWith("#")).length, 70); // (54 of the size store, the watcher and the events, and 16 of the holder table)
     // a job that waits shows in the gauges
     const jobs = (app as unknown as { jobs: { create(k: string, t: string, run: () => Promise<unknown>, d?: undefined, gate?: () => Promise<void>): unknown } }).jobs;
     jobs.create("du", "t", async () => undefined, undefined, () => new Promise<void>(() => {}));
