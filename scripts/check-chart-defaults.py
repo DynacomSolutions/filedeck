@@ -28,6 +28,7 @@ checks = {
     "the sidecar does not run as the hub's user": "runAsUser: 1001" in sidecar and "runAsUser: 1000" not in sidecar,
     "the sidecar sets the identity listener and Serve points at it": "127.0.0.2" in helpers and "FILEDECK_TAILSCALE_LISTEN" in hub,
     "the default node does not bind to a machine name": '    nodeName: ""' in values,
+    "agent pods carry no tolerations by default": "agent:\n  # Tolerations" in values and "  tolerations: []\n  resources:\n    requests: {cpu: 15m" in values,
 }
 failed = [name for name, ok in checks.items() if not ok]
 if failed:

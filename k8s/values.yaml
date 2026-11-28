@@ -184,6 +184,10 @@ hub:
   allowedHosts: []
 
 agent:
+  # Tolerations of every agent pod (static and managed). Empty by default. A `nodes` entry can set its own `tolerations`,
+  # which replaces this list for that agent. For a tainted node, for example:
+  #   tolerations: [{key: dynacom.dev/reserved, operator: Equal, value: hq, effect: NoSchedule}]
+  tolerations: []
   resources:
     requests: {cpu: 15m, memory: 48Mi}
     limits: {cpu: "1", memory: 512Mi}

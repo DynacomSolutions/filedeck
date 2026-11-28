@@ -14,6 +14,21 @@ test "$node" = "/home/filedeck" || { echo "node index hostPath is $node"; exit 1
 chart=$(helm template t k8s --set agent.indexHostPath=/data/fd | index_path)
 test "$chart" = "/data/fd" || { echo "chart-wide index hostPath is $chart"; exit 1; }
 
+tol_node=(--set 'nodes[0].name=a' --set 'nodes[0].nodeName=hq')
+test "$(helm template t k8s "${tol_node[@]}" | grep -c 'tolerations:' || true)" = 0 || { echo "default agent renders tolerations" >&2; exit 1; }
+pernode=$(helm template t k8s "${tol_node[@]}" -s templates/agents.yaml \
+  --set 'nodes[0].tolerations[0].key=dynacom.dev/reserved' --set 'nodes[0].tolerations[0].operator=Equal' \
+  --set 'nodes[0].tolerations[0].value=hq' --set 'nodes[0].tolerations[0].effect=NoSchedule')
+printf '%s\n' "$pernode" | python3 -c '
+import sys, yaml
+d = next(d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") == "Deployment")
+assert d["spec"]["template"]["spec"]["tolerations"] == [{"key": "dynacom.dev/reserved", "operator": "Equal", "value": "hq", "effect": "NoSchedule"}]
+'
+global=$(helm template t k8s "${tol_node[@]}" --set 'agent.tolerations[0].key=x' --set 'agent.tolerations[0].operator=Exists' --set 'nodes[0].tolerations=null')
+test "$(printf '%s\n' "$global" | grep -c 'key: x')" = 0 || { echo "node tolerations must replace the global list" >&2; exit 1; }
+managedtol=$(helm template t k8s --set managedNodes.enabled=true --set 'agent.tolerations[0].key=x' --set 'agent.tolerations[0].operator=Exists')
+case "$managedtol" in *"key: x"*) ;; *) echo "managed agent must render agent.tolerations" >&2; exit 1 ;; esac
+
 policy=(helm template t k8s -s templates/hub-networkpolicy.yaml --set hub.networkPolicy.enabled=true)
 closed=$("${policy[@]}")
 test "$(printf '%s\n' "$closed" | awk '/ingress:/{if (NF == 1) {getline; print $1} else print $2}')" = '[]'
