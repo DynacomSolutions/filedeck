@@ -18,6 +18,7 @@ jobs:
       chart: ${{ steps.detect.outputs.chart }}
       image: ${{ steps.detect.outputs.image }}
       agent: ${{ steps.detect.outputs.agent }}
+      contract_rust: ${{ steps.detect.outputs.contract_rust }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -34,6 +35,7 @@ jobs:
             echo 'chart=true' >> "$GITHUB_OUTPUT"
             echo 'image=true' >> "$GITHUB_OUTPUT"
             echo 'agent=true' >> "$GITHUB_OUTPUT"
+            echo 'contract_rust=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -42,18 +44,20 @@ jobs:
           chart=false
           image=false
           agent=false
+          contract_rust=false
           while IFS= read -r file; do
             case "$file" in
-              server/test/contract/du-*|server/test/contract/size-*|server/test/rust/*) server=true; image=true; agent=true ;;
+              server/test/contract/du-*|server/test/contract/size-*|server/test/rust/*) server=true; image=true; agent=true; contract_rust=true ;;
+              server/test/contract/*) server=true; image=true; contract_rust=true ;;
               server/src/group-types.ts) server=true; web=true; image=true ;;
               server/*) server=true; image=true ;;
               web/*) web=true; server=true; image=true ;;
               scripts/check-test-skips.mjs) server=true; web=true; chart=true; image=true ;;
-              agent/*) agent=true ;;
+              agent/*) agent=true; contract_rust=true ;;
               scripts/ci-image-smoke.sh) image=true ;;
               k8s/*|scripts/*) chart=true ;;
               package.json|package-lock.json|tsconfig.base.json|Dockerfile|.dockerignore|.github/workflows/*)
-                server=true; web=true; chart=true; image=true; agent=true ;;
+                server=true; web=true; chart=true; image=true; agent=true; contract_rust=true ;;
             esac
           done < <(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
           echo "server=$server" >> "$GITHUB_OUTPUT"
@@ -61,6 +65,7 @@ jobs:
           echo "chart=$chart" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "agent=$agent" >> "$GITHUB_OUTPUT"
+          echo "contract_rust=$contract_rust" >> "$GITHUB_OUTPUT"
 
   server:
     needs: changes
@@ -361,6 +366,50 @@ jobs:
         run: node --import tsx --test --test-timeout=600000 --test-concurrency=1 test/contract/*.test.ts
         timeout-minutes: 10
 
+  contract-rust:
+    # the file route contract files (server/test/contract/fs-*.test.ts) against the Rust agent (agent/, filedeckd) started as a
+    # child process on loopback; docs/contract-tests.md. GitHub-hosted runners only: the repository is public.
+    name: contract-rust (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.contract_rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+        timeout-minutes: 5
+      - name: Install the pinned toolchain
+        working-directory: agent
+        run: rustup toolchain install
+        timeout-minutes: 10
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: agent
+        timeout-minutes: 5
+      - name: Build filedeckd
+        working-directory: agent
+        run: cargo build --locked -p filedeckd
+        timeout-minutes: 10
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+        timeout-minutes: 5
+      - run: npm ci --no-audit --no-fund
+        timeout-minutes: 5
+      - name: Run the file route contract files against filedeckd
+        working-directory: server
+        env:
+          FILEDECK_CONTRACT_MODE: spawn
+          FILEDECK_CONTRACT_SPAWN: ${{ github.workspace }}/agent/target/debug/filedeckd
+        run: node --import tsx --test --test-timeout=600000 --test-concurrency=1 test/contract/fs-*.test.ts
+        timeout-minutes: 12
+
   # The Rust agent (agent/). GitHub-hosted runners only: the repository is public.
   rust:
     name: rust (${{ matrix.os }})
@@ -430,7 +479,7 @@ jobs:
 
   aggregate:
     if: always()
-    needs: [changes, server, contract, web, browser, chart, image, rust]
+    needs: [changes, server, contract, contract-rust, web, browser, chart, image, rust]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -445,8 +494,9 @@ jobs:
           echo "browser=${{ needs.browser.result }}"
           echo "chart=${{ needs.chart.result }}"
           echo "image=${{ needs.image.result }}"
+          echo "contract-rust=${{ needs.contract-rust.result }}"
           echo "rust=${{ needs.rust.result }}"
-          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.contract.result }}" "${{ needs.web.result }}" "${{ needs.browser.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}" "${{ needs.rust.result }}"; do
+          for result in "${{ needs.changes.result }}" "${{ needs.server.result }}" "${{ needs.contract.result }}" "${{ needs.contract-rust.result }}" "${{ needs.web.result }}" "${{ needs.browser.result }}" "${{ needs.chart.result }}" "${{ needs.image.result }}" "${{ needs.rust.result }}"; do
             if [[ "$result" == failure || "$result" == cancelled ]]; then
               exit 1
             fi

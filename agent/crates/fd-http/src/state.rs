@@ -33,6 +33,9 @@ pub(crate) struct Inner {
     pub node: String,
     pub root: String,
     pub read_only: Vec<String>,
+    pub fs_root: fd_fs::Root,
+    pub max_edit: u64,
+    pub mounts: fd_fs::MountSource,
     pub token_digest: [u8; 32],
     pub build: BuildInfo,
     pub started_at: u64,
@@ -65,6 +68,11 @@ impl AppState {
                 root: config.root.clone(),
                 // This release has no write route at all, so the whole tree is read only.
                 read_only: vec!["/".to_owned()],
+                fs_root: fd_fs::Root::new(&config.root),
+                max_edit: config.max_edit,
+                mounts: fd_fs::MountSource {
+                    table: config.proc_mounts.clone(),
+                },
                 token_digest: Sha256::digest(config.token.expose().as_bytes()).into(),
                 build: BuildInfo::current(),
                 started_at,

@@ -1,7 +1,7 @@
 # FileDeck agent (Rust)
 
 `filedeckd` is the Rust agent of FileDeck. It replaces the TypeScript agent step by step, Mac first.
-It has the server skeleton (bearer authentication, `/healthz`, `/metrics`, `/api/info`) and the folder sizes: `du`, size jobs and the job list.
+The agent has bearer authentication, `/healthz`, `/metrics`, `/api/info`, the read only file routes (mounts, list, stat, read, download, text) and the folder sizes: `du`, size jobs and the job list.
 There is no change watcher yet, so a `du` that the stored rows cannot answer is answered by a job.
 The web app and the hub do not change.
 
@@ -10,8 +10,9 @@ The web app and the hub do not change.
 | Crate | What it holds |
 |---|---|
 | `crates/fd-core` | configuration, start-up errors, the agent token and its file checks, build facts |
+| `crates/fd-fs` | confined file access: path resolution under the root, list, stat, ranges, text, mounts |
 | `crates/fd-store` | the folder size store (SQLite), the walker and the `du` tree. Synchronous: the HTTP side runs it on blocking threads |
-| `crates/fd-http` | the axum router, bearer authentication, `/healthz`, `/metrics`, `/api/info`, `du`, the size jobs and the job queue |
+| `crates/fd-http` | the axum router, bearer authentication, `/healthz`, `/metrics`, `/api/info`, the file routes, `du`, the size jobs and the job queue |
 | `crates/filedeckd` | the binary: config load, listener, signal handling |
 
 `tests/golden/` holds answers of the TypeScript agent that the Rust tests compare against.
@@ -65,6 +66,8 @@ The file is TOML, named by `--config <file>` or `FILEDECK_CONFIG`. Its keys are 
 | `FILEDECK_JOB_CONCURRENCY` | `job_concurrency` | `2` | jobs that run at once (a scan that runs for 30 s stops counting, so a small one can start) |
 | `FILEDECK_DU_ABANDON_MS` | `du_abandon_ms` | `120000` | a queued `du` job that no client asked about for this long is forgotten; `0` = never |
 | `FILEDECK_READONLY` | `read_only` | none | comma separated absolute prefixes, checked at start |
+| `FILEDECK_PROC_MOUNTS` | `proc_mounts` | system table | a mount table in `/proc/mounts` format, read instead of the system's own |
+| `FILEDECK_MAX_EDIT` | `max_edit` | `5242880` | the largest file `/api/fs/text` returns, in bytes |
 | `FILEDECK_AGENT_TOKEN_FILE` | `agent_token_file` | none | see below |
 | `FILEDECK_AGENT_TOKEN` | | none | the token itself; prefer the file |
 | `FILEDECK_AUTH` | | off | `on` is refused: sign-in is not ported |
@@ -81,12 +84,23 @@ permission bits (mode 0600 or 0400). The agent refuses to start otherwise, and n
 | `GET /healthz` | open | `ok`; `?ready=1` gives 503 before start and after SIGTERM |
 | `GET /metrics` | open | Prometheus text 0.0.4: `filedeck_agent_build_info`, `filedeck_agent_start_timestamp_seconds` |
 | `GET /api/info` | bearer | `{node, root, watches, readOnly, sandbox}`, as the TypeScript agent |
+| `GET /api/mounts` | bearer | `{mounts: [...]}`: device, mount point, type, sizes, network kind. Every mount is `readOnly`. |
+| `GET /api/fs/list` | bearer | `{path, entries, truncated}`; `stream=1` gives NDJSON batches. Folders first, natural order, at most 20000 entries. |
+| `GET /api/fs/stat` | bearer | one entry; a final link is not followed |
+| `GET,HEAD /api/fs/read`, `/api/fs/download` | bearer | file bytes with `Range`, `Last-Modified` and a sandbox CSP |
+| `GET /api/fs/text` | bearer | `{path, content, size, mtime, etag}`; 413 over `FILEDECK_MAX_EDIT`, 415 for a binary file |
+| routes that change files | bearer | 403 `{"error":"this agent is read-only"}` |
 | `GET /api/du` | bearer | `path`, `depth` (0 to 64), `all`, `fresh`, `cachedOnly`, `refresh=auto`: the folder sizes (see below) |
 | `POST /api/jobs/size` | bearer | `{path, fresh?}`: a size job, 202 and the job view |
 | `GET /api/jobs` | bearer | `{jobs: [...]}`, newest first |
 | `GET /api/jobs/:id` | bearer | the job view; `?wait=<0 to 30>` holds the answer until the job has ended |
 | `POST /api/jobs/:id/cancel`, `DELETE /api/jobs/:id` | bearer | cancel; forget a finished job |
 | anything else | bearer | 404 `{"error":"not found"}` |
+
+Paths follow the TypeScript agent: `..` is refused (400), an absolute link is re-based on the root, a link that climbs above
+the root is clamped, and the agent's own names (`.filedeck-trash`, `.filedeck-work`, `.filedeck-work-*`) are hidden and refused.
+Each folder on the way is opened with `openat` and `O_NOFOLLOW`, so a swapped folder cannot lead out of the root.
+The mount table is `/proc/mounts` on Linux (or `FILEDECK_PROC_MOUNTS`) and the output of `mount(8)` on macOS.
 
 ## Folder sizes
 

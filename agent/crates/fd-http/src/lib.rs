@@ -3,6 +3,7 @@
 //! The wire protocol is the one of the TypeScript agent, byte for byte where a client can see it.
 
 mod auth;
+mod files;
 mod info;
 mod jobs;
 mod locks;
@@ -44,6 +45,7 @@ pub fn router(state: AppState) -> Router {
             get(size_routes::job_get).delete(size_routes::job_dismiss),
         )
         .route("/api/jobs/{id}/cancel", post(size_routes::job_cancel))
+        .merge(files::routes())
         .fallback(not_found)
         .layer(from_fn_with_state(state.clone(), auth::require_bearer))
         .with_state(state)
