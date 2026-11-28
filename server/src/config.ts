@@ -48,6 +48,10 @@ export interface Config {
   trashSweepMs: number;
   /** fanotify helper binary that keeps folder sizes current; empty = off */
   fanwatch: string;
+  /** eBPF helper binary that keeps the table of who holds what (docs/holders.md); empty = off */
+  holders: string;
+  /** the size of its ring buffer, in MiB (a power of two, 1 to 256) */
+  holdersRingMb: number;
   /** `GET /api/du` answers 202 with a job id when its scan takes longer than this */
   duWaitMs: number;
   /** a CLI du job nobody waits on or polls for this long is dropped (0 = never) */
@@ -187,6 +191,16 @@ function readSecret(env: NodeJS.ProcessEnv, name: string): string | undefined {
  */
 export function defaultProcMounts(root: string): string {
   return root === "/" ? "/proc/mounts" : `${root}/proc/1/mounts`;
+}
+
+/** A ring buffer size in MiB: a power of two from 1 to 256 (the kernel needs one), else the default with a warning. */
+function ringSetting(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const v = env[name]?.trim();
+  if (!v) return fallback;
+  const n = Number(v);
+  if (Number.isInteger(n) && n >= 1 && n <= 256 && (n & (n - 1)) === 0) return n;
+  console.error(`${name} must be a power of two from 1 to 256, not "${v.slice(0, 40)}"; using ${fallback}`);
+  return fallback;
 }
 
 /** A setting that must be a whole number of at least 1: unset or empty gives `fallback`, anything else is refused at start-up. */
@@ -332,6 +346,8 @@ export function loadConfig(env = process.env): Config {
     trashMaxBytes: Number(env.FILEDECK_TRASH_MAX_BYTES ?? 0),
     trashSweepMs: Number(env.FILEDECK_TRASH_SWEEP_MS ?? 3_600_000),
     fanwatch: env.FILEDECK_FANWATCH ?? "",
+    holders: mode === "agent" ? (env.FILEDECK_HOLDERS ?? "") : "",
+    holdersRingMb: ringSetting(env, "FILEDECK_HOLDERS_RING_MB", 16),
     duWaitMs: Number(env.FILEDECK_DU_WAIT_MS ?? 10_000),
     duAbandonMs: Number(env.FILEDECK_DU_ABANDON_MS ?? 120_000),
     handoverMs: Number(env.FILEDECK_HANDOVER_MS ?? 6000),
@@ -434,6 +450,7 @@ export function workerConfig(cfg: Config, dirs: { thumbs: string; index: string 
     sourceSecretDir: "",
     jobsFile: "",
     fanwatch: "",
+    holders: "",
     trashSweepMs: 0,
     // the account's own folders: a worker never shares the root process's index or thumbnail cache
     thumbDir: dirs.thumbs,
