@@ -11,6 +11,7 @@ This RFC studies a file sync system built into FileDeck, to replace Syncthing. I
 - Proposal: a new daemon `filedeck-syncd` (Rust, a crate in the agent workspace). It follows the change stream, keeps one shared catalogue of file versions in HoardDB (the Postgres engine), moves content in content-defined chunks (FastCDC) over mTLS, and keeps conflicts as copies.
 - Node-only facts stay in a small local SQLite file: the stat cache, the chunk cache, the transfer spool and the stream cursor. All of it can be rebuilt. The catalogue is shared.
 - Syncthing keeps running during the whole migration. Each folder has exactly one active system. FileDeck sync first runs in shadow mode and proves its result with hash manifests.
+- A new folder type, `drain`, moves files one way from the MacBook to eu3 and eu4 and removes them from the Mac after every target has a durable copy (section 3.11). The MacBook is in release 1.
 - Some folders should not be synced at all (section 5).
 - Measured data is partly missing. Sizes and VictoriaMetrics series were not readable from the design agent's pod (section 2.4). Phase 0 (row 32.219) closes that gap before any build work.
 
@@ -27,7 +28,7 @@ Goals:
 Non-goals for version 1:
 
 - File sharing with people outside the node pool.
-- The MacBook and the seedbox peer (section 8, questions 2 and 3).
+- The seedbox peer (section 8, question 6).
 - Extended attributes, ACLs and owners. Version 1 syncs content, mtime, mode bits, symlinks and empty folders.
 - A GUI. The web app gets a read-only sync view after the engine works.
 
@@ -60,7 +61,7 @@ Paths on eu3 and eu4 are in the legacy tree `/home/storage/<label>` (seen in the
 | Software (`gcfh7-qbzer`) | eu3, eu4 | send-receive | phase 0 | Software copy. Holds a Plex config tree with read errors (chart note). Scan 2 min 17 s |
 | tapo-footage (`tapo-footage`, no label) | eu3, eu4 | send-receive | phase 0 | Camera footage copy |
 | Software (`software-hq0-hq1`) | hq0, hq1 | send-receive | phase 0 | Herdr is the one writer on hq0, hq1 is a standby copy |
-| MacBook Downloads (`macbook-downloads`) | hq0, MacBook | send-receive | 28 files and 16.6 GB were pending on 15 Oct | Mac `~/Downloads` to hq0. The `x` uploader moves finished files on to eu4 |
+| MacBook Downloads (`macbook-downloads`) | hq0, MacBook | send-receive | 28 files and 16.6 GB were pending on 15 Oct | Mac `~/Downloads` to hq0. The `x` uploader moves finished files on to eu4. Becomes a `drain` folder (3.11) |
 | db-backups | none | none | 454 GB | Moved to HoardDB object storage (ADR 0021). Removed from Syncthing on 28 Nov 2026 |
 | Projects (`xsxoe-fqfja`) | none live | none | 21.7 M files in Oct | In the chart (`projectsIgnore`, `folderOverrides`) and README. It is in no node's live log. The chart entries are left over |
 
@@ -195,7 +196,7 @@ Syncthing uses version vectors because it has no central authority. FileDeck syn
 
 - Each node keeps for each path the `base_rev` it last applied. A local change is a new version on top of `base_rev`.
 - The node publishes with compare-and-set: the catalogue accepts it only when the path's `rev` still equals `base_rev`. If it does not, another node wrote first: this is a conflict.
-- On a conflict, both versions are kept. The version with the newer mtime keeps the path (tie: the lower node id). The other version is renamed `name.sync-conflict-<yyyymmdd-hhmmss>-<node>.ext` and published as a new file. This is the Syncthing convention, so people recognise it.
+- On a conflict, both versions are kept (owner decision, 28 Nov 2026). The newer write (newer mtime, tie: the lower node id) keeps the name. The other version becomes a conflict copy next to it, named `name.sync-conflict-<yyyymmdd-hhmmss>-<node>.ext`, and is published as a new file. A change event reports each conflict. This is the Syncthing convention, so people recognise it.
 - Modify against delete: the modify wins. The file returns.
 - Directory against file with the same name: the file is renamed as a conflict copy.
 - Case-insensitive targets (Mac): two paths that differ only by case are a conflict. Names are stored as bytes. A Mac node normalises to NFC on its own side only.
@@ -211,11 +212,13 @@ Each folder and node pair has a role:
 | `send-receive` | Published | Applied |
 | `send-only` | Published | Not applied. Reported as a difference |
 | `receive-only` | Not published. Counted as a local difference | Applied |
+| `drain-source` | Published, then removed from the source after every target confirms (3.11) | Not applied |
+| `drain-target` | Not applicable | Applied into the target's own destination folder (3.11) |
 
 - A receive-only node shows local differences as a number and as a list. An explicit action reverts them (fetch the catalogue version again). Nothing reverts by itself.
 - A folder has a marker file `.filedeck-sync` (like `.stfolder`). If the marker is missing, the folder is paused and an alert fires. This stops the classic loss: a disk that did not mount looks like an empty folder, and the empty folder looks like a mass delete.
-- Applying a remote delete moves the file to the node's `.filedeck-trash` (the FileDeck trash), never `unlink`. Retention is the existing trash limits.
-- Mass-delete guard: a batch that deletes more than 1000 files or 5 percent of a folder is held until someone approves it. It raises an alert and a change event.
+- Applying a remote delete moves the file to the node's `.filedeck-trash` (the FileDeck trash), never `unlink`. The file stays in the trash for 7 days (owner decision, 28 Nov 2026).
+- Mass-delete guard: a batch that deletes more than 1000 files or 5 percent of a folder stops and waits for approval. It raises an alert and a change event.
 - Hard links are separate files. Symlinks sync as symlinks and are never followed. Sockets and devices are skipped.
 - `.stignore`-style rules are per folder in the catalogue, not per device. They use the linear-time glob matcher of the event filter. This removes the per-device `.stignore` copy that the chart's init containers write today.
 - Syncthing files (`.stfolder`, `.stignore`, `.stversions`, `~syncthing~*`, `.syncthing.*.tmp`) are ignored by default during the overlap.
@@ -292,6 +295,42 @@ Probes (owner rule: the client path, never a shortcut):
 - Rollout: `RollingUpdate`, `maxSurge 1`, `maxUnavailable 0`. A Postgres advisory lock `sync_node_<node>` decides which pod is active. The old pod, on SIGTERM, fails readiness, finishes in-flight chunks, releases the lock and exits when drained. The new pod takes the lock. The grace period is only a kill ceiling.
 - The deployment, the Service, the scrape job and the alerts ship in one `.cluster` PR.
 
+### 3.11 Drain folders (MacBook to eu3 and eu4)
+
+Owner decision, 28 Nov 2026. Thomas, quoted: the MacBook "must handle the fix where we auto copy folders over to a different folder on sync as we have a one way sync & drain from the Macbook to EU3/EU4". He wants "a folder where we throw a file into the folder, it uploads, then removes itself from the macbook".
+
+What drain replaces. Today `macbook-downloads` is a two-way Syncthing folder (Mac `~/Downloads` and hq0 `/home/Storage/MacBook-Downloads`). A workaround then moves the files on:
+
+- `syncthing-x-uploader` (`.cluster` `syncthing/templates/x-uploader-configmap.yaml`, an `inotifywait` loop) copies each finished file from the `x` subfolder to eu4 `/home/storage/Videos` with `rsync --remove-source-files` (lines 120 to 121). Values: `syncthing/values.yaml:397-400`. Description: `syncthing/README.md:47-70`.
+- The delete on hq0 syncs back to the Mac, so the file leaves the Mac as a side effect. The file crosses two systems and a pod. A failure leaves no clear state.
+- The destination folder is fixed in the chart (`Videos`). Drain replaces the uploader, the receiver pod and the two-way folder with one folder type.
+
+Design:
+
+- A `drain` folder has one source node (the MacBook) and one or more targets (eu3, eu4). Transfer is one way. The roles are `drain-source` and `drain-target` (3.6).
+- Each target maps the folder to its own destination folder. The map is in the catalogue. Example: Mac `~/Downloads/x` to eu4 `/home/storage/Videos` and to eu3 `/home/storage/Unsorted`. No copy job runs after the sync.
+- A file drains only when it is complete. The source must show no open writer in the holder table. A `close_write` (Linux) or FSEvents close event (Mac) must have arrived. If neither signal exists for the path, a size and mtime check runs when an event arrives, and the file drains only if both are unchanged since the last event. No global timer runs.
+- Each target pulls the file (3.4 and 3.7). It verifies the BLAKE3 tree hash, calls `fsync` on the file, renames it into place, calls `fsync` on the parent folder, and then confirms to the catalogue. The confirmation row holds the root hash.
+- The source removes the file only after every target of the folder has confirmed the same root hash. If the file changed on the Mac meanwhile, the hash differs, the file does not drain, and a new version queues.
+- Removal on the Mac is a move to the Mac's FileDeck trash. The copy stays there for 7 days. It is not an instant delete (the rule of 3.6).
+- Name clash at a target: keep both. The newer write keeps the name and the other becomes a conflict copy (3.5). An event reports it. The drain counts as done when both versions are safe.
+- Target offline: the file stays on the Mac and waits. Queue age is a metric and an alert. No data leaves the Mac without confirmation.
+- Disk full at a target (`enospc`): that target stops, the file stays on the Mac and an alert fires. Other targets finish, but the source waits for all of them.
+- A target added later receives new files only. Files already removed from the Mac do not drain again.
+
+Metrics added to 3.10:
+
+| Metric | Use |
+|---|---|
+| `filedeck_sync_drain_queue_files{folder,target}` | Files waiting to drain |
+| `filedeck_sync_drain_oldest_seconds{folder,target}` | Age of the oldest waiting file |
+| `filedeck_sync_drain_bytes_total{folder,target}` | Bytes drained |
+| `filedeck_sync_drain_failures_total{folder,target,class}` | Failures (`offline`, `enospc`, `hash`, `perm`) |
+
+Alerts: `filedeck-sync-drain-stuck` (oldest item over 3600 s for 10 minutes), `filedeck-sync-drain-target-full` (any `enospc`), `filedeck-sync-drain-failures` (failures rising for 30 minutes).
+
+Dependency: the Mac needs the Rust agent for holder and event data and for the trash. That is rust-agent spec phase 3 (join the pool) and its write phase (trash and move). Until then `macbook-downloads` stays on Syncthing with the `x` uploader.
+
 ## 4. State in HoardDB
 
 ### 4.1 Is it sound?
@@ -343,8 +382,9 @@ Costs to watch:
 | Build and cache trees (`node_modules`, `target`, `cargo-target`, `.git/objects`) | Never synced. Same list as `FILEDECK_SIZE_EXCLUDE` |
 | Projects (21.7 M files) | Not synced (not in the live config). Code lives in git. Do not bring it back to Syncthing or to FileDeck sync |
 | tapo-footage | Write-once, time-limited footage. Better as object storage with a retention rule. Until then a one-way copy (send-only from the writer node) |
-| Installed Games, Games Library | Re-downloadable installs and caches. Owner to confirm purpose (question 5). If they are a cache, drop them |
-| Downloads, Thomas' Downloads, MacBook Downloads, the `x` upload path | Staging. Keep as sync for now. The `x-uploader` and its rsync receiver do the same job as sync with a delete step. A `move` policy can replace them later |
+| Installed Games, Games Library | Keep syncing, send-receive (owner decision, 28 Nov 2026) |
+| Downloads, Thomas' Downloads | Staging. Keep as sync |
+| MacBook Downloads, the `x` upload path | Becomes a `drain` folder (3.11). The `x-uploader` and its rsync receiver go away after the cutover |
 | Movies, Shows, Videos, Music, Photos | Large and write-once. Keep file sync in version 1. Move to object storage only if sizes show a saving |
 | Obsidian, RenPy Saves, Software (hq0, hq1) | Keep as sync. Small and active |
 
@@ -378,7 +418,7 @@ Rule: for each folder exactly one system is active. The other is off or observin
 1. Phase 0, measure (row 32.219). Fill in sizes, counts, peers and the 7-day CPU and RAM. Fix the folder list with Thomas.
 2. Shadow mode (row 32.225). `filedeck-syncd` runs on all four nodes in `observe`. It reads the event stream, builds the catalogue in a separate schema `sync_shadow`, plans what it would send and receive, and writes no file in any synced folder. It reports differences against what Syncthing actually did.
 3. Manifests. Each node writes a manifest per folder: path, kind, size, mtime, root hash, sorted. The comparison across nodes uses a directory hash tree, so equal subtrees are skipped in one comparison. Folders that Syncthing says are in sync must give equal manifests. Differences are listed and understood (ignored files, open files, the eu4 read errors) before any cutover.
-4. Cutover per folder (row 32.226). Order: Obsidian, RenPy Saves, Music, Photos, Software (hq0 and hq1), Downloads folders, then Games, then Videos, Shows, Movies, Unsorted, Software (eu3 and eu4), tapo-footage last (or removed under section 5).
+4. Cutover per folder (row 32.226). The MacBook drain folder comes last, after the Rust Mac agent ships (rows 32.231 to 32.233). Order: Obsidian, RenPy Saves, Music, Photos, Software (hq0 and hq1), Downloads folders, then Games, then Videos, Shows, Movies, Unsorted, Software (eu3 and eu4), tapo-footage last (or removed under section 5).
 5. Retirement (row 32.227) only after 30 clean days.
 
 ### 7.2 Cutover steps for one folder
@@ -399,7 +439,7 @@ Rule: for each folder exactly one system is active. The other is off or observin
 
 ## 8. Recommendation and open questions
 
-Recommendation: build the shadow daemon and the catalogue first. Prove them on the small folders. Then cut over folder by folder. Keep Syncthing for the MacBook and seedbox peers until later.
+Recommendation: build the shadow daemon and the catalogue first. Prove them on the small folders. Then cut over folder by folder. The MacBook is in release 1 as a drain folder (3.11). It waits for the Rust Mac agent. Keep Syncthing for the seedbox peer until later.
 
 Why this is worth it: the cost of Syncthing grows with folder size (scans and index work), and the new design grows with the number of changes. Idle nodes should be near zero. The catalogue gives lag, conflicts and drift as plain metrics, which Syncthing does not give us.
 
@@ -407,23 +447,29 @@ Risks:
 
 - A mistake in delete handling is the main data risk. The trash, the mass-delete guard, the marker file and the 7-day soft period answer it.
 - The catalogue is a new dependency. The local outbox keeps nodes working when it is down.
-- The Rust agent (spec in `.data`) is not yet on Linux. The daemon avoids this by reading the events socket, which the TypeScript agent already serves.
+- The Rust agent (spec in `.data`) is not yet on Linux or on the Mac. The Linux daemon avoids this by reading the events socket, which the TypeScript agent already serves. The Mac drain cannot avoid it: it needs the Rust agent (3.11).
 - Work size. Phases 1 to 4 are a real build. Phase 0 and the shadow run reduce risk before the cutover.
 
-Open questions for Thomas. Each has a recommended answer.
+Open questions for Thomas. Each has a recommended answer. Questions 1 to 4 are decided.
 
-1. How do the nodes reach the catalogue: direct Postgres, or through the hub? Recommended: direct from cluster nodes (tenant Secret, session pooler). Add a hub gateway only for the Mac.
-2. Is the MacBook (`macbook-downloads`) in scope for version 1? Recommended: no. Keep it on Syncthing until the Rust Mac agent ships, then move it last.
-3. What does the `comet.seedhost.eu` peer carry, and does it stay? Recommended: leave it on Syncthing, outside this RFC, and decide when phase 0 shows which folders it shares.
-4. Syncthing has a stale `archlinux` device on eu3 and eu4. Remove it? Recommended: yes, as part of phase 0, in a separate chart change that Thomas approves.
-5. What are Installed Games and Games Library for? Recommended: if they are caches or installs, remove them from sync.
-6. Conflict policy: keep both with a conflict copy? Recommended: yes (3.5). Silent "newest wins" is not safe.
-7. Delete policy: trash on apply, a mass-delete guard of 1000 files or 5 percent, and a 7-day soft period after cutover? Recommended: yes.
+Decided on 28 Nov 2026 (Thomas, AskUserQuestion):
+
+1. Conflicts: keep both. The newer write keeps the name. The other version becomes a conflict copy next to it, and an event reports it (3.5). Decided 28 Nov 2026.
+2. Deletes: a synced delete moves the file to FileDeck trash for 7 days. A batch over 1000 files or 5 percent of a folder stops and waits for approval (3.6). Decided 28 Nov 2026.
+3. Installed Games and Games Library: keep syncing, send-receive (section 5). Decided 28 Nov 2026.
+4. The MacBook is in release 1, as a `drain` folder (3.11). It needs the Rust Mac agent first. Decided 28 Nov 2026.
+
+Still open:
+
+5. How do the nodes reach the catalogue: direct Postgres, or through the hub? Recommended: direct from cluster nodes (tenant Secret, session pooler). Add a hub gateway only for the Mac.
+6. What does the `comet.seedhost.eu` peer carry, and does it stay? Recommended: leave it on Syncthing, outside this RFC, and decide when phase 0 shows which folders it shares.
+7. Syncthing has a stale `archlinux` device on eu3 and eu4. Remove it? Recommended: yes, as part of phase 0, in a separate chart change that Thomas approves.
 8. Permissions and owners: sync content, mtime and mode bits only (like the current `ignorePerms`)? Recommended: yes.
 9. Should media (Movies, Shows, Videos, tapo-footage) move to object storage later? Recommended: decide after phase 0 sizes. Footage first.
 10. Check the eu4 disk for the two unreadable files now. Recommended: yes, before cutover of Videos and Unsorted, because the new engine will not hide it either.
 11. Retire Syncthing after 30 clean days and then remove the `syncthing/` chart? Recommended: yes, each in its own PR.
 12. Where does the daemon live? Recommended: Rust crate `fd-sync` in the `agent/` workspace, shipped as its own image and Deployment, not inside the agent pod.
+13. Which destination folder does each drain target use on eu3 and eu4? Today the workaround writes to eu4 `Videos`. Thomas confirms the map.
 
 ## 9. Board rows
 
@@ -442,3 +488,6 @@ Epic 32, "File sync", in `TASKS.md`. One row per phase, in order:
 | 32.227 | Phase 8: retire Syncthing |
 | 32.228 | Folders that leave sync (Plex config, caches, footage) |
 | 32.229 | Check the eu4 disk read errors |
+| 32.231 | Drain folder design and catalogue model (needs the Rust Mac agent, phase 3) |
+| 32.232 | Drain engine: durable confirm, trash on source, settle check |
+| 32.233 | Drain metrics, alerts and the MacBook cutover that retires the `x` uploader |
