@@ -32,6 +32,7 @@ Job notifications (Web Push, hub): with the Settings switch on, the browser give
 
 Agent settings. See [Change events](change-events.md).
 
+- `FILEDECK_HOLDERS`: the eBPF helper that keeps the table of which process holds which file or folder, for example `/usr/local/bin/filedeck-holders`. Empty means off. The chart sets it with `agent.holders.ebpf`. `FILEDECK_HOLDERS_RING_MB` is the size of its ring buffer in MiB (a power of two from 1 to 256, default 16). See [Holders](holders.md).
 - `FILEDECK_FANWATCH`: the fanotify helper, for example `/usr/local/bin/filedeck-fanwatch`. Empty means off. The chart sets it with `agent.fanotify.enabled`. The helper has one setting of its own, in its environment: `FILEDECK_FANWATCH_CACHE` is the number of folder handles in its path cache (default 16384, 0 means no cache).
 - `FILEDECK_SIZE_COMMIT_MS` (default 30000): how often the folder-size store follows the change events. The agent keeps the folders that changed in memory, merges them per folder, and writes and re-reads them together once per interval. A folder size can be as old as the interval. At shutdown the open interval is handed to the store. `0` gives the old behaviour (every 250 ms). Chart value: `agent.sizeStore.commitMs`.
 - `FILEDECK_SIZE_DIRTY_MAX` (default 2000): the most changed folders that the agent holds in memory for one interval. Above it, folders that share a subtree become one stale mark of that subtree, and the next read of the subtree scans it again.
@@ -45,6 +46,6 @@ Agent settings. See [Change events](change-events.md).
 
 Hub setting:
 
-- `FILEDECK_API_TOKEN_SCOPES`: what the token of `FILEDECK_API_TOKEN` may read, separated by commas. `du` is folder sizes and `changes` is the change event stream. The default is `du`. Chart value: `apiToken.scopes`.
+- `FILEDECK_API_TOKEN_SCOPES`: what the token of `FILEDECK_API_TOKEN` may read, separated by commas. `du` is folder sizes, `changes` is the change event stream and `holders` is the table of who holds a path. The default is `du`. Chart value: `apiToken.scopes`.
 
 [Back to the README](../README.md)
