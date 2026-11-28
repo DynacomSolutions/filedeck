@@ -9,6 +9,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { FanWatch as RealFanWatch, mapPath, unescapeLine, type HelperProc } from "../src/fanwatch.ts";
 import { DatabaseSync } from "node:sqlite";
 import { SizeStore as RealSizeStore } from "../src/size-store.ts";
+import { trackTimers } from "./timer-probe.ts";
 
 // Everything a test opens is released at the end of the file even when an assertion threw first: a leaked watcher timer or store worker would keep the process alive.
 const openWatchers: { stop(): void }[] = [];
@@ -149,24 +150,30 @@ test("fanwatch: an unmarked backing mount is not covered by its marked parent", 
 });
 
 test("fanwatch: failed marks persist across unchanged reconciliation ticks", async () => {
-  const s = setup({ reconcileMs: 20 });
+  const s = setup();
   await s.w.start();
   s.w.line("#ready 2");
   s.w.line(`c ${s.root}/data`);
+  s.w.line("#mounts");
   await sleep(100);
   assert.equal(s.w.status().unsupported, 1);
+  s.w.line("#mounts");
   await sleep(100);
   assert.equal(s.w.status().unsupported, 1);
   s.w.stop();
   s.done();
 });
 
-test("fanwatch: a file-only mount added after readiness triggers reconciliation", async () => {
-  const s = setup({ reconcileMs: 20 });
+test("fanwatch: a file-only mount added after readiness triggers reconciliation on the helper's #mounts line", async () => {
+  const s = setup();
   await s.w.start();
   s.w.line("#ready 2");
+  await sleep(50);
   fs.writeFileSync(path.join(s.root, "alias"), "alias");
   fs.appendFileSync(s.mounts, "/dev/a /alias ext4 rw 0 0\n");
+  await sleep(100);
+  assert.equal(s.proc.killed, false, "nothing asks for the mount table until the helper says it changed");
+  s.w.line("#mounts");
   await until(() => s.proc.killed, 5000);
   assert.equal(s.proc.killed, true);
   s.w.stop();
@@ -196,7 +203,7 @@ test("fanwatch: the folder that a bind mount shows is part of the mount signatur
   cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
   const mounts = path.join(dir, "mounts");
   const info = path.join(dir, "mountinfo");
-  const s = setup({ procMounts: mounts, reconcileMs: 20 });
+  const s = setup({ procMounts: mounts });
   fs.mkdirSync(path.join(s.root, "alias"));
   fs.writeFileSync(mounts, "/dev/a / ext4 rw 0 0\n/dev/a /alias ext4 rw 0 0\n");
   const table = (fsroot: string) => `10 1 8:1 / / rw - ext4 /dev/a rw\n11 10 8:1 ${fsroot} /alias rw - ext4 /dev/a rw\n`;
@@ -204,8 +211,11 @@ test("fanwatch: the folder that a bind mount shows is part of the mount signatur
   await s.w.start();
   s.w.line("#ready 1");
   await sleep(120);
+  s.w.line("#mounts");
+  await sleep(60);
   assert.equal(s.proc.killed, false, "nothing changed");
   fs.writeFileSync(info, table("/two"));
+  s.w.line("#mounts");
   await until(() => s.proc.killed, 5000);
   assert.equal(s.proc.killed, true, "the bind shows another folder now");
   s.w.stop();
@@ -734,4 +744,49 @@ test("SizeStore pending writes do not extend the walk tail", async () => {
   await f.st.clearPending();
   assert.equal(st.tail, before);
   f.done();
+});
+
+test("fanwatch: no timer runs while idle, the flush tick exists only while folders wait, and no timer asks for the mount table", async () => {
+  const probe = trackTimers();
+  try {
+    const s = setup();
+    await s.w.start();
+    s.w.line("#caps rename=1 target=1 unlimited=1 cache=1 mounts=1");
+    s.w.line("#ready 2");
+    await until(() => probe.active() === 0, 3000);
+    assert.equal(probe.active(), 0, "ready and idle: no flush tick, no reconcile timer");
+    s.w.line(`w ${s.root}/data`);
+    assert.equal(probe.active() > 0, true, "a changed folder arms the tick");
+    await until(() => s.calls.includes("/data") && probe.active() === 0, 5000);
+    assert.deepEqual(s.calls, ["/data"]);
+    assert.equal(probe.active(), 0, "applied and settled: the tick stopped again");
+    s.w.line(`w ${s.root}/data`);
+    await until(() => s.calls.length === 2 && probe.active() === 0, 5000);
+    assert.equal(s.calls.length, 2, "the next change arms it again");
+    s.w.stop();
+    s.done();
+  } finally {
+    probe.restore();
+  }
+});
+
+test("fanwatch: a helper that cannot watch the mount table (mounts=0) is asked on a timer, one that can is not", async () => {
+  const probe = trackTimers();
+  try {
+    const s = setup({ reconcileMs: 20 });
+    await s.w.start();
+    s.w.line("#caps rename=1 target=1 unlimited=1 cache=1 mounts=0");
+    s.w.line("#ready 2");
+    assert.equal(probe.active() > 0, true);
+    fs.appendFileSync(s.mounts, "/dev/a /alias ext4 rw 0 0\n");
+    fs.writeFileSync(path.join(s.root, "alias"), "alias");
+    await until(() => s.proc.killed, 5000);
+    assert.equal(s.proc.killed, true);
+    s.w.stop();
+    await sleep(50); // (the helper's exit and the reconcile in flight end first)
+    assert.equal(probe.active(), 0);
+    s.done();
+  } finally {
+    probe.restore();
+  }
 });

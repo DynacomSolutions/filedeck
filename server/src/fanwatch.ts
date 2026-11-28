@@ -170,6 +170,9 @@ export class FanWatch {
   private openAt = 0;
   private sizeStats: SizeWriteStats = { commits: 0, dirtyPaths: 0, lastDirtyPaths: 0, excludedEvents: 0, collapsed: 0, commitSeconds: 0 };
   private reconcileTimer: NodeJS.Timeout | null = null;
+  private reconciling = false;
+  private reconcileAgain = false;
+  private sessionTimer: NodeJS.Timeout | null = null;
   private mountSignature = "";
   private mountCount = 0;
   private watchedCount = 0;
@@ -239,7 +242,9 @@ export class FanWatch {
       this.mountSignature = await this.signature(mounts);
       if (!hostPaths.length) return this.warn("no local filesystem under the root");
       if (this.stopped) return;
-      const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["pipe", "pipe", "pipe"] }) as unknown as HelperProc))(this.o.helper, hostPaths);
+      // the helper polls this file for mount changes (a change wakes it, so nothing here asks on a timer)
+      const env = { ...process.env, FILEDECK_FANWATCH_MOUNTINFO: this.o.procMounts };
+      const p = (this.o.spawn ?? ((c, a) => nodeSpawn(c, a, { stdio: ["pipe", "pipe", "pipe"], env }) as unknown as HelperProc))(this.o.helper, hostPaths);
       this.proc = p;
       this.readyAt = Infinity;
       let err = "";
@@ -281,7 +286,6 @@ export class FanWatch {
           };
         }
       });
-      this.ensureReconcileTimer();
     } catch (e) {
       this.warn((e as Error).message);
     }
@@ -312,14 +316,31 @@ export class FanWatch {
     return mounts.map((m) => `${m.mountpoint}\0${m.device}\0${m.fstype}\0${roots.get(m.mountpoint) ?? ""}`).sort().join("\n");
   }
 
-  /** Rebuild helper marks after a mount or bind alias changes. This marks affected trees stale. */
+  /**
+   * Only for a helper that cannot watch the mount table itself (`#caps ... mounts=0`): ask on a timer. A helper that can watch it prints `#mounts`
+   * when the table changes, and nothing runs while the table is quiet.
+   */
   private ensureReconcileTimer() {
     if (this.reconcileTimer || this.stopped) return;
     this.reconcileTimer = setInterval(() => void this.reconcileMounts(), this.o.reconcileMs ?? RECONCILE_MS);
     this.reconcileTimer.unref();
   }
 
+  /** Rebuild helper marks after a mount or bind alias changes. This marks affected trees stale. One run at a time: a change during a run asks for one more. */
   private async reconcileMounts() {
+    if (this.reconciling) return void (this.reconcileAgain = true);
+    this.reconciling = true;
+    try {
+      do {
+        this.reconcileAgain = false;
+        await this.reconcileOnce();
+      } while (this.reconcileAgain);
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  private async reconcileOnce() {
     if (this.stopped || this.handingOver || !this.proc) return;
     try {
       const all = await listMounts(this.o.root, this.o.procMounts);
@@ -468,6 +489,8 @@ export class FanWatch {
     if (this.restartTimer) clearTimeout(this.restartTimer);
     if (this.timer) clearInterval(this.timer);
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    if (this.sessionTimer) clearInterval(this.sessionTimer);
+    this.sessionTimer = null;
     this.timer = null;
     this.reconcileTimer = null;
     this.buf.clear();
@@ -483,7 +506,12 @@ export class FanWatch {
     if (l === "!overflow") return this.overflow();
     if (l === "#sync") return void this.syncing.slice().forEach((f) => f());
     if (l.startsWith("#stats ")) return void this.stats(l);
-    if (l.startsWith("#caps ")) return void (this.caps = l.slice(6));
+    if (l === "#mounts") return void this.reconcileMounts();
+    if (l.startsWith("#caps ")) {
+      this.caps = l.slice(6);
+      if (/\bmounts=0\b/.test(this.caps)) this.ensureReconcileTimer();
+      return;
+    }
     if (l.startsWith("#ready")) {
       this.backoff = 0;
       this.readyAt = Date.now();
@@ -492,6 +520,8 @@ export class FanWatch {
       this.chain = null;
       void this.beginSession(this.readyAt);
       this.announceReady();
+      this.ensureTimer(); // drains what a previous run left pending, then stops again
+      void this.reconcileMounts(); // a mount that changed before the helper began to watch the table
     }
     if (l.startsWith("c ")) {
       const host = unescapeLine(l.slice(2));
@@ -593,7 +623,24 @@ export class FanWatch {
     if (!this.store.sessionStart) return;
     const hash = createHash("sha1").update([...this.marks].sort().join("\0")).digest("hex");
     const id = await this.store.sessionStart(hash, readyAt);
-    if (id !== null && !this.stopped && this.readyAt === readyAt) this.session = { id, hash, readyAt };
+    if (id !== null && !this.stopped && this.readyAt === readyAt) {
+      this.session = { id, hash, readyAt };
+      this.ensureSessionTimer();
+    }
+  }
+
+  /** The run's heartbeat: it runs while a session is open, and ends with it. */
+  private ensureSessionTimer() {
+    if (this.sessionTimer || this.stopped) return;
+    this.sessionTimer = setInterval(() => {
+      if (!this.session) {
+        if (this.sessionTimer) clearInterval(this.sessionTimer);
+        this.sessionTimer = null;
+        return;
+      }
+      void this.sessionTick();
+    }, this.o.sessionMs ?? SESSION_MS);
+    this.sessionTimer.unref();
   }
 
   /** Once a second: the run's heartbeat, and the `since` the store lets it use now that the run before it may have ended. */
@@ -620,6 +667,7 @@ export class FanWatch {
     for (const m of this.marks) this.store.markStale(m);
   }
 
+  /** The flush and drain tick runs only while folders wait to be applied (or the store may still hold some): `tick` stops it when nothing is left. */
   private ensureTimer() {
     if (this.timer || this.stopped) return;
     this.timer = setInterval(() => void this.tick(), Math.max(10, Math.min(FLUSH_MS, this.settleMs)));
@@ -705,7 +753,18 @@ export class FanWatch {
     // with a commit interval the changes of the whole interval are written and applied together; without one, every tick
     const now = Date.now();
     if (!this.commitMs || now - (this.openAt || this.lastCommit) >= this.commitMs) await this.commit();
-    await this.sessionTick();
+    if (this.idle() && this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  /** Nothing waits: no event is buffered, in flight or held, and the store has been read once since its last due time. */
+  private idle(): boolean {
+    if (this.buf.size || this.mem.size || this.inflight || this.draining || this.taken.size || this.flushing.size) return false;
+    if (this.store.isWriter === false) return false; // a standby has nothing to apply, but it must take over rows when it gets the lease
+    if (Date.now() <= this.activeUntil) return false;
+    return !this.store.takeDue || (!this.firstTake && this.lastTake > this.activeUntil);
   }
 
   /** Write the folders that changed since the last commit to the store and re-read them, once. */
@@ -763,7 +822,7 @@ export class FanWatch {
       while (!this.stopped && !this.handingOver && this.store.isWriter !== false) {
         const now = Date.now();
         let batch: string[] | null = [];
-        if (this.store.takeDue && (this.firstTake || now <= this.activeUntil || now - this.lastTake >= this.modifyMs)) {
+        if (this.store.takeDue && (this.firstTake || now <= this.activeUntil || this.lastTake <= this.activeUntil || now - this.lastTake >= this.modifyMs)) {
           // the periodic read catches a row that fell due after activeUntil (a modify row waits for last_run + modifyMs, an event loop stall can skip its window)
           this.firstTake = false;
           this.lastTake = now;

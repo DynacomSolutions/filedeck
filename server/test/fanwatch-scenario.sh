@@ -55,4 +55,14 @@ trailing)
   sleep 2.5
   sync_and_stop
   ;;
+mounts)
+  # a mount change must come out as one "#mounts" line within a second, and a quiet table must print none
+  sleep 0.5
+  grep -q '^#mounts' out && echo "early #mounts" >> err
+  mkdir "$w/extra"
+  mount -t tmpfs tmpfs "$w/extra"
+  for _ in $(seq 20); do grep -q '^#mounts' out && break; sleep 0.05; done
+  umount "$w/extra"
+  sync_and_stop
+  ;;
 esac

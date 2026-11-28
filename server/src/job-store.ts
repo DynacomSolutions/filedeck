@@ -189,6 +189,11 @@ export class JobStore {
     return this.run(`SELECT * FROM jobs WHERE scope=? AND ${LIVE} AND (owner=? OR beat<?)`, (s) => s.all(scope, me, cutoff) as unknown as JobRow[], []);
   }
 
+  /** How many live rows of the scope the store holds (any owner), or -1 when it cannot say (busy or no database). */
+  liveCount(scope: string): number {
+    return this.run(`SELECT count(*) AS n FROM jobs WHERE scope=? AND ${LIVE}`, (s) => (s.get(scope) as { n: number }).n, -1);
+  }
+
   /** Claim and fail in one swap, so a busy database cannot leave a claimed row nobody runs. */
   failClaim(r: JobRow, me: string, view: string, now: number): boolean {
     return this.run(
