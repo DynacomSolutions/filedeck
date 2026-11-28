@@ -59,3 +59,13 @@ test("filedeck du in a pod with no FILEDECK_* sends the projected token to the i
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("hubToken order: FILEDECK_TOKEN, then FILEDECK_TOKEN_FILE, then the pod's ServiceAccount token", () => {
+  const read = (f: string) => ({ "/m/tok": " from-file\n", "/sa": "from-sa" })[f] ?? assert.fail(`no file ${f}`);
+  const pod = { KUBERNETES_SERVICE_HOST: "10.0.0.1", FILEDECK_SA_TOKEN_FILE: "/sa" };
+  assert.equal(hubToken({ ...pod, FILEDECK_TOKEN: "env", FILEDECK_TOKEN_FILE: "/m/tok" }, read), "env");
+  assert.equal(hubToken({ ...pod, FILEDECK_TOKEN_FILE: "/m/tok" }, read), "from-file");
+  assert.equal(hubToken({ FILEDECK_TOKEN_FILE: "/m/tok" }, read), "from-file", "also outside a pod");
+  assert.equal(hubToken(pod, read), "from-sa");
+  assert.equal(hubToken({ ...pod, FILEDECK_TOKEN_FILE: "/gone" }, () => { throw new Error("ENOENT"); }), undefined, "an unreadable named file does not fall through");
+});

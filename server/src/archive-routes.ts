@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import { resolveRead } from "./paths.ts";
 import * as ops from "./fsops.ts";
 import * as ar from "./archive.ts";
-import { Jobs, type JobLanes } from "./jobs.ts";
+import { Jobs, jobWait, untilEnded, type JobLanes } from "./jobs.ts";
 import { JobStore } from "./job-store.ts";
 import type { Config } from "./config.ts";
 import { extractBlocked, hitsReadOnly, jobMayWrite } from "./readonly.ts";
@@ -65,9 +65,12 @@ export function makeAgentJobs(cfg: Config): Jobs {
 /** Listing, polling, cancelling and dismissing the jobs of `jobs`, whatever their kind. */
 export function registerJobRoutes(app: Hono, jobs: Jobs): void {
   app.get("/api/jobs", (c) => c.json({ jobs: jobs.list() }));
-  app.get("/api/jobs/:id", (c) => {
-    jobs.touch(c.req.param("id")); // a client polling a CLI du job keeps it alive
-    const j = jobs.get(c.req.param("id"));
+  app.get("/api/jobs/:id", async (c) => {
+    const id = c.req.param("id");
+    const wait = jobWait(c.req.query("wait"));
+    if (typeof wait === "string") return c.json({ error: wait }, 400);
+    // a client polling a CLI du job keeps it alive; `?wait=<seconds>` holds the answer until the job has ended (a long poll)
+    const j = await untilEnded(() => (jobs.touch(id), jobs.get(id)), wait, c.req.raw.signal);
     return j ? c.json(j) : c.json({ error: "not found" }, 404);
   });
   app.post("/api/jobs/:id/cancel", (c) => {
