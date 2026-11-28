@@ -405,6 +405,7 @@ ETA: 2026-11-28 14:00 ICT
 | 216 | Disk pressure view in the web app | in_progress | claude-20261127-watch-events | disk-pressure-ui | 31.214 | 2026-11-28 09:00 ICT | Live graph and a ranked consumer table<br>Node and disk in the URL path, view options in the query string<br>A path opens in the file browser |
 | 217 | Disk pressure in the MCP server | todo | claude-20261127-watch-events | | 29.207, 31.214 | 2026-11-28 11:00 ICT | Tools for disk snapshots and top consumers<br>A disk pressure event subscription |
 | 218 | Release and prove disk pressure on the first node, then all nodes | todo | claude-20261127-watch-events | | 31.214, 31.216 | 2026-11-28 14:00 ICT | First proof on the root NVMe and the second NVMe, with the real top consumers<br>Then every node |
+| 230 | Add a drive legitimacy, speed and fill test | todo | | | | | Thomas, 27 Nov 20:02 ICT: "worth adding to FileDeck".<br>Test each drive: real capacity, read and write speed, and fill behaviour.<br>Thread: t3-thread://v2/f3837a5f-1d84-4e86-83e2-67f505c42446/4ee6e042-5612-4475-9fca-623eeb6e257b |
 
 ## 32. File sync
 
