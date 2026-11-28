@@ -44,6 +44,7 @@ jobs:
           agent=false
           while IFS= read -r file; do
             case "$file" in
+              server/test/contract/du-*|server/test/contract/size-*|server/test/rust/*) server=true; image=true; agent=true ;;
               server/src/group-types.ts) server=true; web=true; image=true ;;
               server/*) server=true; image=true ;;
               web/*) web=true; server=true; image=true ;;
@@ -398,6 +399,33 @@ jobs:
       - run: cargo test --locked
         timeout-minutes: 10
       - run: cargo deny --locked check
+        timeout-minutes: 5
+      # The contract files that cover the folder sizes, run against the binary (docs/contract-tests.md).
+      - name: Build filedeckd
+        run: cargo build --locked -p filedeckd
+        timeout-minutes: 10
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+        timeout-minutes: 5
+      - run: npm ci --no-audit --no-fund
+        working-directory: .
+        timeout-minutes: 5
+      - name: Run the du contract files against filedeckd
+        working-directory: server
+        env:
+          FILEDECK_CONTRACT_MODE: spawn
+          FILEDECK_CONTRACT_AGENT_NEEDS_TOKEN: "1"
+          FILEDECK_CONTRACT_SPAWN: ${{ github.workspace }}/agent/target/debug/filedeckd
+        run: node --import tsx --test --test-timeout=600000 --test-concurrency=1 test/contract/du-*.test.ts test/contract/size-jobs.test.ts
+        timeout-minutes: 12
+      - name: One size store file, read and written by both agents
+        working-directory: server
+        env:
+          FILEDECK_RUST_BIN: ${{ github.workspace }}/agent/target/debug/filedeckd
+        run: node --import tsx --test --test-timeout=300000 test/rust/store-compat.test.ts
         timeout-minutes: 5
 
   aggregate:

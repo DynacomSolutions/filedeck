@@ -100,12 +100,11 @@ contractTest("a du of a folder with a live scan of an overlapping folder is answ
   }
 });
 
-contractTest("a du that waits too long answers 202; the job is followed with a long poll and the repeat is answered from it", async (t) => {
+contractTest("a du that waits too long answers 202; the job is followed with a long poll and the repeat is answered from it", async () => {
   const app = await agentUnderTest({ root: tmp, env: { FILEDECK_DU_WAIT_MS: "20" } });
   try {
     const first = await app.request("/api/du?path=/big&depth=0&fresh=1");
-    if (first.status === 200) return void t.skip("the agent scanned the tree within the wait: nothing to follow");
-    assert.equal(first.status, 202);
+    assert.equal(first.status, 202, "the scan ended within the wait: the tree is too small for this agent");
     const { jobId, state: s0 } = (await first.json()) as { jobId: string; state: string };
     assert.ok(["queued", "running"].includes(s0));
     const j = (await (await app.request(`/api/jobs/${jobId}?wait=30`)).json()) as { state: string; kind: string; origin: string; result?: { res: { files: number } } };
