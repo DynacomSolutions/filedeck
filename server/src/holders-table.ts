@@ -1,4 +1,4 @@
-import { HF_SHARED, HF_TRUNCATED, HF_VANISHED, HF_ERROR, HT, type HolderRec } from "./holders-proto.ts";
+import { HF_AGENT, HF_MT, HF_SHARED, HF_TRUNCATED, HF_VANISHED, HF_ERROR, HT, type HolderRec } from "./holders-proto.ts";
 
 /**
  * The table "who holds what", kept from the events of `filedeck-holders` (server/native/filedeck-holders.bpf.c). It holds no policy and does no I/O.
@@ -9,21 +9,30 @@ import { HF_SHARED, HF_TRUNCATED, HF_VANISHED, HF_ERROR, HT, type HolderRec } fr
  *
  * Soundness. A process that holds something is always in the table, unless a gap is known: the events are sent before the kernel acts, the table
  * only ever gets more than the kernel has when an event for a release is missed (an extra holder, never a missing one), and what cannot be told is
- * marked: `gaps()` says which pids are to be read again (dirty), whether the table was never seeded, and whether a whole class of events may be lost.
+ * marked: `gaps()` says which pids are to be read again (dirty), whether the table was never seeded, whether a whole class of events may be lost, and which
+ * processes share their file table or folders with another one (their events are not the sharer's) or hold an io_uring (its fixed files are not seen).
+ * Descriptors that a process sent in a message are in flight, held by no process: the holds of the sender at that moment are pinned (they stay until
+ * the sender ends, and then go to the holder with the pid 0, which stays until the table is reset).
  * A hold stays after a missed release until the process execs, exits or is read again. A mapping is never released by an event: the manager reads the
  * process again before it reports a mapping.
  */
 
-export type HoldKind = "cwd" | "root" | "exe" | "fd" | "mmap";
+export type HoldKind = "cwd" | "root" | "exe" | "fd" | "mmap" | "inflight";
+
+/** The pid of the holder of the files that were in flight when their sender ended */
+export const GHOST_PID = 0;
 
 /** One process's hold on one file. */
 export interface Hold {
   /** how many descriptors */
   fd: number;
   mmap: boolean;
-  cwd: boolean;
-  root: boolean;
+  /** how many fs_structs of the process have the file as their working folder, or their root */
+  cwd: number;
+  root: number;
   exe: boolean;
+  /** the process sent descriptors in a message: the file may be in flight, so the hold stays */
+  pin: boolean;
 }
 
 export interface FileRec {
@@ -41,8 +50,10 @@ export interface FileRec {
 export interface ProcState {
   comm: string;
   holds: Map<string, Hold>;
-  cwd?: string;
-  root?: string;
+  /** the working folder and the root folder of each fs_struct of the process (a thread may have its own), by the fs_struct's key. "?" = the one that the kernel
+   *  copied at the fork and whose key is not known yet. */
+  cwds: Map<string, string>;
+  roots: Map<string, string>;
   exe?: string;
   maps: Set<string>;
   /** a gap is known: read this process again */
@@ -51,11 +62,17 @@ export interface ProcState {
   failures: number;
   /** the time (ms) of the last read of this process by a snapshot */
   readAt: number;
+  /** the process holds an io_uring: files in its fixed table are held by the ring, and no hook sees them */
+  uring: boolean;
+  /** the process sent descriptors in a message */
+  scm: boolean;
+  /** the pids that share a file table or folders with this one (this one included), while they all live */
+  group?: Set<number>;
 }
 
 const fileKey = (dev: number, ino: number) => `${dev}:${ino}`;
-const emptyHold = (): Hold => ({ fd: 0, mmap: false, cwd: false, root: false, exe: false });
-const holdIsEmpty = (h: Hold) => h.fd <= 0 && !h.mmap && !h.cwd && !h.root && !h.exe;
+const emptyHold = (): Hold => ({ fd: 0, mmap: false, cwd: 0, root: 0, exe: false, pin: false });
+const holdIsEmpty = (h: Hold) => h.fd <= 0 && !h.mmap && h.cwd <= 0 && h.root <= 0 && !h.exe && !h.pin;
 
 export interface Gaps {
   /** no start-up pass has finished */
@@ -66,6 +83,10 @@ export interface Gaps {
   dirtyPids: number[];
   /** the pids that could not be read (the table cannot vouch for them) */
   unreadable: number[];
+  /** the pids that share their file table or folders with another process: the events of one are not the other's */
+  shared: number[];
+  /** the pids that hold an io_uring */
+  uring: number[];
   /** the table reached its size limit and stopped taking events */
   full: boolean;
 }
@@ -120,7 +141,7 @@ export class HoldersTable {
 
   /** a new, empty table state for a process */
   static newState(comm = ""): ProcState {
-    return { comm, holds: new Map(), maps: new Set(), dirty: false, failures: 0, readAt: 0 };
+    return { comm, holds: new Map(), cwds: new Map(), roots: new Map(), maps: new Set(), dirty: false, failures: 0, readAt: 0, uring: false, scm: false };
   }
 
   // ---- changes of one state ----
@@ -184,7 +205,7 @@ export class HoldersTable {
     }
   }
 
-  #setSlot(t: Target, slot: "cwd" | "root" | "exe", rec: HolderRec): void {
+  #setSlot(t: Target, slot: "exe", rec: HolderRec): void {
     const old = t.st[slot];
     const key = fileKey(rec.dev, rec.ino);
     if (old === key) {
@@ -202,6 +223,44 @@ export class HoldersTable {
         this.#release(t, old);
       }
     }
+  }
+
+  /**
+   * The working folder or the root of one fs_struct. A process has one table per fs_struct, and two threads may have two: the slot is the fs_struct's, not the
+   * process's, so that a thread that changes its folder does not release the folder of another thread.
+   */
+  #setFs(t: Target, kind: "cwd" | "root", rec: HolderRec): void {
+    const slots = kind === "cwd" ? t.st.cwds : t.st.roots;
+    const k = String(rec.key);
+    const name = slots.has(k) ? k : slots.has("?") ? "?" : k; // (the fs_struct that the kernel copied at the fork has the first key that is seen)
+    const old = slots.get(name);
+    const key = fileKey(rec.dev, rec.ino);
+    if (old === key) {
+      this.#hold(t, rec); // (the chain may be newer)
+      if (name !== k) {
+        slots.delete(name);
+        slots.set(k, key);
+      }
+      return;
+    }
+    const h = this.#hold(t, rec);
+    if (!h) return;
+    h[kind]++;
+    slots.delete(name);
+    slots.set(k, key);
+    if (old) {
+      const oh = t.st.holds.get(old);
+      if (oh) {
+        oh[kind] = Math.max(0, oh[kind] - 1);
+        this.#release(t, old);
+      }
+    }
+  }
+
+  /** the process sent descriptors in a message: what it holds now may be in flight, and stays held */
+  #pin(t: Target): void {
+    t.st.scm = true;
+    for (const h of t.st.holds.values()) h.pin = true;
   }
 
   #dropMaps(t: Target): void {
@@ -234,13 +293,22 @@ export class HoldersTable {
       }
       case HT.CWD:
       case HT.SCWD:
-        this.#setSlot(t, "cwd", rec);
+        this.#setFs(t, "cwd", rec);
         return;
       case HT.ROOT:
       case HT.SROOT:
-        this.#setSlot(t, "root", rec);
+        this.#setFs(t, "root", rec);
+        return;
+      case HT.URING:
+      case HT.SURING:
+        t.st.uring = true;
+        return;
+      case HT.SCM:
+        this.#pin(t);
         return;
       case HT.EXECBEG: {
+        // exec ends every thread but one: which fs_struct is left is not known, so a process with several is read again
+        if (t.st.cwds.size > 1 || t.st.roots.size > 1) t.st.dirty = true;
         this.#dropMaps(t);
         const old = t.st.exe;
         if (old) {
@@ -280,12 +348,47 @@ export class HoldersTable {
     return st;
   }
 
-  /** removes a process and every hold of it */
+  /**
+   * Removes a process and the holds of it. What it holds through a table that it shares with another process is that process's too (its own copy of the
+   * hold stays): the processes that were left are read again, and are unproven while they still share. The holds that the process pinned (descriptors that it
+   * sent in a message) go to the ghost holder.
+   */
   dropPid(pid: number): void {
     const st = this.procs.get(pid);
     if (!st) return;
+    if (pid !== GHOST_PID) this.#toGhost(st);
     this.#unindex(pid, st);
     this.procs.delete(pid);
+    const g = st.group;
+    if (g) {
+      g.delete(pid);
+      for (const m of g) {
+        const ms = this.procs.get(m);
+        if (!ms) continue;
+        ms.dirty = true;
+        if (g.size < 2) ms.group = undefined;
+      }
+    }
+  }
+
+  /** the files that a process pinned stay held after it ends (a descriptor in flight is held by no process) */
+  #toGhost(st: ProcState): void {
+    for (const [key, h] of st.holds) {
+      if (!h.pin) continue;
+      const f = this.files.get(key);
+      if (!f) continue;
+      let ghost = this.procs.get(GHOST_PID);
+      if (!ghost) {
+        ghost = HoldersTable.newState("in flight");
+        this.procs.set(GHOST_PID, ghost);
+      }
+      if (ghost.holds.has(key)) continue;
+      const gh = emptyHold();
+      gh.pin = true;
+      ghost.holds.set(key, gh);
+      f.holders.set(GHOST_PID, gh);
+      this.holdCount++;
+    }
   }
 
   #unindex(pid: number, st: ProcState): void {
@@ -355,6 +458,7 @@ export class HoldersTable {
       case HT.SCWD:
       case HT.SROOT:
       case HT.SEXE:
+      case HT.SURING:
       case HT.SMMAP: {
         const w = this.windows.get(rec.pid);
         if (!w) return; // a snapshot record without its start: nothing to attach it to
@@ -369,6 +473,8 @@ export class HoldersTable {
       case HT.ROOT:
       case HT.EXECBEG:
       case HT.EXE:
+      case HT.URING:
+      case HT.SCM:
       case HT.MMAP: {
         if (rec.type === HT.CLOSE && !this.procs.has(rec.pid)) {
           if (win && win.events.length < WINDOW_EVENTS) win.events.push(rec);
@@ -398,20 +504,32 @@ export class HoldersTable {
       for (const [key, h] of parent.holds) {
         const f = this.files.get(key);
         if (!f) continue;
-        const copy: Hold = { ...h };
+        const copy: Hold = { ...h, pin: false }; // (the child sent nothing)
+        if (holdIsEmpty(copy)) continue; // (a hold that only the pin kept)
         st.holds.set(key, copy);
         f.holders.set(child, copy);
         this.holdCount++;
       }
-      st.cwd = parent.cwd;
-      st.root = parent.root;
+      // the folder table of the child is a new one that the kernel filled; its key is not known until the child sets a folder
+      st.cwds = parent.cwds.size === 1 ? new Map([["?", [...parent.cwds.values()][0]!]]) : new Map(parent.cwds);
+      st.roots = parent.roots.size === 1 ? new Map([["?", [...parent.roots.values()][0]!]]) : new Map(parent.roots);
       st.exe = parent.exe;
       st.maps = new Set(parent.maps);
+      st.uring = parent.uring; // (it has the ring's descriptor too)
       if (parent.dirty) st.dirty = true;
     }
     // (a parent that is not in the table holds nothing that is tracked, unless the start-up pass has not read it yet)
     if (this.#seedTouched && !this.#seedDone.has(rec.pid)) st.dirty = true;
-    if (rec.flags & HF_SHARED) st.dirty = true; // (it shares its file table or folders with the parent: later changes of either are not copied)
+    // It shares its file table or folders with the parent: what either does to them is not seen as the other's. They are unproven while both live.
+    if (rec.flags & HF_SHARED) {
+      const ps = this.#state(rec.pid, rec.comm);
+      const g = ps.group ?? (ps.group = new Set([rec.pid]));
+      g.add(child);
+      st.group = g;
+    }
+    // The kernel copied the file table before this event, and a thread of the parent may have opened or closed a file since (MT); the agent's children
+    // may hold what the agent held, and the table has nothing of the agent (AGENT). The child is read: it is unproven until that read ends.
+    if (rec.flags & (HF_MT | HF_AGENT)) st.dirty = true;
   }
 
   /** a read of the process did not end in time or failed: it stays dirty, and after several tries it counts as unreadable */
@@ -451,12 +569,23 @@ export class HoldersTable {
     }
     // the state read from the kernel, then the events that came while it was read (they may be older or newer than what the read saw: applying them is safe)
     const fresh = win.fresh;
+    const old = this.procs.get(rec.pid);
+    if (old) {
+      // what a read of the kernel cannot show: the sharing, the descriptors that were sent (the pins), and that a message was sent
+      fresh.group = old.group;
+      fresh.scm = old.scm;
+      for (const [key, h] of old.holds) {
+        if (!h.pin) continue;
+        let nh = fresh.holds.get(key);
+        if (!nh) fresh.holds.set(key, (nh = emptyHold()));
+        nh.pin = true;
+      }
+    }
     const t: Target = { pid: rec.pid, st: fresh, indexed: false };
-    for (const ev of win.events) this.#apply(t, ev);
-    fresh.dirty = false;
+    for (const ev of win.events) this.#apply(t, ev); // (an event can mark the state: an exec of a process with several folder tables)
     fresh.failures = 0;
     fresh.readAt = Date.now();
-    if (!fresh.comm) fresh.comm = this.procs.get(rec.pid)?.comm ?? "";
+    if (!fresh.comm) fresh.comm = old?.comm ?? "";
     this.#install(rec.pid, fresh);
     this.#seedDone.add(rec.pid);
   }
@@ -473,7 +602,7 @@ export class HoldersTable {
     const touched = this.#seedTouched;
     this.#seedTouched = null;
     this.#seedDone.clear();
-    if (touched) for (const pid of [...this.procs.keys()]) if (!touched.has(pid)) this.dropPid(pid);
+    if (touched) for (const pid of [...this.procs.keys()]) if (pid !== GHOST_PID && !touched.has(pid)) this.dropPid(pid);
     this.seeded = true;
   }
 
@@ -508,11 +637,15 @@ export class HoldersTable {
   gaps(): Gaps {
     const dirtyPids: number[] = [];
     const unreadable: number[] = [];
+    const shared: number[] = [];
+    const uring: number[] = [];
     for (const [pid, st] of this.procs) {
       if (st.dirty) (st.failures >= 3 ? unreadable : dirtyPids).push(pid);
+      if (st.group && st.group.size > 1) shared.push(pid);
+      if (st.uring) uring.push(pid);
     }
     for (const pid of this.windows.keys()) if (!dirtyPids.includes(pid) && !unreadable.includes(pid)) dirtyPids.push(pid); // (a snapshot under way is not yet in the table)
-    return { unseeded: !this.seeded, global: this.globalDirty, dirtyPids, unreadable, full: this.full };
+    return { unseeded: !this.seeded, global: this.globalDirty, dirtyPids, unreadable, shared: shared.sort((x, y) => x - y), uring: uring.sort((x, y) => x - y), full: this.full };
   }
 
   /** The processes that hold a file inside any of the roots (a root is a folder or a file, named by its device and inode number). */
@@ -541,11 +674,12 @@ export class HoldersTable {
       for (const [pid, h] of f.holders) {
         let m = out.get(pid);
         if (!m) out.set(pid, (m = { pid, comm: this.procs.get(pid)?.comm ?? "", kinds: new Set(), uncertain: true }));
-        if (h.cwd) m.kinds.add("cwd");
-        if (h.root) m.kinds.add("root");
+        if (h.cwd > 0) m.kinds.add("cwd");
+        if (h.root > 0) m.kinds.add("root");
         if (h.exe) m.kinds.add("exe");
         if (h.fd > 0) m.kinds.add("fd");
         if (h.mmap) m.kinds.add("mmap");
+        if (h.pin) m.kinds.add("inflight");
         if (!uncertain) m.uncertain = false;
       }
     }

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HT, HF_ERROR, HF_SHARED, HF_TRUNCATED, HF_VANISHED, type HolderRec } from "../src/holders-proto.ts";
-import { HoldersTable } from "../src/holders-table.ts";
+import { HT, HF_AGENT, HF_CUT, HF_ERROR, HF_MT, HF_SHARED, HF_TRUNCATED, HF_VANISHED, type HolderRec } from "../src/holders-proto.ts";
+import { GHOST_PID, HoldersTable } from "../src/holders-table.ts";
 
 /**
  * The table's logic with hand-made events: the start-up pass, the events after it, lost events (a snapshot that replaces what a pid held), exit and
@@ -9,7 +9,7 @@ import { HoldersTable } from "../src/holders-table.ts";
  */
 const DEV = 100;
 // a tree on one device:  / (2)  >  data (10)  >  work (20)  >  deep (30)  >  file (40)
-const rec = (type: number, pid: number, ino: number, chain: number[], extra: Partial<HolderRec> = {}): HolderRec => ({ type, pid, aux: 0, dev: DEV, flags: 0, ino, comm: "p" + pid, chain: Float64Array.from(chain), ...extra });
+const rec = (type: number, pid: number, ino: number, chain: number[], extra: Partial<HolderRec> = {}): HolderRec => ({ type, pid, aux: 0, dev: DEV, flags: 0, ino, comm: "p" + pid, key: 0n, chain: Float64Array.from(chain), ...extra });
 const fd = (pid: number, ino = 40, chain = [30, 20, 10, 2]) => rec(HT.FD, pid, ino, chain);
 const close = (pid: number, ino = 40) => rec(HT.CLOSE, pid, ino, []);
 const root = (ino: number) => ({ dev: DEV, ino });
@@ -92,11 +92,165 @@ test("holders table: a child holds what the parent held at the fork; later chang
   assert.deepEqual(pids(t, 11), [10]);
 });
 
-test("holders table: a fork that shares the file table marks the child to be read again", () => {
+test("holders table: a fork that shares the file table or folders makes both unproven while they share, and neither loses its copy when the other ends", () => {
   const t = seeded();
   t.apply(fd(10));
   t.apply(rec(HT.FORK, 10, 0, [], { aux: 12, flags: HF_SHARED }));
-  assert.deepEqual(t.gaps().dirtyPids, [12]);
+  assert.deepEqual(t.gaps().shared, [10, 12], "the events of one are not the other's: both are unproven");
+  assert.deepEqual(pids(t, 40), [10, 12]);
+  // the child opens a file that the parent holds through the shared table as well: the table has it only for the child
+  t.apply(fd(12, 41, [30, 20, 10, 2]));
+  assert.deepEqual(pids(t, 41), [12]);
+  // the child ends: the parent keeps what it had, and is read again (the shared table changed under it); nothing is shared any more
+  t.apply(rec(HT.EXIT, 12, 0, []));
+  assert.deepEqual(pids(t, 40), [10], "the hold of the parent stays");
+  assert.deepEqual(t.gaps().shared, []);
+  assert.deepEqual(t.gaps().dirtyPids, [10]);
+  // a third process in the group: the group stays while two live
+  const u = seeded();
+  u.apply(rec(HT.FORK, 10, 0, [], { aux: 12, flags: HF_SHARED }));
+  u.apply(rec(HT.FORK, 12, 0, [], { aux: 13, flags: HF_SHARED }));
+  assert.deepEqual(u.gaps().shared, [10, 12, 13]);
+  u.apply(rec(HT.EXIT, 13, 0, []));
+  assert.deepEqual(u.gaps().shared, [10, 12]);
+  // a read of one of them does not end the sharing
+  u.apply(rec(HT.SNAPBEG, 12, 0, []));
+  u.apply(rec(HT.SNAPEND, 12, 0, []));
+  assert.deepEqual(u.gaps().shared, [10, 12]);
+});
+
+test("holders table: a fork of a multi-threaded parent, or of the agent, is read again, and is unproven until then", () => {
+  const t = seeded();
+  t.apply(fd(10));
+  t.apply(rec(HT.FORK, 10, 0, [], { aux: 14, flags: HF_MT }));
+  t.apply(rec(HT.FORK, 99, 0, [], { aux: 15, flags: HF_AGENT }));
+  assert.deepEqual(t.gaps().dirtyPids, [14, 15]);
+  // a thread of the parent closed the file after the kernel copied the table: the child still has it, and the read finds it
+  t.apply(close(10));
+  t.apply(rec(HT.SNAPBEG, 14, 0, []));
+  t.apply(rec(HT.SFD, 14, 40, [30, 20, 10, 2]));
+  t.apply(rec(HT.SNAPEND, 14, 0, []));
+  assert.deepEqual(t.gaps().dirtyPids, [15]);
+  assert.deepEqual(pids(t, 40), [14]);
+});
+
+test("holders table: a lost fork or move record (pid 0) makes the table unproven until a full read ends", () => {
+  const t = seeded();
+  t.apply(rec(HT.DIRTY, 0, 0, []));
+  assert.equal(t.gaps().global, true);
+  t.beginSeed();
+  assert.equal(t.gaps().unseeded, true);
+  t.apply(rec(HT.SEEDEND, 0, 0, []));
+  assert.equal(t.gaps().global, false);
+  assert.equal(t.gaps().unseeded, false);
+  // a record lost while the pass ran leaves the table unproven after it
+  t.beginSeed();
+  t.apply(rec(HT.DIRTY, 0, 0, []));
+  t.apply(rec(HT.SEEDEND, 0, 0, []));
+  assert.equal(t.gaps().global, true);
+});
+
+test("holders table: a process keeps one working folder per fs_struct; a thread with a table of its own does not release the folder of another", () => {
+  const t = seeded();
+  t.apply(rec(HT.CWD, 8, 20, [10, 2], { key: 100n }));
+  t.apply(rec(HT.CWD, 8, 30, [20, 10, 2], { key: 200n })); // another thread, with its own fs_struct
+  assert.deepEqual(pids(t, 20), [8], "the first folder is still held (it is the first fs_struct's)");
+  assert.deepEqual(pids(t, 30), [8]);
+  t.apply(rec(HT.CWD, 8, 50, [11, 2], { key: 200n })); // the thread moves on
+  assert.deepEqual(pids(t, 30), [], "its old folder is released");
+  assert.deepEqual(pids(t, 20), [8], "the other table keeps its folder");
+  assert.deepEqual(pids(t, 11), [8]);
+  t.apply(rec(HT.CWD, 8, 51, [11, 2], { key: 100n }));
+  assert.deepEqual(pids(t, 20), []);
+  // the same folder in two tables is released only when both left it
+  t.apply(rec(HT.ROOT, 8, 2, [], { key: 100n }));
+  t.apply(rec(HT.ROOT, 8, 2, [], { key: 200n }));
+  t.apply(rec(HT.ROOT, 8, 3, [], { key: 100n }));
+  assert.deepEqual([...t.find([root(2)]).get(8)!.kinds].includes("root"), true);
+  // exec ends every thread but one: which table is left is not known
+  t.apply(rec(HT.EXECBEG, 8, 0, []));
+  assert.deepEqual(t.gaps().dirtyPids, [8]);
+});
+
+test("holders table: a snapshot records the folder of every fs_struct of the process", () => {
+  const t = seeded();
+  t.apply(rec(HT.SNAPBEG, 9, 0, []));
+  t.apply(rec(HT.SCWD, 9, 20, [10, 2], { key: 100n }));
+  t.apply(rec(HT.SCWD, 9, 30, [20, 10, 2], { key: 200n }));
+  t.apply(rec(HT.SNAPEND, 9, 0, []));
+  assert.deepEqual(pids(t, 20), [9]);
+  assert.deepEqual([...t.find([root(30)]).get(9)!.kinds], ["cwd"]);
+  assert.equal(t.procs.get(9)!.cwds.size, 2);
+});
+
+test("holders table: a child's folder table has a key of its own; its first folder replaces the one that it copied, and the parent's stays", () => {
+  const t = seeded();
+  t.apply(rec(HT.CWD, 10, 20, [10, 2], { key: 100n }));
+  t.apply(rec(HT.FORK, 10, 0, [], { aux: 11 }));
+  assert.deepEqual(pids(t, 20), [10, 11]);
+  t.apply(rec(HT.CWD, 11, 30, [20, 10, 2], { key: 300n }));
+  assert.deepEqual(pids(t, 20), [10, 11], "the folder 20 is above 30");
+  assert.deepEqual([...t.find([root(20)]).get(11)!.kinds], ["cwd"]);
+  assert.deepEqual([...t.find([root(30)]).keys()], [11]);
+  t.apply(rec(HT.CWD, 11, 50, [11, 2], { key: 300n }));
+  assert.deepEqual([...t.find([root(20)]).keys()], [10], "the child left; the parent holds 20 still");
+});
+
+test("holders table: a chain that was read while a rename ran matches every path on its device, and a later complete sight replaces it", () => {
+  const t = seeded();
+  t.apply(rec(HT.FD, 70, 40, [30], { flags: HF_TRUNCATED | HF_CUT }));
+  assert.equal(t.find([root(99)]).get(70)?.uncertain, true);
+  t.apply(rec(HT.SNAPBEG, 70, 0, []));
+  t.apply(rec(HT.SFD, 70, 40, [30, 20, 10, 2]));
+  t.apply(rec(HT.SNAPEND, 70, 0, []));
+  assert.deepEqual([...t.find([root(99)]).keys()], []);
+  assert.equal(t.find([root(10)]).get(70)?.uncertain, false);
+});
+
+test("holders table: a process with an io_uring is a gap; a read that shows no ring clears it; a child has the ring's descriptor too", () => {
+  const t = seeded();
+  t.apply(rec(HT.URING, 71, 0, []));
+  assert.deepEqual(t.gaps().uring, [71]);
+  t.apply(rec(HT.FORK, 71, 0, [], { aux: 72 }));
+  assert.deepEqual(t.gaps().uring, [71, 72]);
+  t.apply(rec(HT.SNAPBEG, 71, 0, []));
+  t.apply(rec(HT.SNAPEND, 71, 0, []));
+  assert.deepEqual(t.gaps().uring, [72], "the read found no ring in 71");
+  t.apply(rec(HT.SNAPBEG, 72, 0, []));
+  t.apply(rec(HT.SURING, 72, 0, []));
+  t.apply(rec(HT.SNAPEND, 72, 0, []));
+  assert.deepEqual(t.gaps().uring, [72], "the read found it");
+  t.apply(rec(HT.EXIT, 72, 0, []));
+  assert.deepEqual(t.gaps().uring, []);
+});
+
+test("holders table: descriptors that a process sent in a message stay held after it closed them and after it ended (they may be in flight)", () => {
+  const t = seeded();
+  t.apply(fd(73));
+  t.apply(rec(HT.SCM, 73, 0, []));
+  t.apply(close(73));
+  assert.deepEqual([...t.find([root(40)]).get(73)!.kinds], ["inflight"], "closed, but it may be in flight");
+  // a read of the process keeps the pin; a fork does not copy it
+  t.apply(rec(HT.SNAPBEG, 73, 0, []));
+  t.apply(rec(HT.SNAPEND, 73, 0, []));
+  assert.deepEqual(pids(t, 40), [73]);
+  t.apply(rec(HT.FORK, 73, 0, [], { aux: 74 }));
+  assert.deepEqual(pids(t, 40), [73], "the child has no copy of a hold that its parent only pinned");
+  t.apply(rec(HT.EXIT, 73, 0, []));
+  assert.deepEqual(pids(t, 40), [GHOST_PID], "the files go to the holder of the descriptors in flight");
+  assert.equal(t.procs.get(GHOST_PID)!.comm, "in flight");
+  // the pass over all processes does not drop it
+  t.beginSeed();
+  t.apply(rec(HT.SEEDEND, 0, 0, []));
+  assert.deepEqual(pids(t, 40), [GHOST_PID]);
+  // a file that was open but never sent is not pinned
+  t.apply(fd(75, 41, [30, 20, 10, 2]));
+  t.apply(rec(HT.SCM, 75, 0, []));
+  t.apply(fd(75, 42, [30, 20, 10, 2]));
+  t.apply(close(75, 42));
+  t.apply(rec(HT.EXIT, 75, 0, []));
+  assert.deepEqual(pids(t, 41), [GHOST_PID]);
+  assert.deepEqual(pids(t, 42), []);
 });
 
 test("holders table: a fork of a parent that holds nothing tracked gives a clean child", () => {

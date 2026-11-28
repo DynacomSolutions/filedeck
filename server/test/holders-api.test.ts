@@ -8,8 +8,8 @@ import { PassThrough } from "node:stream";
 import { Hono } from "hono";
 import type { Config } from "../src/config.ts";
 import type { HelperProc } from "../src/fanwatch.ts";
-import { Holders, mountsUnder, parseCgroup, type HoldersAnswer } from "../src/holders.ts";
-import { HF_ERROR, HT, encodeRecord, kernelDev } from "../src/holders-proto.ts";
+import { Holders, PROVEN_FS, fsReason, mountsUnder, parseCgroup, type HoldersAnswer } from "../src/holders.ts";
+import { HF_ERROR, HF_MT, HF_SHARED, HT, encodeRecord, kernelDev } from "../src/holders-proto.ts";
 import { registerHolderRoutes } from "../src/holders-routes.ts";
 import { agentError } from "../src/agent-routes.ts";
 
@@ -36,10 +36,20 @@ class Fake extends EventEmitter implements HelperProc {
   written: string[] = [];
   killed = false;
   onWrite?: (s: string) => void;
+  /** answers `sync N` like the helper: the records that the kernel made before it (see `beforeSync`), then SYNC. false = never answers. */
+  autoSync = true;
+  /** the records that are in the ring when a `sync` comes (the helper copies them before it answers) */
+  beforeSync: Array<Parameters<typeof encodeRecord>[0]> = [];
   stdin = {
     write: (s: string) => {
       this.written.push(s);
       this.onWrite?.(s);
+      const m = /^sync (\d+)\n$/.exec(s);
+      if (m && this.autoSync) {
+        const pending = this.beforeSync;
+        this.beforeSync = [];
+        this.send(...pending, { type: HT.SYNC, aux: Number(m[1]) });
+      }
       return true;
     },
     on: () => this.stdin,
@@ -66,7 +76,7 @@ async function until(f: () => boolean, ms = 3000): Promise<void> {
 
 function make(extra: Partial<ConstructorParameters<typeof Holders>[0]> = {}) {
   const helpers: Fake[] = [];
-  const h = new Holders({ helper: "/fake/filedeck-holders", root: "/", settleMs: 150, readMs: 400, mapsFreshMs: 60_000, restartMinMs: 5, spawn: () => {
+  const h = new Holders({ helper: "/fake/filedeck-holders", root: "/", settleMs: 150, readMs: 400, mapsFreshMs: 60_000, restartMinMs: 5, syncMs: 300, provenFs: "any", foreignMounts: async () => ({ mounts: [], unreadable: 0 }), kernelHolds: async () => ({ mounts: [], unreadable: 0 }), spawn: () => {
     const f = new Fake();
     helpers.push(f);
     return f;
@@ -227,6 +237,152 @@ test("holders api: a missing hook that can lose a hold makes every answer unprov
   assert.equal(a.proven, false);
   assert.ok(a.reasons.some((r) => /hook is missing/.test(r)));
   h.close();
+});
+
+test("holders api: a file opened just before the question is found: the helper's records are read before the answer (sync)", async () => {
+  const { h, helpers } = make();
+  h.start();
+  const f = helpers[0]!;
+  await ready(h, f);
+  // the record is still in the ring when the question comes; the helper copies it before it answers `sync`
+  f.beforeSync = [{ type: HT.FD, pid: 910, aux: 3, dev, ino: inoOf("tree/sub/deep/file"), comm: "late", chain: chainOf("tree/sub/deep/file") }];
+  const a = await ask(h, "tree");
+  assert.ok(f.written.some((w) => /^sync \d+\n$/.test(w)), "the question sent sync");
+  assert.deepEqual(a.holders.map((x) => x.pid), [910]);
+  assert.equal(a.proven, true, a.reasons.join("; "));
+  h.close();
+});
+
+test("holders api: a lost record that the helper reports at the sync (pid 0) makes the answer unproven, and the table is read again", async () => {
+  const { h, helpers } = make();
+  h.start();
+  const f = helpers[0]!;
+  await ready(h, f);
+  f.beforeSync = [{ type: HT.DIRTY, pid: 0 }]; // a FORK or MOVED record was lost
+  const a = await ask(h, "tree");
+  assert.equal(a.proven, false);
+  assert.ok(f.written.includes("seed\n"), "every process is read again");
+  assert.ok(a.reasons.some((r) => /unknown processes were lost|start-up pass/.test(r)), a.reasons.join("; "));
+  f.send({ type: HT.SEEDEND });
+  await until(() => h.table.seeded && !h.table.globalDirty);
+  assert.equal((await ask(h, "tree")).proven, true);
+  h.close();
+});
+
+test("holders api: no answer to sync is not a proof", async () => {
+  const { h, helpers } = make({ syncMs: 60 });
+  h.start();
+  const f = helpers[0]!;
+  await ready(h, f);
+  f.autoSync = false;
+  const a = await ask(h, "tree");
+  assert.equal(a.proven, false);
+  assert.ok(a.reasons.some((r) => /sync/.test(r)), a.reasons.join("; "));
+  h.close();
+});
+
+test("holders api: a filesystem where the device number of a file may not be the kernel's (btrfs) is never proven", async () => {
+  const why = fsReason(0x9123683e, "the path");
+  assert.match(why!, /btrfs/);
+  assert.equal(fsReason(0xef53, "the path"), undefined, "ext4");
+  assert.equal(fsReason(0x58465342, "the path"), undefined, "xfs");
+  assert.equal(fsReason(0x01021994, "the path"), undefined, "tmpfs");
+  assert.match(fsReason(0x794c7630, "the path")!, /overlay.*not tracked/);
+  assert.match(fsReason(0x1234, "the path")!, /0x1234/);
+  // the question reads the type of the real folder: a list that does not have it gives a reason, and the list "any" does not
+  const { h, helpers } = make({ provenFs: new Map([[1, "nothing"]]) });
+  h.start();
+  await ready(h, helpers[0]!);
+  const a = await ask(h, "tree");
+  assert.equal(a.proven, false);
+  assert.ok(a.reasons.some((r) => /device number of a file/.test(r)), a.reasons.join("; "));
+  h.close();
+  assert.ok(PROVEN_FS.size >= 4);
+});
+
+test("holders api: a process that shares its file table, a fork of a multi-threaded parent and a process with an io_uring each make the answer unproven", async () => {
+  const { h, helpers } = make();
+  h.start();
+  const f = helpers[0]!;
+  await ready(h, f);
+  f.onWrite = (s) => {
+    const pid = Number(/snap (\d+)/.exec(s)?.[1]);
+    if (pid) f.send({ type: HT.SNAPBEG, pid, aux: pid }, { type: HT.SNAPEND, pid, aux: pid });
+  };
+  f.send({ type: HT.FD, pid: 920, aux: 3, dev, ino: inoOf("tree/sub/deep/file"), comm: "parent", chain: chainOf("tree/sub/deep/file") });
+  f.send({ type: HT.FORK, pid: 920, aux: 921, flags: HF_SHARED });
+  await until(() => h.table.procs.has(921));
+  let a = await ask(h, "other");
+  assert.equal(a.proven, false);
+  assert.ok(a.reasons.some((r) => /share a file table/.test(r)), a.reasons.join("; "));
+  f.send({ type: HT.EXIT, pid: 921 });
+  await until(() => !h.table.procs.has(921));
+  a = await ask(h, "other");
+  assert.equal(a.proven, true, a.reasons.join("; "));
+  assert.ok(f.written.includes("snap 920\n"), "the survivor was read again");
+  // a fork of a multi-threaded parent: read before the answer
+  f.send({ type: HT.FORK, pid: 920, aux: 922, flags: HF_MT });
+  await until(() => h.table.procs.has(922));
+  a = await ask(h, "other");
+  assert.ok(f.written.includes("snap 922\n"), "the child was read again");
+  assert.equal(a.proven, true, a.reasons.join("; "));
+  // an io_uring
+  f.send({ type: HT.URING, pid: 923 });
+  await until(() => h.table.procs.has(923));
+  a = await ask(h, "other");
+  assert.equal(a.proven, false);
+  assert.ok(a.reasons.some((r) => /io_uring/.test(r)), a.reasons.join("; "));
+  h.close();
+});
+
+test("holders api: a hook that the kernel lacks is named, for each of them", async () => {
+  const names = ["dup3", "dup2", "moves", "pivot_root", "replace_fd", "descriptors in a message", "32-bit dup3", "32-bit dup2"];
+  for (let i = 0; i < names.length; i++) {
+    const { h, helpers } = make();
+    h.start();
+    helpers[0]!.send({ type: HT.HELLO, aux: 1 << i, chain: [16 << 20] }, { type: HT.SEEDEND });
+    await until(() => h.state === "ready");
+    const a = await ask(h, "tree");
+    assert.equal(a.proven, false, names[i]);
+    assert.ok(a.reasons.some((r) => /hook is missing/.test(r) && r.includes(names[i]!.replace("32-bit ", ""))), `${names[i]}: ${a.reasons.join("; ")}`);
+    h.close();
+  }
+});
+
+test("holders api: the loop devices and swap files in the path, and overlays of other mount namespaces that use it as a layer, are reported; a namespace that cannot be read is a reason", async () => {
+  const fake = fs.mkdtempSync(path.join(os.tmpdir(), "filedeck-holders-root-"));
+  try {
+    const put = (rel: string, text: string) => {
+      fs.mkdirSync(path.dirname(path.join(fake, rel)), { recursive: true });
+      fs.writeFileSync(path.join(fake, rel), text);
+    };
+    put("sys/block/loop3/loop/backing_file", `${tmp}/tree/disk.img\n`);
+    put("sys/block/loop4/size", "0\n"); // a loop device without a file
+    put("proc/swaps", `Filename Type Size Used Priority\n${tmp}/tree/swapfile file 1024 0 -2\n/dev/sda2 partition 1 0 -3\n`);
+    put("proc/1/mountinfo", "36 25 8:1 / / rw - ext4 /dev/sda1 rw\n");
+    fs.mkdirSync(path.join(fake, "proc/1/ns"), { recursive: true });
+    fs.symlinkSync("mnt:[1]", path.join(fake, "proc/1/ns/mnt"));
+    fs.mkdirSync(path.join(fake, "proc/200/ns"), { recursive: true });
+    fs.symlinkSync("mnt:[2]", path.join(fake, "proc/200/ns/mnt"));
+    put("proc/200/mountinfo", `50 36 0:50 / /merged rw - overlay overlay rw,lowerdir=${tmp}/tree/layer,upperdir=/x/up,workdir=/x/work\n`);
+    const { h, helpers } = make({ root: fake, foreignMounts: undefined, kernelHolds: undefined });
+    h.start();
+    await ready(h, helpers[0]!);
+    const a = await h.query(path.join(tmp, "tree"), `${tmp}/tree`);
+    assert.deepEqual(a.mounts.map((m) => `${m.reason}:${m.mountpoint}`).sort(), [`loop device:${tmp}/tree/disk.img`, `overlay layer:/merged`, `swap file:${tmp}/tree/swapfile`].sort());
+    assert.equal(a.held, true);
+    assert.equal(a.proven, true, a.reasons.join("; "));
+    // a process whose namespace cannot be read (here: a link that is a file): the namespace may hold an overlay that is not seen
+    fs.mkdirSync(path.join(fake, "proc/300"), { recursive: true });
+    fs.mkdirSync(path.join(fake, "proc/300/ns"), { recursive: true });
+    fs.writeFileSync(path.join(fake, "proc/300/ns/mnt"), "not a link");
+    const b = await h.query(path.join(tmp, "other"), `${tmp}/other`);
+    assert.equal(b.proven, false);
+    assert.ok(b.reasons.some((r) => /could not be read/.test(r)), b.reasons.join("; "));
+    h.close();
+  } finally {
+    fs.rmSync(fake, { recursive: true, force: true });
+  }
 });
 
 test("holders api: the helper's refusal makes the feature unavailable, with the reason, and no error", async () => {

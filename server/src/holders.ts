@@ -32,8 +32,17 @@ export interface HoldersOptions {
   /** mappings are read again for a process whose last read is older than this (ms, default 2000) */
   mapsFreshMs?: number;
   platform?: NodeJS.Platform;
+  /** the longest that a question waits for the helper to answer `sync` (ms, default 8000) */
+  syncMs?: number;
   /** the filesystems that are not tracked, by `statfs` type (default: the list of the kernel side; a test on an overlay folder sets its own) */
   untrackedFs?: ReadonlyMap<number, string>;
+  /** the filesystems where a proof is given, by `statfs` type: those where `stat` gives the kernel's own device number of the superblock (default: the list
+   *  below; "any" for a test on a folder of any filesystem) */
+  provenFs?: ReadonlyMap<number, string> | "any";
+  /** the overlay mounts in other mount namespaces that use a folder of the path as a layer (default: read /proc/<pid>/ns/mnt and /proc/<pid>/mountinfo) */
+  foreignMounts?: (virtual: string) => Promise<{ mounts: HolderMount[]; unreadable: number }>;
+  /** the loop devices and swap files that are in the path (default: /sys/block/loop*, /proc/swaps) */
+  kernelHolds?: (virtual: string) => Promise<{ mounts: HolderMount[]; unreadable: number }>;
   log?: (s: string) => void;
 }
 
@@ -50,7 +59,7 @@ export interface Holder {
 export interface HolderMount {
   mountpoint: string;
   fstype: string;
-  reason: "mount inside" | "overlay layer";
+  reason: "mount inside" | "overlay layer" | "loop device" | "swap file";
 }
 
 export interface HoldersAnswer {
@@ -69,10 +78,17 @@ export interface HoldersAnswer {
   at: string;
 }
 
-/** The soft hooks of the helper, in the bit order of HELLO.aux (server/native/filedeck-holders.c) */
-const SOFT_HOOKS = ["__x64_sys_dup3 (dup3)", "dup2", "security_inode_rename (moves)", "chroot_fs_refs"] as const;
-/** Without these the table can miss a hold: a missing one makes every answer unproven */
-const UNSOUND_WHEN_MISSING = new Set([0, 1, 2]);
+/** The soft hooks of the helper, in the bit order of HELLO.aux (server/native/filedeck-holders.c). Without any of them the table can miss a hold: a missing one makes every answer unproven. */
+const SOFT_HOOKS = [
+  "__x64_sys_dup3 (dup3)",
+  "dup2",
+  "security_inode_rename (moves)",
+  "chroot_fs_refs (pivot_root)",
+  "replace_fd (seccomp addfd)",
+  "__scm_send (descriptors in a message)",
+  "__ia32_sys_dup3 (32-bit dup3)",
+  "__ia32_sys_dup2 (32-bit dup2)",
+] as const;
 
 /** The filesystems that the kernel side does not track (the same list as filedeck-holders.bpf.c `untracked_magic`), by `statfs` type and name */
 const UNTRACKED_FS = new Map<number, string>([
@@ -81,6 +97,29 @@ const UNTRACKED_FS = new Map<number, string>([
   [0x6e736673, "nsfs"], [0x19800202, "mqueue"], [0x42494e4d, "binfmt_misc"], [0x73636673, "securityfs"], [0x62656570, "configfs"], [0x6165676c, "pstore"],
   [0xde5e81e4, "efivarfs"],
 ]);
+
+/**
+ * The filesystems where a proof is given. The kernel side names a file by the device number of its superblock (`sb->s_dev`) and the inode number. `stat`
+ * gives that device number only where the filesystem uses the generic code for it (`generic_fillattr`). btrfs does not (every subvolume has a device number
+ * of its own that no superblock has), and neither do some network and FUSE filesystems: there a held file never matches the path. These four do; the kernel
+ * code of each one ends in `generic_fillattr` (ext2, ext3 and ext4 share the type number of ext4).
+ */
+export const PROVEN_FS = new Map<number, string>([
+  [0xef53, "ext4"], [0x58465342, "xfs"], [0x01021994, "tmpfs"], [0xf2f52010, "f2fs"],
+]);
+const FS_NAMES = new Map<number, string>([
+  [0x9123683e, "btrfs"], [0x2fc12fc1, "zfs"], [0x6969, "nfs"], [0x65735546, "fuse"], [0x5346544e, "ntfs"], [0x4d44, "vfat"], [0xff534d42, "cifs"],
+  [0x73717368, "squashfs"], [0x2011bab0, "exfat"], [0x858458f6, "ramfs"], [0x00c36400, "ceph"], [0x7461636f, "ocfs2"], [0x6a656666, "jffs2"],
+]);
+
+/** Why a proof cannot be given on a filesystem (its `statfs` type), or undefined when it can */
+export function fsReason(type: number, what: string, untracked: ReadonlyMap<number, string> = UNTRACKED_FS, proven: ReadonlyMap<number, string> | "any" = PROVEN_FS): string | undefined {
+  const bad = untracked.get(type);
+  if (bad) return `the filesystem of ${what} (${bad}) is not tracked`;
+  if (proven === "any" || proven.has(type)) return undefined;
+  const name = FS_NAMES.get(type) ?? `type 0x${type.toString(16)}`;
+  return `the filesystem of ${what} (${name}) is not one where the device number of a file is known to be the kernel's: a hold on it could not be matched`;
+}
 
 const MAX_HOLDERS = 500;
 const MAX_INFLIGHT = 16;
@@ -107,6 +146,8 @@ export class Holders extends EventEmitter {
   #restartTimer: NodeJS.Timeout | undefined;
   #seeding = false;
   #inflight = new Map<number, { timer: NodeJS.Timeout; done: Array<() => void> }>();
+  #syncSeq = 0;
+  #syncWaiters = new Map<number, { timer: NodeJS.Timeout; resolve: (ok: boolean) => void }>();
   #rateAt = 0;
   #rateEvents = 0;
   readonly o: HoldersOptions;
@@ -231,6 +272,15 @@ export class Holders extends EventEmitter {
         this.reason = undefined;
         this.#backoffReset();
         return;
+      case HT.SYNC:
+        // every record before this one is in the table: the questions that sent `sync` up to this number may use it
+        for (const [n, w] of this.#syncWaiters) {
+          if (n > rec.aux) continue;
+          clearTimeout(w.timer);
+          this.#syncWaiters.delete(n);
+          w.resolve(true);
+        }
+        return;
       case HT.SNAPEND: {
         this.table.apply(rec);
         const w = this.#inflight.get(rec.pid);
@@ -316,6 +366,33 @@ export class Holders extends EventEmitter {
       for (const f of w.done) f();
     }
     this.#inflight.clear();
+    for (const [, w] of this.#syncWaiters) {
+      clearTimeout(w.timer);
+      w.resolve(false);
+    }
+    this.#syncWaiters.clear();
+  }
+
+  /**
+   * The read barrier. The helper copies the ring, reads the lost-event map and the skipped program runs, and answers (docs/holders.md). A hold that was made
+   * before this call is in the table, or a DIRTY record is, when the answer is here. Resolves false when there is no answer in time (then nothing is proven).
+   * The wait is one timer that lives only while the answer is pending.
+   */
+  #sync(): Promise<boolean> {
+    if (!this.#proc || this.state !== "ready") return Promise.resolve(false);
+    const n = ++this.#syncSeq;
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.#syncWaiters.delete(n);
+        resolve(false);
+      }, this.o.syncMs ?? 8000);
+      this.#syncWaiters.set(n, { timer, resolve });
+      if (!this.#send(`sync ${n}\n`)) {
+        clearTimeout(timer);
+        this.#syncWaiters.delete(n);
+        resolve(false);
+      }
+    });
   }
 
   #waitProgress(ms: number): Promise<void> {
@@ -363,9 +440,13 @@ export class Holders extends EventEmitter {
     const roots: Array<{ dev: number; ino: number }> = [];
     if (st.ino >= 1n << 53n) reasons.push("the inode number of the path is too large to compare");
     roots.push({ dev: kernelDev(st.dev), ino: Number(st.ino) });
-    const fsType = (await fs.statfs(real).catch(() => undefined))?.type;
-    const untracked = fsType !== undefined ? (this.o.untrackedFs ?? UNTRACKED_FS).get(Number(fsType)) : undefined;
-    if (untracked) reasons.push(`the filesystem of the path (${untracked}) is not tracked`);
+    const fsOf = async (p: string, what: string) => {
+      const type = (await fs.statfs(p).catch(() => undefined))?.type;
+      if (type === undefined) return reasons.push(`the filesystem of ${what} could not be read`);
+      const why = fsReason(Number(type), what, this.o.untrackedFs ?? UNTRACKED_FS, this.o.provenFs ?? PROVEN_FS);
+      if (why) reasons.push(why);
+    };
+    await fsOf(real, "the path");
 
     // mounts inside the path hold files of other filesystems that belong to it; overlay layers are held by the kernel
     const mounts: HolderMount[] = [];
@@ -373,11 +454,20 @@ export class Holders extends EventEmitter {
       mounts.push(m.mount);
       if (m.mount.reason === "mount inside") {
         const ms = await fs.stat(`${this.o.root === "/" ? "" : this.o.root}${m.mount.mountpoint}`, { bigint: true }).catch(() => undefined);
-        if (ms && ms.ino < 1n << 53n) roots.push({ dev: kernelDev(ms.dev), ino: Number(ms.ino) });
-        else reasons.push(`the mount ${m.mount.mountpoint} could not be read`);
+        if (ms && ms.ino < 1n << 53n) {
+          roots.push({ dev: kernelDev(ms.dev), ino: Number(ms.ino) });
+          await fsOf(`${this.o.root === "/" ? "" : this.o.root}${m.mount.mountpoint}`, `the mount ${m.mount.mountpoint}`);
+        } else reasons.push(`the mount ${m.mount.mountpoint} could not be read`);
       }
     }
 
+    // overlays in other mount namespaces, and what the kernel holds without a process (loop devices, swap files)
+    for (const r of [await (this.o.foreignMounts ?? ((v) => this.#foreignMounts(v)))(virtual), await (this.o.kernelHolds ?? ((v) => this.#kernelHolds(v)))(virtual)]) {
+      mounts.push(...r.mounts);
+      if (r.unreadable) reasons.push(`${r.unreadable} places that could hold the path could not be read (mount namespaces of other users, or a kernel list)`);
+    }
+
+    if (!(await this.#sync())) reasons.push("the helper did not answer the sync request: records may still be on their way");
     await this.#settle();
     let found = this.table.find(roots);
     // mappings are never released by an event: the processes that match by a mapping are read again unless that was done just now
@@ -394,11 +484,13 @@ export class Holders extends EventEmitter {
     if (gaps.global) reasons.push("events of unknown processes were lost: the table is read again");
     if (gaps.dirtyPids.length) reasons.push(`${gaps.dirtyPids.length} processes are being read again after lost events`);
     if (gaps.unreadable.length) reasons.push(`${gaps.unreadable.length} processes could not be read`);
+    if (gaps.shared.length) reasons.push(`${gaps.shared.length} processes share a file table or folders with another process: what one does is not seen as the other's`);
+    if (gaps.uring.length) reasons.push(`${gaps.uring.length} processes hold an io_uring: the files in its fixed table are not seen`);
     if (gaps.full) reasons.push("the table is full and stopped taking events");
-    for (let i = 0; i < SOFT_HOOKS.length; i++) if (this.softMissing & (1 << i) && UNSOUND_WHEN_MISSING.has(i)) reasons.push(`a hook is missing in this kernel: ${SOFT_HOOKS[i]}`);
+    for (let i = 0; i < SOFT_HOOKS.length; i++) if (this.softMissing & (1 << i)) reasons.push(`a hook is missing in this kernel: ${SOFT_HOOKS[i]}`);
 
     const all = [...found.values()].sort((a, b) => a.pid - b.pid);
-    const kindOrder: HoldKind[] = ["cwd", "root", "exe", "fd", "mmap"];
+    const kindOrder: HoldKind[] = ["cwd", "root", "exe", "fd", "mmap", "inflight"];
     const holders: Holder[] = [];
     for (const m of all.slice(0, MAX_HOLDERS)) {
       const h: Holder = { pid: m.pid, comm: m.comm, kinds: kindOrder.filter((k) => m.kinds.has(k)) };
@@ -424,6 +516,76 @@ export class Holders extends EventEmitter {
     } catch {
       return {};
     }
+  }
+
+  /**
+   * Overlay mounts in mount namespaces other than the host's: a mount that a container made for itself uses a folder as a layer, and /proc/1/mountinfo does
+   * not show it. One process of each other namespace is read. A process whose namespace cannot be read (another user's, without CAP_SYS_PTRACE) counts as
+   * unreadable: its namespace may hold such a mount.
+   */
+  async #foreignMounts(virtual: string): Promise<{ mounts: HolderMount[]; unreadable: number }> {
+    const proc = `${this.o.root === "/" ? "" : this.o.root}/proc`;
+    const out: HolderMount[] = [];
+    let unreadable = 0;
+    let names: string[];
+    try {
+      names = (await fs.readdir(proc)).filter((n) => /^[0-9]+$/.test(n));
+    } catch {
+      return { mounts: out, unreadable: 1 };
+    }
+    const host = await fs.readlink(`${proc}/1/ns/mnt`).catch(() => undefined);
+    if (host === undefined) unreadable++;
+    const spaces = new Map<string, string>(); // namespace -> one pid in it
+    for (let i = 0; i < names.length; i += 64) {
+      await Promise.all(
+        names.slice(i, i + 64).map(async (n) => {
+          try {
+            const link = await fs.readlink(`${proc}/${n}/ns/mnt`);
+            if (link !== host && !spaces.has(link)) spaces.set(link, n);
+          } catch (e) {
+            const code = (e as NodeJS.ErrnoException).code;
+            if (code !== "ENOENT" && code !== "ESRCH") unreadable++; // (a process that ended while the list was read is fine)
+          }
+        }),
+      );
+    }
+    for (const pid of spaces.values()) {
+      try {
+        const text = await fs.readFile(`${proc}/${pid}/mountinfo`, "utf8");
+        out.push(...mountsUnder(text, virtual).filter((m) => m.reason === "overlay layer"));
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "ESRCH") unreadable++;
+      }
+    }
+    return { mounts: out, unreadable };
+  }
+
+  /** What the kernel holds without a process: the backing files of loop devices, and the swap files. */
+  async #kernelHolds(virtual: string): Promise<{ mounts: HolderMount[]; unreadable: number }> {
+    const base = this.o.root === "/" ? "" : this.o.root;
+    const out: HolderMount[] = [];
+    let unreadable = 0;
+    try {
+      for (const n of (await fs.readdir(`${base}/sys/block`)).filter((x) => x.startsWith("loop"))) {
+        try {
+          const file = (await fs.readFile(`${base}/sys/block/${n}/loop/backing_file`, "utf8")).replace(/\n$/, "").replace(/ \(deleted\)$/, "");
+          if (file && under(file, virtual)) out.push({ mountpoint: file, fstype: n, reason: "loop device" });
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "ENXIO") unreadable++; // (a loop device without a file has no such attribute)
+        }
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") unreadable++;
+    }
+    try {
+      for (const line of (await fs.readFile(`${base}/proc/swaps`, "utf8")).split("\n").slice(1)) {
+        const name = octal(line.split(/\s+/)[0] ?? "");
+        if (name && under(name, virtual)) out.push({ mountpoint: name, fstype: "swap", reason: "swap file" });
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") unreadable++;
+    }
+    return { mounts: out, unreadable };
   }
 
   async #mountsUnder(virtual: string): Promise<Array<{ mount: HolderMount }>> {

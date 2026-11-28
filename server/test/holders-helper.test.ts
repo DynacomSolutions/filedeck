@@ -105,7 +105,7 @@ test("holders helper: with the privilege, the table sees what processes hold, as
   diag = () => {
     const procs = [...children].map((c) => {
       const st = c.pid === undefined ? undefined : h.table.procs.get(c.pid);
-      return `${c.pid}: ${st ? JSON.stringify({ comm: st.comm, dirty: st.dirty, cwd: st.cwd, exe: st.exe, holds: [...st.holds.entries()].map(([k, v]) => `${k}=${JSON.stringify(v)}`) }) : "not in the table"} exit=${c.exitCode}`;
+      return `${c.pid}: ${st ? JSON.stringify({ comm: st.comm, dirty: st.dirty, cwds: [...st.cwds.entries()], exe: st.exe, holds: [...st.holds.entries()].map(([k, v]) => `${k}=${JSON.stringify(v)}`) }) : "not in the table"} exit=${c.exitCode}`;
     });
     return `state=${h.state} ${h.reason ?? ""} events=${h.table.events} helperEvents=${h.helperEvents} drops=${h.drops} soft=${h.softMissing} size=${JSON.stringify(h.table.size())} gaps=${JSON.stringify(h.table.gaps())}\n${procs.join("\n")}`;
   };
@@ -159,5 +159,146 @@ test("holders helper: with the privilege, the table sees what processes hold, as
     assert.ok(h.helperEvents > 0 || h.table.events > 0);
   } finally {
     h.close();
+    killAll();
+  }
+});
+
+/**
+ * The cases that need a process of our own. One C program (built here with cc, like the executable above) does what the shell cannot: a thread with its own
+ * folder table, a child that shares the file table, an io_uring. It writes the file `ready` when it is in the state under test, and then waits.
+ */
+const probeSource = `#define _GNU_SOURCE
+#include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+static const char *ready, *dir_b;
+static volatile int thread_done;
+static void touch(void) { int fd = open(ready, O_CREAT | O_WRONLY, 0600); if (fd >= 0) close(fd); }
+static void *thread(void *a) { (void)a; if (unshare(CLONE_FS) || chdir(dir_b)) _exit(2); thread_done = 1; for (;;) pause(); return 0; }
+static char stack[65536];
+static int child(void *a) { if (open((const char *)a, O_RDONLY) < 0) _exit(2); touch(); for (;;) pause(); return 0; }
+int main(int argc, char **argv) {
+  if (argc < 3) return 2;
+  ready = argv[2];
+  if (!strcmp(argv[1], "fsthreads") && argc == 6) { /* fsthreads READY A B C */
+    dir_b = argv[4];
+    if (chdir(argv[3])) return 2;
+    pthread_t t;
+    if (pthread_create(&t, 0, thread, 0)) return 2;
+    while (!thread_done) usleep(1000);
+    if (chdir(argv[5])) return 2; /* the main thread moves on: the thread keeps B */
+    touch();
+    for (;;) pause();
+  }
+  if (!strcmp(argv[1], "shared") && argc == 4) { /* shared READY FILE */
+    if (clone(child, stack + sizeof stack, CLONE_FILES | SIGCHLD, argv[3]) < 0) return 2;
+    for (;;) pause();
+  }
+  if (!strcmp(argv[1], "uring")) { /* uring READY */
+    char params[256];
+    memset(params, 0, sizeof params);
+    if (syscall(425, 4, params) < 0) return 77; /* io_uring_setup: not allowed here */
+    touch();
+    for (;;) pause();
+  }
+  return 2;
+}
+`;
+const probeBin = path.join(work, "probe");
+let probeBuilt = false;
+const buildProbe = () => {
+  if (probeBuilt) return;
+  fs.writeFileSync(path.join(work, "probe.c"), probeSource);
+  assert.equal(spawnSync("cc", ["-O1", "-pthread", "-o", probeBin, path.join(work, "probe.c")], { encoding: "utf8" }).status, 0, "cc builds the probe program");
+  probeBuilt = true;
+};
+const waitFile = async (p: string, what: string) => until(async () => fs.existsSync(p), 15_000, what);
+
+async function liveHolders(): Promise<Holders> {
+  const h = new Holders({ helper: bin, root: "/", ringMb: 4, settleMs: 20_000, log: (s) => console.log(`# ${s}`) });
+  h.start();
+  await until(async () => h.state === "ready", 60_000, "the start-up pass");
+  return h;
+}
+
+test("holders helper: a file opened just before the question is in the answer (the sync barrier)", { skip: liveSkip, timeout: 120_000 }, async () => {
+  const h = await liveHolders();
+  try {
+    const tree = path.join(work, "barrier");
+    fs.mkdirSync(tree, { recursive: true });
+    fs.writeFileSync(path.join(tree, "file"), "data");
+    const ready = path.join(work, "barrier.ready");
+    const p = start("sh", ["-c", `exec 3< ${tree}/file; : > ${ready}; sleep 300`]);
+    await waitFile(ready, "the descriptor is open");
+    const a = await holdersOf(h, tree); // one question, no waiting for the table: the barrier must make it complete
+    assert.ok(a.holders.some((x) => x.pid === p.pid && x.kinds.includes("fd")), `the descriptor is in the answer: ${JSON.stringify(a.holders)} ${a.reasons.join("; ")}`);
+    assert.equal(a.proven, true, a.reasons.join("; "));
+  } finally {
+    h.close();
+    killAll();
+  }
+});
+
+test("holders helper: two threads with a folder table each are two holds, and the folder that one left is released", { skip: liveSkip, timeout: 120_000 }, async () => {
+  const h = await liveHolders();
+  try {
+    buildProbe();
+    const tree = path.join(work, "fsthreads");
+    for (const d of ["a", "b", "c"]) fs.mkdirSync(path.join(tree, d), { recursive: true });
+    const ready = path.join(work, "fsthreads.ready");
+    const p = start(probeBin, ["fsthreads", ready, path.join(tree, "a"), path.join(tree, "b"), path.join(tree, "c")]);
+    await waitFile(ready, "the program is in place");
+    const has = async (d: string) => (await holdersOf(h, path.join(tree, d))).holders.some((x) => x.pid === p.pid && x.kinds.includes("cwd"));
+    await until(async () => (await has("c")) && (await has("b")), 20_000, "both folders are held");
+    assert.equal(await has("a"), false, "the folder that the main thread left is not held");
+  } finally {
+    h.close();
+    killAll();
+  }
+});
+
+test("holders helper: a child that shares the file table makes the answer unproven while it lives", { skip: liveSkip, timeout: 120_000 }, async () => {
+  const h = await liveHolders();
+  try {
+    buildProbe();
+    const tree = path.join(work, "shared");
+    fs.mkdirSync(tree, { recursive: true });
+    fs.writeFileSync(path.join(tree, "file"), "data");
+    const ready = path.join(work, "shared.ready");
+    const p = start(probeBin, ["shared", ready, path.join(tree, "file")]);
+    await waitFile(ready, "the child has the file open");
+    const a = await holdersOf(h, tree);
+    assert.equal(a.proven, false);
+    assert.ok(a.reasons.some((r) => /share a file table/.test(r)), a.reasons.join("; "));
+    process.kill(-p.pid!, "SIGKILL");
+    await until(async () => (await holdersOf(h, tree)).proven, 20_000, "the answer is a proof again when both ended");
+  } finally {
+    h.close();
+    killAll();
+  }
+});
+
+test("holders helper: a process with an io_uring makes the answer unproven while it lives", { skip: liveSkip, timeout: 120_000 }, async () => {
+  const h = await liveHolders();
+  try {
+    buildProbe();
+    const ready = path.join(work, "uring.ready");
+    const p = start(probeBin, ["uring", ready]);
+    const code = await Promise.race([new Promise<number | null>((r) => p.once("exit", (c) => r(c))), waitFile(ready, "the ring exists").then(() => -1)]);
+    if (code === 77) return; // io_uring is not allowed on this machine: nothing to test
+    const a = await holdersOf(h, work);
+    assert.equal(a.proven, false);
+    assert.ok(a.reasons.some((r) => /io_uring/.test(r)), a.reasons.join("; "));
+    process.kill(-p.pid!, "SIGKILL");
+    await until(async () => !(await holdersOf(h, work)).reasons.some((r) => /io_uring/.test(r)), 20_000, "the ring is gone");
+  } finally {
+    h.close();
+    killAll();
   }
 });

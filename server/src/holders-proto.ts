@@ -1,5 +1,5 @@
 /**
- * The records that `filedeck-holders` writes to its stdout (server/native/filedeck-holders.h): a fixed part of 48 bytes and `nchain` 64-bit numbers,
+ * The records that `filedeck-holders` writes to its stdout (server/native/filedeck-holders.h): a fixed part of 56 bytes and `nchain` 64-bit numbers,
  * little endian, `len` the whole size. A start failure is one line of JSON before any record (a record never starts with the byte "{").
  */
 
@@ -15,14 +15,18 @@ export const HT = {
   EXIT: 9,
   MOVED: 10,
   DIRTY: 11,
+  URING: 12,
+  SCM: 13,
   SFD: 21,
   SCWD: 23,
   SROOT: 24,
   SEXE: 26,
   SMMAP: 27,
+  SURING: 28,
   SNAPBEG: 30,
   SNAPEND: 31,
   SEEDEND: 32,
+  SYNC: 33,
   STATS: 40,
   HELLO: 41,
 } as const;
@@ -31,8 +35,14 @@ export const HF_TRUNCATED = 1;
 export const HF_SHARED = 2;
 export const HF_VANISHED = 4;
 export const HF_ERROR = 8;
+/** FORK: the parent has or had other threads: one of them may have changed its descriptors while the kernel copied them */
+export const HF_MT = 16;
+/** the chain was read while a rename ran (the kernel side marks the pid as well) */
+export const HF_CUT = 32;
+/** FORK: the parent is the agent (it is not in the table) */
+export const HF_AGENT = 64;
 
-export const HDR_BYTES = 48;
+export const HDR_BYTES = 56;
 const MAX_RECORD = HDR_BYTES + 8 * 256;
 
 export interface HolderRec {
@@ -44,6 +54,8 @@ export interface HolderRec {
   flags: number;
   ino: number;
   comm: string;
+  /** the fs_struct that a folder (CWD, ROOT, SCWD, SROOT) was set in; 0n for the other records */
+  key: bigint;
   /** the inode numbers of the folders above the entry, up to the root of its superblock */
   chain: Float64Array;
 }
@@ -115,6 +127,7 @@ export class HolderDecoder {
         flags,
         ino: ino.v,
         comm: b.toString("latin1", off + 32, end),
+        key: b.readBigUInt64LE(off + 48),
         chain,
       });
       off += len;
@@ -136,7 +149,7 @@ function failureText(line: string): string {
 }
 
 /** A record as the helper writes it (used by the tests and by the recorded fixtures). */
-export function encodeRecord(r: { type: number; pid?: number; aux?: number; dev?: number; flags?: number; ino?: number; comm?: string; chain?: number[] }): Buffer {
+export function encodeRecord(r: { type: number; pid?: number; aux?: number; dev?: number; flags?: number; ino?: number; comm?: string; key?: bigint; chain?: number[] }): Buffer {
   const chain = r.chain ?? [];
   const b = Buffer.alloc(HDR_BYTES + chain.length * 8);
   b.writeUInt32LE(b.length, 0);
@@ -152,6 +165,7 @@ export function encodeRecord(r: { type: number; pid?: number; aux?: number; dev?
   };
   put(r.ino ?? 0, 24);
   b.write(r.comm ?? "", 32, 15, "latin1");
+  b.writeBigUInt64LE(r.key ?? 0n, 48);
   chain.forEach((n, i) => put(n, HDR_BYTES + i * 8));
   return b;
 }
