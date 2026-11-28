@@ -31,8 +31,11 @@ export interface LsEntry {
 export interface DirSource {
   list(rel: string, signal: AbortSignal): Promise<{ entries: LsEntry[]; cached?: boolean }>;
   hash(rel: string, signal: AbortSignal): Promise<string>;
-  /** live compare: directories (relative to this side's root) changed since `since` */
-  changes?(since: number, signal: AbortSignal): Promise<{ seq: number; dirs: string[]; reset: boolean }>;
+  /**
+   * live compare: directories (relative to this side's root) changed since `since`. With `holdMs`, a source that can wait holds the answer until
+   * something changed or the time is up, and says so with `held: true`; one that cannot answers at once.
+   */
+  changes?(since: number, signal: AbortSignal, holdMs?: number): Promise<{ seq: number; dirs: string[]; reset: boolean; held?: boolean }>;
 }
 
 export const BIT: Record<Status, number> = { identical: 1, different: 2, "left-only": 4, "right-only": 8, error: 16 };
@@ -148,7 +151,12 @@ export class CompareSession {
   }
   private closed = false;
   private running = false;
-  private liveTimer: NodeJS.Timeout | undefined;
+  /** per side: the timer of a poll for a source that cannot hold its answer, or of the retry after an error; none while a held request waits */
+  private liveTimers: [NodeJS.Timeout | undefined, NodeJS.Timeout | undefined] = [undefined, undefined];
+  /** per side: its source holds its answers, so the next request goes out at once */
+  private held: [boolean, boolean] = [false, false];
+  /** the handling of change answers, one at a time (the two sides follow their feeds side by side) */
+  private liveLock: Promise<unknown> = Promise.resolve();
   private liveAbort = new AbortController();
   /** change-feed positions per side; -1 until the first poll sets the baseline */
   private seq: [number, number] = [-1, -1];
@@ -480,27 +488,53 @@ export class CompareSession {
    * listed again, its rows are updated in place (unchanged rows and subtrees stay), new work is compared, and
    * the folder's ancestors get their status recomputed.
    */
-  startLive(intervalMs = 2000) {
-    if (this.liveTimer || this.closed || (!this.left.changes && !this.right.changes)) return;
+  startLive(intervalMs = 2000, holdMs = 25_000) {
+    const sides = ([this.left, this.right] as DirSource[]).flatMap((src, i) => (src.changes ? [i as 0 | 1] : []));
+    if (this.liveStarted || this.closed || !sides.length) return;
+    this.liveStarted = true;
     this.stats.live = true;
-    const tick = async () => {
-      try {
-        await this.pollChanges();
-      } catch {
-        /* agent briefly unreachable: try again next tick */
-      }
-      if (!this.closed) {
-        this.liveTimer = setTimeout(() => void tick(), intervalMs);
-        this.liveTimer.unref?.();
-      }
-    };
-    this.liveTimer = setTimeout(() => void tick(), intervalMs);
-    this.liveTimer.unref?.();
+    // One loop per side. A source that holds its answer (an agent) wakes the loop when something changed, with no timer here; one that cannot is
+    // asked every `intervalMs`, as is a side that failed (a short retry).
+    for (const i of sides) {
+      const again = (ms: number) => {
+        if (this.closed) return;
+        if (ms <= 0) return void setImmediate(() => void step());
+        this.liveTimers[i] = setTimeout(() => void step(), ms);
+        this.liveTimers[i]!.unref?.();
+      };
+      const step = async () => {
+        let failed = false;
+        try {
+          await this.pollChanges(holdMs, i);
+        } catch {
+          failed = true; // agent briefly unreachable: try again shortly
+        }
+        again(!failed && this.held[i] ? 0 : intervalMs);
+      };
+      again(this.held[i] ? 0 : intervalMs);
+    }
   }
+  private liveStarted = false;
 
   /** One round of the change feeds (exposed for tests). */
-  async pollChanges(): Promise<number> {
+  async pollChanges(holdMs = 0, only?: 0 | 1): Promise<number> {
     const signal = this.liveAbort.signal;
+    const got: { i: 0 | 1; since: number; ch: { seq: number; dirs: string[]; reset: boolean } }[] = [];
+    for (const [i, src] of [this.left, this.right].entries()) {
+      if (!src.changes || (only !== undefined && only !== i)) continue;
+      const since = this.seq[i] as number;
+      // the first answer is the baseline and is never held
+      const ch = await src.changes(Math.max(0, since), signal, since >= 0 ? holdMs : 0);
+      this.seq[i] = ch.seq;
+      this.held[i] = ch.held === true;
+      got.push({ i: i as 0 | 1, since, ch });
+    }
+    const run = this.liveLock.then(() => this.applyChanges(got, signal));
+    this.liveLock = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyChanges(got: { i: 0 | 1; since: number; ch: { seq: number; dirs: string[]; reset: boolean } }[], signal: AbortSignal): Promise<number> {
     const targets = new Set<number>();
     const want = (side: 0 | 1, rel: string) => {
       const r = (side === 1 ? (this.q.byRp!.get(rel) ?? this.q.byP!.get(rel)) : this.q.byP!.get(rel)) as unknown as DbRow | undefined;
@@ -512,14 +546,10 @@ export class CompareSession {
     const old = [...this.retry];
     this.retry.clear();
     for (const x of old) want(Number(x[0]) as 0 | 1, x.slice(2));
-    for (const [i, src] of [this.left, this.right].entries()) {
-      if (!src.changes) continue;
-      const since = this.seq[i] as number;
-      const ch = await src.changes(Math.max(0, since), signal);
-      this.seq[i] = ch.seq;
+    for (const { i, since, ch } of got) {
       if (since < 0) continue; // first poll: baseline only
-      if (ch.reset) for (const rel of this.focus) want(i as 0 | 1, rel);
-      for (const d of ch.dirs) want(i as 0 | 1, d);
+      if (ch.reset) for (const rel of this.focus) want(i, rel);
+      for (const d of ch.dirs) want(i, d);
     }
     let n = 0;
     for (const id of targets) {
@@ -690,7 +720,7 @@ export class CompareSession {
   close() {
     if (this.closed) return;
     this.closed = true;
-    clearTimeout(this.liveTimer);
+    for (const t of this.liveTimers) clearTimeout(t);
     this.liveAbort.abort();
     this.kick();
     try {

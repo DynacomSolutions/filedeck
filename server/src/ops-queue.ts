@@ -221,8 +221,31 @@ export class OpQueue {
   /** cancel flags the shared store could not take (busy): each tick writes them again until it can, or the row has ended */
   private pendingCancels = new Set<string>();
   constructor(private d: OpQueueDeps) {
-    // one unref'd timer: heartbeat, progress snapshot, foreign requests, adoption of jobs whose owner went silent
-    if (d.shared) setInterval(() => this.tick(), d.shared.tickMs ?? 1000).unref();
+    // one unref'd timer while there is work: heartbeat, progress snapshot, foreign requests, adoption of jobs whose owner went silent (see `arm`)
+    this.arm();
+    this.unwatch = d.shared?.store.watch(() => this.arm());
+  }
+  private unwatch?: () => void;
+  private beatTimer?: ReturnType<typeof setInterval>;
+
+  /** Start the shared-store tick. It stops itself when this process has no job and the store holds no live row (`working`), and the next job starts it again. */
+  private arm() {
+    const sh = this.d.shared;
+    if (!sh || this.beatTimer || this.stopping) return;
+    this.beatTimer = setInterval(() => {
+      this.tick();
+      if (this.working()) return;
+      clearInterval(this.beatTimer);
+      this.beatTimer = undefined;
+    }, sh.tickMs ?? 1000);
+    this.beatTimer.unref();
+  }
+
+  /** True while a job is live here, a write or a cancel waits for the store, or the store holds a live row (a peer's job may need adopting). */
+  private working(): boolean {
+    if (this.pendingCancels.size) return true;
+    for (const j of this.jobs.values()) if (live(j.state) || j.dirty) return true;
+    return this.d.shared!.store.liveCount(SCOPE) !== 0;
   }
 
   create(spec: OpSpec, owner?: Identity): OpView {
@@ -484,6 +507,7 @@ export class OpQueue {
   private save(j: Job, force = true) {
     const sh = this.d.shared;
     if (!sh || j.lost) return;
+    this.arm();
     const now = Date.now();
     if (!force && j.items.length > FINISHED_ITEMS && now - j.savedAt < 250) {
       j.dirty = true;
@@ -602,6 +626,7 @@ export class OpQueue {
    */
   async interrupt(ms = 3000) {
     this.stopping = true;
+    this.unwatch?.();
     const liveJobs = () => [...this.jobs.values()].filter((j) => live(j.state));
     for (const j of liveJobs()) {
       j.wasWaiting = !!j.waiting;

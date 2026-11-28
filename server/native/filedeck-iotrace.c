@@ -1,16 +1,17 @@
 /*
  * filedeck-iotrace: attributes block IO to a disk, a cgroup and a process with eBPF, at very low cost.
  *
- *   filedeck-iotrace [--interval-ms N]      N = 100 to 60000 (default 1000)
+ *   filedeck-iotrace      no options; it reads commands on stdin
  *
  * A BPF program (filedeck-iotrace.bpf.c) counts every read and write request that is sent to a disk, in one bounded hash map in the kernel.
- * Once per interval this program reads and clears the map, sorts the rows and prints ONE line on stdout. It prints nothing else, it writes no file
- * and it sees no single event. The cost is the BPF program per request (a hash update) and one map read per interval.
+ * The helper has no timer. It waits on stdin. For each line "read" it reads and clears the map, sorts the rows and prints ONE line on stdout. It
+ * prints nothing else, it writes no file and it sees no single event. The cost is the BPF program per request (a hash update) and one map read
+ * per command. The caller decides when to read: on a request, for a live subscriber, or on a pressure event (see server/src/iotrace.ts).
  *
- * Output (stdout, one JSON line per interval, deltas for that interval, the 512 rows with the most requests, busiest first):
+ * Output (stdout, one JSON line per "read", deltas since the previous read, the 512 rows with the most requests, busiest first):
  *   {"t":<ms since the epoch>,"ok":true,"rows":[{"dev":"259:0","cg":<cgroup v2 id>,"pid":<tgid>,"comm":"postgres","r":<reads>,"w":<writes>,"rb":<bytes read>,"wb":<bytes written>}]}
  * dev is the whole disk as major:minor. cg is the cgroup v2 id, which is the inode number of the cgroup folder. pid is the thread group id. comm is
- * the task name at the first request of the interval. Rows are not given for an interval without requests ("rows":[]).
+ * the task name at the first request since the previous read. Rows are not given when there were no requests ("rows":[]).
  *   {"ok":false,"error":"..."}   printed once when the helper cannot start (no capability, no BTF, the program does not load) or stops on an error,
  *                                then the exit status is 3. The collector then uses its fallback.
  *
@@ -23,7 +24,7 @@
  *        cc -O2 -DIOTRACE_BPF_OBJ='"filedeck-iotrace.bpf.o"' -o filedeck-iotrace filedeck-iotrace.c -lbpf -lelf -lz   (add -static and -lzstd for a static program)
  * The BPF object is embedded in the program, so the program is one file. See server/scripts/build-native.mjs and the Dockerfile.
  *
- * Exit status: 0 on SIGTERM, SIGINT or a closed stdout, 1 usage error, 3 not supported or not permitted (the line above is printed first).
+ * Exit status: 0 on SIGTERM, SIGINT, a closed stdin or a closed stdout, 1 usage error, 3 not supported or not permitted (the line above is printed first).
  */
 #define _GNU_SOURCE
 #include <bpf/bpf.h>
@@ -299,23 +300,36 @@ static long long wall_ms(void) {
 }
 
 #ifndef IOTRACE_UNIT
-int main(int argc, char **argv) {
-	long interval_ms = 1000;
-	for (int i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--interval-ms") && i + 1 < argc) {
-			char *end;
-			interval_ms = strtol(argv[++i], &end, 10);
-			if (*end || interval_ms < 100 || interval_ms > 60000) {
-				fprintf(stderr, "filedeck-iotrace: --interval-ms must be 100 to 60000\n");
-				return 1;
-			}
-		} else {
-			fprintf(stderr, "usage: filedeck-iotrace [--interval-ms N]\n");
-			return 1;
+/* Reads one command line from stdin. Returns 1 for "read", 0 at end of input or on a signal, -1 for an unknown command. No timer: it blocks in read(). */
+static int next_command(void) {
+	static char buf[64];
+	static size_t len;
+	for (;;) {
+		char *nl = memchr(buf, '\n', len);
+		if (nl) {
+			size_t n = (size_t)(nl - buf);
+			int ok = n == 4 && !memcmp(buf, "read", 4);
+			memmove(buf, nl + 1, len - n - 1);
+			len -= n + 1;
+			return ok ? 1 : -1;
 		}
+		if (len == sizeof buf) return -1; /* a line that is too long is not a command */
+		if (stop) return 0;
+		ssize_t r = read(STDIN_FILENO, buf + len, sizeof buf - len);
+		if (r < 0 && errno == EINTR) continue;
+		if (r <= 0) return 0;
+		len += (size_t)r;
+	}
+}
+
+int main(int argc, char **argv) {
+	(void)argv;
+	if (argc > 1) {
+		fprintf(stderr, "usage: filedeck-iotrace   (reads the command \"read\" on stdin, one line per command)\n");
+		return 1;
 	}
 	signal(SIGPIPE, SIG_IGN);
-	struct sigaction sa = {.sa_handler = on_signal}; /* no SA_RESTART: a signal ends the sleep */
+	struct sigaction sa = {.sa_handler = on_signal}; /* no SA_RESTART: a signal ends the wait for a command */
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
@@ -335,18 +349,13 @@ int main(int argc, char **argv) {
 
 	static struct row rows[MAP_ENTRIES * 2];
 	static char line[LINE_CAP];
-	struct timespec next;
-	clock_gettime(CLOCK_MONOTONIC, &next);
 	int status = 0;
-	while (!stop) {
-		next.tv_nsec += (interval_ms % 1000) * 1000000L;
-		next.tv_sec += interval_ms / 1000 + next.tv_nsec / 1000000000L;
-		next.tv_nsec %= 1000000000L;
-		struct timespec now;
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (now.tv_sec > next.tv_sec || (now.tv_sec == next.tv_sec && now.tv_nsec > next.tv_nsec)) next = now; /* behind (stopped or slow): do not catch up in a burst */
-		while (!stop && clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL) == EINTR) {}
-		if (stop) break;
+	int cmd;
+	while (!stop && (cmd = next_command()) != 0) {
+		if (cmd < 0) {
+			status = fail("unknown command: send \"read\"");
+			break;
+		}
 		int e = 0;
 		size_t n = tracer_collect(&t, rows, sizeof rows / sizeof *rows, &e);
 		if (e) {

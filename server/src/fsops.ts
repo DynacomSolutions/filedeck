@@ -673,6 +673,13 @@ export interface TrashMeta {
   size: number;
 }
 
+const trashListeners = new Set<(m: TrashMeta) => void>();
+/** Calls `fn` after each item is put in the trash by this process. Returns the function that stops it. */
+export function onTrashed(fn: (m: TrashMeta) => void): () => void {
+  trashListeners.add(fn);
+  return () => void trashListeners.delete(fn);
+}
+
 export async function trash(root: string, p: string): Promise<TrashMeta> {
   const r = resolveWrite(root, p);
   assertNotReserved(r.virtual);
@@ -707,6 +714,13 @@ export async function trash(root: string, p: string): Promise<TrashMeta> {
   } catch (e) {
     await pinDirW(root, dir, (at) => rmTree(path.join(at, id), { force: true })).catch(() => undefined); // no ghost item without data
     throw e;
+  }
+  for (const fn of trashListeners) {
+    try {
+      fn(meta);
+    } catch {
+      /* a listener never fails a delete */
+    }
   }
   return meta;
 }

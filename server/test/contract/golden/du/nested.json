@@ -1,0 +1,222 @@
+{
+  "tree": "nested",
+  "queries": [
+    {
+      "q": "depth=0&fresh=1",
+      "answer": {
+        "path": "/nested",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/nested",
+            "type": "dir",
+            "bytes": 111,
+            "files": 4,
+            "dirs": 5
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&fresh=1",
+      "answer": {
+        "path": "/nested",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/nested",
+            "type": "dir",
+            "bytes": 111,
+            "files": 4,
+            "dirs": 5
+          },
+          {
+            "path": "/nested/d1",
+            "type": "dir",
+            "bytes": 110,
+            "files": 2,
+            "dirs": 2
+          },
+          {
+            "path": "/nested/e",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/e2",
+            "type": "dir",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=3&fresh=1",
+      "answer": {
+        "path": "/nested",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/nested",
+            "type": "dir",
+            "bytes": 111,
+            "files": 4,
+            "dirs": 5
+          },
+          {
+            "path": "/nested/d1",
+            "type": "dir",
+            "bytes": 110,
+            "files": 2,
+            "dirs": 2
+          },
+          {
+            "path": "/nested/d1/d2",
+            "type": "dir",
+            "bytes": 100,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/nested/d1/d2/d3",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/e",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/e2",
+            "type": "dir",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=2&all=1&fresh=1",
+      "answer": {
+        "path": "/nested",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/nested",
+            "type": "dir",
+            "bytes": 111,
+            "files": 4,
+            "dirs": 5
+          },
+          {
+            "path": "/nested/d1",
+            "type": "dir",
+            "bytes": 110,
+            "files": 2,
+            "dirs": 2
+          },
+          {
+            "path": "/nested/d1/d2",
+            "type": "dir",
+            "bytes": 100,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/nested/d1/f",
+            "type": "file",
+            "bytes": 10,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/e",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/e2",
+            "type": "dir",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/e2/x",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/f0",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&cachedOnly=1",
+      "answer": {
+        "path": "/nested",
+        "cached": true,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/nested",
+            "type": "dir",
+            "bytes": 111,
+            "files": 4,
+            "dirs": 5
+          },
+          {
+            "path": "/nested/d1",
+            "type": "dir",
+            "bytes": 110,
+            "files": 2,
+            "dirs": 2
+          },
+          {
+            "path": "/nested/e",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/nested/e2",
+            "type": "dir",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false,
+        "stale": true
+      }
+    }
+  ]
+}

@@ -546,7 +546,7 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
    * between `virtual` and the entry, the entry itself when it is a folder): a folder they may pass through but not list hides what is below it.
    * Each folder is asked once for the whole answer.
    */
-  const answerTree = (c: Context, virtual: string, depth: number, all: boolean, head: { cached: boolean; watched: boolean; stale?: boolean }, t: { recheck?: () => Promise<boolean>; done?: () => void } = {}) => {
+  const answerTree = (c: Context, virtual: string, depth: number, all: boolean, head: { cached: boolean; watched: boolean; stale?: boolean; ageMs?: number; refreshJobId?: string }, t: { recheck?: () => Promise<boolean>; done?: () => void } = {}) => {
     c.header("Content-Type", "application/json; charset=UTF-8");
     let ended = false;
     const end = () => {
@@ -555,7 +555,7 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     const canList = o.canList;
     return stream(c, async (s) => {
       s.onAbort(end);
-      let buf = `{"path":${JSON.stringify(virtual)},"cached":${head.cached},"watched":${head.watched},"entries":[`;
+      let buf = `{"path":${JSON.stringify(virtual)},"cached":${head.cached},"watched":${head.watched},${head.ageMs !== undefined ? `"ageMs":${head.ageMs},` : ""}${head.refreshJobId !== undefined ? `"refreshJobId":${JSON.stringify(head.refreshJobId)},` : ""}"entries":[`;
       let first = true;
       let found = false;
       let tail: Record<string, unknown> = {};
@@ -608,6 +608,9 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     });
   };
   const duRuns = new Map<string, DuRun>();
+  /** refresh=auto scans this process started, and how many may run at once (a burst of readers never starts a walk storm) */
+  const refreshing = new Set<string>();
+  const REFRESH_MAX = Math.max(1, cfg.jobConcurrency);
   const DETACHED_KEEP_MS = 60_000;
   app.get("/api/du", async (c) => {
     const arrived = Date.now();
@@ -628,19 +631,43 @@ export function registerSizeRoutes(app: Hono, cfg: Config, jobs: Jobs, o: SizeAc
     if (!(await fs.stat(r.real)).isDirectory()) throw bad("not a directory");
     const all = flag(q("all"));
     const fresh = flag(q("fresh"));
+    // refresh=auto: answer from the stored rows at once; a part that is not vouched for also starts (or joins) one background scan of this folder
+    if (q("refresh") !== undefined && q("refresh") !== "auto") throw bad("refresh must be auto");
+    const auto = q("refresh") === "auto";
+    if (auto && (fresh || flag(q("cachedOnly")))) throw bad("refresh=auto conflicts with fresh and cachedOnly");
+    /** how old the stored row of the folder is, when it is a finished one */
+    const ageOf = (top: { scanned_at?: number; partial?: boolean } | undefined) => (top && !top.partial && top.scanned_at ? Math.max(0, Date.now() - top.scanned_at) : undefined);
     // cachedOnly=1: answer from stored rows only. Never scans, never waits for a lock; 204 when the folder is not stored.
     if (flag(q("cachedOnly"))) {
       // `stale: true` unless the store can vouch for the rows (the same test as the fast path below). A folder a running scan has not finished is
       // answered with what it has counted so far (`partial`), not "not stored".
-      if (!(await sizes.treeTop(r.virtual))) return c.body(null, 204);
+      const top = await sizes.treeTop(r.virtual);
+      if (!top) return c.body(null, 204);
       const vouched = !all && (await sizes.vouches(r.virtual));
-      return answerTree(c, r.virtual, depth, all, { cached: sizes.persistent, watched: sizes.covers(r.virtual), stale: !vouched }, vouched ? { recheck: () => sizes.vouches(r.virtual) } : {});
+      return answerTree(c, r.virtual, depth, all, { cached: sizes.persistent, watched: sizes.covers(r.virtual), stale: !vouched, ageMs: ageOf(top) }, vouched ? { recheck: () => sizes.vouches(r.virtual) } : {});
     }
     if (!fresh) {
       // Watched, validated by a clean walk since the watcher became ready, and nothing pending or dirty on the folder, below it or above it: answer
       // from the store at once, no job (see SizeStore.freshTree). Only the writer vouches.
       // (checked again after the last entry: a change that arrived meanwhile makes the answer `stale`)
-      if (!all && (await sizes.vouches(r.virtual)) && (await sizes.treeTop(r.virtual))) return answerTree(c, r.virtual, depth, all, { cached: sizes.persistent, watched: true }, { recheck: () => sizes.vouches(r.virtual) });
+      const stored = await sizes.treeTop(r.virtual);
+      if (!all && stored && (await sizes.vouches(r.virtual))) return answerTree(c, r.virtual, depth, all, { cached: sizes.persistent, watched: true, ageMs: ageOf(stored) }, { recheck: () => sizes.vouches(r.virtual) });
+      // refresh=auto and the folder is stored but not vouched for: the stored rows go out now, flagged `stale`. One low-priority scan of this folder (no
+      // other) is joined or started, and its id is in the answer. No job starts while another process writes the store, while a scan of an overlapping
+      // folder is live (it would queue behind it) or while REFRESH_MAX refresh scans run, but a live scan of this very folder is always joined.
+      if (auto && stored) {
+        const overlap = (p: { path: string }) => p.path !== r.virtual && (p.path === "/" || r.virtual === "/" || p.path.startsWith(r.virtual + "/") || r.virtual.startsWith(p.path + "/"));
+        let refreshJobId = liveScan(r.virtual, false)?.id;
+        if (!refreshJobId && !stopping() && (await sizes.mayScan()) && !jobs.findLive("du", overlap) && !jobs.findLive("size", overlap)) {
+          for (const id of refreshing) if (!["queued", "running"].includes(jobs.get(id)?.state ?? "")) refreshing.delete(id);
+          if (refreshing.size < REFRESH_MAX) refreshing.add((refreshJobId = startScan("du", r.virtual, false, undefined, undefined, "cli", o.owner?.(c)).id));
+        }
+        if (refreshJobId) {
+          jobs.touch(refreshJobId);
+          o.follows?.(c, refreshJobId); // the client may poll it (see the jobs routes)
+        }
+        return answerTree(c, r.virtual, depth, all, { cached: sizes.persistent, watched: sizes.covers(r.virtual), stale: true, ageMs: ageOf(stored), refreshJobId });
+      }
       // Not vouched for, and either another process holds the writer lease (a rolling deploy) or a scan of another overlapping folder is live (a job here would
       // queue behind it, possibly for hours): answer from the stored rows, flagged `stale: true`, and start nothing; the next request starts a job if it is still needed.
       const overlap = (p: { path: string }) => p.path !== r.virtual && (p.path === "/" || r.virtual === "/" || p.path.startsWith(r.virtual + "/") || r.virtual.startsWith(p.path + "/"));

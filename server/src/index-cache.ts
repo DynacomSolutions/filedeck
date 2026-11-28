@@ -1,3 +1,4 @@
+import { Deadline } from "./deadline.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -223,8 +224,12 @@ export class IndexCache {
   private journal: ChangeEvent[] = [];
   private seq = 0;
   private listeners = new Set<(e: ChangeEvent) => void>();
-  private timer: NodeJS.Timeout | undefined;
-  private flushTimer: NodeJS.Timeout | undefined;
+  /** One one-shot timer for the next trim: the oldest directory reaches 30 days, or a day of writes starts one soon. None while the index is empty. */
+  private trimAt = new Deadline(() => void this.trimAsync());
+  /** One one-shot timer for the batch of `used_at` writes, armed by the first hit after the last batch. */
+  private flushAt = new Deadline(() => this.flushTouched());
+  /** rows written since the last trim */
+  private writes = 0;
   private touched = new Set<string>();
   private file: string;
   private trimming: Promise<{ removed: number }> | null = null;
@@ -279,10 +284,18 @@ export class IndexCache {
       touch: p("UPDATE dirs SET used_at = ? WHERE path = ?"),
     };
     // Trimming scans the whole index (hundreds of MB on a busy node): rare, and never on the event loop (see trimAsync).
-    this.timer = setInterval(() => void this.trimAsync(), this.o.trimMs ?? 60 * 60_000);
-    this.timer.unref?.();
-    this.flushTimer = setInterval(() => this.flushTouched(), 30_000);
-    this.flushTimer.unref?.();
+    // No timer runs here: a write arms the trim (`noteWrites`), and a trim sets the next one from the oldest directory. An index with rows from an earlier run is trimmed once.
+    if (p("SELECT 1 FROM dirs LIMIT 1").get()) this.trimAt.arm(Date.now() + (this.o.trimMs ?? 60 * 60_000));
+  }
+
+  /** Rows were written: arm the trim when none is set, and trim at once when many rows came in (the entry ceiling may be passed). */
+  private noteWrites(rows: number) {
+    this.writes += rows;
+    const every = Math.max(1000, Math.floor((this.o.maxEntries ?? 5_000_000) / 20));
+    if (this.writes >= every) {
+      this.writes = 0;
+      void this.trimAsync();
+    } else this.trimAt.arm(Date.now() + (this.o.trimMs ?? 60 * 60_000));
   }
 
   get enabled() {
@@ -318,6 +331,7 @@ export class IndexCache {
       if (fresh) {
         this.stats.hits++;
         this.touched.add(dir); // written in one batch later: a hit must not wait for a disk write
+        this.flushAt.arm(Date.now() + 30_000);
         this.bumpWatch(dir);
         const rows = this.q.entList.all(dir) as { name: string; t: IdxEntry["t"]; s: number; m: number; ino: number; l: string | null }[];
         return { entries: rows.map((r) => ({ n: r.name, t: r.t, s: r.s, m: r.m, i: r.ino, ...(r.l !== null ? { l: r.l } : {}) })), cached: true };
@@ -385,6 +399,7 @@ export class IndexCache {
             this.q.entPut.run(dir, e.n, e.t, e.s, e.m, e.i, e.l ?? null, hash);
           }
         });
+        this.noteWrites(Math.min(BATCH, entries.length - i));
       }
       tx(() => void this.q.dirPut.run(dir, st.ino, st.mtime, now, now));
     })();
@@ -411,6 +426,7 @@ export class IndexCache {
     const sha256 = await compute();
     try {
       this.q?.hashPut.run(dir, name, st.size, st.mtime, st.ino, sha256);
+      this.noteWrites(1);
     } catch {
       /* cache only */
     }
@@ -515,13 +531,20 @@ export class IndexCache {
   trimAsync(): Promise<{ removed: number }> {
     if (!this.db) return Promise.resolve({ removed: 0 });
     if (this.trimming) return this.trimming;
+    this.writes = 0;
+    this.trimAt.clear();
     const max = this.o.maxEntries ?? 5_000_000;
     const old = Date.now() - 30 * 86400_000;
-    const run = this.file === ":memory:" ? Promise.resolve({ removed: this.trim() }) : runTrimWorker(this.file, old, max);
+    const run = this.file === ":memory:" ? Promise.resolve({ removed: this.trim(), oldest: this.oldestUse() }) : runTrimWorker(this.file, old, max);
     const p = run
       .catch((e: Error) => {
         console.error("index trim failed:", e.message);
-        return { removed: 0 };
+        return { removed: 0, oldest: undefined };
+      })
+      .then((r) => {
+        // the next trim: when the oldest directory reaches 30 days (not sooner than the trim delay); an empty index waits for its next write
+        if (this.db && typeof r.oldest === "number") this.trimAt.arm(Math.max(r.oldest + 30 * 86400_000, Date.now() + Math.min(60_000, this.o.trimMs ?? 60_000)));
+        return { removed: r.removed };
       })
       .finally(() => {
         this.trimming = null;
@@ -557,13 +580,17 @@ export class IndexCache {
     }
     return dropped;
   }
+  private oldestUse(): number | undefined {
+    const r = this.db?.prepare("SELECT min(used_at) AS o FROM dirs").get() as { o: number | null } | undefined;
+    return typeof r?.o === "number" ? r.o : undefined;
+  }
   private dirCount() {
     return (this.db?.prepare("SELECT count(*) AS n FROM dirs").get() as { n: number } | undefined)?.n ?? 0;
   }
 
   close() {
-    clearInterval(this.timer);
-    clearInterval(this.flushTimer);
+    this.trimAt.clear();
+    this.flushAt.clear();
     this.flushTouched();
     for (const d of [...this.watched.keys()]) this.unwatch(d);
     try {
@@ -609,15 +636,16 @@ if (n > max) {
   while (excess > 0) { const rows = lru.all(); if (!rows.length) break; excess -= drop(rows); sleep(20); }
 }
 db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+const o = db.prepare("SELECT min(used_at) AS o FROM dirs").get().o;
 db.close();
-parentPort.postMessage({ removed });
+parentPort.postMessage({ removed, oldest: typeof o === "number" ? o : undefined });
 `;
 
-function runTrimWorker(file: string, old: number, max: number): Promise<{ removed: number }> {
+function runTrimWorker(file: string, old: number, max: number): Promise<{ removed: number; oldest?: number }> {
   return new Promise((resolve, reject) => {
     const w = new Worker(TRIM_WORKER, { eval: true, workerData: { file, old, max }, resourceLimits: { maxOldGenerationSizeMb: 64 }, stdout: false, stderr: false });
     w.unref();
-    w.once("message", (m: { removed: number }) => resolve(m));
+    w.once("message", (m: { removed: number; oldest?: number }) => resolve(m));
     w.once("error", reject);
     w.once("exit", (code) => (code === 0 ? resolve({ removed: 0 }) : reject(new Error(`trim worker exit ${code}`))));
   });

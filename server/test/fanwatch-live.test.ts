@@ -55,7 +55,7 @@ function run(scenario: string): { lines: string[]; err: string } {
 
 test("fanwatch live: create, modify, close, attributes, rename, delete, one line per entry, with the folder flag and the old place of a move", { skip }, () => {
   const { lines, err } = run("basic");
-  assert.match(lines[0]!, /^#caps rename=1 target=1 unlimited=[01] cache=\d+$/, "the kernel features are reported");
+  assert.match(lines[0]!, /^#caps rename=1 target=1 unlimited=[01] cache=\d+ mounts=1$/, "the kernel features are reported");
   assert.equal(lines[1], "#ready 1");
   assert.equal(lines.at(-1), "#sync", "every event the kernel had queued comes before the answer to a sync");
   const has = (l: string) => assert.ok(lines.includes(l), `missing ${JSON.stringify(l)} in\n${lines.join("\n")}`);
@@ -106,4 +106,10 @@ test("fanwatch live: a file that stays open and is written to is reported at mos
   const m = lines.filter((l) => l === "M f /log");
   assert.ok(m.length >= 2 && m.length <= 6, `${m.length} modify lines in a 2 s write: ${lines.join(" | ")}`);
   assert.ok(m.length < 20, "not one per write");
+});
+
+test("fanwatch live: a mount change prints #mounts within a second, and a quiet mount table prints nothing", { skip }, () => {
+  const { lines, err } = run("mounts");
+  assert.equal(err.includes("early #mounts"), false, "no #mounts before the mount table changed");
+  assert.ok(lines.includes("#mounts"), `no #mounts line in\n${lines.join("\n")}`);
 });

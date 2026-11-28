@@ -35,6 +35,6 @@ test("the file identity used by the password vault includes the device", async (
 });
 
 test("du usage text lists both stored-size flags and the interrupt exit status", () => {
-  assert.match(USAGE, /\[--fresh \| --cached\]/);
+  assert.match(USAGE, /\[--fresh \| --cached \| --refresh-auto\]/);
   assert.match(USAGE, /130/);
 });

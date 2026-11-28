@@ -52,7 +52,7 @@ rules:
     verbs: [get, patch]
   - apiGroups: [""]
     resources: [pods]
-    verbs: [get, list]
+    verbs: [get, list, watch]
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]
     verbs: [get, list, create, patch, delete]
@@ -101,7 +101,9 @@ data:
     release="$RELEASE_NAME"
     targets="$STATIC_TARGETS"
     owned_services=""
-    while :; do
+    # One reconcile pass: read the nodes and the agent pods, make the Services and EndpointSlices, then patch the node list and the hub when it changed.
+    # A failed call ends the script (set -e); the container restarts and the first pass runs again.
+    pass() {
       next="$STATIC_TARGETS"
       owned_services=""
       nodes_raw="$(kubectl get nodes -l "$label" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
@@ -172,7 +174,52 @@ data:
         kubectl -n "$namespace" patch "deployment/$hub" --type merge -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"filedeck.dynacom.dev/nodes-hash\":\"$hash\"}}}}}"
       fi
       date +%s >"$HEARTBEAT"
-      sleep "$INTERVAL"
+    }
+    # The reconciler runs no timer. It watches the Node objects that carry the label and the agent pods through the API (watch with bookmarks). Each event
+    # asks for one pass; events that arrive while a pass runs share the next pass (the pending file). A watch the server ends after WATCH_SECONDS is opened
+    # again, which lists the objects once and so closes the gap. Each watch writes its own heartbeat file on every line, bookmarks and keepalives included,
+    # and when it opens again: the liveness probe fails when one watch is silent for longer than a watch lasts.
+    dir="$(dirname "$HEARTBEAT")"
+    pending="$dir/pending"
+    fifo="$dir/events"
+    rm -f "$pending" "$fifo"
+    mkfifo "$fifo"
+    exec 3<>"$fifo"
+    enc() { printf '%s' "$1" | sed -e 's|/|%2F|g' -e 's|=|%3D|g' -e 's|,|%2C|g'; }
+    watch_resource() {
+      name="$1"
+      url="$2"
+      hb="$HEARTBEAT.$name"
+      date +%s >"$hb"
+      while :; do
+        rm -f "$dir/$name.failed"
+        { kubectl get --raw "$url" || : >"$dir/$name.failed"; } | while IFS= read -r line; do
+          date +%s >"$hb"
+          case "$line" in
+            '{"type":"BOOKMARK"'*) ;;
+            *) : >"$pending"; printf '%s\n' "$name" >&3 ;;
+          esac
+        done
+        if [ -e "$dir/$name.failed" ]; then
+          sleep 5
+        else
+          date +%s >"$hb"
+        fi
+      done
+    }
+    watch_args="watch=1&allowWatchBookmarks=true&timeoutSeconds=$WATCH_SECONDS"
+    watchers=""
+    trap 'kill $watchers 2>/dev/null || true' EXIT
+    watch_resource nodes "/api/v1/nodes?$watch_args&labelSelector=$(enc "$label")" &
+    watchers="$!"
+    watch_resource pods "/api/v1/namespaces/$namespace/pods?$watch_args&labelSelector=$(enc "app.kubernetes.io/name=$app_name,app.kubernetes.io/instance=$release,dynacom.dev/filedeck-managed-agent=true")" &
+    watchers="$watchers $!"
+    pass
+    while :; do
+      read -r _ <&3
+      [ -e "$pending" ] || continue
+      rm -f "$pending"
+      pass
     done
 ---
 apiVersion: apps/v1
@@ -208,13 +255,14 @@ spec:
             - {name: STATIC_NAMES, value: {{ join "," $staticNames | quote }}}
             - {name: STATIC_TARGETS, value: {{ join "," $staticTargets | quote }}}
             - {name: PORT, value: {{ .Values.port | quote }}}
-            - {name: INTERVAL, value: {{ .Values.managedNodes.reconcileSeconds | quote }}}
+            - {name: WATCH_SECONDS, value: {{ .Values.managedNodes.watchSeconds | quote }}}
           volumeMounts:
             - {name: script, mountPath: /etc/filedeck, readOnly: true}
             - {name: heartbeat, mountPath: /run/filedeck}
           resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {cpu: 100m, memory: 128Mi}}
           securityContext: {runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-          livenessProbe: {exec: {command: [/bin/sh, -c, 'now=$(date +%s); then=$(cat /run/filedeck/heartbeat 2>/dev/null || echo 0); test $((now-then)) -lt 90']}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 6}
+          # each watch writes its heartbeat on every line (events and bookmarks) and when it opens again, so it is never older than one watch lasts
+          livenessProbe: {exec: {command: [/bin/sh, -c, 'now=$(date +%s); for w in nodes pods; do then=$(cat /run/filedeck/heartbeat.$w 2>/dev/null || echo 0); test $((now-then)) -lt {{ add (int .Values.managedNodes.watchSeconds) 120 }} || exit 1; done']}, periodSeconds: 30, timeoutSeconds: 5, failureThreshold: 3}
       volumes:
         - name: heartbeat
           emptyDir: {}

@@ -114,6 +114,14 @@ apiToken:
   # With sign-in on, the token acts as the account named in `auth.apiTokenAccount`, and the change stream also needs that account to be an administrator.
   scopes: ["du"]
 
+# Pod sign-in for `filedeck du`: a pod that mounts a projected ServiceAccount token with this audience needs no shared secret.
+# The hub checks the token with the TokenReview API and lets only the listed ServiceAccounts read folder sizes (the `du` scope, nothing else).
+# Each entry is `namespace/name` or `namespace/*` (a whole namespace). Empty = off, and the chart adds no RBAC.
+k8sAuth:
+  allow: []
+  # for example: allow: ["agents/*", "dynacom/storage-scanner"]
+  audience: filedeck
+
 # Saved-password vault (hub). Encrypted archive and PDF passwords that someone typed are kept server-side,
 # AES-256-GCM encrypted in a small sqlite file on `storage`; the key is derived from the Secret below, which is
 # generated in-cluster and never lives in Git: the pre-install/pre-upgrade hook Job (templates/vault-key-job.yaml) creates
@@ -237,6 +245,18 @@ agent:
   sizeStore:
     commitMs: 30000
     exclude: "pg_wal,node_modules,target,.git/objects,cargo-target"
+  # Size gauges (docs/configuration.md): folders exported on the agent /metrics as filedeck_path_bytes{node,path}. The value is read from the size store at
+  # scrape time: no walk, no job. A folder the store does not hold has no series (filedeck_path_bytes_missing counts them). Needs `fanotify.enabled` to stay current.
+  # /metrics has no token, so only list paths that you accept in the metrics store.
+  sizeGauges: []
+  # Pod ephemeral storage from the size store: agent_resource_pod_ephemeral_storage_used_bytes{node,namespace,pod,pod_uid} and the alias
+  # filedeck_pod_ephemeral_storage_bytes. Per pod it adds the volumes that kubelet counts (non-memory emptyDir, configMap, gitRepo), the pod log folder and the
+  # writable layer of each running container. Pod names come from a watch of the pods of this node (spec.nodeName), so the agent gets a token with pods get/list/watch.
+  # Folders are read from the host root that the agent already mounts at /host, so there is no extra mount. Off by default.
+  podStorage:
+    enabled: false
+    kubeletPodsDir: /var/lib/kubelet/pods
+    logsDir: /var/log/pods
   # Change events: a stream of every create, delete, modify, close-after-write, attribute change and move of the files on the node, with a journal so a
   # reader that was away can continue from its last cursor. Needs `fanotify.enabled`. See docs/change-events.md.
   events:
@@ -289,7 +309,8 @@ managedNodes:
   enabled: false
   label: dynacom.dev/filedeck-managed
   value: "true"
-  reconcileSeconds: 30
+  # The reconciler watches the Node and agent Pod objects. A watch the server ends after this many seconds is opened again (no timer reconciles).
+  watchSeconds: 300
   image:
     repository: bitnami/kubectl
     tag: "latest"

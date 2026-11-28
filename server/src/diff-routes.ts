@@ -98,10 +98,34 @@ export function registerDiffRoutes(app: Hono, cfg: Config, feedRef: FeedRef = {}
     return c.json({ path: r.virtual, cached: out.cached, entries: out.entries });
   });
   // Directories that changed since `since` (kernel change events on indexed directories), for live compares.
-  app.get("/api/fs/index-changes", (c) => {
-    const ch = index.changes(Number(c.req.query("since") ?? 0) || 0);
+  // With `wait=<seconds>` (at most 30), an answer with nothing new is held until a directory changes or the time is up, and carries `held: true`: the
+  // compare asks again at once, so it needs no poll timer. The wait ends when the caller goes away.
+  app.get("/api/fs/index-changes", async (c) => {
+    const since = Number(c.req.query("since") ?? 0) || 0;
+    const wait = Math.min(30, Math.max(0, Number(c.req.query("wait") ?? 0) || 0));
     const pre = root === "/" ? "" : root;
-    return c.json({ seq: ch.seq, reset: ch.reset, dirs: ch.dirs.filter((d) => d === root || d.startsWith(pre + "/")).map((d) => d.slice(pre.length) || "/") });
+    const inRoot = (ch: { dirs: string[] }) => ch.dirs.filter((d) => d === root || d.startsWith(pre + "/")).map((d) => d.slice(pre.length) || "/");
+    let ch = index.changes(since);
+    if (wait && !ch.reset && !inRoot(ch).length) {
+      await new Promise<void>((done) => {
+        const signal = c.req.raw.signal;
+        let off: () => void = () => undefined;
+        const end = () => {
+          clearTimeout(timer);
+          off();
+          signal.removeEventListener("abort", end);
+          done();
+        };
+        const timer = setTimeout(end, wait * 1000);
+        off = index.onChange((e) => {
+          if (e.dir === root || e.dir.startsWith(pre + "/")) end();
+        });
+        signal.addEventListener("abort", end, { once: true });
+        if (signal.aborted) end();
+      });
+      ch = index.changes(since);
+    }
+    return c.json({ seq: ch.seq, reset: ch.reset, dirs: inRoot(ch), ...(wait ? { held: true } : {}) });
   });
   app.get("/api/fs/index-stats", (c) => c.json({ enabled: index.enabled, ...index.stats }));
 

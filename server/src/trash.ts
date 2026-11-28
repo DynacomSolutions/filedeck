@@ -429,6 +429,8 @@ export interface RetentionPolicy {
   maxBytes: number;
   /** volumes the agent may not change (read-only prefixes) */
   blocked?: (volume: string) => boolean;
+  /** called with the `deletedAt` of every item that is still there after the age step (the caller sets its next deadline from the oldest) */
+  seen?: (deletedAt: number) => void;
 }
 
 /**
@@ -474,12 +476,15 @@ export async function applyRetention(root: string, procMounts: string, p: Retent
             const gone = new Set(old.length ? await removeAs(f.dir, old) : []);
             r.removed += gone.size;
             r.failed += old.length - gone.size;
-            if (cap !== Infinity) for (const i of sv.items) if (!gone.has(i.id) && !old.includes(i.id)) items.push({ ...i, f: k });
+            for (const i of sv.items) if (!gone.has(i.id) && !old.includes(i.id)) {
+              p.seen?.(i.deletedAt);
+              if (cap !== Infinity) items.push({ ...i, f: k });
+            }
             continue;
           }
           r.failed += await clearPurged(root, f.dir);
           if (p.maxAgeDays > 0) {
-            const e = await emptyDir(root, f.dir, cutoff);
+            const e = await emptyDir(root, f.dir, cutoff, p.seen);
             r.removed += e.removed;
             r.failed += e.failed;
           }
@@ -727,14 +732,17 @@ export async function emptyTrash(root: string, volume: string, olderThanDays?: n
 }
 
 /** Removes the items of one folder this process may change (the top of a store, `u0`, or a scope's own folder) deleted before `cutoff` (Infinity: all). */
-async function emptyDir(root: string, dir: string, cutoff: number): Promise<{ removed: number; failed: number }> {
+async function emptyDir(root: string, dir: string, cutoff: number, seen?: (deletedAt: number) => void): Promise<{ removed: number; failed: number }> {
   let removed = 0;
   let failed = 0;
   // Every item is judged on its own age, however many there are (the listing is capped, the sweep is not).
   for await (const names of namesOf(dir, 256, (n) => ID.test(n))) {
     const ages = cutoff === Infinity ? null : await Promise.all(names.map((id) => readItem(dir, id)));
     for (const [k, id] of names.entries()) {
-      if (ages && (ages[k] as TrashItem).deletedAt > cutoff) continue;
+      if (ages && (ages[k] as TrashItem).deletedAt > cutoff) {
+        seen?.((ages[k] as TrashItem).deletedAt);
+        continue;
+      }
       try {
         await removeItem(root, dir, id);
         removed++;

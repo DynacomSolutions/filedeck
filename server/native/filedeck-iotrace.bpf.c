@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * filedeck-iotrace, kernel side: counts the block requests that are sent to a disk, per disk, cgroup and process, in one bounded kernel map.
- * Nothing is sent to user space per event. The loader (filedeck-iotrace.c) reads and clears the map once per interval.
+ * Nothing is sent to user space per event. The loader (filedeck-iotrace.c) reads and clears the map once per "read" command, so no timer runs in the helper.
  *
  * Attached to the BTF tracepoint block_rq_issue ("tp_btf": it needs no tracefs, and CAP_BPF with CAP_PERFMON is enough). The kernel changed the
  * arguments of this tracepoint in 5.11 (request_queue, request) to (request): the loader loads the program that fits the running kernel.

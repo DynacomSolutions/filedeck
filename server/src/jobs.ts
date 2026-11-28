@@ -129,8 +129,31 @@ export class Jobs {
     private lanes?: JobLanes,
     private shared?: JobsStore,
   ) {
-    // one unref'd timer: heartbeat, foreign cancels, adoption of jobs whose owner went silent
-    if (shared) setInterval(() => this.tick(), shared.tickMs ?? 1000).unref();
+    // one unref'd timer while there is work: heartbeat, foreign cancels, adoption of jobs whose owner went silent (see `arm`)
+    this.arm();
+    this.unwatch = shared?.store.watch(() => this.arm());
+  }
+  private unwatch?: () => void;
+  private beatTimer?: ReturnType<typeof setInterval>;
+
+  /** Start the shared-store tick. It stops itself when this process has no job and the store holds no live row (`working`), and the next job starts it again. */
+  private arm() {
+    const sh = this.shared;
+    if (!sh || this.beatTimer || this.stopping) return;
+    this.beatTimer = setInterval(() => {
+      this.tick();
+      if (this.working()) return;
+      clearInterval(this.beatTimer);
+      this.beatTimer = undefined;
+    }, sh.tickMs ?? 1000);
+    this.beatTimer.unref();
+  }
+
+  /** True while a job is live here, a write waits for the store, an adoption runs, or the store holds a live row (a peer's job may need adopting). */
+  private working(): boolean {
+    if (this.adopting.size) return true;
+    for (const j of this.jobs.values()) if (live(j.state) || j.dirty) return true;
+    return this.shared!.store.liveCount(this.shared!.scope) !== 0;
   }
   private timer?: ReturnType<typeof setInterval>;
   private lastSkipLog = 0;
@@ -406,6 +429,7 @@ export class Jobs {
 
   private save(j: Job) {
     if (!this.shared || this.stopping) return;
+    this.arm();
     // a skipped write (busy database) is retried by tick
     j.dirty = !this.shared.store.put({
       id: j.id, scope: this.shared.scope, kind: j.kind, title: j.title, params: j.params ?? null, view: JSON.stringify({ ...this.view(j), queue: undefined }),
@@ -490,6 +514,7 @@ export class Jobs {
    */
   async interrupt(ms = 3000) {
     this.stopping = true;
+    this.unwatch?.();
     for (const j of this.jobs.values()) if (live(j.state)) j.abort.abort();
     for (const end = Date.now() + ms; this.running > 0 && Date.now() < end; ) await new Promise((r) => setTimeout(r, 20));
     this.shared?.store.release(this.me);
@@ -557,4 +582,28 @@ export class Jobs {
         });
     }
   }
+}
+
+/** Longest `?wait=` a job request may ask for, in seconds. */
+export const MAX_JOB_WAIT_S = 30;
+
+/** The `wait` query value in seconds: 0 when absent. Anything but a whole number from 0 to MAX_JOB_WAIT_S is an error message. */
+export function jobWait(v: string | undefined): number | string {
+  if (v === undefined) return 0;
+  if (!/^\d+$/.test(v) || Number(v) > MAX_JOB_WAIT_S) return `wait must be a whole number of seconds from 0 to ${MAX_JOB_WAIT_S}`;
+  return Number(v);
+}
+
+/**
+ * Long poll: the job as it is once it has ended (not queued or running), or as it is after `seconds`, or when the client goes away.
+ * `read` also keeps the job alive (see `Jobs.touch`).
+ */
+export async function untilEnded(read: () => JobView | undefined, seconds: number, signal?: AbortSignal): Promise<JobView | undefined> {
+  const end = Date.now() + seconds * 1000;
+  let v = read();
+  while (v && (v.state === "queued" || v.state === "running") && Date.now() < end && !signal?.aborted) {
+    await new Promise((r) => setTimeout(r, 50));
+    v = read();
+  }
+  return v;
 }
