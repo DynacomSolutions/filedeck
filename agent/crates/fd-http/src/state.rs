@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fd_core::{BuildInfo, Config};
+
+use crate::sizes::Sizes;
 use sha2::{Digest, Sha256};
 
 /// A flag that says whether the agent takes work. The binary sets it when the listener is up
@@ -34,9 +36,24 @@ pub(crate) struct Inner {
     pub token_digest: [u8; 32],
     pub build: BuildInfo,
     pub started_at: u64,
+    pub sizes: Option<Arc<Sizes>>,
 }
 
 impl AppState {
+    /// Shutdown, step one: no new job starts and the running ones stop at their next step.
+    pub fn begin_shutdown(&self) {
+        if let Some(s) = &self.inner.sizes {
+            s.begin_shutdown();
+        }
+    }
+
+    /// Shutdown, step two: wait until no job runs, then give the store's writer lease back.
+    pub async fn drain(&self) {
+        if let Some(s) = &self.inner.sizes {
+            s.drain().await;
+        }
+    }
+
     /// The state for a loaded configuration. The token is kept only as a SHA-256 digest.
     pub fn new(config: &Config, ready: Ready) -> Self {
         let started_at = SystemTime::now()
@@ -51,6 +68,7 @@ impl AppState {
                 token_digest: Sha256::digest(config.token.expose().as_bytes()).into(),
                 build: BuildInfo::current(),
                 started_at,
+                sizes: Sizes::open(config),
             }),
             ready,
         }

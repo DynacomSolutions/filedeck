@@ -95,20 +95,26 @@ async fn main() -> ExitCode {
     };
 
     let ready = Ready::default();
-    let app = router(AppState::new(&config, ready.clone()));
+    let state = AppState::new(&config, ready.clone());
+    let app = router(state.clone());
     ready.set(true);
     println!("filedeckd listening on {addr}");
     tracing::info!(node = %config.node, %addr, "agent started");
 
     let stop = ready.clone();
+    let leaving = state.clone();
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             // Fail readiness first, then stop accepting and finish the requests in flight.
             stop.set(false);
+            // no new scan starts, the running ones stop at their next step
+            leaving.begin_shutdown();
             tracing::info!("shutting down");
         })
         .await;
+    // the scans have stopped: give the size store's writer lease back
+    state.drain().await;
     match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(e),

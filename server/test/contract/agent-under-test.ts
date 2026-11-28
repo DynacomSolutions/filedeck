@@ -133,9 +133,15 @@ async function freePort(): Promise<number> {
   });
 }
 
+/** An agent with no open mode (the Rust agent) always needs a token: the harness gives one to a test that asks for none. */
+const needsToken = (): boolean => process.env.FILEDECK_CONTRACT_AGENT_NEEDS_TOKEN === "1";
+/** For a test of an agent that runs without a token: such an agent does not exist when `FILEDECK_CONTRACT_AGENT_NEEDS_TOKEN=1`. */
+export const hasOpenMode = (): boolean => !needsToken();
+
 async function startSpawned(opts: AgentOptions): Promise<AgentUnderTest> {
   const root = opts.root ?? fixtureRoot();
-  const env = opts.env ?? {};
+  const env = { ...(opts.env ?? {}) };
+  if (needsToken() && !env.FILEDECK_AGENT_TOKEN) env.FILEDECK_AGENT_TOKEN = "contract-token-" + "x".repeat(24);
   const port = await freePort();
   const cmd = process.env.FILEDECK_CONTRACT_SPAWN?.trim();
   const argv = cmd ? cmd.split(/\s+/) : [process.execPath, "--import", "tsx", path.join(serverDir, "src/main.ts")];

@@ -15,13 +15,18 @@ fn label(v: &str) -> String {
 /// nothing that names a path, a node or a size may go here, because the route is open.
 pub(crate) fn render(state: &AppState) -> String {
     let i = &state.inner;
+    let sizes = i
+        .sizes
+        .as_ref()
+        .map(|s| s.metrics_text())
+        .unwrap_or_default();
     format!(
         "# HELP filedeck_agent_build_info The version, commit and OS of this agent. The value is always 1.\n\
          # TYPE filedeck_agent_build_info gauge\n\
          filedeck_agent_build_info{{version=\"{}\",commit=\"{}\",os=\"{}\"}} 1\n\
          # HELP filedeck_agent_start_timestamp_seconds When this agent started, in Unix seconds.\n\
          # TYPE filedeck_agent_start_timestamp_seconds gauge\n\
-         filedeck_agent_start_timestamp_seconds {}\n",
+         filedeck_agent_start_timestamp_seconds {}\n{sizes}",
         label(i.build.version),
         label(i.build.commit),
         label(i.build.os),
