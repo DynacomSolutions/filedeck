@@ -134,7 +134,7 @@ jobs:
         run: chmod o+x "$HOME" "$HOME/work" "$GITHUB_WORKSPACE/.."
       - name: Run the server tests as root, as the image build does
         if: matrix.suite == 'root'
-        run: sudo env "PATH=$PATH" FILEDECK_REQUIRE_FANWATCH=1 FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_HOST_HELPERS=1 FILEDECK_REQUIRE_MOUNT=1 npm test
+        run: sudo env "PATH=$PATH" FILEDECK_REQUIRE_FANWATCH=1 FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_HOST_HELPERS=1 FILEDECK_REQUIRE_MOUNT=1 FILEDECK_REQUIRE_HOLDERS=1 FILEDECK_REQUIRE_HOLDERS_LIVE=1 npm test
         working-directory: server
         timeout-minutes: 10
 
