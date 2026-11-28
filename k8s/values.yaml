@@ -224,6 +224,13 @@ agent:
   # the proc source and carries on.
   pressure:
     ebpf: false
+  # Who holds what: a live table of the processes that hold a file or a folder (working folder, root folder, executable, open file, mapping), kept from eBPF
+  # events (the helper filedeck-holders), and `GET /api/v1/holders?path=` to ask it. Off by default: it adds the BPF and PERFMON capabilities and `hostPID`
+  # to the agent pod, and mounts /sys/kernel/btf read-only (Linux 5.14 or newer with BTF). `ringMb` is the size of the ring buffer in MiB (a power of two).
+  # If the kernel or the runtime refuses it, the agent reports `unavailable` in the answers and carries on (docs/holders.md).
+  holders:
+    ebpf: false
+    ringMb: 16
   # How the folder-size store follows changes (needs `fanotify.enabled`). The changes of `commitMs` are merged per folder and written and re-read together.
   # Folders named in `exclude` (names, globs or runs like `.git/objects`, at any depth) never write to the size store: their size comes from the scheduled
   # scans. The change event stream and its journal are not affected. An empty `exclude` turns excludes off.

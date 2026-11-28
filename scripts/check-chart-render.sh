@@ -73,3 +73,15 @@ if helm template t k8s -s templates/hub.yaml --set port=9091 >/dev/null 2>&1; th
 fi
 
 echo "chart render check passed"
+
+# The holder table (eBPF): nothing of it in a default render; with it on, every agent pod gets the helper, the capabilities, the host pid space and the BTF mount.
+off=$(helm template t k8s --set managedNodes.enabled=true --set 'nodes[0].name=a' --set 'nodes[0].nodeName=a')
+for name in FILEDECK_HOLDERS hostPID /sys/kernel/btf; do
+  case "$off" in *"$name"*) echo "a default render must not mention $name" >&2; exit 1 ;; esac
+done
+on=$(helm template t k8s --set agent.holders.ebpf=true --set agent.holders.ringMb=32 --set managedNodes.enabled=true --set 'nodes[0].name=a' --set 'nodes[0].nodeName=a')
+test "$(printf '%s\n' "$on" | grep -c 'hostPID: true')" = 2 || { echo "the holder table needs hostPID in the agent pods and the managed agent pods" >&2; exit 1; }
+test "$(printf '%s\n' "$on" | grep -c 'FILEDECK_HOLDERS_RING_MB')" = 2
+test "$(printf '%s\n' "$on" | grep -c '/sys/kernel/btf')" -ge 4
+test "$(printf '%s\n' "$on" | grep -c -E '"BPF", "PERFMON"|BPF, PERFMON')" = 2
+printf '%s\n' "$on" | grep -A1 'FILEDECK_HOLDERS_RING_MB' | grep -q '"32"' || { echo "the ring size value is not passed" >&2; exit 1; }

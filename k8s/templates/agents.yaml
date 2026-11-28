@@ -51,6 +51,10 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: {{ . | quote }}
       {{- end }}
+      {{- if $.Values.agent.holders.ebpf }}
+      # The eBPF holder table reports host pids: its start-up pass and its re-reads name processes by the pid namespace of the helper (docs/holders.md).
+      hostPID: true
+      {{- end }}
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -131,6 +135,13 @@ spec:
             - name: FILEDECK_IOTRACE
               value: /usr/local/bin/filedeck-iotrace
             {{- end }}
+            {{- if $.Values.agent.holders.ebpf }}
+            # The live table of which process holds which file or folder, with eBPF (needs CAP_BPF and CAP_PERFMON and hostPID, see securityContext; docs/holders.md).
+            - name: FILEDECK_HOLDERS
+              value: /usr/local/bin/filedeck-holders
+            - name: FILEDECK_HOLDERS_RING_MB
+              value: {{ $.Values.agent.holders.ringMb | int64 | quote }}
+            {{- end }}
             # Folder-size store writes (docs/configuration.md): one commit round per interval, and folders whose changes never reach the store.
             - name: FILEDECK_SIZE_COMMIT_MS
               value: {{ $.Values.agent.sizeStore.commitMs | int64 | quote }}
@@ -210,7 +221,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"{{ if $.Values.agent.fanotify.enabled }}, "SYS_ADMIN"{{ end }}{{ if $.Values.agent.pressure.ebpf }}, "BPF", "PERFMON"{{ end }}{{ if $.Values.auth.enabled }}, "SYS_CHROOT"{{ end }}]
+              add: ["DAC_OVERRIDE", "DAC_READ_SEARCH", "CHOWN", "FOWNER", "SETUID", "SETGID"{{ if $.Values.agent.fanotify.enabled }}, "SYS_ADMIN"{{ end }}{{ if or $.Values.agent.pressure.ebpf $.Values.agent.holders.ebpf }}, "BPF", "PERFMON"{{ end }}{{ if $.Values.auth.enabled }}, "SYS_CHROOT"{{ end }}]
             readOnlyRootFilesystem: true
             runAsNonRoot: false
             runAsUser: 0
@@ -230,6 +241,12 @@ spec:
               mountPath: /var/cache/filedeck
             - name: index
               mountPath: /var/lib/filedeck
+            {{- if $.Values.agent.holders.ebpf }}
+            # The kernel's type information that the BPF program is matched against when it loads (CO-RE).
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+            {{- end }}
             {{- if $.Values.agent.events.socket.enabled }}
             - name: events
               mountPath: /run/filedeck-events
@@ -253,6 +270,12 @@ spec:
           hostPath:
             path: {{ default $.Values.agent.indexHostPath .indexHostPath }}
             type: DirectoryOrCreate
+        {{- if $.Values.agent.holders.ebpf }}
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+        {{- end }}
         {{- if $.Values.agent.events.socket.enabled }}
         - name: events
           hostPath:
