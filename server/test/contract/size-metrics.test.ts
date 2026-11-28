@@ -25,7 +25,7 @@ contractTest("/metrics reports the size store as available and not damaged", asy
     assert.match(t, /^filedeck_watcher_mounts_covered \d+$/m);
     assert.match(t, /^filedeck_watcher_mounts_unsupported \d+$/m);
     assert.match(t, /^filedeck_watcher_mount_aliases \d+$/m);
-    assert.equal(t.split("\n").filter((l) => l && !l.startsWith("#")).length, 54);
+    assert.equal(t.split("\n").filter((l) => l && !l.startsWith("#")).length, 55); // (one of them is the `pressure` kind of filedeck_events_total)
     // a job that waits shows in the gauges (it needs the agent's job queue, so it runs in process only)
     if (inProcessOnly()) {
       const jobs = (app.raw as unknown as { jobs: { create(k: string, t: string, run: () => Promise<unknown>, d?: undefined, gate?: () => Promise<void>): unknown } }).jobs;

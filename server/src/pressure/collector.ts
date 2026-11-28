@@ -68,8 +68,7 @@ const sumRates = (r: Rates) => r.rIops + r.wIops;
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve();
-    const t = setTimeout(done, ms);
-    t.unref();
+    const t = setTimeout(done, ms); // (not unref'd: a request waits on it, and it lasts one interval at most)
     function done() {
       clearTimeout(t);
       signal?.removeEventListener("abort", done);
