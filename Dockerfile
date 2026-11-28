@@ -42,6 +42,11 @@ RUN set -e; case "$(uname -m)" in x86_64) a=x86;; aarch64) a=arm64;; *) echo "fi
     clang -O2 -g -Wall -target bpf "-D__TARGET_ARCH_$a" -I server/native -c server/native/filedeck-iotrace.bpf.c -o /tmp/filedeck-iotrace.bpf.o; \
     gcc -O2 -Wall -static '-DIOTRACE_BPF_OBJ="/tmp/filedeck-iotrace.bpf.o"' -o /usr/local/bin/filedeck-iotrace server/native/filedeck-iotrace.c -lbpf -lelf -lz -lzstd; \
     rm /tmp/filedeck-iotrace.bpf.o
+# The holder table's eBPF helper (server/native/filedeck-holders.*), built the same way: the BPF program with clang, embedded in a static loader.
+RUN set -e; case "$(uname -m)" in x86_64) a=x86;; aarch64) a=arm64;; *) echo "filedeck-holders: no BPF target for $(uname -m)" >&2; exit 1;; esac; \
+    clang -O2 -g -Wall -target bpf "-D__TARGET_ARCH_$a" -I server/native -c server/native/filedeck-holders.bpf.c -o /tmp/filedeck-holders.bpf.o; \
+    gcc -O2 -Wall -static '-DHOLDERS_BPF_OBJ="/tmp/filedeck-holders.bpf.o"' -o /usr/local/bin/filedeck-holders server/native/filedeck-holders.c -lbpf -lelf -lz -lzstd; \
+    rm /tmp/filedeck-holders.bpf.o
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY server/package.json server/
 COPY web/package.json web/
@@ -54,7 +59,7 @@ COPY web web
 COPY scripts/check-test-skips.mjs scripts/check-test-skips.mjs
 RUN npm run typecheck \
  && npm run build \
- && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SMBCLIENT=1 FILEDECK_REQUIRE_IOTRACE=1 npm test && npm prune --omit=dev --workspace=server
+ && FILEDECK_REQUIRE_SANDBOX=1 FILEDECK_REQUIRE_SMBCLIENT=1 FILEDECK_REQUIRE_IOTRACE=1 FILEDECK_REQUIRE_HOLDERS=1 npm test && npm prune --omit=dev --workspace=server
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # libuv's file pool (4 threads by default) is the limit on parallel stat calls; the size walk keeps up to 32 in flight
@@ -75,6 +80,8 @@ RUN apk upgrade --no-cache && apk add --no-cache libarchive-tools 7zip qpdf samb
 COPY --from=build /usr/local/bin/filedeck-fanwatch /usr/local/bin/filedeck-fanwatch
 # eBPF block IO tracer: only started when the chart's agent.pressure.ebpf sets FILEDECK_IOTRACE (it needs CAP_BPF and CAP_PERFMON and kernel BTF).
 COPY --from=build /usr/local/bin/filedeck-iotrace /usr/local/bin/filedeck-iotrace
+# eBPF holder table: only started when the chart's agent.holders.ebpf sets FILEDECK_HOLDERS (it needs CAP_BPF, CAP_PERFMON, hostPID and kernel BTF).
+COPY --from=build /usr/local/bin/filedeck-holders /usr/local/bin/filedeck-holders
 # Sandbox launcher: used for every Git command when the kernel has Landlock (FILEDECK_SANDBOX, set to require below).
 COPY --from=build /usr/local/bin/filedeck-sandbox /usr/local/bin/filedeck-sandbox
 # No-replace rename: places a folder (and a file where the filesystem has no hard links) in a move or copy without overwrite.
