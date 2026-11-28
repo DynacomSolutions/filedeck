@@ -170,6 +170,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fd-events"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fd-fs"
 version = "0.1.0"
 dependencies = [
@@ -211,6 +223,10 @@ dependencies = [
  "serde_json",
  "thiserror",
 ]
+
+[[package]]
+name = "fd-watch"
+version = "0.1.0"
 
 [[package]]
 name = "filedeckd"

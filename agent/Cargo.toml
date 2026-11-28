@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fd-core", "crates/fd-fs", "crates/fd-http", "crates/fd-store", "crates/filedeckd"]
+members = ["crates/fd-core", "crates/fd-events", "crates/fd-fs", "crates/fd-http", "crates/fd-store", "crates/fd-watch", "crates/filedeckd"]
 resolver = "2"
 
 [workspace.package]
@@ -10,6 +10,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+bytes = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 form_urlencoded = "1"
 http-body-util = "0.1"
@@ -30,9 +31,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 
 fd-core = { path = "crates/fd-core" }
+fd-events = { path = "crates/fd-events" }
 fd-fs = { path = "crates/fd-fs" }
 fd-http = { path = "crates/fd-http" }
 fd-store = { path = "crates/fd-store" }
+fd-watch = { path = "crates/fd-watch" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
