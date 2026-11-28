@@ -100,8 +100,9 @@ contractTest("octal escapes in the table are decoded, and a mount whose folder i
 
 contractTest("a mount under a read-only prefix is marked readOnly", () =>
   withTable(hostTable, ["home", "mnt/backup"], { FILEDECK_READONLY: "/home" }, (mounts) => {
-    // the TS agent marks the mounts under the prefix; the Rust agent is read only everywhere and marks every mount
+    // only the mounts under the prefix are marked
     assert.equal(mounts.find((m) => m.mountpoint === "/home").readOnly, true);
+    assert.equal("readOnly" in mounts.find((m) => m.mountpoint === "/"), false);
   }),
 );
 

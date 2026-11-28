@@ -90,9 +90,13 @@ async fn everything_else_needs_the_token_and_the_401_body_equals_the_typescript_
 #[tokio::test]
 async fn an_unknown_route_is_404_with_the_token_and_never_leaks_without_it() {
     let (app, _) = app(&[]);
-    let (s, _, b) = call(&app, "/api/fs/list?path=/", Some(&bearer())).await;
+    let (s, h, b) = call(&app, "/api/nothing-here", Some(&bearer())).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    assert_eq!(b, r#"{"error":"not found"}"#);
+    assert_eq!(b, "404 Not Found");
+    assert!(h[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/plain"));
+    let (s, _, b) = call(&app, "/api/nothing-here", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(!b.contains("404"));
 }
 
 #[tokio::test]
@@ -132,7 +136,7 @@ async fn info_has_the_shape_of_the_typescript_agent() {
     let got: serde_json::Value = serde_json::from_str(&b).unwrap();
     assert_eq!(got["node"], "zq-node-7");
     assert_eq!(got["root"], "/");
-    assert_eq!(got["readOnly"], serde_json::json!(["/"]));
+    assert_eq!(got["readOnly"], serde_json::json!([]));
     // same keys in the same order, at both levels, and the same JSON type for each
     assert_eq!(shape(&got), shape(&golden));
     let order = |s: &str| -> Vec<String> {

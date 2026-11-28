@@ -27,8 +27,14 @@ pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
+/// An unknown route: the plain text that the TypeScript agent's web framework sends.
 async fn not_found() -> Response {
-    json_error(StatusCode::NOT_FOUND, "not found")
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain; charset=UTF-8")],
+        "404 Not Found",
+    )
+        .into_response()
 }
 
 /// The router of the agent. Bearer authentication wraps every route, the fallback too.

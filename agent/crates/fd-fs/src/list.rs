@@ -47,6 +47,11 @@ pub struct Listing {
 /// Read the names of a folder: reserved names (and, unless `hidden`, names that start with a dot) are left out,
 /// the rest is put in the default order and cut at `MAX_LIST`. A bad path fails here, with its status.
 pub fn scan(root: &Root, path: &str, hidden: bool) -> Result<Scan, FsError> {
+    scan_in(root, path, hidden, true)
+}
+
+/// `sorted = false` keeps the order of the directory and stops at the first `MAX_LIST` names: the plain list of the TS agent.
+fn scan_in(root: &Root, path: &str, hidden: bool, sorted: bool) -> Result<Scan, FsError> {
     let r = resolve_read(root, path)?;
     let dir = r.open_dir()?;
     let virtual_path = r.virtual_path.clone();
@@ -63,6 +68,10 @@ pub fn scan(root: &Root, path: &str, hidden: bool) -> Result<Scan, FsError> {
         let text = String::from_utf8_lossy(bytes).into_owned();
         if is_reserved_name(&text) || (!hidden && text.starts_with('.')) {
             continue;
+        }
+        if !sorted && rows.len() >= MAX_LIST {
+            count += 1;
+            break;
         }
         count += 1;
         let dir_like = match item.file_type() {
@@ -86,12 +95,14 @@ pub fn scan(root: &Root, path: &str, hidden: bool) -> Result<Scan, FsError> {
             dir: dir_like,
         });
         // Keep memory at the cap however large the folder is.
-        if rows.len() >= 2 * MAX_LIST {
+        if sorted && rows.len() >= 2 * MAX_LIST {
             sort_rows(&mut rows);
             rows.truncate(MAX_LIST);
         }
     }
-    sort_rows(&mut rows);
+    if sorted {
+        sort_rows(&mut rows);
+    }
     rows.truncate(MAX_LIST);
     Ok(Scan {
         root: root.clone(),
@@ -137,9 +148,10 @@ impl Scan {
     }
 }
 
-/// `GET /api/fs/list` without `stream`.
+/// `GET /api/fs/list` without `stream`: the entries in the order of the directory, as the TS agent gives them.
+/// (The streamed list is in the default order, `scan`.)
 pub fn list(root: &Root, path: &str, hidden: bool) -> Result<Listing, FsError> {
-    let s = scan(root, path, hidden)?;
+    let s = scan_in(root, path, hidden, false)?;
     let (virtual_path, truncated) = (s.virtual_path.clone(), s.truncated);
     let entries = s.details(0, usize::MAX);
     Ok(Listing {
@@ -175,14 +187,25 @@ mod tests {
     #[test]
     fn default_order_and_filters() {
         let (_t, root) = tree();
-        let l = list(&root, "/", false).unwrap();
-        let names: Vec<_> = l.entries.iter().map(|e| e.name.as_str()).collect();
+        let streamed: Vec<_> = scan(&root, "/", false)
+            .unwrap()
+            .batches(500)
+            .flatten()
+            .map(|e| e.name)
+            .collect();
         assert_eq!(
-            names,
+            streamed,
             [
                 "d2", "d10", "linkdir", "sub", "A.txt", "b.txt", "broken", "f1", "f2", "f10"
             ]
         );
+        let l = list(&root, "/", false).unwrap();
+        // the plain list has the same names, in the order of the directory
+        let mut plain: Vec<_> = l.entries.iter().map(|e| e.name.clone()).collect();
+        plain.sort();
+        let mut want = streamed.clone();
+        want.sort();
+        assert_eq!(plain, want);
         assert!(!l.truncated);
         let all = list(&root, "/", true).unwrap();
         assert!(all.entries.iter().any(|e| e.name == ".hidden"));

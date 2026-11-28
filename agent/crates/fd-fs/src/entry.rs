@@ -103,11 +103,12 @@ pub fn stat_entry(root: &Root, path: &str) -> Result<Entry, FsError> {
     let st = r.lstat()?;
     if r.virtual_path == "/" {
         // The root has no parent in the virtual tree. Its name is the last part of the real root path.
+        // The TS agent has no name to give when the root is `/` itself, so it answers 404 (`fsops.ts` `stat`).
         let name = root
             .path()
             .file_name()
             .map(|n| String::from_utf8_lossy(n.as_bytes()).into_owned())
-            .unwrap_or_default();
+            .ok_or_else(FsError::not_found)?;
         return Ok(Entry {
             name,
             path: "/".into(),

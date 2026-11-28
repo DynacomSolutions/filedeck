@@ -66,8 +66,7 @@ impl AppState {
             inner: Arc::new(Inner {
                 node: config.node.clone(),
                 root: config.root.clone(),
-                // This release has no write route at all, so the whole tree is read only.
-                read_only: vec!["/".to_owned()],
+                read_only: config.read_only.clone(),
                 fs_root: fd_fs::Root::new(&config.root),
                 max_edit: config.max_edit,
                 mounts: fd_fs::MountSource {

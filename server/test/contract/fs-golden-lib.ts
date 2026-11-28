@@ -3,7 +3,7 @@
  * `fs-golden.test.ts` checks that any agent gives the same answers. The golden file is `server/test/contract/golden/fs.json`.
  *
  * What differs by file system or by run is normalised: `mtime`, `etag`, the size of a folder, the mode of a link, and the order of
- * the plain list (the TS agent gives the order of the directory, the Rust agent the default order; the streamed list is compared as it is).
+ * the plain list (the plain list is in the order of the directory, which differs by file system; the streamed list is compared as it is).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -72,7 +72,7 @@ function clean(v: unknown): unknown {
   return v;
 }
 
-/** the plain list: the order is the directory's own in the TS agent, so sort it */
+/** the plain list: the order is the directory's own, so sort it */
 function sortPlain(v: unknown): unknown {
   const o = v as { entries?: { name: string }[] };
   if (o && Array.isArray(o.entries)) o.entries = [...o.entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
