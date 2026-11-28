@@ -43,11 +43,24 @@ Agent settings. See [Change events](change-events.md).
 - `FILEDECK_EVENTS_SOCKET_GROUP`: the group of the folder and the socket, a name or a number. A number is safest, because a name is looked up in `/etc/group` of the container.
 - `FILEDECK_EVENTS_JOURNAL_BYTES` (default 2 GiB, 0 means the journal stays in memory) and `FILEDECK_EVENTS_JOURNAL_HOURS` (default 24): the journal keeps the smaller of the two limits. It is in `changes-<node>/` inside `FILEDECK_INDEX_DIR`. Chart values: `agent.events.journal.*`.
 - `FILEDECK_EVENTS_LABELS`: label templates, separated by line feeds, semicolons or commas. Example: `/srv/repos/{org}/{repo}`. The agent logs a bad template and makes no label. Chart value: `agent.events.labels`.
+
+## Disk pressure
+
+Agent settings. See [Disk pressure](disk-pressure.md). The feature is off by default. It has no timer: it reads only for a request, a stream or a metrics scrape.
+
+- `FILEDECK_PRESSURE`: `1` (or `on`, `true`, `yes`) turns it on. Chart value: `agent.pressure.enabled`.
+- `FILEDECK_PRESSURE_INTERVAL_MS` (default 1000, from 250 to 60000): the time between reads while a stream is open. Chart value: `agent.pressure.intervalMs`.
+- `FILEDECK_PRESSURE_CGROUP_ROOT` (default `/sys/fs/cgroup`): the cgroup v2 tree. The chart mounts the host tree read only at `/host-cgroup` and sets this with `agent.pressure.cgroupMount`.
+- `FILEDECK_PRESSURE_PROC_ROOT` (default `/proc`): the process folders. With `agent.pressure.hostPID` the `/proc` of the container is the one of the host, and the pod gets `CAP_SYS_PTRACE`.
+- `FILEDECK_PRESSURE_LEVELS`: a JSON object with free-space levels for the `pressure` change event and `GET /api/v1/pressure`. Empty means off. See [Change events](change-events.md#pressure). Chart value: `agent.pressure.levels`.
+- `FILEDECK_PRESSURE_PATH_DEPTH` (default 3, from 1 to 12): folder parts under a mount that make one path consumer. Chart value: `agent.pressure.pathDepth`.
+- `FILEDECK_PRESSURE_LABELS`: a JSON list of label rules `{"match": "<regular expression on the cgroup path>", "label": "<template>", "link": "<optional URL template>"}`. There are no default rules. Chart value: `agent.pressure.labels`.
+- `FILEDECK_IOTRACE`: the path of the eBPF helper `filedeck-iotrace`. Empty: look in `/usr/local/bin` and next to the other helpers. `off`: never use it.
 - `FILEDECK_INDEX_WATCHES`: the folders that the compare index keeps under change watch (default 32768). With the fanotify helper on, a watch is a table entry in memory that the event bus feeds, not a kernel watch. For a folder that no kernel watcher covers, it is an `fs.watch` of the folder.
 
 Hub setting:
 
 - `FILEDECK_K8S_ALLOW` (hub): the ServiceAccounts whose projected token may read folder sizes, separated by commas: `namespace/name`, or `namespace/*` for a whole namespace. Empty is off. The hub checks the token with the TokenReview API, using its own token and CA from `/var/run/secrets/filedeck-k8s`. `FILEDECK_K8S_AUDIENCE` is the audience the token must have (default `filedeck`). Chart values: `k8sAuth.allow` and `k8sAuth.audience`. See [`filedeck du`](filedeck-du.md).
-- `FILEDECK_API_TOKEN_SCOPES`: what the token of `FILEDECK_API_TOKEN` may read, separated by commas. `du` is folder sizes and `changes` is the change event stream. The default is `du`. Chart value: `apiToken.scopes`.
+- `FILEDECK_API_TOKEN_SCOPES`: what the token of `FILEDECK_API_TOKEN` may read, separated by commas. `du` is folder sizes and `changes` is the change event stream and the filesystem levels, `groups` is grouped storage sizes and `disk-pressure` is the disk pressure routes. The default is `du`. Chart value: `apiToken.scopes`.
 
 [Back to the README](../README.md)

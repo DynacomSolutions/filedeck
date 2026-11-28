@@ -12,7 +12,9 @@ import { looksLikeJwt, type Reviewer } from "./k8s-auth.ts";
  * rule "skip login when X-Filedeck-Token is present" can never bypass login. A matching token may call only
  * with scope `du`: `GET /api/nodes/<node>/api/du` and `GET /api/nodes/<node>/api/jobs/<id>` (du jobs only);
  * with scope `groups`: `GET /api/groups` (storage totals only);
- * with scope `changes`: `GET /api/v1/changes` and `GET /api/nodes/<node>/api/v1/changes`; anything else answers 403.
+ * with scope `changes`: `GET /api/v1/changes`, `GET /api/nodes/<node>/api/v1/changes` and the filesystem levels `GET /api/nodes/<node>/api/v1/pressure`;
+ * with scope `disk-pressure`: `GET /api/v1/disk-pressure[/stream|/nodes]` and `GET /api/nodes/<node>/api/v1/disk-pressure[/stream]` (workload names; read only);
+ * anything else answers 403. A Kubernetes ServiceAccount token never gets `changes`, `disk-pressure` or `groups`.
  * The header is removed before the request goes to an agent.
  * A Kubernetes projected ServiceAccount token (see k8s-auth.ts) may also come in this header. It is checked with `review`, may read the `du`
  * scope only (never `changes` or `groups`), and each call is written to the audit sink with the ServiceAccount. A wrong token still answers 401.
@@ -29,7 +31,8 @@ declare module "hono" {
   }
 }
 
-const CHANGES = /^\/api\/(?:v1\/changes|nodes\/[^/]+\/api\/v1\/changes)$/;
+const CHANGES = /^\/api\/(?:v1\/(?:changes|pressure)|nodes\/[^/]+\/api\/v1\/(?:changes|pressure))$/;
+const DISK_PRESSURE = /^\/api\/(?:v1\/disk-pressure(?:\/stream|\/nodes)?|nodes\/[^/]+\/api\/v1\/disk-pressure(?:\/stream)?)$/;
 
 export function apiTokenAuth(token: string | undefined, account?: () => Identity | { error: string }, scopes: readonly string[] = ["du"], k8s?: { review: Reviewer; sink: (line: string) => void }): MiddlewareHandler {
   const want = token ? digest(token) : undefined;
@@ -54,10 +57,11 @@ export function apiTokenAuth(token: string | undefined, account?: () => Identity
     const du = granted.includes("du");
     const changes = granted.includes("changes");
     const groups = granted.includes("groups");
-    const resources = [du && "folder sizes", changes && "change events", groups && "grouped storage sizes"].filter((resource) => typeof resource === "string");
+    const diskPressure = granted.includes("disk-pressure");
+    const resources = [du && "folder sizes", changes && "change events and filesystem levels", diskPressure && "disk pressure", groups && "grouped storage sizes"].filter((resource) => typeof resource === "string");
     const permitted = new Intl.ListFormat("en-GB", { type: "conjunction" }).format(resources);
     const p = c.req.path;
-    const allowed = c.req.method === "GET" && ((du && (DU.test(p) || JOB.test(p))) || (changes && CHANGES.test(p)) || (groups && p === "/api/groups"));
+    const allowed = c.req.method === "GET" && ((du && (DU.test(p) || JOB.test(p))) || (changes && CHANGES.test(p)) || (diskPressure && DISK_PRESSURE.test(p)) || (groups && p === "/api/groups"));
     if (!allowed) {
       const res = c.json({ error: `forbidden: this token may only read ${permitted || "no resources"}` }, 403);
       after?.(403);

@@ -230,12 +230,6 @@ agent:
   # If the kernel or runtime refuses, the agent logs it once and carries on as without.
   fanotify:
     enabled: false
-  # Disk pressure: which process and cgroup uses a disk. `ebpf` runs the helper filedeck-iotrace, which counts block IO per disk, cgroup and process with
-  # eBPF (no per-event output, no disk writes). Off by default: it adds the BPF and PERFMON capabilities to the agent container (Linux 5.8 or newer with BTF;
-  # the node's cgroup folders must be readable to name a cgroup, see docs/disk-pressure.md). If the kernel or the runtime refuses it, the agent reports
-  # the proc source and carries on.
-  pressure:
-    ebpf: false
   # How the folder-size store follows changes (needs `fanotify.enabled`). The changes of `commitMs` are merged per folder and written and re-read together.
   # Folders named in `exclude` (names, globs or runs like `.git/objects`, at any depth) never write to the size store: their size comes from the scheduled
   # scans. The change event stream and its journal are not affected. An empty `exclude` turns excludes off.
@@ -273,6 +267,40 @@ agent:
       enabled: false
       hostPath: /run/filedeck-events
       group: ""
+  # Live disk pressure and IO attribution (docs/disk-pressure.md): which disks are busy, and which workloads, services, processes and folders cause it.
+  # Off by default. When on, the agent serves /api/v1/pressure and /api/v1/pressure/stream, and /metrics gets the filedeck_disk_* and
+  # filedeck_io_pressure_ratio series (the ten busiest consumers of each disk, by name). It samples only while a stream, a request or a metrics scrape asks.
+  # With nothing more set, it reads the disk numbers and the pressure of the whole machine (they need no privilege) and the cgroup tree of its own container.
+  pressure:
+    enabled: false
+    # Seconds between samples while a stream is open: `intervalMs` (250 to 60000).
+    intervalMs: 1000
+    # Folder parts under a mount that make one "path" consumer, counted from the change events (needs `fanotify.enabled`).
+    pathDepth: 3
+    # Mount the machine's cgroup tree read-only at /host-cgroup, so the agent sees the cgroups of every pod and service (needed to name the consumers).
+    cgroupMount: false
+    # Share the machine's process list (hostPID: true) and add SYS_PTRACE, so the agent reads the IO of single processes (/proc/<pid>/io).
+    # Without it, the consumers are cgroups only.
+    hostPID: false
+    # `ebpf` runs the helper filedeck-iotrace, which counts block IO per disk, cgroup and process with eBPF (no per-event output, no disk writes).
+    # It adds the BPF and PERFMON capabilities to the agent container (Linux 5.8 or newer with BTF, see docs/disk-pressure.md). If the kernel or
+    # the runtime refuses it, the agent uses the proc source and carries on.
+    ebpf: false
+    # Operator label rules for cgroup paths, for example to link an agent session to its page. Each rule:
+    #   - match: "^/agents\\.slice/(?<id>[a-f0-9]+)\\.scope$"   # a regular expression on the cgroup path
+    #     label: "agent {id}"                                  # {1} or {name} take a capture group
+    #     link: "https://example.test/sessions/{id}"           # optional; captures are URL-encoded
+    labels: []
+    # Filesystem pressure events (docs/change-events.md): a `pressure` change event when the free space of a filesystem crosses a level (ok, reserve,
+    # critical) or loses too much too fast, and `GET /api/v1/pressure` with the level of each local filesystem. Off while empty. The change flow is the clock
+    # (a statfs at most every 10 s per filesystem while changes happen), so it needs `fanotify.enabled`. `default` holds for every filesystem; an entry of
+    # `filesystems` (any path on the filesystem) overrides it. Free space is checked in bytes and in percent: a level is reached when either is met (0 = off).
+    # `growthBytes` lost inside `growthWindowSec` (60 to 21600) is a growth breach. Example:
+    #   levels:
+    #     default: {reserveFreePercent: 15, criticalFreePercent: 5}
+    #     filesystems:
+    #       - {path: /srv, reserveFreeBytes: 200000000000, criticalFreeBytes: 50000000000, growthBytes: 100000000000, growthWindowSec: 3600}
+    levels: {}
   # How helper programs that run on repositories (Git: status, details, diffs) are confined. Repositories are other people's data: a link inside a git
   # directory can lead anywhere. With Landlock (Linux 5.13 or newer, enabled in the kernel and not blocked by the
   # container's seccomp profile) those programs can only read beneath the served folder. require (the default): without

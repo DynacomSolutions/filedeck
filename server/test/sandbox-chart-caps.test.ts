@@ -20,7 +20,7 @@ import { useSandbox } from "./sandbox-env.ts";
  * Git on a root-owned private repository and the archive operations must work under it (root only: the wrapper needs CAP_SETPCAP to build the set).
  */
 const IS_ROOT = process.getuid?.() === 0;
-const CAPS: Record<string, number> = { CHOWN: 0, DAC_OVERRIDE: 1, DAC_READ_SEARCH: 2, FOWNER: 3, FSETID: 4, KILL: 5, SETGID: 6, SETUID: 7, SETPCAP: 8, NET_BIND_SERVICE: 10, SYS_CHROOT: 18, SYS_ADMIN: 21, MKNOD: 27, SETFCAP: 31, PERFMON: 38, BPF: 39 };
+const CAPS: Record<string, number> = { CHOWN: 0, DAC_OVERRIDE: 1, DAC_READ_SEARCH: 2, FOWNER: 3, FSETID: 4, KILL: 5, SETGID: 6, SETUID: 7, SETPCAP: 8, NET_BIND_SERVICE: 10, SYS_CHROOT: 18, SYS_PTRACE: 19, SYS_ADMIN: 21, MKNOD: 27, SETFCAP: 31, PERFMON: 38, BPF: 39 };
 
 function chartCaps(): string[] {
   const t = fs.readFileSync(path.resolve(import.meta.dirname, "../../k8s/templates/agents.yaml"), "utf8");

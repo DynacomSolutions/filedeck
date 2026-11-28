@@ -38,7 +38,7 @@ export class DirWatchers implements DirFeed {
   }
 
   private event(e: Matchable) {
-    if (!this.count) return;
+    if (!this.count || e.kind === "pressure") return;
     if (CONTROL_KINDS.has(e.kind)) {
       if (e.kind === "ready") return;
       for (const set of [...this.map.values()]) for (const cb of [...set]) cb();
