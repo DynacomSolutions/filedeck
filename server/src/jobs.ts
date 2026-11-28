@@ -129,8 +129,31 @@ export class Jobs {
     private lanes?: JobLanes,
     private shared?: JobsStore,
   ) {
-    // one unref'd timer: heartbeat, foreign cancels, adoption of jobs whose owner went silent
-    if (shared) setInterval(() => this.tick(), shared.tickMs ?? 1000).unref();
+    // one unref'd timer while there is work: heartbeat, foreign cancels, adoption of jobs whose owner went silent (see `arm`)
+    this.arm();
+    this.unwatch = shared?.store.watch(() => this.arm());
+  }
+  private unwatch?: () => void;
+  private beatTimer?: ReturnType<typeof setInterval>;
+
+  /** Start the shared-store tick. It stops itself when this process has no job and the store holds no live row (`working`), and the next job starts it again. */
+  private arm() {
+    const sh = this.shared;
+    if (!sh || this.beatTimer || this.stopping) return;
+    this.beatTimer = setInterval(() => {
+      this.tick();
+      if (this.working()) return;
+      clearInterval(this.beatTimer);
+      this.beatTimer = undefined;
+    }, sh.tickMs ?? 1000);
+    this.beatTimer.unref();
+  }
+
+  /** True while a job is live here, a write waits for the store, an adoption runs, or the store holds a live row (a peer's job may need adopting). */
+  private working(): boolean {
+    if (this.adopting.size) return true;
+    for (const j of this.jobs.values()) if (live(j.state) || j.dirty) return true;
+    return this.shared!.store.liveCount(this.shared!.scope) !== 0;
   }
   private timer?: ReturnType<typeof setInterval>;
   private lastSkipLog = 0;
@@ -406,6 +429,7 @@ export class Jobs {
 
   private save(j: Job) {
     if (!this.shared || this.stopping) return;
+    this.arm();
     // a skipped write (busy database) is retried by tick
     j.dirty = !this.shared.store.put({
       id: j.id, scope: this.shared.scope, kind: j.kind, title: j.title, params: j.params ?? null, view: JSON.stringify({ ...this.view(j), queue: undefined }),
@@ -490,6 +514,7 @@ export class Jobs {
    */
   async interrupt(ms = 3000) {
     this.stopping = true;
+    this.unwatch?.();
     for (const j of this.jobs.values()) if (live(j.state)) j.abort.abort();
     for (const end = Date.now() + ms; this.running > 0 && Date.now() < end; ) await new Promise((r) => setTimeout(r, 20));
     this.shared?.store.release(this.me);
