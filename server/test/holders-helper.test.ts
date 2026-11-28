@@ -72,11 +72,12 @@ test("holders helper: without the privilege it prints one failure line and exits
   assert.deepEqual(a.holders, []);
 });
 
+let diag: () => string = () => "";
 const until = async (f: () => Promise<boolean>, ms = 15_000, what = "the condition") => {
   const end = Date.now() + ms;
   for (;;) {
     if (await f()) return;
-    if (Date.now() > end) assert.fail(`${what} did not become true in ${ms} ms`);
+    if (Date.now() > end) assert.fail(`${what} did not become true in ${ms} ms\n${diag()}`);
     await new Promise((r) => setTimeout(r, 50));
   }
 };
@@ -91,6 +92,13 @@ test("holders helper: with the privilege, the table sees what processes hold, as
   assert.equal(allowed, true, `this suite must run with BPF allowed (FILEDECK_REQUIRE_HOLDERS_LIVE is set); the helper said: ${probed?.line}`);
   const h = new Holders({ helper: bin, root: "/", ringMb: 4, settleMs: 20_000, log: (s) => console.log(`# ${s}`) });
   h.start();
+  diag = () => {
+    const procs = [...children].map((c) => {
+      const st = c.pid === undefined ? undefined : h.table.procs.get(c.pid);
+      return `${c.pid}: ${st ? JSON.stringify({ comm: st.comm, dirty: st.dirty, cwd: st.cwd, exe: st.exe, holds: [...st.holds.entries()].map(([k, v]) => `${k}=${JSON.stringify(v)}`) }) : "not in the table"} exit=${c.exitCode}`;
+    });
+    return `state=${h.state} ${h.reason ?? ""} events=${h.table.events} helperEvents=${h.helperEvents} drops=${h.drops} soft=${h.softMissing} size=${JSON.stringify(h.table.size())} gaps=${JSON.stringify(h.table.gaps())}\n${procs.join("\n")}`;
+  };
   try {
     await until(async () => h.state === "ready", 60_000, "the start-up pass");
     const tree = path.join(work, "tree");

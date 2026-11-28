@@ -325,9 +325,8 @@ export class Holders extends EventEmitter {
         this.off("progress", done);
         resolve();
       };
-      const t = setTimeout(done, ms);
+      const t = setTimeout(done, ms); // (not unref'd: a question that waits must keep the process alive for this short time)
       this.once("progress", done);
-      t.unref?.();
     });
   }
 
