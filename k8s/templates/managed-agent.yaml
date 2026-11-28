@@ -23,7 +23,12 @@ spec:
         app.kubernetes.io/component: agent
         dynacom.dev/filedeck-managed-agent: "true"
     spec:
+      {{- if .Values.agent.podStorage.enabled }}
+      serviceAccountName: {{ include "filedeck.name" . }}-agent
+      automountServiceAccountToken: true
+      {{- else }}
       automountServiceAccountToken: false
+      {{- end }}
       terminationGracePeriodSeconds: 30
       nodeSelector:
         kubernetes.io/os: linux
@@ -66,6 +71,20 @@ spec:
             - {name: FILEDECK_FANWATCH, value: /usr/local/bin/filedeck-fanwatch}
             {{- end }}
             - {name: NODE_OPTIONS, value: {{ .Values.agent.nodeOptions | quote }}}
+            {{- with .Values.agent.sizeGauges }}
+            - name: FILEDECK_SIZE_GAUGES
+              value: {{ join "\n" . | quote }}
+            {{- end }}
+            {{- if .Values.agent.podStorage.enabled }}
+            - name: FILEDECK_POD_STORAGE
+              value: "on"
+            - name: FILEDECK_POD_NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: FILEDECK_KUBELET_PODS_DIR
+              value: {{ .Values.agent.podStorage.kubeletPodsDir | quote }}
+            - name: FILEDECK_POD_LOGS_DIR
+              value: {{ .Values.agent.podStorage.logsDir | quote }}
+            {{- end }}
             - {name: FILEDECK_EVENTS_JOURNAL_BYTES, value: {{ .Values.agent.events.journal.maxBytes | int64 | quote }}}
             - {name: FILEDECK_EVENTS_JOURNAL_HOURS, value: {{ .Values.agent.events.journal.maxHours | quote }}}
             {{- if .Values.agent.events.socket.enabled }}
