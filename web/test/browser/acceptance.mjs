@@ -94,6 +94,8 @@ async function installFixture(page, opts = {}) {
     if (opts.tailnetDown) return json({ error: 'tailnet identity unavailable' }, 503, TAILNET_DOWN);
     // opts.nodesBody / opts.lists: a check's own node list and folder listings (by path), answered before the shared fixtures
     if (opts.nodesBody && pathname === '/api/nodes') return json(opts.nodesBody);
+    // opts.pressureNodes: the hub's per-node disk pressure summary (the stream is faked in the page, see verifyDiskPressure)
+    if (opts.pressureNodes && pathname === '/api/v1/pressure/nodes') return json(opts.pressureNodes);
     if (opts.storageGroups && pathname === '/api/groups') return json(opts.storageGroups(url.searchParams.get('node')));
     if (opts.lists?.[url.searchParams.get('path')] && pathname.includes('/api/fs/list')) return json({ path: url.searchParams.get('path'), entries: opts.lists[url.searchParams.get('path')], truncated: false });
     // Sign-in is off unless a check asks for a signed-out or signed-in hub. opts.session ({ out }) lets a check end the
@@ -3755,11 +3757,252 @@ async function verifyJobsStatus(browser) {
   assert.deepEqual(failures, [], 'the jobs and status sections pass axe in both themes');
 }
 
+// ---- Disk pressure ----------------------------------------------------------------------------------------------------
+
+// Replaces fetch for the pressure stream with a stream the check feeds by hand: window.pressureEmit(rows) sends NDJSON lines,
+// window.pressureEnd() ends the body, window.pressureReplies queues a failed answer for the next request.
+const pressureStream = () => {
+  const original = window.fetch.bind(window);
+  window.pressureStreams = [];
+  window.pressureReplies = [];
+  window.fetch = async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input, location.href);
+    if (url.pathname !== '/api/v1/pressure/stream') return original(input, init);
+    const stream = { query: Object.fromEntries(url.searchParams), aborted: false };
+    window.pressureStreams.push(stream);
+    const reply = window.pressureReplies.shift();
+    if (reply) return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status, headers: { 'content-type': 'application/json' } });
+    const enc = new TextEncoder();
+    const body = new ReadableStream({
+      start(controller) {
+        window.pressureEmit = (rows) => controller.enqueue(enc.encode(rows.map((row) => JSON.stringify(row) + '\n').join('')));
+        window.pressureEnd = () => controller.close();
+        init.signal.addEventListener('abort', () => {
+          stream.aborted = true;
+          try { controller.error(init.signal.reason); } catch { /* already closed */ }
+        }, { once: true });
+        controller.enqueue(enc.encode('{"type":"ready"}\n'));
+      },
+    });
+    return new Response(body, { headers: { 'content-type': 'application/x-ndjson' } });
+  };
+};
+
+const pressureConsumers = (flip = false) => [
+  { kind: 'cgroup', id: '/kubepods/web', label: 'apps/web-1', pod: { namespace: 'apps', name: 'web-1', container: 'app' }, cgroup: '/kubepods/web', rIops: flip ? 20 : 800, wIops: flip ? 10 : 200, rBps: 4_000_000, wBps: 1_500_000, psiFull10: 12.5 },
+  { kind: 'cgroup', id: '/system.slice/db.service', label: 'db.service', unit: 'db.service', rIops: 300, wIops: 60, rBps: 900_000, wBps: 2_100_000, psiFull10: 3.1 },
+  { kind: 'cgroup', id: '/kubepods/batch', label: 'apps/batch-2', pod: { namespace: 'apps', name: 'batch-2' }, rIops: flip ? 1500 : 12, wIops: flip ? 90 : 3, rBps: 80_000, wBps: 10_000 },
+  { kind: 'process', id: 'pid:7:1', label: 'sort', comm: 'sort', pid: 7, rIops: 40, wIops: 0, rBps: 2_000_000, wBps: 0 },
+  { kind: 'process', id: 'pid:9:1', label: 'postgres', comm: 'postgres', pid: 9, rIops: 20, wIops: 400, rBps: 100_000, wBps: 6_000_000 },
+  { kind: 'path', id: 'path:/srv/media', label: '/srv/media', path: '/srv/media', rIops: 0, wIops: 0, rBps: 0, wBps: 0, eventsPerSec: 31 },
+];
+
+const pressureSnapshot = (n, { disks = ['disk0', 'disk1'], source = 'ebpf', flip = false } = {}) => ({
+  type: 'snapshot', node: 'alpha', at: 1795800000000 + n * 1000, intervalMs: 1000, source,
+  psi: { some: { avg10: 5.3 + (n % 5), avg60: 11.7, avg300: 22.9 }, full: { avg10: 0.9 + (n % 3), avg60: 4.5, avg300: 7.5 } },
+  disks: disks.map((name, i) => ({
+    name, dev: `259:${i}`, mounts: ['/', '/data'], util: 0.4 + (n % 10) / 20, rIops: 1143 + n * 5, wIops: 2492 - n * 3, rBps: 13_500_000, wBps: 31_500_000,
+    queueDepth: 4 + (n % 7), rAwaitMs: 0.4 + (n % 4) / 10, wAwaitMs: 3.1, inflight: 2, consumers: pressureConsumers(flip),
+  })),
+});
+
+async function verifyDiskPressure(browser, width, height, colorScheme) {
+  const failures = [];
+  const requests = [];
+  const size = width > 600 ? 'desktop' : 'narrow';
+  const stamp = process.env.FILEDECK_PRESSURE_SHOT_VERSION;
+  const nodesBody = { nodes: [{ name: 'alpha', online: true }, { name: 'beta', online: false }] };
+  const pressureNodes = [
+    { node: 'alpha', source: 'ebpf', at: 1795800000000, disks: [{ name: 'disk0', util: 0.8, psiFull10: 0.9 }, { name: 'disk1', util: 0.1, psiFull10: 0 }] },
+    { node: 'beta', source: 'proc', at: 1795800000000, disks: [] },
+  ];
+  const watcher = { kind: 'fanotify', running: true, ready: true, mounts: 1, watched: 1, unwatched: 0, excluded: 0, backlog: 0, lostEvents: 0, unresolved: 0, unwatchedPaths: [], coverage: [{ path: '/', state: 'watched' }] };
+  const journal = { serving: true, epoch: 'fixture', oldestCursor: 'fixture:1', newestCursor: 'fixture:2', oldestAgeMs: 1000, bytes: 100, subscribers: { socket: 0, http: 0, internal: 0 }, lagMs: 1, overflows: 0, dropped: 0 };
+  const health = { sampledAt: 1795800000000, sizeStore: { available: true, damaged: false }, roots: [{ path: '/', scannedAt: 1795800000000, fullScan: true, state: 'current' }], watcher, journal };
+  const status = { jobs: [], nodes: [{ node: 'alpha', state: 'available', status: health }] };
+  const mobile = size === 'narrow' && browser.browserType().name() === 'chromium';
+  const { page, context } = await openPage(browser, { viewport: { width, height }, colorScheme, mobile, fixture: { requests, status, nodesBody, pressureNodes }, initScripts: [pressureStream] });
+  const fits = async (label) => assert.equal(await page.locator('.status-page').evaluate((el) => el.scrollWidth <= el.clientWidth), true, label + ' fits at ' + size);
+  const emit = (rows) => page.evaluate((r) => window.pressureEmit(r), rows);
+  const streams = () => page.evaluate(() => window.pressureStreams.map(({ query, aborted }) => ({ query, aborted })));
+  const rowNames = () => page.locator('.pressure-table tbody tr').evaluateAll((rows) => rows.map((row) => row.querySelector('th').firstElementChild.textContent.trim()));
+  const pressed = (group, name) => page.getByRole('group', { name: group }).getByRole('button', { name, exact: true });
+  const shot = async (name) => {
+    if (stamp) await page.locator('.status-wrap').screenshot({
+      path: resolve(evidenceDir, `pressure-${name}-${size}-${colorScheme}-${stamp}.png`),
+      style: 'html, body, #root, .status-page { height: auto !important; overflow: visible !important; }', animations: 'disabled',
+    });
+  };
+  try {
+    // The status overview: a small summary per node, with a link to the busiest disk.
+    await page.goto(new URL('/status', baseURL).href);
+    const summary = page.getByRole('list', { name: 'Disk pressure by node' });
+    await summary.waitFor();
+    assert.equal(await summary.getByRole('link', { name: 'disk0' }).getAttribute('href'), '/status/alpha/disks/disk0');
+    await expectText(page, '80 % busy');
+    await expectText(page, 'No disk data');
+    await fits('overview');
+    await runAxe(page, 'status overview ' + size, failures);
+
+    // The node health card links to the node's disks.
+    await page.goto(new URL('/status/alpha?section=nodes', baseURL).href);
+    await page.getByRole('heading', { name: 'Node health' }).waitFor();
+    const card = page.getByRole('region', { name: 'Disk pressure', exact: true });
+    await card.waitFor();
+    assert.equal(await card.getByRole('link', { name: 'disk0' }).getAttribute('href'), '/status/alpha/disks/disk0');
+    await runAxe(page, 'node health ' + size, failures);
+    await page.goto(new URL('/status?section=disks', baseURL).href);
+    const list = page.getByRole('region', { name: 'Disks of alpha' });
+    await list.waitFor();
+    assert.equal(await page.getByLabel('Node', { exact: true }).inputValue(), '');
+    await shot('disks');
+    await runAxe(page, 'disk list ' + size, failures);
+    await fits('disk list');
+
+    // A plain click on a disk moves inside the page, pushes history and moves focus to the heading.
+    const entries = await page.evaluate(() => history.length);
+    await list.getByRole('link', { name: 'disk0' }).click();
+    const title = page.getByRole('heading', { name: 'Disk disk0 on alpha' });
+    await title.waitFor();
+    assert.equal(new URL(page.url()).pathname, '/status/alpha/disks/disk0');
+    assert.equal(await page.evaluate(() => history.length), entries + 1, 'the disk is content: it pushes history');
+    assert.equal(await title.evaluate((el) => el === document.activeElement), true, 'focus moves to the heading');
+    await expectText(page, 'Live');
+    assert.deepEqual((await streams()).at(-1).query, { node: 'alpha', disk: 'disk0', top: '20' });
+
+    // Samples fill the graphs and the table.
+    await emit(Array.from({ length: 30 }, (_, n) => pressureSnapshot(n)));
+    await page.getByRole('region', { name: 'Who is using this disk', exact: true }).waitFor();
+    assert.equal(await page.locator('.pressure-chart').count(), 6);
+    await expectText(page, 'Source: eBPF');
+    await expectText(page, 'apps/web-1');
+    await expectText(page, 'Collecting history');
+    assert.equal(await page.getByRole('img', { name: /^Busy: Busy \d+ %\. Peak/ }).count(), 1);
+    assert.deepEqual(await rowNames(), ['apps/web-1', 'db.service', 'apps/batch-2']);
+    await title.scrollIntoViewIfNeeded();
+    await fits('disk view');
+    await shot('disk');
+    await runAxe(page, 'disk view ' + size, failures);
+
+    // View options live in the query string and replace history.
+    const before = await page.evaluate(() => history.length);
+    await pressed('History window', '15 min').click();
+    await pressed('Group by', 'Process').click();
+    assert.equal(await pressed('History window', '15 min').getAttribute('aria-pressed'), 'true');
+    assert.equal(new URL(page.url()).search, '?window=15&group=process');
+    assert.equal(await page.evaluate(() => history.length), before, 'options do not add history entries');
+    await page.waitForFunction(() => document.querySelectorAll('.pressure-table tbody tr').length === 2);
+    assert.deepEqual(await rowNames(), ['postgres', 'sort']);
+    assert.match(await page.locator('.pressure-table tbody tr').first().innerText(), /postgres \(9\)/);
+    await pressed('Group by', 'Folder').click();
+    const folder = page.getByRole('link', { name: '/srv/media' });
+    assert.match(await folder.getAttribute('href'), /^\/\?s=/);
+    assert.deepEqual(JSON.parse(new URL(await folder.getAttribute('href'), baseURL).searchParams.get('s')), { t: { i: 'p1', n: 'alpha', p: '/srv/media' }, a: 'p1' });
+    await expectText(page, '31 events/s');
+    await pressed('Group by', 'Cgroup').click();
+    const streamsBefore = (await streams()).length;
+    await page.getByLabel('Top', { exact: true }).selectOption('50');
+    await page.waitForFunction((n) => window.pressureStreams.length === n + 1, streamsBefore);
+    assert.deepEqual((await streams()).at(-1).query, { node: 'alpha', disk: 'disk0', top: '50' });
+    assert.equal((await streams())[streamsBefore - 1].aborted, true, 'the old stream is closed');
+    assert.equal(new URL(page.url()).search, '?window=15&top=50');
+    await expectText(page, 'Live');
+    assert.equal(await page.locator('.pressure-chart').count(), 6, 'a new top-N keeps the history');
+
+    // Keyboard: the window buttons take focus in order and Enter and Space act.
+    await pressed('History window', '1 min').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await pressed('History window', '1 min').getAttribute('aria-pressed'), 'true');
+    assert.equal(new URL(page.url()).search, '?window=1&top=50');
+    await page.keyboard.press('Tab');
+    assert.equal(await pressed('History window', '5 min').evaluate((el) => el === document.activeElement), true);
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => location.search === '?top=50');
+    assert.equal(new URL(page.url()).search, '?top=50', 'the default window leaves the address');
+    const table = page.getByRole('region', { name: 'Who is using this disk', exact: true });
+    await table.focus();
+    assert.equal(await table.evaluate((el) => el === document.activeElement), true, 'the scrolling table takes keyboard focus');
+
+    // The order holds for two seconds while the values update, then ranks again.
+    await page.waitForTimeout(2200);
+    await emit([pressureSnapshot(40), pressureSnapshot(41, { flip: true })]);
+    await expectText(page, '1,500 IOPS');
+    assert.deepEqual(await rowNames(), ['apps/web-1', 'db.service', 'apps/batch-2'], 'no row jumps inside two seconds');
+    await page.waitForTimeout(2200);
+    await emit([pressureSnapshot(42, { flip: true })]);
+    await page.waitForFunction(() => document.querySelector('.pressure-table tbody tr th')?.textContent.includes('apps/batch-2'));
+    assert.deepEqual(await rowNames(), ['apps/batch-2', 'db.service', 'apps/web-1']);
+
+    // Choosing another disk pushes history. Back and Forward restore each disk with its options.
+    await page.getByLabel('Disk', { exact: true }).focus();
+    await page.getByLabel('Disk', { exact: true }).selectOption('disk1');
+    await page.getByRole('heading', { name: 'Disk disk1 on alpha' }).waitFor();
+    assert.equal(new URL(page.url()).pathname + new URL(page.url()).search, '/status/alpha/disks/disk1?top=50');
+    assert.equal(await page.getByLabel('Disk', { exact: true }).evaluate((el) => el === document.activeElement), true, 'the disk menu keeps focus');
+    assert.deepEqual((await streams()).at(-1).query, { node: 'alpha', disk: 'disk1', top: '50' });
+    await page.goBack();
+    await page.getByRole('heading', { name: 'Disk disk0 on alpha' }).waitFor();
+    assert.equal(new URL(page.url()).pathname, '/status/alpha/disks/disk0');
+    assert.equal(await page.getByLabel('Top', { exact: true }).inputValue(), '50');
+    await page.goForward();
+    await page.getByRole('heading', { name: 'Disk disk1 on alpha' }).waitFor();
+
+    // A shared address reproduces the view; the all-disks link goes back to the list.
+    await page.goto(new URL('/status/alpha/disks/disk0?window=15&group=path&top=10', baseURL).href);
+    await page.getByRole('heading', { name: 'Disk disk0 on alpha' }).waitFor();
+    assert.equal(await pressed('History window', '15 min').getAttribute('aria-pressed'), 'true');
+    assert.equal(await pressed('Group by', 'Folder').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.getByLabel('Top', { exact: true }).inputValue(), '10');
+    assert.equal(await page.getByLabel('Node', { exact: true }).inputValue(), 'alpha');
+    assert.deepEqual((await streams()).at(-1).query, { node: 'alpha', disk: 'disk0', top: '10' });
+    await page.getByRole('link', { name: 'All disks' }).click();
+    await page.getByRole('region', { name: 'Disks of alpha' }).waitFor();
+    assert.equal(new URL(page.url()).pathname, '/status/alpha/disks');
+    assert.equal(await page.getByRole('heading', { name: 'Disk pressure', exact: true }).evaluate((el) => el === document.activeElement), true);
+
+    // States: the stream ends and comes back, the node says it is offline, the disk is missing, the hub has no route.
+    await page.goto(new URL('/status/alpha/disks/disk0', baseURL).href);
+    await expectText(page, 'Live');
+    await emit([pressureSnapshot(50, { source: 'proc' })]);
+    await expectText(page, 'Source: proc');
+    const count = (await streams()).length;
+    await page.evaluate(() => window.pressureEnd());
+    await expectText(page, 'Connection ended. Reconnecting…');
+    await page.waitForFunction((n) => window.pressureStreams.length === n + 1, count, { timeout: 10_000 });
+    await expectText(page, 'Live');
+    assert.equal(await page.locator('.pressure-chart').count() > 0, true, 'the history survives a reconnect');
+    await emit([{ type: 'offline' }]);
+    await expectText(page, 'Node offline. Waiting for its stream…');
+    await shot('offline');
+    await emit([pressureSnapshot(60, { disks: ['disk1'] })]);
+    await expectText(page, 'No data for disk disk0 on alpha');
+
+    const diskMenu = page.getByLabel('Disk', { exact: true });
+    await page.evaluate(() => window.pressureReplies.push({ status: 502, body: { error: 'agent is not reachable' } }));
+    await diskMenu.selectOption('disk1');
+    await expectText(page, 'agent is not reachable');
+    await page.evaluate(() => window.pressureReplies.push({ status: 404 }));
+    await diskMenu.selectOption('disk0');
+    await expectText(page, 'does not provide disk pressure yet');
+    await page.getByRole('heading', { name: 'Disk disk0 on alpha' }).waitFor();
+
+    await page.goto(new URL('/status/beta/disks/disk0', baseURL).href);
+    await expectText(page, 'Node offline. Disk pressure resumes when it is back.');
+    await page.waitForTimeout(500);
+    assert.equal(await page.evaluate(() => window.pressureStreams.length), 0, 'no stream for an offline node');
+    assert.deepEqual(failures, []);
+  } finally {
+    await context.close();
+  }
+}
+
 const allChecks = [
   ...['light', 'dark'].flatMap((scheme) => [1440, 390].map((width) => [
     `grouped storage ${width}px ${scheme}`, (browser) => verifyGroupedStorage(browser, width, scheme),
   ])),
   ['jobs and node status', verifyJobsStatus],
+  // FILEDECK_PRESSURE_SHOTS=all runs every size in both themes, for screenshots.
+  ...[[1365, 900, 'light'], [390, 844, 'dark'], ...(process.env.FILEDECK_PRESSURE_SHOTS === 'all' ? [[1365, 900, 'dark'], [390, 844, 'light']] : [])].map(([width, height, scheme]) => [`disk pressure ${width}px ${scheme}`, (b) => verifyDiskPressure(b, width, height, scheme)]),
   ['list semantics', verifyListSemantics],
   ['keyboard shortcuts dialog and confirmations', verifyKeyboardAndConfirmation],
   ['keyboard isolation', verifyKeyboardIsolation],

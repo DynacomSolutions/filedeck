@@ -1,0 +1,218 @@
+/* Disk pressure view. Series colours are the read and write colours of the storage sunburst, with a dashed line for the second series. */
+.status-page {
+  --pressure-a: #6b86de;
+  --pressure-b: #f0ae79;
+}
+
+:root[data-theme="light"] .status-page {
+  --pressure-a: #4f64ae;
+  --pressure-b: #ad592c;
+}
+
+.pressure-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .65rem 1rem;
+  margin-block: 1rem;
+}
+
+.pressure-toolbar .storage-toggle button {
+  min-height: 2.75rem;
+}
+
+.pressure-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .4rem 1rem;
+}
+
+.pressure-status p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.pressure-state-live::before, .pressure-state-connecting::before, .pressure-state-reconnecting::before,
+.pressure-state-offline::before, .pressure-state-unavailable::before, .pressure-state-error::before {
+  content: "";
+  display: inline-block;
+  width: .6rem;
+  height: .6rem;
+  margin-inline-end: .5rem;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.pressure-state-live::before { background: var(--pressure-a); }
+.pressure-state-reconnecting::before, .pressure-state-connecting::before { border: 2px solid var(--pressure-b); background: transparent; }
+.pressure-state-offline::before, .pressure-state-error::before { background: var(--pressure-b); }
+
+.pressure-badge {
+  display: inline-block;
+  padding: .05rem .45rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--pill);
+  background: var(--surface-2);
+  color: var(--fg-soft);
+  font-size: .74rem;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.pressure-facts { margin-block: 1rem; }
+
+.pressure-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: .75rem;
+}
+
+.pressure-chart {
+  margin: 0;
+  padding: .75rem .85rem;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  min-width: 0;
+}
+
+.pressure-chart figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .25rem .75rem;
+  margin-block-end: .5rem;
+  font-size: .82rem;
+}
+
+.pressure-chart-title { font-weight: 700; }
+.pressure-legend { display: flex; flex-wrap: wrap; gap: .1rem .8rem; color: var(--fg-soft); }
+.pressure-key svg { margin-inline-end: .3rem; vertical-align: middle; overflow: visible; }
+.pressure-key strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+.pressure-key line { stroke: var(--pressure-a); stroke-width: 2; }
+.pressure-key.pressure-s1 line { stroke: var(--pressure-b); }
+
+.pressure-plot { position: relative; }
+.pressure-plot svg { display: block; width: 100%; height: 5.25rem; overflow: visible; }
+.pressure-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.pressure-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.pressure-line.pressure-s0 { stroke: var(--pressure-a); }
+.pressure-line.pressure-s1 { stroke: var(--pressure-b); }
+
+.pressure-axis {
+  position: absolute;
+  inset-inline-start: .2rem;
+  padding-inline: .2rem;
+  background: var(--surface);
+  color: var(--fg-soft);
+  font-size: .7rem;
+  line-height: 1.1;
+  pointer-events: none;
+}
+
+.pressure-axis-top { inset-block-start: 0; }
+.pressure-axis-bottom { inset-block-end: 0; }
+
+.pressure-time {
+  display: flex;
+  justify-content: space-between;
+  margin-block-start: .3rem;
+  color: var(--fg-soft);
+  font-size: .72rem;
+}
+
+.pressure-consumers { margin-block-start: 1.5rem; }
+.pressure-consumers .status-subtitle { margin-block: .35rem .75rem; }
+
+.pressure-table-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+}
+
+.pressure-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .85rem;
+}
+
+.pressure-table th, .pressure-table td {
+  padding: .5rem .75rem;
+  border-block-end: 1px solid var(--border);
+  text-align: start;
+  vertical-align: middle;
+  font-weight: 400;
+}
+
+.pressure-table thead th {
+  color: var(--fg-soft);
+  font-size: .76rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pressure-table tbody tr:last-child > * { border-block-end: 0; }
+.pressure-table th[scope="row"] { font-weight: 600; min-width: 12rem; max-width: 24rem; }
+.pressure-table .num { text-align: end; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pressure-table td.num span { display: block; }
+
+.pressure-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .1rem .5rem;
+  margin-block-start: .15rem;
+  color: var(--fg-soft);
+  font-size: .75rem;
+  font-weight: 400;
+}
+
+.pressure-name { overflow-wrap: anywhere; }
+
+.pressure-path {
+  max-width: 100%;
+  justify-content: flex-start;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.pressure-path span { min-width: 0; }
+
+.pressure-bar {
+  display: flex;
+  width: 7rem;
+  min-width: 4rem;
+  height: .5rem;
+  overflow: hidden;
+  background: var(--surface-3);
+  border-radius: 3px;
+}
+
+.pressure-bar-read { background: var(--pressure-a); }
+.pressure-bar-write { background: var(--pressure-b); }
+
+.pressure-summary { margin-block-start: .5rem; }
+.pressure-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .35rem 1rem;
+}
+
+.status-card .pressure-summary-row { padding: .4rem 0; border-block-start: 1px solid var(--border); }
+.status-card .pressure-summary { gap: 0; }
+
+@media (max-width: 600px) {
+  .pressure-toolbar > label { flex: 1 1 100%; }
+  .pressure-toolbar > label select { flex: 1; }
+  .pressure-bar { width: 4.5rem; }
+  .pressure-table th[scope="row"] { min-width: 9rem; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pressure-bar-read, .pressure-bar-write { transition: width .4s var(--ease); }
+}
