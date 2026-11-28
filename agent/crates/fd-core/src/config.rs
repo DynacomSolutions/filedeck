@@ -27,6 +27,16 @@ pub struct Config {
     /// `FILEDECK_MAX_EDIT`: the largest file `/api/fs/text` returns, in bytes (default 5 MiB)
     pub max_edit: u64,
     pub token: Token,
+    /// `FILEDECK_DU_WAIT_MS`: how long a `du` request waits for its scan before it answers 202 (default 10000)
+    pub du_wait_ms: u64,
+    /// `FILEDECK_WALK_MAX_ENTRIES`: cap on the entries of one `du` answer (default 500000)
+    pub walk_max_entries: usize,
+    /// `FILEDECK_INDEX_REVALIDATE_MS`: a stored folder is reused for this long when it did not change (default 30 minutes)
+    pub index_revalidate_ms: u64,
+    /// `FILEDECK_JOB_CONCURRENCY`: jobs that run at once (default 2)
+    pub job_concurrency: usize,
+    /// `FILEDECK_DU_ABANDON_MS`: a queued `du` job that no client asked about for this long is forgotten; 0 = never (default 120000)
+    pub du_abandon_ms: u64,
 }
 
 /// The keys of the TOML file. Environment settings win over the file.
@@ -42,6 +52,27 @@ struct FileConfig {
     proc_mounts: Option<PathBuf>,
     max_edit: Option<u64>,
     agent_token_file: Option<PathBuf>,
+    du_wait_ms: Option<u64>,
+    walk_max_entries: Option<usize>,
+    index_revalidate_ms: Option<u64>,
+    job_concurrency: Option<usize>,
+    du_abandon_ms: Option<u64>,
+}
+
+/// A whole number setting: the environment value when set, else the file value, else the default.
+fn whole<T: std::str::FromStr>(
+    name: &'static str,
+    env: Option<String>,
+    file: Option<T>,
+    default: T,
+) -> Result<T, ConfigError> {
+    match env {
+        Some(v) => v
+            .trim()
+            .parse::<T>()
+            .map_err(|_| ConfigError::invalid(name, "it must be a whole number, 0 or more")),
+        None => Ok(file.unwrap_or(default)),
+    }
 }
 
 impl Config {
@@ -130,6 +161,37 @@ impl Config {
                 .or(f.proc_mounts),
             max_edit,
             token,
+            du_wait_ms: whole(
+                "FILEDECK_DU_WAIT_MS",
+                get("FILEDECK_DU_WAIT_MS"),
+                f.du_wait_ms,
+                10_000,
+            )?,
+            walk_max_entries: whole(
+                "FILEDECK_WALK_MAX_ENTRIES",
+                get("FILEDECK_WALK_MAX_ENTRIES"),
+                f.walk_max_entries,
+                500_000,
+            )?,
+            index_revalidate_ms: whole(
+                "FILEDECK_INDEX_REVALIDATE_MS",
+                get("FILEDECK_INDEX_REVALIDATE_MS"),
+                f.index_revalidate_ms,
+                30 * 60_000,
+            )?,
+            job_concurrency: whole(
+                "FILEDECK_JOB_CONCURRENCY",
+                get("FILEDECK_JOB_CONCURRENCY"),
+                f.job_concurrency,
+                2,
+            )?
+            .max(1),
+            du_abandon_ms: whole(
+                "FILEDECK_DU_ABANDON_MS",
+                get("FILEDECK_DU_ABANDON_MS"),
+                f.du_abandon_ms,
+                120_000,
+            )?,
         })
     }
 }
@@ -210,6 +272,41 @@ mod tests {
         assert_eq!(c.host, None);
         assert!(c.read_only.is_empty());
         assert_eq!(c.token.expose(), TOKEN);
+        assert_eq!(
+            (
+                c.du_wait_ms,
+                c.walk_max_entries,
+                c.index_revalidate_ms,
+                c.job_concurrency,
+                c.du_abandon_ms
+            ),
+            (10_000, 500_000, 1_800_000, 2, 120_000)
+        );
+    }
+
+    #[test]
+    fn size_settings_come_from_the_environment_and_must_be_whole_numbers() {
+        let c = load(
+            &[
+                ("FILEDECK_AGENT_TOKEN", TOKEN),
+                ("FILEDECK_DU_WAIT_MS", "250"),
+                ("FILEDECK_JOB_CONCURRENCY", "1"),
+            ],
+            Some("walk_max_entries = 7"),
+        )
+        .unwrap();
+        assert_eq!(
+            (c.du_wait_ms, c.job_concurrency, c.walk_max_entries),
+            (250, 1, 7)
+        );
+        let e = load(
+            &[
+                ("FILEDECK_AGENT_TOKEN", TOKEN),
+                ("FILEDECK_DU_WAIT_MS", "soon"),
+            ],
+            None,
+        );
+        assert!(e.is_err());
     }
 
     #[test]

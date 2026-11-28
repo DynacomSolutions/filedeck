@@ -5,14 +5,18 @@
 mod auth;
 mod files;
 mod info;
+mod jobs;
+mod locks;
 mod metrics;
+mod size_routes;
+mod sizes;
 mod state;
 
 use axum::Router;
 use axum::http::{StatusCode, header};
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 
 pub use auth::{bearer_matches, is_open_probe};
 pub use state::{AppState, Ready};
@@ -33,6 +37,14 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(info::healthz))
         .route("/metrics", get(metrics::metrics))
         .route("/api/info", get(info::info))
+        .route("/api/du", get(size_routes::du))
+        .route("/api/jobs/size", post(size_routes::size_job))
+        .route("/api/jobs", get(size_routes::jobs_list))
+        .route(
+            "/api/jobs/{id}",
+            get(size_routes::job_get).delete(size_routes::job_dismiss),
+        )
+        .route("/api/jobs/{id}/cancel", post(size_routes::job_cancel))
         .merge(files::routes())
         .fallback(not_found)
         .layer(from_fn_with_state(state.clone(), auth::require_bearer))

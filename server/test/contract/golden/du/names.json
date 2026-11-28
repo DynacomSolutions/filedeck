@@ -1,0 +1,3512 @@
+{
+  "tree": "names",
+  "queries": [
+    {
+      "q": "depth=0&fresh=1",
+      "answer": {
+        "path": "/names",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/names",
+            "type": "dir",
+            "bytes": 1038,
+            "files": 370,
+            "dirs": 82
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&fresh=1",
+      "answer": {
+        "path": "/names",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/names",
+            "type": "dir",
+            "bytes": 1038,
+            "files": 370,
+            "dirs": 82
+          },
+          {
+            "path": "/names/Z",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a-b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/dirs",
+            "type": "dir",
+            "bytes": 120,
+            "files": 60,
+            "dirs": 60
+          },
+          {
+            "path": "/names/many",
+            "type": "dir",
+            "bytes": 897,
+            "files": 300,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x-1",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x.y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/é",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/日本",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 1
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=3&fresh=1",
+      "answer": {
+        "path": "/names",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/names",
+            "type": "dir",
+            "bytes": 1038,
+            "files": 370,
+            "dirs": 82
+          },
+          {
+            "path": "/names/Z",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/Z/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/a",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a b/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/a-b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a-b/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/a/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs",
+            "type": "dir",
+            "bytes": 120,
+            "files": 60,
+            "dirs": 60
+          },
+          {
+            "path": "/names/dirs/d0",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d1",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d10",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d11",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d12",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d13",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d14",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d15",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d16",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d17",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d18",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d19",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d2",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d20",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d21",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d22",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d23",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d24",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d25",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d26",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d27",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d28",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d29",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d3",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d30",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d31",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d32",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d33",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d34",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d35",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d36",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d37",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d38",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d39",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d4",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d40",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d41",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d42",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d43",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d44",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d45",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d46",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d47",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d48",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d49",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d5",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d50",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d51",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d52",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d53",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d54",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d55",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d56",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d57",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d58",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d59",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d6",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d7",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d8",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d9",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many",
+            "type": "dir",
+            "bytes": 897,
+            "files": 300,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x y/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x-1",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x-1/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x.y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x.y/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/é",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/é/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/日本",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/日本/in",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=2&all=1&fresh=1",
+      "answer": {
+        "path": "/names",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/names",
+            "type": "dir",
+            "bytes": 1038,
+            "files": 370,
+            "dirs": 82
+          },
+          {
+            "path": "/names/Z",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/Z/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/a",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a b/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/a-b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a-b/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/a/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs",
+            "type": "dir",
+            "bytes": 120,
+            "files": 60,
+            "dirs": 60
+          },
+          {
+            "path": "/names/dirs/d0",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d1",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d10",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d11",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d12",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d13",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d14",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d15",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d16",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d17",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d18",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d19",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d2",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d20",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d21",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d22",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d23",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d24",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d25",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d26",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d27",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d28",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d29",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d3",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d30",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d31",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d32",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d33",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d34",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d35",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d36",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d37",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d38",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d39",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d4",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d40",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d41",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d42",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d43",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d44",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d45",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d46",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d47",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d48",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d49",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d5",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d50",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d51",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d52",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d53",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d54",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d55",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d56",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d57",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d58",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d59",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d6",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d7",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d8",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/dirs/d9",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many",
+            "type": "dir",
+            "bytes": 897,
+            "files": 300,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f0",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f1",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f10",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f100",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f101",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f102",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f103",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f104",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f105",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f106",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f107",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f108",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f109",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f11",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f110",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f111",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f112",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f113",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f114",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f115",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f116",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f117",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f118",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f119",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f12",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f120",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f121",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f122",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f123",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f124",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f125",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f126",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f127",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f128",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f129",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f13",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f130",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f131",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f132",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f133",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f134",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f135",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f136",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f137",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f138",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f139",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f14",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f140",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f141",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f142",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f143",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f144",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f145",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f146",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f147",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f148",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f149",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f15",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f150",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f151",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f152",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f153",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f154",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f155",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f156",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f157",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f158",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f159",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f16",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f160",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f161",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f162",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f163",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f164",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f165",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f166",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f167",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f168",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f169",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f17",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f170",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f171",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f172",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f173",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f174",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f175",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f176",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f177",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f178",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f179",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f18",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f180",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f181",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f182",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f183",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f184",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f185",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f186",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f187",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f188",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f189",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f19",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f190",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f191",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f192",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f193",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f194",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f195",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f196",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f197",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f198",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f199",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f2",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f20",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f200",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f201",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f202",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f203",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f204",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f205",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f206",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f207",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f208",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f209",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f21",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f210",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f211",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f212",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f213",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f214",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f215",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f216",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f217",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f218",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f219",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f22",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f220",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f221",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f222",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f223",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f224",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f225",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f226",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f227",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f228",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f229",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f23",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f230",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f231",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f232",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f233",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f234",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f235",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f236",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f237",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f238",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f239",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f24",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f240",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f241",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f242",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f243",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f244",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f245",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f246",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f247",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f248",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f249",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f25",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f250",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f251",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f252",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f253",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f254",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f255",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f256",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f257",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f258",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f259",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f26",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f260",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f261",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f262",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f263",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f264",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f265",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f266",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f267",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f268",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f269",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f27",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f270",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f271",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f272",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f273",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f274",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f275",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f276",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f277",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f278",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f279",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f28",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f280",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f281",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f282",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f283",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f284",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f285",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f286",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f287",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f288",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f289",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f29",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f290",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f291",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f292",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f293",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f294",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f295",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f296",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f297",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f298",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f299",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f3",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f30",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f31",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f32",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f33",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f34",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f35",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f36",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f37",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f38",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f39",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f4",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f40",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f41",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f42",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f43",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f44",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f45",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f46",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f47",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f48",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f49",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f5",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f50",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f51",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f52",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f53",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f54",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f55",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f56",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f57",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f58",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f59",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f6",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f60",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f61",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f62",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f63",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f64",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f65",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f66",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f67",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f68",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f69",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f7",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f70",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f71",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f72",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f73",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f74",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f75",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f76",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f77",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f78",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f79",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f8",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f80",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f81",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f82",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f83",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f84",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f85",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f86",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f87",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f88",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f89",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f9",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f90",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f91",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f92",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f93",
+            "type": "file",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f94",
+            "type": "file",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f95",
+            "type": "file",
+            "bytes": 4,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f96",
+            "type": "file",
+            "bytes": 5,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f97",
+            "type": "file",
+            "bytes": 6,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f98",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/many/f99",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x y/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x-1",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x-1/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x.y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x.y/in",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/é",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/é/in",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/names/日本",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/日本/in",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&cachedOnly=1",
+      "answer": {
+        "path": "/names",
+        "cached": true,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/names",
+            "type": "dir",
+            "bytes": 1038,
+            "files": 370,
+            "dirs": 82
+          },
+          {
+            "path": "/names/Z",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/a-b",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/dirs",
+            "type": "dir",
+            "bytes": 120,
+            "files": 60,
+            "dirs": 60
+          },
+          {
+            "path": "/names/many",
+            "type": "dir",
+            "bytes": 897,
+            "files": 300,
+            "dirs": 0
+          },
+          {
+            "path": "/names/x",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x-1",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/x.y",
+            "type": "dir",
+            "bytes": 3,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/é",
+            "type": "dir",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 1
+          },
+          {
+            "path": "/names/日本",
+            "type": "dir",
+            "bytes": 2,
+            "files": 1,
+            "dirs": 1
+          }
+        ],
+        "truncated": false,
+        "stale": true
+      }
+    }
+  ]
+}

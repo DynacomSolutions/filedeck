@@ -7,7 +7,7 @@ import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import { createHub } from "../../src/hub.ts";
 import { loadConfig } from "../../src/config.ts";
-import { agentUnderTest, contractTest, dropFixtureRoot, fixtureRoot } from "./agent-under-test.ts";
+import { ContractUnsupported, agentUnderTest, contractTest, dropFixtureRoot, fixtureRoot, hasOpenMode } from "./agent-under-test.ts";
 
 const tmp = fixtureRoot("filedeck-auth-");
 const servers: ReturnType<typeof serve>[] = [];
@@ -47,6 +47,7 @@ contractTest("agent demands the shared token, the hub supplies it and never forw
 });
 
 contractTest("agent without a token is unchanged", async () => {
+  if (!hasOpenMode()) throw new ContractUnsupported("this agent has no open mode: it always needs a token");
   const app = await agentUnderTest({ root: tmp });
   after(() => app.close());
   assert.equal((await app.request("/api/fs/list?path=/")).status, 200);

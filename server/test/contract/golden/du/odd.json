@@ -1,0 +1,145 @@
+{
+  "tree": "odd",
+  "queries": [
+    {
+      "q": "depth=0&fresh=1",
+      "answer": {
+        "path": "/odd",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/odd",
+            "type": "dir",
+            "bytes": 1052673,
+            "files": 3,
+            "dirs": 1
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&fresh=1",
+      "answer": {
+        "path": "/odd",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/odd",
+            "type": "dir",
+            "bytes": 1052673,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/odd/empty",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=3&fresh=1",
+      "answer": {
+        "path": "/odd",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/odd",
+            "type": "dir",
+            "bytes": 1052673,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/odd/empty",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=2&all=1&fresh=1",
+      "answer": {
+        "path": "/odd",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/odd",
+            "type": "dir",
+            "bytes": 1052673,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/odd/empty",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          },
+          {
+            "path": "/odd/four",
+            "type": "file",
+            "bytes": 4097,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/odd/sparse",
+            "type": "file",
+            "bytes": 1048576,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/odd/zero",
+            "type": "file",
+            "bytes": 0,
+            "files": 1,
+            "dirs": 0
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&cachedOnly=1",
+      "answer": {
+        "path": "/odd",
+        "cached": true,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/odd",
+            "type": "dir",
+            "bytes": 1052673,
+            "files": 3,
+            "dirs": 1
+          },
+          {
+            "path": "/odd/empty",
+            "type": "dir",
+            "bytes": 0,
+            "files": 0,
+            "dirs": 0
+          }
+        ],
+        "truncated": false,
+        "stale": true
+      }
+    }
+  ]
+}

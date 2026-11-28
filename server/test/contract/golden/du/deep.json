@@ -1,0 +1,152 @@
+{
+  "tree": "deep",
+  "queries": [
+    {
+      "q": "depth=0&fresh=1",
+      "answer": {
+        "path": "/deep",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/deep",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 40
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&fresh=1",
+      "answer": {
+        "path": "/deep",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/deep",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 40
+          },
+          {
+            "path": "/deep/l",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 39
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=3&fresh=1",
+      "answer": {
+        "path": "/deep",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/deep",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 40
+          },
+          {
+            "path": "/deep/l",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 39
+          },
+          {
+            "path": "/deep/l/l",
+            "type": "dir",
+            "bytes": 819,
+            "files": 39,
+            "dirs": 38
+          },
+          {
+            "path": "/deep/l/l/l",
+            "type": "dir",
+            "bytes": 817,
+            "files": 38,
+            "dirs": 37
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=2&all=1&fresh=1",
+      "answer": {
+        "path": "/deep",
+        "cached": false,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/deep",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 40
+          },
+          {
+            "path": "/deep/l",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 39
+          },
+          {
+            "path": "/deep/l/f1",
+            "type": "file",
+            "bytes": 1,
+            "files": 1,
+            "dirs": 0
+          },
+          {
+            "path": "/deep/l/l",
+            "type": "dir",
+            "bytes": 819,
+            "files": 39,
+            "dirs": 38
+          }
+        ],
+        "truncated": false
+      }
+    },
+    {
+      "q": "depth=1&cachedOnly=1",
+      "answer": {
+        "path": "/deep",
+        "cached": true,
+        "watched": false,
+        "entries": [
+          {
+            "path": "/deep",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 40
+          },
+          {
+            "path": "/deep/l",
+            "type": "dir",
+            "bytes": 820,
+            "files": 40,
+            "dirs": 39
+          }
+        ],
+        "truncated": false,
+        "stale": true
+      }
+    }
+  ]
+}
