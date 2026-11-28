@@ -17,6 +17,7 @@ checks = {
     "no private stylesheet is embedded in the chart": '  cssContent: ""' in values,
     "no deployment-specific sealed data is embedded": "  sealed: {}" in values,
     "the fanotify watcher (extra capability) is off by default": "  fanotify:\n    enabled: false" in values,
+    "the holder table (eBPF, extra capabilities, host pid space) is off by default": "  holders:\n    ebpf: false" in values,
     "the du API token is off by default": "apiToken:\n  secretName: \"\"" in values,
     "the API token reads folder sizes only by default": '  scopes: ["du"]' in values,
     "pod storage gauges (agent API token) are off by default": "  podStorage:\n    enabled: false" in values,

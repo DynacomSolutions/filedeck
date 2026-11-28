@@ -42,6 +42,9 @@ const allowed = [
   // server/test/iotrace-{unit,helper}.test.ts: the eBPF helper needs clang and libbpf to build (the image build sets FILEDECK_REQUIRE_IOTRACE=1 and fails instead of skipping),
   // and its live run needs a process that may load BPF (CAP_BPF and CAP_PERFMON); an unprivileged pass skips the live run and runs the refusal test instead.
   /^iotrace (?:unit|helper): skipped \(.+\)$/,
+  // server/test/holders-helper.test.ts: the same for the holder table's helper (FILEDECK_REQUIRE_HOLDERS=1 fails a missing build; CI's root suite sets FILEDECK_REQUIRE_HOLDERS_LIVE=1,
+  // which fails a skip of the live run), and its live run needs a process that may load BPF and is in the host pid namespace.
+  /^holders helper: skipped \(.+\)$/,
 ];
 
 rl.on("close", () => {

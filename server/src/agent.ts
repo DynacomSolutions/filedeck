@@ -28,6 +28,8 @@ import { MIN_VIRTUAL_ABI, WorkerPool, landlockForVirtual, type StartWorker } fro
 import { GateAnswer, accountWorkers, makeWorkerSpecs, rootRequests, workerGate, type AccountWorkers, type WorkerSpecs } from "./agent-workers.ts";
 import { Followers, registerOwnedJobRoutes, sizeAccess } from "./agent-jobs.ts";
 import { registerNodeStatus, StatusEventBus } from "./node-status.ts";
+import { Holders } from "./holders.ts";
+import { registerHolderRoutes } from "./holders-routes.ts";
 import { DirWatchers } from "./events/dirwatch.ts";
 import { LabelRules } from "./events/labels.ts";
 import { ownState } from "./events/own-state.ts";
@@ -170,6 +172,10 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
     ? new MacWatch(sizes, { root, procMounts: cfg.procMounts, bus })
     : new FanWatch(sizes, { helper: cfg.fanwatch, root, procMounts: cfg.procMounts, handoverMs: cfg.handoverMs, commitMs: cfg.sizeCommitMs, exclude: cfg.sizeExclude, dirtyMax: cfg.sizeDirtyMax, bus, ignorePath: ownState({ node: cfg.node, root, journalDir, stateDir: cfg.indexDir, tmpDir: os.tmpdir() }) });
   registerNodeStatus(app, cfg, sizes, fan, bus);
+  // Who holds what, live (eBPF, docs/holders.md). Off unless the chart sets FILEDECK_HOLDERS; where the kernel or the permissions refuse it, it says so in its answers.
+  const holders = new Holders({ helper: cfg.holders, root, ringMb: cfg.holdersRingMb });
+  registerHolderRoutes(app, cfg, holders);
+  Object.assign(app, { holders });
   const dirs = new DirWatchers(bus, (v) => fan.covers(v));
   feedRef.feed = dirs;
   sizes.covers = (v) => fan.covers(v);
@@ -277,6 +283,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
         `filedeck_size_store_write_transactions_total ${sizes.writeTransactions}`,
         ...storageGroups.metrics.lines(),
         ...gauges,
+        ...holders.metrics(),
         ...eventMetrics(bus, (w as { helper?: Record<string, number> }).helper, (w as { caps?: string }).caps),
         "",
       ].join("\n"),
@@ -288,6 +295,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
   let socket: EventSocket | undefined;
   (app as unknown as { startWatcher: () => void }).startWatcher = () => {
     void fan.start();
+    holders.start();
     podSource?.start?.();
     // the node-local socket for other services on this machine (off unless FILEDECK_EVENTS_SOCKET is set)
     if (cfg.eventsSocket && !socket)
@@ -305,6 +313,7 @@ export function createAgent(cfg: Config, auditSink?: AuditSink, opts: AgentOptio
       // writer's coverage check reads it), and it must do that before the hard exit of the process. The bus is closed here once, and only here.
       await leaveBounded(
         async () => {
+          holders.close();
           await Promise.all([jobs.interrupt(), pool?.close()]);
           await specs?.close(); // (no worker runs any more)
           await fan.handover();

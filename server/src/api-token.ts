@@ -6,13 +6,14 @@ import { looksLikeJwt, type Reviewer } from "./k8s-auth.ts";
 
 /**
  * Optional read-only token (FILEDECK_API_TOKEN on the hub), sent as `X-Filedeck-Token: <token>`. What it may read is set by its scopes
- * (FILEDECK_API_TOKEN_SCOPES, default `du`): `du` is the `filedeck du` CLI, `changes` is the change event stream.
+ * (FILEDECK_API_TOKEN_SCOPES, default `du`): `du` is the `filedeck du` CLI, `changes` is the change event stream, `holders` is the table of who holds what.
  * Authorization is never read or changed, so an ingress login keeps working. When the header is present at all (any value,
  * also empty or repeated) it must equal the token exactly, else 401; this also holds when the feature is off, so an ingress
  * rule "skip login when X-Filedeck-Token is present" can never bypass login. A matching token may call only
  * with scope `du`: `GET /api/nodes/<node>/api/du` and `GET /api/nodes/<node>/api/jobs/<id>` (du jobs only);
  * with scope `groups`: `GET /api/groups` (storage totals only);
- * with scope `changes`: `GET /api/v1/changes` and `GET /api/nodes/<node>/api/v1/changes`; anything else answers 403.
+ * with scope `changes`: `GET /api/v1/changes` and `GET /api/nodes/<node>/api/v1/changes`;
+ * with scope `holders`: `GET /api/nodes/<node>/api/v1/holders` (read only, the processes that hold a path); anything else answers 403.
  * The header is removed before the request goes to an agent.
  * A Kubernetes projected ServiceAccount token (see k8s-auth.ts) may also come in this header. It is checked with `review`, may read the `du`
  * scope only (never `changes` or `groups`), and each call is written to the audit sink with the ServiceAccount. A wrong token still answers 401.
@@ -30,6 +31,7 @@ declare module "hono" {
 }
 
 const CHANGES = /^\/api\/(?:v1\/changes|nodes\/[^/]+\/api\/v1\/changes)$/;
+const HOLDERS = /^\/api\/nodes\/[^/]+\/api\/v1\/holders$/;
 
 export function apiTokenAuth(token: string | undefined, account?: () => Identity | { error: string }, scopes: readonly string[] = ["du"], k8s?: { review: Reviewer; sink: (line: string) => void }): MiddlewareHandler {
   const want = token ? digest(token) : undefined;
@@ -54,10 +56,11 @@ export function apiTokenAuth(token: string | undefined, account?: () => Identity
     const du = granted.includes("du");
     const changes = granted.includes("changes");
     const groups = granted.includes("groups");
-    const resources = [du && "folder sizes", changes && "change events", groups && "grouped storage sizes"].filter((resource) => typeof resource === "string");
+    const holders = granted.includes("holders");
+    const resources = [du && "folder sizes", changes && "change events", groups && "grouped storage sizes", holders && "the holders of a path"].filter((resource) => typeof resource === "string");
     const permitted = new Intl.ListFormat("en-GB", { type: "conjunction" }).format(resources);
     const p = c.req.path;
-    const allowed = c.req.method === "GET" && ((du && (DU.test(p) || JOB.test(p))) || (changes && CHANGES.test(p)) || (groups && p === "/api/groups"));
+    const allowed = c.req.method === "GET" && ((du && (DU.test(p) || JOB.test(p))) || (changes && CHANGES.test(p)) || (groups && p === "/api/groups") || (holders && HOLDERS.test(p)));
     if (!allowed) {
       const res = c.json({ error: `forbidden: this token may only read ${permitted || "no resources"}` }, 403);
       after?.(403);
