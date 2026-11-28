@@ -1,7 +1,7 @@
 /**
  * Records the golden answers of the file routes from the TS agent, started as a child process (spawn mode).
  *   cd server && node --import tsx test/contract/fs-golden-capture.ts
- * Writes agent/tests/golden/fs.json. Run it again only when the TS agent's answers change on purpose.
+ * Writes server/test/contract/golden/fs.json. Run it again only when the TS agent's answers change on purpose.
  */
 import fs from "node:fs";
 import path from "node:path";

@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentUnderTest } from "./agent-under-test.ts";
 
-export const GOLDEN_FILE = path.resolve(import.meta.dirname, "../../../agent/tests/golden/fs.json");
+export const GOLDEN_FILE = path.resolve(import.meta.dirname, "golden/fs.json");
 
 const MTIME = new Date("2024-03-05T06:07:08.000Z");
 

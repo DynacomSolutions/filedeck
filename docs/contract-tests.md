@@ -74,7 +74,7 @@ The old tests in `server/test/` stay: they call TS functions, and these files gi
 
 ## Golden answers
 
-`agent/tests/golden/fs.json` holds the answers of the TS agent to the requests in `fs-golden-lib.ts`.
+`server/test/contract/golden/fs.json` holds the answers of the TS agent to the requests in `fs-golden-lib.ts`.
 Record them again only when the TS agent changes on purpose:
 
 ```sh
