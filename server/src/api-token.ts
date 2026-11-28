@@ -5,13 +5,14 @@ import { runAs } from "./auth/context.ts";
 
 /**
  * Optional read-only token (FILEDECK_API_TOKEN on the hub), sent as `X-Filedeck-Token: <token>`. What it may read is set by its scopes
- * (FILEDECK_API_TOKEN_SCOPES, default `du`): `du` is the `filedeck du` CLI, `changes` is the change event stream.
+ * (FILEDECK_API_TOKEN_SCOPES, default `du`): `du` is the `filedeck du` CLI, `changes` is the change event stream, `holders` is the table of who holds what.
  * Authorization is never read or changed, so an ingress login keeps working. When the header is present at all (any value,
  * also empty or repeated) it must equal the token exactly, else 401; this also holds when the feature is off, so an ingress
  * rule "skip login when X-Filedeck-Token is present" can never bypass login. A matching token may call only
  * with scope `du`: `GET /api/nodes/<node>/api/du` and `GET /api/nodes/<node>/api/jobs/<id>` (du jobs only);
  * with scope `groups`: `GET /api/groups` (storage totals only);
- * with scope `changes`: `GET /api/v1/changes` and `GET /api/nodes/<node>/api/v1/changes`; anything else answers 403.
+ * with scope `changes`: `GET /api/v1/changes` and `GET /api/nodes/<node>/api/v1/changes`;
+ * with scope `holders`: `GET /api/nodes/<node>/api/v1/holders` (read only, the processes that hold a path); anything else answers 403.
  * The header is removed before the request goes to an agent.
  *
  * With sign-in on, `account` gives the identity the token acts as (FILEDECK_API_TOKEN_ACCOUNT), and the rest of the
@@ -27,12 +28,14 @@ declare module "hono" {
 }
 
 const CHANGES = /^\/api\/(?:v1\/changes|nodes\/[^/]+\/api\/v1\/changes)$/;
+const HOLDERS = /^\/api\/nodes\/[^/]+\/api\/v1\/holders$/;
 
 export function apiTokenAuth(token: string | undefined, account?: () => Identity | { error: string }, scopes: readonly string[] = ["du"]): MiddlewareHandler {
   const du = scopes.includes("du");
   const changes = scopes.includes("changes");
   const groups = scopes.includes("groups");
-  const resources = [du && "folder sizes", changes && "change events", groups && "grouped storage sizes"].filter((resource) => typeof resource === "string");
+  const holders = scopes.includes("holders");
+  const resources = [du && "folder sizes", changes && "change events", groups && "grouped storage sizes", holders && "the holders of a path"].filter((resource) => typeof resource === "string");
   const permitted = new Intl.ListFormat("en-GB", { type: "conjunction" }).format(resources);
   const want = token ? digest(token) : undefined;
   return async (c, next) => {
@@ -41,7 +44,7 @@ export function apiTokenAuth(token: string | undefined, account?: () => Identity
     if (got === null) return next();
     if (!want || !timingSafeEqual(digest(got), want)) return c.json({ error: "unauthorized" }, 401);
     const p = c.req.path;
-    const allowed = c.req.method === "GET" && ((du && (DU.test(p) || JOB.test(p))) || (changes && CHANGES.test(p)) || (groups && p === "/api/groups"));
+    const allowed = c.req.method === "GET" && ((du && (DU.test(p) || JOB.test(p))) || (changes && CHANGES.test(p)) || (groups && p === "/api/groups") || (holders && HOLDERS.test(p)));
     if (!allowed) return c.json({ error: `forbidden: this token may only read ${permitted || "no resources"}` }, 403);
     if (p === "/api/groups") c.set("storageSizesOnly", true);
     c.req.raw.headers.delete("x-filedeck-token");

@@ -119,3 +119,19 @@ test("feature is off without FILEDECK_API_TOKEN; the token file works", async ()
   assert.equal((await on("/api/nodes", { token: TOKEN })).status, 403);
   assert.equal(loadConfig({ FILEDECK_API_TOKEN: "x" } as never).apiToken, undefined, "agents ignore it");
 });
+
+test("the holders scope lets a token ask who holds a path, and only that", async () => {
+  const dflt = await hub({ FILEDECK_API_TOKEN: TOKEN });
+  assert.equal((await dflt("/api/nodes/n/api/v1/holders?path=/d", { token: TOKEN })).status, 403, "the default scope is du only");
+  const req = await hub({ FILEDECK_API_TOKEN: TOKEN, FILEDECK_API_TOKEN_SCOPES: "holders" });
+  const r = await req("/api/nodes/n/api/v1/holders?path=/d", { token: TOKEN });
+  assert.equal(r.status, 200);
+  const body = (await r.json()) as { proven: boolean; feature: { state: string }; holders: unknown[] };
+  assert.equal(body.proven, false, "this agent runs no helper: not known, never 'no holder'");
+  assert.equal(body.feature.state, "disabled");
+  assert.deepEqual(body.holders, []);
+  assert.equal((await req("/api/nodes/n/api/du?path=/d", { token: TOKEN })).status, 403, "a holders token does not read sizes");
+  assert.equal((await req("/api/nodes/n/api/v1/holders?path=/d", { method: "POST", token: TOKEN })).status, 403);
+  assert.equal((await req("/api/nodes/n/api/fs/list?path=/", { token: TOKEN })).status, 403);
+  assert.equal((await req("/api/nodes/n/api/v1/holders", { token: TOKEN })).status, 400, "a path is required");
+});

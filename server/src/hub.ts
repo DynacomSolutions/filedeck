@@ -14,6 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { registerHubDiff } from "./diff-hub.ts";
 import { NODE_STATUS_PATH, readHubNodeStatus } from "./node-status.ts";
+import { HOLDERS_PATH } from "./holders-routes.ts";
 import { registerOps } from "./ops-routes.ts";
 import type { OpQueue } from "./ops-queue.ts";
 import { JobStore } from "./job-store.ts";
@@ -962,7 +963,7 @@ export function createHub(cfg: Config, injected?: Record<string, SourceBackend>,
     // Apply the same administrator check to diagnostics and the change stream.
     const agentPath = normaliseAgentPath(rest)?.replace(/\/+$/, "");
     const isChanges = agentPath === undefined || agentPath === changesPath;
-    if ((isChanges || agentPath === NODE_STATUS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
+    if ((isChanges || agentPath === NODE_STATUS_PATH || agentPath === HOLDERS_PATH) && !mayReadChanges()) return c.json({ error: "administrators only" }, 403);
     // a request without a body (content-length 0 and no transfer-encoding) is sent as such, so it uses a pooled connection like a GET; only a real body is streamed on a connection of its own
     const len0 = c.req.header("content-length");
     const hasBody = !["GET", "HEAD"].includes(c.req.method) && (c.req.header("transfer-encoding") !== undefined || (len0 === undefined ? c.req.raw.body !== null : len0 !== "0"));
