@@ -63,7 +63,7 @@ contractTest("a bad FILEDECK_READONLY entry stops the start", async () => {
         const app = await agentUnderTest({ env: { FILEDECK_AGENT_TOKEN: TOKEN, FILEDECK_READONLY: bad } });
         await app.close();
       },
-      undefined,
+      () => true,
       bad,
     );
   }

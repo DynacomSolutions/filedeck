@@ -4,7 +4,7 @@
 //! (a fixed-seed xorshift, so a failure repeats) builds many paths from the names in the fixture and from `..`, `.` and empty segments.
 //! Every call that succeeds must name a file or folder that is inside the root: its (device, inode) must not be one of the
 //! folders above the root or anything in the folder beside it.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::unnecessary_cast)]
 
 use std::collections::HashSet;
 use std::fs;
@@ -61,16 +61,28 @@ fn fixture() -> Fixture {
     let deep_up = "../".repeat(40);
     let links: Vec<(String, String)> = vec![
         ("abs_out".into(), outside.to_str().unwrap().into()),
-        ("abs_out_file".into(), outside.join("secret").to_str().unwrap().into()),
+        (
+            "abs_out_file".into(),
+            outside.join("secret").to_str().unwrap().into(),
+        ),
         ("abs_base".into(), base.to_str().unwrap().into()),
         ("abs_slash".into(), "/".into()),
         ("abs_etc".into(), "/etc".into()),
         ("a/up1".into(), "..".into()),
         ("a/up2".into(), "../..".into()),
         ("a/up3".into(), "../../..".into()),
-        ("a/b/up_far".into(), format!("{deep_up}{}", outside.to_str().unwrap().trim_start_matches('/'))),
+        (
+            "a/b/up_far".into(),
+            format!(
+                "{deep_up}{}",
+                outside.to_str().unwrap().trim_start_matches('/')
+            ),
+        ),
         ("a/b/to_outside".into(), "../../../outside".into()),
-        ("a/b/to_outside_file".into(), "../../../outside/secret".into()),
+        (
+            "a/b/to_outside_file".into(),
+            "../../../outside/secret".into(),
+        ),
         ("a/b/c/dots".into(), "./../c/./../../b/../file.txt".into()),
         ("a/self".into(), ".".into()),
         ("a/fileln".into(), "file.txt".into()),
@@ -115,11 +127,52 @@ fn fixture() -> Fixture {
 }
 
 const NAMES: &[&str] = &[
-    "a", "b", "c", "dir", "file.txt", "leaf", "text.txt", "abs_out", "abs_out_file", "abs_base",
-    "abs_slash", "abs_etc", "up1", "up2", "up3", "up_far", "to_outside", "to_outside_file", "dots",
-    "self", "fileln", "loop1", "loop2", "chain1", "chain2", "chain3", "back", "root_abs", "missing",
-    "empty_target", "outside", "secret", "etc", "passwd", "tmp", "nothing", ".hidden",
-    ".filedeck-trash", ".filedeck-work-x", "a\u{e9}", "\u{1f600}", "a", "b", "c", "a", "file.txt",
+    "a",
+    "b",
+    "c",
+    "dir",
+    "file.txt",
+    "leaf",
+    "text.txt",
+    "abs_out",
+    "abs_out_file",
+    "abs_base",
+    "abs_slash",
+    "abs_etc",
+    "up1",
+    "up2",
+    "up3",
+    "up_far",
+    "to_outside",
+    "to_outside_file",
+    "dots",
+    "self",
+    "fileln",
+    "loop1",
+    "loop2",
+    "chain1",
+    "chain2",
+    "chain3",
+    "back",
+    "root_abs",
+    "missing",
+    "empty_target",
+    "outside",
+    "secret",
+    "etc",
+    "passwd",
+    "tmp",
+    "nothing",
+    ".hidden",
+    ".filedeck-trash",
+    ".filedeck-work-x",
+    "a\u{e9}",
+    "\u{1f600}",
+    "a",
+    "b",
+    "c",
+    "a",
+    "file.txt",
 ];
 
 /// Segments that change the shape of a path.
@@ -194,7 +247,11 @@ fn no_path_leads_out_of_the_root() {
         if let Ok(l) = list(&root, &p, true) {
             listed += 1;
             for e in &l.entries {
-                assert!(e.path.starts_with('/') && !e.path.contains("/../"), "{p:?}: {}", e.path);
+                assert!(
+                    e.path.starts_with('/') && !e.path.contains("/../"),
+                    "{p:?}: {}",
+                    e.path
+                );
                 assert!(!fd_core::is_reserved_name(&e.name), "{p:?}: {}", e.name);
             }
             // the listing of a folder never shows the folder beside the root
@@ -210,7 +267,10 @@ fn no_path_leads_out_of_the_root() {
     assert!(opened > 300, "only {opened} files opened");
     assert!(listed > 200, "only {listed} folders listed");
     // and the outside folder is as it was
-    assert_eq!(fs::read_to_string(fx.outside_dir.join("secret")).unwrap(), "OUTSIDE");
+    assert_eq!(
+        fs::read_to_string(fx.outside_dir.join("secret")).unwrap(),
+        "OUTSIDE"
+    );
 }
 
 #[test]
@@ -241,10 +301,27 @@ fn the_known_escapes_all_fail() {
 fn structured_path(r: &mut Rng) -> String {
     const BASES: &[&str] = &["", "/a", "/a/b", "/a/b/c", "/dir"];
     const LINKS: &[&str] = &[
-        "abs_out", "abs_slash", "up1", "up2", "up3", "up_far", "to_outside", "self", "back", "root_abs", "dots",
-        "abs_base", "abs_etc", "chain1", "..", ".", "",
+        "abs_out",
+        "abs_slash",
+        "up1",
+        "up2",
+        "up3",
+        "up_far",
+        "to_outside",
+        "self",
+        "back",
+        "root_abs",
+        "dots",
+        "abs_base",
+        "abs_etc",
+        "chain1",
+        "..",
+        ".",
+        "",
     ];
-    const ENDS: &[&str] = &["file.txt", "leaf", "text.txt", "secret", "fileln", "passwd", "outside", "c", "b"];
+    const ENDS: &[&str] = &[
+        "file.txt", "leaf", "text.txt", "secret", "fileln", "passwd", "outside", "c", "b",
+    ];
     let mut p = BASES[r.below(BASES.len())].to_owned();
     for _ in 0..r.below(4) {
         p.push('/');

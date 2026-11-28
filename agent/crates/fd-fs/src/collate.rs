@@ -146,7 +146,14 @@ mod tests {
     #[test]
     fn latin_1_accents_count_as_their_base_letter() {
         assert_eq!(
-            sorted(vec!["escape", "\u{e9} \u{fc}.txt", "e", "\u{e9}", "f", "\u{c9}"]),
+            sorted(vec![
+                "escape",
+                "\u{e9} \u{fc}.txt",
+                "e",
+                "\u{e9}",
+                "f",
+                "\u{c9}"
+            ]),
             ["e", "\u{e9}", "\u{c9}", "\u{e9} \u{fc}.txt", "escape", "f"]
         );
     }
