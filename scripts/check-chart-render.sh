@@ -63,6 +63,18 @@ assert {v["name"] for v in reconciler["spec"]["template"]["spec"]["volumes"]} ==
 agent = next(d for d in docs if d and d.get("kind") == "DaemonSet" and d["metadata"]["name"] == "custom-managed-agent")
 assert "startupProbe" in agent["spec"]["template"]["spec"]["containers"][0]
 print("parsed startup and volume mounts: OK")
+# the reconciler is event driven: no sleep loop, a watch on nodes and pods, a liveness probe on each watch heartbeat
+script = next(d for d in docs if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "custom-managed-reconciler")["data"]["reconcile.sh"]
+assert "sleep \"$INTERVAL\"" not in script and "INTERVAL" not in script
+assert "/api/v1/nodes?" in script and "allowWatchBookmarks=true" in script and "/pods?" in script
+assert {e["name"] for e in container["env"]} >= {"WATCH_SECONDS"} and "INTERVAL" not in {e["name"] for e in container["env"]}
+probe = " ".join(container["livenessProbe"]["exec"]["command"])
+assert "heartbeat.$w" in probe and "nodes pods" in probe
+role = next(d for d in docs if d and d.get("kind") == "Role" and d["metadata"]["name"] == "custom-managed-reconciler")
+assert any("pods" in r["resources"] and "watch" in r["verbs"] for r in role["rules"])
+cluster = next(d for d in docs if d and d.get("kind") == "ClusterRole" and d["metadata"]["name"] == "custom-managed-reconciler")
+assert any("nodes" in r["resources"] and "watch" in r["verbs"] for r in cluster["rules"])
+print("reconciler watches nodes and pods, no timer loop: OK")
 '
 
 test "$(printf '%s\n' "$hub" | awk '/name: FILEDECK_HUB_METRICS_PORT/{getline; gsub(/"/, "", $2); print $2}')" = 9091

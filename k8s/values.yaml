@@ -284,7 +284,8 @@ managedNodes:
   enabled: false
   label: dynacom.dev/filedeck-managed
   value: "true"
-  reconcileSeconds: 30
+  # The reconciler watches the Node and agent Pod objects. A watch the server ends after this many seconds is opened again (no timer reconciles).
+  watchSeconds: 300
   image:
     repository: bitnami/kubectl
     tag: "latest"
