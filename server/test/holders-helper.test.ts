@@ -200,10 +200,15 @@ int main(int argc, char **argv) {
     if (clone(child, stack + sizeof stack, CLONE_FILES | SIGCHLD, argv[3]) < 0) return 2;
     for (;;) pause();
   }
-  if (!strcmp(argv[1], "uring")) { /* uring READY */
+  if (!strcmp(argv[1], "uring") || !strcmp(argv[1], "uring-files")) { /* uring READY: a ring with nothing registered; uring-files READY: one with a registered file */
     char params[256];
     memset(params, 0, sizeof params);
-    if (syscall(425, 4, params) < 0) return 77; /* io_uring_setup: not allowed here */
+    int ring = (int)syscall(425, 4, params); /* io_uring_setup */
+    if (ring < 0) return 77; /* not allowed here */
+    if (!strcmp(argv[1], "uring-files")) {
+      int fds[1] = {open("/dev/null", O_RDONLY)};
+      if (syscall(427, ring, 2 /* IORING_REGISTER_FILES */, fds, 1) < 0) return 77; /* io_uring_register */
+    }
     touch();
     for (;;) pause();
   }
@@ -284,12 +289,28 @@ test("holders helper: a child that shares the file table makes the answer unprov
   }
 });
 
-test("holders helper: a process with an io_uring makes the answer unproven while it lives", { skip: liveSkip, timeout: 120_000 }, async () => {
+test("holders helper: a process with an io_uring and no registered file does not make the answer unproven", { skip: liveSkip, timeout: 120_000 }, async () => {
+  const h = await liveHolders();
+  try {
+    buildProbe();
+    const ready = path.join(work, "uring0.ready");
+    const p = start(probeBin, ["uring", ready]);
+    const code = await Promise.race([new Promise<number | null>((r) => p.once("exit", (c) => r(c))), waitFile(ready, "the ring exists").then(() => -1)]);
+    if (code === 77) return;
+    const a = await holdersOf(h, work);
+    assert.ok(!a.reasons.some((r) => /io_uring/.test(r)), a.reasons.join("; "));
+  } finally {
+    h.close();
+    killAll();
+  }
+});
+
+test("holders helper: a process with an io_uring that has a registered file makes the answer unproven while it lives", { skip: liveSkip, timeout: 120_000 }, async () => {
   const h = await liveHolders();
   try {
     buildProbe();
     const ready = path.join(work, "uring.ready");
-    const p = start(probeBin, ["uring", ready]);
+    const p = start(probeBin, ["uring-files", ready]);
     const code = await Promise.race([new Promise<number | null>((r) => p.once("exit", (c) => r(c))), waitFile(ready, "the ring exists").then(() => -1)]);
     if (code === 77) return; // io_uring is not allowed on this machine: nothing to test
     const a = await holdersOf(h, work);

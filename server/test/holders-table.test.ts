@@ -209,7 +209,9 @@ test("holders table: a chain that was read while a rename ran matches every path
 
 test("holders table: a process with an io_uring is a gap; a read that shows no ring clears it; a child has the ring's descriptor too", () => {
   const t = seeded();
-  t.apply(rec(HT.URING, 71, 0, []));
+  t.apply(rec(HT.URING, 71, 0, [], { aux: 1 }));
+  t.apply(rec(HT.URING, 76, 0, [])); // a ring without registered files
+  assert.deepEqual(t.gaps().uring, [71]);
   assert.deepEqual(t.gaps().uring, [71]);
   t.apply(rec(HT.FORK, 71, 0, [], { aux: 72 }));
   assert.deepEqual(t.gaps().uring, [71, 72]);
@@ -217,7 +219,7 @@ test("holders table: a process with an io_uring is a gap; a read that shows no r
   t.apply(rec(HT.SNAPEND, 71, 0, []));
   assert.deepEqual(t.gaps().uring, [72], "the read found no ring in 71");
   t.apply(rec(HT.SNAPBEG, 72, 0, []));
-  t.apply(rec(HT.SURING, 72, 0, []));
+  t.apply(rec(HT.SURING, 72, 0, [], { aux: 1 }));
   t.apply(rec(HT.SNAPEND, 72, 0, []));
   assert.deepEqual(t.gaps().uring, [72], "the read found it");
   t.apply(rec(HT.EXIT, 72, 0, []));

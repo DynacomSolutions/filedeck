@@ -88,6 +88,7 @@ const SOFT_HOOKS = [
   "__scm_send (descriptors in a message)",
   "__ia32_sys_dup3 (32-bit dup3)",
   "__ia32_sys_dup2 (32-bit dup2)",
+  "io_uring_register (registered files)",
 ] as const;
 
 /** The filesystems that the kernel side does not track (the same list as filedeck-holders.bpf.c `untracked_magic`), by `statfs` type and name */
@@ -485,7 +486,7 @@ export class Holders extends EventEmitter {
     if (gaps.dirtyPids.length) reasons.push(`${gaps.dirtyPids.length} processes are being read again after lost events`);
     if (gaps.unreadable.length) reasons.push(`${gaps.unreadable.length} processes could not be read`);
     if (gaps.shared.length) reasons.push(`${gaps.shared.length} processes share a file table or folders with another process: what one does is not seen as the other's`);
-    if (gaps.uring.length) reasons.push(`${gaps.uring.length} processes hold an io_uring: the files in its fixed table are not seen`);
+    if (gaps.uring.length) reasons.push(`${gaps.uring.length} processes hold an io_uring with registered files: the ring holds them and no hook sees them`);
     if (gaps.full) reasons.push("the table is full and stopped taking events");
     for (let i = 0; i < SOFT_HOOKS.length; i++) if (this.softMissing & (1 << i)) reasons.push(`a hook is missing in this kernel: ${SOFT_HOOKS[i]}`);
 

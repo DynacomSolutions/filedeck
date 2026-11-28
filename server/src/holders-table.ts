@@ -301,7 +301,7 @@ export class HoldersTable {
         return;
       case HT.URING:
       case HT.SURING:
-        t.st.uring = true;
+        if (rec.aux === 1) t.st.uring = true; // (a ring without registered files holds nothing)
         return;
       case HT.SCM:
         this.#pin(t);

@@ -16,7 +16,7 @@
  *   EXIT      the last thread of a process ended         pid
  *   MOVED     an inode moved to another folder           dev, ino (pid = who moved it)
  *   DIRTY     events of this pid may be lost             pid (pid 0: events of unknown pids may be lost)
- *   URING     the process holds an io_uring               pid (its fixed files are held by the ring, and no hook sees them)
+ *   URING     a process holds an io_uring                 pid, aux = 1 when the ring has registered (fixed) files: the ring holds them, and no hook sees them
  *   SCM       the process sent descriptors in a message  pid (the files may be in flight: held by no process)
  *   SFD, SCWD, SROOT, SEXE, SMMAP                        the same as FD, CWD, ROOT, EXE, MMAP, from a snapshot (see below)
  *   SURING    URING, from a snapshot

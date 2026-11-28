@@ -14,7 +14,10 @@
  *   file mapping           fentry security_mmap_file(file)   every mmap of a file, also those of an exec
  *   fork                   tp_btf sched_process_fork         the child holds what the parent holds (a fork of a multi-threaded parent, of the agent, or one
  *                                                            that shares the file table or folders is marked: the table reads the child again)
- *   io_uring               fd_install, iterators             a process with an io_uring: its fixed files are not seen (a record URING: the table says unproven)
+ *   io_uring               fd_install, tp_btf io_uring_register, iterators
+ *                                                            a ring holds files without a descriptor only when files are registered with it. A record URING
+ *                                                            with aux = 1 says that the process holds a ring with registered files (the table says unproven).
+ *                                                            A ring without registered files holds nothing and is ignored.
  *   descriptors in a message fexit __scm_send                a record SCM: the sender's holds stay until the sender ends (the files may be in flight)
  *   exit                   tp_btf sched_process_exit         the table forgets the process (only when its last thread ends)
  *   inode moved            fentry security_inode_rename      only a move to another folder (a rename in one folder changes no chain)
@@ -268,6 +271,20 @@ static __always_inline int path_event(u32 slot_no, u16 type, struct path *path, 
 	return 0;
 }
 
+/* Does the ring of this io_uring file have registered (fixed) files? They are held by the ring, and no descriptor shows them. When the kernel has neither
+ * field that tells it, the answer is yes (never a false "no"). */
+static __always_inline bool uring_has_files(struct file *file)
+{
+	struct io_ring_ctx *ctx = BPF_CORE_READ(file, private_data);
+	if (!ctx)
+		return true;
+	if (bpf_core_field_exists(ctx->file_table.data.nr))
+		return BPF_CORE_READ(ctx, file_table.data.nr) != 0;
+	if (bpf_core_field_exists(ctx->nr_user_files))
+		return BPF_CORE_READ(ctx, nr_user_files) != 0;
+	return true;
+}
+
 /* The anonymous inode of an io_uring is named "[io_uring]". */
 static __always_inline bool is_uring(struct file *file)
 {
@@ -304,8 +321,18 @@ int BPF_PROG(h_fd_install, unsigned int fd, struct file *file)
 {
 	u32 pid = cur_tgid();
 	if (file && !ignored(pid) && is_uring(file))
-		return pid_event(19, HT_URING, pid, 0, 0);
+		return pid_event(19, HT_URING, pid, uring_has_files(file) ? 1 : 0, 0);
 	return file_event(0, HT_FD, fd, file, true);
+}
+
+/* Files are registered with a ring (IORING_REGISTER_FILES 2, FILES_UPDATE 6, FILES2 13, FILES_UPDATE2 14): the ring holds them from now on. */
+SEC("tp_btf/io_uring_register")
+int BPF_PROG(h_uring_register, void *rctx, unsigned int opcode, unsigned int nr_files, unsigned int nr_bufs, long ret)
+{
+	u32 pid = cur_tgid();
+	if (ignored(pid) || (opcode != 2 && opcode != 6 && opcode != 13 && opcode != 14))
+		return 0;
+	return pid_event(24, HT_URING, pid, 1, 0);
 }
 
 /* seccomp's SECCOMP_IOCTL_NOTIF_ADDFD with SETFD puts a file into a descriptor of the task without fd_install (and closes the old one with filp_close) */
@@ -547,7 +574,7 @@ static __always_inline int snap_file(u32 slot_no, u16 type, u32 aux, struct task
 		r->ino = 0;
 		r->key = 0;
 		BPF_CORE_READ_STR_INTO(&r->comm, task, comm);
-		send(r, HT_SURING, pid, 0, 0);
+		send(r, HT_SURING, pid, uring_has_files(file) ? 1 : 0, 0);
 		return 0;
 	}
 	if (!fill(r, BPF_CORE_READ(file, f_path.dentry), true))

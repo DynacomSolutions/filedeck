@@ -160,7 +160,7 @@ static int lib_print(enum libbpf_print_level level, const char *fmt, va_list ap)
 
 /* Programs that the agent can run without: the table then says that it is not complete (HELLO.aux bit). The order is the order of the bits, and of
  * SOFT_HOOKS in server/src/holders.ts. The two 32-bit calls are not loaded (and not counted) where the kernel has no 32-bit emulation. */
-static const char *const SOFT[] = {"h_dup3", "h_dup2", "h_rename", "h_chroot_fs_refs", "h_replace_fd", "h_scm_send", "h_ia32_dup3", "h_ia32_dup2"};
+static const char *const SOFT[] = {"h_dup3", "h_dup2", "h_rename", "h_chroot_fs_refs", "h_replace_fd", "h_scm_send", "h_ia32_dup3", "h_ia32_dup2", "h_uring_register"};
 #define NSOFT (sizeof SOFT / sizeof *SOFT)
 static const char *const ITERS[] = {"snap_files", "snap_vmas", "snap_tasks"};
 #define NITER 3

@@ -327,7 +327,7 @@ test("holders api: a process that shares its file table, a fork of a multi-threa
   assert.ok(f.written.includes("snap 922\n"), "the child was read again");
   assert.equal(a.proven, true, a.reasons.join("; "));
   // an io_uring
-  f.send({ type: HT.URING, pid: 923 });
+  f.send({ type: HT.URING, pid: 923, aux: 1 });
   await until(() => h.table.procs.has(923));
   a = await ask(h, "other");
   assert.equal(a.proven, false);
@@ -336,7 +336,7 @@ test("holders api: a process that shares its file table, a fork of a multi-threa
 });
 
 test("holders api: a hook that the kernel lacks is named, for each of them", async () => {
-  const names = ["dup3", "dup2", "moves", "pivot_root", "replace_fd", "descriptors in a message", "32-bit dup3", "32-bit dup2"];
+  const names = ["dup3", "dup2", "moves", "pivot_root", "replace_fd", "descriptors in a message", "32-bit dup3", "32-bit dup2", "registered files"];
   for (let i = 0; i < names.length; i++) {
     const { h, helpers } = make();
     h.start();

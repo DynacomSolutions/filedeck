@@ -88,6 +88,18 @@ struct super_block {
 struct file {
 	struct inode *f_inode;
 	struct path f_path;
+	void *private_data;
+};
+/* only what the io_uring check reads: the count of registered (fixed) files. The name differs by kernel: file_table.data.nr (6.10 and newer), nr_user_files (older). */
+struct io_rsrc_data {
+	unsigned int nr;
+};
+struct io_file_table {
+	struct io_rsrc_data data;
+};
+struct io_ring_ctx {
+	struct io_file_table file_table;
+	unsigned int nr_user_files;
 };
 struct fs_struct {
 	struct path root;
