@@ -46,7 +46,13 @@ spec:
       {{- end }}
     spec:
       terminationGracePeriodSeconds: 30
+      {{- if $.Values.agent.podStorage.enabled }}
+      # The pod watch of the size gauges needs the API token (pods get/list/watch only, see agent-rbac.yaml).
+      serviceAccountName: {{ include "filedeck.name" $ }}-agent
+      automountServiceAccountToken: true
+      {{- else }}
       automountServiceAccountToken: false
+      {{- end }}
       {{- with .nodeName }}
       nodeSelector:
         kubernetes.io/hostname: {{ . | quote }}
@@ -136,6 +142,20 @@ spec:
               value: {{ $.Values.agent.sizeStore.commitMs | int64 | quote }}
             - name: FILEDECK_SIZE_EXCLUDE
               value: {{ $.Values.agent.sizeStore.exclude | quote }}
+            {{- with $.Values.agent.sizeGauges }}
+            - name: FILEDECK_SIZE_GAUGES
+              value: {{ join "\n" . | quote }}
+            {{- end }}
+            {{- if $.Values.agent.podStorage.enabled }}
+            - name: FILEDECK_POD_STORAGE
+              value: "on"
+            - name: FILEDECK_POD_NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: FILEDECK_KUBELET_PODS_DIR
+              value: {{ $.Values.agent.podStorage.kubeletPodsDir | quote }}
+            - name: FILEDECK_POD_LOGS_DIR
+              value: {{ $.Values.agent.podStorage.logsDir | quote }}
+            {{- end }}
             # Change events (docs/change-events.md): the journal sits in the index folder above; a label template turns a path into labels.
             - name: FILEDECK_EVENTS_JOURNAL_BYTES
               value: {{ $.Values.agent.events.journal.maxBytes | int64 | quote }}
