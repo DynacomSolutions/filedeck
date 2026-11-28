@@ -48,7 +48,7 @@ test("iotrace output: at most 512 rows, the busiest ones", { skip }, () => {
   assert.equal(line.rows[511]!.r, 900 - 511);
 });
 
-test("iotrace output: an interval without requests has an empty list", { skip }, () => {
+test("iotrace output: a read without requests has an empty list", { skip }, () => {
   const line = assertIotraceLine(run("empty").trimEnd());
   assert.deepEqual(line.rows, []);
 });

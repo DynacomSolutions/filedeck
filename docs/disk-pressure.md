@@ -8,12 +8,13 @@
 
 - A BPF program is attached to the block layer tracepoint `block_rq_issue`. It counts each read and write request in one hash map in the kernel. The key is the disk, the cgroup id and the process id. The value is the request and byte counts for reads and writes, and the task name.
 - The map holds at most 16,384 keys and drops the least recently used key when it is full. In that case the busiest keys stay and a rare key can lose counts.
-- Once per interval (default 1000 ms, `--interval-ms`, 100 to 60,000) the helper reads and clears the map. It sorts the rows by request count and prints the top 512 as one JSON line. It prints nothing else. It sees no single event and writes no file.
+- The helper has no timer and no options. It waits on its standard input. For each line `read` it reads and clears the map, sorts the rows by request count and prints the top 512 as one JSON line. It prints nothing else. It sees no single event and writes no file.
+- Nothing in FileDeck reads the map on a schedule. `IotraceSampler` (`server/src/iotrace.ts`) sends `read` only on demand: for an API request, for the `/metrics` scrape (the scraper is the demand), or for a disk pressure event. While a live view is open, a one-shot deadline is set again after each read. The last subscriber to leave clears it. While nobody asks, no timer runs. If the helper cannot run, the sampler uses the proc and cgroup collector in the same on-demand way.
 - The program uses the BTF tracepoint (`tp_btf`) and CO-RE. The build needs no kernel BTF. The BPF object is embedded in the helper, so the helper is one file. Kernel structures are matched by field name against the BTF of the running kernel when the helper starts.
 
 ### Output
 
-One line per interval. The values are the change in that interval.
+One line per `read`. The values are the change since the previous `read`.
 
 ```json
 {"t":1795800001000,"ok":true,"rows":[{"dev":"259:0","cg":4821,"pid":1200,"comm":"postgres","r":10,"w":90,"rb":81920,"wb":737280}]}
@@ -24,10 +25,10 @@ One line per interval. The values are the change in that interval.
 | `t` | Time in milliseconds since the epoch |
 | `dev` | The whole disk as `major:minor`, the same as in `/proc/diskstats` (a partition counts to its disk) |
 | `cg` | The cgroup v2 id. This is the inode number of the cgroup folder, so the collector finds the path with `stat` |
-| `pid`, `comm` | The thread group id and the task name at the first request of the interval |
+| `pid`, `comm` | The thread group id and the task name at the first request since the previous `read` |
 | `r`, `w`, `rb`, `wb` | Read requests, write requests, bytes read, bytes written |
 
-A start failure gives one line `{"ok":false,"error":"..."}` and exit status 3. A read error of the map later gives the same. The collector then uses the proc source. The helper exits with status 0 on `SIGTERM`, `SIGINT` or when its output closes.
+A start failure gives one line `{"ok":false,"error":"..."}` and exit status 3. A read error of the map later gives the same. The collector then uses the proc source. The helper exits with status 0 on `SIGTERM`, `SIGINT` or when its input or output closes.
 
 ### What the attribution gets right
 
@@ -70,8 +71,8 @@ The BPF program uses a small hand-written `vmlinux.h` (`server/native/vmlinux.h`
 
 ### Cost
 
-The program runs once per block request. It does one hash lookup and a few counter updates. The helper wakes once per interval and reads and clears the map.
+The program runs once per block request. It does one hash lookup and a few counter updates. The helper runs only when it gets a `read`.
 
-- Sorting and printing the worst case (16,384 keys in the map) takes about 1.7 ms per interval, which is about 0.17% of one core at the default interval.
-- The map read costs about two system calls per key. A normal interval has tens of keys.
+- Sorting and printing the worst case (16,384 keys in the map) takes about 1.7 ms per read.
+- The map read costs about two system calls per key. A normal read has tens of keys.
 - The kernel part grows with the request rate, not with the number of files. It has not been measured on a live kernel yet (the first live run needs `CAP_BPF`). Measure it with `time` or the `filedeck_pressure_probe_seconds_total` metric of the collector.
