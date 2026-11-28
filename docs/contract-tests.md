@@ -63,11 +63,11 @@ run against the TS agent only until the Rust agent has them.
 | `du-route.test.ts` | `GET /api/du`: shape, depth, `all`, `cachedOnly`, the cached flag, validation, changes, the entry cap, the depth limit, wide folders, path order (`size-store.test.ts`, `size-store-depth.test.ts`, `size-store-stream.test.ts`) |
 | `du-jobs.test.ts` | `refresh=auto`, the job view, the long poll, cancel and dismiss, vanished folders, the replay of a du (`size-store-fresh-api.test.ts`, `jobs-abandon.test.ts`, `size-store-rounds.test.ts`) |
 | `du-queue.test.ts` | a queued du job that nobody asks about is forgotten, a live scan of an overlapping folder gives a `stale` answer, 202 and the repeat (needs a scan that lasts: a big tree) |
-| `du-golden.test.ts` | the du answers of five fixture trees equal the JSON in `agent/tests/golden/du/`, captured from the TS agent |
+| `du-golden.test.ts` | the du answers of five fixture trees equal the JSON in `server/test/contract/golden/du/`, captured from the TS agent |
 
 ## Golden du answers
 
-`agent/tests/golden/du/*.json` hold the du answers of the TS agent for five fixture trees (`du-golden.test.ts`). `scannedAt`, `ageMs` and `diskBytes` are left
+`server/test/contract/golden/du/*.json` hold the du answers of the TS agent for five fixture trees (`du-golden.test.ts`). `scannedAt`, `ageMs` and `diskBytes` are left
 out of the comparison (clock and file system). Record them again only when the TS agent changes on purpose:
 
 ```sh

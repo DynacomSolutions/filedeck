@@ -32,6 +32,8 @@ pub struct Sizes {
     pub(crate) root: String,
     pub(crate) du_wait_ms: u64,
     pub(crate) refresh_max: usize,
+    /// makes "find the live scan of this path, else start one" one step
+    start_lock: Mutex<()>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -65,6 +67,7 @@ impl Sizes {
             root: config.root.clone(),
             du_wait_ms: config.du_wait_ms,
             refresh_max: config.job_concurrency.max(1),
+            start_lock: Mutex::new(()),
         }))
     }
 
@@ -128,6 +131,29 @@ impl Sizes {
             run,
             gate: Some(gate),
         })
+    }
+
+    /// Join the live scan of the path, or start one. The two steps are one, so two requests at once share one job.
+    /// Returns the job view and whether this call started it.
+    pub(crate) fn join_or_start(
+        self: &Arc<Self>,
+        kind: &'static str,
+        virtual_path: &str,
+        fresh: bool,
+        origin: Origin,
+        out: Option<DuOut>,
+    ) -> (Value, bool) {
+        let _one = lock(&self.start_lock);
+        match self
+            .live_scan(virtual_path, fresh)
+            .and_then(|j| self.jobs.get(&j.id))
+        {
+            Some(v) => (v, false),
+            None => (
+                self.start_scan(kind, virtual_path, fresh, origin, out),
+                true,
+            ),
+        }
     }
 
     /// The live size or `du` job of a path: a second request joins it instead of queuing another walk.

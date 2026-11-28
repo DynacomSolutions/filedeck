@@ -5,11 +5,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentUnderTest, contractMode, contractTest, dropFixtureRoot, fixtureRoot } from "./agent-under-test.ts";
 
-// Golden du answers. The files in agent/tests/golden/du/ were captured from the TS agent (FILEDECK_GOLDEN_UPDATE=1 with no
+// Golden du answers. The files in server/test/contract/golden/du/ were captured from the TS agent (FILEDECK_GOLDEN_UPDATE=1 with no
 // FILEDECK_CONTRACT_SPAWN). Every agent must give the same JSON for the same five fixture trees.
 // `scannedAt` and `ageMs` (clock) and `diskBytes` (blocks: they depend on the file system the test runs on) are left out of the comparison.
 // Entries of `all=1` are sorted by path (a folder is read in the order the file system gives it).
-const goldenDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../agent/tests/golden/du");
+const goldenDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "golden/du");
 const update = process.env.FILEDECK_GOLDEN_UPDATE === "1";
 
 let tmp: string;

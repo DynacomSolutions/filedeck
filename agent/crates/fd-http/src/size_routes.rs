@@ -314,9 +314,12 @@ async fn du_inner(state: &AppState, raw: Option<&str>) -> Result<Response, ApiEr
             {
                 sizes.note_refresh_ended();
                 if lock(&sizes.refreshing).len() < sizes.refresh_max {
-                    let v = sizes.start_scan("du", &virtual_path, false, Origin::Cli, None);
+                    let (v, started) =
+                        sizes.join_or_start("du", &virtual_path, false, Origin::Cli, None);
                     let id = v["id"].as_str().unwrap_or_default().to_owned();
-                    lock(&sizes.refreshing).insert(id.clone());
+                    if started {
+                        lock(&sizes.refreshing).insert(id.clone());
+                    }
                     refresh_job_id = Some(id);
                 }
             }
@@ -376,20 +379,17 @@ async fn du_inner(state: &AppState, raw: Option<&str>) -> Result<Response, ApiEr
         (Some(r), Some(j)) if j.state.live() || replay => Arc::clone(r),
         _ => {
             let out: DuOut = Arc::default();
-            let id = if let Some(j) = sizes.live_scan(&virtual_path, fresh) {
-                j.id
-            } else if sizes.stopping() {
+            if sizes.stopping() && sizes.live_scan(&virtual_path, fresh).is_none() {
                 return Err(leaving());
-            } else {
-                let v = sizes.start_scan(
-                    "du",
-                    &virtual_path,
-                    fresh,
-                    Origin::Cli,
-                    Some(Arc::clone(&out)),
-                );
-                v["id"].as_str().unwrap_or_default().to_owned()
-            };
+            }
+            let (v, _) = sizes.join_or_start(
+                "du",
+                &virtual_path,
+                fresh,
+                Origin::Cli,
+                Some(Arc::clone(&out)),
+            );
+            let id = v["id"].as_str().unwrap_or_default().to_owned();
             let r = Arc::new(DuRun {
                 id,
                 detached: std::sync::atomic::AtomicBool::new(false),
@@ -518,10 +518,7 @@ async fn size_job_inner(state: &AppState, body: Body) -> Result<Response, ApiErr
         return Err(leaving());
     }
     // one live size job per path: a second request attaches to it
-    let v = match sizes.live_scan(&r.virtual_path, fresh) {
-        Some(j) => sizes.jobs.get(&j.id).unwrap_or(Value::Null),
-        None => sizes.start_scan("size", &r.virtual_path, fresh, Origin::Ui, None),
-    };
+    let (v, _) = sizes.join_or_start("size", &r.virtual_path, fresh, Origin::Ui, None);
     Ok(json_response(StatusCode::ACCEPTED, &v))
 }
 
