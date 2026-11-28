@@ -1,0 +1,1371 @@
+{
+  "list docs": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "path": "/docs",
+      "entries": [
+        {
+          "name": "abslink",
+          "path": "/docs/abslink",
+          "type": "symlink",
+          "size": 14,
+          "mtime": 0,
+          "mode": 0,
+          "target": "/docs/notes.md",
+          "linkDir": false
+        },
+        {
+          "name": "broken",
+          "path": "/docs/broken",
+          "type": "symlink",
+          "size": 7,
+          "mtime": 0,
+          "mode": 0,
+          "target": "missing",
+          "linkDir": false,
+          "broken": true
+        },
+        {
+          "name": "data.bin",
+          "path": "/docs/data.bin",
+          "type": "file",
+          "size": 4,
+          "mtime": 0,
+          "mode": 384
+        },
+        {
+          "name": "digits.txt",
+          "path": "/docs/digits.txt",
+          "type": "file",
+          "size": 100,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "dirlink",
+          "path": "/docs/dirlink",
+          "type": "symlink",
+          "size": 3,
+          "mtime": 0,
+          "mode": 0,
+          "target": "sub",
+          "linkDir": true
+        },
+        {
+          "name": "escape",
+          "path": "/docs/escape",
+          "type": "symlink",
+          "size": 28,
+          "mtime": 0,
+          "mode": 0,
+          "target": "../../../../../../etc/passwd",
+          "linkDir": false,
+          "broken": true
+        },
+        {
+          "name": "link",
+          "path": "/docs/link",
+          "type": "symlink",
+          "size": 10,
+          "mtime": 0,
+          "mode": 0,
+          "target": "readme.txt",
+          "linkDir": false
+        },
+        {
+          "name": "loop-a",
+          "path": "/docs/loop-a",
+          "type": "symlink",
+          "size": 6,
+          "mtime": 0,
+          "mode": 0,
+          "target": "loop-b",
+          "linkDir": false,
+          "broken": false
+        },
+        {
+          "name": "loop-b",
+          "path": "/docs/loop-b",
+          "type": "symlink",
+          "size": 6,
+          "mtime": 0,
+          "mode": 0,
+          "target": "loop-a",
+          "linkDir": false,
+          "broken": false
+        },
+        {
+          "name": "notes.md",
+          "path": "/docs/notes.md",
+          "type": "file",
+          "size": 17,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "readme.txt",
+          "path": "/docs/readme.txt",
+          "type": "file",
+          "size": 6,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "sub",
+          "path": "/docs/sub",
+          "type": "dir",
+          "size": 0,
+          "mtime": 0,
+          "mode": 493
+        },
+        {
+          "name": "é ü.txt",
+          "path": "/docs/é ü.txt",
+          "type": "file",
+          "size": 1,
+          "mtime": 0,
+          "mode": 420
+        }
+      ],
+      "truncated": false
+    }
+  },
+  "list docs hidden": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "path": "/docs",
+      "entries": [
+        {
+          "name": ".hidden",
+          "path": "/docs/.hidden",
+          "type": "file",
+          "size": 1,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "abslink",
+          "path": "/docs/abslink",
+          "type": "symlink",
+          "size": 14,
+          "mtime": 0,
+          "mode": 0,
+          "target": "/docs/notes.md",
+          "linkDir": false
+        },
+        {
+          "name": "broken",
+          "path": "/docs/broken",
+          "type": "symlink",
+          "size": 7,
+          "mtime": 0,
+          "mode": 0,
+          "target": "missing",
+          "linkDir": false,
+          "broken": true
+        },
+        {
+          "name": "data.bin",
+          "path": "/docs/data.bin",
+          "type": "file",
+          "size": 4,
+          "mtime": 0,
+          "mode": 384
+        },
+        {
+          "name": "digits.txt",
+          "path": "/docs/digits.txt",
+          "type": "file",
+          "size": 100,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "dirlink",
+          "path": "/docs/dirlink",
+          "type": "symlink",
+          "size": 3,
+          "mtime": 0,
+          "mode": 0,
+          "target": "sub",
+          "linkDir": true
+        },
+        {
+          "name": "escape",
+          "path": "/docs/escape",
+          "type": "symlink",
+          "size": 28,
+          "mtime": 0,
+          "mode": 0,
+          "target": "../../../../../../etc/passwd",
+          "linkDir": false,
+          "broken": true
+        },
+        {
+          "name": "link",
+          "path": "/docs/link",
+          "type": "symlink",
+          "size": 10,
+          "mtime": 0,
+          "mode": 0,
+          "target": "readme.txt",
+          "linkDir": false
+        },
+        {
+          "name": "loop-a",
+          "path": "/docs/loop-a",
+          "type": "symlink",
+          "size": 6,
+          "mtime": 0,
+          "mode": 0,
+          "target": "loop-b",
+          "linkDir": false,
+          "broken": false
+        },
+        {
+          "name": "loop-b",
+          "path": "/docs/loop-b",
+          "type": "symlink",
+          "size": 6,
+          "mtime": 0,
+          "mode": 0,
+          "target": "loop-a",
+          "linkDir": false,
+          "broken": false
+        },
+        {
+          "name": "notes.md",
+          "path": "/docs/notes.md",
+          "type": "file",
+          "size": 17,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "readme.txt",
+          "path": "/docs/readme.txt",
+          "type": "file",
+          "size": 6,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "sub",
+          "path": "/docs/sub",
+          "type": "dir",
+          "size": 0,
+          "mtime": 0,
+          "mode": 493
+        },
+        {
+          "name": "é ü.txt",
+          "path": "/docs/é ü.txt",
+          "type": "file",
+          "size": 1,
+          "mtime": 0,
+          "mode": 420
+        }
+      ],
+      "truncated": false
+    }
+  },
+  "list docs stream": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/x-ndjson",
+      "cache-control": "no-store"
+    },
+    "body": [
+      {
+        "e": [
+          {
+            "name": "dirlink",
+            "path": "/docs/dirlink",
+            "type": "symlink",
+            "size": 3,
+            "mtime": 0,
+            "mode": 0,
+            "target": "sub",
+            "linkDir": true
+          },
+          {
+            "name": "sub",
+            "path": "/docs/sub",
+            "type": "dir",
+            "size": 0,
+            "mtime": 0,
+            "mode": 493
+          },
+          {
+            "name": "abslink",
+            "path": "/docs/abslink",
+            "type": "symlink",
+            "size": 14,
+            "mtime": 0,
+            "mode": 0,
+            "target": "/docs/notes.md",
+            "linkDir": false
+          },
+          {
+            "name": "broken",
+            "path": "/docs/broken",
+            "type": "symlink",
+            "size": 7,
+            "mtime": 0,
+            "mode": 0,
+            "target": "missing",
+            "linkDir": false,
+            "broken": true
+          },
+          {
+            "name": "data.bin",
+            "path": "/docs/data.bin",
+            "type": "file",
+            "size": 4,
+            "mtime": 0,
+            "mode": 384
+          },
+          {
+            "name": "digits.txt",
+            "path": "/docs/digits.txt",
+            "type": "file",
+            "size": 100,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "é ü.txt",
+            "path": "/docs/é ü.txt",
+            "type": "file",
+            "size": 1,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "escape",
+            "path": "/docs/escape",
+            "type": "symlink",
+            "size": 28,
+            "mtime": 0,
+            "mode": 0,
+            "target": "../../../../../../etc/passwd",
+            "linkDir": false,
+            "broken": true
+          },
+          {
+            "name": "link",
+            "path": "/docs/link",
+            "type": "symlink",
+            "size": 10,
+            "mtime": 0,
+            "mode": 0,
+            "target": "readme.txt",
+            "linkDir": false
+          },
+          {
+            "name": "loop-a",
+            "path": "/docs/loop-a",
+            "type": "symlink",
+            "size": 6,
+            "mtime": 0,
+            "mode": 0,
+            "target": "loop-b",
+            "linkDir": false,
+            "broken": false
+          },
+          {
+            "name": "loop-b",
+            "path": "/docs/loop-b",
+            "type": "symlink",
+            "size": 6,
+            "mtime": 0,
+            "mode": 0,
+            "target": "loop-a",
+            "linkDir": false,
+            "broken": false
+          },
+          {
+            "name": "notes.md",
+            "path": "/docs/notes.md",
+            "type": "file",
+            "size": 17,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "readme.txt",
+            "path": "/docs/readme.txt",
+            "type": "file",
+            "size": 6,
+            "mtime": 0,
+            "mode": 420
+          }
+        ]
+      },
+      {
+        "done": {
+          "path": "/docs",
+          "truncated": false
+        }
+      }
+    ]
+  },
+  "list docs stream hidden": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/x-ndjson",
+      "cache-control": "no-store"
+    },
+    "body": [
+      {
+        "e": [
+          {
+            "name": "dirlink",
+            "path": "/docs/dirlink",
+            "type": "symlink",
+            "size": 3,
+            "mtime": 0,
+            "mode": 0,
+            "target": "sub",
+            "linkDir": true
+          },
+          {
+            "name": "sub",
+            "path": "/docs/sub",
+            "type": "dir",
+            "size": 0,
+            "mtime": 0,
+            "mode": 493
+          },
+          {
+            "name": ".hidden",
+            "path": "/docs/.hidden",
+            "type": "file",
+            "size": 1,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "abslink",
+            "path": "/docs/abslink",
+            "type": "symlink",
+            "size": 14,
+            "mtime": 0,
+            "mode": 0,
+            "target": "/docs/notes.md",
+            "linkDir": false
+          },
+          {
+            "name": "broken",
+            "path": "/docs/broken",
+            "type": "symlink",
+            "size": 7,
+            "mtime": 0,
+            "mode": 0,
+            "target": "missing",
+            "linkDir": false,
+            "broken": true
+          },
+          {
+            "name": "data.bin",
+            "path": "/docs/data.bin",
+            "type": "file",
+            "size": 4,
+            "mtime": 0,
+            "mode": 384
+          },
+          {
+            "name": "digits.txt",
+            "path": "/docs/digits.txt",
+            "type": "file",
+            "size": 100,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "é ü.txt",
+            "path": "/docs/é ü.txt",
+            "type": "file",
+            "size": 1,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "escape",
+            "path": "/docs/escape",
+            "type": "symlink",
+            "size": 28,
+            "mtime": 0,
+            "mode": 0,
+            "target": "../../../../../../etc/passwd",
+            "linkDir": false,
+            "broken": true
+          },
+          {
+            "name": "link",
+            "path": "/docs/link",
+            "type": "symlink",
+            "size": 10,
+            "mtime": 0,
+            "mode": 0,
+            "target": "readme.txt",
+            "linkDir": false
+          },
+          {
+            "name": "loop-a",
+            "path": "/docs/loop-a",
+            "type": "symlink",
+            "size": 6,
+            "mtime": 0,
+            "mode": 0,
+            "target": "loop-b",
+            "linkDir": false,
+            "broken": false
+          },
+          {
+            "name": "loop-b",
+            "path": "/docs/loop-b",
+            "type": "symlink",
+            "size": 6,
+            "mtime": 0,
+            "mode": 0,
+            "target": "loop-a",
+            "linkDir": false,
+            "broken": false
+          },
+          {
+            "name": "notes.md",
+            "path": "/docs/notes.md",
+            "type": "file",
+            "size": 17,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "readme.txt",
+            "path": "/docs/readme.txt",
+            "type": "file",
+            "size": 6,
+            "mtime": 0,
+            "mode": 420
+          }
+        ]
+      },
+      {
+        "done": {
+          "path": "/docs",
+          "truncated": false
+        }
+      }
+    ]
+  },
+  "list nat stream": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/x-ndjson",
+      "cache-control": "no-store"
+    },
+    "body": [
+      {
+        "e": [
+          {
+            "name": "D1",
+            "path": "/nat/D1",
+            "type": "dir",
+            "size": 0,
+            "mtime": 0,
+            "mode": 493
+          },
+          {
+            "name": "d2",
+            "path": "/nat/d2",
+            "type": "dir",
+            "size": 0,
+            "mtime": 0,
+            "mode": 493
+          },
+          {
+            "name": "d10",
+            "path": "/nat/d10",
+            "type": "dir",
+            "size": 0,
+            "mtime": 0,
+            "mode": 493
+          },
+          {
+            "name": "_u",
+            "path": "/nat/_u",
+            "type": "file",
+            "size": 2,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "-d",
+            "path": "/nat/-d",
+            "type": "file",
+            "size": 2,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "9z",
+            "path": "/nat/9z",
+            "type": "file",
+            "size": 2,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "a",
+            "path": "/nat/a",
+            "type": "file",
+            "size": 1,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "A",
+            "path": "/nat/A",
+            "type": "file",
+            "size": 1,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "b",
+            "path": "/nat/b",
+            "type": "file",
+            "size": 1,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "B",
+            "path": "/nat/B",
+            "type": "file",
+            "size": 1,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "f1",
+            "path": "/nat/f1",
+            "type": "file",
+            "size": 2,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "f02",
+            "path": "/nat/f02",
+            "type": "file",
+            "size": 3,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "f2",
+            "path": "/nat/f2",
+            "type": "file",
+            "size": 2,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "f10",
+            "path": "/nat/f10",
+            "type": "file",
+            "size": 3,
+            "mtime": 0,
+            "mode": 420
+          },
+          {
+            "name": "z9",
+            "path": "/nat/z9",
+            "type": "file",
+            "size": 2,
+            "mtime": 0,
+            "mode": 420
+          }
+        ]
+      },
+      {
+        "done": {
+          "path": "/nat",
+          "truncated": false
+        }
+      }
+    ]
+  },
+  "list nat": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "path": "/nat",
+      "entries": [
+        {
+          "name": "-d",
+          "path": "/nat/-d",
+          "type": "file",
+          "size": 2,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "9z",
+          "path": "/nat/9z",
+          "type": "file",
+          "size": 2,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "A",
+          "path": "/nat/A",
+          "type": "file",
+          "size": 1,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "B",
+          "path": "/nat/B",
+          "type": "file",
+          "size": 1,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "D1",
+          "path": "/nat/D1",
+          "type": "dir",
+          "size": 0,
+          "mtime": 0,
+          "mode": 493
+        },
+        {
+          "name": "_u",
+          "path": "/nat/_u",
+          "type": "file",
+          "size": 2,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "a",
+          "path": "/nat/a",
+          "type": "file",
+          "size": 1,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "b",
+          "path": "/nat/b",
+          "type": "file",
+          "size": 1,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "d10",
+          "path": "/nat/d10",
+          "type": "dir",
+          "size": 0,
+          "mtime": 0,
+          "mode": 493
+        },
+        {
+          "name": "d2",
+          "path": "/nat/d2",
+          "type": "dir",
+          "size": 0,
+          "mtime": 0,
+          "mode": 493
+        },
+        {
+          "name": "f02",
+          "path": "/nat/f02",
+          "type": "file",
+          "size": 3,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "f1",
+          "path": "/nat/f1",
+          "type": "file",
+          "size": 2,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "f10",
+          "path": "/nat/f10",
+          "type": "file",
+          "size": 3,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "f2",
+          "path": "/nat/f2",
+          "type": "file",
+          "size": 2,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
+          "name": "z9",
+          "path": "/nat/z9",
+          "type": "file",
+          "size": 2,
+          "mtime": 0,
+          "mode": 420
+        }
+      ],
+      "truncated": false
+    }
+  },
+  "list root": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "path": "/",
+      "entries": [
+        {
+          "name": "docs",
+          "path": "/docs",
+          "type": "dir",
+          "size": 0,
+          "mtime": 0,
+          "mode": 493
+        },
+        {
+          "name": "nat",
+          "path": "/nat",
+          "type": "dir",
+          "size": 0,
+          "mtime": 0,
+          "mode": 493
+        }
+      ],
+      "truncated": false
+    }
+  },
+  "list via link": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "path": "/docs/sub",
+      "entries": [
+        {
+          "name": "inner.txt",
+          "path": "/docs/sub/inner.txt",
+          "type": "file",
+          "size": 5,
+          "mtime": 0,
+          "mode": 420
+        }
+      ],
+      "truncated": false
+    }
+  },
+  "list file": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "not a directory"
+    }
+  },
+  "list missing": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "not found"
+    }
+  },
+  "list stream missing": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "not found"
+    }
+  },
+  "list dotdot": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "'..' segments are not allowed"
+    }
+  },
+  "list reserved": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "trash is managed via the trash API"
+    }
+  },
+  "stat file": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "readme.txt",
+      "path": "/docs/readme.txt",
+      "type": "file",
+      "size": 6,
+      "mtime": 0,
+      "mode": 420
+    }
+  },
+  "stat dir": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "sub",
+      "path": "/docs/sub",
+      "type": "dir",
+      "size": 0,
+      "mtime": 0,
+      "mode": 493
+    }
+  },
+  "stat link": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "link",
+      "path": "/docs/link",
+      "type": "symlink",
+      "size": 10,
+      "mtime": 0,
+      "mode": 0,
+      "target": "readme.txt",
+      "linkDir": false
+    }
+  },
+  "stat dirlink": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "dirlink",
+      "path": "/docs/dirlink",
+      "type": "symlink",
+      "size": 3,
+      "mtime": 0,
+      "mode": 0,
+      "target": "sub",
+      "linkDir": true
+    }
+  },
+  "stat broken": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "broken",
+      "path": "/docs/broken",
+      "type": "symlink",
+      "size": 7,
+      "mtime": 0,
+      "mode": 0,
+      "target": "missing",
+      "linkDir": false,
+      "broken": true
+    }
+  },
+  "stat abslink": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "abslink",
+      "path": "/docs/abslink",
+      "type": "symlink",
+      "size": 14,
+      "mtime": 0,
+      "mode": 0,
+      "target": "/docs/notes.md",
+      "linkDir": false
+    }
+  },
+  "stat escape link": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "escape",
+      "path": "/docs/escape",
+      "type": "symlink",
+      "size": 28,
+      "mtime": 0,
+      "mode": 0,
+      "target": "../../../../../../etc/passwd",
+      "linkDir": false,
+      "broken": true
+    }
+  },
+  "stat loop": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "loop-a",
+      "path": "/docs/loop-a",
+      "type": "symlink",
+      "size": 6,
+      "mtime": 0,
+      "mode": 0,
+      "target": "loop-b",
+      "linkDir": false,
+      "broken": false
+    }
+  },
+  "stat through escape": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "symlink escapes root"
+    }
+  },
+  "stat missing": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "not found"
+    }
+  },
+  "stat reserved": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "this name is reserved for the file manager's own use"
+    }
+  },
+  "stat unicode": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "é ü.txt",
+      "path": "/docs/é ü.txt",
+      "type": "file",
+      "size": 1,
+      "mtime": 0,
+      "mode": 420
+    }
+  },
+  "read file": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "6",
+      "content-disposition": "inline",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "aGVsbG8K"
+  },
+  "read binary": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/octet-stream",
+      "content-length": "4",
+      "content-disposition": "inline",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "AAEC/w=="
+  },
+  "read via link": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "6",
+      "content-disposition": "inline",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "aGVsbG8K"
+  },
+  "read via abslink": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "17",
+      "content-disposition": "inline",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "IyBub3RlcwpsaW5lIHR3bwo="
+  },
+  "read through escape": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "not found"
+    }
+  },
+  "read loop": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "too many symbolic links"
+    }
+  },
+  "read dir": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "is a directory"
+    }
+  },
+  "read reserved": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "trash is managed via the trash API"
+    }
+  },
+  "read range": {
+    "status": 206,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "10",
+      "content-disposition": "inline",
+      "content-range": "bytes 10-19/100",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "MDEyMzQ1Njc4OQ=="
+  },
+  "read suffix range": {
+    "status": 206,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "5",
+      "content-disposition": "inline",
+      "content-range": "bytes 95-99/100",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "NTY3ODk="
+  },
+  "read open range": {
+    "status": 206,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "5",
+      "content-disposition": "inline",
+      "content-range": "bytes 95-99/100",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "NTY3ODk="
+  },
+  "read bad range": {
+    "status": 416,
+    "headers": {
+      "content-type": "text/plain",
+      "content-disposition": "inline",
+      "content-range": "bytes */100",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": ""
+  },
+  "read head": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "6",
+      "content-disposition": "inline",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": ""
+  },
+  "download file": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "6",
+      "content-disposition": "attachment; filename=\"readme.txt\"; filename*=UTF-8''readme.txt",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "aGVsbG8K"
+  },
+  "download unicode": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "1",
+      "content-disposition": "attachment; filename=\"_ _.txt\"; filename*=UTF-8''%C3%A9%20%C3%BC.txt",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "dQ=="
+  },
+  "download range": {
+    "status": 206,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "5",
+      "content-disposition": "attachment; filename=\"digits.txt\"; filename*=UTF-8''digits.txt",
+      "content-range": "bytes 0-4/100",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": "MDEyMzQ="
+  },
+  "download head": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "content-length": "6",
+      "content-disposition": "attachment; filename=\"readme.txt\"; filename*=UTF-8''readme.txt",
+      "accept-ranges": "bytes",
+      "last-modified": "Tue, 05 Mar 2024 06:07:08 GMT",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    },
+    "body": ""
+  },
+  "text file": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "path": "/docs/notes.md",
+      "content": "# notes\nline two\n",
+      "size": 17,
+      "mtime": 0,
+      "etag": "<etag>"
+    }
+  },
+  "text binary": {
+    "status": 415,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "binary file"
+    }
+  },
+  "text dir": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "is a directory"
+    }
+  },
+  "text missing": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "not found"
+    }
+  },
+  "text through link": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "path": "/docs/readme.txt",
+      "content": "hello\n",
+      "size": 6,
+      "mtime": 0,
+      "etag": "<etag>"
+    }
+  },
+  "unauthorised": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "error": "unauthorized"
+    }
+  }
+}

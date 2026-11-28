@@ -2,15 +2,33 @@
 //!
 //! The TypeScript agent uses `Intl.Collator(undefined, { numeric: true })`. This module follows the ICU root order for
 //! ASCII (punctuation, then digits, then letters without regard to case, runs of digits by value) and puts any other
-//! letter after the ASCII letters, in code point order of its lower case form. Accented letters can therefore sort
-//! differently from ICU. Equal names under this order fall back to UTF-16 order, as in the TypeScript agent.
+//! letter after the ASCII letters, in code point order of its lower case form. The accented letters of Latin-1 count as
+//! their base letter, an unaccented letter first. Other accented letters can sort differently from ICU. Equal names under this order fall back to UTF-16 order, as in the TypeScript agent.
 
 use std::cmp::Ordering;
 
 /// ASCII punctuation and symbols in ICU root order.
 const PUNCT: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
 
+/// The lower case base letter of a Latin-1 accented letter, and whether it carried an accent.
+fn fold(c: char) -> (char, bool) {
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    let base = match lower {
+        '\u{e0}'..='\u{e5}' => 'a',
+        '\u{e7}' => 'c',
+        '\u{e8}'..='\u{eb}' => 'e',
+        '\u{ec}'..='\u{ef}' => 'i',
+        '\u{f1}' => 'n',
+        '\u{f2}'..='\u{f6}' | '\u{f8}' => 'o',
+        '\u{f9}'..='\u{fc}' => 'u',
+        '\u{fd}' | '\u{ff}' => 'y',
+        _ => return (lower, false),
+    };
+    (base, true)
+}
+
 fn weight(c: char) -> u32 {
+    let c = fold(c).0;
     if c.is_control() || c.is_whitespace() {
         return 1;
     }
@@ -73,7 +91,14 @@ pub fn collate(a: &str, b: &str, numeric: bool) -> Ordering {
     if o != Ordering::Equal {
         return o;
     }
-    // The same at the primary level: lower case before upper case at the first difference.
+    // The same at the primary level: an unaccented letter before an accented one at the first difference,
+    // then lower case before upper case at the first difference.
+    for (p, q) in x.iter().zip(&y) {
+        let (ap, aq) = (fold(*p).1, fold(*q).1);
+        if ap != aq {
+            return ap.cmp(&aq);
+        }
+    }
     for (p, q) in x.iter().zip(&y) {
         if p != q && p.to_lowercase().eq(q.to_lowercase()) {
             return if p.is_lowercase() {
@@ -115,6 +140,14 @@ mod tests {
         assert_eq!(
             sorted(vec!["b.txt", "A.txt", "a.txt", "B.txt"]),
             ["a.txt", "A.txt", "b.txt", "B.txt"]
+        );
+    }
+
+    #[test]
+    fn latin_1_accents_count_as_their_base_letter() {
+        assert_eq!(
+            sorted(vec!["escape", "\u{e9} \u{fc}.txt", "e", "\u{e9}", "f", "\u{c9}"]),
+            ["e", "\u{e9}", "\u{c9}", "\u{e9} \u{fc}.txt", "escape", "f"]
         );
     }
 
