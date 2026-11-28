@@ -57,6 +57,11 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: {{ . | quote }}
       {{- end }}
+      {{- $tol := ternary .tolerations $.Values.agent.tolerations (hasKey . "tolerations") }}
+      {{- with $tol }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         seccompProfile:
           type: RuntimeDefault
