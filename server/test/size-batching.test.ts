@@ -93,6 +93,7 @@ test("the cap: too many changed folders in one interval become one stale mark pe
   const w = watch(k.s, { commitMs: 60_000, dirtyMax: 64 });
   for (let i = 0; i < 5000; i++) w.line(`C f /data/proj/mod${i % 400}/sub${i % 7}/f${i}`);
   assert.ok(w.status().backlog <= 64, `backlog ${w.status().backlog}`);
+  await w.handover(10); // the marks of the open interval are written when it ends
   assert.ok(k.stale.length > 0 && k.stale.every((p) => p === "/data/proj" || p.startsWith("/data/proj/") || p === "/data" || p === "/"), `marks ${k.stale}`);
   assert.ok(w.status().size.collapsed > 0);
 });
@@ -165,8 +166,116 @@ test("the size store has an index for the watcher's 'is a newer run there' quest
   const st = new SizeStore(file, { root: dir, ttlMs: 60_000, maxEntries: 100 });
   stores.push(st);
   await st.mayScan();
+  await until(() => {
+    const d = new DatabaseSync(file, { readOnly: true });
+    try { return d.prepare("SELECT 1 FROM sqlite_master WHERE name = 'watch_sessions_mounts'").all().length > 0; } finally { d.close(); }
+  }, 5000); // the index is made in the background after the lease
   const db = new DatabaseSync(file, { readOnly: true });
   const plan = db.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM watch_sessions WHERE id > ? AND mounts_hash = ? LIMIT 1").all(1, "h").map((r) => String(r.detail)).join(" ");
   db.close();
   assert.match(plan, /watch_sessions_mounts/);
+});
+
+test("the cap: merged subtrees get their stale marks in one write at the end of the interval, later events inside them add nothing, and settled() says not settled", async () => {
+  const k = sink();
+  const many: string[][] = [];
+  (k.s as ChangeSink).markStaleMany = (v: string[]) => void many.push(v);
+  const w = watch(k.s, { commitMs: 400, dirtyMax: 64 });
+  for (let i = 0; i < 3000; i++) w.line(`C f /data/proj/mod${i % 400}/sub${i % 7}/f${i}`);
+  assert.equal(k.stale.length, 0, "no mark is written while the interval is open");
+  assert.equal(many.length, 0);
+  assert.equal(w.settled("/data/proj/mod5"), false, "a merged subtree is not settled");
+  const before = w.status().backlog;
+  for (let i = 0; i < 500; i++) w.line(`C f /data/proj/mod${i % 400}/other${i}/f`);
+  assert.ok(w.status().backlog <= before + 1, "events inside a merged subtree are absorbed");
+  await until(() => many.length >= 1, 5000);
+  assert.equal(many.length, 1, "one call, one write transaction, for all the marks of the interval");
+  assert.ok(many[0]!.length >= 1 && many[0]!.length <= 32);
+  assert.ok(many[0]!.every((p) => p === "/" || p === "/data" || p === "/data/proj" || p.startsWith("/data/proj/")), `marks ${many[0]}`);
+});
+
+test("the cap: the marks of one interval stay few (the deepest are merged into their parents)", async () => {
+  const k = sink();
+  const many: string[][] = [];
+  (k.s as ChangeSink).markStaleMany = (v: string[]) => void many.push(v);
+  const w = watch(k.s, { commitMs: 300, dirtyMax: 40 });
+  for (let i = 0; i < 4000; i++) w.line(`C f /data/a${i % 300}/b${i % 11}/c${i % 5}/f${i}`);
+  await until(() => many.length >= 1, 5000);
+  assert.ok(many.flat().length <= 32, `${many.flat().length} marks`);
+});
+
+test("markStaleMany is one write transaction for any number of folders", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "size-mark-")));
+  dirs.push(dir);
+  const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 100 });
+  stores.push(st);
+  await st.mayScan();
+  await sleep(300);
+  const tx0 = st.writeTransactions;
+  const m0 = st.writeTransactionsBySite.mark ?? 0;
+  st.markStaleMany(["/a", "/b/c", "/d/e/f", "/g"]);
+  await st.close();
+  assert.equal(st.writeTransactions - tx0, 1);
+  assert.equal((st.writeTransactionsBySite.mark ?? 0) - m0, 1);
+  const db = new DatabaseSync(path.join(dir, "sizes.db"), { readOnly: true });
+  const n = Number((db.prepare("SELECT count(*) c FROM stale_trees WHERE path IN ('/a', '/b/c', '/d/e/f', '/g')").get() as { c: number }).c);
+  db.close();
+  assert.equal(n, 4);
+});
+
+test("needsApply: only folders that are stored, under a stored folder, or that have stored folders below", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "size-need-")));
+  dirs.push(dir);
+  fs.mkdirSync(path.join(dir, "a/b/c"), { recursive: true });
+  const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 100 });
+  stores.push(st);
+  await st.mayScan();
+  await st.scan("/");
+  const need = await st.needsApply(["/a", "/a/b/c", "/a/b/c/new", "/a/zz", "/x", "/x/y/z", "/"]);
+  assert.ok(need);
+  assert.deepEqual([...need!].sort(), ["/", "/a", "/a/b/c", "/a/b/c/new", "/a/zz", "/x"]);
+});
+
+test("the watch_sessions index is made in the background on a store that lacks it, and its query uses it", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "size-idx2-")));
+  dirs.push(dir);
+  const file = path.join(dir, "sizes.db");
+  const first = new SizeStore(file, { root: dir, ttlMs: 60_000, maxEntries: 100 });
+  await first.mayScan();
+  await first.close();
+  const raw = new DatabaseSync(file);
+  raw.exec("DROP INDEX watch_sessions_mounts");
+  raw.close();
+  const st = new SizeStore(file, { root: dir, ttlMs: 60_000, maxEntries: 100 });
+  stores.push(st);
+  await st.mayScan();
+  const has = () => {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try {
+      return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'watch_sessions_mounts'").all().length > 0;
+    } finally {
+      db.close();
+    }
+  };
+  await until(has, 5000);
+  assert.ok(has());
+  const db = new DatabaseSync(file, { readOnly: true });
+  const plan = db.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM watch_sessions WHERE id > ? AND mounts_hash = ? LIMIT 1").all(1, "h").map((r) => String(r.detail)).join(" ");
+  db.close();
+  assert.match(plan, /USING COVERING INDEX watch_sessions_mounts \(mounts_hash=\? AND id>\?\)/);
+});
+
+test("sessionTick: the earlier run and the own row are read once, and the heartbeat is written every 10 s, not every call", async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "size-sess-")));
+  dirs.push(dir);
+  const st = new SizeStore(path.join(dir, "sizes.db"), { root: dir, ttlMs: 60_000, maxEntries: 100 });
+  stores.push(st);
+  await st.mayScan();
+  await sleep(300);
+  const ready = Date.now() - 1000;
+  const id = await st.sessionStart("h", ready);
+  assert.ok(id);
+  const s0 = st.writeTransactionsBySite.session ?? 0;
+  for (let i = 0; i < 20; i++) assert.ok(await st.sessionTick(id!, "h", ready, 0));
+  assert.ok((st.writeTransactionsBySite.session ?? 0) - s0 <= 2, `${(st.writeTransactionsBySite.session ?? 0) - s0} session writes for 20 ticks`);
 });
