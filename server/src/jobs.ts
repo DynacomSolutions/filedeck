@@ -583,3 +583,27 @@ export class Jobs {
     }
   }
 }
+
+/** Longest `?wait=` a job request may ask for, in seconds. */
+export const MAX_JOB_WAIT_S = 30;
+
+/** The `wait` query value in seconds: 0 when absent. Anything but a whole number from 0 to MAX_JOB_WAIT_S is an error message. */
+export function jobWait(v: string | undefined): number | string {
+  if (v === undefined) return 0;
+  if (!/^\d+$/.test(v) || Number(v) > MAX_JOB_WAIT_S) return `wait must be a whole number of seconds from 0 to ${MAX_JOB_WAIT_S}`;
+  return Number(v);
+}
+
+/**
+ * Long poll: the job as it is once it has ended (not queued or running), or as it is after `seconds`, or when the client goes away.
+ * `read` also keeps the job alive (see `Jobs.touch`).
+ */
+export async function untilEnded(read: () => JobView | undefined, seconds: number, signal?: AbortSignal): Promise<JobView | undefined> {
+  const end = Date.now() + seconds * 1000;
+  let v = read();
+  while (v && (v.state === "queued" || v.state === "running") && Date.now() < end && !signal?.aborted) {
+    await new Promise((r) => setTimeout(r, 50));
+    v = read();
+  }
+  return v;
+}

@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { parseArgs, humanSize, blocks, run, type RunIo, UsageError } from "../src/du-cli.ts";
 
@@ -225,7 +228,7 @@ test("500 still fails at once; 503 past the deadline times out", async () => {
   assert.match(b.err.join(""), /timed out after 100 s/);
 });
 
-test("real CLI process follows a running job across poll sleeps and does not exit 13", async () => {
+test("real CLI process follows a running job with long polls and does not exit 13", async () => {
   let polls = 0;
   const ans = { path: "/u", entries: [E("/u", 4096)], cached: false, truncated: false, watched: false };
   const srv = createServer((req, res) => {
@@ -234,11 +237,13 @@ test("real CLI process follows a running job across poll sleeps and does not exi
       : polls >= 4 ? ans : { jobId: "J" };
     // Connection: close, so no keep-alive socket holds the child's event loop open between polls.
     res.writeHead(req.url!.includes("/jobs/") || polls >= 4 ? 200 : 202, { "content-type": "application/json", connection: "close" });
-    res.end(JSON.stringify(body));
+    // a job request is held, as the hub does for ?wait=: the CLI must not add a sleep of its own
+    if (req.url!.includes("/jobs/")) assert.match(req.url!, /\?wait=\d+$/);
+    setTimeout(() => res.end(JSON.stringify(body)), req.url!.includes("/jobs/") ? 300 : 0);
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
   try {
-    const child = spawn(process.execPath, ["--no-warnings", "--experimental-transform-types", new URL("../src/cli.ts", import.meta.url).pathname, "du", "-s", "n:/u"], {
+    const child = spawn(process.execPath, ["--no-warnings", "--import", "tsx", new URL("../src/cli.ts", import.meta.url).pathname, "du", "-s", "n:/u"], {
       env: { ...process.env, FILEDECK_URL: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, FILEDECK_TOKEN: "tok" },
     });
     let out = "";
@@ -278,4 +283,55 @@ test("mount points: a stored one prints its own size, every one is named on stde
   const x = harness(() => j({ path: "/", entries: [E("/", 1)], cached: false, truncated: true, watched: false, error: "the size store is busy; try again" }));
   assert.equal(await run(["n:/"], env, x.io), 1);
   assert.match(x.err.join(""), /the answer is incomplete: the size store is busy/);
+});
+
+test("--refresh-auto sends refresh=auto, does not wait, and says that a refresh runs", async () => {
+  const h = harness(() => j({ path: "/d", entries: [E("/d", 4096)], cached: true, truncated: false, watched: true, stale: true, ageMs: 90_000, refreshJobId: "R1" }));
+  assert.equal(await run(["--refresh-auto", "-s", "n:/d"], env, h.io), 0);
+  assert.equal(h.calls.length, 1);
+  assert.match(h.calls[0] as string, /refresh=auto/);
+  assert.equal(h.out.join(""), "4\tn:/d\n");
+  assert.match(h.err.join(""), /answered from stored sizes \(90 s old\); a refresh scan runs \(job R1\)/);
+  assert.throws(() => parseArgs(["--refresh-auto", "--cached", "n:/"]), UsageError);
+  assert.throws(() => parseArgs(["--refresh-auto", "--fresh", "n:/"]), UsageError);
+});
+
+test("jobs are followed with a long poll (?wait=): no sleep between requests when the hub holds them", async () => {
+  let polls = 0;
+  let t = 0;
+  const done = j({ path: "/u", entries: [E("/u", 4096)], cached: true, truncated: false, watched: false });
+  const h = harness((u) => (u.includes("/jobs/") ? ((t += 20_000), j({ state: ++polls < 3 ? "running" : "done" })) : polls ? done.clone() : j({ jobId: "J" }, 202)));
+  h.io.now = () => t;
+  const sleeps: number[] = [];
+  h.io.sleep = async (ms) => void sleeps.push(ms);
+  assert.equal(await run(["--timeout", "0", "-s", "n:/u"], env, h.io), 0);
+  assert.equal(polls, 3);
+  assert.deepEqual(sleeps, []);
+  assert.ok(h.calls.filter((c) => c.includes("/jobs/")).every((c) => c.endsWith("/jobs/J?wait=20")));
+});
+
+test("a hub that ignores ?wait= answers at once: the CLI sleeps one second between requests", async () => {
+  let polls = 0;
+  const h = harness((u) => (u.includes("/jobs/") ? j({ state: ++polls < 3 ? "running" : "done" }) : polls ? j({ path: "/u", entries: [E("/u", 1)], cached: true, truncated: false, watched: false }) : j({ jobId: "J" }, 202)));
+  const sleeps: number[] = [];
+  h.io.sleep = async (ms) => void sleeps.push(ms);
+  assert.equal(await run(["-s", "n:/u"], env, h.io), 0);
+  assert.deepEqual(sleeps, [1000, 1000]);
+});
+
+test("FILEDECK_TOKEN_FILE: the token is read from the file; FILEDECK_TOKEN wins; an unreadable file is a configuration error", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "fd-tok-"));
+  try {
+    writeFileSync(join(dir, "tok"), "tok\n");
+    const h = harness(() => j({ path: "/d", entries: [E("/d", 1)], cached: false, truncated: false, watched: false }));
+    assert.equal(await run(["-s", "n:/d"], { FILEDECK_URL: "https://hub.example", FILEDECK_TOKEN_FILE: join(dir, "tok") }, h.io), 0);
+    const g = harness(() => j({ path: "/d", entries: [E("/d", 1)], cached: false, truncated: false, watched: false }));
+    assert.equal(await run(["-s", "n:/d"], { ...env, FILEDECK_TOKEN_FILE: join(dir, "missing") }, g.io), 0, "FILEDECK_TOKEN wins");
+    const k = harness(() => j({}));
+    assert.equal(await run(["-s", "n:/d"], { FILEDECK_URL: "https://hub.example", FILEDECK_TOKEN_FILE: join(dir, "missing") }, k.io), 2);
+    assert.match(k.err.join(""), /FILEDECK_TOKEN_FILE/);
+    assert.equal(k.calls.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });

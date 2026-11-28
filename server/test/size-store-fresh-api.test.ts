@@ -399,3 +399,50 @@ test("S1 a du --fresh finished before SIGTERM is answered from the finished scan
   await lv;
 });
 
+
+test("GET /api/du?refresh=auto: stored rows answer at once, one background job refreshes them, cachedOnly stays as it was", async () => {
+  const root = path.join(tmp, "api-auto");
+  fs.mkdirSync(path.join(root, "t/sub"), { recursive: true });
+  fs.writeFileSync(path.join(root, "t/sub/f"), "abc");
+  for (let i = 0; i < 300; i++) fs.mkdirSync(path.join(root, `t/d${i}/e`), { recursive: true });
+  const aux = path.join(tmp, "api-auto-aux");
+  fs.mkdirSync(aux);
+  const app = createAgent(loadConfig({ FILEDECK_ROOT: root, FILEDECK_NODE: "t", FILEDECK_INDEX_DIR: aux } as never));
+  agents.push(app as unknown as { close(): Promise<void> });
+  type Ans = { stale?: boolean; ageMs?: number; refreshJobId?: string; cached: boolean; entries: { bytes: number }[] };
+  const list = async () => ((await (await app.request("/api/jobs")).json()) as { jobs: { id: string; kind: string }[] }).jobs;
+  const auto = async () => (await (await app.request("/api/du?path=/t&depth=1&refresh=auto")).json()) as Ans;
+  assert.equal((await app.request("/api/du?path=/t&depth=1&refresh=sometimes")).status, 400);
+  assert.equal((await app.request("/api/du?path=/t&depth=1&refresh=auto&fresh=1")).status, 400);
+  assert.equal((await app.request("/api/du?path=/t&depth=1&refresh=auto&cachedOnly=1")).status, 400);
+  // not stored: the old path (a job, then the answer), nothing new in the answer
+  const first = await app.request("/api/du?path=/t&depth=1&refresh=auto");
+  assert.equal(first.status, 200);
+  assert.equal(((await first.json()) as Ans).refreshJobId, undefined);
+  // stored, no watcher: not vouched. Three requests at once are answered from the store and share one job.
+  const before = (await list()).length;
+  const t0 = Date.now();
+  const [a, b, c] = await Promise.all([auto(), auto(), auto()]);
+  assert.ok(Date.now() - t0 < 5000);
+  for (const x of [a, b, c]) {
+    assert.equal(x.stale, true);
+    assert.equal(x.cached, true);
+    assert.equal(typeof x.ageMs, "number");
+    assert.ok(x.entries[0]!.bytes >= 3);
+    assert.equal(typeof x.refreshJobId, "string");
+  }
+  assert.equal(b.refreshJobId, a.refreshJobId, "joined the same job");
+  assert.equal(c.refreshJobId, a.refreshJobId);
+  assert.equal((await list()).length, before + 1, "one job for three requests");
+  // the job can be followed with a long poll
+  const done = (await (await app.request(`/api/jobs/${a.refreshJobId}?wait=20`)).json()) as { state: string };
+  assert.equal(done.state, "done");
+  assert.equal((await app.request(`/api/jobs/${a.refreshJobId}?wait=abc`)).status, 400);
+  assert.equal((await app.request(`/api/jobs/${a.refreshJobId}?wait=31`)).status, 400);
+  // cachedOnly: no job, no refreshJobId, as before
+  const n = (await list()).length;
+  const cached = (await (await app.request("/api/du?path=/t&depth=1&cachedOnly=1")).json()) as Ans;
+  assert.equal(cached.stale, true);
+  assert.equal(cached.refreshJobId, undefined);
+  assert.equal((await list()).length, n);
+});

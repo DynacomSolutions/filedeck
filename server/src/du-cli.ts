@@ -11,6 +11,8 @@ export interface DuOptions {
   json: boolean;
   /** Only answer from stored sizes (`cachedOnly=1`): never starts a scan. */
   cached: boolean;
+  /** Answer from stored sizes at once (`refresh=auto`); the hub starts one background scan for parts that are out of date. Never waits for it. */
+  refreshAuto: boolean;
   /** Seconds in total; 0 follows a live job with no cap. */
   timeout: number;
   targets: { node: string; path: string }[];
@@ -19,7 +21,7 @@ export interface DuOptions {
 /** Default cap in seconds for following a scan; `--timeout 0` removes it. */
 export const DEFAULT_TIMEOUT = 600;
 
-export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached] [--json] [--timeout SECONDS] node:/path...
+export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size] [--fresh | --cached | --refresh-auto] [--json] [--timeout SECONDS] node:/path...
   -s, --summarize     only a total for each argument (same as -d 0)
   -h, --human-readable  sizes like 1.5K, 23M
   -d, --max-depth=N   print entries only N or fewer levels below the argument (0 to 64)
@@ -27,16 +29,17 @@ export const USAGE = `usage: filedeck du [-s] [-h] [-d N] [-a] [--apparent-size]
       --apparent-size print apparent sizes (bytes) instead of disk usage
       --fresh         re-read every folder instead of reusing stored sizes
       --cached        answer from stored sizes only; never starts a scan (reports folders that are not stored)
+      --refresh-auto  answer from stored sizes at once; if they are out of date, the hub also starts one background scan (not waited for)
       --json          print the hub's answer as JSON
       --timeout SECONDS  give up after this long in total (default: 600; 0 follows a live job until it ends)
-environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token)
+environment: FILEDECK_URL (hub base URL), FILEDECK_TOKEN (read-only API token) or FILEDECK_TOKEN_FILE (file that holds it)
             in a pod both are optional: the hub is http://filedeck.dynacom.svc and the token is /var/run/secrets/filedeck/token
 exit status: 0 success, 1 an argument failed, 2 usage or configuration error, 130 interrupted (Ctrl-C)`;
 
 export class UsageError extends Error {}
 
 export function parseArgs(argv: string[]): DuOptions {
-  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, cached: false, json: false, timeout: DEFAULT_TIMEOUT, targets: [] };
+  const o: DuOptions = { summarize: false, human: false, depth: undefined, all: false, apparent: false, fresh: false, cached: false, refreshAuto: false, json: false, timeout: DEFAULT_TIMEOUT, targets: [] };
   const depth = (v: string | undefined) => {
     if (v === undefined || !/^\d+$/.test(v)) throw new UsageError(`invalid maximum depth '${v ?? ""}'`);
     return Number(v);
@@ -57,6 +60,7 @@ export function parseArgs(argv: string[]): DuOptions {
       else if (name === "--apparent-size") o.apparent = true;
       else if (name === "--fresh") o.fresh = true;
       else if (name === "--cached") o.cached = true;
+      else if (name === "--refresh-auto") o.refreshAuto = true;
       else if (name === "--json") o.json = true;
       else if (name === "--timeout") {
         const v = val ?? argv[++i];
@@ -80,6 +84,7 @@ export function parseArgs(argv: string[]): DuOptions {
   if (!o.targets.length) throw new UsageError("missing node:/path operand");
   if (o.summarize && o.depth !== undefined && o.depth !== 0) throw new UsageError("summarizing conflicts with --max-depth=" + o.depth);
   if (o.cached && o.fresh) throw new UsageError("--cached conflicts with --fresh");
+  if (o.refreshAuto && (o.fresh || o.cached)) throw new UsageError("--refresh-auto conflicts with --fresh and --cached");
   if (o.summarize) o.depth = 0;
   if (o.depth !== undefined && o.depth > 64) throw new UsageError("maximum depth is 64");
   return o;
@@ -123,6 +128,10 @@ export interface DuAnswer {
   cached: boolean;
   truncated: boolean;
   watched: boolean;
+  /** milliseconds since the stored row of the folder was scanned (absent when it is not a finished scan) */
+  ageMs?: number;
+  /** with `refresh=auto` on stale rows: the background scan that was started or joined */
+  refreshJobId?: string;
   /**
    * the rows may be out of date: another process is writing the store (a rolling deploy) or a scan of an overlapping folder is running (no job was started),
    * the walk reused rows on their age while the change watcher was running, or a change was reported after the scan
@@ -180,6 +189,9 @@ export interface RunIo {
   signal?: AbortSignal;
 }
 
+/** Seconds of one job request: the hub holds it until the job ends (long poll), so there is no poll interval. */
+export const JOB_WAIT_S = 20;
+
 interface Job {
   state: string;
   error?: string;
@@ -203,7 +215,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
   }
   const base = hubUrl(env);
   if (!base || !hubToken(env)) {
-    io.err("filedeck du: set FILEDECK_URL and FILEDECK_TOKEN (in a pod: mount the projected token, see the filedeck-du skill)\n");
+    io.err("filedeck du: set FILEDECK_URL and FILEDECK_TOKEN or FILEDECK_TOKEN_FILE (in a pod: mount the projected token, see the filedeck-du skill)\n");
     return 2;
   }
   const deadline = o.timeout === 0 ? Infinity : io.now() + o.timeout * 1000;
@@ -265,6 +277,7 @@ export async function run(argv: string[], env: Record<string, string | undefined
     if (o.all) q.set("all", "1");
     if (o.fresh) q.set("fresh", "1");
     if (o.cached) q.set("cachedOnly", "1");
+    if (o.refreshAuto) q.set("refresh", "auto");
     const url = `${api}/du?${q}`;
     try {
       let polled = false;
@@ -283,7 +296,8 @@ export async function run(argv: string[], env: Record<string, string | undefined
         for (;;) {
           stopIfAsked();
           if (io.now() > deadline) throw new Error(`timed out after ${o.timeout} s`);
-          const jr = await patient(`${api}/jobs/${encodeURIComponent(jobId)}`, label);
+          const asked = io.now();
+          const jr = await patient(`${api}/jobs/${encodeURIComponent(jobId)}?wait=${JOB_WAIT_S}`, label);
           if (jr.status === 404 && !rejoined) {
             // Job lost (agent restart): the same request starts or joins a scan.
             rejoined = true;
@@ -300,7 +314,9 @@ export async function run(argv: string[], env: Record<string, string | undefined
           if (j.state === "failed" || j.state === "canceled") throw new Error(`scan ${j.state}${j.error ? `: ${j.error}` : ""}`);
           const p = j.progress;
           io.err(`filedeck du: ${label}: ${j.state}${p ? `, ${p.entries} entries, ${humanSize(p.bytes)}` : ""}\n`);
-          await io.sleep(1000);
+          // The hub holds the request until the job ends (`?wait=`), so there is no poll interval. An older hub ignores `wait` and answers at once:
+          // then (an answer in under a quarter of a second) the CLI waits one second, so it never spins.
+          if (io.now() - asked < 250) await io.sleep(1000);
         }
         if (lost) continue;
         running = false;
@@ -317,7 +333,8 @@ export async function run(argv: string[], env: Record<string, string | undefined
       if (ans.partial) io.err(`filedeck du: ${label}: a scan has not finished some of these folders (it is running, or an agent restart stopped it); their sizes count only what it has finished so far\n`);
       if (ans.error) throw new Error(`the answer is incomplete: ${ans.error}`);
       if (ans.truncated) io.err(`filedeck du: ${label}: the answer hit the entry limit, not every folder is listed\n`);
-      if (ans.stale) io.err(`filedeck du: ${label}: sizes may be out of date (another scan or a deploy is running, or rows older than the change watcher were reused); run the command again in a moment, or use --fresh to re-read\n`);
+      if (o.refreshAuto && ans.stale) io.err(`filedeck du: ${label}: answered from stored sizes${ans.ageMs !== undefined ? ` (${Math.round(ans.ageMs / 1000)} s old)` : ""}; ${ans.refreshJobId ? `a refresh scan runs (job ${ans.refreshJobId}); run the command again later for newer sizes` : "no refresh scan was started"}\n`);
+      else if (ans.stale) io.err(`filedeck du: ${label}: sizes may be out of date (another scan or a deploy is running, or rows older than the change watcher were reused); run the command again in a moment, or use --fresh to re-read\n`);
       // A repeat after our own job is cached by contract, but that scan just ran: only say so when nobody scanned for us.
       if (ans.cached && !polled) {
         const oldest = Math.min(...ans.entries.map((e) => e.scannedAt ?? Infinity));
