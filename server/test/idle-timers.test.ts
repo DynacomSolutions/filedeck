@@ -76,3 +76,24 @@ test("event bus: no timer without a subscriber, one while a subscriber is connec
     probe.restore();
   }
 });
+
+test("jobs: an idle process wakes its tick when a peer's live row appears in the store (the file change tells it, no poll)", async () => {
+  const probe = trackTimers();
+  try {
+    const file = path.join(work, "wake.db");
+    const jobs = new Jobs(2, 100, undefined, undefined, { store: new JobStore(file), scope: "t", tickMs: 20, leaseMs: 100_000 });
+    await until(() => probe.active() === 0);
+    assert.equal(probe.active(), 0);
+    const view = JSON.stringify({ id: "w1", kind: "size", title: "t", state: "running", progress: { bytes: 0, totalBytes: 0, entries: 0, totalEntries: 0, current: "" }, createdAt: 1 });
+    const peer = new JobStore(file);
+    assert.ok(peer.put({ id: "w1", scope: "t", kind: "size", title: "t", params: null, view, state: "running", owner: "peer", beat: Date.now(), created_at: 1, finished_at: null }));
+    await until(() => probe.active() > 0);
+    assert.equal(probe.active() > 0, true, "the new row woke the tick");
+    assert.ok(peer.put({ id: "w1", scope: "t", kind: "size", title: "t", params: null, view, state: "done", owner: "peer", beat: Date.now(), created_at: 1, finished_at: 2 }));
+    await until(() => probe.active() === 0);
+    assert.equal(probe.active(), 0);
+    await jobs.interrupt(10);
+  } finally {
+    probe.restore();
+  }
+});

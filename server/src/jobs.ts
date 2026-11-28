@@ -131,7 +131,9 @@ export class Jobs {
   ) {
     // one unref'd timer while there is work: heartbeat, foreign cancels, adoption of jobs whose owner went silent (see `arm`)
     this.arm();
+    this.unwatch = shared?.store.watch(() => this.arm());
   }
+  private unwatch?: () => void;
   private beatTimer?: ReturnType<typeof setInterval>;
 
   /** Start the shared-store tick. It stops itself when this process has no job and the store holds no live row (`working`), and the next job starts it again. */
@@ -512,6 +514,7 @@ export class Jobs {
    */
   async interrupt(ms = 3000) {
     this.stopping = true;
+    this.unwatch?.();
     for (const j of this.jobs.values()) if (live(j.state)) j.abort.abort();
     for (const end = Date.now() + ms; this.running > 0 && Date.now() < end; ) await new Promise((r) => setTimeout(r, 20));
     this.shared?.store.release(this.me);

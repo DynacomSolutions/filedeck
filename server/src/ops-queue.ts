@@ -223,7 +223,9 @@ export class OpQueue {
   constructor(private d: OpQueueDeps) {
     // one unref'd timer while there is work: heartbeat, progress snapshot, foreign requests, adoption of jobs whose owner went silent (see `arm`)
     this.arm();
+    this.unwatch = d.shared?.store.watch(() => this.arm());
   }
+  private unwatch?: () => void;
   private beatTimer?: ReturnType<typeof setInterval>;
 
   /** Start the shared-store tick. It stops itself when this process has no job and the store holds no live row (`working`), and the next job starts it again. */
@@ -624,6 +626,7 @@ export class OpQueue {
    */
   async interrupt(ms = 3000) {
     this.stopping = true;
+    this.unwatch?.();
     const liveJobs = () => [...this.jobs.values()].filter((j) => live(j.state));
     for (const j of liveJobs()) {
       j.wasWaiting = !!j.waiting;

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { openDb } from "./index-cache.ts";
 
@@ -37,7 +38,7 @@ export class JobStore {
   private db: DatabaseSync | null = null;
   private q = new Map<string, StatementSync>();
 
-  constructor(file: string) {
+  constructor(private readonly file: string) {
     for (let attempt = 0; attempt < 2 && !this.db; attempt++) {
       let db: DatabaseSync | null = null;
       try {
@@ -187,6 +188,23 @@ export class JobStore {
   /** Live jobs whose owner's lease ran out (or who handed over with beat 0), and live rows of `me` (the caller skips those it holds). */
   orphans(scope: string, me: string, cutoff: number): JobRow[] {
     return this.run(`SELECT * FROM jobs WHERE scope=? AND ${LIVE} AND (owner=? OR beat<?)`, (s) => s.all(scope, me, cutoff) as unknown as JobRow[], []);
+  }
+
+  /**
+   * `onChange` runs when another process (or this one) writes the store's files: the kernel tells (inotify), nothing polls. Returns the function that stops it.
+   * A process with no live job uses it to wake its tick when a peer's row appears, since that peer may die and leave the row to adopt.
+   */
+  watch(onChange: () => void): () => void {
+    try {
+      const base = path.basename(this.file);
+      const w = fs.watch(path.dirname(this.file), { persistent: false }, (_e, name) => {
+        if (name && String(name).startsWith(base)) onChange();
+      });
+      w.on("error", () => {});
+      return () => w.close();
+    } catch {
+      return () => {};
+    }
   }
 
   /** How many live rows of the scope the store holds (any owner), or -1 when it cannot say (busy or no database). */
