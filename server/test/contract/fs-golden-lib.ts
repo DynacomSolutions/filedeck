@@ -1,6 +1,6 @@
 /**
  * Golden answers for the file routes. `fs-golden-capture.ts` records them from the TS agent (spawn mode);
- * `fs-golden.test.ts` checks that any agent gives the same answers. The golden file is `agent/tests/golden/fs.json`.
+ * `fs-golden.test.ts` checks that any agent gives the same answers. The golden file is `server/test/contract/golden/fs.json`.
  *
  * What differs by file system or by run is normalised: `mtime`, `etag`, the size of a folder, the mode of a link, and the order of
  * the plain list (the TS agent gives the order of the directory, the Rust agent the default order; the streamed list is compared as it is).
