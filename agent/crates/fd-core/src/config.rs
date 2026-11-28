@@ -22,6 +22,10 @@ pub struct Config {
     pub index_dir: Option<PathBuf>,
     /// `FILEDECK_READONLY`, clean absolute prefixes
     pub read_only: Vec<String>,
+    /// `FILEDECK_PROC_MOUNTS`: a mount table to read instead of the system's own
+    pub proc_mounts: Option<PathBuf>,
+    /// `FILEDECK_MAX_EDIT`: the largest file `/api/fs/text` returns, in bytes (default 5 MiB)
+    pub max_edit: u64,
     pub token: Token,
 }
 
@@ -35,6 +39,8 @@ struct FileConfig {
     port: Option<u32>,
     index_dir: Option<PathBuf>,
     read_only: Option<Vec<String>>,
+    proc_mounts: Option<PathBuf>,
+    max_edit: Option<u64>,
     agent_token_file: Option<PathBuf>,
 }
 
@@ -98,6 +104,13 @@ impl Config {
             None => parse_read_only(f.read_only.unwrap_or_default())?,
         };
 
+        let max_edit = match get("FILEDECK_MAX_EDIT") {
+            Some(v) => v.trim().parse::<u64>().map_err(|_| {
+                ConfigError::invalid("FILEDECK_MAX_EDIT", "it must be a whole number of bytes")
+            })?,
+            None => f.max_edit.unwrap_or(5 * 1024 * 1024),
+        };
+
         let token = load_token(
             get("FILEDECK_AGENT_TOKEN"),
             get("FILEDECK_AGENT_TOKEN_FILE")
@@ -112,6 +125,10 @@ impl Config {
             port,
             index_dir: get("FILEDECK_INDEX_DIR").map(PathBuf::from).or(f.index_dir),
             read_only,
+            proc_mounts: get("FILEDECK_PROC_MOUNTS")
+                .map(PathBuf::from)
+                .or(f.proc_mounts),
+            max_edit,
             token,
         })
     }

@@ -26,5 +26,5 @@ test("a change to the shared storage types selects server and web CI", (t) => {
     encoding: "utf8",
     env: { ...process.env, GITHUB_EVENT_NAME: "pull_request", GITHUB_OUTPUT: output },
   });
-  assert.equal(readFileSync(output, "utf8"), "server=true\nweb=true\nchart=false\nimage=true\nagent=false\n");
+  assert.equal(readFileSync(output, "utf8"), "server=true\nweb=true\nchart=false\nimage=true\nagent=false\ncontract_rust=false\n");
 });

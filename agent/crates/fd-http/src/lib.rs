@@ -3,6 +3,7 @@
 //! The wire protocol is the one of the TypeScript agent, byte for byte where a client can see it.
 
 mod auth;
+mod files;
 mod info;
 mod metrics;
 mod state;
@@ -32,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(info::healthz))
         .route("/metrics", get(metrics::metrics))
         .route("/api/info", get(info::info))
+        .merge(files::routes())
         .fallback(not_found)
         .layer(from_fn_with_state(state.clone(), auth::require_bearer))
         .with_state(state)
