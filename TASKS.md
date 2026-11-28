@@ -400,8 +400,28 @@ ETA: 2026-11-28 14:00 ICT
 
 | ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
 |---|---|---|---|---|---|---|---|
-| 214 | Disk pressure collector, API and metrics | in_progress | claude-20261127-watch-events | disk-pressure | | 2026-11-28 07:30 ICT | Per disk: util, IOPS, MB/s, queue depth, latency, PSI io some and full<br>Attribution per process, cgroup, pod, unit and top folder from proc, cgroup io.stat and change events<br>In-memory only, probe under 1% CPU, no disk writes |
+| 214 | Disk pressure collector, API and metrics | in_progress | FileDeck coordinator thread | disk-pressure-live | | 2026-11-28 20:30 ICT | Per disk: util, IOPS, MB/s, queue depth, latency, PSI io some and full<br>Attribution per process, cgroup, pod, unit and top folder, on demand only (no timer): IotraceSampler with the proc fallback<br>Also F5: pressure event and /api/v1/pressure<br>Branch disk-pressure-live, PR in progress |
 | 215 | eBPF block IO attribution helper | done | FileDeck coordinator thread | disk-pressure-ebpf | | | Merged https://github.com/DynacomSolutions/filedeck/pull/298 (0473a2f), CI green<br>Event-driven read: the helper has no timer and reads the kernel maps only on a `read` command (API request, `/metrics` scrape, pressure event, or a live subscriber with a one-shot deadline)<br>Falls back to the proc and cgroup collector, read on demand in the same way |
-| 216 | Disk pressure view in the web app | in_progress | claude-20261127-watch-events | disk-pressure-ui | 31.214 | 2026-11-28 09:00 ICT | Live graph and a ranked consumer table<br>Node and disk in the URL path, view options in the query string<br>A path opens in the file browser |
-| 217 | Disk pressure in the MCP server | todo | claude-20261127-watch-events | | 29.207, 31.214 | 2026-11-28 11:00 ICT | Tools for disk snapshots and top consumers<br>A disk pressure event subscription |
-| 218 | Release and prove disk pressure on the first node, then all nodes | todo | claude-20261127-watch-events | | 31.214, 31.216 | 2026-11-28 14:00 ICT | First proof on the root NVMe and the second NVMe, with the real top consumers<br>Then every node |
+| 216 | Disk pressure view in the web app | in_progress | FileDeck coordinator thread | disk-pressure-ui | 31.214 | 2026-11-28 09:00 ICT | Live graph and a ranked consumer table<br>Node and disk in the URL path, view options in the query string<br>A path opens in the file browser |
+| 217 | Disk pressure in the MCP server | todo | FileDeck coordinator thread | | 29.207, 31.214 | 2026-11-28 11:00 ICT | Tools for disk snapshots and top consumers<br>A disk pressure event subscription |
+| 218 | Release and prove disk pressure on the first node, then all nodes | todo | FileDeck coordinator thread | | 31.214, 31.216 | 2026-11-28 14:00 ICT | First proof on the root NVMe and the second NVMe, with the real top consumers<br>Then every node |
+| 230 | Add a drive legitimacy, speed and fill test | todo | | | | | Thomas, 27 Nov 20:02 ICT: "worth adding to FileDeck".<br>Test each drive: real capacity, read and write speed, and fill behaviour.<br>Thread: t3-thread://v2/f3837a5f-1d84-4e86-83e2-67f505c42446/4ee6e042-5612-4475-9fca-623eeb6e257b |
+
+## 32. File sync
+
+Owner order, 28 Nov 2026: a sync system built into FileDeck that replaces Syncthing. Design: `docs/rfc/0001-filedeck-sync.md`. Syncthing and its chart stay unchanged until the cutover rows.
+ETA: 2026-12-12 18:00 ICT
+
+| ID | Task | Status | Owner | Branch | Depends | ETA | Notes |
+|---|---|---|---|---|---|---|---|
+| 219 | Phase 0: measure Syncthing and inventory every sync folder | todo | | | | | Size, file count, peers and mode per folder from `filedeck du --cached`<br>7-day CPU and RAM p50 and p95 per node from VictoriaMetrics<br>Folder to device map from `config.xml`. Thomas confirms each folder's purpose |
+| 220 | Phase 1: sync daemon with event reader, stat cache and manifest tool (observe mode) | todo | | | 32.219 | | Rust crate `fd-sync`, reads the node events socket with a cursor<br>One `lstat` per event, no scan. Lost-event signal gives a targeted stat check<br>Manifest and directory hash tree compare tool |
+| 221 | Phase 2: sync catalogue in HoardDB | todo | | | 32.219 | | Tenant by `scripts/db-tenant-add`, GitOps PR in `.cluster`<br>Folders, file revisions, `applied_rev`, tombstones, `NOTIFY`<br>Load test: a burst of 1000 files is one batch, under 20 writes/s |
+| 222 | Phase 3: FastCDC chunks, mTLS transport and resumable transfer | todo | | | 32.220, 32.221 | | BLAKE3 chunk and tree hash, chunk cache, spool with resume<br>mTLS HTTP/2 between nodes, windows sized for the long links, MTU 1230<br>Path test per node pair sets the in-flight count |
+| 223 | Phase 4: conflicts, folder roles and delete safety | todo | | | 32.222 | | Compare-and-set on `base_rev`, conflict copies, send-only and receive-only<br>Trash on delete, mass-delete guard, `.filedeck-sync` marker<br>Read errors (EIO) become a per-file state with back-off |
+| 224 | Phase 5: metrics, alerts, probes and the `.cluster` chart | todo | | | 32.222 | | Series and alerts in RFC 0001 section 3.10, scraped in the same change<br>Exec liveness probe over real mTLS, readiness, advisory-lock rollout<br>Chart and vmagent job in one `.cluster` PR |
+| 225 | Phase 6: shadow run and manifest compare on every folder | todo | | | 32.223, 32.224 | | `observe` mode on all four nodes, no writes to synced folders<br>Manifests equal across nodes for every in-sync folder, differences explained<br>Report against Syncthing's actual result |
+| 226 | Phase 7: per-folder cutover and a rollback drill | todo | | | 32.225 | | One active system per folder. Small folders first, media last<br>Syncthing folder removed through the `removeFromNodes` mechanism, no file touched<br>Deletes go to trash for 7 days. Rollback drill on one folder |
+| 227 | Phase 8: retire Syncthing | todo | | | 32.226 | | After 30 clean days<br>Remove the `syncthing/` chart in its own `.cluster` PR |
+| 228 | Move folders that should not sync to HoardDB or object storage | todo | | | 32.219 | | Plex config, caches, footage, install trees<br>List in RFC 0001 section 5. Needs Thomas to confirm purposes |
+| 229 | Check eu4 disk read errors on two files | todo | | | | | Syncthing logs show `input/output error` on a Videos file and an Unsorted file, retried every 10 s<br>Check the disk before the Videos and Unsorted cutover |

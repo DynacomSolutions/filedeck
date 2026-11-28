@@ -8,6 +8,7 @@ import { parseReadOnly } from "./readonly.ts";
 import { parseSources } from "./sources/registry.ts";
 import { loadGroupRules, type GroupRule } from "./group-rules.ts";
 import type { SourceConfig } from "./sources/types.ts";
+import { parseSizeGauges } from "./size-gauges.ts";
 import { DEFAULT_SIZE_EXCLUDE, parseSizeExclude } from "./size-exclude.ts";
 
 export interface Config {
@@ -151,6 +152,15 @@ export interface Config {
   pressureLevels: string;
   /** agent: path templates that give events their labels (FILEDECK_EVENTS_LABELS), for example `/srv/repos/{org}/{repo}`; separated by line feeds, semicolons or commas */
   eventsLabels: string;
+  /** agent: absolute paths exported as `filedeck_path_bytes` from the size store (FILEDECK_SIZE_GAUGES); empty = none */
+  sizeGauges: string[];
+  /** agent: export pod ephemeral storage from the size store, with pod names from a watch of this node's pods (FILEDECK_POD_STORAGE=on) */
+  podStorage: boolean;
+  /** agent: the Kubernetes node name for the pod watch (FILEDECK_POD_NODE_NAME); default = `node` */
+  podNodeName: string;
+  /** agent: kubelet pod folder and pod log folder, as seen on the host (FILEDECK_KUBELET_PODS_DIR, FILEDECK_POD_LOGS_DIR) */
+  kubeletPodsDir: string;
+  podLogsDir: string;
   /** agent, sign-in on: folder that holds the host helpers (`filedeck-id`); unset = the image's folder, else the built one (host-helpers.ts) */
   hostHelpers: string | undefined;
   /** agent, sign-in on: the PAM service `filedeck-pam` uses for system users' passwords (FILEDECK_PAM_SERVICE: /etc/pam.d/<name> on the machine) */
@@ -411,6 +421,11 @@ export function loadConfig(env = process.env): Config {
     pressurePathDepth: Math.min(12, Math.max(1, Math.floor(Number(env.FILEDECK_PRESSURE_PATH_DEPTH ?? 3)) || 3)),
     pressureIotrace: env.FILEDECK_IOTRACE ?? "",
     pressureLevels: env.FILEDECK_PRESSURE_LEVELS ?? "",
+    sizeGauges: mode === "agent" ? parseSizeGauges(env.FILEDECK_SIZE_GAUGES ?? "") : [],
+    podStorage: mode === "agent" && env.FILEDECK_POD_STORAGE === "on",
+    podNodeName: env.FILEDECK_POD_NODE_NAME || env.FILEDECK_NODE || "local",
+    kubeletPodsDir: env.FILEDECK_KUBELET_PODS_DIR || "/var/lib/kubelet/pods",
+    podLogsDir: env.FILEDECK_POD_LOGS_DIR || "/var/log/pods",
     hostHelpers: env.FILEDECK_HOST_HELPERS || undefined,
     pamService: env.FILEDECK_PAM_SERVICE || "filedeck",
     worker: false,

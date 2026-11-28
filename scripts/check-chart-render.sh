@@ -84,7 +84,6 @@ if helm template t k8s -s templates/hub.yaml --set port=9091 >/dev/null 2>&1; th
   exit 1
 fi
 
-echo "chart render check passed"
 
 # Pod sign-in (k8sAuth): off by default, no RBAC; on, the hub reads the allowlist and may only create TokenReviews.
 off=$(helm template t k8s)
@@ -120,3 +119,36 @@ managedp=$(helm template t k8s --set managedNodes.enabled=true --set agent.press
 for want in "hostPID: true" "mountPath: /host-cgroup" "FILEDECK_PRESSURE_CGROUP_ROOT" "SYS_PTRACE"; do
   case "$managedp" in *"$want"*) ;; *) echo "managed pressure render lacks: $want" >&2; exit 1 ;; esac
 done
+
+# Size gauges and pod storage: off by default (no agent token, no RBAC); on, the agent gets pods get/list/watch only, the env and no extra hostPath.
+for extra in "" "--set managedNodes.enabled=true"; do
+  # shellcheck disable=SC2086
+  off=$(helm template t k8s $extra)
+  case "$off" in *FILEDECK_POD_STORAGE*|*FILEDECK_SIZE_GAUGES*|*filedeck-agent-pods*) echo "size gauges must render nothing by default" >&2; exit 1 ;; esac
+  # shellcheck disable=SC2086
+  on=$(helm template t k8s $extra --set agent.podStorage.enabled=true --set 'agent.sizeGauges={/data,/var/lib/kubelet}')
+  printf '%s\n' "$on" | python3 -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+role = next(d for d in docs if d["kind"] == "ClusterRole" and d["metadata"]["name"] == "filedeck-agent-pods")
+assert role["rules"] == [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]}], role["rules"]
+binding = next(d for d in docs if d["kind"] == "ClusterRoleBinding" and d["metadata"]["name"].startswith("filedeck-agent-pods"))
+assert binding["subjects"][0]["name"] == "filedeck-agent"
+agents = [d for d in docs if d["kind"] in ("Deployment", "DaemonSet") and d["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/component") == "agent"]
+assert agents, "no agent workload rendered"
+for a in agents:
+    spec = a["spec"]["template"]["spec"]
+    assert spec["serviceAccountName"] == "filedeck-agent" and spec["automountServiceAccountToken"] is True
+    c = spec["containers"][0]
+    env = {e["name"]: e for e in c["env"]}
+    assert env["FILEDECK_POD_STORAGE"]["value"] == "on"
+    assert env["FILEDECK_SIZE_GAUGES"]["value"] == "/data\n/var/lib/kubelet"
+    assert env["FILEDECK_POD_NODE_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"
+    assert [v["hostPath"]["path"] for v in spec["volumes"] if "hostPath" in v and v["name"] == "host"] == ["/"]
+    for probe in ("readinessProbe", "livenessProbe", "startupProbe"):
+        assert probe in c, probe
+    if a["kind"] == "Deployment":
+        assert a["spec"]["strategy"]["type"] == "RollingUpdate"
+'
+done
+echo "chart render check passed"

@@ -232,6 +232,18 @@ agent:
   sizeStore:
     commitMs: 30000
     exclude: "pg_wal,node_modules,target,.git/objects,cargo-target"
+  # Size gauges (docs/configuration.md): folders exported on the agent /metrics as filedeck_path_bytes{node,path}. The value is read from the size store at
+  # scrape time: no walk, no job. A folder the store does not hold has no series (filedeck_path_bytes_missing counts them). Needs `fanotify.enabled` to stay current.
+  # /metrics has no token, so only list paths that you accept in the metrics store.
+  sizeGauges: []
+  # Pod ephemeral storage from the size store: agent_resource_pod_ephemeral_storage_used_bytes{node,namespace,pod,pod_uid} and the alias
+  # filedeck_pod_ephemeral_storage_bytes. Per pod it adds the volumes that kubelet counts (non-memory emptyDir, configMap, gitRepo), the pod log folder and the
+  # writable layer of each running container. Pod names come from a watch of the pods of this node (spec.nodeName), so the agent gets a token with pods get/list/watch.
+  # Folders are read from the host root that the agent already mounts at /host, so there is no extra mount. Off by default.
+  podStorage:
+    enabled: false
+    kubeletPodsDir: /var/lib/kubelet/pods
+    logsDir: /var/log/pods
   # Change events: a stream of every create, delete, modify, close-after-write, attribute change and move of the files on the node, with a journal so a
   # reader that was away can continue from its last cursor. Needs `fanotify.enabled`. See docs/change-events.md.
   events:
