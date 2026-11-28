@@ -30,7 +30,7 @@ export function buildFixture(root: string): void {
   w("docs/.filedeck-trash/x", "reserved");
   w("docs/.filedeck-work-abc/y", "reserved");
   w("docs/digits.txt", "0123456789".repeat(10));
-  for (const n of ["f1", "f2", "f10", "f02", "B", "a", "A", "b", "_u", "-d", "9z", "z9"]) w(`nat/${n}`, n);
+  for (const n of ["f1", "f2", "f10", "f02", "Bb", "aa", "cc", "Dd", "_u", "-d", "9z", "z9"]) w(`nat/${n}`, n);
   fs.mkdirSync(path.join(root, "nat/d2"));
   fs.mkdirSync(path.join(root, "nat/d10"));
   fs.mkdirSync(path.join(root, "nat/D1"));

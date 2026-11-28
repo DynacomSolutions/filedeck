@@ -623,34 +623,34 @@
             "mode": 420
           },
           {
-            "name": "a",
-            "path": "/nat/a",
+            "name": "aa",
+            "path": "/nat/aa",
             "type": "file",
-            "size": 1,
+            "size": 2,
             "mtime": 0,
             "mode": 420
           },
           {
-            "name": "A",
-            "path": "/nat/A",
+            "name": "Bb",
+            "path": "/nat/Bb",
             "type": "file",
-            "size": 1,
+            "size": 2,
             "mtime": 0,
             "mode": 420
           },
           {
-            "name": "b",
-            "path": "/nat/b",
+            "name": "cc",
+            "path": "/nat/cc",
             "type": "file",
-            "size": 1,
+            "size": 2,
             "mtime": 0,
             "mode": 420
           },
           {
-            "name": "B",
-            "path": "/nat/B",
+            "name": "Dd",
+            "path": "/nat/Dd",
             "type": "file",
-            "size": 1,
+            "size": 2,
             "mtime": 0,
             "mode": 420
           },
@@ -729,18 +729,10 @@
           "mode": 420
         },
         {
-          "name": "A",
-          "path": "/nat/A",
+          "name": "Bb",
+          "path": "/nat/Bb",
           "type": "file",
-          "size": 1,
-          "mtime": 0,
-          "mode": 420
-        },
-        {
-          "name": "B",
-          "path": "/nat/B",
-          "type": "file",
-          "size": 1,
+          "size": 2,
           "mtime": 0,
           "mode": 420
         },
@@ -753,6 +745,14 @@
           "mode": 493
         },
         {
+          "name": "Dd",
+          "path": "/nat/Dd",
+          "type": "file",
+          "size": 2,
+          "mtime": 0,
+          "mode": 420
+        },
+        {
           "name": "_u",
           "path": "/nat/_u",
           "type": "file",
@@ -761,18 +761,18 @@
           "mode": 420
         },
         {
-          "name": "a",
-          "path": "/nat/a",
+          "name": "aa",
+          "path": "/nat/aa",
           "type": "file",
-          "size": 1,
+          "size": 2,
           "mtime": 0,
           "mode": 420
         },
         {
-          "name": "b",
-          "path": "/nat/b",
+          "name": "cc",
+          "path": "/nat/cc",
           "type": "file",
-          "size": 1,
+          "size": 2,
           "mtime": 0,
           "mode": 420
         },
