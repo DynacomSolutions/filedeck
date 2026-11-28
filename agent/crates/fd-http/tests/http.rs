@@ -13,7 +13,7 @@ const TOKEN: &str = "t0ken-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 fn app(extra: &[(&str, &str)]) -> (axum::Router, Ready) {
     let mut env: Vec<(String, String)> = vec![
         ("FILEDECK_AGENT_TOKEN".into(), TOKEN.into()),
-        ("FILEDECK_NODE".into(), "mac".into()),
+        ("FILEDECK_NODE".into(), "zq-node-7".into()),
     ];
     env.extend(extra.iter().map(|(k, v)| ((*k).into(), (*v).into())));
     let config = Config::load(
@@ -130,7 +130,7 @@ async fn info_has_the_shape_of_the_typescript_agent() {
             .starts_with("application/json")
     );
     let got: serde_json::Value = serde_json::from_str(&b).unwrap();
-    assert_eq!(got["node"], "mac");
+    assert_eq!(got["node"], "zq-node-7");
     assert_eq!(got["root"], "/");
     assert_eq!(got["readOnly"], serde_json::json!(["/"]));
     // same keys in the same order, at both levels, and the same JSON type for each
@@ -165,7 +165,7 @@ fn shape(v: &serde_json::Value) -> serde_json::Value {
 async fn metrics_hold_no_path_node_or_token() {
     let (app, _) = app(&[("FILEDECK_ROOT", "/secret/place")]);
     let (_, _, b) = call(&app, "/metrics", None).await;
-    for bad in [TOKEN, "mac", "/secret/place"] {
+    for bad in [TOKEN, "zq-node-7", "/secret/place"] {
         assert!(!b.contains(bad), "{bad}");
     }
 }
